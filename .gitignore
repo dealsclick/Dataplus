@@ -1,0 +1,11 @@
+.env
+node_modules/
+npm-debug.log*
+
+# Local runtime data and backups
+data/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/

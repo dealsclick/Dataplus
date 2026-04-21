@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DataPlus</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">D+</span>
+        <div>
+          <strong>DataPlus</strong>
+          <small>Marketplace Ops</small>
+        </div>
+      </div>
+      <nav aria-label="Primary">
+        <button class="nav-item active" data-view="dashboard">Dashboard</button>
+        <button class="nav-item" data-view="orders">Orders</button>
+        <button class="nav-item" data-view="customers">Customers</button>
+        <button class="nav-item" data-view="inventory">Inventory</button>
+        <button class="nav-item" data-view="reports">Reports</button>
+        <button class="nav-item" data-view="connections">Sources</button>
+      </nav>
+    </aside>
+
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Local MVP</p>
+          <h1 id="page-title">Dashboard</h1>
+        </div>
+        <div class="quick-actions">
+          <button id="sync-all" class="button secondary">Sync all</button>
+          <a class="button" href="/api/export/inventory">Export inventory</a>
+        </div>
+      </header>
+
+      <section id="dashboard" class="view active">
+        <div class="metric-grid">
+          <article class="metric">
+            <span>Open orders</span>
+            <strong id="metric-open-orders">0</strong>
+          </article>
+          <article class="metric">
+            <span>Inventory SKUs</span>
+            <strong id="metric-inventory">0</strong>
+          </article>
+          <article class="metric warning">
+            <span>Low stock</span>
+            <strong id="metric-low-stock">0</strong>
+          </article>
+          <article class="metric">
+            <span>Reserved units</span>
+            <strong id="metric-reserved">0</strong>
+          </article>
+          <article class="metric">
+            <span>Sales</span>
+            <strong id="metric-sales">$0</strong>
+          </article>
+          <article class="metric">
+            <span>Customers</span>
+            <strong id="metric-customers">0</strong>
+          </article>
+        </div>
+
+        <div class="dashboard-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Orders to Confirm</h2>
+              <button class="text-button" data-view-jump="orders">View all</button>
+            </div>
+            <div id="dashboard-orders" class="compact-list"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Sync Activity</h2>
+              <button class="text-button" data-view-jump="connections">Sources</button>
+            </div>
+            <div id="sync-log" class="compact-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="orders" class="view">
+        <div class="orders-command">
+          <div class="toolbar">
+            <button class="view-toggle">Table View</button>
+            <input id="order-search" type="search" placeholder="Search orders, buyers, SKUs" />
+            <select id="order-status">
+              <option value="all">All statuses</option>
+              <option value="new">New</option>
+              <option value="ready">Ready</option>
+              <option value="approved">Approved</option>
+              <option value="hold">On hold</option>
+              <option value="canceled">Canceled</option>
+              <option value="confirmed">Confirmed</option>
+            </select>
+          </div>
+          <button id="toggle-order-detail" class="button secondary">Show details</button>
+        </div>
+        <div class="order-stats">
+          <article class="stat-card">
+            <span>Total Orders</span>
+            <strong id="orders-stat-total">0</strong>
+            <small>All channels</small>
+          </article>
+          <article class="stat-card">
+            <span>Approved</span>
+            <strong id="orders-stat-approved">0</strong>
+            <small>Ready for next step</small>
+          </article>
+          <article class="stat-card">
+            <span>Pending</span>
+            <strong id="orders-stat-pending">0</strong>
+            <small>Needs review</small>
+          </article>
+          <article class="stat-card">
+            <span>Returns / Canceled</span>
+            <strong id="orders-stat-exceptions">0</strong>
+            <small>Needs attention</small>
+          </article>
+        </div>
+        <div class="orders-workspace">
+          <div id="orders-list" class="order-list"></div>
+          <aside id="order-detail" class="order-detail"></aside>
+        </div>
+      </section>
+
+      <section id="order-full" class="view">
+        <div id="full-order-page"></div>
+      </section>
+
+      <section id="inventory" class="view">
+        <div class="toolbar">
+          <input id="inventory-search" type="search" placeholder="Search SKU, title, brand, category" />
+          <label class="file-button">
+            Import CSV
+            <input id="inventory-import" type="file" accept=".csv,text/csv" />
+          </label>
+        </div>
+        <div class="product-workspace">
+          <div id="product-list" class="product-list"></div>
+          <aside id="product-detail" class="product-detail"></aside>
+        </div>
+      </section>
+
+      <section id="customers" class="view">
+        <div class="toolbar">
+          <input id="customer-search" type="search" placeholder="Search customers, email, phone" />
+        </div>
+        <div id="customer-grid" class="customer-grid"></div>
+      </section>
+
+      <section id="reports" class="view">
+        <div class="report-grid">
+          <article class="metric">
+            <span>Gross sales</span>
+            <strong id="report-sales">$0</strong>
+          </article>
+          <article class="metric">
+            <span>Est. profit</span>
+            <strong id="report-profit">$0</strong>
+          </article>
+          <article class="metric warning">
+            <span>Returns</span>
+            <strong id="report-returns">0</strong>
+          </article>
+          <article class="metric warning">
+            <span>Cancellations</span>
+            <strong id="report-cancellations">0</strong>
+          </article>
+        </div>
+
+        <div class="dashboard-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Sales Performance</h2>
+            </div>
+            <div id="source-performance" class="report-bars"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Profit and Loss</h2>
+            </div>
+            <div id="pnl-summary" class="compact-list"></div>
+          </section>
+        </div>
+
+        <div class="dashboard-grid report-lower">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Product Performance</h2>
+            </div>
+            <div id="product-performance" class="table-wrap compact-table"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Returns and Cancellations</h2>
+            </div>
+            <div id="exception-list" class="compact-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="connections" class="view">
+        <div id="connection-grid" class="connection-grid"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
