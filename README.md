@@ -79,6 +79,39 @@ DP-HOME-001,Kitchen Storage Set,25
 
 Optional columns: `reorderPoint`, `quantity`, `name`.
 
+## Product BSON dump import
+
+The product catalog can import a gzipped Mongo-style BSON dump from a local file:
+
+```powershell
+npm run import:product-dump -- data/imports/products.bson.gz
+```
+
+Preview an import without changing the catalog:
+
+```powershell
+npm run import:product-dump -- data/imports/products.bson.gz --dry-run
+```
+
+To download the FTP dump first, add these values to `.env`:
+
+```env
+PRODUCT_DUMP_FTP_HOST=159.89.90.169
+PRODUCT_DUMP_FTP_PORT=21
+PRODUCT_DUMP_FTP_USER=datawarehouse
+PRODUCT_DUMP_FTP_PASSWORD=your_product_dump_ftp_password
+PRODUCT_DUMP_FTP_REMOTE_PATH=/dump/datawarehouse/products.bson.gz
+PRODUCT_DUMP_LOCAL_PATH=data/imports/products.bson.gz
+```
+
+Then run:
+
+```powershell
+npm run import:product-dump -- --ftp
+```
+
+Products are merged by SKU. Existing products keep local shadow SKUs, serial units, warehouse stock, and other operational history while product dump fields refresh catalog details.
+
 ## Next production steps
 
 1. Add real marketplace API credentials and connector modules per source.

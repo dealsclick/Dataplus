@@ -1,10 +1,16 @@
 const fs = require("fs");
 const path = require("path");
+const zlib = require("zlib");
 const crypto = require("crypto");
+const { BSON } = require("bson");
+const ftp = require("basic-ftp");
 const { readState, writeState, closePool } = require("../db");
 
+const ROOT = path.join(__dirname, "..");
+const DEFAULT_LOCAL_DUMP = path.join(ROOT, "data", "imports", "products.bson.gz");
+
 function loadEnv() {
-  const envPath = path.join(__dirname, "..", ".env");
+  const envPath = path.join(ROOT, ".env");
   if (!fs.existsSync(envPath)) return;
   for (const line of fs.readFileSync(envPath, "utf8").split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -14,6 +20,79 @@ function loadEnv() {
     const value = trimmed.slice(index + 1).trim().replace(/^["']|["']$/g, "");
     if (!process.env[key]) process.env[key] = value;
   }
+}
+
+function parseArgs(argv) {
+  const options = {
+    source: "",
+    downloadFtp: false,
+    dryRun: false,
+    limit: 0
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--ftp") {
+      options.downloadFtp = true;
+    } else if (arg === "--dry-run") {
+      options.dryRun = true;
+    } else if (arg === "--limit") {
+      options.limit = Number(argv[index + 1] || 0);
+      index += 1;
+    } else if (!options.source) {
+      options.source = arg;
+    }
+  }
+
+  return options;
+}
+
+function ensureParentDir(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+}
+
+async function downloadFromFtp(destinationPath) {
+  const host = process.env.PRODUCT_DUMP_FTP_HOST;
+  const user = process.env.PRODUCT_DUMP_FTP_USER;
+  const password = process.env.PRODUCT_DUMP_FTP_PASSWORD;
+  const port = Number(process.env.PRODUCT_DUMP_FTP_PORT || 21);
+  const remotePath = process.env.PRODUCT_DUMP_FTP_REMOTE_PATH || "/dump/datawarehouse/products.bson.gz";
+
+  if (!host || !user || !password) {
+    throw new Error("FTP import needs PRODUCT_DUMP_FTP_HOST, PRODUCT_DUMP_FTP_USER, and PRODUCT_DUMP_FTP_PASSWORD in .env.");
+  }
+
+  ensureParentDir(destinationPath);
+  const client = new ftp.Client();
+  client.ftp.verbose = false;
+  try {
+    await client.access({
+      host,
+      port,
+      user,
+      password,
+      secure: false
+    });
+    await client.downloadTo(destinationPath, remotePath);
+  } finally {
+    client.close();
+  }
+}
+
+function numberValue(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function textValue(value) {
+  return value == null ? "" : String(value).trim();
+}
+
+function listValue(value) {
+  if (Array.isArray(value)) return value.map(textValue).filter(Boolean);
+  const text = textValue(value);
+  if (!text) return [];
+  return text.split(/[|,]/).map((item) => item.trim()).filter(Boolean);
 }
 
 function parseLooseDump(raw) {
@@ -27,74 +106,112 @@ function parseLooseDump(raw) {
       record[key] = value;
     }
   }
-  return record;
+  return Object.keys(record).length ? [record] : [];
 }
 
-function numberValue(value, fallback = 0) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
+function parseJsonRecords(raw) {
+  const parsed = JSON.parse(raw);
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed.products)) return parsed.products;
+  return [parsed];
 }
 
-function textValue(value) {
-  return value == null ? "" : String(value).trim();
+function parseBsonDocuments(buffer) {
+  const records = [];
+  let offset = 0;
+
+  while (offset < buffer.length) {
+    if (offset + 4 > buffer.length) break;
+    const size = buffer.readInt32LE(offset);
+    if (!Number.isFinite(size) || size < 5 || offset + size > buffer.length) {
+      throw new Error(`Invalid BSON document length at byte ${offset}.`);
+    }
+    records.push(BSON.deserialize(buffer.subarray(offset, offset + size), { promoteValues: true }));
+    offset += size;
+  }
+
+  return records;
+}
+
+function readDumpRecords(dumpPath) {
+  const compressed = fs.readFileSync(dumpPath);
+  const buffer = dumpPath.endsWith(".gz") ? zlib.gunzipSync(compressed) : compressed;
+  const extension = path.basename(dumpPath).toLowerCase();
+
+  if (extension.endsWith(".bson") || extension.endsWith(".bson.gz")) {
+    return parseBsonDocuments(buffer);
+  }
+
+  const raw = buffer.toString("utf8");
+  try {
+    return parseJsonRecords(raw);
+  } catch {
+    return parseLooseDump(raw);
+  }
 }
 
 function buildProduct(record) {
-  const sku = textValue(record.sku || record._id);
-  if (!sku) throw new Error("Product dump does not contain sku or _id.");
+  const sku = textValue(record.sku || record.SKU || record._id || record.id);
+  if (!sku) return null;
 
-  const defaultImage = textValue(record.default_image);
+  const defaultImage = textValue(record.default_image || record.defaultImage || record.image || record.image_url);
+  const images = [...new Set([defaultImage, ...listValue(record.images || record.image_urls)].filter(Boolean))];
+  const price = numberValue(record.price || record.sale_price || record.sell_price);
+  const cost = numberValue(record.cost || record.fob_price || record.wholesale_price);
+  const stockQty = numberValue(record.stock_qty ?? record.stockQty ?? record.qty ?? record.quantity);
+  const minQuantity = textValue(record.min_quantity || record.minQuantity);
+
   return {
     sku,
-    externalId: textValue(record._id),
-    title: textValue(record.name || sku),
-    marketplaceTitle: textValue(record.name || sku),
-    shortDescription: textValue(record.short_description),
-    longDescription: textValue(record.description),
+    externalId: textValue(record._id || record.id),
+    title: textValue(record.name || record.title || sku),
+    marketplaceTitle: textValue(record.marketplaceTitle || record.name || record.title || sku),
+    shortDescription: textValue(record.short_description || record.shortDescription),
+    longDescription: textValue(record.description || record.long_description || record.longDescription),
     brand: textValue(record.brand),
-    category: textValue(record.category),
-    condition: "New",
-    status: record.active === true ? "Live" : "Draft",
-    barcode: textValue(record.upc),
+    category: textValue(record.category || record.product_type),
+    condition: textValue(record.condition) || "New",
+    status: record.active === false ? "Draft" : textValue(record.status) || "Draft",
+    barcode: textValue(record.upc || record.barcode || record.gtin),
     defaultImage,
-    images: defaultImage ? [defaultImage] : [],
+    images,
     manufacturer: textValue(record.manufacturer),
-    mfrPartNumber: textValue(record.mfr_part_number),
-    vendorSku: textValue(record.vendor_sku),
+    mfrPartNumber: textValue(record.mfr_part_number || record.mfrPartNumber),
+    vendorSku: textValue(record.vendor_sku || record.vendorSku),
     supplier: textValue(record.supplier),
-    supplierCode: textValue(record.supplier_code),
-    vendor: textValue(record.supplier),
+    supplierCode: textValue(record.supplier_code || record.supplierCode),
+    vendor: textValue(record.vendor || record.supplier),
     unspsc: textValue(record.unspsc),
     uom: textValue(record.uom),
-    uomQty: textValue(record.uom_qty),
-    minQuantity: textValue(record.min_quantity),
-    quantityIncrements: textValue(record.quantity_increments),
+    uomQty: textValue(record.uom_qty || record.uomQty),
+    minQuantity,
+    quantityIncrements: textValue(record.quantity_increments || record.quantityIncrements),
     hazardous: record.hazardous === true,
-    sdsUrl: textValue(record.sds_url),
-    itemHeight: numberValue(record.item_height),
-    itemLength: numberValue(record.item_length),
-    itemWeight: numberValue(record.item_weight),
-    itemWidth: numberValue(record.item_width),
-    packageHeight: numberValue(record.package_height),
-    packageLength: numberValue(record.package_length),
-    packageWeight: numberValue(record.package_weight),
-    packageWidth: numberValue(record.package_width),
-    qty: numberValue(record.stock_qty),
-    reserved: 0,
-    stockQty: numberValue(record.stock_qty),
-    stockStatus: textValue(record.stock_status),
-    stockUpdatedAt: textValue(record.stock_updated_at),
-    reorderPoint: numberValue(record.min_quantity),
-    ctechId: textValue(record.ctech_id),
-    ctechIdLastExport: textValue(record.ctech_id_last_export),
-    fobPrice: numberValue(record.fob_price),
-    price: numberValue(record.price),
-    cost: numberValue(record.fob_price),
-    msrp: numberValue(record.list_price),
+    sdsUrl: textValue(record.sds_url || record.sdsUrl),
+    itemHeight: numberValue(record.item_height || record.itemHeight),
+    itemLength: numberValue(record.item_length || record.itemLength),
+    itemWeight: numberValue(record.item_weight || record.itemWeight),
+    itemWidth: numberValue(record.item_width || record.itemWidth),
+    packageHeight: numberValue(record.package_height || record.packageHeight),
+    packageLength: numberValue(record.package_length || record.packageLength),
+    packageWeight: numberValue(record.package_weight || record.packageWeight),
+    packageWidth: numberValue(record.package_width || record.packageWidth),
+    qty: stockQty,
+    stockQty,
+    stockStatus: textValue(record.stock_status || record.stockStatus),
+    stockUpdatedAt: textValue(record.stock_updated_at || record.stockUpdatedAt),
+    reorderPoint: numberValue(minQuantity),
+    ctechId: textValue(record.ctech_id || record.ctechId),
+    ctechIdLastExport: textValue(record.ctech_id_last_export || record.ctechIdLastExport),
+    fobPrice: numberValue(record.fob_price || record.fobPrice),
+    price,
+    cost,
+    msrp: numberValue(record.list_price || record.msrp),
     wildcardSearch: textValue(record.wildcardSearch),
-    tags: [],
+    tags: listValue(record.tags),
+    attributes: record.attributes && typeof record.attributes === "object" ? record.attributes : {},
     sources: { productDump: sku },
-    importedFrom: "product_data.json",
+    importedFrom: "products.bson.gz",
     updatedAt: new Date().toISOString()
   };
 }
@@ -103,7 +220,7 @@ async function readAppState() {
   const postgresState = await readState();
   if (postgresState) return { state: postgresState, write: (next) => writeState(next) };
 
-  const fallbackPath = path.join(__dirname, "..", "data", "db.json");
+  const fallbackPath = path.join(ROOT, "data", "db.json");
   if (!fs.existsSync(fallbackPath)) throw new Error("No PostgreSQL state or data/db.json found.");
   return {
     state: JSON.parse(fs.readFileSync(fallbackPath, "utf8")),
@@ -111,26 +228,55 @@ async function readAppState() {
   };
 }
 
+function mergeProduct(existing, product) {
+  const next = { ...existing, ...product, id: existing.id || crypto.randomUUID() };
+  next.sources = { ...(existing.sources || {}), ...(product.sources || {}) };
+  next.images = product.images.length ? product.images : existing.images || [];
+  next.tags = product.tags.length ? product.tags : existing.tags || [];
+  next.shadowSkus = Array.isArray(existing.shadowSkus) ? existing.shadowSkus : [];
+  next.serialUnits = Array.isArray(existing.serialUnits) ? existing.serialUnits : [];
+  next.warehouseStock = Array.isArray(existing.warehouseStock) ? existing.warehouseStock : [];
+  return next;
+}
+
 async function main() {
   loadEnv();
-  const dumpPath = process.argv[2];
-  if (!dumpPath) throw new Error("Usage: node scripts/import-product-dump.js <product_data.json>");
+  const options = parseArgs(process.argv.slice(2));
+  const dumpPath = path.resolve(options.source || process.env.PRODUCT_DUMP_LOCAL_PATH || DEFAULT_LOCAL_DUMP);
 
-  const raw = fs.readFileSync(dumpPath, "utf8");
-  const record = parseLooseDump(raw);
-  const product = buildProduct(record);
+  if (options.downloadFtp) {
+    await downloadFromFtp(dumpPath);
+    console.log(`Downloaded product dump to ${path.relative(ROOT, dumpPath)}`);
+  }
+
+  if (!fs.existsSync(dumpPath)) {
+    throw new Error(`Product dump not found: ${dumpPath}`);
+  }
+
+  const rawRecords = readDumpRecords(dumpPath);
+  const records = options.limit > 0 ? rawRecords.slice(0, options.limit) : rawRecords;
+  const products = records.map(buildProduct).filter(Boolean);
   const { state, write } = await readAppState();
 
   state.inventory = Array.isArray(state.inventory) ? state.inventory : [];
-  const existing = state.inventory.find((item) => String(item.sku || "").toLowerCase() === product.sku.toLowerCase());
-  if (existing) {
-    Object.assign(existing, product, { id: existing.id || crypto.randomUUID() });
-  } else {
-    state.inventory.push({ id: crypto.randomUUID(), ...product });
+  const bySku = new Map(state.inventory.map((item, index) => [String(item.sku || "").toLowerCase(), { item, index }]));
+  const stats = { read: rawRecords.length, importable: products.length, created: 0, updated: 0, skipped: rawRecords.length - products.length };
+
+  for (const product of products) {
+    const key = product.sku.toLowerCase();
+    const existing = bySku.get(key);
+    if (existing) {
+      state.inventory[existing.index] = mergeProduct(existing.item, product);
+      stats.updated += 1;
+    } else {
+      state.inventory.push({ id: crypto.randomUUID(), ...product });
+      bySku.set(key, { item: product, index: state.inventory.length - 1 });
+      stats.created += 1;
+    }
   }
 
-  await write(state);
-  console.log(`${existing ? "Updated" : "Created"} SKU ${product.sku}`);
+  if (!options.dryRun) await write(state);
+  console.log(`${options.dryRun ? "Dry run:" : "Imported"} ${stats.importable} products (${stats.created} created, ${stats.updated} updated, ${stats.skipped} skipped) from ${path.basename(dumpPath)}.`);
 }
 
 main()
