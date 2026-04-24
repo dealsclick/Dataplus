@@ -137,6 +137,43 @@ function parseBsonDocuments(buffer) {
   return records;
 }
 
+async function readBsonDocumentsStream(dumpPath, limit = 0) {
+  const records = [];
+  await forEachBsonDocumentStream(dumpPath, { limit }, (record) => {
+    records.push(record);
+  });
+  return records;
+}
+
+async function forEachBsonDocumentStream(dumpPath, options = {}, onRecord) {
+  const limit = Number(options.limit || 0);
+  let buffer = Buffer.alloc(0);
+  const source = fs.createReadStream(dumpPath);
+  const stream = dumpPath.endsWith(".gz") ? source.pipe(zlib.createGunzip()) : source;
+  let count = 0;
+
+  for await (const chunk of stream) {
+    buffer = Buffer.concat([buffer, chunk]);
+    while (buffer.length >= 4 && (!limit || count < limit)) {
+      const size = buffer.readInt32LE(0);
+      if (!Number.isFinite(size) || size < 5) {
+        throw new Error(`Invalid BSON document length at record ${count}: ${size}.`);
+      }
+      if (buffer.length < size) break;
+      const record = BSON.deserialize(buffer.subarray(0, size), { promoteValues: true });
+      buffer = buffer.subarray(size);
+      await onRecord(record, count);
+      count += 1;
+    }
+    if (limit && count >= limit) {
+      stream.destroy();
+      break;
+    }
+  }
+
+  return count;
+}
+
 function scalarValue(value) {
   if (value == null) return value;
   if (value instanceof Date) return value.toISOString();
@@ -178,6 +215,29 @@ function readDumpRecords(dumpPath) {
   } catch {
     return parseLooseDump(raw);
   }
+}
+
+async function readDumpRecordsForInspect(dumpPath, limit = 5) {
+  const extension = path.basename(dumpPath).toLowerCase();
+  if (extension.endsWith(".bson") || extension.endsWith(".bson.gz")) {
+    return readBsonDocumentsStream(dumpPath, limit);
+  }
+  return readDumpRecords(dumpPath).slice(0, limit);
+}
+
+async function forEachDumpRecord(dumpPath, options = {}, onRecord) {
+  const extension = path.basename(dumpPath).toLowerCase();
+  if (extension.endsWith(".bson") || extension.endsWith(".bson.gz")) {
+    return forEachBsonDocumentStream(dumpPath, options, onRecord);
+  }
+
+  const records = readDumpRecords(dumpPath);
+  const limit = Number(options.limit || 0);
+  const selected = limit > 0 ? records.slice(0, limit) : records;
+  for (let index = 0; index < selected.length; index += 1) {
+    await onRecord(selected[index], index);
+  }
+  return records.length;
 }
 
 function buildProduct(record) {
@@ -296,11 +356,9 @@ async function main() {
     throw new Error(`Product dump not found: ${dumpPath}`);
   }
 
-  const rawRecords = readDumpRecords(dumpPath);
-  const records = options.limit > 0 ? rawRecords.slice(0, options.limit) : rawRecords;
-  const products = records.map(buildProduct).filter(Boolean);
-
   if (options.inspect) {
+    const inspectLimit = Math.max(1, options.limit || 5);
+    const records = await readDumpRecordsForInspect(dumpPath, inspectLimit);
     const sample = records.slice(0, Math.max(1, options.limit || 3)).map((record, index) => {
       const normalizedRecord = normalizeDumpRecord(record);
       const product = buildProduct(record);
@@ -336,7 +394,7 @@ async function main() {
         productManagerFieldCount: product ? Object.keys(product.productManagerFields || {}).length : 0
       };
     });
-    console.log(JSON.stringify({ file: path.basename(dumpPath), recordsRead: rawRecords.length, inspected: sample.length, sample }, null, 2));
+    console.log(JSON.stringify({ file: path.basename(dumpPath), inspected: sample.length, sample }, null, 2));
     return;
   }
 
@@ -344,20 +402,32 @@ async function main() {
 
   state.inventory = Array.isArray(state.inventory) ? state.inventory : [];
   const bySku = new Map(state.inventory.map((item, index) => [String(item.sku || "").toLowerCase(), { item, index }]));
-  const stats = { read: rawRecords.length, importable: products.length, created: 0, updated: 0, skipped: rawRecords.length - products.length };
+  const stats = { read: 0, importable: 0, created: 0, updated: 0, skipped: 0 };
 
-  for (const product of products) {
+  await forEachDumpRecord(dumpPath, { limit: options.limit }, async (record) => {
+    stats.read += 1;
+    const product = buildProduct(record);
+    if (!product) {
+      stats.skipped += 1;
+      return;
+    }
+    stats.importable += 1;
     const key = product.sku.toLowerCase();
     const existing = bySku.get(key);
     if (existing) {
-      state.inventory[existing.index] = mergeProduct(existing.item, product);
+      if (!options.dryRun) state.inventory[existing.index] = mergeProduct(existing.item, product);
       stats.updated += 1;
     } else {
-      state.inventory.push({ id: crypto.randomUUID(), ...product });
-      bySku.set(key, { item: product, index: state.inventory.length - 1 });
+      const next = { id: crypto.randomUUID(), ...product };
+      if (!options.dryRun) state.inventory.push(next);
+      bySku.set(key, { item: next, index: options.dryRun ? state.inventory.length : state.inventory.length - 1 });
       stats.created += 1;
     }
-  }
+    if (stats.read % 10000 === 0) {
+      process.stderr.write(`Processed ${stats.read} records (${stats.created} created, ${stats.updated} updated, ${stats.skipped} skipped)\\r`);
+    }
+  });
+  if (stats.read >= 10000) process.stderr.write("\n");
 
   if (!options.dryRun) await write(state);
   console.log(`${options.dryRun ? "Dry run:" : "Imported"} ${stats.importable} products (${stats.created} created, ${stats.updated} updated, ${stats.skipped} skipped) from ${path.basename(dumpPath)}.`);

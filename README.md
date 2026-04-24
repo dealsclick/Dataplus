@@ -99,6 +99,8 @@ Inspect source keys and mapped DataPlus fields before importing:
 npm run import:product-dump -- data/imports/products.bson.gz --inspect --limit 3
 ```
 
+If you already downloaded the FTP file, inspect or import the local file path instead of adding `--ftp` again. The FTP dump can be large, and `--ftp` downloads a fresh copy before running the requested action.
+
 To download the FTP dump first, add these values to `.env`:
 
 ```env
