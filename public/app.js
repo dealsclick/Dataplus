@@ -3368,15 +3368,41 @@ function renderProductManagerFields(item) {
     "uom_qty",
     "upc",
     "vendor_sku",
+    "zoro_sku",
+    "zoro_price",
+    "zoro_leadtime",
+    "zoro_minimum_qty",
+    "varis_contract_price",
+    "varis_list_price",
+    "varis_od_managed_price",
+    "varis_non_od_managed_price",
+    "varis_od_private_price",
+    "varis_non_od_private_price",
     "wildcardSearch",
     "stock_qty",
     "stock_status",
     "stock_updated_at",
+    "original_image",
+    "default_supplier",
+    "last_prices_update_at",
+    "last_prices_update_by",
+    "lead_time",
+    "leadtime",
+    "suppliers",
+    "alt_vendor_sku",
+    "country_of_origin",
+    "original_sds_url",
     "inactive_mailed_at",
     "checked_image",
     "validated_at",
+    "item_key",
+    "item_clearance_indicator",
     "ctech_id",
-    "ctech_id_last_export"
+    "ctech_id_last_export",
+    "original",
+    "vendor_descripton",
+    "vendor_description",
+    "uploaded_by"
   ];
   const keys = [...preferredOrder.filter((key) => Object.prototype.hasOwnProperty.call(fields, key)), ...Object.keys(fields).filter((key) => !preferredOrder.includes(key)).sort()];
 
@@ -3513,6 +3539,31 @@ function renderProductContentPage() {
             <label>Checked image error<input value="${html(item.checkedImageError || "")}" data-product-field="checkedImageError" data-product-id="${item.id}" /></label>
             <label>Checked image size<input value="${html(item.checkedImageSize || "")}" data-product-field="checkedImageSize" data-product-id="${item.id}" /></label>
             <label>Checked image timestamp<input value="${html(item.checkedImageTimestamp || "")}" data-product-field="checkedImageTimestamp" data-product-id="${item.id}" /></label>
+          </div>
+          <h4>Supplier Channel Fields</h4>
+          <div class="form-grid">
+            <label>Zoro SKU<input value="${html(item.zoroSku || "")}" data-product-field="zoroSku" data-product-id="${item.id}" /></label>
+            <label>Zoro price<input type="number" step="0.01" value="${item.zoroPrice || 0}" data-product-field="zoroPrice" data-product-id="${item.id}" /></label>
+            <label>Zoro leadtime<input value="${html(item.zoroLeadtime || "")}" data-product-field="zoroLeadtime" data-product-id="${item.id}" /></label>
+            <label>Zoro minimum qty<input type="number" step="1" value="${item.zoroMinimumQty || 0}" data-product-field="zoroMinimumQty" data-product-id="${item.id}" /></label>
+            <label>Varis contract price<input type="number" step="0.01" value="${item.varisContractPrice || 0}" data-product-field="varisContractPrice" data-product-id="${item.id}" /></label>
+            <label>Varis list price<input type="number" step="0.01" value="${item.varisListPrice || 0}" data-product-field="varisListPrice" data-product-id="${item.id}" /></label>
+            <label>Varis OD managed<input type="number" step="0.01" value="${item.varisOdManagedPrice || 0}" data-product-field="varisOdManagedPrice" data-product-id="${item.id}" /></label>
+            <label>Varis non-OD managed<input type="number" step="0.01" value="${item.varisNonOdManagedPrice || 0}" data-product-field="varisNonOdManagedPrice" data-product-id="${item.id}" /></label>
+            <label>Varis OD private<input type="number" step="0.01" value="${item.varisOdPrivatePrice || 0}" data-product-field="varisOdPrivatePrice" data-product-id="${item.id}" /></label>
+            <label>Varis non-OD private<input type="number" step="0.01" value="${item.varisNonOdPrivatePrice || 0}" data-product-field="varisNonOdPrivatePrice" data-product-id="${item.id}" /></label>
+            <label>Default supplier<input value="${html(item.defaultSupplier || "")}" data-product-field="defaultSupplier" data-product-id="${item.id}" /></label>
+            <label>Lead time<input value="${html(item.leadTime || "")}" data-product-field="leadTime" data-product-id="${item.id}" /></label>
+            <label>Alt vendor SKU<input value="${html(item.altVendorSku || "")}" data-product-field="altVendorSku" data-product-id="${item.id}" /></label>
+            <label>Country of origin<input value="${html(item.countryOfOrigin || "")}" data-product-field="countryOfOrigin" data-product-id="${item.id}" /></label>
+            <label>Item key<input value="${html(item.itemKey || "")}" data-product-field="itemKey" data-product-id="${item.id}" /></label>
+            <label>Clearance indicator<input value="${html(item.itemClearanceIndicator || "")}" data-product-field="itemClearanceIndicator" data-product-id="${item.id}" /></label>
+            <label>Original image<input value="${html(item.originalImage || "")}" data-product-field="originalImage" data-product-id="${item.id}" /></label>
+            <label>Original SDS URL<input value="${html(item.originalSdsUrl || "")}" data-product-field="originalSdsUrl" data-product-id="${item.id}" /></label>
+            <label>Last prices update at<input value="${html(item.lastPricesUpdateAt || "")}" data-product-field="lastPricesUpdateAt" data-product-id="${item.id}" /></label>
+            <label>Last prices update by<input value="${html(item.lastPricesUpdateBy || "")}" data-product-field="lastPricesUpdateBy" data-product-id="${item.id}" /></label>
+            <label>Vendor description<textarea rows="3" data-product-field="vendorDescription" data-product-id="${item.id}">${html(item.vendorDescription || "")}</textarea></label>
+            <label>Uploaded by<input value="${html(item.uploadedBy || "")}" data-product-field="uploadedBy" data-product-id="${item.id}" /></label>
           </div>
           ${renderProductManagerFields(item)}
         </section>
@@ -5511,7 +5562,7 @@ async function updateProductField(input) {
   const item = state.inventory.find((row) => row.id === input.dataset.productId);
   if (!item) return;
   const field = input.dataset.productField;
-  const numericFields = new Set(["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "stockQty", "fobPrice"]);
+  const numericFields = new Set(["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"]);
   const booleanFields = new Set(["hazardous", "active"]);
   let value = input.value;
   if (numericFields.has(field)) value = Number(input.value);

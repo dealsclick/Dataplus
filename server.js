@@ -470,6 +470,31 @@ function normalizeDb(db) {
       checkedImageError: item.checkedImageError ?? item.checked_image?.error ?? "",
       checkedImageSize: item.checkedImageSize ?? item.checked_image?.size ?? "",
       checkedImageTimestamp: item.checkedImageTimestamp ?? item.checked_image?.timestamp ?? "",
+      zoroLeadtime: item.zoroLeadtime ?? item.zoro_leadtime ?? "",
+      zoroPrice: Number(item.zoroPrice ?? item.zoro_price ?? 0),
+      zoroSku: item.zoroSku ?? item.zoro_sku ?? "",
+      zoroMinimumQty: Number(item.zoroMinimumQty ?? item.zoro_minimum_qty ?? 0),
+      varisContractPrice: Number(item.varisContractPrice ?? item.varis_contract_price ?? 0),
+      varisListPrice: Number(item.varisListPrice ?? item.varis_list_price ?? 0),
+      varisOdManagedPrice: Number(item.varisOdManagedPrice ?? item.varis_od_managed_price ?? 0),
+      varisNonOdManagedPrice: Number(item.varisNonOdManagedPrice ?? item.varis_non_od_managed_price ?? 0),
+      varisOdPrivatePrice: Number(item.varisOdPrivatePrice ?? item.varis_od_private_price ?? 0),
+      varisNonOdPrivatePrice: Number(item.varisNonOdPrivatePrice ?? item.varis_non_od_private_price ?? 0),
+      originalImage: item.originalImage ?? item.original_image ?? "",
+      defaultSupplier: item.defaultSupplier ?? item.default_supplier ?? "",
+      lastPricesUpdateAt: item.lastPricesUpdateAt ?? item.last_prices_update_at ?? "",
+      lastPricesUpdateBy: item.lastPricesUpdateBy ?? item.last_prices_update_by ?? "",
+      leadTime: item.leadTime ?? item.lead_time ?? item.leadtime ?? "",
+      leadtime: item.leadtime ?? "",
+      suppliers: item.suppliers === undefined ? [] : item.suppliers,
+      altVendorSku: item.altVendorSku ?? item.alt_vendor_sku ?? "",
+      countryOfOrigin: item.countryOfOrigin ?? item.country_of_origin ?? "",
+      originalSdsUrl: item.originalSdsUrl ?? item.original_sds_url ?? "",
+      itemKey: item.itemKey ?? item.item_key ?? "",
+      itemClearanceIndicator: item.itemClearanceIndicator ?? item.item_clearance_indicator ?? "",
+      original: item.original === undefined ? null : item.original,
+      vendorDescription: item.vendorDescription ?? item.vendor_descripton ?? item.vendor_description ?? "",
+      uploadedBy: item.uploadedBy ?? item.uploaded_by ?? "",
       productManagerFields: item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {},
       serialUnits: Array.isArray(item.serialUnits) ? item.serialUnits : [],
       warehouseStock: Array.isArray(item.warehouseStock) ? item.warehouseStock : [],
@@ -2445,8 +2470,8 @@ function parseList(value) {
 
 function inventoryPayloadFromRecord(record) {
   const payload = {};
-  const textFields = ["marketplaceTitle", "brand", "category", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp"];
-  const numberFields = ["price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "reorderPoint", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "stockQty", "fobPrice"];
+  const textFields = ["marketplaceTitle", "brand", "category", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
+  const numberFields = ["price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "reorderPoint", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
 
   for (const field of textFields) {
     if (record[field] !== undefined) payload[field] = String(record[field]).trim();
@@ -2460,12 +2485,14 @@ function inventoryPayloadFromRecord(record) {
   if (record.tags !== undefined) payload.tags = parseList(record.tags);
   if (record.productManagerFields && typeof record.productManagerFields === "object") payload.productManagerFields = record.productManagerFields;
   if (record.checkedImage && typeof record.checkedImage === "object") payload.checkedImage = record.checkedImage;
+  if (record.suppliers !== undefined) payload.suppliers = record.suppliers;
+  if (record.original !== undefined) payload.original = record.original;
   return payload;
 }
 
 function applyInventoryPatch(item, body) {
-  const textFields = ["sku", "title", "marketplaceTitle", "brand", "category", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp"];
-  const numberFields = ["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "stockQty", "fobPrice"];
+  const textFields = ["sku", "title", "marketplaceTitle", "brand", "category", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
+  const numberFields = ["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
 
   for (const field of textFields) {
     if (body[field] !== undefined) item[field] = String(body[field]);
@@ -2479,6 +2506,8 @@ function applyInventoryPatch(item, body) {
   if (body.tags !== undefined) item.tags = parseList(body.tags);
   if (body.productManagerFields && typeof body.productManagerFields === "object") item.productManagerFields = body.productManagerFields;
   if (body.checkedImage && typeof body.checkedImage === "object") item.checkedImage = body.checkedImage;
+  if (body.suppliers !== undefined) item.suppliers = body.suppliers;
+  if (body.original !== undefined) item.original = body.original;
 }
 
 function ensureInventoryWarehouseStock(item, warehouse) {
