@@ -81,10 +81,16 @@ Optional columns: `reorderPoint`, `quantity`, `name`.
 
 ## Product BSON dump import
 
-The product catalog can import a gzipped Mongo-style BSON dump from a local file:
+The product catalog can import a gzipped Mongo-style BSON dump from a local file. Full imports write to `data/catalog/products.ndjson` so the app does not try to load hundreds of thousands of products into the operational inventory JSON.
 
 ```powershell
 npm run import:product-dump -- data/imports/products.bson.gz
+```
+
+To intentionally import records into the smaller operational inventory table instead, add `--inventory`. Use this only with a limit or curated file:
+
+```powershell
+npm run import:product-dump -- data/imports/products.bson.gz --inventory --limit 1000
 ```
 
 Preview an import without changing the catalog:

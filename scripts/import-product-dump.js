@@ -8,6 +8,7 @@ const { readState, writeState, closePool } = require("../db");
 
 const ROOT = path.join(__dirname, "..");
 const DEFAULT_LOCAL_DUMP = path.join(ROOT, "data", "imports", "products.bson.gz");
+const DEFAULT_CATALOG_PATH = path.join(ROOT, "data", "catalog", "products.ndjson");
 
 function loadEnv() {
   const envPath = path.join(ROOT, ".env");
@@ -28,6 +29,7 @@ function parseArgs(argv) {
     downloadFtp: false,
     dryRun: false,
     inspect: false,
+    inventory: false,
     limit: 0
   };
 
@@ -39,6 +41,8 @@ function parseArgs(argv) {
       options.dryRun = true;
     } else if (arg === "--inspect") {
       options.inspect = true;
+    } else if (arg === "--inventory") {
+      options.inventory = true;
     } else if (arg === "--limit") {
       options.limit = Number(argv[index + 1] || 0);
       index += 1;
@@ -367,6 +371,93 @@ function mergeProduct(existing, product) {
   return next;
 }
 
+async function importCatalogStore(dumpPath, options) {
+  const catalogPath = path.resolve(process.env.PRODUCT_CATALOG_LOCAL_PATH || DEFAULT_CATALOG_PATH);
+  const tempPath = `${catalogPath}.tmp`;
+  const manifestPath = `${catalogPath}.manifest.json`;
+  ensureParentDir(catalogPath);
+
+  const stats = { read: 0, importable: 0, skipped: 0 };
+  const startedAt = new Date().toISOString();
+  const seen = new Set();
+  const writer = options.dryRun ? null : fs.createWriteStream(tempPath, { encoding: "utf8" });
+
+  try {
+    await forEachDumpRecord(dumpPath, { limit: options.limit }, async (record) => {
+      stats.read += 1;
+      const product = buildProduct(record);
+      if (!product) {
+        stats.skipped += 1;
+        return;
+      }
+      stats.importable += 1;
+      seen.add(product.sku.toLowerCase());
+      if (writer) {
+        writer.write(`${JSON.stringify({ id: product.sku, ...product })}\n`);
+      }
+      if (stats.read % 10000 === 0) {
+        process.stderr.write(`Processed ${stats.read} records (${stats.importable} catalog products, ${stats.skipped} skipped)\\r`);
+      }
+    });
+  } finally {
+    if (writer) await new Promise((resolve, reject) => writer.end((error) => (error ? reject(error) : resolve())));
+  }
+
+  if (stats.read >= 10000) process.stderr.write("\n");
+
+  if (!options.dryRun) {
+    fs.renameSync(tempPath, catalogPath);
+    fs.writeFileSync(manifestPath, JSON.stringify({
+      source: path.basename(dumpPath),
+      catalogPath: path.relative(ROOT, catalogPath),
+      importedAt: new Date().toISOString(),
+      startedAt,
+      recordsRead: stats.read,
+      productCount: stats.importable,
+      skipped: stats.skipped,
+      uniqueSkuCount: seen.size
+    }, null, 2));
+  }
+
+  console.log(`${options.dryRun ? "Dry run:" : "Imported"} ${stats.importable} catalog products (${stats.skipped} skipped) from ${path.basename(dumpPath)}${options.dryRun ? "" : ` into ${path.relative(ROOT, catalogPath)}`}.`);
+}
+
+async function importInventoryState(dumpPath, options) {
+  const { state, write } = await readAppState();
+
+  state.inventory = Array.isArray(state.inventory) ? state.inventory : [];
+  const bySku = new Map(state.inventory.map((item, index) => [String(item.sku || "").toLowerCase(), { item, index }]));
+  const stats = { read: 0, importable: 0, created: 0, updated: 0, skipped: 0 };
+
+  await forEachDumpRecord(dumpPath, { limit: options.limit }, async (record) => {
+    stats.read += 1;
+    const product = buildProduct(record);
+    if (!product) {
+      stats.skipped += 1;
+      return;
+    }
+    stats.importable += 1;
+    const key = product.sku.toLowerCase();
+    const existing = bySku.get(key);
+    if (existing) {
+      if (!options.dryRun) state.inventory[existing.index] = mergeProduct(existing.item, product);
+      stats.updated += 1;
+    } else {
+      const next = { id: crypto.randomUUID(), ...product };
+      if (!options.dryRun) state.inventory.push(next);
+      bySku.set(key, { item: next, index: options.dryRun ? state.inventory.length : state.inventory.length - 1 });
+      stats.created += 1;
+    }
+    if (stats.read % 10000 === 0) {
+      process.stderr.write(`Processed ${stats.read} records (${stats.created} created, ${stats.updated} updated, ${stats.skipped} skipped)\\r`);
+    }
+  });
+  if (stats.read >= 10000) process.stderr.write("\n");
+
+  if (!options.dryRun) await write(state);
+  console.log(`${options.dryRun ? "Dry run:" : "Imported"} ${stats.importable} inventory products (${stats.created} created, ${stats.updated} updated, ${stats.skipped} skipped) from ${path.basename(dumpPath)}.`);
+}
+
 async function main() {
   loadEnv();
   const options = parseArgs(process.argv.slice(2));
@@ -434,39 +525,11 @@ async function main() {
     return;
   }
 
-  const { state, write } = await readAppState();
-
-  state.inventory = Array.isArray(state.inventory) ? state.inventory : [];
-  const bySku = new Map(state.inventory.map((item, index) => [String(item.sku || "").toLowerCase(), { item, index }]));
-  const stats = { read: 0, importable: 0, created: 0, updated: 0, skipped: 0 };
-
-  await forEachDumpRecord(dumpPath, { limit: options.limit }, async (record) => {
-    stats.read += 1;
-    const product = buildProduct(record);
-    if (!product) {
-      stats.skipped += 1;
-      return;
-    }
-    stats.importable += 1;
-    const key = product.sku.toLowerCase();
-    const existing = bySku.get(key);
-    if (existing) {
-      if (!options.dryRun) state.inventory[existing.index] = mergeProduct(existing.item, product);
-      stats.updated += 1;
-    } else {
-      const next = { id: crypto.randomUUID(), ...product };
-      if (!options.dryRun) state.inventory.push(next);
-      bySku.set(key, { item: next, index: options.dryRun ? state.inventory.length : state.inventory.length - 1 });
-      stats.created += 1;
-    }
-    if (stats.read % 10000 === 0) {
-      process.stderr.write(`Processed ${stats.read} records (${stats.created} created, ${stats.updated} updated, ${stats.skipped} skipped)\\r`);
-    }
-  });
-  if (stats.read >= 10000) process.stderr.write("\n");
-
-  if (!options.dryRun) await write(state);
-  console.log(`${options.dryRun ? "Dry run:" : "Imported"} ${stats.importable} products (${stats.created} created, ${stats.updated} updated, ${stats.skipped} skipped) from ${path.basename(dumpPath)}.`);
+  if (options.inventory) {
+    await importInventoryState(dumpPath, options);
+  } else {
+    await importCatalogStore(dumpPath, options);
+  }
 }
 
 main()
