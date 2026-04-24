@@ -27,6 +27,7 @@ function parseArgs(argv) {
     source: "",
     downloadFtp: false,
     dryRun: false,
+    inspect: false,
     limit: 0
   };
 
@@ -36,6 +37,8 @@ function parseArgs(argv) {
       options.downloadFtp = true;
     } else if (arg === "--dry-run") {
       options.dryRun = true;
+    } else if (arg === "--inspect") {
+      options.inspect = true;
     } else if (arg === "--limit") {
       options.limit = Number(argv[index + 1] || 0);
       index += 1;
@@ -80,12 +83,13 @@ async function downloadFromFtp(destinationPath) {
 }
 
 function numberValue(value, fallback = 0) {
-  const number = Number(value);
+  const number = Number(scalarValue(value));
   return Number.isFinite(number) ? number : fallback;
 }
 
 function textValue(value) {
-  return value == null ? "" : String(value).trim();
+  const scalar = scalarValue(value);
+  return scalar == null ? "" : String(scalar).trim();
 }
 
 function listValue(value) {
@@ -133,6 +137,32 @@ function parseBsonDocuments(buffer) {
   return records;
 }
 
+function scalarValue(value) {
+  if (value == null) return value;
+  if (value instanceof Date) return value.toISOString();
+  if (value && typeof value === "object") {
+    if (value.$numberDecimal !== undefined) return value.$numberDecimal;
+    if (value.$date !== undefined) return scalarValue(value.$date);
+    if (value._bsontype === "Decimal128" && typeof value.toString === "function") return value.toString();
+    if (value._bsontype === "ObjectId" && typeof value.toString === "function") return value.toString();
+  }
+  return value;
+}
+
+function normalizeDumpValue(value) {
+  const scalar = scalarValue(value);
+  if (scalar !== value) return scalar;
+  if (Array.isArray(value)) return value.map(normalizeDumpValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, normalizeDumpValue(child)]));
+  }
+  return value;
+}
+
+function normalizeDumpRecord(record) {
+  return Object.fromEntries(Object.entries(record || {}).map(([key, value]) => [key, normalizeDumpValue(value)]));
+}
+
 function readDumpRecords(dumpPath) {
   const compressed = fs.readFileSync(dumpPath);
   const buffer = dumpPath.endsWith(".gz") ? zlib.gunzipSync(compressed) : compressed;
@@ -151,65 +181,78 @@ function readDumpRecords(dumpPath) {
 }
 
 function buildProduct(record) {
-  const sku = textValue(record.sku || record.SKU || record._id || record.id);
+  const normalizedRecord = normalizeDumpRecord(record);
+  const sku = textValue(normalizedRecord._id || normalizedRecord.sku || normalizedRecord.SKU || normalizedRecord.id);
   if (!sku) return null;
 
-  const defaultImage = textValue(record.default_image || record.defaultImage || record.image || record.image_url);
-  const images = [...new Set([defaultImage, ...listValue(record.images || record.image_urls)].filter(Boolean))];
-  const price = numberValue(record.price || record.sale_price || record.sell_price);
-  const cost = numberValue(record.cost || record.fob_price || record.wholesale_price);
-  const stockQty = numberValue(record.stock_qty ?? record.stockQty ?? record.qty ?? record.quantity);
-  const minQuantity = textValue(record.min_quantity || record.minQuantity);
+  const defaultImage = textValue(normalizedRecord.default_image || normalizedRecord.defaultImage || normalizedRecord.image || normalizedRecord.image_url);
+  const images = [...new Set([defaultImage, ...listValue(normalizedRecord.images || normalizedRecord.image_urls)].filter(Boolean))];
+  const price = numberValue(normalizedRecord.price || normalizedRecord.sale_price || normalizedRecord.sell_price);
+  const cost = numberValue(normalizedRecord.cost || normalizedRecord.fob_price || normalizedRecord.wholesale_price);
+  const stockQty = numberValue(normalizedRecord.stock_qty ?? normalizedRecord.stockQty ?? normalizedRecord.qty ?? normalizedRecord.quantity);
+  const minQuantity = textValue(normalizedRecord.min_quantity || normalizedRecord.minQuantity);
+  const checkedImage = normalizedRecord.checked_image && typeof normalizedRecord.checked_image === "object" ? normalizedRecord.checked_image : {};
 
   return {
     sku,
-    externalId: textValue(record._id || record.id),
-    title: textValue(record.name || record.title || sku),
-    marketplaceTitle: textValue(record.marketplaceTitle || record.name || record.title || sku),
-    shortDescription: textValue(record.short_description || record.shortDescription),
-    longDescription: textValue(record.description || record.long_description || record.longDescription),
-    brand: textValue(record.brand),
-    category: textValue(record.category || record.product_type),
-    condition: textValue(record.condition) || "New",
-    status: record.active === false ? "Draft" : textValue(record.status) || "Draft",
-    barcode: textValue(record.upc || record.barcode || record.gtin),
+    externalId: textValue(normalizedRecord._id || normalizedRecord.id),
+    title: textValue(normalizedRecord.name || normalizedRecord.title || sku),
+    marketplaceTitle: textValue(normalizedRecord.marketplaceTitle || normalizedRecord.name || normalizedRecord.title || sku),
+    shortDescription: textValue(normalizedRecord.short_description || normalizedRecord.shortDescription),
+    longDescription: textValue(normalizedRecord.description || normalizedRecord.long_description || normalizedRecord.longDescription),
+    brand: textValue(normalizedRecord.brand),
+    category: textValue(normalizedRecord.category || normalizedRecord.product_type),
+    condition: textValue(normalizedRecord.condition) || "New",
+    status: normalizedRecord.active === false ? "Draft" : textValue(normalizedRecord.status) || "Draft",
+    active: normalizedRecord.active === undefined ? true : Boolean(normalizedRecord.active),
+    barcode: textValue(normalizedRecord.upc || normalizedRecord.barcode || normalizedRecord.gtin),
     defaultImage,
     images,
-    manufacturer: textValue(record.manufacturer),
-    mfrPartNumber: textValue(record.mfr_part_number || record.mfrPartNumber),
-    vendorSku: textValue(record.vendor_sku || record.vendorSku),
-    supplier: textValue(record.supplier),
-    supplierCode: textValue(record.supplier_code || record.supplierCode),
-    vendor: textValue(record.vendor || record.supplier),
-    unspsc: textValue(record.unspsc),
-    uom: textValue(record.uom),
-    uomQty: textValue(record.uom_qty || record.uomQty),
+    manufacturer: textValue(normalizedRecord.manufacturer),
+    mfrPartNumber: textValue(normalizedRecord.mfr_part_number || normalizedRecord.mfrPartNumber),
+    vendorSku: textValue(normalizedRecord.vendor_sku || normalizedRecord.vendorSku),
+    supplier: textValue(normalizedRecord.supplier),
+    supplierCode: textValue(normalizedRecord.supplier_code || normalizedRecord.supplierCode),
+    vendor: textValue(normalizedRecord.vendor || normalizedRecord.supplier),
+    unspsc: textValue(normalizedRecord.unspsc),
+    uom: textValue(normalizedRecord.uom),
+    uomQty: textValue(normalizedRecord.uom_qty || normalizedRecord.uomQty),
     minQuantity,
-    quantityIncrements: textValue(record.quantity_increments || record.quantityIncrements),
-    hazardous: record.hazardous === true,
-    sdsUrl: textValue(record.sds_url || record.sdsUrl),
-    itemHeight: numberValue(record.item_height || record.itemHeight),
-    itemLength: numberValue(record.item_length || record.itemLength),
-    itemWeight: numberValue(record.item_weight || record.itemWeight),
-    itemWidth: numberValue(record.item_width || record.itemWidth),
-    packageHeight: numberValue(record.package_height || record.packageHeight),
-    packageLength: numberValue(record.package_length || record.packageLength),
-    packageWeight: numberValue(record.package_weight || record.packageWeight),
-    packageWidth: numberValue(record.package_width || record.packageWidth),
+    quantityIncrements: textValue(normalizedRecord.quantity_increments || normalizedRecord.quantityIncrements),
+    hazardous: normalizedRecord.hazardous === true,
+    sdsUrl: textValue(normalizedRecord.sds_url || normalizedRecord.sdsUrl),
+    itemHeight: numberValue(normalizedRecord.item_height || normalizedRecord.itemHeight),
+    itemLength: numberValue(normalizedRecord.item_length || normalizedRecord.itemLength),
+    itemWeight: numberValue(normalizedRecord.item_weight || normalizedRecord.itemWeight),
+    itemWidth: numberValue(normalizedRecord.item_width || normalizedRecord.itemWidth),
+    packageHeight: numberValue(normalizedRecord.package_height || normalizedRecord.packageHeight),
+    packageLength: numberValue(normalizedRecord.package_length || normalizedRecord.packageLength),
+    packageWeight: numberValue(normalizedRecord.package_weight || normalizedRecord.packageWeight),
+    packageWidth: numberValue(normalizedRecord.package_width || normalizedRecord.packageWidth),
     qty: stockQty,
     stockQty,
-    stockStatus: textValue(record.stock_status || record.stockStatus),
-    stockUpdatedAt: textValue(record.stock_updated_at || record.stockUpdatedAt),
+    stockStatus: textValue(normalizedRecord.stock_status || normalizedRecord.stockStatus),
+    stockUpdatedAt: textValue(normalizedRecord.stock_updated_at || normalizedRecord.stockUpdatedAt),
     reorderPoint: numberValue(minQuantity),
-    ctechId: textValue(record.ctech_id || record.ctechId),
-    ctechIdLastExport: textValue(record.ctech_id_last_export || record.ctechIdLastExport),
-    fobPrice: numberValue(record.fob_price || record.fobPrice),
+    ctechId: textValue(normalizedRecord.ctech_id || normalizedRecord.ctechId),
+    ctechIdLastExport: textValue(normalizedRecord.ctech_id_last_export || normalizedRecord.ctechIdLastExport),
+    fobPrice: numberValue(normalizedRecord.fob_price || normalizedRecord.fobPrice),
     price,
     cost,
-    msrp: numberValue(record.list_price || record.msrp),
-    wildcardSearch: textValue(record.wildcardSearch),
-    tags: listValue(record.tags),
-    attributes: record.attributes && typeof record.attributes === "object" ? record.attributes : {},
+    msrp: numberValue(normalizedRecord.list_price || normalizedRecord.msrp),
+    wildcardSearch: textValue(normalizedRecord.wildcardSearch),
+    tags: listValue(normalizedRecord.tags),
+    attributes: normalizedRecord.attributes && typeof normalizedRecord.attributes === "object" ? normalizedRecord.attributes : {},
+    productDumpCreatedAt: textValue(normalizedRecord.created_at || normalizedRecord.createdAt),
+    productDumpUpdatedAt: textValue(normalizedRecord.updated_at || normalizedRecord.updatedAt),
+    inactiveMailedAt: textValue(normalizedRecord.inactive_mailed_at || normalizedRecord.inactiveMailedAt),
+    validatedAt: textValue(normalizedRecord.validated_at || normalizedRecord.validatedAt),
+    checkedImage,
+    checkedImageUrl: textValue(checkedImage.url),
+    checkedImageError: textValue(checkedImage.error),
+    checkedImageSize: textValue(checkedImage.size),
+    checkedImageTimestamp: textValue(checkedImage.timestamp),
+    productManagerFields: normalizedRecord,
     sources: { productDump: sku },
     importedFrom: "products.bson.gz",
     updatedAt: new Date().toISOString()
@@ -256,6 +299,47 @@ async function main() {
   const rawRecords = readDumpRecords(dumpPath);
   const records = options.limit > 0 ? rawRecords.slice(0, options.limit) : rawRecords;
   const products = records.map(buildProduct).filter(Boolean);
+
+  if (options.inspect) {
+    const sample = records.slice(0, Math.max(1, options.limit || 3)).map((record, index) => {
+      const normalizedRecord = normalizeDumpRecord(record);
+      const product = buildProduct(record);
+      return {
+        index,
+        rawKeys: Object.keys(normalizedRecord),
+        sku: product?.sku || "",
+        mapped: product ? {
+          sku: product.sku,
+          title: product.title,
+          active: product.active,
+          status: product.status,
+          brand: product.brand,
+          category: product.category,
+          price: product.price,
+          cost: product.cost,
+          msrp: product.msrp,
+          stockQty: product.stockQty,
+          vendorSku: product.vendorSku,
+          supplier: product.supplier,
+          supplierCode: product.supplierCode,
+          manufacturer: product.manufacturer,
+          mfrPartNumber: product.mfrPartNumber,
+          barcode: product.barcode,
+          images: product.images,
+          tags: product.tags,
+          productDumpCreatedAt: product.productDumpCreatedAt,
+          productDumpUpdatedAt: product.productDumpUpdatedAt,
+          inactiveMailedAt: product.inactiveMailedAt,
+          checkedImageUrl: product.checkedImageUrl,
+          validatedAt: product.validatedAt
+        } : null,
+        productManagerFieldCount: product ? Object.keys(product.productManagerFields || {}).length : 0
+      };
+    });
+    console.log(JSON.stringify({ file: path.basename(dumpPath), recordsRead: rawRecords.length, inspected: sample.length, sample }, null, 2));
+    return;
+  }
+
   const { state, write } = await readAppState();
 
   state.inventory = Array.isArray(state.inventory) ? state.inventory : [];

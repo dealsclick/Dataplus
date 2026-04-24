@@ -3321,6 +3321,79 @@ function renderInventoryTable(items) {
     : `<div class="empty-state">No inventory rows match this filter.</div>`;
 }
 
+function productManagerValue(value) {
+  if (value == null || value === "") return "";
+  if (Array.isArray(value)) return value.join(", ");
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function renderProductManagerFields(item) {
+  const fields = item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {};
+  const preferredOrder = [
+    "_id",
+    "sku",
+    "active",
+    "brand",
+    "category",
+    "created_at",
+    "updated_at",
+    "default_image",
+    "images",
+    "description",
+    "short_description",
+    "hazardous",
+    "item_height",
+    "item_length",
+    "item_weight",
+    "item_width",
+    "list_price",
+    "price",
+    "fob_price",
+    "manufacturer",
+    "mfr_part_number",
+    "min_quantity",
+    "name",
+    "package_height",
+    "package_length",
+    "package_weight",
+    "package_width",
+    "quantity_increments",
+    "sds_url",
+    "supplier",
+    "supplier_code",
+    "tags",
+    "unspsc",
+    "uom",
+    "uom_qty",
+    "upc",
+    "vendor_sku",
+    "wildcardSearch",
+    "stock_qty",
+    "stock_status",
+    "stock_updated_at",
+    "inactive_mailed_at",
+    "checked_image",
+    "validated_at",
+    "ctech_id",
+    "ctech_id_last_export"
+  ];
+  const keys = [...preferredOrder.filter((key) => Object.prototype.hasOwnProperty.call(fields, key)), ...Object.keys(fields).filter((key) => !preferredOrder.includes(key)).sort()];
+
+  return keys.length
+    ? `
+      <div class="product-manager-grid">
+        ${keys.map((key) => `
+          <label>
+            ${html(key)}
+            <textarea rows="${typeof fields[key] === "object" ? 4 : 2}" readonly>${html(productManagerValue(fields[key]))}</textarea>
+          </label>
+        `).join("")}
+      </div>
+    `
+    : `<p class="muted">No product dump fields have been imported for this product yet.</p>`;
+}
+
 function renderProductContentPage() {
   const item = state.inventory.find((row) => row.id === selectedProductId);
   const detail = $("#product-profile-page");
@@ -3409,6 +3482,7 @@ function renderProductContentPage() {
             <label>Brand<input value="${html(item.brand || "")}" data-product-field="brand" data-product-id="${item.id}" /></label>
             <label>Category<input value="${html(item.category || "")}" data-product-field="category" data-product-id="${item.id}" /></label>
             <label>Condition<input value="${html(item.condition || "")}" data-product-field="condition" data-product-id="${item.id}" /></label>
+            <label>Source active<select data-product-field="active" data-product-id="${item.id}"><option value="false" ${item.active ? "" : "selected"}>No</option><option value="true" ${item.active ? "selected" : ""}>Yes</option></select></label>
             <label>Barcode / UPC<input value="${html(item.barcode || "")}" data-product-field="barcode" data-product-id="${item.id}" /></label>
           </div>
         </section>
@@ -3424,7 +3498,23 @@ function renderProductContentPage() {
             <label>Supplier code<input value="${html(item.supplierCode || "")}" data-product-field="supplierCode" data-product-id="${item.id}" /></label>
             <label>UNSPSC<input value="${html(item.unspsc || "")}" data-product-field="unspsc" data-product-id="${item.id}" /></label>
             <label>CTech ID<input value="${html(item.ctechId || "")}" data-product-field="ctechId" data-product-id="${item.id}" /></label>
+            <label>CTech last export<input value="${html(item.ctechIdLastExport || "")}" data-product-field="ctechIdLastExport" data-product-id="${item.id}" /></label>
           </div>
+        </section>
+
+        <section class="full-card span-2">
+          <h3>Product Manager Source Fields</h3>
+          <div class="form-grid">
+            <label>Dump created at<input value="${html(item.productDumpCreatedAt || "")}" data-product-field="productDumpCreatedAt" data-product-id="${item.id}" /></label>
+            <label>Dump updated at<input value="${html(item.productDumpUpdatedAt || "")}" data-product-field="productDumpUpdatedAt" data-product-id="${item.id}" /></label>
+            <label>Inactive mailed at<input value="${html(item.inactiveMailedAt || "")}" data-product-field="inactiveMailedAt" data-product-id="${item.id}" /></label>
+            <label>Validated at<input value="${html(item.validatedAt || "")}" data-product-field="validatedAt" data-product-id="${item.id}" /></label>
+            <label>Checked image URL<input value="${html(item.checkedImageUrl || "")}" data-product-field="checkedImageUrl" data-product-id="${item.id}" /></label>
+            <label>Checked image error<input value="${html(item.checkedImageError || "")}" data-product-field="checkedImageError" data-product-id="${item.id}" /></label>
+            <label>Checked image size<input value="${html(item.checkedImageSize || "")}" data-product-field="checkedImageSize" data-product-id="${item.id}" /></label>
+            <label>Checked image timestamp<input value="${html(item.checkedImageTimestamp || "")}" data-product-field="checkedImageTimestamp" data-product-id="${item.id}" /></label>
+          </div>
+          ${renderProductManagerFields(item)}
         </section>
 
         <section class="full-card span-2">
@@ -5422,7 +5512,7 @@ async function updateProductField(input) {
   if (!item) return;
   const field = input.dataset.productField;
   const numericFields = new Set(["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "stockQty", "fobPrice"]);
-  const booleanFields = new Set(["hazardous"]);
+  const booleanFields = new Set(["hazardous", "active"]);
   let value = input.value;
   if (numericFields.has(field)) value = Number(input.value);
   if (booleanFields.has(field)) value = input.value === "true";

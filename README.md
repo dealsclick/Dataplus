@@ -93,6 +93,12 @@ Preview an import without changing the catalog:
 npm run import:product-dump -- data/imports/products.bson.gz --dry-run
 ```
 
+Inspect source keys and mapped DataPlus fields before importing:
+
+```powershell
+npm run import:product-dump -- data/imports/products.bson.gz --inspect --limit 3
+```
+
 To download the FTP dump first, add these values to `.env`:
 
 ```env
