@@ -14,14 +14,43 @@
           <strong>DataPlus</strong>
           <small>Marketplace Ops</small>
         </div>
+        <button id="menu-expand-toggle" class="menu-expand" aria-label="Expand all menu groups" title="Expand all menu groups" data-toggle-menu-groups>+</button>
       </div>
       <nav aria-label="Primary">
+        <span class="nav-section-label">Home</span>
         <button class="nav-item active" data-view="dashboard">Dashboard</button>
-        <button class="nav-item" data-view="orders">Orders</button>
+        <div class="nav-group" data-nav-group="order-management">
+          <button class="nav-item nav-parent" data-view="orders">Order Management</button>
+          <div class="nav-children">
+            <button class="nav-child" data-view="orders">Orders</button>
+            <button class="nav-child" data-view="drafts">Drafts</button>
+            <button class="nav-child" data-view="returns">Returns</button>
+          </div>
+        </div>
         <button class="nav-item" data-view="customers">Customers</button>
-        <button class="nav-item" data-view="inventory">Inventory</button>
+        <span class="nav-section-label">Operations</span>
+        <div class="nav-group" data-nav-group="catalog">
+          <button class="nav-item nav-parent" data-view="catalog" data-catalog-tab-link="products">Catalog</button>
+          <div class="nav-children">
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="products">Products</button>
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="inventory">Inventory</button>
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="templates">Templates</button>
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="readiness">Readiness</button>
+          </div>
+        </div>
+        <div class="nav-group" data-nav-group="purchasing">
+          <button class="nav-item nav-parent" data-view="purchasing" data-purchasing-tab-link="pos">Purchasing</button>
+          <div class="nav-children">
+            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="pos">POs</button>
+            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="vendors">Vendors</button>
+            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="brands">Brands</button>
+            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="warehouses">Warehouses</button>
+          </div>
+        </div>
+        <span class="nav-section-label">Insights</span>
         <button class="nav-item" data-view="reports">Reports</button>
-        <button class="nav-item" data-view="connections">Sources</button>
+        <span class="nav-section-label">Admin</span>
+        <button class="nav-item" data-view="connections">Channels</button>
       </nav>
     </aside>
 
@@ -32,8 +61,9 @@
           <h1 id="page-title">Dashboard</h1>
         </div>
         <div class="quick-actions">
+          <button id="theme-toggle" class="button secondary" type="button" data-toggle-theme>Dark mode</button>
           <button id="sync-all" class="button secondary">Sync all</button>
-          <a class="button" href="/api/export/inventory">Export inventory</a>
+          <div id="topbar-actions-slot"></div>
         </div>
       </header>
 
@@ -76,7 +106,7 @@
           <section class="panel">
             <div class="panel-head">
               <h2>Sync Activity</h2>
-              <button class="text-button" data-view-jump="connections">Sources</button>
+              <button class="text-button" data-view-jump="connections">Channels</button>
             </div>
             <div id="sync-log" class="compact-list"></div>
           </section>
@@ -86,7 +116,6 @@
       <section id="orders" class="view">
         <div class="orders-command">
           <div class="toolbar">
-            <button class="view-toggle">Table View</button>
             <input id="order-search" type="search" placeholder="Search orders, buyers, SKUs" />
             <select id="order-status">
               <option value="all">All statuses</option>
@@ -98,7 +127,10 @@
               <option value="confirmed">Confirmed</option>
             </select>
           </div>
-          <button id="toggle-order-detail" class="button secondary">Show details</button>
+        </div>
+        <div id="bulk-order-bar" class="bulk-bar">
+          <span><strong id="bulk-order-count">0</strong> selected</span>
+          <small>Use Actions to approve, hold, cancel, or create a PO.</small>
         </div>
         <div class="order-stats">
           <article class="stat-card">
@@ -132,25 +164,106 @@
         <div id="full-order-page"></div>
       </section>
 
-      <section id="inventory" class="view">
+      <section id="drafts" class="view">
         <div class="toolbar">
-          <input id="inventory-search" type="search" placeholder="Search SKU, title, brand, category" />
+          <input id="draft-search" type="search" placeholder="Search draft number, buyer, notes" />
+        </div>
+        <div id="drafts-list" class="order-list"></div>
+      </section>
+
+      <section id="draft-full" class="view">
+        <div id="full-draft-page"></div>
+      </section>
+
+      <section id="returns" class="view">
+        <div class="toolbar">
+          <input id="return-search" type="search" placeholder="Search return, order, channel, warehouse" />
+        </div>
+        <div id="returns-management-list" class="catalog-list"></div>
+      </section>
+
+      <section id="return-full" class="view">
+        <div id="return-profile-page"></div>
+      </section>
+
+      <section id="purchasing" class="view">
+        <div class="subnav">
+          <button class="subnav-item active" data-purchasing-tab="pos">Purchase Orders</button>
+          <button class="subnav-item" data-purchasing-tab="vendors">Vendors</button>
+          <button class="subnav-item" data-purchasing-tab="brands">Brands</button>
+          <button class="subnav-item" data-purchasing-tab="warehouses">Warehouses</button>
+        </div>
+        <div class="toolbar">
+          <input id="po-search" type="search" placeholder="Search PO, vendor, order number" />
+        </div>
+        <div id="po-list" class="po-list"></div>
+        <div id="vendor-list" class="vendor-list"></div>
+        <div id="brand-list" class="brand-list"></div>
+        <div id="warehouse-list" class="warehouse-list"></div>
+      </section>
+
+      <section id="po-full" class="view">
+        <div id="po-profile-page"></div>
+      </section>
+
+      <section id="vendor-full" class="view">
+        <div id="vendor-profile-page"></div>
+      </section>
+
+      <section id="brand-full" class="view">
+        <div id="brand-profile-page"></div>
+      </section>
+
+      <section id="warehouse-full" class="view">
+        <div id="warehouse-profile-page"></div>
+      </section>
+
+      <section id="catalog" class="view">
+        <div class="subnav">
+          <button class="subnav-item active" data-catalog-tab="products">Products</button>
+          <button class="subnav-item" data-catalog-tab="inventory">Inventory</button>
+          <button class="subnav-item" data-catalog-tab="templates">Templates</button>
+          <button class="subnav-item" data-catalog-tab="readiness">Readiness</button>
+        </div>
+        <div class="toolbar">
+          <input id="catalog-search" type="search" placeholder="Search SKU, title, brand, category" />
           <label class="file-button">
             Import CSV
             <input id="inventory-import" type="file" accept=".csv,text/csv" />
           </label>
         </div>
-        <div class="product-workspace">
-          <div id="product-list" class="product-list"></div>
-          <aside id="product-detail" class="product-detail"></aside>
-        </div>
+        <div id="products-list" class="catalog-list"></div>
+        <div id="inventory-list" class="catalog-list"></div>
+        <div id="template-list" class="catalog-list"></div>
+        <div id="readiness-list" class="catalog-list"></div>
+      </section>
+
+      <section id="product-full" class="view">
+        <div id="product-profile-page"></div>
+      </section>
+
+      <section id="shadow-full" class="view">
+        <div id="shadow-profile-page"></div>
+      </section>
+
+      <section id="template-full" class="view">
+        <div id="template-profile-page"></div>
+      </section>
+
+      <section id="inventory-full" class="view">
+        <div id="inventory-profile-page"></div>
       </section>
 
       <section id="customers" class="view">
         <div class="toolbar">
           <input id="customer-search" type="search" placeholder="Search customers, email, phone" />
+          <button class="button secondary" data-create-customer>New customer</button>
         </div>
         <div id="customer-grid" class="customer-grid"></div>
+      </section>
+
+      <section id="customer-full" class="view">
+        <div id="customer-profile-page"></div>
       </section>
 
       <section id="reports" class="view">
@@ -202,12 +315,664 @@
             <div id="exception-list" class="compact-list"></div>
           </section>
         </div>
+
       </section>
 
       <section id="connections" class="view">
         <div id="connection-grid" class="connection-grid"></div>
       </section>
+
+      <section id="channel-full" class="view">
+        <div id="channel-profile-page"></div>
+      </section>
     </main>
+
+    <div id="vendor-create-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="vendor-create-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">New vendor</p>
+            <h2>Create vendor</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-vendor-modal aria-label="Close vendor form">x</button>
+        </div>
+        <div class="modal-grid">
+          <label>Vendor name<input id="new-vendor-name" name="name" required /></label>
+          <label>Vendor POC<input name="contactName" /></label>
+          <label>Email<input name="email" type="email" /></label>
+          <label>Phone<input name="phone" /></label>
+          <label>Website<input name="website" /></label>
+          <label>Type<input name="type" value="Supplier" /></label>
+          <label class="span-2">Notes<textarea name="notes" rows="3"></textarea></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-vendor-modal>Cancel</button>
+          <button class="button" type="submit">Create vendor</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="manual-order-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="manual-order-form" class="modal-card manual-order-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Manual order</p>
+            <h2 id="manual-order-modal-title">Create draft order</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-manual-order-modal aria-label="Close manual order form">x</button>
+        </div>
+        <input id="manual-order-id" name="draftId" type="hidden" />
+        <div class="manual-order-hero">
+          <div>
+            <strong>Fast path</strong>
+            <small>Start with the customer and line items. Save it as a draft first, then turn it into a live order when you are ready.</small>
+          </div>
+        </div>
+        <div class="modal-grid">
+          <label>Customer name<input id="manual-order-buyer" name="buyer" required /></label>
+          <label>Channel
+            <select id="manual-order-source" name="source">
+              <option>Manual</option>
+              <option>Phone</option>
+              <option>Email</option>
+              <option>Wholesale</option>
+            </select>
+          </label>
+          <label>Email<input id="manual-order-email" name="buyerEmail" type="email" /></label>
+          <label>Phone<input id="manual-order-phone" name="phone" /></label>
+          <label class="span-2">Marketplace / customer reference<input id="manual-order-reference" name="marketplaceOrderNumber" placeholder="Optional external reference" /></label>
+        </div>
+        <section class="manual-order-section">
+          <div class="manual-order-section-head">
+            <h3>Line items</h3>
+            <button type="button" class="button secondary" data-add-draft-line>Add line</button>
+          </div>
+          <div id="manual-order-lines" class="manual-order-lines"></div>
+        </section>
+        <section class="manual-order-section">
+          <div class="manual-order-section-head">
+            <h3>Shipping</h3>
+          </div>
+          <div class="modal-grid">
+            <label>Recipient<input id="manual-order-ship-name" name="shippingName" /></label>
+            <label>Country<input id="manual-order-ship-country" name="shippingCountry" value="US" /></label>
+            <label class="span-2">Address line 1<input id="manual-order-ship-line1" name="shippingLine1" /></label>
+            <label class="span-2">Address line 2<input id="manual-order-ship-line2" name="shippingLine2" /></label>
+            <label>City<input id="manual-order-ship-city" name="shippingCity" /></label>
+            <label>State<input id="manual-order-ship-state" name="shippingState" /></label>
+            <label>Postal code<input id="manual-order-ship-postal" name="shippingPostalCode" /></label>
+          </div>
+        </section>
+        <label class="manual-order-note">Notes<textarea id="manual-order-note" name="note" rows="3" placeholder="Internal note, payment reminder, customer instructions"></textarea></label>
+        <div class="manual-order-footer">
+          <div class="manual-order-totals">
+            <span>Units <strong id="manual-order-total-qty">0</strong></span>
+            <span>Subtotal <strong id="manual-order-total-amount">$0.00</strong></span>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="button secondary" data-close-manual-order-modal>Cancel</button>
+            <button class="button" type="submit">Save draft</button>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <div id="order-edit-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="order-edit-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Order</p>
+            <h2>Edit order</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-order-edit-modal aria-label="Close order edit form">x</button>
+        </div>
+        <input id="order-edit-id" name="orderId" type="hidden" />
+        <div class="modal-grid">
+          <label>Customer name<input id="order-edit-buyer" name="buyer" required /></label>
+          <label>Channel<input id="order-edit-source" name="source" /></label>
+          <label>Email<input id="order-edit-email" name="buyerEmail" type="email" /></label>
+          <label>Phone<input id="order-edit-phone" name="phone" /></label>
+          <label>Marketplace reference<input id="order-edit-marketplace-number" name="marketplaceOrderNumber" /></label>
+          <label>Ship by<input id="order-edit-ship-by" name="shipBy" type="date" /></label>
+          <label class="span-2">Notes<textarea id="order-edit-notes" name="notes" rows="4" placeholder="Customer notes, internal notes, or order context"></textarea></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-order-edit-modal>Cancel</button>
+          <button class="button" type="submit">Save order</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="order-refund-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="order-refund-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Order refund</p>
+            <h2>Record refund</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-order-refund-modal aria-label="Close refund form">x</button>
+        </div>
+        <input id="order-refund-id" name="orderId" type="hidden" />
+        <div class="modal-grid">
+          <div class="span-2">
+            <strong>Refunded line items</strong>
+            <div id="order-refund-lines" class="manual-order-lines"></div>
+          </div>
+          <label>Refund amount<input id="order-refund-amount" name="amount" type="number" min="0.01" step="0.01" required readonly /></label>
+          <label>Refund date<input id="order-refund-date" name="refundedAt" type="date" required /></label>
+          <label>Refund method
+            <select id="order-refund-method" name="method">
+              <option value="marketplace">Marketplace</option>
+              <option value="original_payment">Original payment method</option>
+              <option value="manual">Manual</option>
+              <option value="store_credit">Store credit</option>
+            </select>
+          </label>
+          <label>Reference<input id="order-refund-reference" name="reference" placeholder="Refund id, transaction id, case id" /></label>
+          <label class="span-2">Reason<input id="order-refund-reason" name="reason" placeholder="Return completed, buyer adjustment, partial refund" /></label>
+          <label class="span-2">Notes<textarea id="order-refund-notes" name="note" rows="3" placeholder="Internal note about the refund"></textarea></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-order-refund-modal>Cancel</button>
+          <button class="button" type="submit">Save refund</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="warehouse-create-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="warehouse-create-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">New warehouse</p>
+            <h2>Create warehouse</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-warehouse-modal aria-label="Close warehouse form">x</button>
+        </div>
+        <div class="modal-grid">
+          <label>Warehouse name<input id="new-warehouse-name" name="name" required /></label>
+          <label>Warehouse code<input name="code" placeholder="WH-NJ" /></label>
+          <label>Contact name<input name="contactName" /></label>
+          <label>Phone<input name="phone" /></label>
+          <label>Email<input name="email" type="email" /></label>
+          <label>Status
+            <select name="status">
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </label>
+          <label class="span-2">Address<input name="addressLine" placeholder="Street, city, state ZIP" /></label>
+          <label class="span-2">Notes<textarea name="notes" rows="3"></textarea></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-warehouse-modal>Cancel</button>
+          <button class="button" type="submit">Create warehouse</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="warehouse-bin-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="warehouse-bin-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Warehouse location</p>
+            <h2>Add bin / location</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-warehouse-bin-modal aria-label="Close warehouse bin form">x</button>
+        </div>
+        <input id="warehouse-bin-warehouse-id" name="warehouseId" type="hidden" />
+        <div class="modal-grid">
+          <label>Bin code<input name="code" placeholder="NJ-REC-01" /></label>
+          <label>Bin name<input name="name" required placeholder="Receiving lane 01" /></label>
+          <label>Location type
+            <select name="type">
+              <option>Receiving</option>
+              <option>Storage</option>
+              <option>Returns</option>
+              <option>Quarantine</option>
+              <option>Picking</option>
+            </select>
+          </label>
+          <label class="checkbox-row"><input name="isDefault" type="checkbox" /> Default location</label>
+          <label class="checkbox-row"><input name="active" type="checkbox" checked /> Active</label>
+          <label class="span-2">Notes<textarea name="notes" rows="3"></textarea></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-warehouse-bin-modal>Cancel</button>
+          <button class="button" type="submit">Add location</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="shadow-create-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="shadow-create-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Marketplace shadow</p>
+            <h2>Create shadow SKU</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-shadow-modal aria-label="Close shadow SKU form">x</button>
+        </div>
+        <div class="modal-grid">
+          <label>Parent SKU<input id="shadow-parent-sku" name="parentSku" readonly /></label>
+          <label>Marketplace
+            <select id="shadow-marketplace" name="marketplace" required></select>
+          </label>
+          <label class="span-2">Shadow SKU<input id="shadow-sku" name="shadowSku" required /></label>
+          <label>Marketplace price<input id="shadow-price" name="price" type="number" step="0.01" min="0" /></label>
+          <label>Handling time days<input id="shadow-handling-time" name="handlingTimeDays" type="number" min="0" value="2" /></label>
+          <label>Status
+            <select name="status">
+              <option>Draft</option>
+              <option>Active</option>
+              <option>Paused</option>
+            </select>
+          </label>
+          <label class="span-2">Notes<textarea name="notes" rows="3"></textarea></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-shadow-modal>Cancel</button>
+          <button class="button" type="submit">Create shadow</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="fulfillment-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="fulfillment-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Order fulfillment</p>
+            <h2>Add tracking</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-fulfillment-modal aria-label="Close fulfillment form">x</button>
+        </div>
+        <input id="fulfillment-order-id" name="orderId" type="hidden" />
+        <div class="modal-grid">
+          <label>Ship from warehouse
+            <select id="fulfillment-warehouse" name="warehouseId" required></select>
+          </label>
+          <label>Carrier
+            <select id="fulfillment-carrier" name="carrier" required>
+              <option value="USPS">USPS</option>
+              <option value="UPS">UPS</option>
+              <option value="FedEx">FedEx</option>
+              <option value="Other">Other unsupported carrier</option>
+            </select>
+          </label>
+          <label>Ship date<input id="fulfillment-ship-date" name="shipDate" type="date" required /></label>
+          <label id="fulfillment-carrier-name-wrap" hidden>Carrier name<input id="fulfillment-carrier-name" name="carrierName" /></label>
+          <label>Tracking number<input id="fulfillment-tracking-number" name="trackingNumber" required /></label>
+          <label id="fulfillment-tracking-url-wrap" class="span-2" hidden>Tracking URL<input id="fulfillment-tracking-url" name="trackingUrl" type="url" placeholder="https://..." /></label>
+          <div class="span-2">
+            <strong>Fulfillment line items</strong>
+            <div id="fulfillment-lines" class="manual-order-lines"></div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-fulfillment-modal>Cancel</button>
+          <button class="button" type="submit">Save fulfillment</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="order-reserve-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="order-reserve-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Order allocation</p>
+            <h2>Reserve inventory</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-order-reserve-modal aria-label="Close reserve inventory form">x</button>
+        </div>
+        <input id="order-reserve-id" name="orderId" type="hidden" />
+        <div class="modal-grid">
+          <label>Warehouse
+            <select id="order-reserve-warehouse" name="warehouseId" required></select>
+          </label>
+          <label>Quantity<input id="order-reserve-qty" name="qty" type="number" min="1" required /></label>
+          <label class="span-2">Notes<textarea name="note" rows="3" placeholder="Pick route, preferred warehouse, shortage context"></textarea></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-order-reserve-modal>Cancel</button>
+          <button class="button" type="submit">Reserve inventory</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="inventory-transfer-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="inventory-transfer-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Inventory movement</p>
+            <h2>Transfer stock</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-inventory-transfer-modal aria-label="Close transfer form">x</button>
+        </div>
+        <input id="inventory-transfer-product-id" name="productId" type="hidden" />
+        <div class="modal-grid">
+          <label>From warehouse
+            <select id="inventory-transfer-from" name="fromWarehouseId" required></select>
+          </label>
+          <label>To warehouse
+            <select id="inventory-transfer-to" name="toWarehouseId" required></select>
+          </label>
+          <label>Quantity<input id="inventory-transfer-qty" name="qty" type="number" min="1" required /></label>
+          <label>To bin / location<input id="inventory-transfer-bin" name="toLocationBin" placeholder="BIN-02" /></label>
+          <label class="span-2">Notes<textarea name="note" rows="3" placeholder="Rebalance, pick support, returns move"></textarea></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-inventory-transfer-modal>Cancel</button>
+          <button class="button" type="submit">Transfer stock</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="order-return-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="order-return-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Order return</p>
+            <h2>Create return</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-order-return-modal aria-label="Close return form">x</button>
+        </div>
+        <input id="order-return-id" name="orderId" type="hidden" />
+        <div class="modal-grid">
+          <label>Return warehouse
+            <select id="order-return-warehouse" name="warehouseId" required></select>
+          </label>
+          <label>Return date<input id="order-return-date" name="createdAt" type="date" required /></label>
+          <label>Reason<input id="order-return-reason" name="reason" required placeholder="Buyer remorse, damaged, wrong item" /></label>
+          <label>Amount<input id="order-return-amount" name="amount" type="number" min="0" step="0.01" /></label>
+          <label>Status
+            <select name="status">
+              <option value="requested">Requested</option>
+              <option value="received">Received</option>
+              <option value="closed">Closed</option>
+            </select>
+          </label>
+          <label>Condition
+            <select name="condition">
+              <option value="Unknown">Unknown</option>
+              <option value="New">New</option>
+              <option value="Opened">Opened</option>
+              <option value="Damaged">Damaged</option>
+            </select>
+          </label>
+          <div class="span-2">
+            <strong>Returned line items</strong>
+            <div id="order-return-lines" class="manual-order-lines"></div>
+          </div>
+          <div class="span-2 receive-attachment-panel">
+            <div class="receive-attachment-head">
+              <strong>Images and attachments</strong>
+              <button type="button" class="button secondary compact-button" data-add-order-return-attachment>Add image</button>
+            </div>
+            <input id="order-return-file-input" type="file" accept="image/*" multiple hidden />
+            <div id="order-return-attachments" class="receive-attachments-list">
+              <p class="muted">No images attached.</p>
+            </div>
+          </div>
+          <label class="span-2">Notes<textarea name="note" rows="3" placeholder="Include carrier claim, inspection result, etc."></textarea></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-order-return-modal>Cancel</button>
+          <button class="button" type="submit">Create return</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="po-receive-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="po-receive-form" class="modal-card receive-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Purchase order</p>
+            <h2>Receive inventory</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-po-receive-modal aria-label="Close receiving form">x</button>
+        </div>
+        <input id="po-receive-id" name="poId" type="hidden" />
+        <input id="po-receive-mode" name="mode" type="hidden" value="final" />
+        <div class="modal-grid">
+          <label>Received date<input id="po-receive-date" name="receivedAt" type="date" required /></label>
+          <label>Warehouse
+            <select id="po-receive-warehouse" name="warehouseId" required></select>
+          </label>
+          <label>Default bin / location<input id="po-receive-location" name="defaultLocationBin" placeholder="A-01 / Receiving shelf" /></label>
+          <label class="span-2">Notes<textarea name="note" rows="3" placeholder="Condition, packing slip, discrepancy, etc."></textarea></label>
+        </div>
+        <div class="receive-tools-grid">
+          <label class="receive-scan-field">Scan SKU / UPC / vendor SKU
+            <input id="po-receive-scan" type="text" autocomplete="off" placeholder="Scan and press Enter" />
+          </label>
+          <label>Whole-PO serial paste
+            <textarea id="po-receive-bulk-serials" rows="3" placeholder="SKU, SERIAL-001&#10;SKU, SERIAL-002"></textarea>
+          </label>
+          <div class="receive-bulk-actions">
+            <button type="button" class="button secondary" data-apply-po-paste>Apply PO serial paste</button>
+            <button type="button" class="button secondary" data-receive-all>Receive all remaining</button>
+            <button type="button" class="button secondary" data-receive-none>Receive none</button>
+          </div>
+        </div>
+        <div class="receive-attachment-panel">
+          <div class="receive-attachment-head">
+            <strong>Receiving documents</strong>
+            <button type="button" class="button secondary compact-button" data-add-receive-attachment>Add attachment</button>
+          </div>
+          <input id="po-receive-file-input" type="file" multiple hidden />
+          <div id="po-receive-attachments" class="receive-attachments-list">
+            <p class="muted">No receiving documents added.</p>
+          </div>
+        </div>
+        <div class="receive-toolbar">
+          <div id="po-receive-summary" class="muted">0 lines selected</div>
+          <div class="receive-toolbar-actions">
+            <button type="button" class="button secondary" data-receive-open-all>Open all serials</button>
+            <button type="button" class="button secondary" data-receive-collapse-all>Collapse all</button>
+          </div>
+        </div>
+        <div id="po-receive-lines" class="receive-lines"></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-po-receive-modal>Cancel</button>
+          <div class="receive-footer-actions">
+            <button type="button" class="button secondary" data-save-po-draft>Save draft</button>
+            <button class="button" type="submit" data-final-po-receive>Receive inventory</button>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <div id="po-duplicate-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Duplicate PO check</p>
+            <h2>Order already linked to a PO</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-po-duplicate-modal aria-label="Close duplicate PO warning">x</button>
+        </div>
+        <div id="po-duplicate-content" class="edit-stack"></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-po-duplicate-modal>Cancel</button>
+          <button type="button" class="button secondary" data-open-existing-po>Open existing PO</button>
+          <button type="button" class="button" data-force-create-po>Create another PO anyway</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="receipt-detail-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card receipt-detail-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Receipt detail</p>
+            <h2 id="receipt-detail-title">Receipt</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-receipt-detail-modal aria-label="Close receipt detail">x</button>
+        </div>
+        <div id="receipt-detail-content" class="receipt-detail-content"></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-receipt-detail-modal>Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="return-workflow-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="return-workflow-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Returns</p>
+            <h2>Update return workflow</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-return-workflow-modal aria-label="Close return workflow">x</button>
+        </div>
+        <input id="return-workflow-id" name="returnId" type="hidden" />
+        <div class="modal-grid">
+          <label>Status
+            <select id="return-workflow-status" name="status">
+              <option value="requested">Requested</option>
+              <option value="received">Received</option>
+              <option value="inspecting">Inspecting</option>
+              <option value="resolved">Resolved</option>
+            </select>
+          </label>
+          <label>Condition
+            <select id="return-workflow-condition" name="condition">
+              <option value="Unknown">Unknown</option>
+              <option value="New">New</option>
+              <option value="Like new">Like new</option>
+              <option value="Used">Used</option>
+              <option value="Damaged">Damaged</option>
+              <option value="Defective">Defective</option>
+            </select>
+          </label>
+          <label>Received date<input id="return-workflow-received-at" name="receivedAt" type="date" /></label>
+          <label>Bin / location<input id="return-workflow-bin" name="binLocation" placeholder="NJ-RTN-01" /></label>
+          <label>Inspection status
+            <select id="return-workflow-inspection-status" name="inspectionStatus">
+              <option value="">Not started</option>
+              <option value="passed">Passed</option>
+              <option value="review">Needs review</option>
+              <option value="failed">Failed</option>
+            </select>
+          </label>
+          <label>Inspection condition
+            <select id="return-workflow-inspection-condition" name="inspectionCondition">
+              <option value="">Not set</option>
+              <option value="sellable">Sellable</option>
+              <option value="open_box">Open box</option>
+              <option value="damaged">Damaged</option>
+              <option value="defective">Defective</option>
+            </select>
+          </label>
+          <label>Disposition
+            <select id="return-workflow-disposition" name="disposition">
+              <option value="">Not resolved</option>
+              <option value="restock">Restock</option>
+              <option value="quarantine">Quarantine</option>
+              <option value="rtv">Return to vendor</option>
+              <option value="dispose">Dispose</option>
+            </select>
+          </label>
+          <label>Received by<input id="return-workflow-received-by" name="receivedBy" /></label>
+          <div class="span-2 receive-attachment-panel">
+            <div class="receive-attachment-head">
+              <strong>Inspection images</strong>
+              <button type="button" class="button secondary compact-button" data-add-return-workflow-attachment>Add image</button>
+            </div>
+            <input id="return-workflow-file-input" type="file" accept="image/*" multiple hidden />
+            <div id="return-workflow-attachments" class="receive-attachments-list">
+              <p class="muted">No inspection images added.</p>
+            </div>
+          </div>
+          <label class="span-2">Inspection notes<textarea id="return-workflow-inspection-notes" name="inspectionNotes" rows="3"></textarea></label>
+          <label class="span-2">Resolution notes<textarea id="return-workflow-resolution-notes" name="resolutionNotes" rows="3"></textarea></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-return-workflow-modal>Cancel</button>
+          <button class="button" type="submit">Save return workflow</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="return-receive-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="return-receive-form" class="modal-card return-receive-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Returns</p>
+            <h2>Receive return</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-return-receive-modal aria-label="Close receive return">x</button>
+        </div>
+        <input id="return-receive-id" name="returnId" type="hidden" />
+        <div class="return-receive-intro">
+          Complete the return in one step. Use the optional section only when you need images or notes.
+        </div>
+        <div class="modal-grid return-receive-primary-grid">
+          <label>Received date<input id="return-receive-date" name="receivedAt" type="date" required /></label>
+          <label>Received by<input id="return-receive-by" name="receivedBy" /></label>
+          <label>Bin / location<input id="return-receive-bin" name="binLocation" placeholder="NJ-RTN-01" /></label>
+          <label>Condition
+            <select id="return-receive-condition" name="condition">
+              <option value="Unknown">Unknown</option>
+              <option value="New">New</option>
+              <option value="Like new">Like new</option>
+              <option value="Used">Used</option>
+              <option value="Damaged">Damaged</option>
+              <option value="Defective">Defective</option>
+            </select>
+          </label>
+          <label>Inspection status
+            <select id="return-receive-inspection-status" name="inspectionStatus">
+              <option value="passed">Passed</option>
+              <option value="review">Needs review</option>
+              <option value="failed">Failed</option>
+            </select>
+          </label>
+          <label>Inspection condition
+            <select id="return-receive-inspection-condition" name="inspectionCondition">
+              <option value="sellable">Sellable</option>
+              <option value="open_box">Open box</option>
+              <option value="damaged">Damaged</option>
+              <option value="defective">Defective</option>
+            </select>
+          </label>
+          <label>Disposition
+            <select id="return-receive-disposition" name="disposition">
+              <option value="restock">Restock</option>
+              <option value="quarantine">Quarantine</option>
+              <option value="rtv">Return to vendor</option>
+              <option value="dispose">Dispose</option>
+            </select>
+          </label>
+          <label>Return fee<input id="return-receive-fee" name="returnFee" type="number" min="0" step="0.01" value="0" /></label>
+        </div>
+        <div class="return-receive-secondary">
+          <details>
+            <summary>Optional details</summary>
+            <div class="return-receive-secondary-body">
+              <div class="receive-attachment-panel">
+                <div class="receive-attachment-head">
+                  <strong>Return images</strong>
+                  <button type="button" class="button secondary compact-button" data-add-return-receive-attachment>Add image</button>
+                </div>
+                <input id="return-receive-file-input" type="file" accept="image/*" multiple hidden />
+                <div id="return-receive-attachments" class="receive-attachments-list">
+                  <p class="muted">No return images added.</p>
+                </div>
+              </div>
+              <div class="modal-grid">
+                <label>Inspection notes<textarea id="return-receive-inspection-notes" name="inspectionNotes" rows="3"></textarea></label>
+                <label>Resolution notes<textarea id="return-receive-resolution-notes" name="resolutionNotes" rows="3"></textarea></label>
+                <label class="span-2">Receiving notes<textarea id="return-receive-notes" name="note" rows="3"></textarea></label>
+              </div>
+            </div>
+          </details>
+        </div>
+        <div class="modal-actions return-receive-actions">
+          <button type="button" class="button secondary" data-close-return-receive-modal>Cancel</button>
+          <button class="button" type="submit">Complete return</button>
+        </div>
+      </form>
+    </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script src="/app.js"></script>

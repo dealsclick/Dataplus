@@ -5,7 +5,8 @@
   "description": "Local MVP for managing marketplace inventory and orders.",
   "scripts": {
     "start": "node server.js",
-    "db:migrate": "node scripts/migrate-json-to-postgres.js"
+    "db:migrate": "node scripts/migrate-json-to-postgres.js",
+    "import:product-dump": "node scripts/import-product-dump.js"
   },
   "engines": {
     "node": ">=20"
