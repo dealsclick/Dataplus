@@ -2,6 +2,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const readline = require("readline");
 const postgres = require("./db");
 
 const PORT = process.env.PORT || 4173;
@@ -9,10 +10,198 @@ const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
 const DATA_DIR = path.join(ROOT, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
+const CATALOG_FILE = path.join(DATA_DIR, "catalog", "products.ndjson");
+const CATALOG_MANIFEST_FILE = `${CATALOG_FILE}.manifest.json`;
+const CATALOG_VENDOR_INDEX_FILE = path.join(DATA_DIR, "catalog", "vendors.json");
+const CATALOG_CATEGORY_INDEX_FILE = path.join(DATA_DIR, "catalog", "categories.json");
+const CATALOG_INDEX_DIR = path.join(DATA_DIR, "catalog", "index");
+const CATALOG_INDEX_MANIFEST_FILE = path.join(CATALOG_INDEX_DIR, "manifest.json");
+const CATALOG_INDEX_SUPPLIERS_FILE = path.join(CATALOG_INDEX_DIR, "suppliers.json");
+const CATALOG_INDEX_SUPPLIER_DIR = path.join(CATALOG_INDEX_DIR, "suppliers");
+const CATALOG_INDEX_SKU_DIR = path.join(CATALOG_INDEX_DIR, "sku-shards");
+const SHOPIFY_TAXONOMY_INDEX_FILE = path.join(DATA_DIR, "channel-taxonomies", "shopify", "taxonomy-index.json");
+const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
 const ENV_FILE = path.join(ROOT, ".env");
 
 const SOURCES = ["Temu", "eBay", "Whatnot", "TikTok Shop"];
 const ORDER_PREFIX = "DP";
+
+const PRODUCT_MAPPING_FIELDS = [
+  { key: "sku", label: "SKU", type: "text", requiredForImport: true },
+  { key: "title", label: "Title", type: "text" },
+  { key: "marketplaceTitle", label: "Marketplace title", type: "text" },
+  { key: "shortDescription", label: "Short description", type: "text" },
+  { key: "longDescription", label: "Long description", type: "text" },
+  { key: "bulletPoints", label: "Bullet points", type: "list" },
+  { key: "brand", label: "Brand", type: "text" },
+  { key: "sourceBrand", label: "Source brand", type: "text" },
+  { key: "brandLocked", label: "Brand locked", type: "boolean" },
+  { key: "category", label: "Main category", type: "text" },
+  { key: "sourceCategory", label: "Vendor category", type: "text" },
+  { key: "categoryVerified", label: "Category verified", type: "boolean" },
+  { key: "vendor", label: "Vendor", type: "text" },
+  { key: "supplier", label: "Supplier", type: "text" },
+  { key: "supplierCode", label: "Supplier code", type: "text" },
+  { key: "manufacturer", label: "Manufacturer", type: "text" },
+  { key: "mfrPartNumber", label: "Manufacturer part number", type: "text" },
+  { key: "vendorSku", label: "Vendor SKU", type: "text" },
+  { key: "barcode", label: "Barcode", type: "text" },
+  { key: "condition", label: "Condition", type: "text" },
+  { key: "status", label: "Status", type: "text" },
+  { key: "active", label: "Active", type: "boolean" },
+  { key: "price", label: "Price", type: "number" },
+  { key: "cost", label: "Cost", type: "number" },
+  { key: "msrp", label: "MSRP", type: "number" },
+  { key: "qty", label: "Quantity", type: "number" },
+  { key: "reserved", label: "Reserved", type: "number" },
+  { key: "available", label: "Available", type: "computed" },
+  { key: "reorderPoint", label: "Reorder point", type: "number" },
+  { key: "stockQty", label: "Source stock quantity", type: "number" },
+  { key: "stockStatus", label: "Stock status", type: "text" },
+  { key: "weightOz", label: "Weight oz", type: "number" },
+  { key: "lengthIn", label: "Length in", type: "number" },
+  { key: "widthIn", label: "Width in", type: "number" },
+  { key: "heightIn", label: "Height in", type: "number" },
+  { key: "countryOfOrigin", label: "Country of origin", type: "text" },
+  { key: "hazardous", label: "Hazardous", type: "boolean" },
+  { key: "images", label: "Images", type: "list" },
+  { key: "defaultImage", label: "Default image", type: "text" },
+  { key: "shopifyId", label: "Shopify ID", type: "text" },
+  { key: "shopifyVariantId", label: "Shopify variant ID", type: "text" },
+  { key: "shopifyStatus", label: "Shopify status", type: "text" },
+  { key: "shopifyPublished", label: "Shopify published", type: "boolean" },
+  { key: "shopifyPublishedAt", label: "Shopify published at", type: "text" },
+  { key: "shopifyUpdatedAt", label: "Shopify updated at", type: "text" },
+  { key: "shopifySyncedAt", label: "Shopify synced at", type: "text" },
+  { key: "tags", label: "Tags", type: "list" },
+  { key: "seoKeywords", label: "SEO keywords", type: "text" },
+  { key: "unspsc", label: "UNSPSC", type: "text" },
+  { key: "uom", label: "UOM", type: "text" },
+  { key: "uomQty", label: "UOM quantity", type: "text" },
+  { key: "shopifyHandle", label: "Shopify handle", type: "computed" },
+  { key: "shopifyCategoryId", label: "Shopify category ID", type: "category" },
+  { key: "shopifyCategoryPath", label: "Shopify category breadcrumb", type: "category" },
+  { key: "googleCategoryId", label: "Google category ID", type: "category" },
+  { key: "googleCategoryBreadcrumb", label: "Google category breadcrumb", type: "category" },
+  { key: "sdsUrl", label: "SDS URL", type: "text" },
+  { key: "originalSdsUrl", label: "Original SDS URL", type: "text" }
+];
+
+const DUMP_REVIEW_FIELDS = new Set([
+  "barcode",
+  "vendorSku",
+  "mfrPartNumber",
+  "uom",
+  "uomQty",
+  "minQuantity",
+  "quantityIncrements",
+  "cost",
+  "price",
+  "fobPrice",
+  "msrp",
+  "stockQty",
+  "qty",
+  "stockStatus",
+  "countryOfOrigin",
+  "supplier",
+  "supplierCode"
+]);
+
+const DUMP_PROTECTED_CONTENT_FIELDS = new Set([
+  "title",
+  "marketplaceTitle",
+  "shortDescription",
+  "longDescription",
+  "bulletPoints",
+  "category",
+  "defaultImage",
+  "images",
+  "tags",
+  "manufacturer",
+  "seoKeywords"
+]);
+
+const DUMP_SOURCE_TRACE_FIELDS = new Set([
+  "sourceBrand",
+  "productManagerFields",
+  "productDumpCreatedAt",
+  "productDumpUpdatedAt",
+  "inactiveMailedAt",
+  "validatedAt",
+  "checkedImage",
+  "checkedImageUrl",
+  "checkedImageError",
+  "checkedImageSize",
+  "checkedImageTimestamp",
+  "wildcardSearch",
+  "original",
+  "originalImage",
+  "vendorDescription",
+  "updatedAt",
+  "sources",
+  "importedFrom"
+]);
+
+const DEFAULT_EXPORT_MAPPINGS = [
+  {
+    id: "export-shopify-basic",
+    name: "Shopify Product CSV",
+    source: "Shopify",
+    format: "csv",
+    mode: "export",
+    mappings: [
+      { externalColumn: "Handle", productField: "shopifyHandle" },
+      { externalColumn: "Title", productField: "marketplaceTitle" },
+      { externalColumn: "Body (HTML)", productField: "longDescription" },
+      { externalColumn: "Vendor", productField: "vendor" },
+      { externalColumn: "Product Category", productField: "shopifyCategoryPath" },
+      { externalColumn: "Google Shopping / Google Product Category", productField: "googleCategoryId" },
+      { externalColumn: "Tags", productField: "tags" },
+      { externalColumn: "Variant SKU", productField: "sku" },
+      { externalColumn: "Variant Price", productField: "price" },
+      { externalColumn: "Variant Inventory Qty", productField: "available" },
+      { externalColumn: "Image Src", productField: "defaultImage" },
+      { externalColumn: "Status", productField: "status" }
+    ],
+    notes: "Starter Shopify product export. Adjust columns to match the exact Shopify CSV you use."
+  },
+  {
+    id: "export-ebay-basic",
+    name: "eBay Product CSV",
+    source: "eBay",
+    format: "csv",
+    mode: "export",
+    mappings: [
+      { externalColumn: "SKU", productField: "sku" },
+      { externalColumn: "Title", productField: "marketplaceTitle" },
+      { externalColumn: "Description", productField: "longDescription" },
+      { externalColumn: "Brand", productField: "brand" },
+      { externalColumn: "Price", productField: "price" },
+      { externalColumn: "Quantity", productField: "available" },
+      { externalColumn: "Condition", productField: "condition" },
+      { externalColumn: "Category", productField: "category" }
+    ],
+    notes: "Starter eBay export."
+  },
+  {
+    id: "export-amazon-basic",
+    name: "Amazon Product CSV",
+    source: "Amazon",
+    format: "csv",
+    mode: "export",
+    mappings: [
+      { externalColumn: "item_sku", productField: "sku" },
+      { externalColumn: "item_name", productField: "marketplaceTitle" },
+      { externalColumn: "brand_name", productField: "brand" },
+      { externalColumn: "manufacturer", productField: "manufacturer" },
+      { externalColumn: "external_product_id", productField: "barcode" },
+      { externalColumn: "standard_price", productField: "price" },
+      { externalColumn: "quantity", productField: "available" },
+      { externalColumn: "product_description", productField: "longDescription" }
+    ],
+    notes: "Starter Amazon-style product export."
+  }
+];
 
 const DEFAULT_CHANNEL_SETTINGS = {
   defaultShadowStatus: "Draft",
@@ -126,6 +315,8 @@ const DEFAULT_MARKETPLACE_TEMPLATES = [
     notes: "TikTok Shop needs category, package dimensions, certifications, and delivery options."
   }
 ];
+
+let catalogFacetCache = null;
 
 loadLocalEnv();
 
@@ -377,11 +568,15 @@ async function readDb() {
 }
 
 async function writeDb(db) {
-  if (postgres.isPostgresEnabled()) await postgres.writeState(db);
+  if (postgres.isPostgresEnabled()) {
+    await postgres.writeState(db);
+    return;
+  }
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
 function writeDbSync(db) {
+  if (postgres.isPostgresEnabled()) return;
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
@@ -398,6 +593,242 @@ function loadLocalEnv() {
   }
 }
 
+function sourceScalarValue(value) {
+  if (value == null) return value;
+  if (value instanceof Date) return value.toISOString();
+  if (value && typeof value === "object") {
+    if (value.$numberDecimal !== undefined) return value.$numberDecimal;
+    if (value.$date !== undefined) return sourceScalarValue(value.$date);
+    if (value._bsontype === "Decimal128" && typeof value.toString === "function") return value.toString();
+    if (value._bsontype === "ObjectId" && typeof value.toString === "function") return value.toString();
+  }
+  return value;
+}
+
+function sourceTextValue(value) {
+  const scalar = sourceScalarValue(value);
+  return scalar == null ? "" : String(scalar).trim();
+}
+
+function sourceNumberValue(value, fallback = 0) {
+  const number = Number(sourceScalarValue(value));
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function sourceListValue(value) {
+  if (Array.isArray(value)) return value.map(sourceTextValue).filter(Boolean);
+  const text = sourceTextValue(value);
+  if (!text) return [];
+  return text.split(/[|,]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function sourceBooleanValue(value, fallback = false) {
+  if (value === undefined) return fallback;
+  if (value === true || value === false) return value;
+  const text = sourceTextValue(value).toLowerCase();
+  if (["true", "1", "yes", "y", "active"].includes(text)) return true;
+  if (["false", "0", "no", "n", "inactive"].includes(text)) return false;
+  return fallback;
+}
+
+function calculateDimensionalWeight(item = {}) {
+  const length = Number(item.packageLength || 0);
+  const width = Number(item.packageWidth || 0);
+  const height = Number(item.packageHeight || 0);
+  if (!(length > 0 && width > 0 && height > 0)) return 0;
+  return Math.round(((length * width * height) / 139) * 1000) / 1000;
+}
+
+function normalizedCompareValue(value) {
+  if (Array.isArray(value)) return value.map((item) => normalizedCompareValue(item)).join("|");
+  if (value && typeof value === "object") return JSON.stringify(value);
+  if (value === undefined || value === null) return "";
+  const number = Number(value);
+  if (Number.isFinite(number) && String(value).trim() !== "") return String(Number(number.toFixed(4)));
+  return String(value).trim();
+}
+
+function formatBrandName(value) {
+  const text = sourceTextValue(value).replace(/[\u2122\u00ae\u00a9]/g, "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const acronyms = new Set(["3M", "A/C", "AC", "ANSI", "BUNN", "CFC", "CFL", "CMM", "CNC", "CPR", "CPU", "DVI", "EPA", "GFCI", "HD", "HDMI", "HVAC", "ISO", "IT", "LED", "LLC", "LP", "MRO", "NEMA", "NSF", "OSHA", "PVC", "RFID", "UL", "UPS", "USB", "USA", "US", "UV", "VGA", "WiFi", "WIFI", "WD-40"]);
+  const lowerWords = new Set(["and", "of", "the", "for", "in", "on", "to", "with"]);
+  const formatPart = (part, index) => {
+    if (!part) return part;
+    const upper = part.toUpperCase();
+    const compactUpper = upper.replace(/[^A-Z0-9]/g, "");
+    if (compactUpper === "3M") return "3M";
+    if (/^([A-Z]\.){2,}[A-Z]?\.?$/i.test(part)) return upper;
+    if (/^[A-Z0-9]{2,4}$/.test(part)) return upper;
+    if (acronyms.has(upper)) return upper === "WIFI" ? "WiFi" : upper;
+    if (/^\d+[A-Z]*$/i.test(part)) return upper;
+    const lower = part.toLowerCase();
+    if (index > 0 && lowerWords.has(lower)) return lower;
+    return lower.charAt(0).toUpperCase() + lower.slice(1);
+  };
+  return text
+    .split(" ")
+    .map((word, wordIndex) => word
+      .split("/")
+      .map((slashPart) => slashPart
+        .split("-")
+        .map((part, partIndex) => formatPart(part, wordIndex + partIndex))
+        .join("-"))
+      .join("/"))
+    .join(" ");
+}
+
+function formatCategoryName(value) {
+  const text = sourceTextValue(value).replace(/[\u2122\u00ae\u00a9]/g, "").replace(/\s*>\s*/g, " > ").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const acronyms = new Set(["3D", "A/C", "AC", "ANSI", "CFC", "CFL", "CNC", "CPR", "CPU", "DVI", "EPA", "GFCI", "HD", "HDMI", "HVAC", "ISO", "IT", "LED", "MRO", "NEMA", "NSF", "OSHA", "PPE", "PVC", "RFID", "UL", "UPS", "USB", "UV", "VGA", "VFD", "WiFi", "WIFI"]);
+  const lowerWords = new Set(["and", "of", "the", "for", "in", "on", "to", "with"]);
+  const formatToken = (token, index) => {
+    if (!token || token === "&") return token;
+    const upper = token.toUpperCase();
+    if (/^([A-Z]\.){2,}[A-Z]?\.?$/i.test(token)) return upper;
+    if (acronyms.has(upper)) return upper === "WIFI" ? "WiFi" : upper;
+    if (/^\d+[A-Z]*$/i.test(token)) return upper;
+    const lower = token.toLowerCase();
+    if (index > 0 && lowerWords.has(lower)) return lower;
+    if (/^[A-Z0-9]{2,4}$/.test(token)) return upper;
+    return lower.charAt(0).toUpperCase() + lower.slice(1);
+  };
+  return text
+    .split(" > ")
+    .map((segment) => segment
+      .split(" ")
+      .map((word, wordIndex) => word
+        .split("/")
+        .map((slashPart) => slashPart
+          .split("-")
+          .map((part, partIndex) => formatToken(part, wordIndex + partIndex))
+          .join("-"))
+        .join("/"))
+      .join(" "))
+    .join(" > ");
+}
+
+function sourceBrandFrom(item = {}) {
+  return sourceTextValue(item.sourceBrand || item.productManagerFields?.brand || item.original?.brand || item.brand || "");
+}
+
+function brandLooksLikeSupplier(item = {}) {
+  const brand = sourceTextValue(item.brand).toLowerCase();
+  if (!brand) return true;
+  return [item.supplier, item.vendor, item.defaultSupplier, item.supplierCode]
+    .map((value) => sourceTextValue(value).toLowerCase())
+    .filter(Boolean)
+    .includes(brand);
+}
+
+function normalizeCatalogImportReviews(reviews = []) {
+  return (Array.isArray(reviews) ? reviews : []).map((review) => ({
+    id: review.id || crypto.randomUUID(),
+    sku: sourceTextValue(review.sku),
+    productId: sourceTextValue(review.productId),
+    field: sourceTextValue(review.field),
+    label: sourceTextValue(review.label || review.field),
+    currentValue: review.currentValue ?? "",
+    incomingValue: review.incomingValue ?? "",
+    source: sourceTextValue(review.source || "Product dump"),
+    status: sourceTextValue(review.status || "pending"),
+    createdAt: review.createdAt || new Date().toISOString(),
+    updatedAt: review.updatedAt || review.createdAt || new Date().toISOString(),
+    decidedAt: review.decidedAt || "",
+    decisionNote: review.decisionNote || ""
+  })).filter((review) => review.sku && review.field).slice(0, 5000);
+}
+
+function queueCatalogImportReview(db, item, field, incomingValue, source = "Product dump") {
+  const currentValue = item[field];
+  if (normalizedCompareValue(currentValue) === normalizedCompareValue(incomingValue)) return false;
+  db.catalogImportReviews = normalizeCatalogImportReviews(db.catalogImportReviews);
+  const pending = db.catalogImportReviews.find((review) => (
+    review.status === "pending"
+    && review.sku.toLowerCase() === String(item.sku || "").toLowerCase()
+    && review.field === field
+  ));
+  const now = new Date().toISOString();
+  if (pending) {
+    pending.productId = item.id || pending.productId;
+    pending.currentValue = currentValue ?? "";
+    pending.incomingValue = incomingValue ?? "";
+    pending.source = source;
+    pending.updatedAt = now;
+    return true;
+  }
+  db.catalogImportReviews.unshift({
+    id: crypto.randomUUID(),
+    sku: item.sku || "",
+    productId: item.id || "",
+    field,
+    label: PRODUCT_MAPPING_FIELDS.find((mapping) => mapping.key === field)?.label || field,
+    currentValue: currentValue ?? "",
+    incomingValue: incomingValue ?? "",
+    source,
+    status: "pending",
+    createdAt: now,
+    updatedAt: now,
+    decidedAt: "",
+    decisionNote: ""
+  });
+  db.catalogImportReviews = db.catalogImportReviews.slice(0, 5000);
+  return true;
+}
+
+function isEmptyCatalogValue(value) {
+  if (Array.isArray(value)) return value.length === 0;
+  if (value === undefined || value === null) return true;
+  if (typeof value === "number") return value === 0;
+  return String(value).trim() === "";
+}
+
+function applyProtectedSourceProduct(db, existing, incoming, source = "Source catalog") {
+  const sourceBrand = sourceBrandFrom(incoming);
+  if (sourceBrand) existing.sourceBrand = sourceBrand;
+  for (const [field, incomingValue] of Object.entries(incoming || {})) {
+    if (["id", "reserved", "shadowSkus", "serialUnits", "warehouseStock"].includes(field)) continue;
+    if (field === "qty" && incoming.stockQty !== undefined) continue;
+    if (field === "brand") {
+      if (!existing.brand || (!existing.brandLocked && brandLooksLikeSupplier(existing))) {
+        existing.brand = formatBrandName(incomingValue);
+      } else if (existing.brandLocked || normalizedCompareValue(existing.brand) !== normalizedCompareValue(incomingValue)) {
+        queueCatalogImportReview(db, existing, "brand", formatBrandName(incomingValue), source);
+      }
+      continue;
+    }
+    if (field === "category") {
+      const formattedCategory = formatCategoryName(incomingValue);
+      if (formattedCategory) {
+        existing.sourceCategory = existing.sourceCategory || formattedCategory;
+        existing.vendorCategory = existing.vendorCategory || formattedCategory;
+      }
+      continue;
+    }
+    if (DUMP_SOURCE_TRACE_FIELDS.has(field)) {
+      existing[field] = incomingValue;
+      continue;
+    }
+    if (DUMP_REVIEW_FIELDS.has(field)) {
+      if (isEmptyCatalogValue(existing[field]) && !isEmptyCatalogValue(incomingValue)) {
+        existing[field] = incomingValue;
+      } else {
+        queueCatalogImportReview(db, existing, field, incomingValue, source);
+      }
+      continue;
+    }
+    if (DUMP_PROTECTED_CONTENT_FIELDS.has(field)) {
+      if (isEmptyCatalogValue(existing[field]) && !isEmptyCatalogValue(incomingValue)) existing[field] = incomingValue;
+      continue;
+    }
+    existing[field] = incomingValue;
+  }
+  existing.sources = { ...(incoming.sources || {}), ...(existing.sources || {}), catalog: incoming.sku || existing.sku };
+  existing.updatedAt = new Date().toISOString();
+  return existing;
+}
+
 function normalizeDb(db) {
   let changed = false;
   db.sequence = db.sequence || {};
@@ -407,32 +838,58 @@ function normalizeDb(db) {
   db.sequence.draft = Number(db.sequence.draft || 0);
   db.inventoryLedger = Array.isArray(db.inventoryLedger) ? db.inventoryLedger : [];
   db.marketplaceTemplates = normalizeMarketplaceTemplates(db.marketplaceTemplates);
+  db.exportMappings = normalizeExportMappings(db.exportMappings);
+  db.categorySettings = normalizeCategorySettings(db.categorySettings);
+  db.sourceCatalogOverrides = normalizeSourceCatalogOverrides(db.sourceCatalogOverrides);
+  db.vendorCategoryMappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings);
+  db.catalogImportReviews = normalizeCatalogImportReviews(db.catalogImportReviews);
+  db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+  db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
   db.connections = (db.connections || SOURCES.map((name) => ({ id: crypto.randomUUID(), name }))).map(normalizeChannel);
 
   db.inventory = (db.inventory || []).map((item) => {
     const defaults = PRODUCT_DEFAULTS[item.sku] || {};
+    const categoryVerified = sourceBooleanValue(item.categoryVerified ?? item.mainCategoryVerified, Boolean(defaults.category));
+    const currentCategory = formatCategoryName(item.category ?? defaults.category ?? "");
+    const sourceCategory = formatCategoryName(item.sourceCategory ?? item.vendorCategory ?? item.productManagerFields?.category ?? item.original?.category ?? (categoryVerified ? "" : currentCategory));
     const product = {
-      price: Number(item.price ?? defaults.price ?? 0),
-      cost: Number(item.cost ?? defaults.cost ?? 0),
-      msrp: Number(item.msrp ?? defaults.msrp ?? 0),
-      brand: item.brand ?? defaults.brand ?? "",
-      category: item.category ?? defaults.category ?? "",
+      title: item.title ?? item.name ?? defaults.title ?? item.sku ?? "",
+      price: Number(sourceNumberValue(item.price ?? item.sale_price ?? item.sell_price ?? defaults.price ?? 0)),
+      cost: Number(sourceNumberValue(item.cost ?? item.fob_price ?? item.wholesale_price ?? defaults.cost ?? 0)),
+      msrp: Number(sourceNumberValue(item.msrp ?? item.list_price ?? defaults.msrp ?? 0)),
+      brand: formatBrandName(item.brand ?? defaults.brand ?? ""),
+      sourceBrand: item.sourceBrand ?? item.productManagerFields?.brand ?? item.original?.brand ?? item.brand ?? "",
+      brandLocked: Boolean(item.brandLocked ?? false),
+      category: categoryVerified ? currentCategory : "",
+      mainCategory: categoryVerified ? currentCategory : "",
+      categoryVerified,
+      sourceCategory,
+      vendorCategory: sourceCategory,
       condition: item.condition ?? defaults.condition ?? "New",
       status: item.status ?? defaults.status ?? "Draft",
       active: item.active === undefined ? true : Boolean(item.active),
-      barcode: item.barcode ?? defaults.barcode ?? "",
-      shortDescription: item.shortDescription ?? defaults.shortDescription ?? "",
-      longDescription: item.longDescription ?? defaults.longDescription ?? "",
-      images: Array.isArray(item.images) ? item.images : defaults.images || [],
-      tags: Array.isArray(item.tags) ? item.tags : defaults.tags || [],
+      barcode: item.barcode ?? item.upc ?? item.gtin ?? defaults.barcode ?? "",
+      shortDescription: item.shortDescription ?? item.short_description ?? defaults.shortDescription ?? "",
+      longDescription: item.longDescription ?? item.description ?? item.long_description ?? defaults.longDescription ?? "",
+      bulletPoints: sourceListValue(item.bulletPoints ?? item.bullet_points ?? item.keyFeatures ?? item.features ?? defaults.bulletPoints ?? []),
+      images: sourceListValue(item.images ?? defaults.images ?? []),
+      tags: sourceListValue(item.tags ?? defaults.tags ?? []),
       weightOz: Number(item.weightOz ?? defaults.weightOz ?? 0),
       lengthIn: Number(item.lengthIn ?? defaults.lengthIn ?? 0),
       widthIn: Number(item.widthIn ?? defaults.widthIn ?? 0),
       heightIn: Number(item.heightIn ?? defaults.heightIn ?? 0),
-      vendor: item.vendor ?? defaults.vendor ?? "",
-      marketplaceTitle: item.marketplaceTitle ?? defaults.marketplaceTitle ?? item.title,
+      vendor: item.vendor ?? item.supplier ?? defaults.vendor ?? "",
+      marketplaceTitle: item.marketplaceTitle ?? item.name ?? defaults.marketplaceTitle ?? item.title ?? item.sku,
       seoKeywords: item.seoKeywords ?? defaults.seoKeywords ?? "",
       externalId: item.externalId ?? item._id ?? "",
+      shopifyId: item.shopifyId ?? item.shopify_ID ?? item.shopify_id ?? "",
+      shopifyVariantId: item.shopifyVariantId ?? item.shopify_variant_id ?? "",
+      shopifyHandle: item.shopifyHandle ?? item.shopify_handle ?? "",
+      shopifyStatus: item.shopifyStatus ?? item.shopify_status ?? "",
+      shopifyPublished: item.shopifyPublished === undefined ? sourceBooleanValue(item.shopify_published, false) : Boolean(item.shopifyPublished),
+      shopifyPublishedAt: item.shopifyPublishedAt ?? item.shopify_published_at ?? "",
+      shopifyUpdatedAt: item.shopifyUpdatedAt ?? item.shopify_updated_at ?? "",
+      shopifySyncedAt: item.shopifySyncedAt ?? item.shopify_synced_at ?? "",
       defaultImage: item.defaultImage ?? item.default_image ?? "",
       manufacturer: item.manufacturer ?? "",
       mfrPartNumber: item.mfrPartNumber ?? item.mfr_part_number ?? "",
@@ -454,12 +911,13 @@ function normalizeDb(db) {
       packageLength: Number(item.packageLength ?? item.package_length ?? 0),
       packageWeight: Number(item.packageWeight ?? item.package_weight ?? 0),
       packageWidth: Number(item.packageWidth ?? item.package_width ?? 0),
-      stockQty: Number(item.stockQty ?? item.stock_qty ?? item.qty ?? 0),
+      dimensionalWeight: Number(item.dimensionalWeight ?? item.dimensional_weight ?? calculateDimensionalWeight(item)),
+      stockQty: Number(sourceNumberValue(item.stockQty ?? item.stock_qty ?? item.qty ?? 0)),
       stockStatus: item.stockStatus ?? item.stock_status ?? "",
       stockUpdatedAt: item.stockUpdatedAt ?? item.stock_updated_at ?? "",
       ctechId: item.ctechId ?? item.ctech_id ?? "",
       ctechIdLastExport: item.ctechIdLastExport ?? item.ctech_id_last_export ?? "",
-      fobPrice: Number(item.fobPrice ?? item.fob_price ?? 0),
+      fobPrice: Number(sourceNumberValue(item.fobPrice ?? item.fob_price ?? 0)),
       wildcardSearch: item.wildcardSearch ?? "",
       productDumpCreatedAt: item.productDumpCreatedAt ?? item.created_at ?? "",
       productDumpUpdatedAt: item.productDumpUpdatedAt ?? item.updated_at ?? "",
@@ -502,7 +960,11 @@ function normalizeDb(db) {
       attributes: item.attributes || {}
     };
 
-    const merged = { ...product, ...item, images: product.images, tags: product.tags, serialUnits: product.serialUnits, warehouseStock: product.warehouseStock, shadowSkus: product.shadowSkus };
+    const merged = { ...item, ...product, images: product.images, tags: product.tags, serialUnits: product.serialUnits, warehouseStock: product.warehouseStock, shadowSkus: product.shadowSkus };
+    if (!merged.brandLocked && merged.brand && !brandLooksLikeSupplier(merged)) {
+      merged.brandLocked = true;
+      changed = true;
+    }
     const availableWarehouses = Array.isArray(db.warehouses) ? db.warehouses : [];
     if (!Array.isArray(merged.warehouseStock) || !merged.warehouseStock.length) {
       const fallbackWarehouse = availableWarehouses.find((warehouse) => warehouse.isDefaultReceiving) || availableWarehouses[0];
@@ -959,6 +1421,851 @@ function normalizeMarketplaceTemplates(templates = []) {
   return merged;
 }
 
+function parseMappingRows(rows) {
+  if (Array.isArray(rows)) return rows;
+  return String(rows || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [externalColumn, productField, defaultValue = ""] = line.split("|").map((part) => part.trim());
+      return { externalColumn, productField, defaultValue };
+    });
+}
+
+function normalizeExportMappingRow(row = {}) {
+  return {
+    id: row.id || crypto.randomUUID(),
+    externalColumn: String(row.externalColumn || row.column || "").trim(),
+    productField: String(row.productField || row.field || "").trim(),
+    defaultValue: row.defaultValue === undefined ? "" : String(row.defaultValue),
+    transform: String(row.transform || "").trim(),
+    required: Boolean(row.required)
+  };
+}
+
+function normalizeExportMapping(template = {}) {
+  const mappings = parseMappingRows(template.mappings).map(normalizeExportMappingRow).filter((row) => row.externalColumn);
+  return {
+    id: template.id || crypto.randomUUID(),
+    name: String(template.name || template.source || "Product Export Mapping").trim(),
+    source: String(template.source || template.channel || "Custom").trim(),
+    format: "csv",
+    mode: template.mode || "both",
+    status: template.status || "active",
+    mappings,
+    notes: template.notes || "",
+    createdAt: template.createdAt || new Date().toISOString(),
+    updatedAt: template.updatedAt || template.createdAt || new Date().toISOString()
+  };
+}
+
+function normalizeExportMappings(templates = []) {
+  const input = Array.isArray(templates) ? templates : [];
+  const existing = new Map(input.map((template) => [String(template.id || template.name || "").toLowerCase(), template]));
+  const merged = DEFAULT_EXPORT_MAPPINGS.map((defaults) => normalizeExportMapping({ ...defaults, ...(existing.get(defaults.id.toLowerCase()) || {}) }));
+  for (const template of input) {
+    const key = String(template.id || "").toLowerCase();
+    if (!DEFAULT_EXPORT_MAPPINGS.some((defaults) => defaults.id.toLowerCase() === key)) merged.push(normalizeExportMapping(template));
+  }
+  return merged;
+}
+
+function categoryMappingForProduct(db, item, channel = "shopify") {
+  const category = formatCategoryName(item.category || "").toLowerCase();
+  if (!category) return null;
+  const settings = normalizeCategorySettings(db.categorySettings);
+  const match = settings.find((row) => formatCategoryName(row.name || "").toLowerCase() === category || String(row.categoryId || "").trim().toLowerCase() === category);
+  return match?.mappings?.[channel] || null;
+}
+
+function slugPart(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function verifiedBrandForHandle(item = {}) {
+  const explicitBrand = item.verifiedBrand || item.verified_brand;
+  if (String(explicitBrand || "").trim()) return explicitBrand;
+  return item.brandLocked && String(item.brand || "").trim() ? item.brand : "";
+}
+
+function shopifyHandleForProduct(item) {
+  const verifiedBrand = verifiedBrandForHandle(item);
+  const title = item.marketplaceTitle || item.title || item.name;
+  const name = item.name || item.title || item.marketplaceTitle;
+  const parts = verifiedBrand ? [verifiedBrand, item.sku, title] : [item.sku, name];
+  return parts.map(slugPart)
+    .filter(Boolean)
+    .join("-")
+    .replace(/-+/g, "-");
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#(\d+);/g, (_, code) => {
+      const number = Number(code);
+      return Number.isFinite(number) ? String.fromCharCode(number) : "";
+    });
+}
+
+function stripHtml(value) {
+  return decodeHtmlEntities(value)
+    .replace(/<\s*br\s*\/?>/gi, "\n")
+    .replace(/<\/\s*(p|div|li|h[1-6]|tr)\s*>/gi, "\n")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
+}
+
+function normalizeContentWhitespace(value) {
+  return String(value || "")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function isMostlyAllCaps(value) {
+  const letters = String(value || "").replace(/[^a-z]/gi, "");
+  if (letters.length < 12) return false;
+  const upper = letters.replace(/[^A-Z]/g, "").length;
+  const lower = letters.replace(/[^a-z]/g, "").length;
+  return upper / letters.length > 0.85 && lower < 3;
+}
+
+function smartLowerWord(word) {
+  if (/^\d/.test(word) || /^[A-Z]{1,4}\d/i.test(word)) return word;
+  if (/^(sku|upc|usb|led|pvc|hvac|api|seo|sds|ul|ce)$/i.test(word)) return word.toUpperCase();
+  if (/^(usa|us)$/i.test(word)) return word.toUpperCase();
+  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+}
+
+function titleCaseAllCaps(value) {
+  return String(value || "").split(/(\s+|[-/])/).map((part) => {
+    if (!/[A-Z]/i.test(part) || /^[-/]$/.test(part)) return part;
+    return smartLowerWord(part);
+  }).join("");
+}
+
+function sentenceCaseAllCaps(value) {
+  const text = String(value || "").toLowerCase();
+  return text.replace(/(^|[.!?]\s+)([a-z])/g, (match, prefix, letter) => `${prefix}${letter.toUpperCase()}`)
+    .replace(/\b(usb|led|pvc|hvac|api|seo|sds|ul|ce|usa|upc|sku)\b/g, (match) => match.toUpperCase());
+}
+
+function sanitizeProductTitle(value) {
+  const text = normalizeContentWhitespace(stripHtml(value));
+  return isMostlyAllCaps(text) ? titleCaseAllCaps(text) : text;
+}
+
+function sanitizeProductText(value) {
+  const text = normalizeContentWhitespace(stripHtml(value));
+  return isMostlyAllCaps(text) ? sentenceCaseAllCaps(text) : text;
+}
+
+function sanitizeProductHtml(value) {
+  const text = sanitizeProductText(value);
+  if (!text) return "";
+  return text.split(/\n{2,}/).map((paragraph) => `<p>${escapeHtml(paragraph.trim())}</p>`).join("");
+}
+
+function productFieldValue(db, item, field, mapping = {}) {
+  if (String(mapping.externalColumn || "").trim().toLowerCase() === "handle") return shopifyHandleForProduct(item);
+  if (field === "available") return Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0);
+  if (field === "vendor") return item.vendor ?? item.supplier ?? "";
+  if (field === "qty") return item.qty ?? item.stockQty ?? "";
+  if (field === "shopifyHandle") return shopifyHandleForProduct(item);
+  if (field === "images") return (item.images || []).join("|");
+  if (field === "tags") return (item.tags || []).join("|");
+  if (field === "bulletPoints") return (item.bulletPoints || []).join("|");
+  if (field === "sources") return Object.entries(item.sources || {}).map(([source, id]) => `${source}:${id}`).join(";");
+  if (field === "shopifyCategoryId") return categoryMappingForProduct(db, item, "shopify")?.categoryId || "";
+  if (field === "shopifyCategoryPath") return categoryMappingForProduct(db, item, "shopify")?.categoryPath || "";
+  if (field === "googleCategoryId") return categoryMappingForProduct(db, item, "shopify")?.googleCategory?.id || "";
+  if (field === "googleCategoryBreadcrumb") return categoryMappingForProduct(db, item, "shopify")?.googleCategory?.breadcrumb || categoryMappingForProduct(db, item, "shopify")?.googleCategory?.fullName || "";
+  if (field === "title" || field === "marketplaceTitle") return sanitizeProductTitle(item[field]);
+  if (["shortDescription", "longDescription", "vendorDescription"].includes(field)) {
+    return /html/i.test(String(mapping.externalColumn || "")) ? sanitizeProductHtml(item[field]) : sanitizeProductText(item[field]);
+  }
+  return item[field] ?? "";
+}
+
+function cleanExportNumber(value, decimals = 3) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return Number(number.toFixed(decimals)).toString();
+}
+
+function shopifyDimensionValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return `${cleanExportNumber(number * 25.4, 3)} mm`;
+}
+
+function shopifyWeightValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return `${cleanExportNumber(number * 0.45359237, 3)} kg`;
+}
+
+function shopifyBooleanValue(value, item = {}) {
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  const text = String(value ?? "").trim().toLowerCase();
+  if (["true", "1", "yes", "y", "active", "in stock", "instock", "available", "received"].includes(text)) return "TRUE";
+  if (["false", "0", "no", "n", "inactive", "out of stock", "outofstock", "unavailable", "discontinued", "deleted"].includes(text)) return "FALSE";
+  if (Number.isFinite(Number(value))) return Number(value) > 0 ? "TRUE" : "FALSE";
+  return Number(item.stockQty ?? item.qty ?? 0) > 0 ? "TRUE" : "FALSE";
+}
+
+function padDatePart(value) {
+  return String(value).padStart(2, "0");
+}
+
+function shopifyDateTimeValue(value) {
+  if (!value) return "";
+  const text = String(value).trim();
+  const dmy = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/);
+  if (dmy) {
+    const [, day, month, year, hour = "0", minute = "0"] = dmy;
+    return `${year}-${padDatePart(month)}-${padDatePart(day)} ${padDatePart(hour)}:${padDatePart(minute)}`;
+  }
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getUTCFullYear()}-${padDatePart(date.getUTCMonth() + 1)}-${padDatePart(date.getUTCDate())} ${padDatePart(date.getUTCHours())}:${padDatePart(date.getUTCMinutes())}`;
+}
+
+function shopifyJsonValue(value) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === "[object Object]") return "";
+    try {
+      return JSON.stringify(JSON.parse(trimmed));
+    } catch {
+      return JSON.stringify(trimmed);
+    }
+  }
+  return JSON.stringify(value);
+}
+
+function barcodeTextValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  let text = raw;
+  if (/^\d+(?:\.\d+)?e\+\d+$/i.test(text)) {
+    const number = Number(text);
+    if (Number.isFinite(number)) {
+      text = number.toLocaleString("fullwide", { useGrouping: false, maximumFractionDigits: 0 });
+    }
+  }
+  const digits = text.replace(/\D/g, "");
+  if (!digits) return "";
+  return digits.length > 7 && digits.length < 12 ? digits.padStart(12, "0") : digits;
+}
+
+function shopifyProductStatusValue(value, item = {}, mapping = {}) {
+  const raw = String(value || mapping.defaultValue || item.status || "").trim().toLowerCase();
+  if (["active", "published", "publish"].includes(raw)) return "Active";
+  if (["archived", "archive", "deleted", "discontinued"].includes(raw)) return "Archived";
+  return "Draft";
+}
+
+function shopifyPublishedValue(item = {}, mapping = {}) {
+  return shopifyProductStatusValue(item.status, item, mapping) === "Active" ? "TRUE" : "FALSE";
+}
+
+function categoryTypeValue(value) {
+  const parts = String(value || "")
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.slice(-2).join(" > ") || parts[0] || "";
+}
+
+function formatMappedExportValue(value, mapping = {}, item = {}) {
+  const column = String(mapping.externalColumn || "");
+  if (/^(Variant Barcode|Barcode|UPC|GTIN|EAN)$/i.test(column)) return barcodeTextValue(value);
+  if (/^Type$/i.test(column)) return categoryTypeValue(value);
+  if (/^Status$/i.test(column)) return shopifyProductStatusValue(value, item, mapping);
+  if (/^Published$/i.test(column)) return shopifyPublishedValue(item, mapping);
+  if (/^Variant Inventory Tracker$/i.test(column)) return "shopify";
+  if (/^Metafield:\s*custom\..*\[dimension\]/i.test(column)) return shopifyDimensionValue(value);
+  if (/^Metafield:\s*custom\..*\[weight\]/i.test(column)) return shopifyWeightValue(value);
+  if (/^Metafield:\s*custom\..*\[boolean\]/i.test(column)) return shopifyBooleanValue(value, item);
+  if (/^Metafield:\s*custom\..*\[date_time\]/i.test(column)) return shopifyDateTimeValue(value);
+  if (/^Metafield:\s*custom\..*\[json\]/i.test(column)) return shopifyJsonValue(value);
+  if (Array.isArray(value)) return value.join("|");
+  if (value && typeof value === "object") return JSON.stringify(value);
+  return value;
+}
+
+function castMappedProductValue(field, value) {
+  const definition = PRODUCT_MAPPING_FIELDS.find((item) => item.key === field);
+  if (!definition) return value;
+  if (definition.type === "number") return Number.isFinite(Number(value)) ? Number(value) : undefined;
+  if (definition.type === "boolean") return value === true || ["true", "1", "yes", "active"].includes(String(value || "").trim().toLowerCase());
+  if (definition.type === "list") return parseList(value);
+  return value;
+}
+
+function mappedRecordToProductPayload(record, template) {
+  const payload = {};
+  for (const mapping of template.mappings || []) {
+    if (!record || record[mapping.externalColumn] === undefined) continue;
+    const field = mapping.productField;
+    if (!PRODUCT_MAPPING_FIELDS.some((definition) => definition.key === field) || field === "available" || field === "shopifyHandle" || field.startsWith("google")) continue;
+    const value = castMappedProductValue(field, record[mapping.externalColumn]);
+    if (value !== undefined) payload[field] = value;
+  }
+  return payload;
+}
+
+function mappedProductsCsv(db, template, items) {
+  const headers = (template.mappings || []).map((mapping) => mapping.externalColumn);
+  const rows = items.map((item) => (template.mappings || []).map((mapping) => {
+    const value = productFieldValue(db, item, mapping.productField, mapping);
+    const formatted = formatMappedExportValue(value, mapping, item);
+    return formatted === "" || formatted === undefined || formatted === null ? mapping.defaultValue || "" : formatted;
+  }));
+  return [headers, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\n");
+}
+
+function mappedExportFilename(template) {
+  return `${String(template.name || "product-export").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "product-export"}.csv`;
+}
+
+function csvValue(record, names = []) {
+  for (const name of names) {
+    if (record[name] !== undefined) return String(record[name] ?? "").trim();
+  }
+  const normalized = Object.fromEntries(Object.entries(record || {}).map(([key, value]) => [key.trim().toLowerCase(), value]));
+  for (const name of names) {
+    const value = normalized[String(name).trim().toLowerCase()];
+    if (value !== undefined) return String(value ?? "").trim();
+  }
+  return "";
+}
+
+function normalizedHandle(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeShopifyStatus(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (["active", "published"].includes(text)) return "Active";
+  if (["archived", "archive"].includes(text)) return "Archived";
+  if (["draft", "unpublished", ""].includes(text)) return "Draft";
+  return String(value || "").trim();
+}
+
+function normalizeShopifyPublished(value, status = "") {
+  const text = String(value || "").trim().toLowerCase();
+  if (["true", "1", "yes", "y"].includes(text)) return true;
+  if (["false", "0", "no", "n"].includes(text)) return false;
+  return normalizeShopifyStatus(status) === "Active";
+}
+
+function buildShopifyLookupMaps(db) {
+  const bySku = new Map();
+  const byHandle = new Map();
+  const byProductId = new Map();
+  for (const item of db.inventory || []) {
+    if (item.sku) bySku.set(String(item.sku).trim().toLowerCase(), item);
+    if (item.shopifyId) byProductId.set(String(item.shopifyId).trim(), item);
+    if (item.shopifyHandle) byHandle.set(normalizedHandle(item.shopifyHandle), item);
+    const computed = shopifyHandleForProduct(item);
+    if (computed) byHandle.set(normalizedHandle(computed), item);
+  }
+  return { bySku, byHandle, byProductId };
+}
+
+function shopifyStatusPayloadFromRecord(record) {
+  const status = normalizeShopifyStatus(csvValue(record, ["Status"]));
+  const productId = csvValue(record, ["ID", "Product ID"]);
+  return {
+    sku: csvValue(record, ["Variant SKU", "Variant: SKU", "SKU"]),
+    handle: csvValue(record, ["Handle"]),
+    shopifyId: productId,
+    shopifyVariantId: csvValue(record, ["Variant ID", "Variant: ID"]),
+    shopifyHandle: csvValue(record, ["Handle"]),
+    shopifyStatus: status,
+    shopifyPublished: normalizeShopifyPublished(csvValue(record, ["Published"]), status),
+    shopifyPublishedAt: csvValue(record, ["Published At", "Published: At"]),
+    shopifyUpdatedAt: csvValue(record, ["Updated At", "Updated: At"]),
+    shopifySyncedAt: new Date().toISOString()
+  };
+}
+
+function findProductForShopifyRecord(record, maps) {
+  const payload = shopifyStatusPayloadFromRecord(record);
+  const skuKey = String(payload.sku || "").trim().toLowerCase();
+  if (skuKey && maps.bySku.has(skuKey)) return { item: maps.bySku.get(skuKey), payload, matchBy: "Variant SKU" };
+  const handleKey = normalizedHandle(payload.handle);
+  if (handleKey && maps.byHandle.has(handleKey)) return { item: maps.byHandle.get(handleKey), payload, matchBy: "Handle" };
+  if (payload.shopifyId && maps.byProductId.has(payload.shopifyId)) return { item: maps.byProductId.get(payload.shopifyId), payload, matchBy: "Shopify ID" };
+  return { item: null, payload, matchBy: "" };
+}
+function normalizeCategorySettings(settings = []) {
+  return (Array.isArray(settings) ? settings : []).map((category) => ({
+    id: category.id || crypto.randomUUID(),
+    categoryId: category.categoryId || category.id || "",
+    name: formatCategoryName(category.name || "Uncategorized"),
+    status: category.status || "needs_review",
+    owner: category.owner || "",
+    notes: category.notes || "",
+    mappings: {
+      shopify: normalizeChannelCategoryMapping(category.mappings?.shopify),
+      temu: normalizeChannelCategoryMapping(category.mappings?.temu),
+      tiktok: normalizeChannelCategoryMapping(category.mappings?.tiktok),
+      ebay: normalizeChannelCategoryMapping(category.mappings?.ebay),
+      whatnot: normalizeChannelCategoryMapping(category.mappings?.whatnot)
+    },
+    defaults: {
+      condition: category.defaults?.condition || "New",
+      countryOfOrigin: category.defaults?.countryOfOrigin || "",
+      hazardousAllowed: Boolean(category.defaults?.hazardousAllowed),
+      packageWeightRequired: category.defaults?.packageWeightRequired !== false,
+      shippingProfile: category.defaults?.shippingProfile || "",
+      returnPolicy: category.defaults?.returnPolicy || ""
+    },
+    requiredAttributes: Array.isArray(category.requiredAttributes) ? category.requiredAttributes : [],
+    updatedAt: category.updatedAt || category.createdAt || new Date().toISOString(),
+    createdAt: category.createdAt || new Date().toISOString()
+  }));
+}
+
+function categoryIdentity(value, scope = "source") {
+  const name = formatCategoryName(value || "Uncategorized") || "Uncategorized";
+  const hash = crypto.createHash("sha1").update(name.toLowerCase()).digest("hex").slice(0, 16);
+  return { id: `${scope}-${hash}`, name };
+}
+
+function normalizeChannelCategoryMapping(mapping = {}) {
+  return {
+    categoryId: mapping.categoryId || "",
+    categoryPath: mapping.categoryPath || "",
+    categoryHandle: mapping.categoryHandle || "",
+    collectionHandle: mapping.collectionHandle || "",
+    taxonomyVersion: mapping.taxonomyVersion || "",
+    googleCategory: mapping.googleCategory && typeof mapping.googleCategory === "object" ? {
+      id: mapping.googleCategory.id || "",
+      fullName: mapping.googleCategory.fullName || mapping.googleCategory.breadcrumb || "",
+      breadcrumb: mapping.googleCategory.breadcrumb || mapping.googleCategory.fullName || "",
+      taxonomy: mapping.googleCategory.taxonomy || ""
+    } : null,
+    attributes: Array.isArray(mapping.attributes) ? mapping.attributes.map((attribute) => ({
+      id: attribute.id || "",
+      name: attribute.name || "",
+      handle: attribute.handle || "",
+      description: attribute.description || "",
+      extended: Boolean(attribute.extended)
+    })).filter((attribute) => attribute.id || attribute.name) : [],
+    status: mapping.status || (mapping.categoryId || mapping.categoryPath ? "mapped" : "missing"),
+    notes: mapping.notes || ""
+  };
+}
+
+function readCatalogCategoryIndex() {
+  if (!fs.existsSync(CATALOG_CATEGORY_INDEX_FILE)) return { categories: [], categoryCount: 0, generatedAt: "" };
+  try {
+    return JSON.parse(fs.readFileSync(CATALOG_CATEGORY_INDEX_FILE, "utf8"));
+  } catch {
+    return { categories: [], categoryCount: 0, generatedAt: "" };
+  }
+}
+
+function categorySettingsMap(db) {
+  db.categorySettings = normalizeCategorySettings(db.categorySettings);
+  const map = new Map();
+  for (const category of db.categorySettings) {
+    if (category.id) map.set(category.id, category);
+    if (category.categoryId) map.set(category.categoryId, category);
+    const nameKey = formatCategoryName(category.name || "").toLowerCase();
+    if (nameKey) map.set(`name:${nameKey}`, category);
+  }
+  return map;
+}
+
+function readShopifyTaxonomyIndex() {
+  if (!fs.existsSync(SHOPIFY_TAXONOMY_INDEX_FILE)) return { categories: [], categoryCount: 0, version: "", generatedAt: "" };
+  try {
+    return JSON.parse(fs.readFileSync(SHOPIFY_TAXONOMY_INDEX_FILE, "utf8"));
+  } catch {
+    return { categories: [], categoryCount: 0, version: "", generatedAt: "" };
+  }
+}
+
+function compactShopifyCategory(category) {
+  return {
+    id: category.id || "",
+    handle: category.handle || String(category.id || "").split("/").pop() || "",
+    name: category.name || "",
+    fullName: category.fullName || category.name || "",
+    path: Array.isArray(category.path) ? category.path : String(category.fullName || category.name || "").split(" > ").filter(Boolean),
+    level: Number(category.level || 0),
+    vertical: category.vertical || "",
+    attributeCount: Number(category.attributeCount || (category.attributes || []).length || 0),
+    googleCategory: category.googleCategory || null,
+    attributes: Array.isArray(category.attributes) ? category.attributes : []
+  };
+}
+
+function searchShopifyTaxonomy(query = "", limit = 20) {
+  const index = readShopifyTaxonomyIndex();
+  const q = String(query || "").trim().toLowerCase();
+  const tokens = q.split(/\s+/).filter(Boolean);
+  const max = Math.max(1, Math.min(Number(limit || 20), 50));
+  let rows = index.categories || [];
+  if (tokens.length) {
+    rows = rows.map((category) => {
+      const haystack = String((category.fullName || "") + " " + (category.name || "") + " " + (category.id || "") + " " + (category.handle || "")).toLowerCase();
+      if (!tokens.every((token) => haystack.includes(token))) return null;
+      const exact = haystack === q ? 100 : 0;
+      const leaf = String(category.name || "").toLowerCase().includes(q) ? 30 : 0;
+      const path = String(category.fullName || "").toLowerCase().includes(q) ? 15 : 0;
+      return { category, score: exact + leaf + path - Math.max(0, Number(category.level || 0) - 2) };
+    }).filter(Boolean).sort((a, b) => b.score - a.score || a.category.fullName.localeCompare(b.category.fullName)).map((row) => row.category);
+  }
+  return {
+    channel: "shopify",
+    version: index.version || "",
+    generatedAt: index.generatedAt || "",
+    total: rows.length,
+    categories: rows.slice(0, max).map(compactShopifyCategory)
+  };
+}
+
+function enrichShopifyCategoryMapping(mapping = {}) {
+  const next = { ...mapping };
+  const shopifyIndex = readShopifyTaxonomyIndex();
+  const lookup = String(next.categoryId || "").trim();
+  const pathLookup = String(next.categoryPath || "").trim().toLowerCase();
+  const shopifyCategory = (shopifyIndex.categories || []).find((row) => (
+    (lookup && (row.id === lookup || row.handle === lookup || String(row.id || "").split("/").pop() === lookup)) ||
+    (pathLookup && String(row.fullName || row.name || "").trim().toLowerCase() === pathLookup)
+  ));
+  if (!shopifyCategory) return next;
+  const compact = compactShopifyCategory(shopifyCategory);
+  return {
+    ...next,
+    categoryId: shopifyCategory.id,
+    categoryPath: shopifyCategory.fullName,
+    categoryHandle: shopifyCategory.handle,
+    taxonomyVersion: shopifyIndex.version || "",
+    googleCategory: compact.googleCategory,
+    attributes: compact.attributes
+  };
+}
+
+function findOrCreateCategorySetting(db, categoryName) {
+  db.categorySettings = normalizeCategorySettings(db.categorySettings);
+  const identity = categoryIdentity(categoryName, "main");
+  let category = db.categorySettings.find((row) => (
+    row.categoryId === identity.id ||
+    row.id === identity.id ||
+    formatCategoryName(row.name).toLowerCase() === identity.name.toLowerCase()
+  ));
+  if (!category) {
+    category = normalizeCategorySettings([{ categoryId: identity.id, name: identity.name }])[0];
+    db.categorySettings.push(category);
+  }
+  return category;
+}
+
+function categorySavedSettings(settings, category) {
+  return settings.get(category.id) || settings.get(category.categoryId) || settings.get(`name:${formatCategoryName(category.name || "").toLowerCase()}`) || {};
+}
+
+function categoryMappingSummary(category, saved) {
+  const mappings = saved.mappings || {};
+  const mappingCount = ["shopify", "temu", "tiktok", "ebay", "whatnot"].filter((key) => {
+    const mapping = mappings[key] || {};
+    return mapping.categoryId || mapping.categoryPath || mapping.collectionHandle;
+  }).length;
+  return {
+    mappings,
+    mappingCount,
+    missingMappings: ["shopify", "temu", "tiktok", "ebay", "whatnot"].filter((key) => {
+      const mapping = mappings[key] || {};
+      return !(mapping.categoryId || mapping.categoryPath || mapping.collectionHandle);
+    })
+  };
+}
+
+function publicCategoryRow(category, settings, scope) {
+  const categoryName = formatCategoryName(category.name);
+  const saved = categorySavedSettings(settings, { ...category, name: categoryName });
+  const { mappings, mappingCount, missingMappings } = categoryMappingSummary(category, saved);
+  return {
+    ...category,
+    scope,
+    name: categoryName,
+    topBrands: Array.isArray(category.topBrands) ? category.topBrands.map((brand) => ({ ...brand, name: formatBrandName(brand.name) })) : [],
+    status: saved.status || (mappingCount ? "mapped" : "needs_review"),
+    owner: saved.owner || "",
+    notes: saved.notes || "",
+    mappings: {
+      shopify: normalizeChannelCategoryMapping(mappings.shopify),
+      temu: normalizeChannelCategoryMapping(mappings.temu),
+      tiktok: normalizeChannelCategoryMapping(mappings.tiktok),
+      ebay: normalizeChannelCategoryMapping(mappings.ebay),
+      whatnot: normalizeChannelCategoryMapping(mappings.whatnot)
+    },
+    defaults: normalizeCategorySettings([{ ...saved, name: categoryName, categoryId: category.id }])[0].defaults,
+    requiredAttributes: Array.isArray(saved.requiredAttributes) ? saved.requiredAttributes : [],
+    mappingCount,
+    missingMappings
+  };
+}
+
+function aggregateMainCatalogCategories(db) {
+  const byCategory = new Map();
+  for (const item of db.inventory || []) {
+    const name = item.categoryVerified ? (formatCategoryName(item.category || item.mainCategory || "Uncategorized") || "Uncategorized") : "Uncategorized";
+    const key = name.toLowerCase();
+    if (!byCategory.has(key)) {
+      const identity = categoryIdentity(name, "main");
+      byCategory.set(key, {
+        id: identity.id,
+        categoryId: identity.id,
+        name,
+        productCount: 0,
+        activeProductCount: 0,
+        stockProductCount: 0,
+        hazardousProductCount: 0,
+        _vendors: new Map(),
+        _brands: new Map()
+      });
+    }
+    const row = byCategory.get(key);
+    row.productCount += 1;
+    if (item.active !== false) row.activeProductCount += 1;
+    if (Number(item.stockQty ?? item.qty ?? 0) > 0) row.stockProductCount += 1;
+    if (item.hazardous) row.hazardousProductCount += 1;
+    const vendor = sourceTextValue(item.supplier || item.vendor || "Unassigned");
+    if (vendor) row._vendors.set(vendor, (row._vendors.get(vendor) || 0) + 1);
+    const brand = formatBrandName(item.brand || "");
+    if (brand) row._brands.set(brand, (row._brands.get(brand) || 0) + 1);
+  }
+  for (const setting of normalizeCategorySettings(db.categorySettings)) {
+    const name = formatCategoryName(setting.name || "");
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (!byCategory.has(key)) {
+      const identity = categoryIdentity(name, "main");
+      byCategory.set(key, {
+        id: identity.id,
+        categoryId: identity.id,
+        name,
+        productCount: 0,
+        activeProductCount: 0,
+        stockProductCount: 0,
+        hazardousProductCount: 0,
+        _vendors: new Map(),
+        _brands: new Map()
+      });
+    }
+  }
+  return [...byCategory.values()].map((row) => {
+    const topVendors = [...row._vendors.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 12);
+    const topBrands = [...row._brands.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 12);
+    delete row._vendors;
+    delete row._brands;
+    return { ...row, topVendors, topBrands };
+  }).sort((a, b) => b.productCount - a.productCount || a.name.localeCompare(b.name));
+}
+
+function sourceCatalogCategoryRows() {
+  const index = readCatalogCategoryIndex();
+  return {
+    rows: (index.categories || []).map((category) => {
+      const name = formatCategoryName(category.name);
+      return { ...category, id: category.id || categoryIdentity(name, "source").id, categoryId: category.id || categoryIdentity(name, "source").id, name };
+    }),
+    index
+  };
+}
+
+function categoryCoverage(db) {
+  const settings = normalizeCategorySettings(db.categorySettings);
+  const mainRows = aggregateMainCatalogCategories(db);
+  const sourceRows = sourceCatalogCategoryRows().rows;
+  const vendorMappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings);
+  const mappedMainNames = new Set(settings.map((row) => formatCategoryName(row.name).toLowerCase()).filter(Boolean));
+  for (const row of mainRows) mappedMainNames.add(formatCategoryName(row.name).toLowerCase());
+  const shopifyMapped = settings.filter((row) => row.mappings?.shopify?.categoryPath || row.mappings?.shopify?.categoryId);
+  const shopifyWithTaxonomyId = shopifyMapped.filter((row) => row.mappings?.shopify?.categoryId);
+  const products = Array.isArray(db.inventory) ? db.inventory : [];
+  const verifiedProducts = products.filter((item) => item.categoryVerified && formatCategoryName(item.category || item.mainCategory));
+  const uncategorizedProducts = products.filter((item) => !(item.categoryVerified && formatCategoryName(item.category || item.mainCategory)));
+  const activeUncategorizedProducts = uncategorizedProducts.filter((item) => item.active !== false);
+  const sourceCategoryNames = new Set(sourceRows.map((row) => formatCategoryName(row.name).toLowerCase()).filter(Boolean));
+  const learnedVendorCategoryNames = new Set(Object.values(vendorMappings).map((row) => formatCategoryName(row.vendorCategory).toLowerCase()).filter(Boolean));
+  const unmappedMainRows = mainRows.filter((row) => {
+    const saved = settings.find((setting) => formatCategoryName(setting.name).toLowerCase() === formatCategoryName(row.name).toLowerCase());
+    return !(saved?.mappings?.shopify?.categoryPath || saved?.mappings?.shopify?.categoryId);
+  });
+  const pathMissingTaxonomy = shopifyMapped.filter((row) => row.mappings?.shopify?.categoryPath && !row.mappings?.shopify?.categoryId);
+  return {
+    mainCategoryCount: mappedMainNames.size,
+    sourceCategoryCount: sourceCategoryNames.size,
+    shopifyMappedCount: shopifyMapped.length,
+    shopifyTaxonomyIdCount: shopifyWithTaxonomyId.length,
+    shopifyMissingCount: unmappedMainRows.length,
+    shopifyPathMissingTaxonomyIdCount: pathMissingTaxonomy.length,
+    productCount: products.length,
+    verifiedProductCount: verifiedProducts.length,
+    uncategorizedProductCount: uncategorizedProducts.length,
+    activeUncategorizedProductCount: activeUncategorizedProducts.length,
+    vendorCategoryMappingCount: Object.keys(vendorMappings).length,
+    sourceVendorCategoryMappedCount: [...learnedVendorCategoryNames].filter((name) => sourceCategoryNames.has(name)).length,
+    attention: [
+      { key: "missing-shopify", label: "Main categories missing Shopify mapping", count: unmappedMainRows.length, sample: unmappedMainRows.slice(0, 5).map((row) => row.name) },
+      { key: "missing-taxonomy-id", label: "Shopify paths missing taxonomy ID", count: pathMissingTaxonomy.length, sample: pathMissingTaxonomy.slice(0, 5).map((row) => row.name) },
+      { key: "uncategorized-products", label: "Products missing verified Main category", count: uncategorizedProducts.length, sample: uncategorizedProducts.slice(0, 5).map((item) => item.sku || item.title).filter(Boolean) }
+    ]
+  };
+}
+
+function categoryCoverageRows(db, issue) {
+  const settings = normalizeCategorySettings(db.categorySettings);
+  const mainRows = aggregateMainCatalogCategories(db);
+  const vendorMappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings);
+  const settingForName = (name) => settings.find((row) => formatCategoryName(row.name).toLowerCase() === formatCategoryName(name).toLowerCase());
+  if (issue === "missing-shopify") {
+    return mainRows
+      .map((row) => ({ row, setting: settingForName(row.name) }))
+      .filter(({ setting }) => !(setting?.mappings?.shopify?.categoryPath || setting?.mappings?.shopify?.categoryId))
+      .map(({ row }) => ({
+        category: row.name,
+        products: row.productCount || 0,
+        active_products: row.activeProductCount || 0,
+        issue: "Missing Shopify category mapping",
+        current_shopify_category: ""
+      }));
+  }
+  if (issue === "missing-taxonomy-id") {
+    return settings
+      .filter((row) => row.mappings?.shopify?.categoryPath && !row.mappings?.shopify?.categoryId)
+      .map((row) => ({
+        category: row.name,
+        shopify_category: row.mappings.shopify.categoryPath || "",
+        shopify_category_id: "",
+        issue: "Shopify category path did not match a taxonomy ID"
+      }));
+  }
+  if (issue === "uncategorized-products") {
+    return (db.inventory || [])
+      .filter((item) => !(item.categoryVerified && formatCategoryName(item.category || item.mainCategory)))
+      .map((item) => ({
+        sku: item.sku || "",
+        title: item.marketplaceTitle || item.title || "",
+        supplier: item.supplier || item.vendor || "",
+        vendor_category: item.sourceCategory || item.vendorCategory || "",
+        current_main_category: item.category || item.mainCategory || "",
+        active: item.active !== false ? "true" : "false"
+      }));
+  }
+  if (issue === "vendor-category-mappings") {
+    return Object.values(vendorMappings)
+      .sort((a, b) => String(a.supplier).localeCompare(String(b.supplier)) || String(a.vendorCategory).localeCompare(String(b.vendorCategory)))
+      .map((row) => ({
+        supplier: row.supplier || "",
+        vendor_category: row.vendorCategory || "",
+        main_category: row.mainCategory || "",
+        sample_sku: row.sampleSku || "",
+        match_count: row.matchCount || 0,
+        conflict_count: row.conflictCount || 0,
+        updated_at: row.updatedAt || ""
+      }));
+  }
+  return [];
+}
+
+function coverageIssueLabel(issue) {
+  return {
+    "missing-shopify": "missing-shopify-mappings",
+    "missing-taxonomy-id": "shopify-paths-missing-taxonomy-id",
+    "uncategorized-products": "uncategorized-products",
+    "vendor-category-mappings": "vendor-category-mappings"
+  }[issue] || "category-coverage";
+}
+
+function rowsToCsv(rows = []) {
+  const headers = [...new Set(rows.flatMap((row) => Object.keys(row)))];
+  return [headers, ...rows.map((row) => headers.map((header) => row[header] ?? ""))]
+    .map((row) => row.map(escapeCsv).join(","))
+    .join("\n");
+}
+
+const IMPORT_ERROR_COLUMNS = ["row", "record_key", "field", "issue", "raw_value", "sku", "category", "supplier", "details"];
+
+function csvRecordRow(record, fallback = "") {
+  return record?.__rowNumber || fallback || "";
+}
+
+function standardImportError(attrs = {}) {
+  const row = {
+    row: attrs.row ?? csvRecordRow(attrs.record),
+    record_key: attrs.recordKey ?? attrs.key ?? attrs.sku ?? attrs.category ?? "",
+    field: attrs.field || "",
+    issue: attrs.issue || attrs.error || "Import issue",
+    raw_value: attrs.rawValue ?? attrs.raw_value ?? "",
+    sku: attrs.sku || "",
+    category: attrs.category || "",
+    supplier: attrs.supplier || "",
+    details: attrs.details || ""
+  };
+  for (const [key, value] of Object.entries(attrs)) {
+    if (row[key] === undefined && !["record", "key", "error", "rawValue", "raw_value"].includes(key)) row[key] = value ?? "";
+  }
+  return row;
+}
+
+function importErrorMessages(rows = []) {
+  return rows.map((row) => {
+    const normalized = standardImportError(row);
+    const target = normalized.record_key || normalized.sku || normalized.category || normalized.field;
+    return `${normalized.issue}${target ? `: ${target}` : ""}${normalized.row ? ` (row ${normalized.row})` : ""}`;
+  }).slice(0, 50);
+}
+
+function publicCategories(db, query = "", scope = "source") {
+  const settings = categorySettingsMap(db);
+  const q = String(query || "").trim().toLowerCase();
+  const normalizedScope = scope === "main" ? "main" : "source";
+  const source = normalizedScope === "main"
+    ? { rows: aggregateMainCatalogCategories(db), index: { generatedAt: "", catalogImportedAt: "" } }
+    : sourceCatalogCategoryRows();
+  const rows = source.rows.map((category) => publicCategoryRow(category, settings, normalizedScope)).filter((category) => !q || `${category.name} ${category.status} ${category.notes} ${(category.topVendors || []).map((v) => v.name).join(" ")}`.toLowerCase().includes(q));
+  return {
+    categories: rows,
+    total: rows.length,
+    scope: normalizedScope,
+    coverage: categoryCoverage(db),
+    indexGeneratedAt: source.index.generatedAt || "",
+    catalogImportedAt: source.index.catalogImportedAt || ""
+  };
+}
+
+function findPublicCategory(db, categoryId, scope = "source") {
+  const categories = publicCategories(db, "", scope).categories;
+  return categories.find((category) => category.id === categoryId || category.categoryId === categoryId);
+}
+
 function normalizeOrderTimeline(order) {
   const events = Array.isArray(order.timeline) ? order.timeline : [];
   if (!events.some((event) => event.type === "created")) {
@@ -1039,6 +2346,11 @@ function cleanSerialPart(value) {
 function generatedSerial(po, vendor, receivedAt, unitIndex = 1) {
   const base = `${cleanSerialPart(po.poNumber)}-${cleanSerialPart(vendor?.vendorNumber || po.supplier)}-${cleanSerialPart(receivedAt)}`;
   return unitIndex > 1 ? `${base}-${String(unitIndex).padStart(3, "0")}` : base;
+}
+
+function generatedReceiptSerial(po, vendor, receivedAt, sku, unitIndex = 1) {
+  const base = `${cleanSerialPart(po.poNumber)}-${cleanSerialPart(vendor?.vendorNumber || po.supplier)}-${cleanSerialPart(sku)}-${cleanSerialPart(receivedAt)}`;
+  return `${base}-${String(unitIndex).padStart(3, "0")}`;
 }
 
 function findOpenPurchaseOrderLinks(db, orderIds = []) {
@@ -1478,6 +2790,7 @@ function normalizeVendor(db, vendor) {
     totalPOs: Number(vendor.totalPOs || 0),
     totalSpend: Number(vendor.totalSpend || 0),
     lastPOAt: vendor.lastPOAt || "",
+    catalogStats: vendor.catalogStats && typeof vendor.catalogStats === "object" ? vendor.catalogStats : {},
     changeLog,
     createdAt,
     updatedAt: vendor.updatedAt || createdAt
@@ -1533,10 +2846,28 @@ function addPoTimeline(po, event) {
 
 function normalizeBrands(db) {
   let changed = false;
-  const existing = new Map((db.brands || []).map((brand) => [String(brand.name || "").toLowerCase(), brand]));
+  const existing = new Map();
+  for (const brand of db.brands || []) {
+    const formatted = formatBrandName(brand.name);
+    if (!formatted) continue;
+    const key = formatted.toLowerCase();
+    if (existing.has(key)) {
+      const current = existing.get(key);
+      current.vendorIds = [...new Set([...(current.vendorIds || []), ...(brand.vendorIds || [])])];
+      current.notes = current.notes || brand.notes || "";
+      changed = true;
+    } else {
+      existing.set(key, { ...brand, name: formatted });
+      if (brand.name !== formatted) changed = true;
+    }
+  }
   for (const item of db.inventory || []) {
-    const name = String(item.brand || "").trim();
+    const name = formatBrandName(item.brand || "");
     if (!name) continue;
+    if (item.brand !== name) {
+      item.brand = name;
+      changed = true;
+    }
     const key = name.toLowerCase();
     if (!existing.has(key)) {
       const vendor = findVendorByName(db, item.vendor);
@@ -1973,7 +3304,7 @@ function parseBody(req) {
     let body = "";
     req.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 5_000_000) {
+      if (body.length > 50_000_000) {
         req.destroy();
         reject(new Error("Body too large"));
       }
@@ -1990,7 +3321,7 @@ function parseBody(req) {
 }
 
 function escapeCsv(value) {
-  const text = String(value ?? "");
+  const text = String(value ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
@@ -2027,7 +3358,11 @@ function parseCsv(text) {
   if (!rows.length) return [];
 
   const headers = rows[0].map((header) => header.trim());
-  return rows.slice(1).map((cells) => Object.fromEntries(headers.map((header, index) => [header, cells[index] ?? ""])));
+  return rows.slice(1).map((cells, index) => {
+    const record = Object.fromEntries(headers.map((header, cellIndex) => [header, cells[cellIndex] ?? ""]));
+    Object.defineProperty(record, "__rowNumber", { value: index + 2, enumerable: false });
+    return record;
+  });
 }
 
 function serveStatic(req, res) {
@@ -2048,6 +3383,187 @@ function serveStatic(req, res) {
 
   res.writeHead(200, { "Content-Type": contentType });
   fs.createReadStream(filePath).pipe(res);
+}
+
+function normalizeImportJobStatus(status) {
+  const value = String(status || 'success').trim().toLowerCase();
+  if (['queued', 'running', 'success', 'warning', 'failed', 'stopped'].includes(value)) return value;
+  if (['done', 'complete', 'completed', 'ok'].includes(value)) return 'success';
+  if (['stop', 'stopped', 'cancel', 'canceled', 'cancelled'].includes(value)) return 'stopped';
+  if (['error', 'errored', 'failure'].includes(value)) return 'failed';
+  return 'success';
+}
+
+function importJobSectionFromSyncRun(run = {}) {
+  const type = String(run.type || '').toLowerCase();
+  const source = String(run.source || 'System');
+  if (/order/.test(type)) return 'Orders';
+  if (/customer/.test(type)) return 'Customers';
+  if (/categor/.test(type)) return 'Categories';
+  if (/inventory|stock/.test(type)) return 'Inventory';
+  if (/product|catalog|shopify/.test(type)) return 'Products';
+  return source;
+}
+
+function normalizeImportJob(job = {}) {
+  const now = new Date().toISOString();
+  const status = normalizeImportJobStatus(job.status);
+  const createdAt = job.createdAt || job.startedAt || job.finishedAt || job.updatedAt || now;
+  const finishedAt = job.finishedAt || (['success', 'warning', 'failed'].includes(status) ? job.updatedAt || createdAt : '');
+  const errors = Array.isArray(job.errors)
+    ? job.errors.map((error) => typeof error === 'string' ? error : error?.message || JSON.stringify(error)).filter(Boolean).slice(0, 50)
+    : (job.error ? [String(job.error)] : []);
+  return {
+    id: job.id || crypto.randomUUID(),
+    syncRunId: job.syncRunId || '',
+    section: job.section || job.source || 'System',
+    operation: job.operation || job.type || 'Import',
+    direction: job.direction || (/export/i.test(`${job.operation || ''} ${job.type || ''}`) ? 'export' : 'import'),
+    status,
+    fileName: job.fileName || '',
+    originalFileName: job.originalFileName || job.fileName || '',
+    originalFilePath: job.originalFilePath || '',
+    errorFileName: job.errorFileName || '',
+    errorFilePath: job.errorFilePath || '',
+    message: job.message || '',
+    details: job.details || '',
+    totalRows: Number(job.totalRows ?? job.requested ?? job.rows ?? 0) || 0,
+    changed: Number(job.changed ?? job.updated ?? 0) || 0,
+    created: Number(job.created ?? 0) || 0,
+    missingCount: Number(job.missingCount ?? job.missing ?? 0) || 0,
+    errors,
+    createdAt,
+    startedAt: job.startedAt || createdAt,
+    finishedAt,
+    updatedAt: job.updatedAt || finishedAt || createdAt
+  };
+}
+
+function syncRunToImportJob(run = {}) {
+  return normalizeImportJob({
+    id: `sync-${run.id || crypto.randomUUID()}`,
+    syncRunId: run.id || '',
+    section: importJobSectionFromSyncRun(run),
+    operation: run.type || 'Sync',
+    direction: /export/i.test(String(run.type || '')) ? 'export' : 'import',
+    status: run.status || 'success',
+    fileName: run.fileName || '',
+    message: run.message || '',
+    errors: run.errors || [],
+    createdAt: run.createdAt,
+    startedAt: run.createdAt,
+    finishedAt: run.createdAt,
+    updatedAt: run.createdAt
+  });
+}
+
+function normalizeImportJobs(jobs = [], syncRuns = []) {
+  const normalizedJobs = (Array.isArray(jobs) ? jobs : []).map(normalizeImportJob);
+  const jobIds = new Set(normalizedJobs.map((job) => job.id));
+  const derivedRuns = (Array.isArray(syncRuns) ? syncRuns : [])
+    .filter((run) => !run.importJobId || !jobIds.has(run.importJobId))
+    .map(syncRunToImportJob);
+  const seen = new Set();
+  return [...normalizedJobs, ...derivedRuns]
+    .filter((job) => {
+      if (seen.has(job.id)) return false;
+      seen.add(job.id);
+      return true;
+    })
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))
+    .slice(0, 250);
+}
+
+function createImportJob(db, attrs = {}) {
+  db.importJobs = normalizeImportJobs(db.importJobs, []);
+  const now = new Date().toISOString();
+  const job = normalizeImportJob({
+    id: crypto.randomUUID(),
+    status: 'running',
+    createdAt: now,
+    startedAt: now,
+    updatedAt: now,
+    ...attrs
+  });
+  db.importJobs.unshift(job);
+  db.importJobs = db.importJobs.slice(0, 250);
+  return job;
+}
+
+function finishImportJob(job, attrs = {}) {
+  if (!job) return null;
+  const now = new Date().toISOString();
+  Object.assign(job, normalizeImportJob({
+    ...job,
+    ...attrs,
+    status: attrs.status || 'success',
+    finishedAt: attrs.finishedAt || now,
+    updatedAt: now
+  }));
+  return job;
+}
+
+function safeImportFileName(fileName, fallback = "import.csv") {
+  const base = path.basename(String(fileName || fallback)).replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").trim();
+  return base || fallback;
+}
+
+function attachImportJobOriginalFile(job, content = "", fileName = "") {
+  if (!job || !content) return job;
+  const dir = path.join(IMPORT_JOB_FILE_DIR, job.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const safeName = safeImportFileName(fileName || job.fileName || "original.csv");
+  const filePath = path.join(dir, safeName);
+  fs.writeFileSync(filePath, String(content), "utf8");
+  job.originalFileName = safeName;
+  job.originalFilePath = filePath;
+  if (!job.fileName) job.fileName = safeName;
+  return job;
+}
+
+function attachImportJobErrorsFile(job, rows = []) {
+  if (!job || !rows.length) return job;
+  const dir = path.join(IMPORT_JOB_FILE_DIR, job.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, "errors.csv");
+  const normalizedRows = rows.map((row) => {
+    const normalized = typeof row === "object" && row !== null
+      ? standardImportError(row)
+      : standardImportError({ issue: String(row) });
+    const ordered = {};
+    for (const column of IMPORT_ERROR_COLUMNS) ordered[column] = normalized[column] ?? "";
+    for (const [key, value] of Object.entries(normalized)) {
+      if (ordered[key] === undefined) ordered[key] = value ?? "";
+    }
+    return ordered;
+  });
+  fs.writeFileSync(filePath, rowsToCsv(normalizedRows), "utf8");
+  job.errorFileName = "errors.csv";
+  job.errorFilePath = filePath;
+  return job;
+}
+
+function findImportJob(db, id) {
+  db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
+  return db.importJobs.find((job) => job.id === id);
+}
+
+function sendImportJobFile(res, job, kind) {
+  const isOriginal = kind === "original";
+  const filePath = isOriginal ? job?.originalFilePath : job?.errorFilePath;
+  const fileName = isOriginal ? job?.originalFileName : job?.errorFileName;
+  if (!filePath || !fs.existsSync(filePath)) return false;
+  const contentType = fileName?.endsWith(".gz")
+    ? "application/gzip"
+    : fileName?.endsWith(".json")
+      ? "application/json; charset=utf-8"
+      : "text/csv; charset=utf-8";
+  res.writeHead(200, {
+    "Content-Type": contentType,
+    "Content-Disposition": `attachment; filename=${safeImportFileName(fileName || (isOriginal ? "original.csv" : "errors.csv"))}`
+  });
+  res.end(fs.readFileSync(filePath));
+  return true;
 }
 
 function publicState(db) {
@@ -2469,18 +3985,31 @@ function parseList(value) {
 }
 
 function inventoryPayloadFromRecord(record) {
+  record = {
+    ...record,
+    brand: record.brand ?? record.Brand ?? record.brandName ?? record.brand_name ?? record["Brand Name"] ?? record["brand name"] ?? record["brand_name"]
+  };
   const payload = {};
-  const textFields = ["marketplaceTitle", "brand", "category", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
-  const numberFields = ["price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "reorderPoint", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
+  const textFields = ["marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
+  const numberFields = ["price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "reorderPoint", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
 
   for (const field of textFields) {
     if (record[field] !== undefined) payload[field] = String(record[field]).trim();
   }
+  if (payload.brand !== undefined) payload.brand = formatBrandName(payload.brand);
+  if (payload.sourceBrand !== undefined) payload.sourceBrand = sourceTextValue(payload.sourceBrand);
+  if (payload.category !== undefined) payload.category = formatCategoryName(payload.category);
+  if (payload.mainCategory !== undefined) payload.mainCategory = formatCategoryName(payload.mainCategory);
+  if (payload.sourceCategory !== undefined) payload.sourceCategory = formatCategoryName(payload.sourceCategory);
+  if (payload.vendorCategory !== undefined) payload.vendorCategory = formatCategoryName(payload.vendorCategory);
   for (const field of numberFields) {
     if (record[field] !== undefined && Number.isFinite(Number(record[field]))) payload[field] = Number(record[field]);
   }
   if (record.hazardous !== undefined) payload.hazardous = record.hazardous === true || String(record.hazardous).toLowerCase() === "true";
   if (record.active !== undefined) payload.active = record.active === true || String(record.active).toLowerCase() === "true";
+  if (record.brandLocked !== undefined) payload.brandLocked = record.brandLocked === true || String(record.brandLocked).toLowerCase() === "true";
+  if (record.categoryVerified !== undefined) payload.categoryVerified = record.categoryVerified === true || String(record.categoryVerified).toLowerCase() === "true";
+  if (record.shopifyPublished !== undefined) payload.shopifyPublished = record.shopifyPublished === true || String(record.shopifyPublished).toLowerCase() === "true";
   if (record.images !== undefined) payload.images = parseList(record.images);
   if (record.tags !== undefined) payload.tags = parseList(record.tags);
   if (record.productManagerFields && typeof record.productManagerFields === "object") payload.productManagerFields = record.productManagerFields;
@@ -2491,23 +4020,40 @@ function inventoryPayloadFromRecord(record) {
 }
 
 function applyInventoryPatch(item, body) {
-  const textFields = ["sku", "title", "marketplaceTitle", "brand", "category", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
-  const numberFields = ["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
+  const textFields = ["sku", "title", "marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
+  const numberFields = ["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
 
   for (const field of textFields) {
     if (body[field] !== undefined) item[field] = String(body[field]);
   }
+  if (body.brand !== undefined) item.brand = formatBrandName(body.brand);
+  if (body.sourceBrand !== undefined) item.sourceBrand = sourceTextValue(body.sourceBrand);
+  if (body.category !== undefined) item.category = formatCategoryName(body.category);
+  if (body.category !== undefined) {
+    item.mainCategory = item.category;
+    item.categoryVerified = true;
+  }
+  if (body.mainCategory !== undefined) item.mainCategory = formatCategoryName(body.mainCategory);
+  if (body.sourceCategory !== undefined) item.sourceCategory = formatCategoryName(body.sourceCategory);
+  if (body.vendorCategory !== undefined) item.vendorCategory = formatCategoryName(body.vendorCategory);
   for (const field of numberFields) {
     if (body[field] !== undefined && Number.isFinite(Number(body[field]))) item[field] = Number(body[field]);
   }
   if (body.hazardous !== undefined) item.hazardous = body.hazardous === true || String(body.hazardous).toLowerCase() === "true";
   if (body.active !== undefined) item.active = body.active === true || String(body.active).toLowerCase() === "true";
+  if (body.brandLocked !== undefined) item.brandLocked = body.brandLocked === true || String(body.brandLocked).toLowerCase() === "true";
+  if (body.categoryVerified !== undefined) item.categoryVerified = body.categoryVerified === true || String(body.categoryVerified).toLowerCase() === "true";
+  if (body.shopifyPublished !== undefined) item.shopifyPublished = body.shopifyPublished === true || String(body.shopifyPublished).toLowerCase() === "true";
   if (body.images !== undefined) item.images = parseList(body.images);
   if (body.tags !== undefined) item.tags = parseList(body.tags);
+  if (body.bulletPoints !== undefined) item.bulletPoints = parseList(body.bulletPoints);
   if (body.productManagerFields && typeof body.productManagerFields === "object") item.productManagerFields = body.productManagerFields;
   if (body.checkedImage && typeof body.checkedImage === "object") item.checkedImage = body.checkedImage;
   if (body.suppliers !== undefined) item.suppliers = body.suppliers;
   if (body.original !== undefined) item.original = body.original;
+  if (["packageLength", "packageWidth", "packageHeight"].some((field) => body[field] !== undefined)) {
+    item.dimensionalWeight = calculateDimensionalWeight(item);
+  }
 }
 
 function ensureInventoryWarehouseStock(item, warehouse) {
@@ -2609,13 +4155,1489 @@ function applyShadowSkuPatch(shadow, body) {
   });
 }
 
+function catalogSearchText(product = {}) {
+  return [
+    product.sku,
+    product.title,
+    product.marketplaceTitle,
+    product.brand,
+    product.category,
+    product.manufacturer,
+    product.mfrPartNumber,
+    product.vendorSku,
+    product.supplier,
+    product.supplierCode,
+    product.zoroSku,
+    product.altVendorSku,
+    product.itemKey,
+    product.barcode,
+    product.wildcardSearch
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function catalogFilterParams(searchParams) {
+  return {
+    supplier: searchParams.get("supplier") || "",
+    suppliers: searchParams.get("suppliers") || "",
+    active: searchParams.get("active") || "",
+    productMembership: searchParams.get("productMembership") || "",
+    stockStatus: searchParams.get("stockStatus") || "",
+    hasStock: searchParams.get("hasStock") || "",
+    hazardous: searchParams.get("hazardous") || "",
+    brand: searchParams.get("brand") || "",
+    category: searchParams.get("category") || ""
+  };
+}
+
+function productMatchesCatalogFilters(product = {}, filters = {}) {
+  const supplierValues = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim().toLowerCase()).filter(Boolean);
+  if (supplierValues.length && !supplierValues.includes(String(product.supplier || product.vendor || "").toLowerCase())) return false;
+  if (filters.active && String(product.active !== false) !== filters.active) return false;
+  if (filters.productMembership === "in-products" && !product.inProducts) return false;
+  if (filters.productMembership === "not-in-products" && product.inProducts) return false;
+  if (filters.stockStatus && String(product.stockStatus || "") !== filters.stockStatus) return false;
+  if (filters.hasStock && String(Number(product.stockQty ?? product.qty ?? 0) > 0) !== filters.hasStock) return false;
+  if (filters.hazardous && String(Boolean(product.hazardous)) !== filters.hazardous) return false;
+  if (filters.brand && formatBrandName(product.brand || "") !== filters.brand) return false;
+  if (filters.category && formatCategoryName(product.category || "") !== formatCategoryName(filters.category)) return false;
+  return true;
+}
+
+function hasCatalogFilters(filters = {}) {
+  return Object.values(filters).some((value) => value !== "");
+}
+
+function normalizeSourceCatalogOverrides(overrides = {}) {
+  const entries = Array.isArray(overrides)
+    ? overrides.map((row) => [row.sku, row])
+    : Object.entries(overrides || {});
+  const result = {};
+  for (const [sku, row] of entries) {
+    const key = String(sku || row?.sku || "").trim().toLowerCase();
+    if (!key) continue;
+    result[key] = {
+      sku: row.sku || sku,
+      status: row.status || "",
+      active: row.active === undefined ? undefined : Boolean(row.active),
+      category: row.category ? formatCategoryName(row.category) : "",
+      categoryVerified: row.categoryVerified === undefined ? Boolean(row.category) : Boolean(row.categoryVerified),
+      deleted: Boolean(row.deleted),
+      updatedAt: row.updatedAt || new Date().toISOString()
+    };
+  }
+  return result;
+}
+
+function vendorCategoryMappingKey(supplier, vendorCategory) {
+  const supplierKey = String(supplier || "").trim().toLowerCase();
+  const categoryKey = formatCategoryName(vendorCategory || "").toLowerCase();
+  return supplierKey && categoryKey ? `${supplierKey}::${categoryKey}` : "";
+}
+
+function normalizeVendorCategoryMappings(mappings = {}) {
+  const entries = Array.isArray(mappings)
+    ? mappings.map((row) => [vendorCategoryMappingKey(row?.supplier, row?.vendorCategory), row])
+    : Object.entries(mappings || {});
+  const result = {};
+  for (const [key, row] of entries) {
+    const supplier = sourceTextValue(row?.supplier);
+    const vendorCategory = formatCategoryName(row?.vendorCategory || row?.sourceCategory || row?.category);
+    const mainCategory = formatCategoryName(row?.mainCategory || row?.mappedCategory || row?.categoryOverride);
+    const normalizedKey = key && key.includes("::") ? key : vendorCategoryMappingKey(supplier, vendorCategory);
+    if (!normalizedKey || !supplier || !vendorCategory || !mainCategory) continue;
+    result[normalizedKey] = {
+      supplier,
+      vendorCategory,
+      mainCategory,
+      categoryVerified: row.categoryVerified === undefined ? true : Boolean(row.categoryVerified),
+      source: row.source || "vendor-category-map",
+      sampleSku: row.sampleSku || "",
+      matchCount: Number(row.matchCount || 0),
+      conflictCount: Number(row.conflictCount || 0),
+      updatedAt: row.updatedAt || new Date().toISOString(),
+      createdAt: row.createdAt || row.updatedAt || new Date().toISOString()
+    };
+  }
+  return result;
+}
+
+function sourceCatalogOverrideMap(db = {}) {
+  db.sourceCatalogOverrides = normalizeSourceCatalogOverrides(db.sourceCatalogOverrides);
+  return db.sourceCatalogOverrides;
+}
+
+function vendorCategoryMappingMap(db = {}) {
+  db.vendorCategoryMappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings);
+  return db.vendorCategoryMappings;
+}
+
+function applySourceCatalogOverride(product = {}, overrides = {}, vendorMappings = {}) {
+  const override = overrides[String(product.sku || "").toLowerCase()];
+  const supplier = sourceTextValue(product.supplier || product.vendor);
+  const vendorCategory = formatCategoryName(product.sourceCategory || product.vendorCategory || product.category || "");
+  const vendorMapping = vendorMappings[vendorCategoryMappingKey(supplier, vendorCategory)];
+  if (!override && !vendorMapping) return product;
+  const mappedCategory = override?.category || vendorMapping?.mainCategory || product.mainCategory || "";
+  return {
+    ...product,
+    sourceCategory: product.sourceCategory || product.vendorCategory || product.category || "",
+    vendorCategory: product.vendorCategory || product.sourceCategory || product.category || "",
+    mainCategory: mappedCategory,
+    categoryVerified: mappedCategory ? true : Boolean(product.categoryVerified),
+    status: override?.status || product.status,
+    active: override?.active === undefined ? product.active : override.active,
+    sourceCatalogDeleted: Boolean(override?.deleted),
+    sourceCatalogOverrideUpdatedAt: override?.updatedAt || "",
+    vendorCategoryMappingUpdatedAt: vendorMapping?.updatedAt || "",
+    vendorCategoryMappedFrom: vendorMapping ? "vendor-category-map" : ""
+  };
+}
+
+function inventoryBySkuMap(db = {}) {
+  const rows = Array.isArray(db.inventory) ? db.inventory : [];
+  return new Map(rows.map((item) => [String(item.sku || "").toLowerCase(), item]).filter(([sku]) => sku));
+}
+
+function sourceProductDiffs(source = {}, product = {}) {
+  if (!product) return [];
+  const checks = [
+    ["title", source.marketplaceTitle || source.title, product.marketplaceTitle || product.title],
+    ["brand", source.brand, product.brand],
+    ["cost", Number(source.cost || 0), Number(product.cost || 0)],
+    ["price", Number(source.price || 0), Number(product.price || 0)],
+    ["qty", Number(source.stockQty ?? source.qty ?? 0), Number(product.stockQty ?? product.qty ?? 0)],
+    ["status", source.status || (source.active === false ? "Inactive" : "Active"), product.status || (product.active === false ? "Inactive" : "Active")]
+  ];
+  return checks
+    .filter(([, left, right]) => String(left ?? "").trim() !== String(right ?? "").trim())
+    .map(([field]) => field);
+}
+
+function decorateSourceCatalogProduct(product = {}, overrides = {}, productsBySku = new Map(), vendorMappings = {}) {
+  const row = applySourceCatalogOverride(product, overrides, vendorMappings);
+  const activeProduct = productsBySku.get(String(row.sku || "").toLowerCase());
+  return {
+    ...row,
+    inProducts: Boolean(activeProduct),
+    productCatalogId: activeProduct?.id || "",
+    productCatalogStatus: activeProduct?.status || "",
+    productCatalogActive: activeProduct ? activeProduct.active !== false : false,
+    productCatalogDiffs: activeProduct ? sourceProductDiffs(row, activeProduct) : []
+  };
+}
+
+function catalogSummary(product = {}) {
+  return {
+    id: product.id || product.sku,
+    sku: product.sku || "",
+    title: product.title || product.marketplaceTitle || "",
+    marketplaceTitle: product.marketplaceTitle || product.title || "",
+    brand: formatBrandName(product.brand || ""),
+    sourceBrand: product.sourceBrand || "",
+    brandLocked: Boolean(product.brandLocked),
+    category: formatCategoryName(product.mainCategory || (product.categoryVerified ? product.category : "")),
+    mainCategory: formatCategoryName(product.mainCategory || (product.categoryVerified ? product.category : "")),
+    categoryVerified: Boolean(product.categoryVerified),
+    sourceCategory: formatCategoryName(product.sourceCategory || product.vendorCategory || product.category || ""),
+    vendorCategory: formatCategoryName(product.vendorCategory || product.sourceCategory || product.category || ""),
+    manufacturer: product.manufacturer || "",
+    mfrPartNumber: product.mfrPartNumber || "",
+    vendorSku: product.vendorSku || "",
+    supplier: product.supplier || "",
+    supplierCode: product.supplierCode || "",
+    stockStatus: product.stockStatus || "",
+    hazardous: Boolean(product.hazardous),
+    price: Number(product.price || 0),
+    cost: Number(product.cost || 0),
+    msrp: Number(product.msrp || 0),
+    stockQty: Number(product.stockQty ?? product.qty ?? 0),
+    active: product.active !== false,
+    status: product.status || "Draft",
+    inProducts: Boolean(product.inProducts),
+    productCatalogId: product.productCatalogId || "",
+    productCatalogStatus: product.productCatalogStatus || "",
+    productCatalogActive: Boolean(product.productCatalogActive),
+    productCatalogDiffs: Array.isArray(product.productCatalogDiffs) ? product.productCatalogDiffs : [],
+    alternateVendorCount: Number(product.alternateVendorCount || 0),
+    defaultImage: product.defaultImage || "",
+    images: Array.isArray(product.images) ? product.images.slice(0, 4) : [],
+    zoroSku: product.zoroSku || "",
+    zoroPrice: Number(product.zoroPrice || 0),
+    varisContractPrice: Number(product.varisContractPrice || 0),
+    countryOfOrigin: product.countryOfOrigin || "",
+    productManagerFieldCount: product.productManagerFields ? Object.keys(product.productManagerFields).length : 0
+  };
+}
+
+function readCatalogManifest() {
+  if (!fs.existsSync(CATALOG_MANIFEST_FILE)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(CATALOG_MANIFEST_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function readCatalogVendorIndex() {
+  if (!fs.existsSync(CATALOG_VENDOR_INDEX_FILE)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(CATALOG_VENDOR_INDEX_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function readSourceCatalogIndexManifest() {
+  if (!fs.existsSync(CATALOG_INDEX_MANIFEST_FILE) || !fs.existsSync(CATALOG_INDEX_SUPPLIERS_FILE)) return null;
+  try {
+    const manifest = JSON.parse(fs.readFileSync(CATALOG_INDEX_MANIFEST_FILE, "utf8"));
+    const catalogStat = fs.existsSync(CATALOG_FILE) ? fs.statSync(CATALOG_FILE) : null;
+    if (!catalogStat || Number(manifest.catalogSize || 0) !== catalogStat.size || Number(manifest.catalogMtimeMs || 0) !== catalogStat.mtimeMs) return null;
+    const suppliers = JSON.parse(fs.readFileSync(CATALOG_INDEX_SUPPLIERS_FILE, "utf8"));
+    return { ...manifest, suppliers: suppliers.suppliers || [] };
+  } catch {
+    return null;
+  }
+}
+
+function skuShardName(sku) {
+  const key = String(sku || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return (key.slice(0, 2) || "__").padEnd(2, "_");
+}
+
+async function readCatalogProductAtOffset(offset) {
+  const handle = await fs.promises.open(CATALOG_FILE, "r");
+  try {
+    const chunks = [];
+    const buffer = Buffer.alloc(8192);
+    let position = Number(offset || 0);
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+      if (!bytesRead) break;
+      const slice = buffer.subarray(0, bytesRead);
+      const newline = slice.indexOf(10);
+      if (newline >= 0) {
+        chunks.push(slice.subarray(0, newline));
+        break;
+      }
+      chunks.push(Buffer.from(slice));
+      position += bytesRead;
+    }
+    const line = Buffer.concat(chunks).toString("utf8").trim();
+    return line ? JSON.parse(line) : null;
+  } finally {
+    await handle.close();
+  }
+}
+
+function normalizeCatalogProductForInventory(record) {
+  const sku = sourceTextValue(record._id || record.sku || record.SKU || record.id);
+  if (!sku) return null;
+  const defaultImage = sourceTextValue(record.defaultImage || record.default_image || record.image || record.image_url);
+  const images = [...new Set([defaultImage, ...sourceListValue(record.images || record.image_urls)].filter(Boolean))];
+  const stockQty = sourceNumberValue(record.stockQty ?? record.stock_qty ?? record.qty ?? record.quantity);
+  const minQuantity = sourceTextValue(record.minQuantity || record.min_quantity);
+  const checkedImage = record.checkedImage || record.checked_image || {};
+  const sourceBrand = sourceTextValue(record.sourceBrand || record.brand);
+  const sourceCategory = formatCategoryName(record.sourceCategory || record.vendorCategory || record.category || record.product_type);
+  const mainCategory = formatCategoryName(record.mainCategory || record.categoryOverride || (record.categoryVerified ? record.category : ""));
+
+  const product = {
+    sku,
+    externalId: sourceTextValue(record.externalId || record._id || record.id),
+    title: sourceTextValue(record.title || record.name || sku),
+    marketplaceTitle: sourceTextValue(record.marketplaceTitle || record.name || record.title || sku),
+    shortDescription: sourceTextValue(record.shortDescription || record.short_description),
+    longDescription: sourceTextValue(record.longDescription || record.description || record.long_description),
+    bulletPoints: sourceListValue(record.bulletPoints || record.bullet_points || record.keyFeatures || record.features),
+    brand: sourceBrand,
+    sourceBrand,
+    brandLocked: sourceBooleanValue(record.brandLocked, false),
+    category: mainCategory,
+    mainCategory,
+    categoryVerified: Boolean(mainCategory),
+    sourceCategory,
+    vendorCategory: sourceCategory,
+    condition: sourceTextValue(record.condition) || "New",
+    status: record.active === false ? "Draft" : sourceTextValue(record.status) || "Draft",
+    active: sourceBooleanValue(record.active, true),
+    barcode: sourceTextValue(record.barcode || record.upc || record.gtin),
+    defaultImage,
+    images,
+    manufacturer: sourceTextValue(record.manufacturer),
+    mfrPartNumber: sourceTextValue(record.mfrPartNumber || record.mfr_part_number),
+    vendorSku: sourceTextValue(record.vendorSku || record.vendor_sku),
+    supplier: sourceTextValue(record.supplier),
+    supplierCode: sourceTextValue(record.supplierCode || record.supplier_code),
+    vendor: sourceTextValue(record.vendor || record.supplier),
+    unspsc: sourceTextValue(record.unspsc),
+    uom: sourceTextValue(record.uom),
+    uomQty: sourceTextValue(record.uomQty || record.uom_qty),
+    minQuantity,
+    quantityIncrements: sourceTextValue(record.quantityIncrements || record.quantity_increments),
+    hazardous: sourceBooleanValue(record.hazardous, false),
+    sdsUrl: sourceTextValue(record.sdsUrl || record.sds_url),
+    itemHeight: sourceNumberValue(record.itemHeight || record.item_height),
+    itemLength: sourceNumberValue(record.itemLength || record.item_length),
+    itemWeight: sourceNumberValue(record.itemWeight || record.item_weight),
+    itemWidth: sourceNumberValue(record.itemWidth || record.item_width),
+    packageHeight: sourceNumberValue(record.packageHeight || record.package_height),
+    packageLength: sourceNumberValue(record.packageLength || record.package_length),
+    packageWeight: sourceNumberValue(record.packageWeight || record.package_weight),
+    packageWidth: sourceNumberValue(record.packageWidth || record.package_width),
+    dimensionalWeight: sourceNumberValue(record.dimensionalWeight || record.dimensional_weight),
+    qty: stockQty,
+    stockQty,
+    stockStatus: sourceTextValue(record.stockStatus || record.stock_status),
+    stockUpdatedAt: sourceTextValue(record.stockUpdatedAt || record.stock_updated_at),
+    reorderPoint: sourceNumberValue(minQuantity),
+    ctechId: sourceTextValue(record.ctechId || record.ctech_id),
+    ctechIdLastExport: sourceTextValue(record.ctechIdLastExport || record.ctech_id_last_export),
+    fobPrice: sourceNumberValue(record.fobPrice || record.fob_price),
+    price: sourceNumberValue(record.price || record.sale_price || record.sell_price),
+    cost: sourceNumberValue(record.cost || record.fob_price || record.wholesale_price),
+    msrp: sourceNumberValue(record.msrp || record.list_price),
+    wildcardSearch: sourceTextValue(record.wildcardSearch),
+    tags: sourceListValue(record.tags),
+    attributes: record.attributes && typeof record.attributes === "object" ? record.attributes : {},
+    productDumpCreatedAt: sourceTextValue(record.productDumpCreatedAt || record.created_at || record.createdAt),
+    productDumpUpdatedAt: sourceTextValue(record.productDumpUpdatedAt || record.updated_at || record.updatedAt),
+    inactiveMailedAt: sourceTextValue(record.inactiveMailedAt || record.inactive_mailed_at),
+    validatedAt: sourceTextValue(record.validatedAt || record.validated_at),
+    checkedImage: checkedImage && typeof checkedImage === "object" ? checkedImage : {},
+    checkedImageUrl: sourceTextValue(checkedImage?.url),
+    checkedImageError: sourceTextValue(checkedImage?.error),
+    checkedImageSize: sourceTextValue(checkedImage?.size),
+    checkedImageTimestamp: sourceTextValue(checkedImage?.timestamp),
+    originalImage: sourceTextValue(record.originalImage || record.original_image),
+    countryOfOrigin: sourceTextValue(record.countryOfOrigin || record.country_of_origin),
+    original: record.original === undefined ? null : record.original,
+    productManagerFields: record.productManagerFields && typeof record.productManagerFields === "object" ? record.productManagerFields : {},
+    sources: { ...(record.sources || {}), catalog: sku },
+    importedFrom: record.importedFrom || "source catalog",
+    updatedAt: new Date().toISOString()
+  };
+  product.dimensionalWeight = product.dimensionalWeight || calculateDimensionalWeight(product);
+  return product;
+}
+
+function isInventoryShellProduct(item) {
+  const sku = sourceTextValue(item.sku);
+  if (!sku) return false;
+  const title = sourceTextValue(item.title);
+  const marketplaceTitle = sourceTextValue(item.marketplaceTitle);
+  return (!title || title === sku || marketplaceTitle === sku)
+    && !sourceTextValue(item.vendorSku || item.vendor_sku)
+    && !sourceTextValue(item.supplier || item.vendor)
+    && !sourceTextValue(item.defaultImage || item.default_image)
+    && !sourceTextValue(item.shortDescription || item.short_description)
+    && !sourceTextValue(item.longDescription || item.description);
+}
+
+function upsertInventoryProductFromCatalog(db, product) {
+  product = normalizeCatalogProductForInventory(product);
+  if (!product) return { item: null, existing: false };
+  db.inventory = Array.isArray(db.inventory) ? db.inventory : [];
+  const existing = db.inventory.find((item) => String(item.sku || "").toLowerCase() === String(product.sku || "").toLowerCase());
+  if (existing) {
+    const wasShell = isInventoryShellProduct(existing);
+    if (wasShell) {
+      const keep = {
+        id: existing.id,
+        reserved: existing.reserved,
+        shadowSkus: existing.shadowSkus,
+        serialUnits: existing.serialUnits,
+        warehouseStock: [],
+        sources: existing.sources
+      };
+      Object.assign(existing, product, keep, {
+        sources: { ...(product.sources || {}), ...(existing.sources || {}), catalog: product.sku },
+        updatedAt: new Date().toISOString()
+      });
+    } else {
+      applyProtectedSourceProduct(db, existing, product, "Source catalog");
+    }
+    return { item: existing, existing: true };
+  }
+  const item = {
+    id: crypto.randomUUID(),
+    ...product,
+    qty: Number(product.stockQty ?? product.qty ?? 0),
+    reserved: 0,
+    reorderPoint: Number(product.reorderPoint || 0),
+    shadowSkus: [],
+    serialUnits: [],
+    warehouseStock: [],
+    sources: { ...(product.sources || {}), catalog: product.sku },
+    updatedAt: new Date().toISOString()
+  };
+  db.inventory.push(item);
+  return { item, existing: false };
+}
+
+async function findCatalogProductsBySkus(skus = [], db = {}) {
+  const wanted = new Set(skus.map((sku) => String(sku || "").toLowerCase()).filter(Boolean));
+  const found = [];
+  if (!wanted.size || !fs.existsSync(CATALOG_FILE)) return found;
+  const overrides = sourceCatalogOverrideMap(db);
+  const vendorMappings = vendorCategoryMappingMap(db);
+  const productsBySku = inventoryBySkuMap(db);
+  const decorate = (product) => decorateSourceCatalogProduct(product, overrides, productsBySku, vendorMappings);
+  const index = readSourceCatalogIndexManifest();
+  if (index) {
+    const byShard = new Map();
+    for (const sku of wanted) {
+      const shard = skuShardName(sku);
+      byShard.set(shard, [...(byShard.get(shard) || []), sku]);
+    }
+    for (const [shard, shardSkus] of byShard) {
+      const shardPath = path.join(CATALOG_INDEX_SKU_DIR, `${shard}.ndjson`);
+      if (!fs.existsSync(shardPath)) continue;
+      const shardWanted = new Set(shardSkus);
+      const rl = readline.createInterface({ input: fs.createReadStream(shardPath, { encoding: "utf8" }), crlfDelay: Infinity });
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        let row;
+        try { row = JSON.parse(line); } catch { continue; }
+        const sku = String(row[0] || "").toLowerCase();
+        if (!shardWanted.has(sku)) continue;
+        const product = await readCatalogProductAtOffset(row[1]);
+        if (product) found.push(decorate(product));
+        wanted.delete(sku);
+        shardWanted.delete(sku);
+        if (!shardWanted.size) {
+          rl.close();
+          break;
+        }
+      }
+    }
+    return found;
+  }
+  const rl = readline.createInterface({
+    input: fs.createReadStream(CATALOG_FILE, { encoding: "utf8" }),
+    crlfDelay: Infinity
+  });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    let product;
+    try {
+      product = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const key = String(product.sku || "").toLowerCase();
+    if (wanted.has(key)) {
+      found.push(decorate(product));
+      wanted.delete(key);
+      if (!wanted.size) {
+        rl.close();
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+async function findSourceCatalogAlternatesBySkus(skus = [], db = {}) {
+  const wanted = [...new Set(skus.map((sku) => String(sku || "").trim().toLowerCase()).filter(Boolean))];
+  const result = Object.fromEntries(wanted.map((sku) => [sku, []]));
+  if (!wanted.length || !fs.existsSync(CATALOG_FILE)) return result;
+  const overrides = sourceCatalogOverrideMap(db);
+  const vendorMappings = vendorCategoryMappingMap(db);
+  const productsBySku = inventoryBySkuMap(db);
+  const index = readSourceCatalogIndexManifest();
+  if (index) {
+    const byShard = new Map();
+    for (const sku of wanted) {
+      const shard = skuShardName(sku);
+      byShard.set(shard, [...(byShard.get(shard) || []), sku]);
+    }
+    for (const [shard, shardSkus] of byShard) {
+      const shardPath = path.join(CATALOG_INDEX_SKU_DIR, `${shard}.ndjson`);
+      if (!fs.existsSync(shardPath)) continue;
+      const shardWanted = new Set(shardSkus);
+      const rl = readline.createInterface({ input: fs.createReadStream(shardPath, { encoding: "utf8" }), crlfDelay: Infinity });
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        let row;
+        try { row = JSON.parse(line); } catch { continue; }
+        const sku = String(row[0] || "").toLowerCase();
+        if (!shardWanted.has(sku)) continue;
+        const product = await readCatalogProductAtOffset(row[1]);
+        if (!product) continue;
+        const decorated = decorateSourceCatalogProduct(product, overrides, productsBySku, vendorMappings);
+        if (!decorated.sourceCatalogDeleted) result[sku].push(catalogSummary(decorated));
+      }
+    }
+    return result;
+  }
+  const wantedSet = new Set(wanted);
+  const rl = readline.createInterface({
+    input: fs.createReadStream(CATALOG_FILE, { encoding: "utf8" }),
+    crlfDelay: Infinity
+  });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    let product;
+    try { product = JSON.parse(line); } catch { continue; }
+    const sku = String(product.sku || "").toLowerCase();
+    if (!wantedSet.has(sku)) continue;
+    const decorated = decorateSourceCatalogProduct(product, overrides, productsBySku, vendorMappings);
+    if (!decorated.sourceCatalogDeleted) result[sku].push(catalogSummary(decorated));
+  }
+  return result;
+}
+
+async function annotateCatalogAlternateCounts(items = [], db = {}) {
+  const skus = items.map((item) => item.sku).filter(Boolean);
+  if (!skus.length) return items;
+  const alternates = await findSourceCatalogAlternatesBySkus(skus, db);
+  return items.map((item) => {
+    const rows = alternates[String(item.sku || "").toLowerCase()] || [];
+    const vendors = new Set(rows.map((row) => row.supplier || row.vendor || "").filter(Boolean).map((value) => String(value).toLowerCase()));
+    return { ...item, alternateVendorCount: Math.max(0, vendors.size - 1) };
+  });
+}
+
+async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, db = {} } = {}) {
+  const pageNumber = Math.max(1, Number(page || 1));
+  const pageSize = Math.min(100, Math.max(1, Number(limit || 50)));
+  const offset = (pageNumber - 1) * pageSize;
+  const q = String(query || "").trim().toLowerCase();
+  const exactSkuQuery = /^[a-z0-9_-]{6,}$/i.test(String(query || "").trim());
+  const filtered = hasCatalogFilters(filters);
+  const selectedSuppliers = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim()).filter(Boolean);
+  const supplierIndexedFilter = selectedSuppliers.length >= 1 && !q;
+  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hazardous, filters.brand, filters.category].every((value) => !value);
+  const vendorIndex = supplierIndexedFilter ? readCatalogVendorIndex() : null;
+  const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
+  const supplierTotal = supplierOnlyFilter
+    ? (vendorIndex?.vendors || []).filter((row) => supplierNames.has(String(row.name || "").toLowerCase())).reduce((sum, row) => sum + Number(row.productCount || 0), 0)
+    : 0;
+  const maxScanRows = q && !filtered ? 50000 : Infinity;
+  const result = {
+    items: [],
+    page: pageNumber,
+    limit: pageSize,
+    totalMatches: 0,
+    hasMore: false,
+    scanned: 0,
+    partial: false,
+    manifest: readCatalogManifest(),
+    vendorIndex: supplierIndexedFilter ? vendorIndex : undefined
+  };
+  if (!fs.existsSync(CATALOG_FILE)) return result;
+  const overrides = sourceCatalogOverrideMap(db);
+  const vendorMappings = vendorCategoryMappingMap(db);
+  const productsBySku = inventoryBySkuMap(db);
+  const sourceIndex = supplierIndexedFilter ? readSourceCatalogIndexManifest() : null;
+  if (sourceIndex) {
+    const supplierRows = (sourceIndex.suppliers || []).filter((row) => supplierNames.has(String(row.name || "").toLowerCase()));
+    if (supplierRows.length) {
+      let matched = 0;
+      let scanned = 0;
+      for (const supplier of supplierRows) {
+        const supplierPath = path.join(CATALOG_INDEX_DIR, supplier.file || "");
+        if (!fs.existsSync(supplierPath)) continue;
+        const rl = readline.createInterface({ input: fs.createReadStream(supplierPath, { encoding: "utf8" }), crlfDelay: Infinity });
+        for await (const line of rl) {
+          if (!line.trim()) continue;
+          scanned += 1;
+          let item;
+          try { item = JSON.parse(line); } catch { continue; }
+          item = decorateSourceCatalogProduct(item, overrides, productsBySku, vendorMappings);
+          if (item.sourceCatalogDeleted) continue;
+          if (!productMatchesCatalogFilters(item, filters)) continue;
+          if (matched >= offset && result.items.length < pageSize) result.items.push(catalogSummary(item));
+          matched += 1;
+          if (supplierOnlyFilter && result.items.length >= pageSize && matched >= offset + pageSize) {
+            rl.close();
+            break;
+          }
+        }
+        if (supplierOnlyFilter && result.items.length >= pageSize && matched >= offset + pageSize) break;
+      }
+      result.scanned = scanned;
+      result.totalMatches = supplierOnlyFilter ? (supplierRows.reduce((sum, row) => sum + Number(row.productCount || 0), 0) || matched) : matched;
+      result.items = await annotateCatalogAlternateCounts(result.items, db);
+      result.hasMore = result.totalMatches > offset + result.items.length;
+      result.indexed = true;
+      return result;
+    }
+  }
+
+  const rl = readline.createInterface({
+    input: fs.createReadStream(CATALOG_FILE, { encoding: "utf8" }),
+    crlfDelay: Infinity
+  });
+
+  for await (const line of rl) {
+    result.scanned += 1;
+    if (!line.trim()) continue;
+    let product;
+    try {
+      product = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (Number.isFinite(maxScanRows) && result.scanned >= maxScanRows) {
+      result.partial = true;
+      rl.close();
+      break;
+    }
+    product = decorateSourceCatalogProduct(product, overrides, productsBySku, vendorMappings);
+    if (product.sourceCatalogDeleted) continue;
+    if (q && !catalogSearchText(product).includes(q)) continue;
+    if (!productMatchesCatalogFilters(product, filters)) continue;
+    if (result.totalMatches >= offset && result.items.length < pageSize) {
+      result.items.push(catalogSummary(product));
+    }
+    result.totalMatches += 1;
+    if (exactSkuQuery && String(product.sku || "").toLowerCase() === q) {
+      result.hasMore = false;
+      rl.close();
+      break;
+    }
+    if (q && !filtered && result.items.length >= pageSize) {
+      result.hasMore = true;
+      result.partial = true;
+      rl.close();
+      break;
+    }
+    if (supplierOnlyFilter && supplierTotal && result.items.length >= pageSize && result.totalMatches >= offset + pageSize) {
+      result.totalMatches = supplierTotal;
+      result.hasMore = supplierTotal > offset + result.items.length;
+      rl.close();
+      break;
+    }
+    if (!filtered && !q && result.items.length >= pageSize && result.totalMatches > offset + pageSize) {
+      result.hasMore = true;
+      rl.close();
+      break;
+    }
+  }
+  if (supplierOnlyFilter && supplierTotal) result.totalMatches = supplierTotal;
+  if (!result.hasMore) result.hasMore = result.totalMatches > offset + result.items.length;
+  if (!q && !hasCatalogFilters(filters) && result.manifest?.productCount) result.totalMatches = Number(result.manifest.productCount || result.totalMatches);
+  result.items = await annotateCatalogAlternateCounts(result.items, db);
+  return result;
+}
+
+async function collectCatalogProductsForExport({ query = "", filters = {}, limit = 10000, db = {} } = {}) {
+  const maxItems = Math.min(25000, Math.max(1, Number(limit || 10000)));
+  const q = String(query || "").trim().toLowerCase();
+  const selectedSuppliers = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim()).filter(Boolean);
+  const supplierIndexedFilter = selectedSuppliers.length >= 1 && !q;
+  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hazardous, filters.brand, filters.category].every((value) => !value);
+  const sourceIndex = supplierIndexedFilter ? readSourceCatalogIndexManifest() : null;
+  const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
+  const items = [];
+  let matched = 0;
+  const overrides = sourceCatalogOverrideMap(db);
+  const vendorMappings = vendorCategoryMappingMap(db);
+  const productsBySku = inventoryBySkuMap(db);
+
+  if (sourceIndex) {
+    const supplierRows = (sourceIndex.suppliers || []).filter((row) => supplierNames.has(String(row.name || "").toLowerCase()));
+    for (const supplier of supplierRows) {
+      const supplierPath = path.join(CATALOG_INDEX_DIR, supplier.file || "");
+      if (!fs.existsSync(supplierPath)) continue;
+      const rl = readline.createInterface({ input: fs.createReadStream(supplierPath, { encoding: "utf8" }), crlfDelay: Infinity });
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        let item;
+        try { item = JSON.parse(line); } catch { continue; }
+        item = decorateSourceCatalogProduct(item, overrides, productsBySku, vendorMappings);
+        if (item.sourceCatalogDeleted) continue;
+        if (!productMatchesCatalogFilters(item, filters)) continue;
+        matched += 1;
+        items.push(catalogSummary(item));
+        if (items.length >= maxItems) {
+          rl.close();
+          break;
+        }
+      }
+      if (items.length >= maxItems) break;
+    }
+    return { items, matched: supplierRows.reduce((sum, row) => sum + Number(row.productCount || 0), 0) || matched, limited: items.length >= maxItems };
+  }
+
+  if (!fs.existsSync(CATALOG_FILE)) return { items, matched: 0, limited: false };
+  const rl = readline.createInterface({
+    input: fs.createReadStream(CATALOG_FILE, { encoding: "utf8" }),
+    crlfDelay: Infinity
+  });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    let product;
+    try {
+      product = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    product = decorateSourceCatalogProduct(product, overrides, productsBySku, vendorMappings);
+    if (product.sourceCatalogDeleted) continue;
+    if (q && !catalogSearchText(product).includes(q)) continue;
+    if (!productMatchesCatalogFilters(product, filters)) continue;
+    matched += 1;
+    items.push(catalogSummary(product));
+    if (items.length >= maxItems) {
+      rl.close();
+      break;
+    }
+  }
+  return { items, matched, limited: items.length >= maxItems };
+}
+
+async function scanCatalogFacets() {
+  const mtime = fs.existsSync(CATALOG_FILE) ? fs.statSync(CATALOG_FILE).mtimeMs : 0;
+  const vendorIndex = readCatalogVendorIndex();
+  if (catalogFacetCache && catalogFacetCache.mtime === mtime && catalogFacetCache.vendorIndexGeneratedAt === vendorIndex?.generatedAt) return catalogFacetCache.data;
+  const result = {
+    suppliers: new Set((vendorIndex?.vendors || vendorIndex?.suppliers || []).map((vendor) => typeof vendor === "string" ? vendor : vendor.name).filter(Boolean)),
+    stockStatuses: new Set(),
+    brands: new Set(),
+    categories: new Set(),
+    scanned: 0,
+    manifest: readCatalogManifest(),
+    vendorIndex
+  };
+  if (!fs.existsSync(CATALOG_FILE)) {
+    return { suppliers: [...result.suppliers].sort((a, b) => a.localeCompare(b)), stockStatuses: [], brands: [], categories: [], scanned: 0, manifest: result.manifest, vendorIndex };
+  }
+  const maxRows = 50000;
+  const rl = readline.createInterface({
+    input: fs.createReadStream(CATALOG_FILE, { encoding: "utf8" }),
+    crlfDelay: Infinity
+  });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    let product;
+    try {
+      product = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    result.scanned += 1;
+    if (product.supplier || product.vendor) result.suppliers.add(String(product.supplier || product.vendor));
+    if (product.stockStatus) result.stockStatuses.add(String(product.stockStatus));
+    if (product.brand) result.brands.add(formatBrandName(product.brand));
+    if (product.category) result.categories.add(formatCategoryName(product.category));
+    if (result.scanned >= maxRows) {
+      rl.close();
+      break;
+    }
+  }
+  const sortValues = (set, limit = 500) => [...set].sort((a, b) => a.localeCompare(b)).slice(0, limit);
+  const sortCategories = (set, limit = 500) => {
+    const byKey = new Map();
+    for (const value of set) {
+      const formatted = formatCategoryName(value);
+      if (!formatted) continue;
+      byKey.set(formatted.toLowerCase(), formatted);
+    }
+    return [...byKey.values()].sort((a, b) => a.localeCompare(b)).slice(0, limit);
+  };
+  const sortBrands = (set, limit = 500) => {
+    const byKey = new Map();
+    const brandLabelScore = (label) => {
+      const value = String(label || "");
+      let score = value === value.toLowerCase() ? 0 : 1;
+      if (/[A-Z]{2,}/.test(value) || /\b\d+[A-Z]+\b/.test(value)) score += 1;
+      if (/^([A-Z]\.){2,}[A-Z]?\.?/.test(value)) score += 1;
+      return score;
+    };
+    for (const value of set) {
+      const formatted = formatBrandName(value);
+      if (!formatted) continue;
+      const key = formatted.toLowerCase();
+      const current = byKey.get(key);
+      if (!current || brandLabelScore(formatted) > brandLabelScore(current)) byKey.set(key, formatted);
+    }
+    return [...byKey.values()].sort((a, b) => a.localeCompare(b)).slice(0, limit);
+  };
+  const data = {
+    suppliers: sortValues(result.suppliers, 10000),
+    stockStatuses: sortValues(result.stockStatuses),
+    brands: sortBrands(result.brands),
+    categories: sortCategories(result.categories),
+    scanned: result.scanned,
+    manifest: result.manifest,
+    vendorIndex: result.vendorIndex
+  };
+  catalogFacetCache = { mtime, vendorIndexGeneratedAt: vendorIndex?.generatedAt, data };
+  return data;
+}
+
+async function findCatalogProductBySku(sku, db = {}) {
+  const key = String(sku || "").trim().toLowerCase();
+  if (!key || !fs.existsSync(CATALOG_FILE)) return null;
+  const overrides = sourceCatalogOverrideMap(db);
+  const vendorMappings = vendorCategoryMappingMap(db);
+  const productsBySku = inventoryBySkuMap(db);
+  const rl = readline.createInterface({
+    input: fs.createReadStream(CATALOG_FILE, { encoding: "utf8" }),
+    crlfDelay: Infinity
+  });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    let product;
+    try {
+      product = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (String(product.sku || "").toLowerCase() === key) {
+      rl.close();
+      return decorateSourceCatalogProduct(product, overrides, productsBySku, vendorMappings);
+    }
+  }
+  return null;
+}
+
 async function handleApi(req, res) {
-  const db = await readDb();
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split("/").filter(Boolean);
 
+  if (postgres.isPostgresEnabled() && parts[0] === "api" && parts[1] === "export-mappings" && !parts[3]) {
+    let exportMappings = normalizeExportMappings(await postgres.readStateField("exportMappings"));
+    if (req.method === "GET" && parts.length === 2) {
+      return sendJson(res, 200, { exportMappings });
+    }
+    if (req.method === "POST" && parts.length === 2) {
+      const body = await parseBody(req);
+      const template = normalizeExportMapping({
+        name: body.name || `${body.source || "Custom"} Product Mapping`,
+        source: body.source || "Custom",
+        mode: body.mode || "both",
+        mappings: body.mappings || [
+          { externalColumn: "SKU", productField: "sku" },
+          { externalColumn: "Title", productField: "title" },
+          { externalColumn: "Price", productField: "price" }
+        ],
+        notes: body.notes || ""
+      });
+      exportMappings.unshift(template);
+      await postgres.writeStateField("exportMappings", exportMappings);
+      return sendJson(res, 200, { template, exportMappings });
+    }
+    if (req.method === "PATCH" && parts[2]) {
+      const body = await parseBody(req);
+      const template = exportMappings.find((row) => row.id === parts[2]);
+      if (!template) return notFound(res);
+      for (const field of ["name", "source", "mode", "status", "notes"]) {
+        if (body[field] !== undefined) template[field] = String(body[field] || "").trim();
+      }
+      if (body.mappings !== undefined) template.mappings = parseMappingRows(body.mappings).map(normalizeExportMappingRow).filter((row) => row.externalColumn);
+      template.updatedAt = new Date().toISOString();
+      exportMappings = normalizeExportMappings(exportMappings);
+      await postgres.writeStateField("exportMappings", exportMappings);
+      return sendJson(res, 200, { template: normalizeExportMapping(template), exportMappings });
+    }
+    if (req.method === "DELETE" && parts[2]) {
+      if (DEFAULT_EXPORT_MAPPINGS.some((defaults) => defaults.id === parts[2])) {
+        return sendJson(res, 400, { error: "Built-in mappings can be deactivated or duplicated, but not deleted." });
+      }
+      const before = exportMappings.length;
+      exportMappings = exportMappings.filter((row) => row.id !== parts[2]);
+      if (exportMappings.length === before) return notFound(res);
+      await postgres.writeStateField("exportMappings", exportMappings);
+      return sendJson(res, 200, { exportMappings });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/product-fields") {
+    return sendJson(res, 200, { fields: PRODUCT_MAPPING_FIELDS });
+  }
+
+  const db = await readDb();
+
   if (req.method === "GET" && url.pathname === "/api/state") {
     return sendJson(res, 200, publicState(db));
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/import-jobs') {
+    db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
+    return sendJson(res, 200, { importJobs: db.importJobs });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "stop") {
+    const job = findImportJob(db, parts[2]);
+    if (!job) return notFound(res);
+    if (!["queued", "running"].includes(String(job.status || "").toLowerCase())) {
+      return sendJson(res, 400, { error: "Only queued or running jobs can be stopped." });
+    }
+    finishImportJob(job, {
+      status: "stopped",
+      message: job.message || "Job was stopped.",
+      details: [job.details, "Stopped by user from Jobs profile."].filter(Boolean).join(" ")
+    });
+    await writeDb(db);
+    const normalized = normalizeDb(db);
+    return sendJson(res, 200, { job: normalized.importJobs.find((row) => row.id === job.id) || job, importJobs: normalized.importJobs });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3]) {
+    const job = findImportJob(db, parts[2]);
+    if (!job) return notFound(res);
+    if (parts[3] === "original") {
+      if (sendImportJobFile(res, job, "original")) return;
+      return sendJson(res, 404, { error: "Original file was not saved for this job." });
+    }
+    if (parts[3] === "errors.csv") {
+      if (sendImportJobFile(res, job, "errors")) return;
+      const rows = (job.errors || []).map((error) => ({ error }));
+      if (!rows.length) return sendJson(res, 404, { error: "This job has no errors." });
+      res.writeHead(200, {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename=${safeImportFileName(job.errorFileName || "errors.csv")}`
+      });
+      return res.end(rowsToCsv(rows));
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/products") {
+    const result = await scanCatalog({
+      query: url.searchParams.get("q") || "",
+      page: url.searchParams.get("page") || 1,
+      limit: url.searchParams.get("limit") || 50,
+      filters: catalogFilterParams(url.searchParams),
+      db
+    });
+    return sendJson(res, 200, result);
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/facets") {
+    return sendJson(res, 200, await scanCatalogFacets());
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/alternates") {
+    const skus = String(url.searchParams.get("skus") || url.searchParams.get("sku") || "")
+      .split(",")
+      .map((sku) => sku.trim())
+      .filter(Boolean)
+      .slice(0, 100);
+    const alternates = await findSourceCatalogAlternatesBySkus(skus, db);
+    return sendJson(res, 200, { alternates });
+  }
+  if (req.method === "GET" && url.pathname === "/api/categories") {
+    return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", url.searchParams.get("scope") || "source"));
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "categories" && parts[2] === "coverage" && parts[3]) {
+    const issue = String(parts[3] || "").replace(/\.csv$/i, "");
+    const rows = categoryCoverageRows(db, issue);
+    const filename = `${coverageIssueLabel(issue)}.csv`;
+    if (String(parts[3] || "").toLowerCase().endsWith(".csv") || url.searchParams.get("format") === "csv") {
+      res.writeHead(200, {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename=${filename}`
+      });
+      return res.end(rowsToCsv(rows));
+    }
+    return sendJson(res, 200, { issue, label: coverageIssueLabel(issue), rows, total: rows.length, filename });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/categories/import-sku-csv") {
+    const body = await parseBody(req);
+    const records = parseCsv(body.csv || "");
+    const inventoryBySku = inventoryBySkuMap(db);
+    const overrides = sourceCatalogOverrideMap(db);
+    const vendorMappings = vendorCategoryMappingMap(db);
+    const now = new Date().toISOString();
+    const dryRun = body.dryRun === true || String(body.dryRun).toLowerCase() === "true";
+    const job = dryRun ? null : createImportJob(db, {
+      section: "Categories",
+      operation: "SKU category import",
+      direction: "import",
+      fileName: body.fileName || "sku-categories.csv",
+      totalRows: records.length,
+      message: `Importing ${records.length} SKU category row${records.length === 1 ? "" : "s"}.`
+    });
+    if (job) attachImportJobOriginalFile(job, body.csv || "", body.fileName || "sku-categories.csv");
+    const seen = new Set();
+    const rowInfos = [];
+    const errorRows = [];
+    let updatedProducts = 0;
+    let updatedSourceOverrides = 0;
+    let updatedVendorCategoryMappings = 0;
+    let vendorCategoryConflicts = 0;
+    let skipped = 0;
+    const samples = [];
+    for (const record of records) {
+      const sku = sourceTextValue(record.sku || record.SKU || record.Sku || record["Variant SKU"] || record["variant sku"]);
+      const category = formatCategoryName(record.category || record.Category || record.internalCategory || record["Internal Category"] || record["product category"] || record["Product Category"]);
+      if (!sku || !category) {
+        skipped += 1;
+        errorRows.push(standardImportError({
+          record,
+          sku,
+          category,
+          field: !sku ? "sku" : "category",
+          issue: "Missing SKU or category",
+          rawValue: JSON.stringify(record)
+        }));
+        continue;
+      }
+      const key = sku.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rowInfos.push({ sku, key, category, record });
+    }
+    const sourceProducts = await findCatalogProductsBySkus(rowInfos.map((row) => row.sku), db);
+    const sourceBySku = new Map(sourceProducts.map((product) => [String(product.sku || "").toLowerCase(), product]));
+    for (const { sku, key, category, record } of rowInfos) {
+      const existing = inventoryBySku.get(key);
+      if (existing && !dryRun) {
+        if (!existing.sourceCategory && existing.category && !existing.categoryVerified) existing.sourceCategory = existing.category;
+        if (existing.category !== category) {
+          existing.category = category;
+          existing.mainCategory = category;
+          existing.categoryVerified = true;
+          existing.updatedAt = now;
+          updatedProducts += 1;
+        }
+        existing.vendorCategory = existing.sourceCategory || existing.vendorCategory || "";
+      } else if (existing) {
+        updatedProducts += existing.category !== category ? 1 : 0;
+      }
+      if (!dryRun) overrides[key] = { ...(overrides[key] || { sku }), sku, category, categoryVerified: true, updatedAt: now };
+      updatedSourceOverrides += 1;
+      const sourceProduct = sourceBySku.get(key);
+      const supplier = sourceTextValue(existing?.supplier || existing?.vendor || sourceProduct?.supplier || sourceProduct?.vendor);
+      const vendorCategory = formatCategoryName(existing?.sourceCategory || existing?.vendorCategory || sourceProduct?.sourceCategory || sourceProduct?.vendorCategory || "");
+      const mappingKey = vendorCategoryMappingKey(supplier, vendorCategory);
+      if (mappingKey) {
+        const currentMapping = vendorMappings[mappingKey];
+        if (currentMapping && formatCategoryName(currentMapping.mainCategory).toLowerCase() !== category.toLowerCase()) {
+          vendorCategoryConflicts += 1;
+          errorRows.push(standardImportError({
+            record,
+            recordKey: sku,
+            sku,
+            supplier,
+            category,
+            field: "category",
+            issue: "Vendor category mapping conflict",
+            rawValue: vendorCategory,
+            details: `Vendor category "${vendorCategory}" is already learned as "${currentMapping.mainCategory}".`,
+            vendor_category: vendorCategory,
+            existing_main_category: currentMapping.mainCategory,
+            incoming_main_category: category
+          }));
+          if (!dryRun) {
+            currentMapping.conflictCount = Number(currentMapping.conflictCount || 0) + 1;
+            currentMapping.updatedAt = now;
+          }
+        } else {
+          if (!dryRun) {
+            vendorMappings[mappingKey] = {
+              ...(currentMapping || {}),
+              supplier,
+              vendorCategory,
+              mainCategory: category,
+              categoryVerified: true,
+              source: "sku-category-import",
+              sampleSku: currentMapping?.sampleSku || sku,
+              matchCount: Number(currentMapping?.matchCount || 0) + 1,
+              updatedAt: now,
+              createdAt: currentMapping?.createdAt || now
+            };
+          }
+          updatedVendorCategoryMappings += currentMapping ? 0 : 1;
+        }
+      }
+      if (samples.length < 10) samples.push({ sku, category, vendorCategory, supplier, inProducts: Boolean(existing) });
+    }
+    if (dryRun) {
+      return sendJson(res, 200, {
+        requested: records.length,
+        changed: seen.size,
+        updatedProducts,
+        updatedSourceOverrides,
+        updatedVendorCategoryMappings,
+        vendorCategoryConflicts,
+        skipped,
+        samples,
+        dryRun: true
+      });
+    }
+    db.sourceCatalogOverrides = overrides;
+    db.vendorCategoryMappings = vendorMappings;
+    attachImportJobErrorsFile(job, errorRows);
+    finishImportJob(job, {
+      status: errorRows.length ? "warning" : "success",
+      message: `Imported ${seen.size} SKU category mapping${seen.size === 1 ? "" : "s"}.`,
+      totalRows: records.length,
+      changed: seen.size,
+      missingCount: skipped,
+      errors: importErrorMessages(errorRows)
+    });
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+    db.syncRuns.unshift({
+      id: crypto.randomUUID(),
+      importJobId: job?.id,
+      source: "CSV",
+      type: "sku-category-import",
+      status: errorRows.length ? "warning" : "success",
+      fileName: body.fileName || "sku-categories.csv",
+      message: `Imported ${seen.size} SKU category mapping${seen.size === 1 ? "" : "s"}.`,
+      createdAt: now
+    });
+    catalogFacetCache = null;
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, {
+      requested: records.length,
+      changed: seen.size,
+      updatedProducts,
+      updatedSourceOverrides,
+      updatedVendorCategoryMappings,
+      vendorCategoryConflicts,
+      skipped,
+      samples,
+      state: publicState(normalized),
+      categories: publicCategories(normalized, "", "main")
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/categories/import-mapping-csv") {
+    const body = await parseBody(req);
+    const records = parseCsv(body.csv || "");
+    const now = new Date().toISOString();
+    const dryRun = body.dryRun === true || String(body.dryRun).toLowerCase() === "true";
+    const job = dryRun ? null : createImportJob(db, {
+      section: "Categories",
+      operation: "Shopify category mapping import",
+      direction: "import",
+      fileName: body.fileName || "category-mapping.csv",
+      totalRows: records.length,
+      message: `Importing ${records.length} category mapping row${records.length === 1 ? "" : "s"}.`
+    });
+    if (job) attachImportJobOriginalFile(job, body.csv || "", body.fileName || "category-mapping.csv");
+    let changed = 0;
+    let skipped = 0;
+    const errorRows = [];
+    const samples = [];
+    for (const record of records) {
+      const categoryName = formatCategoryName(csvValue(record, ["category", "Category", "mainCategory", "Main Category", "internalCategory", "Internal Category", "product category", "Product Category"]));
+      if (!categoryName) {
+        skipped += 1;
+        errorRows.push(standardImportError({
+          record,
+          field: "category",
+          issue: "Missing category",
+          rawValue: JSON.stringify(record)
+        }));
+        continue;
+      }
+      const shopifyCategoryId = csvValue(record, ["shopify_category_id", "shopifyCategoryId", "Shopify Category ID", "Shopify ID", "shopify id", "shopify_id"]);
+      const shopifyCategoryPath = csvValue(record, ["shopify_category", "shopify_category_path", "shopifyCategory", "shopifyCategoryPath", "Shopify Category", "Shopify Category Path", "Shopify Path", "shopify path", "shopify", "Shopify", "SHOPIFY"]);
+      const shopifyCategoryHandle = csvValue(record, ["shopify_category_handle", "shopifyCategoryHandle", "Shopify Category Handle", "shopify handle"]);
+      const shopifyCollectionHandle = csvValue(record, ["collection_handle", "collectionHandle", "Collection Handle", "shopify_collection_handle"]);
+      const googleCategoryId = csvValue(record, ["google_category_id", "googleCategoryId", "Google Category ID", "Google ID", "google id"]);
+      const googleCategoryPath = csvValue(record, ["google_category_path", "googleCategoryPath", "Google Category Path", "Google Path", "google_product_category", "google product category"]);
+      const notes = csvValue(record, ["notes", "Notes"]);
+      const owner = csvValue(record, ["owner", "Owner"]);
+      const status = csvValue(record, ["status", "Status"]);
+      if (!shopifyCategoryId && !shopifyCategoryPath && !shopifyCollectionHandle && !googleCategoryId && !googleCategoryPath) {
+        skipped += 1;
+        errorRows.push(standardImportError({
+          record,
+          category: categoryName,
+          field: "shopify_category",
+          issue: "Missing Shopify/Google mapping",
+          rawValue: JSON.stringify(record)
+        }));
+        continue;
+      }
+      let mapping = {
+        categoryId: shopifyCategoryId,
+        categoryPath: shopifyCategoryPath,
+        categoryHandle: shopifyCategoryHandle,
+        collectionHandle: shopifyCollectionHandle,
+        googleCategory: (googleCategoryId || googleCategoryPath) ? {
+          id: googleCategoryId,
+          fullName: googleCategoryPath,
+          breadcrumb: googleCategoryPath,
+          taxonomy: "Google Product Taxonomy"
+        } : null,
+        notes
+      };
+      if (shopifyCategoryId || shopifyCategoryPath) mapping = enrichShopifyCategoryMapping(mapping);
+      if (!dryRun) {
+        const category = findOrCreateCategorySetting(db, categoryName);
+        category.mappings.shopify = normalizeChannelCategoryMapping({ ...category.mappings.shopify, ...mapping });
+        category.status = status || "mapped";
+        if (owner) category.owner = owner;
+        if (notes) category.notes = notes;
+        category.updatedAt = now;
+      }
+      changed += 1;
+      if (samples.length < 10) samples.push({ category: categoryName, shopifyCategoryId: mapping.categoryId || "", shopifyCategoryPath: mapping.categoryPath || "", googleCategory: mapping.googleCategory?.breadcrumb || "" });
+    }
+    if (dryRun) {
+      return sendJson(res, 200, { requested: records.length, changed, skipped, samples, dryRun: true });
+    }
+    attachImportJobErrorsFile(job, errorRows);
+    finishImportJob(job, {
+      status: errorRows.length ? "warning" : "success",
+      message: `Imported ${changed} category mapping${changed === 1 ? "" : "s"}.`,
+      totalRows: records.length,
+      changed,
+      missingCount: skipped,
+      errors: importErrorMessages(errorRows)
+    });
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+    db.syncRuns.unshift({
+      id: crypto.randomUUID(),
+      importJobId: job?.id,
+      source: "CSV",
+      type: "category-mapping-import",
+      status: errorRows.length ? "warning" : "success",
+      fileName: body.fileName || "category-mapping.csv",
+      message: `Imported ${changed} category mapping${changed === 1 ? "" : "s"}.`,
+      createdAt: now
+    });
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, {
+      requested: records.length,
+      changed,
+      skipped,
+      samples,
+      state: publicState(normalized),
+      categories: publicCategories(normalized, "", "main")
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/shopify/categories") {
+    return sendJson(res, 200, searchShopifyTaxonomy(url.searchParams.get("q") || "", url.searchParams.get("limit") || 20));
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "categories" && parts[2]) {
+    const body = await parseBody(req);
+    const scope = body.scope || url.searchParams.get("scope") || "source";
+    const source = findPublicCategory(db, parts[2], scope);
+    if (!source) return notFound(res);
+    db.categorySettings = normalizeCategorySettings(db.categorySettings);
+    let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
+    if (!category) {
+      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name }])[0];
+      db.categorySettings.push(category);
+    }
+    for (const field of ["status", "owner", "notes"]) {
+      if (body[field] !== undefined) category[field] = String(body[field] || "").trim();
+    }
+    if (body.channel && body.mapping && category.mappings[body.channel]) {
+      let mapping = { ...body.mapping };
+      if (body.channel === "shopify" && mapping.categoryId) {
+        mapping = enrichShopifyCategoryMapping(mapping);
+      }
+      category.mappings[body.channel] = normalizeChannelCategoryMapping({ ...category.mappings[body.channel], ...mapping });
+    }
+    if (body.defaults && typeof body.defaults === "object") {
+      category.defaults = normalizeCategorySettings([{ ...category, defaults: { ...category.defaults, ...body.defaults } }])[0].defaults;
+    }
+    if (body.requiredAttributes !== undefined) {
+      category.requiredAttributes = Array.isArray(body.requiredAttributes) ? body.requiredAttributes : String(body.requiredAttributes || "").split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+    }
+    category.updatedAt = new Date().toISOString();
+    await writeDb(db);
+    return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", scope));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/promote") {
+    const body = await parseBody(req);
+    const product = await findCatalogProductBySku(body.sku, db);
+    if (!product) return notFound(res);
+    const upserted = upsertInventoryProductFromCatalog(db, product);
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    const promoted = normalized.inventory.find((item) => String(item.sku || "").toLowerCase() === String(product.sku || "").toLowerCase());
+    return sendJson(res, 200, { item: promoted, state: publicState(normalized), existing: upserted.existing });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/promote-bulk") {
+    const body = await parseBody(req);
+    const skus = Array.isArray(body.skus) ? body.skus.slice(0, 5000) : [];
+    const products = await findCatalogProductsBySkus(skus, db);
+    for (const product of products) upsertInventoryProductFromCatalog(db, product);
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { changed: products.length, state: publicState(normalized) });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/catalog/promote-csv') {
+    const body = await parseBody(req);
+    const records = parseCsv(body.csv || '');
+    const skusFromRecords = records.flatMap((record) => [
+      record.sku,
+      record.SKU,
+      record.Sku,
+      record['Variant SKU'],
+      record['variant sku'],
+      record['Vendor SKU'],
+      record.vendorSku
+    ]).filter(Boolean);
+    const skus = skusFromRecords.length
+      ? skusFromRecords
+      : String(body.csv || '').split(/[\r\n,;\t]+/)
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .filter((value) => !['sku', 'variant sku', 'vendor sku'].includes(value.toLowerCase()));
+    const uniqueSkus = [...new Set(skus.map((sku) => String(sku || '').trim()).filter(Boolean))].slice(0, 10000);
+    const skuMeta = new Map();
+    for (const record of records) {
+      const sku = String(record.sku || record.SKU || record.Sku || record['Variant SKU'] || record['variant sku'] || record['Vendor SKU'] || record.vendorSku || '').trim();
+      if (sku && !skuMeta.has(sku.toLowerCase())) skuMeta.set(sku.toLowerCase(), { record, row: csvRecordRow(record) });
+    }
+    if (!skuMeta.size) {
+      String(body.csv || '').split(/\r?\n/).forEach((line, index) => {
+        const sku = line.trim();
+        if (sku && !['sku', 'variant sku', 'vendor sku'].includes(sku.toLowerCase()) && !skuMeta.has(sku.toLowerCase())) {
+          skuMeta.set(sku.toLowerCase(), { row: index + 1, rawValue: line });
+        }
+      });
+    }
+    const job = createImportJob(db, {
+      section: 'Source Catalog',
+      operation: 'Add SKUs CSV to products',
+      direction: 'import',
+      fileName: body.fileName || 'source-skus.csv',
+      totalRows: uniqueSkus.length,
+      message: `Moving ${uniqueSkus.length} source SKU${uniqueSkus.length === 1 ? '' : 's'} into Products.`
+    });
+    attachImportJobOriginalFile(job, body.csv || '', body.fileName || 'source-skus.csv');
+    const products = await findCatalogProductsBySkus(uniqueSkus, db);
+    const found = new Set(products.map((product) => String(product.sku || '').toLowerCase()));
+    for (const product of products) upsertInventoryProductFromCatalog(db, product);
+    const missing = uniqueSkus.filter((sku) => !found.has(String(sku || '').toLowerCase()));
+    const errorRows = missing.map((sku) => {
+      const meta = skuMeta.get(String(sku || '').toLowerCase()) || {};
+      return standardImportError({
+        record: meta.record,
+        row: meta.row,
+        sku,
+        field: 'sku',
+        issue: 'SKU not found in source catalog',
+        rawValue: meta.rawValue || sku
+      });
+    });
+    attachImportJobErrorsFile(job, errorRows);
+    finishImportJob(job, {
+      status: missing.length ? 'warning' : 'success',
+      message: `Added ${products.length} of ${uniqueSkus.length} source SKU${uniqueSkus.length === 1 ? '' : 's'} to Products.`,
+      changed: products.length,
+      totalRows: uniqueSkus.length,
+      missingCount: missing.length,
+      errors: importErrorMessages(errorRows)
+    });
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, {
+      requested: uniqueSkus.length,
+      changed: products.length,
+      missing: missing.slice(0, 100),
+      job: normalized.importJobs.find((row) => row.id === job.id) || job,
+      state: publicState(normalized)
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/bulk") {
+    const body = await parseBody(req);
+    const action = String(body.action || "");
+    const skus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, 25000);
+    if (!skus.length) return sendJson(res, 400, { error: "Select source catalog products first." });
+    if (action === "add-active") {
+      const products = await findCatalogProductsBySkus(skus, db);
+      for (const product of products) upsertInventoryProductFromCatalog(db, product);
+      const normalized = normalizeDb(db);
+      await writeDb(normalized);
+      return sendJson(res, 200, { changed: products.length, state: publicState(normalized) });
+    }
+    const statusByAction = {
+      "set-active": { status: "Active", active: true, deleted: false },
+      "set-inactive": { status: "Inactive", active: false, deleted: false },
+      "set-discontinued": { status: "Discontinued", active: false, deleted: false },
+      delete: { status: "Deleted", active: false, deleted: true }
+    };
+    const patch = statusByAction[action];
+    if (!patch) return sendJson(res, 400, { error: "Unsupported source catalog action." });
+    const overrides = sourceCatalogOverrideMap(db);
+    const now = new Date().toISOString();
+    for (const sku of skus) {
+      const key = sku.toLowerCase();
+      overrides[key] = { ...(overrides[key] || { sku }), sku, ...patch, updatedAt: now };
+    }
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { changed: skus.length, state: publicState(normalized) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/export") {
+    const body = await parseBody(req);
+    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    const template = db.exportMappings.find((row) => row.id === body.mappingId);
+    if (!template) return sendJson(res, 404, { error: "Export mapping not found." });
+    if (!(template.mappings || []).length) return sendJson(res, 400, { error: "Template has no mapped columns." });
+    const skus = Array.isArray(body.skus)
+      ? [...new Set(body.skus.map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, 100000)
+      : [];
+    let items = [];
+    let matched = 0;
+    let limited = false;
+    if (skus.length) {
+      items = await findCatalogProductsBySkus(skus, db);
+      matched = items.length;
+    } else {
+      const result = await collectCatalogProductsForExport({
+        query: body.query || "",
+        filters: body.filters || {},
+        limit: body.limit || 10000,
+        db
+      });
+      items = result.items;
+      matched = result.matched;
+      limited = result.limited;
+    }
+    return sendJson(res, 200, {
+      filename: mappedExportFilename(template),
+      csv: mappedProductsCsv(db, template, items),
+      count: items.length,
+      matched,
+      limited
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/inventory/bulk") {
+    const body = await parseBody(req);
+    const ids = new Set(Array.isArray(body.ids) ? body.ids : []);
+    const action = String(body.action || "");
+    let changed = 0;
+    if (action === "delete") {
+      const before = db.inventory.length;
+      db.inventory = db.inventory.filter((item) => !ids.has(item.id));
+      changed = before - db.inventory.length;
+    } else {
+      const statusByAction = {
+        "set-active": "Active",
+        "set-inactive": "Inactive",
+        "set-discontinued": "Discontinued"
+      };
+      const status = statusByAction[action];
+      if (!status) return sendJson(res, 400, { error: "Unsupported bulk action." });
+      for (const item of db.inventory || []) {
+        if (!ids.has(item.id)) continue;
+        item.status = status;
+        item.active = status === "Active";
+        item.updatedAt = new Date().toISOString();
+        changed += 1;
+      }
+    }
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { changed, state: publicState(normalized) });
   }
 
   if (req.method === "POST" && url.pathname === "/api/temu/exchange-code") {
@@ -2623,6 +5645,305 @@ async function handleApi(req, res) {
     const result = await exchangeTemuCode(db, body.code);
     const normalized = normalizeDb(await readDb());
     return sendJson(res, 200, { ...result, state: publicState(normalized) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/export-mappings") {
+    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    return sendJson(res, 200, { exportMappings: db.exportMappings });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/export-mappings") {
+    const body = await parseBody(req);
+    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    const template = normalizeExportMapping({
+      name: body.name || `${body.source || "Custom"} Product Mapping`,
+      source: body.source || "Custom",
+      mode: body.mode || "both",
+      mappings: body.mappings || [
+        { externalColumn: "SKU", productField: "sku" },
+        { externalColumn: "Title", productField: "title" },
+        { externalColumn: "Price", productField: "price" },
+        { externalColumn: "Quantity", productField: "available" }
+      ],
+      notes: body.notes || ""
+    });
+    db.exportMappings.unshift(template);
+    await writeDb(db);
+    return sendJson(res, 200, { template, exportMappings: db.exportMappings });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "export-mappings" && parts[2]) {
+    const body = await parseBody(req);
+    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    const template = db.exportMappings.find((row) => row.id === parts[2]);
+    if (!template) return notFound(res);
+    for (const field of ["name", "source", "mode", "status", "notes"]) {
+      if (body[field] !== undefined) template[field] = String(body[field] || "").trim();
+    }
+    if (body.mappings !== undefined) template.mappings = parseMappingRows(body.mappings).map(normalizeExportMappingRow).filter((row) => row.externalColumn);
+    template.updatedAt = new Date().toISOString();
+    await writeDb(db);
+    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    return sendJson(res, 200, { template: normalizeExportMapping(template), exportMappings: db.exportMappings });
+  }
+
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "export-mappings" && parts[2]) {
+    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    if (DEFAULT_EXPORT_MAPPINGS.some((defaults) => defaults.id === parts[2])) {
+      return sendJson(res, 400, { error: "Built-in mappings can be deactivated or duplicated, but not deleted." });
+    }
+    const before = db.exportMappings.length;
+    db.exportMappings = db.exportMappings.filter((row) => row.id !== parts[2]);
+    if (db.exportMappings.length === before) return notFound(res);
+    await writeDb(db);
+    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    return sendJson(res, 200, { exportMappings: db.exportMappings });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "export-mappings" && parts[2] && parts[3] === "export") {
+    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    const template = db.exportMappings.find((row) => row.id === parts[2]);
+    if (!template) return notFound(res);
+    if (!(template.mappings || []).length) return sendJson(res, 400, { error: "Template has no mapped columns." });
+    const skus = new Set(String(url.searchParams.get("skus") || "").split(",").map((sku) => sku.trim()).filter(Boolean).map((sku) => sku.toLowerCase()));
+    const items = skus.size ? db.inventory.filter((item) => skus.has(String(item.sku || "").toLowerCase())) : db.inventory;
+    const csv = mappedProductsCsv(db, template, items);
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename=${mappedExportFilename(template)}`
+    });
+    return res.end(csv);
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "export-mappings" && parts[2] && parts[3] === "export") {
+    const body = await parseBody(req);
+    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    const template = db.exportMappings.find((row) => row.id === parts[2]);
+    if (!template) return notFound(res);
+    if (!(template.mappings || []).length) return sendJson(res, 400, { error: "Template has no mapped columns." });
+    const skus = new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim().toLowerCase()).filter(Boolean));
+    const items = skus.size ? db.inventory.filter((item) => skus.has(String(item.sku || "").toLowerCase())) : db.inventory;
+    return sendJson(res, 200, { filename: mappedExportFilename(template), csv: mappedProductsCsv(db, template, items), count: items.length });
+  }
+
+  if (req.method === 'POST' && parts[0] === 'api' && parts[1] === 'export-mappings' && parts[2] && parts[3] === 'import') {
+    const body = await parseBody(req);
+    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    const template = db.exportMappings.find((row) => row.id === parts[2]);
+    if (!template) return notFound(res);
+    const records = parseCsv(body.csv || '');
+    const skuMapping = (template.mappings || []).find((mapping) => mapping.productField === 'sku');
+    if (!skuMapping) return sendJson(res, 400, { error: 'Template needs a mapped SKU column before importing.' });
+    const job = body.dryRun ? null : createImportJob(db, {
+      section: 'Products',
+      operation: `${template.name} import`,
+      direction: 'import',
+      fileName: body.fileName || `${template.source || 'products'}.csv`,
+      totalRows: records.length,
+      message: `Importing ${records.length} row${records.length === 1 ? '' : 's'} with ${template.name}.`
+    });
+    if (job) attachImportJobOriginalFile(job, body.csv || '', body.fileName || `${template.source || 'products'}.csv`);
+    let changed = 0;
+    let created = 0;
+    const preview = [];
+    const errorRows = [];
+    for (const record of records) {
+      const sku = String(record[skuMapping.externalColumn] || '').trim();
+      if (!sku) {
+        errorRows.push(standardImportError({
+          record,
+          field: skuMapping.externalColumn || 'sku',
+          issue: 'Missing SKU',
+          rawValue: JSON.stringify(record)
+        }));
+        continue;
+      }
+      const payload = mappedRecordToProductPayload(record, template);
+      payload.sku = sku;
+      const existing = db.inventory.find((item) => String(item.sku || '').toLowerCase() === sku.toLowerCase());
+      if (body.dryRun) {
+        preview.push({ sku, action: existing ? 'update' : 'create', fields: Object.keys(payload).filter((field) => field !== 'sku') });
+        continue;
+      }
+      if (existing) {
+        applyInventoryPatch(existing, payload);
+        if (payload.brand !== undefined && payload.brandLocked === undefined) existing.brandLocked = true;
+        existing.updatedAt = new Date().toISOString();
+      } else {
+        db.inventory.push({
+          id: crypto.randomUUID(),
+          title: payload.title || sku,
+          qty: Number(payload.qty || 0),
+          reserved: Number(payload.reserved || 0),
+          reorderPoint: Number(payload.reorderPoint || 0),
+          sources: {},
+          updatedAt: new Date().toISOString(),
+          brandLocked: payload.brand !== undefined ? true : Boolean(payload.brandLocked),
+          ...payload
+        });
+        created += 1;
+      }
+      changed += 1;
+    }
+    if (body.dryRun) return sendJson(res, 200, { changed: preview.length, preview: preview.slice(0, 50) });
+    const status = errorRows.length ? 'warning' : 'success';
+    const message = `Updated ${changed} product row${changed === 1 ? '' : 's'} from ${template.name}${errorRows.length ? `; ${errorRows.length} row${errorRows.length === 1 ? '' : 's'} need review.` : '.'}`;
+    attachImportJobErrorsFile(job, errorRows);
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+    db.syncRuns.unshift({
+      id: crypto.randomUUID(),
+      importJobId: job.id,
+      source: template.source || 'CSV',
+      type: 'mapped-product-import',
+      status,
+      fileName: body.fileName || '',
+      message,
+      createdAt: new Date().toISOString()
+    });
+    finishImportJob(job, { status, message, changed, created, totalRows: records.length, missingCount: errorRows.length, errors: importErrorMessages(errorRows) });
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { changed, created, job: normalized.importJobs.find((row) => row.id === job.id) || job, state: publicState(normalized) });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/shopify/status-import') {
+    const body = await parseBody(req);
+    const records = parseCsv(body.csv || '');
+    const maps = buildShopifyLookupMaps(db);
+    const preview = [];
+    const missing = [];
+    const errorRows = [];
+    const job = body.dryRun ? null : createImportJob(db, {
+      section: 'Products',
+      operation: 'Shopify status import',
+      direction: 'import',
+      fileName: body.fileName || 'shopify-status.csv',
+      totalRows: records.length,
+      message: `Updating Shopify IDs and live status from ${records.length} row${records.length === 1 ? '' : 's'}.`
+    });
+    if (job) attachImportJobOriginalFile(job, body.csv || '', body.fileName || 'shopify-status.csv');
+    let changed = 0;
+    for (const record of records) {
+      const { item, payload, matchBy } = findProductForShopifyRecord(record, maps);
+      const key = payload.sku || payload.handle || payload.shopifyId;
+      if (!key) {
+        errorRows.push(standardImportError({
+          record,
+          field: 'sku',
+          issue: 'Missing Shopify match key',
+          rawValue: JSON.stringify(record),
+          details: 'Expected Variant SKU, Handle, or Shopify product ID.'
+        }));
+        continue;
+      }
+      if (!item) {
+        missing.push(key);
+        errorRows.push(standardImportError({
+          record,
+          recordKey: key,
+          sku: payload.sku || '',
+          field: payload.sku ? 'sku' : payload.handle ? 'handle' : 'shopifyId',
+          issue: 'No matching product found',
+          rawValue: key,
+          details: matchBy ? `Tried ${matchBy}.` : 'No matching SKU, handle, or Shopify ID found.'
+        }));
+        if (preview.length < 50) preview.push({ sku: payload.sku || '', handle: payload.handle || '', action: 'missing', fields: [] });
+        continue;
+      }
+      const fields = ['shopifyId', 'shopifyVariantId', 'shopifyHandle', 'shopifyStatus', 'shopifyPublished', 'shopifyPublishedAt', 'shopifyUpdatedAt', 'shopifySyncedAt']
+        .filter((field) => payload[field] !== undefined && payload[field] !== '' && item[field] !== payload[field]);
+      if (body.dryRun) {
+        if (preview.length < 50) preview.push({ sku: item.sku, handle: payload.handle, action: fields.length ? 'update' : 'unchanged', matchBy, fields });
+        if (fields.length) changed += 1;
+        continue;
+      }
+      for (const field of fields) item[field] = payload[field];
+      if (fields.length) {
+        item.updatedAt = new Date().toISOString();
+        changed += 1;
+      }
+    }
+    if (body.dryRun) {
+      return sendJson(res, 200, {
+        changed,
+        matched: records.length - missing.length,
+        missing: missing.slice(0, 100),
+        preview
+      });
+    }
+    const issueCount = errorRows.length;
+    const status = issueCount ? 'warning' : 'success';
+    const message = `Updated Shopify status for ${changed} product row${changed === 1 ? '' : 's'}${issueCount ? `; ${issueCount} row${issueCount === 1 ? '' : 's'} need review.` : '.'}`;
+    attachImportJobErrorsFile(job, errorRows);
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+    db.syncRuns.unshift({
+      id: crypto.randomUUID(),
+      importJobId: job.id,
+      source: 'Shopify',
+      type: 'shopify-status-import',
+      status,
+      fileName: body.fileName || '',
+      message,
+      createdAt: new Date().toISOString()
+    });
+    finishImportJob(job, { status, message, changed, totalRows: records.length, missingCount: issueCount, errors: importErrorMessages(errorRows) });
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { changed, missing: missing.slice(0, 100), job: normalized.importJobs.find((row) => row.id === job.id) || job, state: publicState(normalized) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "catalog-import-reviews" && parts[2] && ["accept", "reject"].includes(parts[3])) {
+    const body = await parseBody(req);
+    db.catalogImportReviews = normalizeCatalogImportReviews(db.catalogImportReviews);
+    const review = db.catalogImportReviews.find((row) => row.id === parts[2]);
+    if (!review) return notFound(res);
+    if (review.status !== "pending") return sendJson(res, 400, { error: "This review has already been decided." });
+    const item = db.inventory.find((row) => row.id === review.productId || String(row.sku || "").toLowerCase() === review.sku.toLowerCase());
+    if (!item) return sendJson(res, 404, { error: "Product not found for this review." });
+    if (parts[3] === "accept") {
+      item[review.field] = review.incomingValue;
+      if (review.field === "brand") item.brandLocked = true;
+      if (["packageLength", "packageWidth", "packageHeight"].includes(review.field)) item.dimensionalWeight = calculateDimensionalWeight(item);
+      item.updatedAt = new Date().toISOString();
+      review.status = "accepted";
+    } else {
+      review.status = "rejected";
+    }
+    review.decisionNote = body.note || "";
+    review.decidedAt = new Date().toISOString();
+    review.updatedAt = review.decidedAt;
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { review, state: publicState(normalized) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "catalog-import-reviews" && parts[2] === "bulk") {
+    const body = await parseBody(req);
+    const action = String(body.action || "");
+    const ids = new Set(Array.isArray(body.ids) ? body.ids : []);
+    if (!["accept", "reject"].includes(action)) return sendJson(res, 400, { error: "Unsupported review action." });
+    db.catalogImportReviews = normalizeCatalogImportReviews(db.catalogImportReviews);
+    let changed = 0;
+    for (const review of db.catalogImportReviews) {
+      if (!ids.has(review.id) || review.status !== "pending") continue;
+      const item = db.inventory.find((row) => row.id === review.productId || String(row.sku || "").toLowerCase() === review.sku.toLowerCase());
+      if (!item) continue;
+      if (action === "accept") {
+        item[review.field] = review.incomingValue;
+        if (review.field === "brand") item.brandLocked = true;
+        if (["packageLength", "packageWidth", "packageHeight"].includes(review.field)) item.dimensionalWeight = calculateDimensionalWeight(item);
+        item.updatedAt = new Date().toISOString();
+        review.status = "accepted";
+      } else {
+        review.status = "rejected";
+      }
+      review.decidedAt = new Date().toISOString();
+      review.updatedAt = review.decidedAt;
+      changed += 1;
+    }
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { changed, state: publicState(normalized) });
   }
 
   if (req.method === "GET" && url.pathname === "/api/export/inventory") {
@@ -2713,14 +6034,32 @@ async function handleApi(req, res) {
     return res.end(htmlDoc);
   }
 
-  if (req.method === "POST" && url.pathname === "/api/import/inventory") {
+  if (req.method === 'POST' && url.pathname === '/api/import/inventory') {
     const body = await parseBody(req);
-    const records = parseCsv(body.csv || "");
+    const records = parseCsv(body.csv || '');
+    const job = createImportJob(db, {
+      section: 'Inventory',
+      operation: 'Inventory CSV import',
+      direction: 'import',
+      fileName: body.fileName || 'inventory.csv',
+      totalRows: records.length,
+      message: `Importing ${records.length} inventory row${records.length === 1 ? '' : 's'}.`
+    });
+    attachImportJobOriginalFile(job, body.csv || '', body.fileName || 'inventory.csv');
     let changed = 0;
+    const errorRows = [];
 
     for (const record of records) {
-      const sku = String(record.sku || record.SKU || "").trim();
-      if (!sku) continue;
+      const sku = String(record.sku || record.SKU || '').trim();
+      if (!sku) {
+        errorRows.push(standardImportError({
+          record,
+          field: 'sku',
+          issue: 'Missing SKU',
+          rawValue: JSON.stringify(record)
+        }));
+        continue;
+      }
 
       const existing = db.inventory.find((item) => item.sku.toLowerCase() === sku.toLowerCase());
       const qty = Number(record.qty ?? record.quantity ?? record.QTY);
@@ -2731,6 +6070,7 @@ async function handleApi(req, res) {
         if (Number.isFinite(qty)) existing.qty = qty;
         existing.title = title;
         Object.assign(existing, productFields);
+        if (productFields.brand !== undefined && productFields.brandLocked === undefined) existing.brandLocked = true;
         existing.updatedAt = new Date().toISOString();
       } else {
         db.inventory.push({
@@ -2738,6 +6078,7 @@ async function handleApi(req, res) {
           sku,
           title,
           ...productFields,
+          brandLocked: productFields.brand !== undefined ? true : Boolean(productFields.brandLocked),
           qty: Number.isFinite(qty) ? qty : 0,
           reserved: 0,
           reorderPoint: Number(record.reorderPoint || 0),
@@ -2748,16 +6089,24 @@ async function handleApi(req, res) {
       changed += 1;
     }
 
+    const status = errorRows.length ? 'warning' : 'success';
+    const message = `Updated ${changed} inventory row${changed === 1 ? '' : 's'} from CSV${errorRows.length ? `; ${errorRows.length} row${errorRows.length === 1 ? '' : 's'} need review.` : '.'}`;
+    attachImportJobErrorsFile(job, errorRows);
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
     db.syncRuns.unshift({
       id: crypto.randomUUID(),
-      source: "CSV",
-      type: "inventory",
-      status: "success",
-      message: `Updated ${changed} inventory row${changed === 1 ? "" : "s"} from CSV.`,
+      importJobId: job.id,
+      source: 'CSV',
+      type: 'inventory',
+      status,
+      fileName: body.fileName || '',
+      message,
       createdAt: new Date().toISOString()
     });
-    await writeDb(db);
-    return sendJson(res, 200, { changed, state: publicState(db) });
+    finishImportJob(job, { status, message, changed, totalRows: records.length, missingCount: errorRows.length, errors: importErrorMessages(errorRows) });
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { changed, job: normalized.importJobs.find((row) => row.id === job.id) || job, state: publicState(normalized) });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts.length === 3) {
@@ -2767,6 +6116,7 @@ async function handleApi(req, res) {
     const qtyBefore = Number(item.qty || 0);
     const reservedBefore = Number(item.reserved || 0);
     applyInventoryPatch(item, body);
+    if (body.brand !== undefined && body.brandLocked === undefined) item.brandLocked = true;
     item.updatedAt = new Date().toISOString();
     const qtyAfter = Number(item.qty || 0);
     const reservedAfter = Number(item.reserved || 0);
@@ -3080,6 +6430,7 @@ async function handleApi(req, res) {
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "marketplace-templates" && parts[2]) {
     const body = await parseBody(req);
     db.marketplaceTemplates = normalizeMarketplaceTemplates(db.marketplaceTemplates);
+  db.categorySettings = normalizeCategorySettings(db.categorySettings);
     const template = db.marketplaceTemplates.find((row) => row.id === parts[2]);
     if (!template) return notFound(res);
     const textFields = ["marketplace", "notes"];
@@ -3114,6 +6465,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "marketplace-templates" && parts[3] === "action") {
     const body = await parseBody(req);
     db.marketplaceTemplates = normalizeMarketplaceTemplates(db.marketplaceTemplates);
+  db.categorySettings = normalizeCategorySettings(db.categorySettings);
     const template = db.marketplaceTemplates.find((row) => row.id === parts[2]);
     if (!template) return notFound(res);
     const action = String(body.action || "").toLowerCase();
@@ -3493,7 +6845,7 @@ async function handleApi(req, res) {
         const serialInput = providedSerials[index] || {};
         const noSerial = serialInput.noSerial === true || String(serialInput.noSerial).toLowerCase() === "true";
         const manualSerial = String(serialInput.serialNumber || "").trim();
-        const serialNumber = noSerial || !manualSerial ? generatedSerial(po, vendor, receivedAt, index + 1) : manualSerial;
+        const serialNumber = noSerial || !manualSerial ? generatedReceiptSerial(po, vendor, receivedAt, sku, index + 1) : manualSerial;
         const serialRecord = {
           id: crypto.randomUUID(),
           serialNumber,
@@ -4592,6 +7944,7 @@ const server = http.createServer((req, res) => {
     });
   } else if (req.url.startsWith("/api/")) {
     handleApi(req, res).catch((error) => {
+      console.error(error);
       const status = error.message.includes("credentials missing") || error.message.includes("authorization code is required") ? 400 : 500;
       sendJson(res, status, { error: error.message });
     });

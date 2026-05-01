@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node server.js",
     "db:migrate": "node scripts/migrate-json-to-postgres.js",
-    "import:product-dump": "node scripts/import-product-dump.js"
+    "import:product-dump": "node scripts/import-product-dump.js",
+    "import:shopify-taxonomy": "node scripts/import-shopify-taxonomy.js",
+    "catalog:index": "node scripts/build-source-catalog-index.js",
+    "catalog:rehydrate-products": "node scripts/rehydrate-products-from-catalog.js"
   },
   "engines": {
     "node": ">=20"

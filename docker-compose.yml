@@ -1,0 +1,32 @@
+services:
+  dataplus:
+    build:
+      context: .
+    container_name: dataplus
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: "4173"
+      DATAPLUS_DOCKER: "1"
+    ports:
+      - "4200:4173"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4173/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: dataplus-public-tunnel
+    profiles:
+      - public
+    depends_on:
+      dataplus:
+        condition: service_healthy
+    command: tunnel --no-autoupdate --url http://dataplus:4173
+    restart: unless-stopped

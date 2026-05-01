@@ -10,6 +10,71 @@ npm.cmd start
 
 Open `http://localhost:4173`.
 
+## Run with Docker
+
+Docker keeps the app and Node dependencies isolated. Your local `data` folder is mounted into the container, so product catalog files, jobs, imports, and `data/db.json` stay on your PC.
+
+1. Install Docker Desktop for Windows and start it.
+2. Open PowerShell in this project folder:
+
+```powershell
+cd C:\Users\luis\Documents\codex\dataplus
+```
+
+3. Build and start DataPlus:
+
+```powershell
+docker compose up --build -d
+```
+
+4. Open:
+
+```text
+http://localhost:4200
+```
+
+Useful Docker commands:
+
+```powershell
+docker compose logs -f
+docker compose restart
+docker compose down
+docker compose up -d
+```
+
+The Docker port mapping is `4200:4173`, so your browser uses port `4200` and the app inside Docker uses port `4173`.
+
+When `DATABASE_URL` points at `localhost` or `127.0.0.1`, the Docker setup routes it to your Windows host automatically so the container can use the same local PostgreSQL database as the app on your PC.
+
+To open DataPlus from another device on your home network, find your PC's local IP address:
+
+```powershell
+ipconfig
+```
+
+Then use:
+
+```text
+http://YOUR-PC-IP:4200
+```
+
+To temporarily expose DataPlus publicly for free with a Cloudflare quick tunnel:
+
+```powershell
+docker compose --profile public up -d cloudflared
+docker compose logs --tail 80 cloudflared
+```
+
+The logs will show a `trycloudflare.com` URL. This URL can change when the tunnel restarts and has no uptime guarantee.
+
+To turn off public access:
+
+```powershell
+docker compose stop cloudflared
+```
+
+Public access is risky until authentication is added.
+
 ## PostgreSQL
 
 The app can use PostgreSQL when `DATABASE_URL` is present in `.env`.
@@ -110,9 +175,9 @@ If you already downloaded the FTP file, inspect or import the local file path in
 To download the FTP dump first, add these values to `.env`:
 
 ```env
-PRODUCT_DUMP_FTP_HOST=159.89.90.169
+PRODUCT_DUMP_FTP_HOST=your_ftp_host
 PRODUCT_DUMP_FTP_PORT=21
-PRODUCT_DUMP_FTP_USER=datawarehouse
+PRODUCT_DUMP_FTP_USER=your_ftp_username
 PRODUCT_DUMP_FTP_PASSWORD=your_product_dump_ftp_password
 PRODUCT_DUMP_FTP_REMOTE_PATH=/dump/datawarehouse/products.bson.gz
 PRODUCT_DUMP_LOCAL_PATH=data/imports/products.bson.gz
@@ -125,6 +190,65 @@ npm run import:product-dump -- --ftp
 ```
 
 Products are merged by SKU. Existing products keep local shadow SKUs, serial units, warehouse stock, and other operational history while product dump fields refresh catalog details.
+
+## Command reference
+
+Use these commands from the project folder:
+
+```powershell
+cd C:\Users\luis\Documents\codex\dataplus
+```
+
+Start the local app:
+
+```powershell
+npm start
+```
+
+Import the full product dump into the offline source catalog:
+
+```powershell
+npm run import:product-dump -- data/imports/products.bson.gz
+```
+
+Rebuild the fast source catalog index after importing or replacing `data/catalog/products.ndjson`:
+
+```powershell
+npm run catalog:index
+```
+
+This creates `data/catalog/index`. It makes supplier filtering and SKU CSV promotion much faster. The index should be refreshed after every full product dump import.
+
+Refresh Shopify taxonomy, Shopify category attributes, and Shopify-to-Google category mappings:
+
+```powershell
+npm run import:shopify-taxonomy
+```
+
+This writes `data/channel-taxonomies/shopify/taxonomy-index.json`. Run it when Shopify updates its product taxonomy or when you want the latest Shopify/Google category mappings.
+
+Migrate JSON state into PostgreSQL:
+
+```powershell
+npm run db:migrate
+```
+
+Use this when setting up or refreshing PostgreSQL from `data/db.json`.
+
+Common full refresh order:
+
+```powershell
+npm run import:product-dump -- data/imports/products.bson.gz
+npm run catalog:index
+npm run import:shopify-taxonomy
+npm start
+```
+
+Only use `--inventory` when you intentionally want dump records added directly to the smaller active catalog:
+
+```powershell
+npm run import:product-dump -- data/imports/products.bson.gz --inventory --limit 1000
+```
 
 ## Next production steps
 

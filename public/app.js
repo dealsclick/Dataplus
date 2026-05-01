@@ -5,6 +5,40 @@ let orderDetailVisible = false;
 let selectedOrderIds = new Set();
 let purchasingTab = "pos";
 let catalogTab = "products";
+let sourceCatalogPage = 1;
+let sourceCatalogState = { items: [], totalMatches: 0, hasMore: false, manifest: null, query: "", loading: false };
+let sourceCatalogRequestId = 0;
+let sourceCatalogFacets = null;
+let selectedSourceSuppliers = new Set();
+let supplierMultiOpen = false;
+let categoryState = { categories: [], total: 0, query: "", scope: "main", loading: false };
+let categoryScope = "main";
+let categoryRequestId = 0;
+let selectedCategoryId = null;
+let shopifyTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
+let shopifyTaxonomyTimer = null;
+let selectedExportMappingId = null;
+let activeExportMappingPageId = null;
+let activeImportSection = "products";
+let mappingDraftDirty = false;
+let productFieldOptions = null;
+let pendingProductImport = { templateId: null, fileName: "", csv: "", preview: null, mode: "mapped" };
+let selectedSourceSkus = new Set();
+let selectedSourceAllFiltered = false;
+let pendingSourceSkuImport = { fileName: "", csv: "", skus: [], result: null, running: false, error: "" };
+let selectedProductIds = new Set();
+let selectedProductAllFiltered = false;
+let productAlternatesCache = {};
+let selectedProductWorkspaceTab = "home";
+let selectedProductGalleryImageById = {};
+let pendingProductImageManager = { productId: null, images: [], defaultImage: "" };
+let pendingProductBulletManager = { productId: null, bulletPoints: [] };
+let productCatalogPage = 1;
+let inventoryCatalogPage = 1;
+const PRODUCT_CATALOG_PAGE_SIZE = 100;
+let productFilterOptionsCache = { inventoryCount: -1, suppliers: [], stockStatuses: [], shopifyStatuses: [], brands: [], categories: [] };
+let inventoryById = new Map();
+let activeApiRequests = 0;
 let selectedPoId = null;
 let selectedVendorId = null;
 let selectedCustomerId = null;
@@ -36,17 +70,99 @@ let selectedReturnId = null;
 let currentViewId = "dashboard";
 let menuGroupsExpanded = localStorage.getItem("dataplus-menu-groups-expanded") === "true";
 let themeMode = localStorage.getItem("dataplus-theme") || "light";
+let jobsFilter = { query: "", section: "", status: "", direction: "" };
+let selectedImportJobId = null;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
-async function api(path, options = {}) {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options
+// Icons are inline SVGs from the open-source Lucide icon set (ISC license).
+const LUCIDE_ICONS = {
+  "arrow-left": '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+  "badge-check": '<path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.78 4.78 4 4 0 0 1-6.74 0 4 4 0 0 1-4.78-4.78 4 4 0 0 1 0-6.75Z"/><path d="m9 12 2 2 4-4"/>',
+  "bar-chart-3": '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+  "boxes": '<path d="M2.97 12.92 12 17.5l9.03-4.58"/><path d="M2.97 17.92 12 22.5l9.03-4.58"/><path d="M12 2 2.97 6.58 12 11.16l9.03-4.58L12 2Z"/>',
+  "clipboard-check": '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
+  "clipboard-list": '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/>',
+  "copy": '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  "database": '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/>',
+  "dollar-sign": '<path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"/>',
+  "edit-3": '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  "file-pen-line": '<path d="m18 5-2.4-2.4A2 2 0 0 0 14.2 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10.4 12.6 8 15l1 1 2.4-2.4"/><path d="m14 9 1 1"/>',
+  "fingerprint": '<path d="M2 12c0-2.8 0-4.2.54-5.27A5 5 0 0 1 4.73 4.54C5.8 4 7.2 4 10 4h4c2.8 0 4.2 0 5.27.54a5 5 0 0 1 2.19 2.19C22 7.8 22 9.2 22 12"/><path d="M6 12a6 6 0 0 1 12 0v2"/><path d="M9 12a3 3 0 0 1 6 0v6"/><path d="M12 12v10"/>',
+  "gauge": '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+  "home": '<path d="m3 10 9-7 9 7"/><path d="M5 10v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V10"/><path d="M9 21v-6h6v6"/>',
+  "image": '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
+  "info": '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  "layout-dashboard": '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
+  "layout-template": '<rect width="18" height="7" x="3" y="3" rx="1"/><rect width="9" height="7" x="3" y="14" rx="1"/><rect width="5" height="7" x="16" y="14" rx="1"/>',
+  "list-check": '<path d="M11 6h10"/><path d="M11 12h10"/><path d="M11 18h10"/><path d="m3 6 1 1 2-2"/><path d="m3 12 1 1 2-2"/><path d="m3 18 1 1 2-2"/>',
+  "moon": '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  "more-horizontal": '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+  "package": '<path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
+  "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  "radio": '<path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2a6 6 0 0 1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/>',
+  "refresh-cw": '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>',
+  "ruler": '<path d="m16 2 6 6L8 22l-6-6Z"/><path d="m7.5 10.5 2 2"/><path d="m10.5 7.5 2 2"/><path d="m13.5 4.5 2 2"/><path d="m4.5 13.5 2 2"/>',
+  "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  "shopping-bag": '<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
+  "shopping-cart": '<circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57L21.9 7H5.12"/>',
+  "store": '<path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M15 22v-6a3 3 0 0 0-6 0v6"/><path d="M2 7h20"/><path d="M2 7v3a2 2 0 1 0 4 0V7"/><path d="M6 7v3a2 2 0 1 0 4 0V7"/><path d="M10 7v3a2 2 0 1 0 4 0V7"/><path d="M14 7v3a2 2 0 1 0 4 0V7"/><path d="M18 7v3a2 2 0 1 0 4 0V7"/>',
+  "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+  "tags": '<path d="M9 5H2v7l8.29 8.29a2.83 2.83 0 0 0 4 0l3-3a2.83 2.83 0 0 0 0-4Z"/><path d="M6 9.01V9"/><path d="m15 5 6.3 6.3a2.4 2.4 0 0 1 0 3.4L19 17"/>',
+  "truck": '<path d="M10 17h4V5H2v12h3"/><path d="M14 17h1"/><path d="M19 17h3v-3.34a2 2 0 0 0-.34-1.11L19 9h-5"/><circle cx="7.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/>',
+  "trash-2": '<path d="M3 6h18"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><path d="M19 6l-1 14c-.1 1-1 2-2 2H8c-1 0-1.9-1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+  "undo-2": '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
+  "upload": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+  "users": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  "warehouse": '<path d="M22 8.35V20a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8.35A2 2 0 0 1 3.26 6.5l8-3.2a2 2 0 0 1 1.48 0l8 3.2A2 2 0 0 1 22 8.35Z"/><path d="M6 18h12"/><path d="M6 14h12"/><rect width="12" height="12" x="6" y="10"/>'
+};
+
+function iconMarkup(name, className = "") {
+  const paths = LUCIDE_ICONS[name];
+  if (!paths) return "";
+  const classes = ["app-icon", className].filter(Boolean).join(" ");
+  return '<svg class="' + classes + '" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + paths + '</svg>';
+}
+
+function withIcon(name, label, className = "") {
+  return iconMarkup(name, className) + '<span>' + html(label) + '</span>';
+}
+
+function sectionIconTitle(name, label) {
+  return '<strong class="icon-title">' + iconMarkup(name) + '<span>' + html(label) + '</span></strong>';
+}
+
+function iconElement(name, className = "") {
+  const template = document.createElement("template");
+  template.innerHTML = iconMarkup(name, className).trim();
+  return template.content.firstElementChild;
+}
+
+function hydrateStaticIcons(root = document) {
+  root.querySelectorAll("[data-icon]").forEach((element) => {
+    if (element.dataset.iconHydrated === "true") return;
+    const svg = iconElement(element.dataset.icon, element.dataset.iconClass || "");
+    if (!svg) return;
+    element.prepend(svg);
+    element.dataset.iconHydrated = "true";
   });
-  if (!response.ok) throw new Error((await response.json()).error || "Request failed");
-  return response.json();
+}
+
+async function api(path, options = {}) {
+  activeApiRequests += 1;
+  setSavingIndicator(true, options.method && options.method !== "GET" ? "Saving..." : "Loading...");
+  try {
+    const response = await fetch(path, {
+      headers: { "Content-Type": "application/json" },
+      ...options
+    });
+    if (!response.ok) throw new Error((await response.json()).error || "Request failed");
+    return response.json();
+  } finally {
+    activeApiRequests = Math.max(0, activeApiRequests - 1);
+    if (!activeApiRequests) setSavingIndicator(false);
+  }
 }
 
 function money(value) {
@@ -78,6 +194,113 @@ function html(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function productImageUrls(item = {}) {
+  const images = Array.isArray(item.images)
+    ? item.images
+    : String(item.images || "").split(/[\n|,]/);
+  return [...new Set([
+    item.defaultImage || item.default_image,
+    ...images,
+    item.originalImage || item.original_image
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+function productEditableImageUrls(item = {}) {
+  const images = Array.isArray(item.images)
+    ? item.images
+    : String(item.images || "").split(/[\n|,]/);
+  return [...new Set([
+    item.defaultImage || item.default_image,
+    ...images
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+function productBulletPoints(item = {}) {
+  const bullets = Array.isArray(item.bulletPoints)
+    ? item.bulletPoints
+    : String(item.bulletPoints || item.bullet_points || "").split(/[\n|]/);
+  return bullets.map((value) => String(value || "").trim()).filter(Boolean);
+}
+
+function renderProductBulletSection(item) {
+  const bullets = productBulletPoints(item);
+  const preview = bullets.slice(0, 5);
+  return `
+    <section class="product-bullets-panel">
+      <div class="product-bullets-head">
+        <div>
+          ${sectionIconTitle("list-check", "Bullet points")}
+          <span>${bullets.length || 0} bullet${bullets.length === 1 ? "" : "s"}</span>
+        </div>
+        <button class="button secondary compact-button" type="button" data-open-product-bullets="${item.id}">${bullets.length ? "Edit" : "Add"}</button>
+      </div>
+      ${preview.length ? `
+        <ul class="product-bullet-preview">
+          ${preview.map((bullet) => `<li>${html(bullet)}</li>`).join("")}
+        </ul>
+        ${bullets.length > preview.length ? `<p class="muted">+${bullets.length - preview.length} more bullet${bullets.length - preview.length === 1 ? "" : "s"}</p>` : ""}
+      ` : `
+        <p class="muted">No bullet points yet.</p>
+      `}
+    </section>
+  `;
+}
+
+function calculateDimensionalWeight(item = {}) {
+  const length = Number(item.packageLength || 0);
+  const width = Number(item.packageWidth || 0);
+  const height = Number(item.packageHeight || 0);
+  if (!(length > 0 && width > 0 && height > 0)) return 0;
+  return Math.round(((length * width * height) / 139) * 1000) / 1000;
+}
+
+function productDimensionInput(label, field, item) {
+  return `
+    <label>
+      <span>${html(label)}</span>
+      <input type="number" step="0.001" value="${html(item[field] ?? 0)}" data-product-field="${field}" data-product-dimension-field="${field}" data-product-id="${item.id}" />
+    </label>
+  `;
+}
+
+function renderProductDimensionsCard(item) {
+  const dimensionalWeight = Number(item.dimensionalWeight ?? calculateDimensionalWeight(item) ?? 0);
+  return `
+    <section class="product-section-card product-section-orange">
+      <div class="product-section-title">${sectionIconTitle("ruler", "Dimensions")}</div>
+      <div class="dimension-editor">
+        <div class="dimension-group">
+          <div class="dimension-group-title"><strong>Item dimensions</strong><span>Length x Width x Height</span></div>
+          <div class="dimension-triplet">
+            ${productDimensionInput("Length", "itemLength", item)}
+            ${productDimensionInput("Width", "itemWidth", item)}
+            ${productDimensionInput("Height", "itemHeight", item)}
+          </div>
+        </div>
+        <div class="dimension-group">
+          <div class="dimension-group-title"><strong>Package dimensions</strong><span>Length x Width x Height</span></div>
+          <div class="dimension-triplet">
+            ${productDimensionInput("Length", "packageLength", item)}
+            ${productDimensionInput("Width", "packageWidth", item)}
+            ${productDimensionInput("Height", "packageHeight", item)}
+          </div>
+        </div>
+        <div class="dimension-group">
+          <div class="dimension-group-title"><strong>Weights</strong><span>Calculated from package dimensions</span></div>
+          <div class="dimension-weight-grid">
+            ${productDimensionInput("Item weight", "itemWeight", item)}
+            ${productDimensionInput("Package weight", "packageWeight", item)}
+            <label>
+              <span>Dimensional weight</span>
+              <input type="number" step="0.001" value="${html(dimensionalWeight)}" data-dimensional-weight-preview="${item.id}" readonly />
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
 }
 
 function defaultReceivingWarehouse() {
@@ -274,16 +497,30 @@ function toast(message) {
   toast.timer = window.setTimeout(() => node.classList.remove("show"), 2600);
 }
 
+function setSavingIndicator(active, label = "Saving...") {
+  const progress = $("#global-save-progress");
+  const status = $("#global-save-status");
+  if (!progress || !status) return;
+  status.textContent = label;
+  document.body.classList.toggle("is-saving", active);
+  progress.setAttribute("aria-hidden", active ? "false" : "true");
+}
+
 function closeActionMenus() {
   document.querySelectorAll(".action-popover.open").forEach((menu) => menu.classList.remove("open"));
 }
 
+function productById(id) {
+  return inventoryById.get(id) || null;
+}
+
 function setState(nextState) {
   state = nextState;
+  inventoryById = new Map((state.inventory || []).map((item) => [item.id, item]));
   if (!selectedOrderId || !state.orders.some((order) => order.id === selectedOrderId)) {
     selectedOrderId = state.orders[0]?.id || null;
   }
-  if (!selectedProductId || !state.inventory.some((item) => item.id === selectedProductId)) {
+  if (!selectedProductId || !inventoryById.has(selectedProductId)) {
     selectedProductId = state.inventory[0]?.id || null;
   }
   if (selectedShadowId && !state.inventory.some((item) => (item.shadowSkus || []).some((shadow) => shadow.id === selectedShadowId))) {
@@ -291,6 +528,9 @@ function setState(nextState) {
   }
   if (!selectedTemplateId || !(state.marketplaceTemplates || []).some((template) => template.id === selectedTemplateId)) {
     selectedTemplateId = state.marketplaceTemplates?.[0]?.id || null;
+  }
+  if (!selectedExportMappingId || !(state.exportMappings || []).some((template) => template.id === selectedExportMappingId)) {
+    selectedExportMappingId = state.exportMappings?.[0]?.id || null;
   }
   if (!selectedChannelId || !(state.connections || []).some((channel) => channel.id === selectedChannelId)) {
     selectedChannelId = state.connections?.[0]?.id || null;
@@ -330,7 +570,7 @@ function showView(id) {
       (id === "catalog" && button.dataset.catalogTabLink === catalogTab);
     button.classList.toggle("active", active);
   });
-  $("#page-title").textContent = ({ dashboard: "Dashboard", orders: "Orders", drafts: "Drafts", "draft-full": "Draft Details", returns: "Returns", "return-full": "Return Details", "order-full": "Order Details", purchasing: "Purchasing", "po-full": "Purchase Order", "vendor-full": "Vendor Profile", "brand-full": "Brand Profile", "warehouse-full": "Warehouse Profile", catalog: "Catalog", "product-full": "Product Details", "shadow-full": "Shadow SKU Details", "template-full": "Template Preview", "inventory-full": "Inventory Details", "customer-full": "Customer Profile", customers: "Customers", inventory: "Inventory", reports: "Reports", connections: "Channels", "channel-full": "Channel Settings" })[id];
+  $("#page-title").textContent = ({ dashboard: "Dashboard", orders: "Orders", drafts: "Drafts", "draft-full": "Draft Details", returns: "Returns", "return-full": "Return Details", "order-full": "Order Details", purchasing: "Purchasing", "po-full": "Purchase Order", "vendor-full": "Vendor Profile", "brand-full": "Brand Profile", "warehouse-full": "Warehouse Profile", catalog: "Catalog", jobs: "Jobs", "import-export": "Import / Export", "product-full": "Product Details", "shadow-full": "Shadow SKU Details", "template-full": "Template Preview", "inventory-full": "Inventory Details", "customer-full": "Customer Profile", customers: "Customers", inventory: "Inventory", reports: "Reports", connections: "Channels", "channel-full": "Channel Settings" })[id];
   if (id === "order-full") renderFullOrderPage();
   if (id === "drafts") renderDrafts();
   if (id === "draft-full") renderDraftOrderPage();
@@ -340,6 +580,8 @@ function showView(id) {
   if (id === "vendor-full") renderVendorProfile();
   if (id === "brand-full") renderBrandProfile();
   if (id === "warehouse-full") renderWarehouseProfile();
+  if (id === "import-export") renderImportExportMappings();
+  if (id === "jobs") renderJobsPage();
   if (id === "product-full") renderProductContentPage();
   if (id === "shadow-full") renderShadowSkuPage();
   if (id === "template-full") renderTemplatePreviewPage();
@@ -429,15 +671,18 @@ function renderTopbarActions() {
       : `<button data-view="catalog" data-catalog-tab-link="inventory">Open inventory</button>`);
     actions.push(`<button data-view="catalog" data-catalog-tab-link="products">Open products</button>`);
     actions.push(`<button data-view="catalog" data-catalog-tab-link="readiness">Open readiness</button>`);
+  } else if (currentViewId === "jobs") {
+    actions.push(`<button data-refresh-import-jobs>Refresh jobs</button>`);
+    actions.push(`<button data-view-jump="import-export">Open import center</button>`);
   } else if (currentViewId === "product-full") {
-    const item = (state.inventory || []).find((row) => row.id === selectedProductId);
+    const item = productById(selectedProductId);
     if (item) {
       actions.push(`<button data-create-shadow="${item.id}">Create shadow SKU</button>`);
       actions.push(`<button data-bulk-create-shadows="${item.id}">Create all marketplace shadows</button>`);
       actions.push(`<button data-select-product="${item.id}" data-product-target="inventory-full">View inventory details</button>`);
     }
   } else if (currentViewId === "inventory-full") {
-    const item = (state.inventory || []).find((row) => row.id === selectedProductId);
+    const item = productById(selectedProductId);
     if (item) {
       actions.push(`<button data-select-product="${item.id}" data-product-target="product-full">Edit product content</button>`);
       actions.push(`<button data-open-inventory-transfer="${item.id}">Transfer stock</button>`);
@@ -472,7 +717,7 @@ function renderTopbarActions() {
   }
   target.innerHTML = `
     <div class="action-menu topbar-action-menu">
-      <button class="button" data-action-menu="topbar-actions">Actions</button>
+      <button class="button" data-action-menu="topbar-actions">${withIcon("more-horizontal", "Actions")}</button>
       <div class="action-popover" data-menu-for="topbar-actions">
         ${actions.join("")}
       </div>
@@ -494,7 +739,9 @@ function applyTheme() {
   document.documentElement.dataset.theme = themeMode;
   const button = $("#theme-toggle");
   if (button) {
-    button.textContent = themeMode === "dark" ? "Light mode" : "Dark mode";
+    const label = themeMode === "dark" ? "Light mode" : "Dark mode";
+    button.innerHTML = withIcon(themeMode === "dark" ? "sun" : "moon", label);
+    button.dataset.iconHydrated = "true";
     button.setAttribute("aria-label", `Switch to ${themeMode === "dark" ? "light" : "dark"} mode`);
   }
 }
@@ -2679,6 +2926,123 @@ function renderBrandProfile() {
   `;
 }
 
+
+function countLabel(value) {
+  return Number(value || 0).toLocaleString();
+}
+
+function pctLabel(value, total) {
+  const number = Number(value || 0);
+  const denominator = Number(total || 0);
+  if (!denominator) return "0%";
+  return `${((number / denominator) * 100).toFixed(number / denominator >= 0.1 ? 0 : 1)}%`;
+}
+
+function chartRows(rows = [], total = 0, options = {}) {
+  const selected = rows.filter(Boolean).slice(0, options.limit || 10);
+  const max = Math.max(1, ...selected.map((row) => Number(row.count || 0)));
+  return selected.length
+    ? selected.map((row) => {
+      const count = Number(row.count || 0);
+      const width = Math.max(2, (count / max) * 100);
+      return `
+        <div class="vendor-chart-row">
+          <div class="vendor-chart-label"><span>${html(row.name || "Unspecified")}</span><strong>${countLabel(count)}</strong></div>
+          <div class="vendor-chart-track"><span style="width:${width}%"></span></div>
+          <small>${pctLabel(count, total)}</small>
+        </div>
+      `;
+    }).join("")
+    : `<p class="muted">No catalog breakdown available.</p>`;
+}
+
+function binaryChartRows(rows = [], total = 0) {
+  return rows.map((row) => ({ name: row.name, count: Number(row.count || 0) })).filter((row) => row.count > 0).map((row) => `
+    <div class="vendor-metric-split-row">
+      <span>${html(row.name)}</span>
+      <strong>${countLabel(row.count)}</strong>
+      <small>${pctLabel(row.count, total)}</small>
+    </div>
+  `).join("") || `<p class="muted">No split available.</p>`;
+}
+
+function purchaseOrderBreakdown(pos = []) {
+  const statuses = new Map();
+  const units = new Map();
+  for (const po of pos) {
+    const status = String(po.status || "unknown");
+    statuses.set(status, (statuses.get(status) || 0) + 1);
+    units.set(status, (units.get(status) || 0) + Number(po.totalUnits || 0));
+  }
+  return [...statuses.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, count]) => ({ name: `${name} (${countLabel(units.get(name) || 0)} units)`, count }));
+}
+
+function renderVendorCatalogCharts(vendor, pos = []) {
+  const stats = vendor.catalogStats || {};
+  const total = Number(stats.productCount || 0);
+  const activeRows = [
+    { name: "Active", count: stats.activeProductCount },
+    { name: "Inactive", count: stats.inactiveProductCount }
+  ];
+  const stockRows = [
+    { name: "In stock", count: stats.stockProductCount },
+    { name: "Out of stock", count: stats.outOfStockProductCount }
+  ];
+  const poRows = purchaseOrderBreakdown(pos);
+  return `
+    <section class="full-card span-2 vendor-analytics-card">
+      <div class="section-head vendor-section-head">
+        <div>
+          <h3>Catalog Analytics</h3>
+          <p class="muted">Source catalog mix for this vendor.</p>
+        </div>
+        <span class="status active">${countLabel(total)} source SKUs</span>
+      </div>
+      <div class="vendor-kpi-strip">
+        <span><small>In stock</small><strong>${countLabel(stats.stockProductCount)}</strong><em>${pctLabel(stats.stockProductCount, total)}</em></span>
+        <span><small>Active</small><strong>${countLabel(stats.activeProductCount)}</strong><em>${pctLabel(stats.activeProductCount, total)}</em></span>
+        <span><small>Categories</small><strong>${countLabel((stats.categoryCounts || []).length)}</strong><em>top groups</em></span>
+        <span><small>Brands</small><strong>${countLabel((stats.brandCounts || []).length)}</strong><em>top brands</em></span>
+      </div>
+      <div class="vendor-analytics-layout">
+        <div class="vendor-chart-panel vendor-primary-chart">
+          <h4>Top Categories By SKU Count</h4>
+          ${chartRows(stats.categoryCounts || [], total, { limit: 10 })}
+        </div>
+        <div class="vendor-side-stack">
+          <div class="vendor-metric-panel">
+            <h4>Availability</h4>
+            ${binaryChartRows(stockRows, total)}
+          </div>
+          <div class="vendor-metric-panel">
+            <h4>Source Status</h4>
+            ${binaryChartRows(activeRows, total)}
+          </div>
+          <div class="vendor-chart-panel compact">
+            <h4>Supplier Codes</h4>
+            ${chartRows(stats.supplierCodeCounts || (stats.supplierCodes || []).map((name) => ({ name, count: 0 })), total, { limit: 5 })}
+          </div>
+        </div>
+      </div>
+      <div class="vendor-secondary-grid">
+        <div class="vendor-chart-panel compact">
+          <h4>Top Brands</h4>
+          ${chartRows(stats.brandCounts || [], total, { limit: 7 })}
+        </div>
+        <div class="vendor-chart-panel compact">
+          <h4>Stock Status</h4>
+          ${chartRows(stats.stockStatusCounts || [], total, { limit: 7 })}
+        </div>
+        <div class="vendor-chart-panel compact">
+          <h4>PO Status Mix</h4>
+          ${chartRows(poRows, Math.max(1, pos.length), { limit: 7 })}
+        </div>
+      </div>
+    </section>
+  `;
+}
 function renderVendorProfile() {
   const vendor = (state.vendors || []).find((item) => item.id === selectedVendorId) || state.vendors?.[0];
   const target = $("#vendor-profile-page");
@@ -2725,7 +3089,7 @@ function renderVendorProfile() {
   };
 
   target.innerHTML = `
-    <div class="full-order">
+    <div class="full-order vendor-profile">
       <div class="full-order-head">
         <button class="text-button" data-view-jump="purchasing">Back to purchasing</button>
         <div>
@@ -2740,7 +3104,7 @@ function renderVendorProfile() {
       </div>
 
       <div class="full-order-grid">
-        <section class="full-card span-2">
+        <section class="full-card span-2 vendor-summary-card">
           <h3>Vendor Summary</h3>
           <div class="summary-grid">
             <span><small>Open POs</small><strong>${vendor.openPOs}</strong></span>
@@ -2749,8 +3113,11 @@ function renderVendorProfile() {
             <span><small>Lead time</small><strong>${vendor.leadTimeDays} days</strong></span>
             <span><small>MOQ</small><strong>${vendor.moq}</strong></span>
             <span><small>Rating</small><strong>${vendor.rating || "N/A"}</strong></span>
+            <span><small>Source SKUs</small><strong>${countLabel(vendor.catalogStats?.productCount)}</strong></span>
+            <span><small>In-stock SKUs</small><strong>${countLabel(vendor.catalogStats?.stockProductCount)}</strong></span>
           </div>
         </section>
+        ${renderVendorCatalogCharts(vendor, pos)}
         <section class="full-card">
           <h3>Primary Contact</h3>
           <div class="edit-stack">
@@ -2775,15 +3142,15 @@ function renderVendorProfile() {
             <label>Minimum order<input type="number" value="${vendor.moq}" data-vendor-field="moq" data-vendor-id="${vendor.id}" /></label>
           </div>
         </section>
-        <section class="full-card span-2">
+        <section class="full-card span-2 vendor-admin-card">
           <h3>Brands Carried</h3>
-          <div class="vendor-check-list brand-profile-vendors">
+          <div class="vendor-check-list vendor-profile-brands">
             ${(state.brands || []).map((brand) => `
               <label><input type="checkbox" ${brand.vendorIds?.includes(vendor.id) ? "checked" : ""} data-vendor-brand="${vendor.id}" data-brand-id="${brand.id}" />${html(brand.name)}</label>
             `).join("")}
           </div>
         </section>
-        <section class="full-card span-2">
+        <section class="full-card span-2 vendor-admin-card">
           <h3>PO Submission Setup</h3>
           <div class="submission-grid">
             <div class="edit-stack">
@@ -2814,7 +3181,7 @@ function renderVendorProfile() {
             </div>
           </div>
         </section>
-        <section class="full-card span-2">
+        <section class="full-card span-2 vendor-admin-card">
           <h3>Vendor Files</h3>
           <div class="file-section-grid">
             ${fileSection("priceUpdates", "Price Update Files")}
@@ -3107,26 +3474,647 @@ function renderCustomerProfile() {
 
 function filteredCatalogItems() {
   const query = $("#catalog-search")?.value.trim().toLowerCase() || "";
+  const filters = catalogFilters();
   return state.inventory.filter((item) => {
     const shadows = (item.shadowSkus || []).map((shadow) => `${shadow.shadowSku} ${shadow.marketplace}`).join(" ");
-    return `${item.sku} ${item.title} ${item.marketplaceTitle} ${item.brand} ${item.category} ${item.vendor} ${shadows}`.toLowerCase().includes(query);
+    const matchesSearch = `${item.sku} ${item.title} ${item.marketplaceTitle} ${item.brand} ${item.category} ${item.sourceCategory} ${item.vendorCategory} ${item.vendor} ${item.supplier} ${item.supplierCode} ${shadows}`.toLowerCase().includes(query);
+    if (!matchesSearch) return false;
+    if (filters.supplier && String(item.supplier || item.vendor || "") !== filters.supplier) return false;
+    if (filters.active && String(item.active !== false) !== filters.active) return false;
+    if (filters.stockStatus && String(item.stockStatus || "") !== filters.stockStatus) return false;
+    if (filters.shopifyStatus === "live" && !(item.shopifyId && item.shopifyStatus === "Active" && item.shopifyPublished === true)) return false;
+    if (filters.shopifyStatus === "missing" && item.shopifyId) return false;
+    if (filters.shopifyStatus && !["live", "missing"].includes(filters.shopifyStatus) && String(item.shopifyStatus || "") !== filters.shopifyStatus) return false;
+    if (filters.hasStock && String(Number(item.stockQty ?? item.qty ?? 0) > 0) !== filters.hasStock) return false;
+    if (filters.hazardous && String(Boolean(item.hazardous)) !== filters.hazardous) return false;
+    if (filters.verifiedBrand && String(Boolean(verifiedBrandForHandle(item))) !== filters.verifiedBrand) return false;
+    if (filters.brand && String(item.brand || "") !== filters.brand) return false;
+    if (filters.category && String(item.category || "") !== filters.category) return false;
+    return true;
   });
 }
 
-function renderCatalog() {
-  const items = filteredCatalogItems();
-  if (!items.some((item) => item.id === selectedProductId)) {
-    selectedProductId = items[0]?.id || state.inventory[0]?.id || null;
-  }
+function catalogFilters() {
+  return {
+    supplier: catalogTab === "source" ? "" : ($("#catalog-filter-supplier")?.value || ""),
+    suppliers: catalogTab === "source" ? [...selectedSourceSuppliers].join("|") : "",
+    active: $("#catalog-filter-active")?.value || "",
+    productMembership: $("#catalog-filter-product-membership")?.value || "",
+    stockStatus: $("#catalog-filter-stock-status")?.value || "",
+    shopifyStatus: catalogTab === "source" ? "" : ($("#catalog-filter-shopify-status")?.value || ""),
+    hasStock: $("#catalog-filter-has-stock")?.value || "",
+    hazardous: $("#catalog-filter-hazardous")?.value || "",
+    verifiedBrand: catalogTab === "source" ? "" : ($("#catalog-filter-verified-brand")?.value || ""),
+    brand: $("#catalog-filter-brand")?.value || "",
+    category: $("#catalog-filter-category")?.value || ""
+  };
+}
 
+function fillSelectOptions(select, values = [], emptyLabel = "All") {
+  if (!select) return;
+  const current = select.value;
+  const first = select.querySelector("option")?.outerHTML || `<option value="">${emptyLabel}</option>`;
+  const unique = [...new Set(values.filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b)).slice(0, 250);
+  select.innerHTML = first + unique.map((value) => `<option value="${html(value)}">${html(value)}</option>`).join("");
+  if (unique.includes(current)) select.value = current;
+}
+
+function domToken(value) {
+  return String(value || "").replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function hasText(value, min = 1) {
+  return String(value || "").replace(/<[^>]+>/g, " ").trim().length >= min;
+}
+
+function productReadiness(item = {}) {
+  const available = Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0);
+  const checks = [
+    { key: "title", label: "Title", ok: hasText(item.marketplaceTitle || item.title, 8) },
+    { key: "description", label: "Description", ok: hasText(item.longDescription || item.shortDescription, 40) },
+    { key: "image", label: "Image", ok: Boolean(item.defaultImage || (item.images || [])[0]) },
+    { key: "category", label: "Main category", ok: hasText(item.category) && item.categoryVerified !== false },
+    { key: "brand", label: "Brand", ok: hasText(item.brand) },
+    { key: "price", label: "Price", ok: Number(item.price || 0) > 0 },
+    { key: "vendor", label: "Vendor", ok: hasText(item.vendor || item.supplier) },
+    { key: "stock", label: "Stock", ok: available > 0 },
+    { key: "barcode", label: "UPC / barcode", ok: hasText(item.barcode) },
+    { key: "dimensions", label: "Weight / dimensions", ok: Number(item.weightOz || item.itemWeight || 0) > 0 }
+  ];
+  const passed = checks.filter((check) => check.ok).length;
+  const score = Math.round((passed / checks.length) * 100);
+  const missing = checks.filter((check) => !check.ok).map((check) => check.label);
+  return { score, passed, total: checks.length, missing, ready: score >= 80 && missing.length <= 2 };
+}
+
+function readinessTone(score) {
+  if (score >= 80) return "active";
+  if (score >= 50) return "hold";
+  return "canceled";
+}
+
+function renderReadinessPill(item) {
+  const readiness = productReadiness(item);
+  return `<span class="status ${readinessTone(readiness.score)}">${withIcon("gauge", String(readiness.score) + "% ready", "status-icon")}</span>`;
+}
+
+async function loadProductAlternates(sku) {
+  const key = String(sku || "").toLowerCase();
+  if (!key || productAlternatesCache[key]) return;
+  productAlternatesCache[key] = { loading: true, rows: [] };
+  try {
+    const result = await api(`/api/catalog/alternates?sku=${encodeURIComponent(sku)}`);
+    productAlternatesCache[key] = { loading: false, rows: result.alternates?.[key] || [] };
+  } catch (error) {
+    productAlternatesCache[key] = { loading: false, rows: [], error: error.message };
+  }
+  if ((state.inventory || []).find((item) => item.id === selectedProductId)?.sku === sku) renderProductContentPage();
+}
+
+async function loadProductTableAlternates(items = []) {
+  const missingSkus = [...new Set(items.map((item) => item.sku).filter(Boolean))]
+    .filter((sku) => !productAlternatesCache[String(sku).toLowerCase()]);
+  if (!missingSkus.length) return;
+  for (const sku of missingSkus) productAlternatesCache[String(sku).toLowerCase()] = { loading: true, rows: [] };
+  try {
+    const result = await api(`/api/catalog/alternates?skus=${encodeURIComponent(missingSkus.join(","))}`);
+    for (const sku of missingSkus) {
+      const key = String(sku).toLowerCase();
+      productAlternatesCache[key] = { loading: false, rows: result.alternates?.[key] || [] };
+    }
+  } catch (error) {
+    for (const sku of missingSkus) {
+      productAlternatesCache[String(sku).toLowerCase()] = { loading: false, rows: [], error: error.message };
+    }
+  }
+  if (catalogTab === "products") renderProductsTable(filteredCatalogItems());
+}
+
+function renderProductAlternatesCell(item = {}) {
+  const key = String(item.sku || "").toLowerCase();
+  const cache = productAlternatesCache[key];
+  if (!cache || cache.loading) return `<span class="status draft">Loading</span>`;
+  const rows = cache.rows || [];
+  if (!rows.length) return `<span class="status draft">None found</span>`;
+  const vendors = [...new Set(rows.map((row) => row.supplier || row.vendor || "Unknown").filter(Boolean))];
+  const cheapest = rows.reduce((best, row) => {
+    const cost = Number(row.cost || 0);
+    if (!best || (cost > 0 && cost < Number(best.cost || Infinity))) return row;
+    return best;
+  }, null);
+  return `
+    <span class="status ${vendors.length > 1 ? "hold" : "ready"}">${vendors.length} vendor${vendors.length === 1 ? "" : "s"}</span>
+    <small>${html(vendors.slice(0, 2).join(", "))}${vendors.length > 2 ? ` +${vendors.length - 2}` : ""}</small>
+    ${cheapest ? `<small>Best cost ${money(cheapest.cost || 0)} / Qty ${Number(cheapest.stockQty ?? cheapest.qty ?? 0)}</small>` : ""}
+  `;
+}
+
+function renderProductAvailabilityPanel(item = {}) {
+  const key = String(item.sku || "").toLowerCase();
+  const cache = productAlternatesCache[key];
+  if (!cache) {
+    loadProductAlternates(item.sku);
+    return `<p class="muted">Loading vendor availability...</p>`;
+  }
+  if (cache.loading) return `<p class="muted">Loading vendor availability...</p>`;
+  if (cache.error) return `<p class="muted">Unable to load vendor availability.</p>`;
+  const rows = cache.rows || [];
+  return rows.length
+    ? `
+      <div class="catalog-table-wrap compact-availability">
+        <table class="catalog-table">
+          <thead><tr><th>SKU</th><th>Vendor / Supplier</th><th>Brand</th><th>Cost</th><th>Qty</th></tr></thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                <td>${html(row.sku)}</td>
+                <td>${html(row.supplier || row.vendor || "Unknown")}</td>
+                <td>${html(row.brand || "No brand")}</td>
+                <td>${money(row.cost || 0)}</td>
+                <td>${Number(row.stockQty ?? row.qty ?? 0)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `
+    : `<p class="muted">No source catalog vendor availability found for this SKU.</p>`;
+}
+
+function updateCatalogFilterOptions() {
+  if (!state) return;
+  if (catalogTab === "source") {
+    if (!sourceCatalogFacets) loadSourceCatalogFacets();
+    const facets = sourceCatalogFacets || {};
+    renderSupplierMultiSelect(facets.suppliers || []);
+    fillSelectOptions($("#catalog-filter-stock-status"), facets.stockStatuses || [], "Any stock status");
+    fillSelectOptions($("#catalog-filter-brand"), facets.brands || [], "All brands");
+    fillSelectOptions($("#catalog-filter-category"), facets.categories || [], "All categories");
+    return;
+  }
+  const products = state.inventory || [];
+  if (productFilterOptionsCache.inventoryCount !== products.length) {
+    productFilterOptionsCache = {
+      inventoryCount: products.length,
+      suppliers: products.map((item) => item.supplier || item.vendor),
+      stockStatuses: products.map((item) => item.stockStatus),
+      shopifyStatuses: products.map((item) => item.shopifyStatus),
+      brands: products.map((item) => item.brand),
+      categories: products.map((item) => item.category)
+    };
+  }
+  $("#supplier-multi-filter")?.remove();
+  $("#catalog-filter-supplier").style.display = "";
+  fillSelectOptions($("#catalog-filter-supplier"), productFilterOptionsCache.suppliers, "All suppliers");
+  fillSelectOptions($("#catalog-filter-stock-status"), productFilterOptionsCache.stockStatuses, "Any stock status");
+  fillSelectOptions($("#catalog-filter-shopify-status"), productFilterOptionsCache.shopifyStatuses, "Any Shopify status");
+  fillSelectOptions($("#catalog-filter-brand"), productFilterOptionsCache.brands, "All brands");
+  fillSelectOptions($("#catalog-filter-category"), productFilterOptionsCache.categories, "All categories");
+}
+
+function renderSupplierMultiSelect(suppliers = []) {
+  const select = $("#catalog-filter-supplier");
+  if (!select) return;
+  select.style.display = "none";
+  let container = $("#supplier-multi-filter");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "supplier-multi-filter";
+    container.className = "supplier-multi-filter";
+    select.insertAdjacentElement("afterend", container);
+  }
+  const query = $("#supplier-multi-search")?.value || "";
+  const q = query.trim().toLowerCase();
+  const selected = [...selectedSourceSuppliers];
+  const filtered = suppliers
+    .filter((supplier) => !q || String(supplier).toLowerCase().includes(q))
+    .slice(0, 120);
+  container.innerHTML = `
+    <button type="button" class="supplier-chip-control ${supplierMultiOpen ? "open" : ""}" data-toggle-supplier-filter>
+      <span class="supplier-chip-list">
+        ${selected.length ? selected.slice(0, 4).map((supplier) => `<span class="supplier-chip">${html(supplier)} <em data-remove-source-supplier="${html(supplier)}">x</em></span>`).join("") : `<span class="supplier-placeholder">All suppliers</span>`}
+        ${selected.length > 4 ? `<span class="supplier-chip more">+${selected.length - 4}</span>` : ""}
+      </span>
+      <span class="supplier-caret">${supplierMultiOpen ? "▲" : "▼"}</span>
+    </button>
+    <div class="supplier-dropdown ${supplierMultiOpen ? "show" : ""}">
+      <div class="supplier-search-row">
+        <input id="supplier-multi-search" type="search" placeholder="Search suppliers" value="${html(query)}" />
+        <button type="button" class="text-button" data-clear-source-suppliers ${selected.length ? "" : "disabled"}>Clear</button>
+      </div>
+      <div class="supplier-option-list">
+        ${filtered.map((supplier) => `
+          <label class="${selectedSourceSuppliers.has(String(supplier)) ? "selected" : ""}">
+            <input type="checkbox" data-source-supplier="${html(supplier)}" ${selectedSourceSuppliers.has(String(supplier)) ? "checked" : ""} />
+            <span>${html(supplier)}</span>
+          </label>
+        `).join("") || `<div class="empty-state compact">No suppliers match.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+async function loadSourceCatalog(page = sourceCatalogPage) {
+  const query = $("#catalog-search")?.value.trim() || "";
+  const requestId = ++sourceCatalogRequestId;
+  sourceCatalogState = { ...sourceCatalogState, loading: true, query };
+  renderSourceCatalogTable();
+  try {
+    const filters = catalogFilters();
+    const params = new URLSearchParams({ q: query, page: String(page), limit: "50" });
+    for (const [key, value] of Object.entries(filters)) {
+      if (value) params.set(key, value);
+    }
+    const result = await api(`/api/catalog/products?${params.toString()}`);
+    if (requestId !== sourceCatalogRequestId) return;
+    sourceCatalogPage = result.page || page;
+    sourceCatalogState = { ...result, loading: false, query };
+    mergeSourceFacetsFromItems(result.items || []);
+    renderSourceCatalogTable();
+  } catch (error) {
+    if (requestId !== sourceCatalogRequestId) return;
+    sourceCatalogState = { items: [], totalMatches: 0, hasMore: false, manifest: null, query, loading: false, error: error.message };
+    renderSourceCatalogTable();
+  }
+}
+
+function mergeSourceFacetsFromItems(items = []) {
+  const current = sourceCatalogFacets || { suppliers: [], stockStatuses: [], brands: [], categories: [] };
+  const merge = (existing = [], values = []) => [...new Set([...existing, ...values.filter(Boolean).map(String)])].sort((a, b) => a.localeCompare(b)).slice(0, 500);
+  sourceCatalogFacets = {
+    ...current,
+    suppliers: merge(current.suppliers, items.map((item) => item.supplier)),
+    stockStatuses: merge(current.stockStatuses, items.map((item) => item.stockStatus)),
+    brands: merge(current.brands, items.map((item) => item.brand)),
+    categories: merge(current.categories, items.map((item) => item.category))
+  };
+  updateCatalogFilterOptions();
+}
+
+async function loadSourceCatalogFacets() {
+  try {
+    sourceCatalogFacets = await api("/api/catalog/facets");
+    if (catalogTab === "source") updateCatalogFilterOptions();
+  } catch {
+    sourceCatalogFacets = { suppliers: [], stockStatuses: [], brands: [], categories: [] };
+  }
+}
+
+async function loadCategories() {
+  const query = $("#catalog-search")?.value.trim() || "";
+  const requestId = ++categoryRequestId;
+  categoryState = { ...categoryState, loading: true, query, scope: categoryScope };
+  renderCategories();
+  try {
+    const params = new URLSearchParams();
+    if (query) params.set("q", query);
+    params.set("scope", categoryScope);
+    const result = await api(`/api/categories?${params.toString()}`);
+    if (requestId !== categoryRequestId) return;
+    categoryState = { ...result, query, scope: categoryScope, loading: false };
+    if (!selectedCategoryId || !(categoryState.categories || []).some((category) => category.id === selectedCategoryId)) {
+      selectedCategoryId = categoryState.categories?.[0]?.id || null;
+    }
+    renderCategories();
+  } catch (error) {
+    if (requestId !== categoryRequestId) return;
+    categoryState = { categories: [], total: 0, query, loading: false, error: error.message };
+    renderCategories();
+  }
+}
+
+async function loadShopifyTaxonomyOptions(categoryId, query) {
+  const requestCategoryId = categoryId;
+  const requestQuery = String(query || "").trim();
+  shopifyTaxonomyState = { ...shopifyTaxonomyState, categoryId: requestCategoryId, query: requestQuery, loading: true };
+  renderCategories();
+  try {
+    const params = new URLSearchParams({ q: requestQuery, limit: "12" });
+    const result = await api(`/api/channel-taxonomies/shopify/categories?${params.toString()}`);
+    if (shopifyTaxonomyState.categoryId !== requestCategoryId || shopifyTaxonomyState.query !== requestQuery) return;
+    shopifyTaxonomyState = { categoryId: requestCategoryId, query: requestQuery, results: result.categories || [], total: result.total || 0, version: result.version || "", loading: false };
+    renderCategories();
+  } catch (error) {
+    if (shopifyTaxonomyState.categoryId !== requestCategoryId || shopifyTaxonomyState.query !== requestQuery) return;
+    shopifyTaxonomyState = { categoryId: requestCategoryId, query: requestQuery, results: [], total: 0, version: "", loading: false, error: error.message };
+    renderCategories();
+  }
+}
+
+function renderShopifyAttributeList(attributes = []) {
+  const rows = attributes.slice(0, 24);
+  if (!rows.length) return `<p class="muted">Select a Shopify category to see channel attributes.</p>`;
+  return `
+    <div class="shopify-attribute-list">
+      ${rows.map((attribute) => `
+        <span title="${html(attribute.description || attribute.name || "")}">
+          <strong>${html(attribute.name || attribute.handle || attribute.id)}</strong>
+          <small>${html(attribute.handle || attribute.id || "")}${attribute.extended ? " / extended" : ""}</small>
+        </span>
+      `).join("")}
+    </div>
+    ${attributes.length > rows.length ? `<small class="muted">+${attributes.length - rows.length} more attributes</small>` : ""}
+  `;
+}
+
+function renderShopifyCategoryMapper(category) {
+  const mapping = category.mappings?.shopify || {};
+  const selectedSearch = shopifyTaxonomyState.categoryId === category.id
+    ? shopifyTaxonomyState
+    : { query: mapping.categoryPath || "", results: [], total: 0, loading: false };
+  const status = mappingStatus(category, "shopify");
+  return `
+    <section class="category-map-card shopify-taxonomy-card ${status}">
+      <div class="section-head">
+        <div>
+          <h4>Shopify</h4>
+          <p class="muted">Search Shopify's product taxonomy, then use the matching category.</p>
+        </div>
+        <span class="status ${status === "mapped" ? "active" : "hold"}">${status}</span>
+      </div>
+      <div class="shopify-selected-category">
+        <span><small>Selected category</small><strong>${html(mapping.categoryPath || "None selected")}</strong></span>
+        ${mapping.categoryId ? `<code>${html(mapping.categoryId)}</code>` : ""}
+        ${mapping.googleCategory?.id ? `<div class="google-category-chip"><strong>Google ${html(mapping.googleCategory.id)}</strong><small>${html(mapping.googleCategory.breadcrumb || mapping.googleCategory.fullName || "")}</small></div>` : ""}
+        ${mapping.taxonomyVersion ? `<small>Taxonomy ${html(mapping.taxonomyVersion)}</small>` : ""}
+      </div>
+      <label class="shopify-taxonomy-search">Search Shopify taxonomy
+        <input value="${html(selectedSearch.query || "")}" placeholder="Search category, e.g. air fryer, safety gloves" data-shopify-taxonomy-search="${category.id}" />
+      </label>
+      <div class="shopify-taxonomy-results">
+        ${selectedSearch.loading ? `<div class="empty-state compact">Searching Shopify...</div>` : ""}
+        ${selectedSearch.error ? `<div class="empty-state compact">${html(selectedSearch.error)}</div>` : ""}
+        ${(!selectedSearch.loading && selectedSearch.results.length) ? selectedSearch.results.map((result) => `
+          <button class="shopify-taxonomy-result" data-apply-shopify-taxonomy="${category.id}" data-shopify-category-id="${html(result.id)}">
+            <span><strong>${html(result.name)}</strong><small>${html(result.fullName)}</small>${result.googleCategory?.id ? `<small>Google ${html(result.googleCategory.id)} / ${html(result.googleCategory.breadcrumb || result.googleCategory.fullName || "")}</small>` : ""}</span>
+            <em>${Number(result.attributeCount || 0).toLocaleString()} attrs</em>
+          </button>
+        `).join("") : ""}
+        ${(!selectedSearch.loading && selectedSearch.query && !selectedSearch.results.length && !selectedSearch.error) ? `<div class="empty-state compact">No Shopify categories found.</div>` : ""}
+      </div>
+      <div class="category-map-grid shopify-manual-fields">
+        <label>Category ID<input value="${html(mapping.categoryId || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="categoryId" /></label>
+        <label>Category path<input value="${html(mapping.categoryPath || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="categoryPath" /></label>
+        <label>Collection / handle<input value="${html(mapping.collectionHandle || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="collectionHandle" /></label>
+        <label>Notes<input value="${html(mapping.notes || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="notes" /></label>
+      </div>
+      <div class="shopify-required-attributes">
+        <h5>Shopify Attributes</h5>
+        ${renderShopifyAttributeList(mapping.attributes || [])}
+      </div>
+    </section>
+  `;
+}
+
+async function applyShopifyTaxonomyCategory(button) {
+  const categoryId = button.dataset.applyShopifyTaxonomy;
+  const shopifyCategoryId = button.dataset.shopifyCategoryId;
+  if (!categoryId || !shopifyCategoryId) return;
+  const result = await api(`/api/categories/${categoryId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ scope: categoryScope, channel: "shopify", mapping: { categoryId: shopifyCategoryId } })
+  });
+  categoryState = { ...result, query: categoryState.query, scope: categoryScope, loading: false };
+  selectedCategoryId = categoryId;
+  shopifyTaxonomyState = { categoryId, query: "", results: [], total: 0, version: "", loading: false };
+  renderCategories();
+  toast("Shopify category mapped.");
+}
+function mappingStatus(category, channel) {
+  const mapping = category.mappings?.[channel] || {};
+  return mapping.categoryId || mapping.categoryPath || mapping.collectionHandle ? "mapped" : "missing";
+}
+
+function renderCategoryMappingFields(category, channel, label) {
+  if (channel === "shopify") return renderShopifyCategoryMapper(category);
+  const mapping = category.mappings?.[channel] || {};
+  return `
+    <section class="category-map-card ${mappingStatus(category, channel)}">
+      <div class="section-head">
+        <h4>${label}</h4>
+        <span class="status ${mappingStatus(category, channel) === "mapped" ? "active" : "hold"}">${mappingStatus(category, channel)}</span>
+      </div>
+      <div class="category-map-grid">
+        <label>Category ID<input value="${html(mapping.categoryId || "")}" data-category-map="${category.id}" data-channel="${channel}" data-map-field="categoryId" /></label>
+        <label>Category path<input value="${html(mapping.categoryPath || "")}" data-category-map="${category.id}" data-channel="${channel}" data-map-field="categoryPath" /></label>
+        <label>Collection / handle<input value="${html(mapping.collectionHandle || "")}" data-category-map="${category.id}" data-channel="${channel}" data-map-field="collectionHandle" /></label>
+        <label>Notes<input value="${html(mapping.notes || "")}" data-category-map="${category.id}" data-channel="${channel}" data-map-field="notes" /></label>
+      </div>
+    </section>
+  `;
+}
+
+function renderCategoryCoverage() {
+  const coverage = categoryState.coverage || {};
+  const pct = (part, total) => total ? `${Math.round((Number(part || 0) / Number(total || 1)) * 100)}%` : "0%";
+  const attention = coverage.attention || [];
+  const actionCards = [
+    ...attention.map((row) => ({ key: row.key, label: row.label, count: row.count })),
+    { key: "vendor-category-mappings", label: "Learned vendor category mappings", count: coverage.vendorCategoryMappingCount || 0 }
+  ];
+  return `
+    <section class="category-coverage">
+      <div class="category-coverage-head">
+        <div>
+          <p class="eyebrow">Category coverage</p>
+          <h3>Mapping health</h3>
+        </div>
+        <small>${Number(coverage.productCount || 0).toLocaleString()} products tracked</small>
+      </div>
+      <div class="category-coverage-grid">
+        <span><small>Main categories</small><strong>${Number(coverage.mainCategoryCount || 0).toLocaleString()}</strong><em>${Number(coverage.verifiedProductCount || 0).toLocaleString()} verified products</em></span>
+        <span class="${coverage.shopifyMissingCount ? "needs-work" : "ready"}"><small>Missing Shopify</small><strong>${Number(coverage.shopifyMissingCount || 0).toLocaleString()}</strong><em>${pct((coverage.mainCategoryCount || 0) - (coverage.shopifyMissingCount || 0), coverage.mainCategoryCount)} mapped</em></span>
+        <span class="${coverage.shopifyPathMissingTaxonomyIdCount ? "needs-work" : "ready"}"><small>Paths missing ID</small><strong>${Number(coverage.shopifyPathMissingTaxonomyIdCount || 0).toLocaleString()}</strong><em>${Number(coverage.shopifyTaxonomyIdCount || 0).toLocaleString()} have taxonomy IDs</em></span>
+        <span class="${coverage.activeUncategorizedProductCount ? "needs-work" : "ready"}"><small>Uncategorized active</small><strong>${Number(coverage.activeUncategorizedProductCount || 0).toLocaleString()}</strong><em>${Number(coverage.uncategorizedProductCount || 0).toLocaleString()} total missing</em></span>
+        <span><small>Source categories</small><strong>${Number(coverage.sourceCategoryCount || 0).toLocaleString()}</strong><em>Vendor catalog categories</em></span>
+        <span><small>Vendor learned maps</small><strong>${Number(coverage.vendorCategoryMappingCount || 0).toLocaleString()}</strong><em>${Number(coverage.sourceVendorCategoryMappedCount || 0).toLocaleString()} matched source paths</em></span>
+      </div>
+      <div class="category-coverage-attention">
+        ${actionCards.map((row) => `
+          <div>
+            <strong>${html(row.label)}</strong>
+            <small>${Number(row.count || 0).toLocaleString()} rows</small>
+            <span class="coverage-actions">
+              <a href="/api/categories/coverage/${encodeURIComponent(row.key)}">View</a>
+              <a href="/api/categories/coverage/${encodeURIComponent(row.key)}.csv">Download CSV</a>
+            </span>
+          </div>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderCategories() {
+  const target = $("#category-list");
+  if (!target) return;
+  const categories = categoryState.categories || [];
+  const scopeLabel = categoryScope === "main" ? "Main catalog" : "Source catalog";
+  const selected = categories.find((category) => category.id === selectedCategoryId) || categories[0];
+  if (selected) selectedCategoryId = selected.id;
+  if (categoryState.loading && !categories.length) {
+    target.innerHTML = `<div class="empty-state">Loading categories...</div>`;
+    return;
+  }
+  if (categoryState.error) {
+    target.innerHTML = `<div class="empty-state">${html(categoryState.error)}</div>`;
+    return;
+  }
+  target.innerHTML = categories.length ? `
+    ${renderCategoryCoverage()}
+    <div class="category-workspace">
+      <aside class="category-list-panel">
+        <div class="category-list-head">
+          <div>
+            <strong>${Number(categoryState.total || categories.length).toLocaleString()} categories</strong>
+            <small>${html(categoryScope === "source" && categoryState.indexGeneratedAt ? `Indexed ${simpleDate(categoryState.indexGeneratedAt)}` : scopeLabel)}</small>
+          </div>
+          <div class="category-scope-tabs" role="tablist" aria-label="Category catalog source">
+            <button type="button" class="${categoryScope === "main" ? "active" : ""}" data-category-scope="main">Main</button>
+            <button type="button" class="${categoryScope === "source" ? "active" : ""}" data-category-scope="source">Source</button>
+          </div>
+        </div>
+        <div class="category-list-scroll">
+          ${categories.slice(0, 500).map((category) => `
+            <button class="category-row ${category.id === selectedCategoryId ? "active" : ""}" data-select-category="${category.id}">
+              <span><strong>${html(category.name)}</strong><small>${Number(category.productCount || 0).toLocaleString()} products / ${category.mappingCount || 0} mapped</small></span>
+              <em>${category.missingMappings?.length ? `${category.missingMappings.length} missing` : "ready"}</em>
+            </button>
+          `).join("")}
+        </div>
+      </aside>
+      <section class="category-detail-panel">
+        ${selected ? `
+          <div class="category-detail-head">
+            <div>
+              <p class="eyebrow">Internal category</p>
+              <h2>${html(selected.name)}</h2>
+              <p class="muted">${categoryScope === "main" ? "Active product catalog category. Map this to Shopify and Google before listing." : "Full source catalog category. Use this to compare supplier coverage and future product mapping."}</p>
+            </div>
+            <span class="status ${selected.status === "mapped" ? "active" : "hold"}">${html(selected.status || "needs_review")}</span>
+          </div>
+          <div class="category-metrics">
+            <span><small>Products</small><strong>${Number(selected.productCount || 0).toLocaleString()}</strong></span>
+            <span><small>Active</small><strong>${Number(selected.activeProductCount || 0).toLocaleString()}</strong></span>
+            <span><small>In stock</small><strong>${Number(selected.stockProductCount || 0).toLocaleString()}</strong></span>
+            <span><small>Hazardous</small><strong>${Number(selected.hazardousProductCount || 0).toLocaleString()}</strong></span>
+          </div>
+          <div class="category-detail-grid">
+            <section class="category-settings-card">
+              <h3>Category Settings</h3>
+              <div class="category-map-grid">
+                <label>Status<select data-category-field="status" data-category-id="${selected.id}">${["needs_review", "mapped", "approved", "paused"].map((status) => `<option value="${status}" ${selected.status === status ? "selected" : ""}>${status.replace("_", " ")}</option>`).join("")}</select></label>
+                <label>Owner<input value="${html(selected.owner || "")}" data-category-field="owner" data-category-id="${selected.id}" /></label>
+                <label>Default condition<input value="${html(selected.defaults?.condition || "New")}" data-category-default="condition" data-category-id="${selected.id}" /></label>
+                <label>Shipping profile<input value="${html(selected.defaults?.shippingProfile || "")}" data-category-default="shippingProfile" data-category-id="${selected.id}" /></label>
+                <label>Country of origin<input value="${html(selected.defaults?.countryOfOrigin || "")}" data-category-default="countryOfOrigin" data-category-id="${selected.id}" /></label>
+                <label>Required attributes<textarea rows="3" data-category-field="requiredAttributes" data-category-id="${selected.id}">${html((selected.requiredAttributes || []).join("\n"))}</textarea></label>
+                <label class="span-2">Notes<textarea rows="3" data-category-field="notes" data-category-id="${selected.id}">${html(selected.notes || "")}</textarea></label>
+              </div>
+            </section>
+            <section class="category-settings-card">
+              <h3>Top Vendors</h3>
+              <div class="category-mini-list">${(selected.topVendors || []).slice(0, 8).map((vendor) => `<span><strong>${html(vendor.name)}</strong><small>${Number(vendor.count || 0).toLocaleString()}</small></span>`).join("") || `<p class="muted">No vendor data.</p>`}</div>
+            </section>
+            <section class="category-settings-card">
+              <h3>Top Brands</h3>
+              <div class="category-mini-list">${(selected.topBrands || []).slice(0, 8).map((brand) => `<span><strong>${html(brand.name)}</strong><small>${Number(brand.count || 0).toLocaleString()}</small></span>`).join("") || `<p class="muted">No brand data.</p>`}</div>
+            </section>
+          </div>
+          <div class="category-mapping-grid">
+            ${renderCategoryMappingFields(selected, "shopify", "Shopify")}
+            ${renderCategoryMappingFields(selected, "temu", "Temu")}
+            ${renderCategoryMappingFields(selected, "tiktok", "TikTok Shop")}
+            ${renderCategoryMappingFields(selected, "ebay", "eBay")}
+            ${renderCategoryMappingFields(selected, "whatnot", "Whatnot")}
+          </div>
+        ` : `<div class="empty-state">Select a category.</div>`}
+      </section>
+    </div>
+  ` : `<div class="empty-state">No categories match this search.</div>`;
+}
+
+async function updateCategoryField(input) {
+  const categoryId = input.dataset.categoryId || input.dataset.categoryMap;
+  if (!categoryId) return;
+  const body = {};
+  body.scope = categoryScope;
+  if (input.dataset.categoryField) {
+    body[input.dataset.categoryField] = input.dataset.categoryField === "requiredAttributes" ? input.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) : input.value;
+  }
+  if (input.dataset.categoryDefault) {
+    body.defaults = { [input.dataset.categoryDefault]: input.type === "checkbox" ? input.checked : input.value };
+  }
+  if (input.dataset.channel && input.dataset.mapField) {
+    body.channel = input.dataset.channel;
+    body.mapping = { [input.dataset.mapField]: input.value };
+  }
+  const result = await api(`/api/categories/${categoryId}`, { method: "PATCH", body: JSON.stringify(body) });
+  categoryState = { ...result, query: categoryState.query, scope: categoryScope, loading: false };
+  selectedCategoryId = categoryId;
+  renderCategories();
+  toast("Category updated.");
+}
+
+function renderCatalog() {
+  if (!state) return;
   document.querySelectorAll("[data-catalog-tab]").forEach((button) => button.classList.toggle("active", button.dataset.catalogTab === catalogTab));
+  updateCatalogFilterOptions();
+  if (selectedProductIds.size) {
+    const inventoryIds = new Set((state.inventory || []).map((item) => item.id));
+    selectedProductIds = new Set([...selectedProductIds].filter((id) => inventoryIds.has(id)));
+  }
+  updateCatalogBulkBar();
+  const catalogToolbar = $("#catalog-search")?.closest(".toolbar");
+  const catalogFilters = document.querySelector(".catalog-filters");
+  const catalogBulkBar = document.querySelector(".catalog-bulk-bar");
+  const showCatalogToolbar = ["products", "source", "categories", "reviews", "inventory"].includes(catalogTab);
+  const showCatalogFilters = ["products", "source", "inventory"].includes(catalogTab);
+  if (catalogToolbar) catalogToolbar.style.display = showCatalogToolbar ? "" : "none";
+  if (catalogFilters) catalogFilters.style.display = showCatalogFilters ? "" : "none";
+  if (catalogBulkBar) catalogBulkBar.style.display = ["products", "source"].includes(catalogTab) ? "" : "none";
+  const inventoryImportButton = $("#inventory-import")?.closest(".file-button");
+  if (inventoryImportButton) inventoryImportButton.style.display = ["products", "inventory"].includes(catalogTab) ? "" : "none";
+  document.querySelectorAll(".category-only-control").forEach((element) => {
+    element.style.display = catalogTab === "categories" ? "" : "none";
+  });
   $("#products-list").style.display = catalogTab === "products" ? "block" : "none";
+  $("#source-catalog-list").style.display = catalogTab === "source" ? "block" : "none";
+  $("#import-review-list").style.display = catalogTab === "reviews" ? "block" : "none";
+  $("#category-list").style.display = catalogTab === "categories" ? "block" : "none";
+  const catalogImportExportList = $("#import-export-list");
+  if (catalogImportExportList) catalogImportExportList.style.display = catalogTab === "import-export" ? "block" : "none";
   $("#inventory-list").style.display = catalogTab === "inventory" ? "block" : "none";
   $("#template-list").style.display = catalogTab === "templates" ? "block" : "none";
   $("#readiness-list").style.display = catalogTab === "readiness" ? "block" : "none";
+  document.querySelectorAll(".source-only-control").forEach((element) => {
+    element.style.display = catalogTab === "source" ? "" : "none";
+  });
+  document.querySelectorAll(".product-only-control").forEach((element) => {
+    element.style.display = catalogTab === "products" ? "" : "none";
+  });
 
+  if (catalogTab === "source") {
+    renderSourceCatalogTable();
+    loadSourceCatalog(sourceCatalogPage);
+    return;
+  }
+  if (catalogTab === "categories") {
+    renderCategories();
+    if (!categoryState.categories.length || categoryState.query !== ($("#catalog-search")?.value.trim() || "") || categoryState.scope !== categoryScope) loadCategories();
+    return;
+  }
+  if (catalogTab === "reviews") {
+    renderCatalogImportReviews();
+    return;
+  }
   if (catalogTab === "inventory") {
+    const items = filteredCatalogItems();
     renderInventoryTable(items);
+    return;
+  }
+  if (catalogTab === "import-export") {
+    showView("import-export");
     return;
   }
   if (catalogTab === "templates") {
@@ -3137,7 +4125,829 @@ function renderCatalog() {
     renderReadinessQueue();
     return;
   }
+  const items = filteredCatalogItems();
+  if (!items.some((item) => item.id === selectedProductId)) {
+    selectedProductId = items[0]?.id || state.inventory[0]?.id || null;
+  }
   renderProductsTable(items);
+}
+
+function renderSourceCatalogTable() {
+  const target = $("#source-catalog-list");
+  if (!target) return;
+  const { items = [], manifest, loading, error, totalMatches = 0, hasMore = false, partial = false, scanned = 0 } = sourceCatalogState || {};
+  const importedLabel = manifest?.importedAt ? simpleDate(manifest.importedAt) : "";
+  const countLabel = manifest?.productCount ? `${Number(manifest.productCount).toLocaleString()} imported` : "Catalog file pending";
+  const exportMappings = state.exportMappings || [];
+  const selectedCount = selectedSourceAllFiltered ? totalMatches : selectedSourceSkus.size;
+  const sourceSelectionLabel = selectedSourceAllFiltered
+    ? `${Number(totalMatches || 0).toLocaleString()} filtered selected`
+    : selectedSourceSkus.size
+      ? `${Number(selectedSourceSkus.size).toLocaleString()} selected`
+      : `${Number(totalMatches || 0).toLocaleString()} filtered products`;
+
+  if (loading && !items.length) {
+    target.innerHTML = `<div class="empty-state">Searching source catalog...</div>`;
+    return;
+  }
+  if (error) {
+    target.innerHTML = `<div class="empty-state">Unable to search source catalog: ${html(error)}</div>`;
+    return;
+  }
+  target.innerHTML = `
+    <div class="catalog-source-summary">
+      <span><strong>${html(countLabel)}</strong>${importedLabel ? `<small>Last import ${html(importedLabel)}</small>` : ""}</span>
+      <span><strong>${Number(totalMatches || 0).toLocaleString()}</strong><small>${partial ? `matches in ${Number(scanned || 0).toLocaleString()} scanned` : "matches"}</small></span>
+      <span><strong>Page ${sourceCatalogPage}</strong><small>${loading ? "Refreshing" : hasMore ? "More available" : "End of results"}</small></span>
+    </div>
+    ${items.length ? `
+      <div class="catalog-selection-toolbar">
+        <div class="selection-summary">
+          <strong>Source catalog selection</strong>
+          <small>${html(sourceSelectionLabel)}${selectedSourceAllFiltered ? " for export" : ""}</small>
+        </div>
+        <div class="selection-actions">
+          <button class="button secondary" type="button" data-select-source-page>Select current page</button>
+          <button class="button secondary" type="button" data-select-source-filtered ${totalMatches ? "" : "disabled"}>Select all filtered</button>
+          <button class="button secondary" type="button" data-clear-source-selection ${selectedCount ? "" : "disabled"}>Clear</button>
+        </div>
+        <select id="source-export-template" aria-label="Source export template">
+          ${exportMappings.map((template) => `<option value="${template.id}" ${template.id === selectedExportMappingId ? "selected" : ""}>${html(template.name)}</option>`).join("")}
+        </select>
+        <button class="button secondary" type="button" data-export-source-products ${exportMappings.length ? "" : "disabled"}>Export CSV</button>
+      </div>
+      <div class="catalog-table-wrap">
+        <table class="catalog-table">
+          <thead>
+            <tr><th><input type="checkbox" data-source-check-all ${items.every((item) => selectedSourceAllFiltered || selectedSourceSkus.has(item.sku)) ? "checked" : ""} /></th><th>Source Product</th><th>Supplier</th><th>Manufacturer</th><th>Brand</th><th>Price</th><th>Stock</th><th>Channels</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            ${items.map((item) => {
+              const sourceMenuId = `source-${domToken(item.sku)}`;
+              return `
+              <tr class="${item.inProducts && item.productCatalogDiffs?.length ? "source-changed-row" : ""}">
+                <td><input type="checkbox" data-source-check="${html(item.sku)}" ${selectedSourceAllFiltered || selectedSourceSkus.has(item.sku) ? "checked" : ""} /></td>
+                <td>
+                  <strong>${html(item.sku)}</strong>
+                  <small>${html(item.title || item.marketplaceTitle || "Untitled product")}</small>
+                  ${item.inProducts ? `<span class="status active">In Products</span>` : `<span class="status draft">Source only</span>`}
+                  ${item.productCatalogDiffs?.length ? `<small class="source-diff-note">Changed: ${html(item.productCatalogDiffs.slice(0, 4).join(", "))}</small>` : ""}
+                  ${item.alternateVendorCount ? `<small>${Number(item.alternateVendorCount)} other vendor${item.alternateVendorCount === 1 ? "" : "s"} available</small>` : ""}
+                </td>
+                <td>${html([item.supplier, item.supplierCode].filter(Boolean).join(" / ") || "No supplier")}</td>
+                <td>${html(item.manufacturer || item.mfrPartNumber || "No manufacturer")}</td>
+                <td>${html(item.brand || "No brand")}</td>
+                <td><strong>${money(item.price || 0)}</strong><small>Cost ${money(item.cost || 0)}</small></td>
+                <td>${Number(item.stockQty || 0)}<small>${html(item.status || (item.active === false ? "Inactive" : "Active"))}</small></td>
+                <td>
+                  ${item.zoroSku ? `<small>Zoro ${html(item.zoroSku)}</small>` : ""}
+                  ${item.varisContractPrice ? `<small>Varis ${money(item.varisContractPrice)}</small>` : ""}
+                </td>
+                <td>
+                  <div class="action-menu">
+                    <button class="icon-button" data-action-menu="${html(sourceMenuId)}" aria-label="Open source catalog actions">...</button>
+                    <div class="action-popover" data-menu-for="${html(sourceMenuId)}">
+                      <button data-promote-catalog-sku="${html(item.sku)}">Add to Active Catalog</button>
+                      <button data-source-row-action="set-active" data-source-sku="${html(item.sku)}">Set active</button>
+                      <button data-source-row-action="set-inactive" data-source-sku="${html(item.sku)}">Set inactive</button>
+                      <button data-source-row-action="set-discontinued" data-source-sku="${html(item.sku)}">Set discontinued</button>
+                      <button data-source-row-action="delete" data-source-sku="${html(item.sku)}">Hide from Source Catalog</button>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            `; }).join("")}
+          </tbody>
+        </table>
+      </div>
+      <div class="catalog-pager">
+        <button class="button secondary" data-source-page="${sourceCatalogPage - 1}" ${sourceCatalogPage <= 1 ? "disabled" : ""}>Previous</button>
+        <button class="button secondary" data-source-page="${sourceCatalogPage + 1}" ${hasMore ? "" : "disabled"}>Next</button>
+      </div>
+    ` : `<div class="empty-state">No source catalog products match this search.</div>`}
+  `;
+  updateCatalogBulkBar();
+}
+
+function updateCatalogBulkBar() {
+  const count = catalogTab === "source"
+    ? (selectedSourceAllFiltered ? Number(sourceCatalogState?.totalMatches || 0) : selectedSourceSkus.size)
+    : selectedProductAllFiltered ? filteredCatalogItems().length : selectedProductIds.size;
+  const countEl = $("#catalog-selected-count");
+  if (countEl) countEl.textContent = count;
+  const action = $("#catalog-bulk-action");
+  if (!action) return;
+  [...action.options].forEach((option) => {
+    if (!option.value) return;
+    option.disabled = catalogTab !== "source" && option.value === "add-active";
+  });
+  if (catalogTab !== "source" && action.value === "add-active") action.value = "";
+}
+
+function clearCatalogSelection() {
+  selectedSourceSkus.clear();
+  selectedSourceAllFiltered = false;
+  selectedProductIds.clear();
+  selectedProductAllFiltered = false;
+  renderCatalog();
+}
+
+async function loadProductFieldOptions() {
+  if (productFieldOptions) return productFieldOptions;
+  try {
+    const result = await api("/api/product-fields");
+    productFieldOptions = result.fields || [];
+  } catch {
+    productFieldOptions = [
+      { key: "sku", label: "SKU" },
+      { key: "title", label: "Title" },
+      { key: "marketplaceTitle", label: "Marketplace title" },
+      { key: "price", label: "Price" },
+      { key: "qty", label: "Quantity" },
+      { key: "available", label: "Available" }
+    ];
+  }
+  if (currentViewId === "import-export" || catalogTab === "import-export") renderImportExportMappings();
+  return productFieldOptions;
+}
+
+function mappingRowsText(template) {
+  return (template.mappings || []).map((row) => `${row.externalColumn}|${row.productField}|${row.defaultValue || ""}`).join("\n");
+}
+
+function parseCsvHeaderLine(text) {
+  const line = String(text || "").split(/\r?\n/)[0] || "";
+  const headers = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    const next = line[i + 1];
+    if (char === '"' && inQuotes && next === '"') {
+      field += '"';
+      i += 1;
+    } else if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === "," && !inQuotes) {
+      headers.push(field.trim());
+      field = "";
+    } else {
+      field += char;
+    }
+  }
+  headers.push(field.trim());
+  return headers.filter(Boolean);
+}
+
+function guessProductField(header) {
+  const key = String(header || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const guesses = {
+    sku: "sku",
+    itemsku: "sku",
+    variantsku: "sku",
+    handle: "sku",
+    title: "marketplaceTitle",
+    itemname: "marketplaceTitle",
+    name: "marketplaceTitle",
+    description: "longDescription",
+    bodyhtml: "longDescription",
+    brand: "brand",
+    brandname: "brand",
+    vendor: "vendor",
+    price: "price",
+    standardprice: "price",
+    variantprice: "price",
+    quantity: "qty",
+    qty: "qty",
+    inventoryqty: "qty",
+    variantinventoryqty: "qty",
+    category: "category",
+    productcategory: "shopifyCategoryPath",
+    googleproductcategory: "googleCategoryId",
+    image: "defaultImage",
+    imagesrc: "defaultImage",
+    tags: "tags",
+    barcode: "barcode",
+    condition: "condition"
+  };
+  return guesses[key] || "";
+}
+
+function renderFieldOptionBadges() {
+  const fields = productFieldOptions || [];
+  return fields.slice(0, 80).map((field) => `<button type="button" class="field-chip" data-copy-field="${html(field.key)}">${html(field.label || field.key)}<small>${html(field.key)}</small></button>`).join("");
+}
+
+function renderProductFieldSelect(value = "", templateId = "", rowIndex = 0) {
+  const fields = productFieldOptions || [];
+  return `
+    <select data-export-mapping-draft-row-field="productField" data-export-mapping-id="${templateId}" data-mapping-row-index="${rowIndex}">
+      <option value="">Unmapped</option>
+      ${fields.map((field) => `<option value="${html(field.key)}" ${field.key === value ? "selected" : ""}>${html(field.label || field.key)} (${html(field.key)})</option>`).join("")}
+    </select>
+  `;
+}
+
+function renderMappingDraftRow(row = {}, templateId = "", index = 0) {
+  return `
+    <article class="mapping-row-edit">
+      <input value="${html(row.externalColumn || "")}" data-export-mapping-draft-row-field="externalColumn" data-export-mapping-id="${templateId}" data-mapping-row-index="${index}" />
+      ${renderProductFieldSelect(row.productField, templateId, index)}
+      <input value="${html(row.defaultValue || "")}" data-export-mapping-draft-row-field="defaultValue" data-export-mapping-id="${templateId}" data-mapping-row-index="${index}" />
+      <label class="checkbox-row"><input type="checkbox" ${row.required ? "checked" : ""} data-export-mapping-draft-row-field="required" data-export-mapping-id="${templateId}" data-mapping-row-index="${index}" /> Required</label>
+      <button class="button secondary" type="button" data-remove-export-mapping-row="${templateId}" data-mapping-row-index="${index}">Delete</button>
+    </article>
+  `;
+}
+
+function isBuiltInExportMapping(template = {}) {
+  return ["export-shopify-basic", "export-ebay-basic", "export-amazon-basic"].includes(template.id);
+}
+
+function importJobRows() {
+  const rows = Array.isArray(state?.importJobs) && state.importJobs.length
+    ? state.importJobs
+    : (state?.syncRuns || []).map((run) => ({
+      id: run.id,
+      section: run.source || 'System',
+      operation: run.type || 'Sync',
+      direction: /export/i.test(run.type || '') ? 'export' : 'import',
+      status: run.status || 'success',
+      fileName: run.fileName || '',
+      message: run.message || '',
+      totalRows: 0,
+      changed: 0,
+      created: 0,
+      missingCount: 0,
+      errors: run.errors || [],
+      createdAt: run.createdAt,
+      updatedAt: run.createdAt,
+      finishedAt: run.createdAt
+    }));
+  return rows.slice().sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0));
+}
+
+function importJobStatusClass(status = '') {
+  const value = String(status || '').toLowerCase();
+  if (value === 'running' || value === 'queued') return 'hold';
+  if (value === 'failed') return 'canceled';
+  if (value === 'stopped') return 'inactive';
+  if (value === 'warning') return 'draft';
+  return 'active';
+}
+
+function importJobStatusLabel(status = '') {
+  const value = String(status || 'success').toLowerCase();
+  if (value === 'running') return 'Running';
+  if (value === 'queued') return 'Queued';
+  if (value === 'failed') return 'Failed';
+  if (value === 'warning') return 'Needs review';
+  if (value === 'stopped') return 'Stopped';
+  return 'Done';
+}
+
+function renderImportJobMetrics(job = {}) {
+  const metrics = [];
+  if (Number(job.totalRows || 0)) metrics.push(`${Number(job.totalRows || 0).toLocaleString()} rows`);
+  if (Number(job.changed || 0)) metrics.push(`${Number(job.changed || 0).toLocaleString()} changed`);
+  if (Number(job.created || 0)) metrics.push(`${Number(job.created || 0).toLocaleString()} created`);
+  if (Number(job.missingCount || 0)) metrics.push(`${Number(job.missingCount || 0).toLocaleString()} missing`);
+  return metrics.join(' / ') || html(job.direction || 'import');
+}
+
+function filteredImportJobs({ useJobsFilters = false } = {}) {
+  let jobs = importJobRows();
+  if (!useJobsFilters) return jobs;
+  const query = String(jobsFilter.query || "").trim().toLowerCase();
+  if (jobsFilter.section) jobs = jobs.filter((job) => String(job.section || "").toLowerCase() === jobsFilter.section);
+  if (jobsFilter.status) jobs = jobs.filter((job) => String(job.status || "").toLowerCase() === jobsFilter.status);
+  if (jobsFilter.direction) jobs = jobs.filter((job) => String(job.direction || "").toLowerCase() === jobsFilter.direction);
+  if (query) jobs = jobs.filter((job) => `${job.operation} ${job.section} ${job.fileName} ${job.status} ${job.message}`.toLowerCase().includes(query));
+  return jobs;
+}
+
+function importJobFilterOptions(field) {
+  return [...new Set(importJobRows().map((job) => String(job[field] || "").trim()).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function selectedImportJob(filteredJobs = null) {
+  const allJobs = importJobRows();
+  const visibleJobs = filteredJobs || allJobs;
+  let job = allJobs.find((row) => row.id === selectedImportJobId);
+  if (!job || (filteredJobs && !visibleJobs.some((row) => row.id === job.id))) {
+    job = visibleJobs[0] || allJobs[0] || null;
+    selectedImportJobId = job?.id || null;
+  }
+  return job;
+}
+
+function jobImportSection(job = {}) {
+  const text = `${job.section || ""} ${job.operation || ""}`.toLowerCase();
+  if (/categor/.test(text)) return "categories";
+  if (/source/.test(text)) return "source";
+  if (/inventory/.test(text)) return "inventory";
+  if (/order/.test(text)) return "orders";
+  if (/customer/.test(text)) return "customers";
+  return "products";
+}
+
+function renderJobProfile(job = null) {
+  if (!job) {
+    return `
+      <aside class="job-profile-panel">
+        <div class="empty-state compact">Select a job to see its profile.</div>
+      </aside>
+    `;
+  }
+  const status = String(job.status || "success").toLowerCase();
+  const canStop = ["queued", "running"].includes(status);
+  const hasOriginal = Boolean(job.originalFilePath);
+  const hasErrors = Boolean((job.errors || []).length || job.errorFilePath || job.errorFileName);
+  const statRows = [
+    ["Type", job.direction || "import"],
+    ["Category", job.section || "System"],
+    ["Started", dateLabel(job.startedAt || job.createdAt)],
+    ["Ended", job.finishedAt ? dateLabel(job.finishedAt) : "Running"],
+    ["Original", job.originalFileName || job.fileName || "None"],
+    ["Rows", Number(job.totalRows || 0).toLocaleString()],
+    ["Changed", Number(job.changed || 0).toLocaleString()],
+    ["Missing", Number(job.missingCount || 0).toLocaleString()]
+  ];
+  return `
+    <aside class="job-profile-panel">
+      <div class="job-profile-head">
+        <div>
+          <p class="eyebrow">Job Profile</p>
+          <h3>${html(job.operation || "Import job")}</h3>
+          <p class="muted">${html([job.section, job.fileName].filter(Boolean).join(" / ") || "System job")}</p>
+        </div>
+        <span class="status ${importJobStatusClass(job.status)}">${html(importJobStatusLabel(job.status))}</span>
+      </div>
+      <div class="job-profile-actions">
+        <button class="button" type="button" data-job-run="${html(job.id)}">${withIcon("upload", "Run")}</button>
+        <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon("refresh-cw", "Refresh")}</button>
+        <button class="button danger" type="button" data-job-stop="${html(job.id)}" ${canStop ? "" : "disabled"}>Stop</button>
+      </div>
+      <div class="job-profile-note">
+        ${canStop ? "This job is currently active and can be stopped." : "Run opens the matching import area. Background reruns will be connected when the runner is added."}
+      </div>
+      <div class="job-profile-stats">
+        ${statRows.map(([label, value]) => `<span><small>${html(label)}</small><strong>${html(value)}</strong></span>`).join("")}
+      </div>
+      <div class="job-profile-files">
+        ${hasOriginal ? `<a class="button secondary" href="/api/import-jobs/${encodeURIComponent(job.id)}/original">${withIcon("download", "Original file")}</a>` : `<button class="button secondary" type="button" disabled>Original file</button>`}
+        ${hasErrors ? `<a class="button secondary" href="/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv">${withIcon("download", "Errors CSV")}</a>` : `<button class="button secondary" type="button" disabled>Errors CSV</button>`}
+      </div>
+      ${job.message ? `<div class="job-profile-message"><strong>Status message</strong><p>${html(job.message)}</p></div>` : ""}
+      ${(job.errors || []).length ? `
+        <div class="job-profile-errors">
+          <strong>Error preview</strong>
+          ${(job.errors || []).slice(0, 8).map((error) => `<span>${html(error)}</span>`).join("")}
+        </div>
+      ` : ""}
+    </aside>
+  `;
+}
+
+function renderImportJobActions(job = {}) {
+  const actions = [];
+  if (job.originalFilePath) actions.push(`<a href="/api/import-jobs/${encodeURIComponent(job.id)}/original">Original file</a>`);
+  if ((job.errors || []).length || job.errorFilePath || job.errorFileName) actions.push(`<a href="/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv">Errors CSV</a>`);
+  return actions.length ? `<div class="import-job-actions">${actions.join('')}</div>` : '';
+}
+
+function renderImportQueuePanel({ full = false } = {}) {
+  const jobs = importJobRows();
+  const filteredJobs = filteredImportJobs({ useJobsFilters: full && currentViewId === "jobs" });
+  const visibleJobs = full ? filteredJobs : filteredJobs.slice(0, 8);
+  const runningCount = jobs.filter((job) => ['queued', 'running'].includes(String(job.status || '').toLowerCase())).length;
+  const failedCount = jobs.filter((job) => String(job.status || '').toLowerCase() === 'failed').length;
+  return `
+    <section class="import-queue-panel ${full ? 'full' : ''}">
+      <div class="section-head import-queue-head">
+        <div>
+          <p class="eyebrow">Queue</p>
+          <h3>${full ? 'Import Queue & History' : 'Queue & History'}</h3>
+          <p class="muted">${runningCount ? `${runningCount} running / ` : ''}${failedCount ? `${failedCount} failed / ` : ''}${jobs.length} total jobs</p>
+        </div>
+        <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon('refresh-cw', 'Refresh')}</button>
+      </div>
+      <div class="import-job-list">
+        ${visibleJobs.map((job) => `
+          <article class="import-job-row ${selectedImportJobId === job.id ? 'selected' : ''}" data-select-import-job="${html(job.id)}">
+            <div class="import-job-main">
+              <span class="status ${importJobStatusClass(job.status)}">${html(importJobStatusLabel(job.status))}</span>
+              <div class="import-job-title">
+                <strong>${html(job.operation || 'Import')}</strong>
+                <small>${html([job.section, job.fileName].filter(Boolean).join(' / ') || 'System job')}</small>
+              </div>
+            </div>
+            <div class="import-job-meta">
+              <span>${html(renderImportJobMetrics(job))}</span>
+              <span>${html(dateLabel(job.startedAt || job.createdAt))}</span>
+              <span>${job.finishedAt ? html(dateLabel(job.finishedAt)) : 'Running'}</span>
+            </div>
+            ${renderImportJobActions(job)}
+            ${job.message ? `<p class="import-job-message">${html(job.message)}</p>` : ''}
+            ${(job.errors || []).length ? `<details class="import-job-errors"><summary>View details</summary><div>${(job.errors || []).slice(0, 30).map((error) => `<span>${html(error)}</span>`).join('')}</div></details>` : ''}
+          </article>
+        `).join('') || `<div class="empty-state compact">No imports have been recorded yet.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function importExportSections(templates = []) {
+  const jobs = importJobRows();
+  return [
+    { id: 'products', icon: 'package', label: 'Products', meta: `${templates.length} templates`, description: 'Mapped product imports and marketplace exports.' },
+    { id: 'inventory', icon: 'warehouse', label: 'Inventory', meta: 'Stock CSV', description: 'Quantities, costs, and stock updates.' },
+    { id: 'source', icon: 'database', label: 'Source Catalog', meta: 'Supplier SKUs', description: 'Move source SKUs into Products.' },
+    { id: 'categories', icon: 'tags', label: 'Categories', meta: 'Coming soon', description: 'Category mappings and taxonomy updates.' },
+    { id: 'orders', icon: 'shopping-cart', label: 'Orders', meta: 'Coming soon', description: 'Order imports and marketplace order templates.' },
+    { id: 'customers', icon: 'users', label: 'Customers', meta: 'Coming soon', description: 'Customer imports and contact updates.' },
+    { id: 'queue', icon: 'list-check', label: 'Queue', meta: `${jobs.length} jobs`, description: 'Import history, warnings, and failures.' }
+  ];
+}
+
+function renderImportSectionMenu(sections = []) {
+  return `
+    <aside class="import-section-menu">
+      <div class="import-menu-title">
+        <p class="eyebrow">Sections</p>
+        <strong>Import / Export</strong>
+      </div>
+      ${sections.map((section) => `
+        <button class="import-section-button ${activeImportSection === section.id ? 'active' : ''}" type="button" data-import-section="${section.id}">
+          ${iconMarkup(section.icon)}
+          <span><strong>${html(section.label)}</strong><small>${html(section.description)}</small></span>
+          <em>${html(section.meta)}</em>
+        </button>
+      `).join('')}
+    </aside>
+  `;
+}
+
+function renderTemplateActionRows(templates = []) {
+  return `
+    <div class="import-template-list">
+      ${templates.map((template) => {
+        const hasSku = (template.mappings || []).some((row) => row.productField === 'sku');
+        return `
+          <article class="import-template-row">
+            <div>
+              <strong>${html(template.name)}</strong>
+              <small>${html(template.source)} / ${(template.mappings || []).length} columns / ${hasSku ? 'SKU mapped' : 'Needs SKU'}</small>
+            </div>
+            <div class="import-template-actions">
+              <button class="button secondary" type="button" data-open-export-mapping="${template.id}">${withIcon('file-pen-line', 'Manage')}</button>
+              <button class="button secondary" type="button" data-open-product-import="${template.id}">${withIcon('upload', 'Import')}</button>
+              <a class="button secondary" href="/api/export-mappings/${template.id}/export">${withIcon('clipboard-list', 'Export')}</a>
+              ${isBuiltInExportMapping(template)
+                ? `<button class="button secondary" type="button" data-duplicate-export-mapping="${template.id}">${withIcon('copy', 'Duplicate')}</button>`
+                : `<button class="button danger" type="button" data-delete-export-mapping="${template.id}">${withIcon('trash-2', 'Delete')}</button>`}
+            </div>
+          </article>
+        `;
+      }).join('') || `<div class="empty-state compact">Create a template to start importing or exporting product files.</div>`}
+    </div>
+  `;
+}
+
+function renderImportSectionBody(sectionId, templates = []) {
+  const shopifyTemplate = templates.find((template) => /shopify/i.test(`${template.name} ${template.source}`));
+  if (sectionId === 'inventory') {
+    return `
+      <section class="import-section-panel">
+        <div class="import-panel-title">
+          ${sectionIconTitle('warehouse', 'Inventory Imports')}
+          <p class="muted">Update active product quantities, stock fields, and inventory attributes from CSV.</p>
+        </div>
+        <div class="import-action-list">
+          <article class="import-action-row">
+            <div><strong>Inventory CSV</strong><small>Imports SKU, quantity, title, brand, costs, prices, and mapped inventory fields.</small></div>
+            <label class="file-button">${withIcon('upload', 'Import inventory CSV')}<input type="file" accept=".csv,text/csv" data-central-inventory-import /></label>
+          </article>
+          <article class="import-action-row muted-row">
+            <div><strong>Warehouse stock import</strong><small>Reserved for bin/location stock templates.</small></div>
+            <button class="button secondary" type="button" disabled>Coming soon</button>
+          </article>
+        </div>
+      </section>
+    `;
+  }
+  if (sectionId === 'source') {
+    return `
+      <section class="import-section-panel">
+        <div class="import-panel-title">
+          ${sectionIconTitle('database', 'Source Catalog')}
+          <p class="muted">Promote supplier catalog SKUs into Products from a CSV list.</p>
+        </div>
+        <div class="import-action-list">
+          <article class="import-action-row">
+            <div><strong>Add source SKUs to Products</strong><small>Upload a sku list, preview counts, then move matching source rows into the main catalog.</small></div>
+            <label class="file-button">${withIcon('upload', 'Add SKUs CSV')}<input type="file" accept=".csv,text/csv" data-central-source-sku-import /></label>
+          </article>
+          <article class="import-action-row">
+            <div><strong>Open Source Catalog</strong><small>Filter suppliers, select rows, export, or run source catalog actions.</small></div>
+            <button class="button secondary" type="button" data-view="catalog" data-catalog-tab-link="source">${withIcon('search', 'Open source catalog')}</button>
+          </article>
+        </div>
+      </section>
+    `;
+  }
+  if (sectionId === 'queue') return renderImportQueuePanel({ full: true });
+  if (sectionId === 'categories' || sectionId === 'orders' || sectionId === 'customers') {
+    const labels = { categories: 'Category Imports', orders: 'Order Imports', customers: 'Customer Imports' };
+    const icons = { categories: 'tags', orders: 'shopping-cart', customers: 'users' };
+    return `
+      <section class="import-section-panel">
+        <div class="import-panel-title">
+          ${sectionIconTitle(icons[sectionId], labels[sectionId])}
+          <p class="muted">This section is reserved so future imports have a clean home instead of being added randomly across pages.</p>
+        </div>
+        <div class="import-action-list">
+          <article class="import-action-row muted-row">
+            <div><strong>${html(labels[sectionId])}</strong><small>Template mapping, validation preview, and queue tracking will use this same flow.</small></div>
+            <button class="button secondary" type="button" disabled>Coming soon</button>
+          </article>
+        </div>
+      </section>
+    `;
+  }
+  return `
+    <section class="import-section-panel">
+      <div class="import-panel-title">
+        ${sectionIconTitle('package', 'Product Import / Export')}
+        <p class="muted">Use mapped templates for Shopify, eBay, Amazon, and custom product files.</p>
+      </div>
+      <div class="import-action-list">
+        <article class="import-action-row">
+          <div><strong>Shopify / Matrixify status</strong><small>Updates Shopify ID, Variant ID, handle, published state, and live status after Shopify export.</small></div>
+          <label class="file-button">${withIcon('upload', 'Import Shopify status')}<input type="file" accept=".csv,text/csv" data-central-shopify-status-import /></label>
+        </article>
+        ${shopifyTemplate ? `
+          <article class="import-action-row">
+            <div><strong>Shopify product CSV</strong><small>Import or export with the Shopify product template already mapped in DataPlus.</small></div>
+            <div class="import-template-actions">
+              <button class="button secondary" type="button" data-open-product-import="${shopifyTemplate.id}">${withIcon('upload', 'Import CSV')}</button>
+              <a class="button secondary" href="/api/export-mappings/${shopifyTemplate.id}/export">${withIcon('clipboard-list', 'Export CSV')}</a>
+              <button class="button secondary" type="button" data-open-export-mapping="${shopifyTemplate.id}">${withIcon('file-pen-line', 'Manage')}</button>
+            </div>
+          </article>
+        ` : ''}
+        <article class="import-action-row">
+          <div><strong>Template library</strong><small>Open each template page to add columns, delete fields, save changes, import, export, or duplicate.</small></div>
+          <button class="button" type="button" data-create-export-mapping>${withIcon('plus', 'New template')}</button>
+        </article>
+      </div>
+    </section>
+    <section class="import-section-panel">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Templates</p>
+          <h3>Product Templates</h3>
+        </div>
+      </div>
+      ${renderTemplateActionRows(templates)}
+    </section>
+  `;
+}
+
+function renderImportExportCenter(templates = []) {
+  const sections = importExportSections(templates);
+  if (!sections.some((section) => section.id === activeImportSection)) activeImportSection = 'products';
+  return `
+    <div class="import-center">
+      <div class="mapping-directory-head import-center-head">
+        <div>
+          <p class="eyebrow">Operations</p>
+          <h2>Import / Export Center</h2>
+          <p class="muted">Central home for product files today, with room for orders, customers, categories, and inventory workflows.</p>
+        </div>
+        <div class="mapping-actions">
+          <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon('refresh-cw', 'Refresh queue')}</button>
+          <button class="button" type="button" data-create-export-mapping>${withIcon('plus', 'New template')}</button>
+        </div>
+      </div>
+      <div class="import-center-layout">
+        ${renderImportSectionMenu(sections)}
+        <main class="import-section-workspace">${renderImportSectionBody(activeImportSection, templates)}</main>
+        ${renderImportQueuePanel()}
+      </div>
+    </div>
+  `;
+}
+
+function renderMappingDirectory(templates = []) {
+  const activeCount = templates.filter((template) => template.status !== "inactive").length;
+  const shopifyCount = templates.filter((template) => /shopify/i.test(`${template.name} ${template.source}`)).length;
+  return `
+    <div class="mapping-directory">
+      <div class="mapping-directory-head">
+        <div>
+          <p class="eyebrow">Import / Export Mapping</p>
+          <h2>Template Library</h2>
+          <p class="muted">Open a template to manage its settings, mapped columns, imports, and exports.</p>
+        </div>
+        <button class="button" type="button" data-create-export-mapping>New template</button>
+      </div>
+      <div class="mapping-summary-grid">
+        <span><small>Total templates</small><strong>${templates.length}</strong></span>
+        <span><small>Active</small><strong>${activeCount}</strong></span>
+        <span><small>Shopify</small><strong>${shopifyCount}</strong></span>
+        <span><small>Mapped columns</small><strong>${templates.reduce((sum, template) => sum + (template.mappings || []).length, 0)}</strong></span>
+      </div>
+      <div class="mapping-template-grid">
+        ${templates.map((template) => {
+          const hasSku = (template.mappings || []).some((row) => row.productField === "sku");
+          return `
+            <article class="mapping-template-card">
+              <div class="mapping-template-card-head">
+                <span class="status ${template.status === "inactive" ? "draft" : "active"}">${html(template.status || "active")}</span>
+                <small>${html(template.mode || "both")}</small>
+              </div>
+              <h3>${html(template.name)}</h3>
+              <p>${html(template.source)} / ${(template.mappings || []).length} columns</p>
+              <div class="mapping-card-flags">
+                <span>${hasSku ? "SKU mapped" : "Needs SKU"}</span>
+                <span>${/shopify/i.test(`${template.name} ${template.source}`) ? "Shopify" : "Custom"}</span>
+              </div>
+              <div class="mapping-template-actions">
+                <button class="button secondary" type="button" data-open-export-mapping="${template.id}">Open</button>
+                <button class="button secondary" type="button" data-duplicate-export-mapping="${template.id}">Duplicate</button>
+                ${isBuiltInExportMapping(template)
+                  ? `<button class="button secondary" type="button" disabled title="Built-in templates cannot be deleted">Built-in</button>`
+                  : `<button class="button danger" type="button" data-delete-export-mapping="${template.id}">Delete</button>`}
+              </div>
+            </article>
+          `;
+        }).join("") || `<div class="empty-state">Create your first import/export template.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderJobsPage() {
+  const target = $("#jobs-page");
+  if (!target) return;
+  const sections = importJobFilterOptions("section");
+  const statuses = importJobFilterOptions("status");
+  const directions = importJobFilterOptions("direction");
+  const jobs = filteredImportJobs({ useJobsFilters: true });
+  const selectedJob = selectedImportJob(jobs);
+  const totalJobs = importJobRows().length;
+  const warnings = importJobRows().filter((job) => ["warning", "failed"].includes(String(job.status || "").toLowerCase())).length;
+  const savedFiles = importJobRows().filter((job) => job.originalFilePath).length;
+  target.innerHTML = `
+    <div class="jobs-page">
+      <section class="jobs-command-bar">
+        <div class="jobs-command-head">
+          <div>
+            <p class="eyebrow">Operations</p>
+            <h2>Jobs</h2>
+            <p class="muted">${Number(jobs.length || 0).toLocaleString()} visible of ${Number(totalJobs || 0).toLocaleString()} jobs</p>
+          </div>
+          <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon("refresh-cw", "Refresh jobs")}</button>
+        </div>
+        <div class="jobs-quick-stats">
+          <span><small>Total</small><strong>${Number(totalJobs || 0).toLocaleString()}</strong></span>
+          <span><small>Review</small><strong>${Number(warnings || 0).toLocaleString()}</strong></span>
+          <span><small>Files</small><strong>${Number(savedFiles || 0).toLocaleString()}</strong></span>
+        </div>
+        <div class="jobs-filter-bar">
+          <input id="jobs-search" type="search" placeholder="Search jobs, files, messages" value="${html(jobsFilter.query || "")}" />
+          <select id="jobs-filter-section">
+            <option value="">All categories</option>
+            ${sections.map((section) => `<option value="${html(section.toLowerCase())}" ${jobsFilter.section === section.toLowerCase() ? "selected" : ""}>${html(section)}</option>`).join("")}
+          </select>
+          <select id="jobs-filter-status">
+            <option value="">All statuses</option>
+            ${statuses.map((status) => `<option value="${html(status.toLowerCase())}" ${jobsFilter.status === status.toLowerCase() ? "selected" : ""}>${html(importJobStatusLabel(status))}</option>`).join("")}
+          </select>
+          <select id="jobs-filter-direction">
+            <option value="">All types</option>
+            ${directions.map((direction) => `<option value="${html(direction.toLowerCase())}" ${jobsFilter.direction === direction.toLowerCase() ? "selected" : ""}>${html(direction)}</option>`).join("")}
+          </select>
+          <button class="button secondary" type="button" data-clear-job-filters>Clear</button>
+        </div>
+      </section>
+      <div class="jobs-workspace">
+        ${renderImportQueuePanel({ full: true })}
+        ${renderJobProfile(selectedJob)}
+      </div>
+    </div>
+  `;
+}
+
+function renderMappingDetailPage(selected) {
+  return `
+    <div class="mapping-page">
+      <div class="mapping-page-head">
+        <div>
+          <button class="text-button" type="button" data-back-export-mappings>Back to templates</button>
+          <p class="eyebrow">Import / Export Mapping</p>
+          <h2>${html(selected.name)}</h2>
+          <p class="muted">${html(selected.source)} template / ${(selected.mappings || []).length} mapped columns / ${html(selected.mode || "both")}</p>
+        </div>
+        <div class="mapping-actions">
+          <button type="button" class="button" data-save-export-mapping="${selected.id}">Save changes</button>
+          <span class="mapping-save-state" id="mapping-save-state">${mappingDraftDirty ? "Unsaved changes" : "No unsaved changes"}</span>
+          <a class="button" href="/api/export-mappings/${selected.id}/export">Download CSV</a>
+          <button type="button" class="button secondary" data-open-product-import="${selected.id}">Import CSV</button>
+          <label class="file-button secondary">Load headers<input type="file" accept=".csv,text/csv" data-load-mapping-headers="${selected.id}" /></label>
+          <button type="button" class="button secondary" data-duplicate-export-mapping="${selected.id}">Duplicate</button>
+          ${isBuiltInExportMapping(selected) ? "" : `<button type="button" class="button danger" data-delete-export-mapping="${selected.id}">Delete</button>`}
+        </div>
+      </div>
+      <div class="mapping-summary-grid">
+        <span><small>Source</small><strong>${html(selected.source)}</strong></span>
+        <span><small>Columns</small><strong>${(selected.mappings || []).length}</strong></span>
+        <span><small>Import key</small><strong>${(selected.mappings || []).some((row) => row.productField === "sku") ? "SKU mapped" : "Needs SKU"}</strong></span>
+        <span><small>Status</small><strong>${html(selected.status || "active")}</strong></span>
+      </div>
+      <div class="mapping-page-grid">
+        <section class="mapping-card">
+          <div class="section-head">
+            <div>
+              <h3>Template Settings</h3>
+              <p class="muted">Name, channel, import/export mode, and notes.</p>
+            </div>
+          </div>
+          <div class="category-map-grid">
+            <label>Name<input value="${html(selected.name)}" data-export-mapping-draft-field="name" data-export-mapping-id="${selected.id}" /></label>
+            <label>Source / channel<input value="${html(selected.source)}" data-export-mapping-draft-field="source" data-export-mapping-id="${selected.id}" /></label>
+            <label>Status<select data-export-mapping-draft-field="status" data-export-mapping-id="${selected.id}"><option value="active" ${selected.status === "active" ? "selected" : ""}>active</option><option value="inactive" ${selected.status === "inactive" ? "selected" : ""}>inactive</option></select></label>
+            <label>Mode<select data-export-mapping-draft-field="mode" data-export-mapping-id="${selected.id}"><option value="both" ${selected.mode === "both" ? "selected" : ""}>import + export</option><option value="export" ${selected.mode === "export" ? "selected" : ""}>export only</option><option value="import" ${selected.mode === "import" ? "selected" : ""}>import only</option></select></label>
+            <label class="span-2">Notes<textarea rows="4" data-export-mapping-draft-field="notes" data-export-mapping-id="${selected.id}">${html(selected.notes || "")}</textarea></label>
+          </div>
+        </section>
+        <section class="mapping-card">
+          <div class="section-head">
+            <div>
+              <h3>Available Product Fields</h3>
+              <p class="muted">Use these fields when building mapped columns.</p>
+            </div>
+          </div>
+          <div class="field-chip-grid">${renderFieldOptionBadges() || `<p class="muted">Loading fields...</p>`}</div>
+        </section>
+      </div>
+      <section class="mapping-card">
+        <div class="section-head">
+          <div>
+            <h3>Column Mapping</h3>
+            <p class="muted">Edit each template column directly. Empty DataPlus field means the column exports the default value.</p>
+          </div>
+          <button class="button secondary" type="button" data-add-export-mapping-row="${selected.id}">Add column</button>
+        </div>
+        <div class="mapping-row-editor">
+          <div class="mapping-row-editor-head">
+            <span>External column</span>
+            <span>DataPlus field</span>
+            <span>Default value</span>
+            <span>Required</span>
+            <span></span>
+          </div>
+          ${(selected.mappings || []).map((row, index) => renderMappingDraftRow(row, selected.id, index)).join("") || `<div class="empty-state compact">No columns yet. Add a column or load headers from a CSV.</div>`}
+        </div>
+        <details class="mapping-raw-editor">
+          <summary>Advanced raw editor</summary>
+          <textarea class="mapping-textarea" rows="10" data-export-mapping-draft-raw="${selected.id}">${html(mappingRowsText(selected))}</textarea>
+        </details>
+      </section>
+    </div>
+  `;
+}
+
+function renderImportExportMappings() {
+  const target = $("#import-export-page") || $("#import-export-list");
+  if (!target) return;
+  if (!state) {
+    target.innerHTML = `<div class="empty-state">Loading import/export templates...</div>`;
+    loadExportMappingsOnly().catch((error) => toast(error.message));
+    return;
+  }
+  if (!productFieldOptions) loadProductFieldOptions();
+  const templates = state.exportMappings || [];
+  const selected = templates.find((template) => template.id === activeExportMappingPageId);
+  target.innerHTML = selected ? renderMappingDetailPage(selected) : renderImportExportCenter(templates);
+}
+
+async function refreshImportJobs() {
+  const result = await api('/api/import-jobs');
+  state.importJobs = result.importJobs || [];
+  if (currentViewId === 'jobs') renderJobsPage();
+  else renderImportExportMappings();
+  toast('Import queue refreshed.');
+}
+
+async function stopImportJob(jobId) {
+  const result = await api(`/api/import-jobs/${encodeURIComponent(jobId)}/stop`, { method: "POST" });
+  state.importJobs = result.importJobs || state.importJobs || [];
+  selectedImportJobId = result.job?.id || jobId;
+  renderJobsPage();
+  toast("Job stopped.");
 }
 
 function renderMarketplaceTemplates() {
@@ -3205,8 +5015,38 @@ function allocatedQtyFor(product, currentShadow = null) {
 
 function renderReadinessQueue() {
   const rows = allShadowRows();
-  $("#readiness-list").innerHTML = rows.length
-    ? `
+  const products = (state.inventory || []).map((product) => ({ product, readiness: productReadiness(product) }))
+    .sort((a, b) => a.readiness.score - b.readiness.score);
+  $("#readiness-list").innerHTML = `
+      <div class="catalog-readiness-overview">
+        <div class="mapping-summary-grid">
+          <span><small>Products</small><strong>${products.length}</strong></span>
+          <span><small>Ready products</small><strong>${products.filter((row) => row.readiness.ready).length}</strong></span>
+          <span><small>Needs work</small><strong>${products.filter((row) => !row.readiness.ready).length}</strong></span>
+          <span><small>Shadow listings</small><strong>${rows.length}</strong></span>
+        </div>
+      </div>
+      ${products.length ? `
+      <div class="catalog-table-wrap readiness-table">
+        <table class="catalog-table">
+          <thead><tr><th>Product</th><th>Score</th><th>Missing</th><th>Stock</th><th>Price</th><th>Vendor</th><th>Action</th></tr></thead>
+          <tbody>
+            ${products.slice(0, 150).map(({ product, readiness }) => `
+              <tr>
+                <td><button class="order-link product-name-link" data-select-product="${product.id}" data-product-target="product-full">${html(product.sku)}</button><small>${html(product.marketplaceTitle || product.title || "Untitled product")}</small></td>
+                <td><span class="status ${readinessTone(readiness.score)}">${readiness.score}% ready</span></td>
+                <td>${html(readiness.missing.slice(0, 5).join(", ") || "None")}</td>
+                <td>${Number(product.qty ?? product.stockQty ?? 0)}</td>
+                <td>${money(product.price || 0)}</td>
+                <td>${html(product.vendor || product.supplier || "No vendor")}</td>
+                <td><button class="button secondary" data-select-product="${product.id}" data-product-target="product-full">Review</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+      ` : `<div class="empty-state">No products yet.</div>`}
+      ${rows.length ? `
       <div class="catalog-table-wrap">
         <table class="catalog-table">
           <thead><tr><th>Shadow SKU</th><th>Marketplace</th><th>Parent</th><th>Readiness</th><th>Missing</th><th>Allocation</th><th>Sync</th><th>Action</th></tr></thead>
@@ -3234,33 +5074,171 @@ function renderReadinessQueue() {
           </tbody>
         </table>
       </div>
-    `
-    : `<div class="empty-state">No shadow SKUs yet. Create marketplace shadows from a product page.</div>`;
+    ` : `<div class="empty-state">No shadow SKUs yet. Create marketplace shadows from a product page.</div>`}
+    `;
+}
+
+function renderCatalogImportReviews() {
+  const reviews = (state.catalogImportReviews || []);
+  const pending = reviews.filter((review) => review.status === "pending");
+  const decided = reviews.filter((review) => review.status !== "pending").slice(0, 50);
+  const byField = pending.reduce((acc, review) => {
+    acc[review.field] = (acc[review.field] || 0) + 1;
+    return acc;
+  }, {});
+  const topFields = Object.entries(byField).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  $("#import-review-list").innerHTML = `
+    <div class="catalog-review-page">
+      <div class="mapping-directory-head">
+        <div>
+          <p class="eyebrow">Import Review</p>
+          <h2>Protected Catalog Changes</h2>
+          <p class="muted">Weekly dump changes for protected fields wait here before they touch cleaned product data.</p>
+        </div>
+        <div class="mapping-actions">
+          <button class="button secondary" type="button" data-review-bulk-action="reject">Reject all pending</button>
+          <button class="button" type="button" data-review-bulk-action="accept">Accept all pending</button>
+        </div>
+      </div>
+      <div class="mapping-summary-grid">
+        <span><small>Pending changes</small><strong>${pending.length}</strong></span>
+        <span><small>Products affected</small><strong>${new Set(pending.map((review) => review.sku)).size}</strong></span>
+        <span><small>Most changed field</small><strong>${html(topFields[0]?.[0] || "None")}</strong></span>
+        <span><small>Resolved history</small><strong>${decided.length}</strong></span>
+      </div>
+      ${topFields.length ? `<div class="review-field-chips">${topFields.map(([field, count]) => `<span>${html(field)} <strong>${count}</strong></span>`).join("")}</div>` : ""}
+      ${pending.length ? `
+        <div class="catalog-table-wrap review-table">
+          <table class="catalog-table">
+            <thead><tr><th>SKU</th><th>Field</th><th>Current DataPlus value</th><th>Incoming dump value</th><th>Source</th><th>Updated</th><th>Action</th></tr></thead>
+            <tbody>
+              ${pending.slice(0, 300).map((review) => `
+                <tr>
+                  <td><button class="order-link product-name-link" data-review-open-product="${html(review.sku)}">${html(review.sku)}</button></td>
+                  <td><strong>${html(review.label || review.field)}</strong></td>
+                  <td>${html(review.currentValue)}</td>
+                  <td>${html(review.incomingValue)}</td>
+                  <td>${html(review.source || "Product dump")}</td>
+                  <td>${review.updatedAt ? simpleDate(review.updatedAt) : ""}</td>
+                  <td class="review-actions">
+                    <button class="button secondary compact-button" type="button" data-review-action="reject" data-review-id="${review.id}">Reject</button>
+                    <button class="button compact-button" type="button" data-review-action="accept" data-review-id="${review.id}">Accept</button>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+        ${pending.length > 300 ? `<p class="muted">Showing first 300 pending changes. Use the API bulk actions for the full queue.</p>` : ""}
+      ` : `<div class="empty-state">No pending protected changes. New weekly dump differences will appear here.</div>`}
+      ${decided.length ? `
+        <section class="review-history">
+          <h3>Recent decisions</h3>
+          <div class="catalog-table-wrap">
+            <table class="catalog-table">
+              <thead><tr><th>SKU</th><th>Field</th><th>Decision</th><th>Value</th><th>Date</th></tr></thead>
+              <tbody>${decided.map((review) => `<tr><td>${html(review.sku)}</td><td>${html(review.label || review.field)}</td><td><span class="status ${review.status === "accepted" ? "active" : "inactive"}">${html(review.status)}</span></td><td>${html(review.incomingValue)}</td><td>${review.decidedAt ? simpleDate(review.decidedAt) : ""}</td></tr>`).join("")}</tbody>
+            </table>
+          </div>
+        </section>
+      ` : ""}
+    </div>
+  `;
+}
+
+async function applyCatalogImportReview(id, action) {
+  const result = await api(`/api/catalog-import-reviews/${id}/${action}`, { method: "POST", body: JSON.stringify({}) });
+  setState(result.state);
+  renderCatalogImportReviews();
+  toast(action === "accept" ? "Change accepted." : "Change rejected.");
+}
+
+async function applyCatalogImportReviewBulk(action) {
+  const pendingIds = (state.catalogImportReviews || []).filter((review) => review.status === "pending").map((review) => review.id);
+  if (!pendingIds.length) return toast("No pending changes.");
+  const result = await api("/api/catalog-import-reviews/bulk", {
+    method: "POST",
+    body: JSON.stringify({ action, ids: pendingIds })
+  });
+  setState(result.state);
+  renderCatalogImportReviews();
+  toast(`${result.changed || 0} change${result.changed === 1 ? "" : "s"} ${action === "accept" ? "accepted" : "rejected"}.`);
+}
+
+function openProductFromReviewSku(sku) {
+  const item = (state.inventory || []).find((product) => String(product.sku || "").toLowerCase() === String(sku || "").toLowerCase());
+  if (!item) return toast("Product not found.");
+  selectedProductId = item.id;
+  selectedProductWorkspaceTab = "source";
+  setView("product-full");
 }
 
 function renderProductsTable(items) {
+  const exportMappings = state.exportMappings || [];
+  const filteredCount = items.length;
+  const pageCount = Math.max(1, Math.ceil(filteredCount / PRODUCT_CATALOG_PAGE_SIZE));
+  productCatalogPage = Math.min(Math.max(1, productCatalogPage), pageCount);
+  const pageStart = (productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
+  const pageItems = items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
+  const selectedCount = selectedProductAllFiltered ? filteredCount : selectedProductIds.size;
+  const selectionLabel = selectedProductAllFiltered
+    ? `${Number(filteredCount).toLocaleString()} filtered results selected`
+    : selectedProductIds.size
+      ? `${Number(selectedProductIds.size).toLocaleString()} selected`
+      : `${Number(filteredCount).toLocaleString()} filtered products`;
+  loadProductTableAlternates(pageItems).catch((error) => toast(error.message));
   $("#products-list").innerHTML = items.length
     ? `
+      <div class="catalog-selection-toolbar product-export-bar">
+        <div class="selection-summary">
+          <strong>Product selection</strong>
+          <small>${html(selectionLabel)} / showing ${Number(pageItems.length).toLocaleString()}</small>
+        </div>
+        <div class="selection-actions">
+          <button class="button secondary" type="button" data-select-products-page>Select current page</button>
+          <button class="button secondary" type="button" data-select-products-filtered>Select all results</button>
+          <button class="button secondary" type="button" data-clear-products-selection ${selectedCount ? "" : "disabled"}>Clear</button>
+        </div>
+        <div class="product-export-controls">
+          <select id="product-export-template">
+            ${exportMappings.map((template) => `<option value="${template.id}" ${template.id === selectedExportMappingId ? "selected" : ""}>${html(template.name)}</option>`).join("")}
+          </select>
+          <button class="button secondary" type="button" data-export-products ${exportMappings.length ? "" : "disabled"}>Export CSV</button>
+        </div>
+      </div>
+      <div class="catalog-source-summary product-page-summary">
+        <span><strong>${Number(filteredCount).toLocaleString()}</strong><small>filtered products</small></span>
+        <span><strong>Page ${productCatalogPage} of ${pageCount}</strong><small>${Number(pageStart + 1).toLocaleString()}-${Number(pageStart + pageItems.length).toLocaleString()}</small></span>
+        <span><strong>${Number(PRODUCT_CATALOG_PAGE_SIZE).toLocaleString()}</strong><small>rows per page</small></span>
+        <div class="source-pagination">
+          <button class="button secondary" type="button" data-product-page="${productCatalogPage - 1}" ${productCatalogPage <= 1 ? "disabled" : ""}>Previous</button>
+          <button class="button secondary" type="button" data-product-page="${productCatalogPage + 1}" ${productCatalogPage >= pageCount ? "disabled" : ""}>Next</button>
+        </div>
+      </div>
       <div class="catalog-table-wrap">
         <table class="catalog-table">
           <thead>
-            <tr><th>Product</th><th>Manufacturer</th><th>Vendor SKU</th><th>Brand</th><th>Category</th><th>Status</th><th>Shadows</th><th>Price</th><th>Images</th><th>Updated</th><th>Action</th></tr>
+            <tr><th><input type="checkbox" data-product-check-all ${pageItems.length && pageItems.every((item) => selectedProductAllFiltered || selectedProductIds.has(item.id)) ? "checked" : ""} /></th><th>Product</th><th>Readiness</th><th>Alternates</th><th>Manufacturer</th><th>Vendor SKU</th><th>Brand</th><th>Category</th><th>Status</th><th>Shopify</th><th>Shadows</th><th>Price</th><th>Images</th><th>Updated</th><th>Action</th></tr>
           </thead>
           <tbody>
-            ${items.map((item) => `
+            ${pageItems.map((item) => `
               <tr>
+                <td><input type="checkbox" data-product-check="${item.id}" ${selectedProductAllFiltered || selectedProductIds.has(item.id) ? "checked" : ""} /></td>
                 <td>
                   <button class="order-link product-name-link" data-select-product="${item.id}" data-product-target="product-full">${html(item.sku)}</button>
                   <small>${html(item.marketplaceTitle || item.title || "Untitled product")}</small>
                 </td>
+                <td>${renderReadinessPill(item)}<small>${html(productReadiness(item).missing.slice(0, 2).join(", ") || "Ready checks passed")}</small></td>
+                <td>${renderProductAlternatesCell(item)}</td>
                 <td>${html(item.manufacturer || "No manufacturer")}</td>
                 <td>${html(item.vendorSku || "No vendor SKU")}</td>
-                <td>${html(item.brand || "No brand")}</td>
-                <td>${html(item.category || "Uncategorized")}</td>
+                <td>${html(item.brand || "No brand")}<small>${verifiedBrandForHandle(item) ? "Verified" : "Unverified"}</small></td>
+                <td>${html(item.category || "Uncategorized")}<small>Vendor: ${html(item.sourceCategory || item.vendorCategory || "n/a")}</small></td>
                 <td><span class="status ${String(item.status || "draft").toLowerCase()}">${html(item.status || "Draft")}</span></td>
+                <td><span class="status ${item.shopifyId && item.shopifyStatus === "Active" && item.shopifyPublished === true ? "active" : "draft"}">${html(item.shopifyStatus || (item.shopifyId ? "Synced" : "Not live"))}</span><small>${html(item.shopifyId || "No Shopify ID")}</small></td>
                 <td>${(item.shadowSkus || []).length}</td>
                 <td>${money(item.price || 0)}</td>
-                <td>${(item.images || []).length}</td>
+                <td><span class="image-count-pill ${productImageUrls(item).length > 1 ? "has-gallery" : ""}">${productImageUrls(item).length}</span></td>
                 <td>${simpleDate(item.updatedAt)}</td>
                 <td>
                   <div class="action-menu">
@@ -3268,6 +5246,10 @@ function renderProductsTable(items) {
                     <div class="action-popover" data-menu-for="product-${item.id}">
                       <button data-select-product="${item.id}" data-product-target="product-full">Edit product content</button>
                       <button data-select-product="${item.id}" data-product-target="inventory-full">View inventory details</button>
+                      <button data-product-row-action="set-active" data-product-id="${item.id}">Set active</button>
+                      <button data-product-row-action="set-inactive" data-product-id="${item.id}">Set inactive</button>
+                      <button data-product-row-action="set-discontinued" data-product-id="${item.id}">Set discontinued</button>
+                      <button data-product-row-action="delete" data-product-id="${item.id}">Delete from Products</button>
                     </div>
                   </div>
                 </td>
@@ -3281,15 +5263,29 @@ function renderProductsTable(items) {
 }
 
 function renderInventoryTable(items) {
+  const filteredCount = items.length;
+  const pageCount = Math.max(1, Math.ceil(filteredCount / PRODUCT_CATALOG_PAGE_SIZE));
+  inventoryCatalogPage = Math.min(Math.max(1, inventoryCatalogPage), pageCount);
+  const pageStart = (inventoryCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
+  const pageItems = items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
   $("#inventory-list").innerHTML = items.length
     ? `
+      <div class="catalog-source-summary product-page-summary">
+        <span><strong>${Number(filteredCount).toLocaleString()}</strong><small>filtered inventory items</small></span>
+        <span><strong>Page ${inventoryCatalogPage} of ${pageCount}</strong><small>${Number(pageStart + 1).toLocaleString()}-${Number(pageStart + pageItems.length).toLocaleString()}</small></span>
+        <span><strong>${Number(PRODUCT_CATALOG_PAGE_SIZE).toLocaleString()}</strong><small>rows per page</small></span>
+        <div class="source-pagination">
+          <button class="button secondary" type="button" data-inventory-page="${inventoryCatalogPage - 1}" ${inventoryCatalogPage <= 1 ? "disabled" : ""}>Previous</button>
+          <button class="button secondary" type="button" data-inventory-page="${inventoryCatalogPage + 1}" ${inventoryCatalogPage >= pageCount ? "disabled" : ""}>Next</button>
+        </div>
+      </div>
       <div class="catalog-table-wrap">
         <table class="catalog-table inventory-table">
           <thead>
             <tr><th>SKU</th><th>Product</th><th>On hand</th><th>Reserved</th><th>Available</th><th>Reorder point</th><th>Cost</th><th>Vendor</th><th>Action</th></tr>
           </thead>
           <tbody>
-            ${items.map((item) => {
+            ${pageItems.map((item) => {
               const available = Number(item.qty || 0) - Number(item.reserved || 0);
               const low = available <= Number(item.reorderPoint || 0);
               return `
@@ -3420,8 +5416,678 @@ function renderProductManagerFields(item) {
     : `<p class="muted">No product dump fields have been imported for this product yet.</p>`;
 }
 
+function productFieldLabel(label, field, item, options = {}) {
+  const value = item[field] ?? "";
+  const className = options.className ? ` class="${html(options.className)}"` : "";
+  const attrs = options.readonly
+    ? `readonly aria-readonly="true"`
+    : `data-product-field="${field}" data-product-id="${item.id}"`;
+  if (options.textarea) {
+    return `<label${className}>${label}<textarea rows="${options.rows || 3}" ${attrs}>${html(value)}</textarea></label>`;
+  }
+  const type = options.type || "text";
+  const step = options.step ? ` step="${options.step}"` : "";
+  const min = options.min !== undefined ? ` min="${options.min}"` : "";
+  return `<label${className}>${label}<input type="${type}"${step}${min} value="${html(value)}" ${attrs} /></label>`;
+}
+
+function productShadowForMarketplace(item, marketplace) {
+  const key = String(marketplace || "").toLowerCase();
+  return (item.shadowSkus || []).find((shadow) => String(shadow.marketplace || shadow.company || "").toLowerCase().includes(key)) || null;
+}
+
+function productTabButton(id, label) {
+  const icons = { home: "home", shopify: "shopping-bag", zoro: "store", shipping: "truck", pricing: "dollar-sign", source: "database", search: "search" };
+  return `<button class="product-workspace-tab ${selectedProductWorkspaceTab === id ? "active" : ""}" data-product-workspace-tab="${id}">${withIcon(icons[id] || "info", label)}</button>`;
+}
+
+function exportMappingForSource(source) {
+  const key = String(source || "").trim().toLowerCase();
+  const templates = state.exportMappings || [];
+  return templates
+    .filter((template) => {
+      const sourceText = String(template.source || "").toLowerCase();
+      const nameText = String(template.name || "").toLowerCase();
+      return sourceText.includes(key) || nameText.includes(key);
+    })
+    .sort((a, b) => (b.mappings || []).length - (a.mappings || []).length)[0] || null;
+}
+
+function slugPart(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function verifiedBrandForHandle(item = {}) {
+  const explicitBrand = item.verifiedBrand || item.verified_brand;
+  if (String(explicitBrand || "").trim()) return explicitBrand;
+  return item.brandLocked && String(item.brand || "").trim() ? item.brand : "";
+}
+
+function categoryMappingForProduct(item, channel = "shopify") {
+  const category = String(item.category || "").trim().toLowerCase();
+  if (!category) return null;
+  return (state.categorySettings || []).find((row) => (
+    String(row.name || "").trim().toLowerCase() === category
+    || String(row.categoryId || row.id || "").trim().toLowerCase() === category
+  ))?.mappings?.[channel] || null;
+}
+
+function shopifyHandleForProduct(item) {
+  const verifiedBrand = verifiedBrandForHandle(item);
+  const title = item.marketplaceTitle || item.title || item.name;
+  const name = item.name || item.title || item.marketplaceTitle;
+  const parts = verifiedBrand ? [verifiedBrand, item.sku, title] : [item.sku, name];
+  return parts.map(slugPart)
+    .filter(Boolean)
+    .join("-")
+    .replace(/-+/g, "-");
+}
+
+function cleanExportNumber(value, decimals = 3) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return Number(number.toFixed(decimals)).toString();
+}
+
+function shopifyDimensionValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return `${cleanExportNumber(number * 25.4, 3)} mm`;
+}
+
+function shopifyWeightValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return `${cleanExportNumber(number * 0.45359237, 3)} kg`;
+}
+
+function shopifyBooleanValue(value, item = {}) {
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  const text = String(value ?? "").trim().toLowerCase();
+  if (["true", "1", "yes", "y", "active", "in stock", "instock", "available", "received"].includes(text)) return "TRUE";
+  if (["false", "0", "no", "n", "inactive", "out of stock", "outofstock", "unavailable", "discontinued", "deleted"].includes(text)) return "FALSE";
+  if (Number.isFinite(Number(value))) return Number(value) > 0 ? "TRUE" : "FALSE";
+  return Number(item.stockQty ?? item.qty ?? 0) > 0 ? "TRUE" : "FALSE";
+}
+
+function padDatePart(value) {
+  return String(value).padStart(2, "0");
+}
+
+function shopifyDateTimeValue(value) {
+  if (!value) return "";
+  const text = String(value).trim();
+  const dmy = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/);
+  if (dmy) {
+    const [, day, month, year, hour = "0", minute = "0"] = dmy;
+    return `${year}-${padDatePart(month)}-${padDatePart(day)} ${padDatePart(hour)}:${padDatePart(minute)}`;
+  }
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getUTCFullYear()}-${padDatePart(date.getUTCMonth() + 1)}-${padDatePart(date.getUTCDate())} ${padDatePart(date.getUTCHours())}:${padDatePart(date.getUTCMinutes())}`;
+}
+
+function shopifyJsonValue(value) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === "[object Object]") return "";
+    try {
+      return JSON.stringify(JSON.parse(trimmed));
+    } catch {
+      return JSON.stringify(trimmed);
+    }
+  }
+  return JSON.stringify(value);
+}
+
+function barcodeTextValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  let text = raw;
+  if (/^\d+(?:\.\d+)?e\+\d+$/i.test(text)) {
+    const number = Number(text);
+    if (Number.isFinite(number)) {
+      text = number.toLocaleString("fullwide", { useGrouping: false, maximumFractionDigits: 0 });
+    }
+  }
+  const digits = text.replace(/\D/g, "");
+  if (!digits) return "";
+  return digits.length > 7 && digits.length < 12 ? digits.padStart(12, "0") : digits;
+}
+
+function shopifyProductStatusValue(value, item = {}, mapping = {}) {
+  const raw = String(value || mapping.defaultValue || item.status || "").trim().toLowerCase();
+  if (["active", "published", "publish"].includes(raw)) return "Active";
+  if (["archived", "archive", "deleted", "discontinued"].includes(raw)) return "Archived";
+  return "Draft";
+}
+
+function shopifyPublishedValue(item = {}, mapping = {}) {
+  return shopifyProductStatusValue(item.status, item, mapping) === "Active" ? "TRUE" : "FALSE";
+}
+
+function categoryTypeValue(value) {
+  const parts = String(value || "")
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.slice(-2).join(" > ") || parts[0] || "";
+}
+
+function formatMappedExportValue(value, mapping = {}, item = {}) {
+  const column = String(mapping.externalColumn || "");
+  if (/^(Variant Barcode|Barcode|UPC|GTIN|EAN)$/i.test(column)) return barcodeTextValue(value);
+  if (/^Type$/i.test(column)) return categoryTypeValue(value);
+  if (/^Status$/i.test(column)) return shopifyProductStatusValue(value, item, mapping);
+  if (/^Published$/i.test(column)) return shopifyPublishedValue(item, mapping);
+  if (/^Variant Inventory Tracker$/i.test(column)) return "shopify";
+  if (/^Metafield:\s*custom\..*\[dimension\]/i.test(column)) return shopifyDimensionValue(value);
+  if (/^Metafield:\s*custom\..*\[weight\]/i.test(column)) return shopifyWeightValue(value);
+  if (/^Metafield:\s*custom\..*\[boolean\]/i.test(column)) return shopifyBooleanValue(value, item);
+  if (/^Metafield:\s*custom\..*\[date_time\]/i.test(column)) return shopifyDateTimeValue(value);
+  if (/^Metafield:\s*custom\..*\[json\]/i.test(column)) return shopifyJsonValue(value);
+  if (Array.isArray(value)) return value.join("|");
+  if (value && typeof value === "object") return JSON.stringify(value);
+  return value;
+}
+
+function productMappedValue(item, mapping = {}) {
+  const field = mapping.productField;
+  if (String(mapping.externalColumn || "").trim().toLowerCase() === "handle") return shopifyHandleForProduct(item);
+  if (!field) return mapping.defaultValue || "";
+  if (field === "available") return Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0);
+  if (field === "vendor") return item.vendor ?? item.supplier ?? "";
+  if (field === "qty") return item.qty ?? item.stockQty ?? "";
+  if (field === "shopifyHandle") return shopifyHandleForProduct(item);
+  if (field === "images") return (item.images || []).join("|");
+  if (field === "tags") return Array.isArray(item.tags) ? item.tags.join("|") : item.tags || "";
+  if (field === "bulletPoints") return productBulletPoints(item).join("|");
+  if (field === "sources") return Object.entries(item.sources || {}).map(([source, id]) => `${source}:${id}`).join(";");
+  if (field === "shopifyCategoryId") return categoryMappingForProduct(item, "shopify")?.categoryId || "";
+  if (field === "shopifyCategoryPath") return categoryMappingForProduct(item, "shopify")?.categoryPath || "";
+  if (field === "googleCategoryId") return categoryMappingForProduct(item, "shopify")?.googleCategory?.id || "";
+  if (field === "googleCategoryBreadcrumb") {
+    const googleCategory = categoryMappingForProduct(item, "shopify")?.googleCategory;
+    return googleCategory?.breadcrumb || googleCategory?.fullName || "";
+  }
+  const value = item[field];
+  const formatted = formatMappedExportValue(value, mapping, item);
+  return formatted === undefined || formatted === null || formatted === "" ? mapping.defaultValue || "" : formatted;
+}
+
+function mappedFieldDefinition(field) {
+  return (productFieldOptions || []).find((option) => option.key === field) || null;
+}
+
+function renderMappedProductField(item, mapping = {}) {
+  const field = mapping.productField || "";
+  const definition = mappedFieldDefinition(field);
+  const computedFields = new Set(["available", "shopifyHandle", "shopifyCategoryId", "shopifyCategoryPath", "googleCategoryId", "googleCategoryBreadcrumb", "sources"]);
+  const editable = field && !computedFields.has(field) && definition?.type !== "computed" && definition?.type !== "category";
+  const value = productMappedValue(item, mapping);
+  const isLong = String(value || "").length > 100 || /description|body|html|seo|tags/i.test(`${mapping.externalColumn || ""} ${field}`);
+  const meta = [
+    field ? `DataPlus: ${field}` : "Not mapped",
+    mapping.defaultValue ? `Default: ${mapping.defaultValue}` : ""
+  ].filter(Boolean).join(" | ");
+  const control = isLong
+    ? `<textarea rows="3" ${editable ? `data-product-field="${html(field)}" data-product-id="${item.id}"` : "readonly"}>${html(value)}</textarea>`
+    : `<input value="${html(value)}" ${editable ? `data-product-field="${html(field)}" data-product-id="${item.id}"` : "readonly"} />`;
+  return `
+    <label class="mapped-product-field ${editable ? "" : "readonly"}">
+      <span>${html(mapping.externalColumn || field || "Unmapped column")}</span>
+      <small>${html(meta)}</small>
+      ${control}
+    </label>
+  `;
+}
+
+function renderMarketplaceTab(item, marketplace) {
+  const shadow = productShadowForMarketplace(item, marketplace);
+  const isShopify = marketplace === "shopify";
+  const title = isShopify ? "Shopify" : marketplace.toUpperCase();
+  const template = isShopify ? exportMappingForSource("shopify") : null;
+  const mappedFields = template?.mappings || [];
+  return `
+    <div class="product-tab-grid">
+      <section class="product-panel span-2">
+        <div class="section-head product-section-head">
+          <div>
+            <h3>${title} Listing Fields</h3>
+            <p class="muted">${template ? `${html(template.name)} / ${mappedFields.length} mapped columns` : "Core channel fields"}</p>
+          </div>
+          <span class="status ${shadow ? "active" : "draft"}">${shadow ? "Shadow exists" : "No shadow"}</span>
+        </div>
+        ${mappedFields.length ? `
+          <div class="mapped-product-field-grid">
+            ${mappedFields.map((mapping) => renderMappedProductField(item, mapping)).join("")}
+          </div>
+        ` : `
+          <div class="product-form-grid">
+            ${productFieldLabel(`${title} ID`, isShopify ? "shopifyId" : `${marketplace}Id`, item)}
+            ${productFieldLabel("Marketplace title", "marketplaceTitle", item)}
+            ${productFieldLabel("Main category", "category", item)}
+            ${productFieldLabel("Vendor category", "sourceCategory", item, { readonly: true })}
+            ${productFieldLabel("Brand", "brand", item)}
+            ${productFieldLabel("SEO keywords", "seoKeywords", item)}
+            ${productFieldLabel("Tags", "tags", item)}
+          </div>
+          <div class="product-field-stack">
+            ${productFieldLabel("Short description", "shortDescription", item, { textarea: true, rows: 3 })}
+            ${productFieldLabel("Long description / body HTML", "longDescription", item, { textarea: true, rows: 8 })}
+          </div>
+        `}
+      </section>
+      <section class="product-panel">
+        <h3>Channel Pricing</h3>
+        <div class="product-price-grid">
+          ${shadow ? `
+            <label>Shadow price<input type="number" step="0.01" value="${Number(shadow.price || 0)}" data-shadow-field="price" data-product-id="${item.id}" data-shadow-id="${shadow.id}" /></label>
+            <label>Status<select data-shadow-field="status" data-product-id="${item.id}" data-shadow-id="${shadow.id}">${["Draft", "Active", "Paused"].map((status) => `<option ${String(shadow.status || "Draft") === status ? "selected" : ""}>${status}</option>`).join("")}</select></label>
+          ` : `
+            ${productFieldLabel("Base price", "price", item, { type: "number", step: "0.01" })}
+            ${productFieldLabel("Cost", "cost", item, { type: "number", step: "0.01" })}
+          `}
+        </div>
+      </section>
+      <section class="product-panel">
+        <h3>Channel Shipping</h3>
+        <div class="product-field-stack compact-fields">
+          ${shadow ? `
+            <label>Handling time<input type="number" min="0" value="${Number(shadow.handlingTimeDays || 0)}" data-shadow-field="handlingTimeDays" data-product-id="${item.id}" data-shadow-id="${shadow.id}" /></label>
+            <label>Shipping profile<input value="${html(shadow.shippingProfile || "")}" data-shadow-field="shippingProfile" data-product-id="${item.id}" data-shadow-id="${shadow.id}" /></label>
+            <label>Shipping service<input value="${html(shadow.shippingService || "")}" data-shadow-field="shippingService" data-product-id="${item.id}" data-shadow-id="${shadow.id}" /></label>
+          ` : `<p class="muted">Create a marketplace shadow to manage channel-specific shipping.</p>`}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderZoroTab(item) {
+  return `
+    <div class="product-tab-grid">
+      <section class="product-panel span-2">
+        <h3>Zoro Fields</h3>
+        <div class="product-form-grid">
+          ${productFieldLabel("Zoro SKU", "zoroSku", item)}
+          ${productFieldLabel("Zoro price", "zoroPrice", item, { type: "number", step: "0.01" })}
+          ${productFieldLabel("Zoro lead time", "zoroLeadtime", item)}
+          ${productFieldLabel("Zoro minimum qty", "zoroMinimumQty", item, { type: "number", step: "1" })}
+          ${productFieldLabel("Default supplier", "defaultSupplier", item)}
+          ${productFieldLabel("Alt vendor SKU", "altVendorSku", item)}
+        </div>
+        <div class="product-field-stack">
+          ${productFieldLabel("Vendor description", "vendorDescription", item, { textarea: true, rows: 4 })}
+        </div>
+      </section>
+      <section class="product-panel">
+        <h3>Source Availability</h3>
+        ${renderProductAvailabilityPanel(item)}
+      </section>
+    </div>
+  `;
+}
+
+function renderShippingTab(item) {
+  return `
+    <div class="product-tab-grid">
+      <section class="product-panel span-2">
+        <h3>Shipping Preferences</h3>
+        <div class="product-form-grid">
+          ${productFieldLabel("Item weight", "itemWeight", item, { type: "number", step: "0.001" })}
+          ${productFieldLabel("Item length", "itemLength", item, { type: "number", step: "0.001" })}
+          ${productFieldLabel("Item width", "itemWidth", item, { type: "number", step: "0.001" })}
+          ${productFieldLabel("Item height", "itemHeight", item, { type: "number", step: "0.001" })}
+          ${productFieldLabel("Package weight", "packageWeight", item, { type: "number", step: "0.001" })}
+          ${productFieldLabel("Package length", "packageLength", item, { type: "number", step: "0.001" })}
+          ${productFieldLabel("Package width", "packageWidth", item, { type: "number", step: "0.001" })}
+          ${productFieldLabel("Package height", "packageHeight", item, { type: "number", step: "0.001" })}
+          ${productFieldLabel("Country of origin", "countryOfOrigin", item)}
+          ${productFieldLabel("SDS URL", "sdsUrl", item)}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderPricingTab(item, grossProfit, margin) {
+  const shadows = item.shadowSkus || [];
+  return `
+    <div class="product-tab-grid">
+      <section class="product-panel">
+        <h3>Base Pricing</h3>
+        <div class="product-price-grid">
+          ${productFieldLabel("Price", "price", item, { type: "number", step: "0.01" })}
+          ${productFieldLabel("Cost", "cost", item, { type: "number", step: "0.01" })}
+          ${productFieldLabel("MSRP", "msrp", item, { type: "number", step: "0.01" })}
+          ${productFieldLabel("FOB", "fobPrice", item, { type: "number", step: "0.01" })}
+        </div>
+        <div class="product-margin-box"><small>Gross profit</small><strong>${money(grossProfit)}</strong><span>${margin.toFixed(1)}% margin</span></div>
+      </section>
+      <section class="product-panel span-2">
+        <h3>Marketplace Pricing</h3>
+        <div class="catalog-table-wrap compact-availability">
+          <table class="catalog-table">
+            <thead><tr><th>Marketplace</th><th>Shadow SKU</th><th>Price</th><th>Status</th><th>Inventory policy</th></tr></thead>
+            <tbody>
+              ${shadows.map((shadow) => `
+                <tr>
+                  <td>${html(shadow.marketplace || shadow.company || "")}</td>
+                  <td>${html(shadow.shadowSku || "")}</td>
+                  <td><input type="number" step="0.01" value="${Number(shadow.price || 0)}" data-shadow-field="price" data-product-id="${item.id}" data-shadow-id="${shadow.id}" /></td>
+                  <td>${html(shadow.status || "Draft")}</td>
+                  <td>${html(shadow.inventoryPolicy || "Share parent inventory")}</td>
+                </tr>
+              `).join("") || `<tr><td colspan="5">No marketplace shadows yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderBrandGuard(item = {}) {
+  const sourceBrand = item.sourceBrand || item.productManagerFields?.brand || item.original?.brand || "";
+  const locked = Boolean(item.brandLocked);
+  return `
+    <div class="brand-guard-field">
+      <div class="brand-guard-head">
+        <strong>Brand protection</strong>
+        <span class="status ${locked ? "active" : "hold"}">${locked ? "Locked" : "Unlocked"}</span>
+      </div>
+      ${productFieldLabel("Brand", "brand", item)}
+      <label class="brand-lock-toggle">
+        <input type="checkbox" ${locked ? "checked" : ""} data-product-field="brandLocked" data-product-id="${item.id}" />
+        <span>Lock brand from dump updates</span>
+      </label>
+      <p class="brand-lock-message">${locked ? "Weekly data dumps cannot overwrite this brand." : "This brand can still be changed by approved imports."}</p>
+      <div class="brand-source-note">
+        <span>Dump brand</span>
+        <strong>${html(sourceBrand || "Not provided")}</strong>
+      </div>
+    </div>
+  `;
+}
+
+function renderProductHomeTab(item, context) {
+  const { images, galleryImage, tagsText, readiness, activeStatus, stockQty, shadowCount, grossProfit, margin } = context;
+  return `
+    <div class="product-home-grid">
+      <div class="product-home-side">
+        <section class="product-image-panel">
+          <div class="product-gallery-head">
+            <div>
+              ${sectionIconTitle("image", "Gallery")}
+              <span>${images.length} image${images.length === 1 ? "" : "s"}</span>
+            </div>
+            <button class="button secondary compact-button" type="button" data-open-product-images="${item.id}">${withIcon("edit-3", "Edit")}</button>
+          </div>
+          <div class="product-main-image product-home-image">
+            ${galleryImage ? `<img src="${html(galleryImage)}" alt="${html(item.title || item.sku)}" />` : `<div class="image-placeholder">No image</div>`}
+          </div>
+          <div class="product-image-rail">
+            ${images.map((image, index) => `
+              <button class="product-image-thumb ${image === galleryImage ? "active" : ""}" data-product-gallery-image="${html(image)}" data-product-id="${item.id}" aria-label="Show image ${index + 1}">
+                <img src="${html(image)}" alt="${html(item.title || item.sku)} image ${index + 1}" />
+              </button>
+            `).join("") || `<span>No media</span>`}
+          </div>
+          <div class="product-gallery-foot">
+            ${galleryImage ? `<a class="product-image-link" href="${html(galleryImage)}" target="_blank" rel="noopener">Open image</a>` : `<span>No product media yet</span>`}
+            <button class="link-button" type="button" data-open-product-images="${item.id}">${withIcon("image", "Manage images")}</button>
+          </div>
+        </section>
+        ${renderProductDimensionsCard(item)}
+      </div>
+      <div class="product-home-main">
+        <div class="product-home-column">
+          <section class="product-section-card product-section-blue">
+            <div class="product-section-title">${sectionIconTitle("info", "General")}<span class="status ${item.active === false ? "inactive" : "active"}">${activeStatus}</span></div>
+            <div class="product-row-fields">
+              ${productFieldLabel("Internal title", "title", item)}
+              ${renderBrandGuard(item)}
+              ${productFieldLabel("Main category", "category", item)}
+              ${productFieldLabel("Vendor category", "sourceCategory", item, { readonly: true })}
+              ${productFieldLabel("Condition", "condition", item)}
+              ${productFieldLabel("Tags", "tags", item)}
+            </div>
+            <div class="product-field-stack product-home-descriptions">
+              ${productFieldLabel("Short description", "shortDescription", item, { textarea: true, rows: 3, className: "product-description-field" })}
+              ${productFieldLabel("Long description", "longDescription", item, { textarea: true, rows: 6, className: "product-description-field" })}
+              ${renderProductBulletSection(item)}
+            </div>
+          </section>
+        </div>
+        <div class="product-home-column">
+          <section class="product-section-card product-section-green">
+            <div class="product-section-title">${sectionIconTitle("truck", "Purchasing")}</div>
+            <div class="product-row-fields">
+              ${productFieldLabel("Supplier", "supplier", item)}
+              ${productFieldLabel("Supplier code", "supplierCode", item)}
+              ${productFieldLabel("Vendor SKU", "vendorSku", item)}
+              ${productFieldLabel("Manufacturer", "manufacturer", item)}
+              ${productFieldLabel("MFR part number", "mfrPartNumber", item)}
+              ${productFieldLabel("Barcode / UPC", "barcode", item)}
+            </div>
+          </section>
+          <section class="product-section-card product-section-teal">
+            <div class="product-section-title">${sectionIconTitle("dollar-sign", "Pricing")}<span>${money(grossProfit)} profit</span></div>
+            <div class="product-row-fields">
+              ${productFieldLabel("Price", "price", item, { type: "number", step: "0.01" })}
+              ${productFieldLabel("Cost", "cost", item, { type: "number", step: "0.01" })}
+              ${productFieldLabel("MSRP", "msrp", item, { type: "number", step: "0.01" })}
+              ${productFieldLabel("FOB", "fobPrice", item, { type: "number", step: "0.01" })}
+            </div>
+            <div class="summary-grid product-home-summary pricing-summary">
+              <span><small>Margin</small><strong>${margin.toFixed(1)}%</strong></span>
+              <span><small>Stock</small><strong>${countLabel(stockQty)}</strong></span>
+              <span><small>Shadows</small><strong>${shadowCount}</strong></span>
+              <span><small>Readiness</small><strong>${readiness.score}%</strong></span>
+            </div>
+          </section>
+          <section class="product-section-card product-section-purple">
+            <div class="product-section-title">${sectionIconTitle("fingerprint", "Identifiers")}</div>
+            <div class="product-row-fields">
+              ${productFieldLabel("External ID", "externalId", item)}
+              ${productFieldLabel("Shopify ID", "shopifyId", item)}
+              ${productFieldLabel("Shopify variant ID", "shopifyVariantId", item)}
+              ${productFieldLabel("Shopify status", "shopifyStatus", item)}
+              ${productFieldLabel("Shopify published at", "shopifyPublishedAt", item)}
+              ${productFieldLabel("Shopify synced at", "shopifySyncedAt", item)}
+              ${productFieldLabel("UNSPSC", "unspsc", item)}
+              ${productFieldLabel("CTech ID", "ctechId", item)}
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function openProductImagesModal(productId) {
+  const item = productById(productId);
+  if (!item) return;
+  const editableImages = productEditableImageUrls(item);
+  const defaultImage = item.defaultImage || item.default_image || editableImages[0] || "";
+  pendingProductImageManager = {
+    productId,
+    images: editableImages.length ? editableImages : [""],
+    defaultImage
+  };
+  renderProductImagesModal();
+  $("#product-images-modal")?.classList.add("show");
+  $("#product-images-modal")?.setAttribute("aria-hidden", "false");
+}
+
+function closeProductImagesModal() {
+  pendingProductImageManager = { productId: null, images: [], defaultImage: "" };
+  $("#product-images-modal")?.classList.remove("show");
+  $("#product-images-modal")?.setAttribute("aria-hidden", "true");
+}
+
+function renderProductImagesModal() {
+  const item = productById(pendingProductImageManager.productId);
+  const content = $("#product-images-content");
+  if (!content) return;
+  if (!item) {
+    content.innerHTML = `<p class="muted">Select a product first.</p>`;
+    return;
+  }
+  const rows = pendingProductImageManager.images.length ? pendingProductImageManager.images : [""];
+  const sourceImage = String(item.originalImage || item.original_image || "").trim();
+  const sourceAlreadyIncluded = !sourceImage || rows.includes(sourceImage);
+  content.innerHTML = `
+    <div class="product-image-manager">
+      <section class="product-image-manager-preview">
+        <div class="product-main-image">
+          ${pendingProductImageManager.defaultImage ? `<img src="${html(pendingProductImageManager.defaultImage)}" alt="${html(item.title || item.sku)}" />` : `<div class="image-placeholder">No default image</div>`}
+        </div>
+        <div class="product-image-manager-meta">
+          <strong>${html(item.sku || "")}</strong>
+          <span>${rows.filter(Boolean).length} managed image${rows.filter(Boolean).length === 1 ? "" : "s"}</span>
+        </div>
+      </section>
+      <section class="product-image-manager-list">
+        <div class="product-image-manager-actions">
+          <strong>Product images</strong>
+          <button class="button secondary compact-button" type="button" data-add-product-image>Add image</button>
+        </div>
+        <div class="product-image-rows">
+          ${rows.map((image, index) => `
+            <article class="product-image-row">
+              <div class="product-image-row-preview">
+                ${image ? `<img src="${html(image)}" alt="${html(item.title || item.sku)} image ${index + 1}" />` : `<span>New</span>`}
+              </div>
+              <label>Image URL<input value="${html(image)}" data-product-image-url="${index}" placeholder="https://..." /></label>
+              <div class="product-image-row-actions">
+                <button type="button" class="button secondary compact-button" data-set-default-product-image="${index}" ${image && image === pendingProductImageManager.defaultImage ? "disabled" : ""}>Default</button>
+                <button type="button" class="button secondary compact-button" data-remove-product-image="${index}">Remove</button>
+              </div>
+            </article>
+          `).join("")}
+        </div>
+        ${sourceImage ? `
+          <div class="product-source-image-note">
+            <div>
+              <strong>Source reference image</strong>
+              <span>${sourceAlreadyIncluded ? "Already included in product images." : "Available from the supplier feed."}</span>
+            </div>
+            ${sourceAlreadyIncluded ? "" : `<button class="button secondary compact-button" type="button" data-add-source-product-image="${html(sourceImage)}">Add source image</button>`}
+          </div>
+        ` : ""}
+      </section>
+    </div>
+  `;
+}
+
+function syncProductImageModalInputs() {
+  $$("[data-product-image-url]").forEach((input) => {
+    const index = Number(input.dataset.productImageUrl);
+    pendingProductImageManager.images[index] = input.value.trim();
+  });
+  pendingProductImageManager.images = pendingProductImageManager.images.map((value) => String(value || "").trim());
+  if (!pendingProductImageManager.images.includes(pendingProductImageManager.defaultImage)) {
+    pendingProductImageManager.defaultImage = pendingProductImageManager.images.find(Boolean) || "";
+  }
+}
+
+async function saveProductImagesModal() {
+  const item = productById(pendingProductImageManager.productId);
+  if (!item) return;
+  syncProductImageModalInputs();
+  const images = [...new Set(pendingProductImageManager.images.filter(Boolean))];
+  const defaultImage = pendingProductImageManager.defaultImage || images[0] || "";
+  const secondaryImages = images.filter((image) => image !== defaultImage);
+  const result = await api(`/api/inventory/${item.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ defaultImage, images: secondaryImages })
+  });
+  selectedProductId = result.item.id;
+  selectedProductGalleryImageById[result.item.id] = defaultImage;
+  setState(result.state || { ...state, inventory: state.inventory.map((row) => row.id === result.item.id ? result.item : row), summary: result.summary });
+  closeProductImagesModal();
+  toast("Product images updated.");
+}
+
+function openProductBulletsModal(productId) {
+  const item = productById(productId);
+  if (!item) return;
+  const bullets = productBulletPoints(item);
+  pendingProductBulletManager = {
+    productId,
+    bulletPoints: bullets.length ? bullets : ["", "", "", "", ""]
+  };
+  renderProductBulletsModal();
+  $("#product-bullets-modal")?.classList.add("show");
+  $("#product-bullets-modal")?.setAttribute("aria-hidden", "false");
+}
+
+function closeProductBulletsModal() {
+  pendingProductBulletManager = { productId: null, bulletPoints: [] };
+  $("#product-bullets-modal")?.classList.remove("show");
+  $("#product-bullets-modal")?.setAttribute("aria-hidden", "true");
+}
+
+function renderProductBulletsModal() {
+  const item = productById(pendingProductBulletManager.productId);
+  const content = $("#product-bullets-content");
+  if (!content) return;
+  if (!item) {
+    content.innerHTML = `<p class="muted">Select a product first.</p>`;
+    return;
+  }
+  const rows = pendingProductBulletManager.bulletPoints.length ? pendingProductBulletManager.bulletPoints : ["", "", "", "", ""];
+  content.innerHTML = `
+    <div class="product-bullet-manager">
+      <div class="product-bullet-manager-intro">
+        <strong>${html(item.sku || "")}</strong>
+        <span>Reusable product highlights for marketplace metafields, attributes, or product descriptions.</span>
+      </div>
+      <div class="product-bullet-rows">
+        ${rows.map((bullet, index) => `
+          <article class="product-bullet-row">
+            <span>${index + 1}</span>
+            <input value="${html(bullet)}" data-product-bullet-input="${index}" placeholder="Add a product highlight" />
+            <button type="button" class="button secondary compact-button" data-remove-product-bullet="${index}">Remove</button>
+          </article>
+        `).join("")}
+      </div>
+      <button type="button" class="button secondary" data-add-product-bullet>Add bullet point</button>
+    </div>
+  `;
+}
+
+function syncProductBulletModalInputs() {
+  $$("[data-product-bullet-input]").forEach((input) => {
+    pendingProductBulletManager.bulletPoints[Number(input.dataset.productBulletInput)] = input.value.trim();
+  });
+}
+
+async function saveProductBulletsModal() {
+  const item = productById(pendingProductBulletManager.productId);
+  if (!item) return;
+  syncProductBulletModalInputs();
+  const bulletPoints = pendingProductBulletManager.bulletPoints.map((value) => String(value || "").trim()).filter(Boolean);
+  const result = await api(`/api/inventory/${item.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ bulletPoints })
+  });
+  selectedProductId = result.item.id;
+  setState(result.state || { ...state, inventory: state.inventory.map((row) => row.id === result.item.id ? result.item : row), summary: result.summary });
+  closeProductBulletsModal();
+  toast("Bullet points updated.");
+}
+
 function renderProductContentPage() {
-  const item = state.inventory.find((row) => row.id === selectedProductId);
+  const item = productById(selectedProductId);
   const detail = $("#product-profile-page");
   if (!item) {
     detail.innerHTML = `<div class="empty-state">Select a product to edit product content.</div>`;
@@ -3430,185 +6096,104 @@ function renderProductContentPage() {
 
   const grossProfit = Number(item.price || 0) - Number(item.cost || 0);
   const margin = Number(item.price || 0) ? (grossProfit / Number(item.price || 0)) * 100 : 0;
-  const imagesText = (item.images || []).join("\n");
+  const images = productImageUrls(item);
   const tagsText = (item.tags || []).join(", ");
-  const defaultImage = item.defaultImage || item.default_image;
-
-  detail.innerHTML = `
-    <div class="full-order">
-      <div class="full-order-head">
-        <button class="text-button" data-view-jump="catalog">Back to catalog</button>
-        <div>
-          <p class="eyebrow">${html(item.category || "Product")}</p>
-          <h2>${html(item.sku)}</h2>
-          <p class="muted">${html(item.title || "Untitled product")}</p>
-        </div>
-        <div class="profit-pill">
-          <small>Gross profit</small>
-          <strong>${money(grossProfit)} / ${margin.toFixed(1)}%</strong>
-        </div>
-      </div>
-
-      <div class="image-strip">
-        ${[defaultImage, ...(item.images || [])].filter(Boolean).slice(0, 4).map((image) => `<img src="${html(image)}" alt="${html(item.title)}" />`).join("") || `<div class="image-placeholder">No images</div>`}
-      </div>
-
-      <div class="full-order-grid">
-        <section class="full-card span-2">
-          <h3>Core Listing</h3>
-          <div class="edit-stack">
-            <label>Internal title<input value="${html(item.title || "")}" data-product-field="title" data-product-id="${item.id}" /></label>
-            <label>Marketplace title<input value="${html(item.marketplaceTitle || "")}" data-product-field="marketplaceTitle" data-product-id="${item.id}" /></label>
-            <label>Short description<textarea rows="3" data-product-field="shortDescription" data-product-id="${item.id}">${html(item.shortDescription || "")}</textarea></label>
-            <label>Long description<textarea rows="7" data-product-field="longDescription" data-product-id="${item.id}">${html(item.longDescription || "")}</textarea></label>
+  const defaultImage = item.defaultImage || item.default_image || images[0] || "";
+  const selectedGalleryImage = selectedProductGalleryImageById[item.id];
+  const galleryImage = images.includes(selectedGalleryImage) ? selectedGalleryImage : defaultImage || images[0] || "";
+  const activeStatus = item.active === false ? "Inactive source" : "Active source";
+  const stockQty = Number(item.stockQty ?? item.qty ?? 0);
+  const shadowCount = (item.shadowSkus || []).length;
+  const readiness = productReadiness(item);
+  const context = { images, defaultImage, galleryImage, tagsText, readiness, activeStatus, stockQty, shadowCount, grossProfit, margin };
+  let activeTabContent = "";
+  if (selectedProductWorkspaceTab === "shopify") {
+    activeTabContent = renderMarketplaceTab(item, "shopify");
+  } else if (selectedProductWorkspaceTab === "zoro") {
+    activeTabContent = renderZoroTab(item);
+  } else if (selectedProductWorkspaceTab === "shipping") {
+    activeTabContent = renderShippingTab(item);
+  } else if (selectedProductWorkspaceTab === "pricing") {
+    activeTabContent = renderPricingTab(item, grossProfit, margin);
+  } else if (selectedProductWorkspaceTab === "source") {
+    activeTabContent = `
+      <div class="product-tab-grid">
+        <section class="product-panel span-2">
+          <h3>Source and Compliance</h3>
+          <div class="product-form-grid">
+            ${productFieldLabel("External ID", "externalId", item)}
+            ${productFieldLabel("UNSPSC", "unspsc", item)}
+            ${productFieldLabel("Hazardous", "hazardous", item)}
+            ${productFieldLabel("SDS URL", "sdsUrl", item)}
+            ${productFieldLabel("Original SDS URL", "originalSdsUrl", item)}
+            ${productFieldLabel("Country of origin", "countryOfOrigin", item)}
+            ${productFieldLabel("Validated at", "validatedAt", item)}
+            ${productFieldLabel("Stock status", "stockStatus", item)}
+            ${productFieldLabel("Stock updated", "stockUpdatedAt", item)}
           </div>
         </section>
-
-        <section class="full-card span-2">
-          <div class="section-head">
-            <h3>Marketplace Shadows</h3>
-            <button class="button secondary" data-create-shadow="${item.id}">Create shadow</button>
-          </div>
-          <div class="table-wrap compact-table">
-            <table>
-              <thead><tr><th>Shadow SKU</th><th>Parent SKU</th><th>Marketplace</th><th>Price</th><th>Handling</th><th>Status</th><th>Notes</th></tr></thead>
-              <tbody>
-                ${(item.shadowSkus || []).map((shadow) => `
-                  <tr>
-                    <td><button class="order-link product-name-link" data-select-shadow="${shadow.id}" data-parent-product="${item.id}">${html(shadow.shadowSku)}</button></td>
-                    <td>${html(item.sku)}</td>
-                    <td>${html(shadow.marketplace || shadow.company || "")}</td>
-                    <td><input type="number" step="0.01" value="${Number(shadow.price || 0)}" data-shadow-field="price" data-product-id="${item.id}" data-shadow-id="${shadow.id}" /></td>
-                    <td><input type="number" min="0" value="${Number(shadow.handlingTimeDays || 0)}" data-shadow-field="handlingTimeDays" data-product-id="${item.id}" data-shadow-id="${shadow.id}" /></td>
-                    <td>
-                      <select data-shadow-field="status" data-product-id="${item.id}" data-shadow-id="${shadow.id}">
-                        ${["Draft", "Active", "Paused"].map((status) => `<option ${String(shadow.status || "Draft") === status ? "selected" : ""}>${status}</option>`).join("")}
-                      </select>
-                    </td>
-                    <td><input value="${html(shadow.notes || "")}" data-shadow-field="notes" data-product-id="${item.id}" data-shadow-id="${shadow.id}" /></td>
-                  </tr>
-                `).join("") || `<tr><td colspan="7">No marketplace shadows yet.</td></tr>`}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section class="full-card">
-          <h3>Commercial</h3>
-          <div class="edit-stack">
-            <label>Price<input type="number" step="0.01" value="${item.price || 0}" data-product-field="price" data-product-id="${item.id}" /></label>
-            <label>MSRP<input type="number" step="0.01" value="${item.msrp || 0}" data-product-field="msrp" data-product-id="${item.id}" /></label>
-            <label>Status<input value="${html(item.status || "")}" data-product-field="status" data-product-id="${item.id}" /></label>
-          </div>
-        </section>
-
-        <section class="full-card">
-          <h3>Product Data</h3>
-          <div class="edit-stack">
-            <label>Brand<input value="${html(item.brand || "")}" data-product-field="brand" data-product-id="${item.id}" /></label>
-            <label>Category<input value="${html(item.category || "")}" data-product-field="category" data-product-id="${item.id}" /></label>
-            <label>Condition<input value="${html(item.condition || "")}" data-product-field="condition" data-product-id="${item.id}" /></label>
-            <label>Source active<select data-product-field="active" data-product-id="${item.id}"><option value="false" ${item.active ? "" : "selected"}>No</option><option value="true" ${item.active ? "selected" : ""}>Yes</option></select></label>
-            <label>Barcode / UPC<input value="${html(item.barcode || "")}" data-product-field="barcode" data-product-id="${item.id}" /></label>
-          </div>
-        </section>
-
-        <section class="full-card span-2">
-          <h3>Supplier Identifiers</h3>
-          <div class="form-grid">
-            <label>External ID<input value="${html(item.externalId || "")}" data-product-field="externalId" data-product-id="${item.id}" /></label>
-            <label>Manufacturer<input value="${html(item.manufacturer || "")}" data-product-field="manufacturer" data-product-id="${item.id}" /></label>
-            <label>MFR part number<input value="${html(item.mfrPartNumber || "")}" data-product-field="mfrPartNumber" data-product-id="${item.id}" /></label>
-            <label>Vendor SKU<input value="${html(item.vendorSku || "")}" data-product-field="vendorSku" data-product-id="${item.id}" /></label>
-            <label>Supplier<input value="${html(item.supplier || "")}" data-product-field="supplier" data-product-id="${item.id}" /></label>
-            <label>Supplier code<input value="${html(item.supplierCode || "")}" data-product-field="supplierCode" data-product-id="${item.id}" /></label>
-            <label>UNSPSC<input value="${html(item.unspsc || "")}" data-product-field="unspsc" data-product-id="${item.id}" /></label>
-            <label>CTech ID<input value="${html(item.ctechId || "")}" data-product-field="ctechId" data-product-id="${item.id}" /></label>
-            <label>CTech last export<input value="${html(item.ctechIdLastExport || "")}" data-product-field="ctechIdLastExport" data-product-id="${item.id}" /></label>
-          </div>
-        </section>
-
-        <section class="full-card span-2">
-          <h3>Product Manager Source Fields</h3>
-          <div class="form-grid">
-            <label>Dump created at<input value="${html(item.productDumpCreatedAt || "")}" data-product-field="productDumpCreatedAt" data-product-id="${item.id}" /></label>
-            <label>Dump updated at<input value="${html(item.productDumpUpdatedAt || "")}" data-product-field="productDumpUpdatedAt" data-product-id="${item.id}" /></label>
-            <label>Inactive mailed at<input value="${html(item.inactiveMailedAt || "")}" data-product-field="inactiveMailedAt" data-product-id="${item.id}" /></label>
-            <label>Validated at<input value="${html(item.validatedAt || "")}" data-product-field="validatedAt" data-product-id="${item.id}" /></label>
-            <label>Checked image URL<input value="${html(item.checkedImageUrl || "")}" data-product-field="checkedImageUrl" data-product-id="${item.id}" /></label>
-            <label>Checked image error<input value="${html(item.checkedImageError || "")}" data-product-field="checkedImageError" data-product-id="${item.id}" /></label>
-            <label>Checked image size<input value="${html(item.checkedImageSize || "")}" data-product-field="checkedImageSize" data-product-id="${item.id}" /></label>
-            <label>Checked image timestamp<input value="${html(item.checkedImageTimestamp || "")}" data-product-field="checkedImageTimestamp" data-product-id="${item.id}" /></label>
-          </div>
-          <h4>Supplier Channel Fields</h4>
-          <div class="form-grid">
-            <label>Zoro SKU<input value="${html(item.zoroSku || "")}" data-product-field="zoroSku" data-product-id="${item.id}" /></label>
-            <label>Zoro price<input type="number" step="0.01" value="${item.zoroPrice || 0}" data-product-field="zoroPrice" data-product-id="${item.id}" /></label>
-            <label>Zoro leadtime<input value="${html(item.zoroLeadtime || "")}" data-product-field="zoroLeadtime" data-product-id="${item.id}" /></label>
-            <label>Zoro minimum qty<input type="number" step="1" value="${item.zoroMinimumQty || 0}" data-product-field="zoroMinimumQty" data-product-id="${item.id}" /></label>
-            <label>Varis contract price<input type="number" step="0.01" value="${item.varisContractPrice || 0}" data-product-field="varisContractPrice" data-product-id="${item.id}" /></label>
-            <label>Varis list price<input type="number" step="0.01" value="${item.varisListPrice || 0}" data-product-field="varisListPrice" data-product-id="${item.id}" /></label>
-            <label>Varis OD managed<input type="number" step="0.01" value="${item.varisOdManagedPrice || 0}" data-product-field="varisOdManagedPrice" data-product-id="${item.id}" /></label>
-            <label>Varis non-OD managed<input type="number" step="0.01" value="${item.varisNonOdManagedPrice || 0}" data-product-field="varisNonOdManagedPrice" data-product-id="${item.id}" /></label>
-            <label>Varis OD private<input type="number" step="0.01" value="${item.varisOdPrivatePrice || 0}" data-product-field="varisOdPrivatePrice" data-product-id="${item.id}" /></label>
-            <label>Varis non-OD private<input type="number" step="0.01" value="${item.varisNonOdPrivatePrice || 0}" data-product-field="varisNonOdPrivatePrice" data-product-id="${item.id}" /></label>
-            <label>Default supplier<input value="${html(item.defaultSupplier || "")}" data-product-field="defaultSupplier" data-product-id="${item.id}" /></label>
-            <label>Lead time<input value="${html(item.leadTime || "")}" data-product-field="leadTime" data-product-id="${item.id}" /></label>
-            <label>Alt vendor SKU<input value="${html(item.altVendorSku || "")}" data-product-field="altVendorSku" data-product-id="${item.id}" /></label>
-            <label>Country of origin<input value="${html(item.countryOfOrigin || "")}" data-product-field="countryOfOrigin" data-product-id="${item.id}" /></label>
-            <label>Item key<input value="${html(item.itemKey || "")}" data-product-field="itemKey" data-product-id="${item.id}" /></label>
-            <label>Clearance indicator<input value="${html(item.itemClearanceIndicator || "")}" data-product-field="itemClearanceIndicator" data-product-id="${item.id}" /></label>
-            <label>Original image<input value="${html(item.originalImage || "")}" data-product-field="originalImage" data-product-id="${item.id}" /></label>
-            <label>Original SDS URL<input value="${html(item.originalSdsUrl || "")}" data-product-field="originalSdsUrl" data-product-id="${item.id}" /></label>
-            <label>Last prices update at<input value="${html(item.lastPricesUpdateAt || "")}" data-product-field="lastPricesUpdateAt" data-product-id="${item.id}" /></label>
-            <label>Last prices update by<input value="${html(item.lastPricesUpdateBy || "")}" data-product-field="lastPricesUpdateBy" data-product-id="${item.id}" /></label>
-            <label>Vendor description<textarea rows="3" data-product-field="vendorDescription" data-product-id="${item.id}">${html(item.vendorDescription || "")}</textarea></label>
-            <label>Uploaded by<input value="${html(item.uploadedBy || "")}" data-product-field="uploadedBy" data-product-id="${item.id}" /></label>
-          </div>
+        <section class="product-panel span-2">
+          <h3>Raw Product Manager Fields</h3>
           ${renderProductManagerFields(item)}
         </section>
-
-        <section class="full-card span-2">
-          <h3>Buying Rules and Compliance</h3>
-          <div class="form-grid">
-            <label>UOM<input value="${html(item.uom || "")}" data-product-field="uom" data-product-id="${item.id}" /></label>
-            <label>UOM qty<input value="${html(item.uomQty || "")}" data-product-field="uomQty" data-product-id="${item.id}" /></label>
-            <label>Min quantity<input value="${html(item.minQuantity || "")}" data-product-field="minQuantity" data-product-id="${item.id}" /></label>
-            <label>Quantity increments<input value="${html(item.quantityIncrements || "")}" data-product-field="quantityIncrements" data-product-id="${item.id}" /></label>
-            <label>Hazardous<select data-product-field="hazardous" data-product-id="${item.id}"><option value="false" ${item.hazardous ? "" : "selected"}>No</option><option value="true" ${item.hazardous ? "selected" : ""}>Yes</option></select></label>
-            <label>SDS URL<input value="${html(item.sdsUrl || "")}" data-product-field="sdsUrl" data-product-id="${item.id}" /></label>
+      </div>
+    `;
+  } else if (selectedProductWorkspaceTab === "search") {
+    activeTabContent = `
+      <div class="product-tab-grid">
+        <section class="product-panel span-2">
+          <h3>Search and Content</h3>
+          <div class="product-field-stack">
+            ${productFieldLabel("Short description", "shortDescription", item, { textarea: true, rows: 3 })}
+            ${productFieldLabel("Long description", "longDescription", item, { textarea: true, rows: 8 })}
+            ${productFieldLabel("SEO keywords", "seoKeywords", item)}
+            ${productFieldLabel("Wildcard search", "wildcardSearch", item, { textarea: true, rows: 4 })}
           </div>
         </section>
+      </div>
+    `;
+  } else {
+    selectedProductWorkspaceTab = "home";
+    activeTabContent = renderProductHomeTab(item, context);
+  }
 
-        <section class="full-card span-2">
-          <h3>Images and SEO</h3>
-          <div class="edit-stack">
-            <label>Default image URL<input value="${html(defaultImage || "")}" data-product-field="defaultImage" data-product-id="${item.id}" /></label>
-            <label>Image URLs<textarea rows="4" data-product-field="images" data-product-id="${item.id}">${html(imagesText)}</textarea></label>
-            <label>SEO keywords<input value="${html(item.seoKeywords || "")}" data-product-field="seoKeywords" data-product-id="${item.id}" /></label>
-            <label>Tags<input value="${html(tagsText)}" data-product-field="tags" data-product-id="${item.id}" /></label>
-            <label>Wildcard search<textarea rows="3" data-product-field="wildcardSearch" data-product-id="${item.id}">${html(item.wildcardSearch || "")}</textarea></label>
+  detail.innerHTML = `
+    <div class="product-editor-page">
+      <div class="product-workspace-head">
+        <div class="product-workspace-title">
+          <button class="text-button" data-view-jump="catalog">${withIcon("arrow-left", "Back to catalog")}</button>
+          <div>
+            <h2>Product <span>${html(item.marketplaceTitle || item.title || "Untitled product")}</span></h2>
+            <div class="product-workspace-chips">
+              <span>SKU ${html(item.sku)}</span>
+              <span>${html(item.vendor || item.supplier || "No vendor")}</span>
+              <span>${html(item.active === false ? "Inactive" : "Active")}</span>
+              <span class="${item.brandLocked ? "brand-lock-chip" : "brand-lock-chip unlocked"}">${item.brandLocked ? "Brand locked" : "Brand unlocked"}</span>
+              <span>${countLabel(stockQty)} available</span>
+              ${renderReadinessPill(item)}
+            </div>
           </div>
-        </section>
-
-        <section class="full-card span-2">
-          <h3>Item and Package Attributes</h3>
-          <div class="form-grid">
-            <label>Item weight<input type="number" step="0.001" value="${item.itemWeight || item.weightOz || 0}" data-product-field="itemWeight" data-product-id="${item.id}" /></label>
-            <label>Item length<input type="number" step="0.001" value="${item.itemLength || item.lengthIn || 0}" data-product-field="itemLength" data-product-id="${item.id}" /></label>
-            <label>Item width<input type="number" step="0.001" value="${item.itemWidth || item.widthIn || 0}" data-product-field="itemWidth" data-product-id="${item.id}" /></label>
-            <label>Item height<input type="number" step="0.001" value="${item.itemHeight || item.heightIn || 0}" data-product-field="itemHeight" data-product-id="${item.id}" /></label>
-            <label>Package weight<input type="number" step="0.001" value="${item.packageWeight || 0}" data-product-field="packageWeight" data-product-id="${item.id}" /></label>
-            <label>Package length<input type="number" step="0.001" value="${item.packageLength || 0}" data-product-field="packageLength" data-product-id="${item.id}" /></label>
-            <label>Package width<input type="number" step="0.001" value="${item.packageWidth || 0}" data-product-field="packageWidth" data-product-id="${item.id}" /></label>
-            <label>Package height<input type="number" step="0.001" value="${item.packageHeight || 0}" data-product-field="packageHeight" data-product-id="${item.id}" /></label>
-          </div>
-        </section>
+        </div>
+        <div class="product-editor-actions">
+          <button class="button secondary" data-select-product="${item.id}" data-product-target="inventory-full">${withIcon("warehouse", "Inventory")}</button>
+          <button class="button" data-create-shadow="${item.id}">${withIcon("plus", "Create shadow")}</button>
+        </div>
+      </div>
+      <div class="product-workspace-tabs">
+        ${productTabButton("home", "Product Home")}
+        ${productTabButton("shopify", "Shopify")}
+        ${productTabButton("zoro", "Zoro")}
+        ${productTabButton("shipping", "Shipping Preferences")}
+        ${productTabButton("pricing", "Pricing Management")}
+        ${productTabButton("source", "Source Details")}
+        ${productTabButton("search", "Search Content")}
+      </div>
+      <div class="product-workspace-body">
+        ${activeTabContent}
       </div>
     </div>
   `;
 }
-
 function findShadowSelection() {
   for (const product of state.inventory || []) {
     const shadow = (product.shadowSkus || []).find((item) => item.id === selectedShadowId);
@@ -3884,7 +6469,8 @@ function renderShadowSkuPage() {
             <span><small>Parent SKU</small><strong>${html(product.sku)}</strong></span>
             <span><small>Title</small><strong>${html(product.marketplaceTitle || product.title || "")}</strong></span>
             <span><small>Brand</small><strong>${html(product.brand || "n/a")}</strong></span>
-            <span><small>Category</small><strong>${html(product.category || "n/a")}</strong></span>
+            <span><small>Main category</small><strong>${html(product.category || "n/a")}</strong></span>
+            <span><small>Vendor category</small><strong>${html(product.sourceCategory || product.vendorCategory || "n/a")}</strong></span>
             <span><small>Manufacturer</small><strong>${html(product.manufacturer || "n/a")}</strong></span>
             <span><small>Vendor SKU</small><strong>${html(product.vendorSku || "n/a")}</strong></span>
           </div>
@@ -3976,7 +6562,7 @@ function renderShadowSkuPage() {
 }
 
 function renderInventoryProductPage() {
-  const item = state.inventory.find((row) => row.id === selectedProductId);
+  const item = productById(selectedProductId);
   const target = $("#inventory-profile-page");
   if (!item) {
     target.innerHTML = `<div class="empty-state">Select an inventory item to view details.</div>`;
@@ -4364,6 +6950,7 @@ function render() {
   renderCustomers();
   renderPurchaseOrders();
   renderCatalog();
+  renderJobsPage();
   renderReports();
   renderConnections();
   renderTopbarActions();
@@ -4386,6 +6973,43 @@ function render() {
 
 async function load() {
   setState(await api("/api/state"));
+}
+
+function lightweightState() {
+  return {
+    inventory: [],
+    sourceCatalog: [],
+    orders: [],
+    orderDrafts: [],
+    returns: [],
+    customers: [],
+    purchaseOrders: [],
+    vendors: [],
+    brands: [],
+    warehouses: [],
+    marketplaceTemplates: [],
+    exportMappings: [],
+    connections: [],
+    importJobs: [],
+    syncRuns: [],
+    summary: {}
+  };
+}
+
+function mergeExportMappingsState(result = {}) {
+  const exportMappings = result.exportMappings || result.state?.exportMappings || [];
+  if (!state) state = lightweightState();
+  state = { ...state, exportMappings };
+  if (!selectedExportMappingId || !exportMappings.some((template) => template.id === selectedExportMappingId)) {
+    selectedExportMappingId = exportMappings[0]?.id || null;
+  }
+  return exportMappings;
+}
+
+async function loadExportMappingsOnly() {
+  const result = await api("/api/export-mappings");
+  mergeExportMappingsState(result);
+  renderImportExportMappings();
 }
 
 async function confirmOrder(id) {
@@ -5562,12 +8186,16 @@ async function updateProductField(input) {
   const item = state.inventory.find((row) => row.id === input.dataset.productId);
   if (!item) return;
   const field = input.dataset.productField;
-  const numericFields = new Set(["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"]);
-  const booleanFields = new Set(["hazardous", "active"]);
+  const numericFields = new Set(["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"]);
+  const booleanFields = new Set(["hazardous", "active", "brandLocked"]);
   let value = input.value;
   if (numericFields.has(field)) value = Number(input.value);
-  if (booleanFields.has(field)) value = input.value === "true";
+  if (booleanFields.has(field)) value = input.type === "checkbox" ? input.checked : input.value === "true";
   const payload = { [field]: value };
+  if (["packageLength", "packageWidth", "packageHeight"].includes(field)) {
+    const next = { ...item, [field]: value };
+    payload.dimensionalWeight = calculateDimensionalWeight(next);
+  }
   const result = await api(`/api/inventory/${item.id}`, { method: "PATCH", body: JSON.stringify(payload) });
   Object.assign(item, result.item);
   state.summary = result.summary;
@@ -5657,6 +8285,371 @@ async function updateMarketplaceTemplate(input) {
   toast("Marketplace template updated.");
 }
 
+async function createExportMapping() {
+  const form = $("#export-mapping-create-form");
+  const formData = form ? new FormData(form) : null;
+  const name = String(formData?.get("name") || "Custom Product Mapping").trim();
+  const source = String(formData?.get("source") || "Custom").trim();
+  const mode = String(formData?.get("mode") || "both").trim();
+  const notes = String(formData?.get("notes") || "").trim();
+  if (!name) throw new Error("Template name is required.");
+  const result = await api("/api/export-mappings", {
+    method: "POST",
+    body: JSON.stringify({ name, source, mode, notes })
+  });
+  selectedExportMappingId = result.template.id;
+  activeExportMappingPageId = result.template.id;
+  mergeExportMappingsState(result);
+  closeExportMappingCreateModal();
+  renderImportExportMappings();
+  toast("Template created.");
+}
+
+function openExportMappingCreateModal() {
+  const modal = $("#export-mapping-create-modal");
+  const form = $("#export-mapping-create-form");
+  if (form) form.reset();
+  modal?.classList.add("show");
+  modal?.setAttribute("aria-hidden", "false");
+  setTimeout(() => $("#export-mapping-name")?.focus(), 0);
+}
+
+function closeExportMappingCreateModal() {
+  $("#export-mapping-create-modal")?.classList.remove("show");
+  $("#export-mapping-create-modal")?.setAttribute("aria-hidden", "true");
+}
+
+async function updateExportMapping(input) {
+  const template = (state.exportMappings || []).find((row) => row.id === input.dataset.exportMappingId);
+  if (!template) return;
+  const field = input.dataset.exportMappingField;
+  const value = input.type === "checkbox" ? input.checked : input.value;
+  const result = await api(`/api/export-mappings/${template.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ [field]: value })
+  });
+  selectedExportMappingId = result.template.id;
+  activeExportMappingPageId = result.template.id;
+  mergeExportMappingsState(result);
+  renderImportExportMappings();
+  toast("Mapping updated.");
+}
+
+async function saveExportMappingRows(templateId, mappings) {
+  const result = await api(`/api/export-mappings/${templateId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ mappings })
+  });
+  selectedExportMappingId = result.template.id;
+  activeExportMappingPageId = result.template.id;
+  mergeExportMappingsState(result);
+  renderImportExportMappings();
+  toast("Mapping columns updated.");
+}
+
+function markMappingDraftDirty() {
+  mappingDraftDirty = true;
+  const node = $("#mapping-save-state");
+  if (node) {
+    node.textContent = "Unsaved changes";
+    node.classList.add("dirty");
+  }
+}
+
+function markMappingDraftSaved() {
+  mappingDraftDirty = false;
+  const node = $("#mapping-save-state");
+  if (node) {
+    node.textContent = "Saved";
+    node.classList.remove("dirty");
+  }
+}
+
+function parseMappingRowsText(text) {
+  return String(text || "").split(/\r?\n/).map((line) => {
+    const [externalColumn = "", productField = "", defaultValue = "", required = ""] = line.split("|");
+    return {
+      externalColumn: externalColumn.trim(),
+      productField: productField.trim(),
+      defaultValue: defaultValue.trim(),
+      required: ["true", "yes", "required", "1"].includes(required.trim().toLowerCase())
+    };
+  }).filter((row) => row.externalColumn || row.productField || row.defaultValue);
+}
+
+function collectExportMappingDraft(templateId) {
+  const payload = {};
+  document.querySelectorAll(`[data-export-mapping-draft-field][data-export-mapping-id="${CSS.escape(templateId)}"]`).forEach((input) => {
+    const field = input.dataset.exportMappingDraftField;
+    payload[field] = input.type === "checkbox" ? input.checked : input.value;
+  });
+  const raw = document.querySelector(`[data-export-mapping-draft-raw="${CSS.escape(templateId)}"]`);
+  if (raw?.dataset.mappingRawDirty === "true") {
+    payload.mappings = parseMappingRowsText(raw.value);
+    return payload;
+  }
+  const rows = [];
+  document.querySelectorAll(`[data-export-mapping-draft-row-field][data-export-mapping-id="${CSS.escape(templateId)}"]`).forEach((input) => {
+    const index = Number(input.dataset.mappingRowIndex || 0);
+    const field = input.dataset.exportMappingDraftRowField;
+    rows[index] = rows[index] || {};
+    rows[index][field] = input.type === "checkbox" ? input.checked : input.value;
+  });
+  payload.mappings = rows.filter(Boolean).map((row) => ({
+    externalColumn: row.externalColumn || "",
+    productField: row.productField || "",
+    defaultValue: row.defaultValue || "",
+    required: Boolean(row.required)
+  })).filter((row) => row.externalColumn || row.productField || row.defaultValue);
+  return payload;
+}
+
+async function saveExportMappingDraft(templateId) {
+  const payload = collectExportMappingDraft(templateId);
+  const result = await api(`/api/export-mappings/${templateId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+  selectedExportMappingId = result.template.id;
+  activeExportMappingPageId = result.template.id;
+  mergeExportMappingsState(result);
+  markMappingDraftSaved();
+  renderImportExportMappings();
+  toast("Template saved.");
+}
+
+function reindexMappingDraftRows(templateId) {
+  document.querySelectorAll(".mapping-row-edit").forEach((row, index) => {
+    row.querySelectorAll("[data-mapping-row-index]").forEach((input) => {
+      input.dataset.mappingRowIndex = String(index);
+    });
+    const removeButton = row.querySelector("[data-remove-export-mapping-row]");
+    if (removeButton) {
+      removeButton.dataset.mappingRowIndex = String(index);
+      removeButton.dataset.removeExportMappingRow = templateId;
+    }
+  });
+}
+
+function addExportMappingRow(templateId) {
+  const editor = document.querySelector(".mapping-row-editor");
+  if (!editor) return;
+  const empty = editor.querySelector(".empty-state");
+  if (empty) empty.remove();
+  const index = editor.querySelectorAll(".mapping-row-edit").length;
+  editor.insertAdjacentHTML("beforeend", renderMappingDraftRow({ externalColumn: "New Column", productField: "", defaultValue: "" }, templateId, index));
+  reindexMappingDraftRows(templateId);
+  markMappingDraftDirty();
+}
+
+function removeExportMappingRow(templateId, index) {
+  const row = [...document.querySelectorAll(".mapping-row-edit")][Number(index)];
+  if (!row) return;
+  row.remove();
+  reindexMappingDraftRows(templateId);
+  markMappingDraftDirty();
+}
+
+async function duplicateExportMapping(templateId) {
+  const template = (state.exportMappings || []).find((row) => row.id === templateId);
+  if (!template) return;
+  const result = await api("/api/export-mappings", {
+    method: "POST",
+    body: JSON.stringify({
+      name: `${template.name} Copy`,
+      source: template.source,
+      mode: template.mode,
+      notes: template.notes,
+      mappings: template.mappings || []
+    })
+  });
+  selectedExportMappingId = result.template.id;
+  activeExportMappingPageId = result.template.id;
+  mergeExportMappingsState(result);
+  renderImportExportMappings();
+  toast("Template duplicated.");
+}
+
+async function deleteExportMapping(templateId) {
+  const template = (state.exportMappings || []).find((row) => row.id === templateId);
+  if (isBuiltInExportMapping(template)) {
+    toast("Built-in templates cannot be deleted. Duplicate it first, then delete the copy.");
+    return;
+  }
+  if (!confirm("Delete this import/export template? This removes the local mapping configuration.")) return;
+  const result = await api(`/api/export-mappings/${templateId}`, { method: "DELETE" });
+  activeExportMappingPageId = null;
+  const exportMappings = mergeExportMappingsState(result);
+  if (selectedExportMappingId === templateId) selectedExportMappingId = exportMappings[0]?.id || null;
+  renderImportExportMappings();
+  toast("Template deleted.");
+}
+
+async function importMappedProducts(input) {
+  const [file] = input.files || [];
+  if (!file) return;
+  const csv = await file.text();
+  await previewProductImport(input.dataset.importExportFile, csv, file.name);
+}
+
+function renderProductImportModal() {
+  const template = (state.exportMappings || []).find((row) => row.id === pendingProductImport.templateId);
+  const content = $("#product-import-content");
+  if (!content) return;
+  const isShopifyStatus = pendingProductImport.mode === "shopify-status";
+  if (!template && !isShopifyStatus) return;
+  const preview = pendingProductImport.preview;
+  $("#product-import-title").textContent = isShopifyStatus ? "Import Shopify status" : `Import ${template.name}`;
+  content.innerHTML = `
+    <div class="product-import-steps">
+      <section class="product-import-step active">
+        <span>1</span>
+        <strong>Choose CSV</strong>
+        <small>${html(pendingProductImport.fileName || "No file selected")}</small>
+      </section>
+      <section class="product-import-step ${preview ? "active" : ""}">
+        <span>2</span>
+        <strong>Review preview</strong>
+        <small>${preview ? `${preview.changed} updates detected` : "Waiting for file"}</small>
+      </section>
+      <section class="product-import-step ${preview ? "active" : ""}">
+        <span>3</span>
+        <strong>Import</strong>
+        <small>${isShopifyStatus ? "Updates Shopify fields only" : "Matched by mapped SKU"}</small>
+      </section>
+    </div>
+    <div class="product-import-picker">
+      <div>
+        <strong>${html(isShopifyStatus ? "Matrixify Products export" : template.name)}</strong>
+        <small>${html(isShopifyStatus ? "Matches by Variant SKU, then Handle, then Shopify ID. Does not overwrite product content." : `${template.source} / ${(template.mappings || []).length} mapped columns`)}</small>
+      </div>
+      <label class="file-button">Choose CSV<input type="file" accept=".csv,text/csv" ${isShopifyStatus ? "data-import-shopify-status-file" : `data-import-export-file="${template.id}"`} /></label>
+    </div>
+    ${preview ? `
+      <div class="product-import-summary">
+        <span><small>Updates</small><strong>${preview.changed}</strong></span>
+        <span><small>${isShopifyStatus ? "Matched" : "Creates"}</small><strong>${isShopifyStatus ? (preview.matched || 0) : (preview.preview || []).filter((row) => row.action === "create").length}</strong></span>
+        <span><small>Updates</small><strong>${(preview.preview || []).filter((row) => row.action === "update").length}</strong></span>
+        ${isShopifyStatus ? `<span><small>Missing</small><strong>${(preview.missing || []).length}</strong></span>` : ""}
+      </div>
+      <div class="mapping-preview-table product-import-preview">
+        <table class="catalog-table">
+          <thead><tr><th>SKU</th><th>${isShopifyStatus ? "Handle" : "Action"}</th><th>${isShopifyStatus ? "Action / match" : "Mapped fields"}</th><th>Fields</th></tr></thead>
+          <tbody>${(preview.preview || []).slice(0, 12).map((row) => `<tr><td>${html(row.sku)}</td><td>${html(isShopifyStatus ? row.handle : row.action)}</td><td>${html(isShopifyStatus ? `${row.action}${row.matchBy ? ` by ${row.matchBy}` : ""}` : "")}</td><td>${html((row.fields || []).join(", "))}</td></tr>`).join("")}</tbody>
+        </table>
+      </div>
+    ` : `<div class="empty-state compact">${isShopifyStatus ? "Choose a Matrixify Products export to preview Shopify IDs and live statuses." : "Choose a CSV to preview what will be created or updated."}</div>`}
+  `;
+  $("[data-run-product-import]").disabled = !preview || !pendingProductImport.csv;
+  $("[data-run-product-import]").textContent = isShopifyStatus ? "Update Shopify status" : "Import products";
+}
+
+function openProductImportModal(templateId) {
+  pendingProductImport = { templateId, fileName: "", csv: "", preview: null, mode: "mapped" };
+  $("#product-import-modal")?.classList.add("show");
+  $("#product-import-modal")?.setAttribute("aria-hidden", "false");
+  renderProductImportModal();
+}
+
+function openShopifyStatusImportModal() {
+  pendingProductImport = { templateId: null, fileName: "", csv: "", preview: null, mode: "shopify-status" };
+  $("#product-import-modal")?.classList.add("show");
+  $("#product-import-modal")?.setAttribute("aria-hidden", "false");
+  renderProductImportModal();
+}
+
+function closeProductImportModal() {
+  pendingProductImport = { templateId: null, fileName: "", csv: "", preview: null, mode: "mapped" };
+  $("#product-import-modal")?.classList.remove("show");
+  $("#product-import-modal")?.setAttribute("aria-hidden", "true");
+}
+
+async function previewProductImport(templateId, csv, fileName = "") {
+  const result = await api(`/api/export-mappings/${templateId}/import`, {
+    method: "POST",
+    body: JSON.stringify({ csv, dryRun: true, fileName })
+  });
+  pendingProductImport = { templateId, fileName, csv, preview: result, mode: "mapped" };
+  renderProductImportModal();
+  toast(`Previewed ${result.changed} product row${result.changed === 1 ? "" : "s"}.`);
+}
+
+async function importShopifyStatusFile(input) {
+  const [file] = input.files || [];
+  if (!file) return;
+  const csv = await file.text();
+  const result = await api("/api/shopify/status-import", {
+    method: "POST",
+    body: JSON.stringify({ csv, dryRun: true, fileName: file.name })
+  });
+  pendingProductImport = { templateId: null, fileName: file.name, csv, preview: result, mode: "shopify-status" };
+  $("#product-import-modal")?.classList.add("show");
+  $("#product-import-modal")?.setAttribute("aria-hidden", "false");
+  renderProductImportModal();
+  toast(`Previewed ${result.changed} Shopify status update${result.changed === 1 ? "" : "s"}.`);
+  input.value = "";
+}
+
+async function runProductImport() {
+  if (!pendingProductImport.csv) return;
+  if (pendingProductImport.mode === "shopify-status") {
+    const result = await api("/api/shopify/status-import", {
+      method: "POST",
+      body: JSON.stringify({ csv: pendingProductImport.csv, fileName: pendingProductImport.fileName })
+    });
+    closeProductImportModal();
+    setState(result.state);
+    renderCatalog();
+    toast(`Updated Shopify status for ${result.changed} product${result.changed === 1 ? "" : "s"}.`);
+    return;
+  }
+  if (!pendingProductImport.templateId) return;
+  const result = await api(`/api/export-mappings/${pendingProductImport.templateId}/import`, {
+    method: "POST",
+    body: JSON.stringify({ csv: pendingProductImport.csv, fileName: pendingProductImport.fileName })
+  });
+  closeProductImportModal();
+  setState(result.state);
+  renderImportExportMappings();
+  toast(`Imported ${result.changed} product row${result.changed === 1 ? "" : "s"}.`);
+}
+
+async function loadMappingHeaders(input) {
+  const [file] = input.files || [];
+  if (!file) return;
+  const csv = await file.text();
+  const headers = parseCsvHeaderLine(csv);
+  if (!headers.length) return toast("No CSV headers found.");
+  const mappings = headers.map((header) => ({
+    externalColumn: header,
+    productField: guessProductField(header),
+    defaultValue: ""
+  }));
+  const templateId = input.dataset.loadMappingHeaders;
+  const editor = document.querySelector(".mapping-row-editor");
+  if (activeExportMappingPageId === templateId && editor) {
+    editor.innerHTML = `
+      <div class="mapping-row-editor-head">
+        <span>External column</span>
+        <span>DataPlus field</span>
+        <span>Default value</span>
+        <span>Required</span>
+        <span></span>
+      </div>
+      ${mappings.map((row, index) => renderMappingDraftRow(row, templateId, index)).join("")}
+    `;
+    const raw = document.querySelector(`[data-export-mapping-draft-raw="${CSS.escape(templateId)}"]`);
+    if (raw) {
+      raw.value = mappings.map((row) => `${row.externalColumn}|${row.productField}|${row.defaultValue || ""}`).join("\n");
+      raw.dataset.mappingRawDirty = "false";
+    }
+    markMappingDraftDirty();
+    toast(`Loaded ${headers.length} columns. Click Save changes to keep them.`);
+    return;
+  }
+  await saveExportMappingRows(templateId, mappings);
+}
+
 async function updateChannelField(input) {
   const channel = (state.connections || []).find((row) => row.id === input.dataset.channelId);
   if (!channel) return;
@@ -5715,9 +8708,322 @@ async function updateOrderMoney(input) {
 
 async function importInventory(file) {
   const csv = await file.text();
-  const result = await api("/api/import/inventory", { method: "POST", body: JSON.stringify({ csv }) });
+  const result = await api("/api/import/inventory", { method: "POST", body: JSON.stringify({ csv, fileName: file.name }) });
   setState(result.state);
   toast(`Imported ${result.changed} inventory rows.`);
+}
+
+async function importSkuCategories(file) {
+  const csv = await file.text();
+  const result = await api("/api/categories/import-sku-csv", {
+    method: "POST",
+    body: JSON.stringify({ csv, fileName: file.name })
+  });
+  setState(result.state);
+  categoryScope = "main";
+  selectedCategoryId = null;
+  categoryRequestId += 1;
+  categoryState = { ...(result.categories || {}), query: "", scope: "main", loading: false };
+  renderCatalog();
+  toast(`Imported ${result.changed} SKU categories. ${result.updatedProducts} active products updated.`);
+}
+
+async function importCategoryMappings(file) {
+  const csv = await file.text();
+  const result = await api("/api/categories/import-mapping-csv", {
+    method: "POST",
+    body: JSON.stringify({ csv, fileName: file.name })
+  });
+  setState(result.state);
+  categoryScope = "main";
+  selectedCategoryId = null;
+  categoryRequestId += 1;
+  categoryState = { ...(result.categories || {}), query: "", scope: "main", loading: false };
+  renderCatalog();
+  toast(`Imported ${result.changed} category mappings.`);
+}
+
+async function promoteCatalogProduct(sku) {
+  if (!sku) return;
+  const result = await api("/api/catalog/promote", {
+    method: "POST",
+    body: JSON.stringify({ sku })
+  });
+  selectedProductId = result.item?.id || selectedProductId;
+  setState(result.state);
+  renderSourceCatalogTable();
+  toast(`${sku} ${result.existing ? "updated in" : "added to"} active catalog.`);
+}
+
+async function promoteCatalogSkusFromCsv(file) {
+  const csv = await file.text();
+  const result = await api("/api/catalog/promote-csv", {
+    method: "POST",
+    body: JSON.stringify({ csv })
+  });
+  selectedSourceSkus.clear();
+  selectedSourceAllFiltered = false;
+  setState(result.state);
+  sourceCatalogPage = 1;
+  renderCatalog();
+  const missing = result.missing?.length ? ` ${result.missing.length} not found.` : "";
+  toast(`Added ${result.changed} of ${result.requested} SKU${result.requested === 1 ? "" : "s"} to active catalog.${missing}`);
+}
+
+function sourceSkuCandidatesFromCsv(csv) {
+  const text = String(csv || "");
+  const records = parseCsvHeaderLine(text).length ? parseCsv(text) : [];
+  const headerSkus = records.flatMap((record) => [
+    record.sku,
+    record.SKU,
+    record.Sku,
+    record["Variant SKU"],
+    record["variant sku"],
+    record["Vendor SKU"],
+    record.vendorSku
+  ]).filter(Boolean);
+  const rawSkus = text.split(/[\r\n,;\t]+/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .filter((value) => !["sku", "variant sku", "vendor sku"].includes(value.toLowerCase()));
+  return [...new Set((headerSkus.length ? headerSkus : rawSkus).map((sku) => String(sku || "").trim()).filter(Boolean))];
+}
+
+async function openSourceSkuImportModal(file) {
+  const csv = await file.text();
+  pendingSourceSkuImport = {
+    fileName: file.name || "source-skus.csv",
+    csv,
+    skus: sourceSkuCandidatesFromCsv(csv),
+    result: null,
+    running: false,
+    error: ""
+  };
+  $("#source-sku-import-modal")?.classList.add("show");
+  $("#source-sku-import-modal")?.setAttribute("aria-hidden", "false");
+  renderSourceSkuImportModal();
+}
+
+function closeSourceSkuImportModal() {
+  pendingSourceSkuImport = { fileName: "", csv: "", skus: [], result: null, running: false, error: "" };
+  $("#source-sku-import-modal")?.classList.remove("show");
+  $("#source-sku-import-modal")?.setAttribute("aria-hidden", "true");
+}
+
+function renderSourceSkuImportModal() {
+  const content = $("#source-sku-import-content");
+  if (!content) return;
+  const pending = pendingSourceSkuImport;
+  const result = pending.result;
+  const requested = result?.requested ?? pending.skus.length;
+  const changed = result?.changed ?? 0;
+  const missing = result?.missing || [];
+  const progress = pending.running ? 65 : result ? 100 : pending.skus.length ? 33 : 0;
+  content.innerHTML = `
+    <div class="product-import-steps">
+      <section class="product-import-step active">
+        <span>1</span>
+        <strong>Upload file</strong>
+        <small>${html(pending.fileName || "No file selected")}</small>
+      </section>
+      <section class="product-import-step ${pending.skus.length || pending.running || result ? "active" : ""}">
+        <span>2</span>
+        <strong>Read SKUs</strong>
+        <small>${Number(pending.skus.length || 0).toLocaleString()} unique SKU${pending.skus.length === 1 ? "" : "s"} found</small>
+      </section>
+      <section class="product-import-step ${pending.running || result ? "active" : ""}">
+        <span>3</span>
+        <strong>Add to products</strong>
+        <small>${pending.running ? "Working through source catalog" : result ? `${changed} moved` : "Ready to run"}</small>
+      </section>
+    </div>
+    <div class="source-import-progress">
+      <div class="source-import-progress-bar"><span style="width:${progress}%"></span></div>
+      <div class="source-import-progress-meta">
+        <strong>${pending.running ? "Importing source SKUs..." : result ? "Import complete" : "Ready to import"}</strong>
+        <small>${result ? `${changed} added or updated / ${requested} requested` : `${requested} SKU${requested === 1 ? "" : "s"} queued`}</small>
+      </div>
+    </div>
+    ${pending.error ? `<div class="empty-state compact">${html(pending.error)}</div>` : ""}
+    <div class="product-import-summary">
+      <span><small>Requested</small><strong>${Number(requested || 0).toLocaleString()}</strong></span>
+      <span><small>Moved to products</small><strong>${Number(changed || 0).toLocaleString()}</strong></span>
+      <span><small>Missing</small><strong>${Number(missing.length || 0).toLocaleString()}</strong></span>
+    </div>
+    <div class="source-import-preview-grid">
+      <section class="mapping-card">
+        <h3>SKU preview</h3>
+        <div class="source-import-sku-list">
+          ${pending.skus.slice(0, 80).map((sku) => `<span>${html(sku)}</span>`).join("") || `<p class="muted">No SKUs detected. Use a sku column or one SKU per line.</p>`}
+        </div>
+      </section>
+      <section class="mapping-card">
+        <h3>Missing after import</h3>
+        <div class="source-import-sku-list missing">
+          ${missing.slice(0, 100).map((sku) => `<span>${html(sku)}</span>`).join("") || `<p class="muted">${result ? "All requested SKUs were found in the source catalog." : "Missing SKUs will appear here after import."}</p>`}
+        </div>
+      </section>
+    </div>
+  `;
+  const runButton = $("[data-run-source-sku-import]");
+  if (runButton) runButton.disabled = pending.running || !pending.skus.length || Boolean(result);
+}
+
+async function runSourceSkuImport() {
+  if (!pendingSourceSkuImport.csv || pendingSourceSkuImport.running) return;
+  pendingSourceSkuImport.running = true;
+  pendingSourceSkuImport.error = "";
+  renderSourceSkuImportModal();
+  try {
+    const result = await api("/api/catalog/promote-csv", {
+      method: "POST",
+      body: JSON.stringify({ csv: pendingSourceSkuImport.csv, fileName: pendingSourceSkuImport.fileName })
+    });
+    selectedSourceSkus.clear();
+    selectedSourceAllFiltered = false;
+    pendingSourceSkuImport = { ...pendingSourceSkuImport, running: false, result };
+    setState(result.state);
+    sourceCatalogPage = 1;
+    renderCatalog();
+    renderSourceSkuImportModal();
+    const missing = result.missing?.length ? ` ${result.missing.length} not found.` : "";
+    toast(`Added ${result.changed} of ${result.requested} SKU${result.requested === 1 ? "" : "s"} to active catalog.${missing}`);
+  } catch (error) {
+    pendingSourceSkuImport.running = false;
+    pendingSourceSkuImport.error = error.message;
+    renderSourceSkuImportModal();
+  }
+}
+
+async function applyCatalogBulkAction() {
+  const action = $("#catalog-bulk-action")?.value || "";
+  if (!action) {
+    toast("Choose a bulk action.");
+    return;
+  }
+  if (catalogTab === "source") {
+    if (selectedSourceAllFiltered) return toast("Select current page or individual source products before applying bulk actions.");
+    const skus = [...selectedSourceSkus];
+    if (!skus.length) return toast("Select source catalog products first.");
+    if (action === "delete" && !confirm(`Hide ${skus.length} source catalog product${skus.length === 1 ? "" : "s"} from this catalog view?`)) return;
+    const result = await api("/api/catalog/bulk", {
+      method: "POST",
+      body: JSON.stringify({ skus, action })
+    });
+    setState(result.state);
+    selectedSourceSkus.clear();
+    selectedSourceAllFiltered = false;
+    renderCatalog();
+    toast(sourceCatalogActionMessage(action, result.changed));
+    return;
+  }
+
+  const ids = selectedProductAllFiltered ? filteredCatalogItems().map((item) => item.id) : [...selectedProductIds];
+  if (!ids.length) return toast("Select active products first.");
+  if (action === "delete" && !confirm(`Delete ${ids.length} product${ids.length === 1 ? "" : "s"} from Products?`)) return;
+  const result = await api("/api/inventory/bulk", {
+    method: "POST",
+    body: JSON.stringify({ ids, action })
+  });
+  setState(result.state);
+  selectedProductIds.clear();
+  selectedProductAllFiltered = false;
+  renderCatalog();
+  toast(productActionMessage(action, result.changed));
+}
+
+function productActionMessage(action, count) {
+  const label = {
+    delete: "Deleted",
+    "set-active": "Set active",
+    "set-inactive": "Set inactive",
+    "set-discontinued": "Set discontinued"
+  }[action] || "Updated";
+  return `${label} ${count} product${count === 1 ? "" : "s"}.`;
+}
+
+function sourceCatalogActionMessage(action, count) {
+  const label = {
+    "add-active": "Added to active catalog",
+    delete: "Hidden from Source Catalog",
+    "set-active": "Set active",
+    "set-inactive": "Set inactive",
+    "set-discontinued": "Set discontinued"
+  }[action] || "Updated";
+  return `${label} ${count} source product${count === 1 ? "" : "s"}.`;
+}
+
+async function runProductRowAction(id, action) {
+  if (action === "delete" && !confirm("Delete this product from Products?")) return;
+  const result = await api("/api/inventory/bulk", {
+    method: "POST",
+    body: JSON.stringify({ ids: [id], action })
+  });
+  setState(result.state);
+  selectedProductIds.delete(id);
+  selectedProductAllFiltered = false;
+  renderCatalog();
+  toast(productActionMessage(action, result.changed));
+}
+
+async function runSourceCatalogRowAction(sku, action) {
+  if (action === "delete" && !confirm("Hide this product from Source Catalog?")) return;
+  const result = await api("/api/catalog/bulk", {
+    method: "POST",
+    body: JSON.stringify({ skus: [sku], action })
+  });
+  setState(result.state);
+  selectedSourceSkus.delete(sku);
+  selectedSourceAllFiltered = false;
+  renderCatalog();
+  toast(sourceCatalogActionMessage(action, result.changed));
+}
+
+async function exportProductsFromProductsTab() {
+  const templateId = $("#product-export-template")?.value || selectedExportMappingId;
+  if (!templateId) return toast("Choose an export mapping.");
+  selectedExportMappingId = templateId;
+  const selectedSkus = [...selectedProductIds]
+    .map((id) => (state.inventory || []).find((item) => item.id === id)?.sku)
+    .filter(Boolean);
+  const filteredSkus = selectedSkus.length && !selectedProductAllFiltered
+    ? selectedSkus
+    : filteredCatalogItems().map((item) => item.sku).filter(Boolean);
+  if (!filteredSkus.length) return toast("No products match this export.");
+  const result = await api(`/api/export-mappings/${templateId}/export`, {
+    method: "POST",
+    body: JSON.stringify({ skus: filteredSkus })
+  });
+  downloadCsvResult(result, "product-export.csv");
+  toast(`Exported ${Number(result.count || 0).toLocaleString()} product${result.count === 1 ? "" : "s"}.`);
+}
+
+async function exportSourceCatalogProducts() {
+  const templateId = $("#source-export-template")?.value || selectedExportMappingId;
+  if (!templateId) return toast("Choose an export mapping.");
+  selectedExportMappingId = templateId;
+  const body = selectedSourceAllFiltered || !selectedSourceSkus.size
+    ? { query: $("#catalog-search")?.value.trim() || "", filters: catalogFilters() }
+    : { skus: [...selectedSourceSkus] };
+  const result = await api("/api/catalog/export", {
+    method: "POST",
+    body: JSON.stringify({ ...body, mappingId: templateId })
+  });
+  downloadCsvResult(result, "source-catalog-export.csv");
+  const limited = result.limited && result.matched > result.count ? ` of ${Number(result.matched).toLocaleString()} matched` : "";
+  toast(`Exported ${Number(result.count || 0).toLocaleString()}${limited} source product${result.count === 1 ? "" : "s"}.`);
+}
+
+function downloadCsvResult(result, fallbackName) {
+  const blob = new Blob([result.csv || ""], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = result.filename || fallbackName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 document.addEventListener("click", (event) => {
@@ -5728,8 +9034,12 @@ document.addEventListener("click", (event) => {
   const orderButton = event.target.closest("[data-select-order]");
   const poButton = event.target.closest("[data-select-po]");
   const productButton = event.target.closest("[data-select-product]");
+  const productWorkspaceTabButton = event.target.closest("[data-product-workspace-tab]");
   const shadowButton = event.target.closest("[data-select-shadow]");
   const templateButton = event.target.closest("[data-select-template]");
+  const categoryButton = event.target.closest("[data-select-category]");
+  const categoryScopeButton = event.target.closest("[data-category-scope]");
+  const clearJobFiltersButton = event.target.closest("[data-clear-job-filters]");
   const channelButton = event.target.closest("[data-select-channel]");
   const exchangeTemuButton = event.target.closest("[data-exchange-temu-code]");
   const actionMenuButton = event.target.closest("[data-action-menu]");
@@ -5744,6 +9054,53 @@ document.addEventListener("click", (event) => {
   const toggleOrderDetailAction = event.target.closest("[data-toggle-order-detail-action]");
   const purchasingTabButton = event.target.closest("[data-purchasing-tab]");
   const catalogTabButton = event.target.closest("[data-catalog-tab]");
+  const sourcePageButton = event.target.closest("[data-source-page]");
+  const promoteCatalogButton = event.target.closest("[data-promote-catalog-sku]");
+  const sourceRowActionButton = event.target.closest("[data-source-row-action]");
+  const applyShopifyTaxonomyButton = event.target.closest("[data-apply-shopify-taxonomy]");
+  const reviewActionButton = event.target.closest("[data-review-action]");
+  const reviewBulkActionButton = event.target.closest("[data-review-bulk-action]");
+  const reviewOpenProductButton = event.target.closest("[data-review-open-product]");
+  const exportMappingButton = event.target.closest("[data-select-export-mapping]");
+  const openExportMappingButton = event.target.closest("[data-open-export-mapping]");
+  const backExportMappingsButton = event.target.closest("[data-back-export-mappings]");
+  const createExportMappingButton = event.target.closest("[data-create-export-mapping]");
+  const saveExportMappingButton = event.target.closest("[data-save-export-mapping]");
+  const duplicateExportMappingButton = event.target.closest("[data-duplicate-export-mapping]");
+  const deleteExportMappingButton = event.target.closest("[data-delete-export-mapping]");
+  const addExportMappingRowButton = event.target.closest("[data-add-export-mapping-row]");
+  const removeExportMappingRowButton = event.target.closest("[data-remove-export-mapping-row]");
+  const openProductImportButton = event.target.closest("[data-open-product-import]");
+  const closeProductImportButton = event.target.closest("[data-close-product-import-modal]");
+  const closeExportMappingCreateButton = event.target.closest("[data-close-export-mapping-create-modal]");
+  const runProductImportButton = event.target.closest("[data-run-product-import]");
+  const closeSourceSkuImportButton = event.target.closest("[data-close-source-sku-import-modal]");
+  const runSourceSkuImportButton = event.target.closest("[data-run-source-sku-import]");
+  const importSectionButton = event.target.closest("[data-import-section]");
+  const refreshImportJobsButton = event.target.closest("[data-refresh-import-jobs]");
+  const selectImportJobButton = event.target.closest("[data-select-import-job]");
+  const stopJobButton = event.target.closest("[data-job-stop]");
+  const runJobButton = event.target.closest("[data-job-run]");
+  const exportProductsButton = event.target.closest("[data-export-products]");
+  const exportSourceProductsButton = event.target.closest("[data-export-source-products]");
+  const copyFieldButton = event.target.closest("[data-copy-field]");
+  const sourceCheck = event.target.closest("[data-source-check]");
+  const sourceCheckAll = event.target.closest("[data-source-check-all]");
+  const selectSourcePageButton = event.target.closest("[data-select-source-page]");
+  const selectSourceFilteredButton = event.target.closest("[data-select-source-filtered]");
+  const clearSourceSelectionButton = event.target.closest("[data-clear-source-selection]");
+  const sourceSupplierCheck = event.target.closest("[data-source-supplier]");
+  const toggleSupplierFilterButton = event.target.closest("[data-toggle-supplier-filter]");
+  const clearSourceSuppliersButton = event.target.closest("[data-clear-source-suppliers]");
+  const removeSourceSupplierButton = event.target.closest("[data-remove-source-supplier]");
+  const productCheck = event.target.closest("[data-product-check]");
+  const productCheckAll = event.target.closest("[data-product-check-all]");
+  const productRowActionButton = event.target.closest("[data-product-row-action]");
+  const productPageButton = event.target.closest("[data-product-page]");
+  const inventoryPageButton = event.target.closest("[data-inventory-page]");
+  const selectProductsPageButton = event.target.closest("[data-select-products-page]");
+  const selectProductsFilteredButton = event.target.closest("[data-select-products-filtered]");
+  const clearProductsSelectionButton = event.target.closest("[data-clear-products-selection]");
   const vendorButton = event.target.closest("[data-select-vendor]");
   const brandButton = event.target.closest("[data-select-brand]");
   const customerButton = event.target.closest("[data-select-customer]");
@@ -5826,7 +9183,237 @@ document.addEventListener("click", (event) => {
   const forceCreatePoButton = event.target.closest("[data-force-create-po]");
   const openFulfillmentButton = event.target.closest("[data-open-fulfillment]");
   const themeToggleButton = event.target.closest("[data-toggle-theme]");
+  const productGalleryButton = event.target.closest("[data-product-gallery-image]");
+  const openProductImagesButton = event.target.closest("[data-open-product-images]");
+  const closeProductImagesButton = event.target.closest("[data-close-product-images-modal]");
+  const addProductImageButton = event.target.closest("[data-add-product-image]");
+  const addSourceProductImageButton = event.target.closest("[data-add-source-product-image]");
+  const removeProductImageButton = event.target.closest("[data-remove-product-image]");
+  const setDefaultProductImageButton = event.target.closest("[data-set-default-product-image]");
+  const saveProductImagesButton = event.target.closest("[data-save-product-images]");
+  const openProductBulletsButton = event.target.closest("[data-open-product-bullets]");
+  const closeProductBulletsButton = event.target.closest("[data-close-product-bullets-modal]");
+  const addProductBulletButton = event.target.closest("[data-add-product-bullet]");
+  const removeProductBulletButton = event.target.closest("[data-remove-product-bullet]");
+  const saveProductBulletsButton = event.target.closest("[data-save-product-bullets]");
 
+  if (categoryButton) {
+    selectedCategoryId = categoryButton.dataset.selectCategory;
+    shopifyTaxonomyState = { categoryId: selectedCategoryId, query: "", results: [], total: 0, version: "", loading: false };
+    renderCategories();
+    return;
+  }
+  if (categoryScopeButton) {
+    categoryScope = categoryScopeButton.dataset.categoryScope === "source" ? "source" : "main";
+    selectedCategoryId = null;
+    shopifyTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
+    categoryRequestId += 1;
+    loadCategories();
+    return;
+  }
+  if (clearJobFiltersButton) {
+    jobsFilter = { query: "", section: "", status: "", direction: "" };
+    renderJobsPage();
+    return;
+  }
+  if (applyShopifyTaxonomyButton) {
+    applyShopifyTaxonomyCategory(applyShopifyTaxonomyButton).catch((error) => toast(error.message));
+    return;
+  }
+  if (reviewActionButton) {
+    applyCatalogImportReview(reviewActionButton.dataset.reviewId, reviewActionButton.dataset.reviewAction).catch((error) => toast(error.message));
+    return;
+  }
+  if (reviewBulkActionButton) {
+    applyCatalogImportReviewBulk(reviewBulkActionButton.dataset.reviewBulkAction).catch((error) => toast(error.message));
+    return;
+  }
+  if (reviewOpenProductButton) {
+    openProductFromReviewSku(reviewOpenProductButton.dataset.reviewOpenProduct);
+    return;
+  }
+  if (productWorkspaceTabButton) {
+    selectedProductWorkspaceTab = productWorkspaceTabButton.dataset.productWorkspaceTab || "home";
+    renderProductContentPage();
+    return;
+  }
+  if (productGalleryButton) {
+    selectedProductGalleryImageById[productGalleryButton.dataset.productId] = productGalleryButton.dataset.productGalleryImage || "";
+    renderProductContentPage();
+    return;
+  }
+  if (openProductImagesButton) {
+    openProductImagesModal(openProductImagesButton.dataset.openProductImages);
+    return;
+  }
+  if (closeProductImagesButton) {
+    closeProductImagesModal();
+    return;
+  }
+  if (addProductImageButton) {
+    syncProductImageModalInputs();
+    pendingProductImageManager.images.push("");
+    renderProductImagesModal();
+    return;
+  }
+  if (addSourceProductImageButton) {
+    syncProductImageModalInputs();
+    const image = addSourceProductImageButton.dataset.addSourceProductImage || "";
+    if (image && !pendingProductImageManager.images.includes(image)) pendingProductImageManager.images.push(image);
+    if (!pendingProductImageManager.defaultImage) pendingProductImageManager.defaultImage = image;
+    renderProductImagesModal();
+    return;
+  }
+  if (removeProductImageButton) {
+    syncProductImageModalInputs();
+    pendingProductImageManager.images.splice(Number(removeProductImageButton.dataset.removeProductImage), 1);
+    if (!pendingProductImageManager.images.length) pendingProductImageManager.images.push("");
+    if (!pendingProductImageManager.images.includes(pendingProductImageManager.defaultImage)) {
+      pendingProductImageManager.defaultImage = pendingProductImageManager.images.find(Boolean) || "";
+    }
+    renderProductImagesModal();
+    return;
+  }
+  if (setDefaultProductImageButton) {
+    syncProductImageModalInputs();
+    pendingProductImageManager.defaultImage = pendingProductImageManager.images[Number(setDefaultProductImageButton.dataset.setDefaultProductImage)] || "";
+    renderProductImagesModal();
+    return;
+  }
+  if (saveProductImagesButton) {
+    saveProductImagesModal().catch((error) => toast(error.message));
+    return;
+  }
+  if (openProductBulletsButton) {
+    openProductBulletsModal(openProductBulletsButton.dataset.openProductBullets);
+    return;
+  }
+  if (closeProductBulletsButton) {
+    closeProductBulletsModal();
+    return;
+  }
+  if (addProductBulletButton) {
+    syncProductBulletModalInputs();
+    pendingProductBulletManager.bulletPoints.push("");
+    renderProductBulletsModal();
+    return;
+  }
+  if (removeProductBulletButton) {
+    syncProductBulletModalInputs();
+    pendingProductBulletManager.bulletPoints.splice(Number(removeProductBulletButton.dataset.removeProductBullet), 1);
+    if (!pendingProductBulletManager.bulletPoints.length) pendingProductBulletManager.bulletPoints.push("");
+    renderProductBulletsModal();
+    return;
+  }
+  if (saveProductBulletsButton) {
+    saveProductBulletsModal().catch((error) => toast(error.message));
+    return;
+  }
+  if (importSectionButton) {
+    activeImportSection = importSectionButton.dataset.importSection || "products";
+    renderImportExportMappings();
+    return;
+  }
+  if (refreshImportJobsButton) {
+    refreshImportJobs().catch((error) => toast(error.message));
+    return;
+  }
+  if (selectImportJobButton && currentViewId === "jobs" && !event.target.closest("a, button, input, select, summary")) {
+    selectedImportJobId = selectImportJobButton.dataset.selectImportJob;
+    renderJobsPage();
+    return;
+  }
+  if (stopJobButton && !stopJobButton.disabled) {
+    stopImportJob(stopJobButton.dataset.jobStop).catch((error) => toast(error.message));
+    return;
+  }
+  if (runJobButton) {
+    const job = importJobRows().find((row) => row.id === runJobButton.dataset.jobRun);
+    activeImportSection = jobImportSection(job);
+    showView("import-export");
+    toast("Opened the matching import area.");
+    return;
+  }
+  if (exportMappingButton) {
+    selectedExportMappingId = exportMappingButton.dataset.selectExportMapping;
+    activeExportMappingPageId = exportMappingButton.dataset.selectExportMapping;
+    renderImportExportMappings();
+    return;
+  }
+  if (openExportMappingButton) {
+    selectedExportMappingId = openExportMappingButton.dataset.openExportMapping;
+    activeExportMappingPageId = openExportMappingButton.dataset.openExportMapping;
+    mappingDraftDirty = false;
+    renderImportExportMappings();
+    return;
+  }
+  if (backExportMappingsButton) {
+    activeExportMappingPageId = null;
+    mappingDraftDirty = false;
+    renderImportExportMappings();
+    return;
+  }
+  if (createExportMappingButton) {
+    openExportMappingCreateModal();
+    return;
+  }
+  if (closeExportMappingCreateButton) {
+    closeExportMappingCreateModal();
+    return;
+  }
+  if (saveExportMappingButton) {
+    saveExportMappingDraft(saveExportMappingButton.dataset.saveExportMapping).catch((error) => toast(error.message));
+    return;
+  }
+  if (duplicateExportMappingButton) {
+    duplicateExportMapping(duplicateExportMappingButton.dataset.duplicateExportMapping).catch((error) => toast(error.message));
+    return;
+  }
+  if (deleteExportMappingButton) {
+    deleteExportMapping(deleteExportMappingButton.dataset.deleteExportMapping).catch((error) => toast(error.message));
+    return;
+  }
+  if (addExportMappingRowButton) {
+    addExportMappingRow(addExportMappingRowButton.dataset.addExportMappingRow);
+    return;
+  }
+  if (removeExportMappingRowButton) {
+    removeExportMappingRow(removeExportMappingRowButton.dataset.removeExportMappingRow, removeExportMappingRowButton.dataset.mappingRowIndex);
+    return;
+  }
+  if (openProductImportButton) {
+    openProductImportModal(openProductImportButton.dataset.openProductImport);
+    return;
+  }
+  if (closeProductImportButton) {
+    closeProductImportModal();
+    return;
+  }
+  if (runProductImportButton) {
+    runProductImport().catch((error) => toast(error.message));
+    return;
+  }
+  if (closeSourceSkuImportButton) {
+    closeSourceSkuImportModal();
+    return;
+  }
+  if (runSourceSkuImportButton) {
+    runSourceSkuImport().catch((error) => toast(error.message));
+    return;
+  }
+  if (exportProductsButton) {
+    exportProductsFromProductsTab().catch((error) => toast(error.message));
+    return;
+  }
+  if (exportSourceProductsButton) {
+    exportSourceCatalogProducts().catch((error) => toast(error.message));
+    return;
+  }
+  if (copyFieldButton) {
+    navigator.clipboard?.writeText(copyFieldButton.dataset.copyField || "");
+    toast(`Field key: ${copyFieldButton.dataset.copyField}`);
+    return;
+  }
   if (themeToggleButton) {
     themeMode = themeMode === "dark" ? "light" : "dark";
     localStorage.setItem("dataplus-theme", themeMode);
@@ -6293,7 +9880,160 @@ document.addEventListener("click", (event) => {
   }
   if (catalogTabButton) {
     catalogTab = catalogTabButton.dataset.catalogTab;
+    if (catalogTab === "source") sourceCatalogPage = 1;
+    if (catalogTab === "categories") categoryRequestId += 1;
     renderCatalog();
+    return;
+  }
+  if (sourcePageButton) {
+    sourceCatalogPage = Math.max(1, Number(sourcePageButton.dataset.sourcePage || 1));
+    loadSourceCatalog(sourceCatalogPage);
+    return;
+  }
+  if (sourceRowActionButton) {
+    closeActionMenus();
+    runSourceCatalogRowAction(sourceRowActionButton.dataset.sourceSku, sourceRowActionButton.dataset.sourceRowAction).catch((error) => toast(error.message));
+    return;
+  }
+  if (promoteCatalogButton) {
+    promoteCatalogProduct(promoteCatalogButton.dataset.promoteCatalogSku);
+    return;
+  }
+  if (sourceCheck) {
+    selectedSourceAllFiltered = false;
+    if (sourceCheck.checked) selectedSourceSkus.add(sourceCheck.dataset.sourceCheck);
+    else selectedSourceSkus.delete(sourceCheck.dataset.sourceCheck);
+    renderSourceCatalogTable();
+    return;
+  }
+  if (sourceCheckAll) {
+    selectedSourceAllFiltered = false;
+    for (const item of sourceCatalogState.items || []) {
+      if (sourceCheckAll.checked) selectedSourceSkus.add(item.sku);
+      else selectedSourceSkus.delete(item.sku);
+    }
+    renderSourceCatalogTable();
+    return;
+  }
+  if (selectSourcePageButton) {
+    selectedSourceAllFiltered = false;
+    for (const item of sourceCatalogState.items || []) selectedSourceSkus.add(item.sku);
+    renderSourceCatalogTable();
+    return;
+  }
+  if (selectSourceFilteredButton) {
+    selectedSourceSkus.clear();
+    selectedSourceAllFiltered = true;
+    renderSourceCatalogTable();
+    return;
+  }
+  if (clearSourceSelectionButton) {
+    selectedSourceSkus.clear();
+    selectedSourceAllFiltered = false;
+    renderSourceCatalogTable();
+    return;
+  }
+  if (toggleSupplierFilterButton) {
+    if (event.target.closest("[data-remove-source-supplier]")) {
+      selectedSourceSuppliers.delete(event.target.closest("[data-remove-source-supplier]").dataset.removeSourceSupplier);
+      sourceCatalogPage = 1;
+      selectedSourceSkus.clear();
+      selectedSourceAllFiltered = false;
+      renderSupplierMultiSelect(sourceCatalogFacets?.suppliers || []);
+      renderCatalog();
+      return;
+    }
+    supplierMultiOpen = !supplierMultiOpen;
+    renderSupplierMultiSelect(sourceCatalogFacets?.suppliers || []);
+    if (supplierMultiOpen) setTimeout(() => $("#supplier-multi-search")?.focus(), 0);
+    return;
+  }
+  if (sourceSupplierCheck) {
+    if (sourceSupplierCheck.checked) selectedSourceSuppliers.add(sourceSupplierCheck.dataset.sourceSupplier);
+    else selectedSourceSuppliers.delete(sourceSupplierCheck.dataset.sourceSupplier);
+    supplierMultiOpen = true;
+    sourceCatalogPage = 1;
+    selectedSourceSkus.clear();
+    selectedSourceAllFiltered = false;
+    renderSupplierMultiSelect(sourceCatalogFacets?.suppliers || []);
+    renderCatalog();
+    return;
+  }
+  if (clearSourceSuppliersButton) {
+    selectedSourceSuppliers.clear();
+    supplierMultiOpen = true;
+    sourceCatalogPage = 1;
+    selectedSourceSkus.clear();
+    selectedSourceAllFiltered = false;
+    renderSupplierMultiSelect(sourceCatalogFacets?.suppliers || []);
+    renderCatalog();
+    return;
+  }
+  if (removeSourceSupplierButton) {
+    selectedSourceSuppliers.delete(removeSourceSupplierButton.dataset.removeSourceSupplier);
+    sourceCatalogPage = 1;
+    selectedSourceSkus.clear();
+    selectedSourceAllFiltered = false;
+    renderSupplierMultiSelect(sourceCatalogFacets?.suppliers || []);
+    renderCatalog();
+    return;
+  }
+  if (productCheck) {
+    selectedProductAllFiltered = false;
+    if (productCheck.checked) selectedProductIds.add(productCheck.dataset.productCheck);
+    else selectedProductIds.delete(productCheck.dataset.productCheck);
+    renderProductsTable(filteredCatalogItems());
+    updateCatalogBulkBar();
+    return;
+  }
+  if (productCheckAll) {
+    selectedProductAllFiltered = false;
+    const items = filteredCatalogItems();
+    const pageStart = (productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
+    const pageItems = items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
+    for (const item of pageItems) {
+      if (productCheckAll.checked) selectedProductIds.add(item.id);
+      else selectedProductIds.delete(item.id);
+    }
+    renderProductsTable(items);
+    updateCatalogBulkBar();
+    return;
+  }
+  if (productPageButton) {
+    productCatalogPage = Math.max(1, Number(productPageButton.dataset.productPage || 1));
+    renderProductsTable(filteredCatalogItems());
+    return;
+  }
+  if (inventoryPageButton) {
+    inventoryCatalogPage = Math.max(1, Number(inventoryPageButton.dataset.inventoryPage || 1));
+    renderInventoryTable(filteredCatalogItems());
+    return;
+  }
+  if (selectProductsPageButton || selectProductsFilteredButton) {
+    const items = filteredCatalogItems();
+    const pageStart = (productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
+    if (selectProductsFilteredButton) {
+      selectedProductIds.clear();
+      selectedProductAllFiltered = true;
+    } else {
+      selectedProductAllFiltered = false;
+      const nextItems = items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
+      for (const item of nextItems) selectedProductIds.add(item.id);
+    }
+    renderProductsTable(items);
+    updateCatalogBulkBar();
+    return;
+  }
+  if (clearProductsSelectionButton) {
+    selectedProductIds.clear();
+    selectedProductAllFiltered = false;
+    renderProductsTable(filteredCatalogItems());
+    updateCatalogBulkBar();
+    return;
+  }
+  if (productRowActionButton) {
+    closeActionMenus();
+    runProductRowAction(productRowActionButton.dataset.productId, productRowActionButton.dataset.productRowAction).catch((error) => toast(error.message));
     return;
   }
   if (orderCheck) {
@@ -6334,12 +10074,14 @@ document.addEventListener("click", (event) => {
     showView(viewButton.dataset.view);
     if (viewButton.dataset.view === "purchasing") renderPurchaseOrders();
     if (viewButton.dataset.view === "catalog") renderCatalog();
+    if (viewButton.dataset.view === "jobs") renderJobsPage();
   }
   if (jumpButton) {
     closeActionMenus();
     showView(jumpButton.dataset.viewJump);
     if (jumpButton.dataset.viewJump === "catalog") renderCatalog();
     if (jumpButton.dataset.viewJump === "purchasing") renderPurchaseOrders();
+    if (jumpButton.dataset.viewJump === "jobs") renderJobsPage();
   }
   if (confirmButton) confirmOrder(confirmButton.dataset.confirmOrder);
   if (syncButton) syncSource(syncButton.dataset.syncSource);
@@ -6362,6 +10104,7 @@ document.addEventListener("click", (event) => {
   }
   if (productButton) {
     selectedProductId = productButton.dataset.selectProduct;
+    if (productButton.dataset.productTarget === "product-full") selectedProductWorkspaceTab = "home";
     if (productButton.dataset.productTarget) {
       closeActionMenus();
       showView(productButton.dataset.productTarget);
@@ -6394,6 +10137,22 @@ $("#order-search").addEventListener("input", renderOrders);
 $("#order-status").addEventListener("change", renderOrders);
 $("#draft-search")?.addEventListener("input", renderDrafts);
 $("#return-search")?.addEventListener("input", renderReturnsManagement);
+document.addEventListener("input", (event) => {
+  const jobsSearch = event.target.closest("#jobs-search");
+  if (!jobsSearch) return;
+  jobsFilter.query = jobsSearch.value;
+  renderJobsPage();
+});
+document.addEventListener("change", (event) => {
+  const section = event.target.closest("#jobs-filter-section");
+  const status = event.target.closest("#jobs-filter-status");
+  const direction = event.target.closest("#jobs-filter-direction");
+  if (!section && !status && !direction) return;
+  if (section) jobsFilter.section = section.value;
+  if (status) jobsFilter.status = status.value;
+  if (direction) jobsFilter.direction = direction.value;
+  renderJobsPage();
+});
 $("#toggle-order-detail")?.addEventListener("click", () => {
   orderDetailVisible = !orderDetailVisible;
   $("#toggle-order-detail").textContent = orderDetailVisible ? "Hide details" : "Show details";
@@ -6401,10 +10160,71 @@ $("#toggle-order-detail")?.addEventListener("click", () => {
 });
 $("#customer-search").addEventListener("input", renderCustomers);
 $("#po-search").addEventListener("input", renderPurchaseOrders);
-$("#catalog-search").addEventListener("input", renderCatalog);
+$("#catalog-search").addEventListener("input", () => {
+  if (catalogTab === "source") sourceCatalogPage = 1;
+  if (catalogTab === "products") productCatalogPage = 1;
+  if (catalogTab === "inventory") inventoryCatalogPage = 1;
+  if (catalogTab === "categories") categoryRequestId += 1;
+  selectedSourceSkus.clear();
+  selectedSourceAllFiltered = false;
+  selectedProductIds.clear();
+  selectedProductAllFiltered = false;
+  renderCatalog();
+});
+[
+  "#catalog-filter-supplier",
+  "#catalog-filter-active",
+  "#catalog-filter-product-membership",
+  "#catalog-filter-stock-status",
+  "#catalog-filter-shopify-status",
+  "#catalog-filter-has-stock",
+  "#catalog-filter-hazardous",
+  "#catalog-filter-verified-brand",
+  "#catalog-filter-brand",
+  "#catalog-filter-category"
+].forEach((selector) => {
+  $(selector)?.addEventListener("change", () => {
+    sourceCatalogPage = 1;
+    productCatalogPage = 1;
+    inventoryCatalogPage = 1;
+    clearCatalogSelection();
+  });
+});
+$("#catalog-clear-filters")?.addEventListener("click", () => {
+  $("#catalog-search").value = "";
+  selectedSourceSuppliers.clear();
+  for (const selector of ["#catalog-filter-supplier", "#catalog-filter-active", "#catalog-filter-product-membership", "#catalog-filter-stock-status", "#catalog-filter-shopify-status", "#catalog-filter-has-stock", "#catalog-filter-hazardous", "#catalog-filter-verified-brand", "#catalog-filter-brand", "#catalog-filter-category"]) {
+    const element = $(selector);
+    if (element) element.value = "";
+  }
+  sourceCatalogPage = 1;
+  productCatalogPage = 1;
+  inventoryCatalogPage = 1;
+  clearCatalogSelection();
+});
+$("#catalog-apply-bulk")?.addEventListener("click", applyCatalogBulkAction);
 $("#inventory-import").addEventListener("change", (event) => {
   const [file] = event.target.files;
   if (file) importInventory(file);
+  event.target.value = "";
+});
+$("#source-sku-import")?.addEventListener("change", (event) => {
+  const [file] = event.target.files;
+  if (file) openSourceSkuImportModal(file).catch((error) => toast(error.message));
+  event.target.value = "";
+});
+$("#shopify-status-import")?.addEventListener("change", (event) => {
+  const [file] = event.target.files;
+  if (file) importShopifyStatusFile(event.target).catch((error) => toast(error.message));
+});
+$("#category-sku-import")?.addEventListener("change", (event) => {
+  const [file] = event.target.files;
+  if (file) importSkuCategories(file).catch((error) => toast(error.message));
+  event.target.value = "";
+});
+$("#category-mapping-import")?.addEventListener("change", (event) => {
+  const [file] = event.target.files;
+  if (file) importCategoryMappings(file).catch((error) => toast(error.message));
   event.target.value = "";
 });
 $("#vendor-create-form")?.addEventListener("submit", (event) => {
@@ -6454,6 +10274,10 @@ $("#order-reserve-form")?.addEventListener("submit", (event) => {
 $("#inventory-transfer-form")?.addEventListener("submit", (event) => {
   event.preventDefault();
   submitInventoryTransfer(event.currentTarget).catch((error) => toast(error.message));
+});
+$("#export-mapping-create-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  createExportMapping().catch((error) => toast(error.message));
 });
 $("#po-receive-form")?.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -6508,6 +10332,40 @@ $("#return-workflow-file-input")?.addEventListener("change", async (event) => {
   event.currentTarget.value = "";
 });
 document.addEventListener("input", (event) => {
+  const dimensionInput = event.target.closest("[data-product-dimension-field]");
+  if (dimensionInput) {
+    const product = productById(dimensionInput.dataset.productId);
+    if (product) {
+      const next = {
+        ...product,
+        [dimensionInput.dataset.productDimensionField]: Number(dimensionInput.value || 0)
+      };
+      const preview = document.querySelector(`[data-dimensional-weight-preview="${CSS.escape(dimensionInput.dataset.productId)}"]`);
+      if (preview) preview.value = calculateDimensionalWeight(next);
+    }
+  }
+  const supplierSearch = event.target.closest("#supplier-multi-search");
+  if (supplierSearch) {
+    supplierMultiOpen = true;
+    renderSupplierMultiSelect(sourceCatalogFacets?.suppliers || []);
+    setTimeout(() => {
+      const input = $("#supplier-multi-search");
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    }, 0);
+    return;
+  }
+  const shopifySearch = event.target.closest("[data-shopify-taxonomy-search]");
+  if (shopifySearch) {
+    clearTimeout(shopifyTaxonomyTimer);
+    const categoryId = shopifySearch.dataset.shopifyTaxonomySearch;
+    const query = shopifySearch.value;
+    shopifyTaxonomyState = { ...shopifyTaxonomyState, categoryId, query };
+    shopifyTaxonomyTimer = setTimeout(() => loadShopifyTaxonomyOptions(categoryId, query), 300);
+    return;
+  }
   const draftField = event.target.closest("[data-draft-line-field]");
   if (draftField) {
     const id = draftField.dataset.lineId;
@@ -6547,6 +10405,13 @@ document.addEventListener("input", (event) => {
     });
   }
 });
+
+document.addEventListener("click", (event) => {
+  if (catalogTab === "source" && supplierMultiOpen && !event.target.closest("#supplier-multi-filter")) {
+    supplierMultiOpen = false;
+    renderSupplierMultiSelect(sourceCatalogFacets?.suppliers || []);
+  }
+}, true);
 
 document.addEventListener("change", (event) => {
   const refundSelect = event.target.closest("[data-refund-line-select]");
@@ -6621,7 +10486,18 @@ document.addEventListener("change", (event) => {
   const shadowAttributeInput = event.target.closest("[data-shadow-attribute]");
   const shadowOverrideInput = event.target.closest("[data-shadow-override]");
   const templateInput = event.target.closest("[data-template-field]");
+  const exportMappingInput = event.target.closest("[data-export-mapping-field]");
+  const exportMappingRowInput = event.target.closest("[data-export-mapping-row-field]");
+  const exportMappingDraftInput = event.target.closest("[data-export-mapping-draft-field], [data-export-mapping-draft-row-field], [data-export-mapping-draft-raw]");
+  const mappedImportFile = event.target.closest("[data-import-export-file]");
+  const shopifyStatusImportFile = event.target.closest("[data-import-shopify-status-file]");
+  const centralInventoryImportFile = event.target.closest("[data-central-inventory-import]");
+  const centralSourceSkuImportFile = event.target.closest("[data-central-source-sku-import]");
+  const centralShopifyStatusImportFile = event.target.closest("[data-central-shopify-status-import]");
+  const categorySkuImportFile = event.target.closest("[data-category-sku-import]");
+  const mappingHeaderFile = event.target.closest("[data-load-mapping-headers]");
   const channelInput = event.target.closest("[data-channel-field]");
+  const categoryInput = event.target.closest("[data-category-field], [data-category-default], [data-category-map]");
   const orderMoneyInput = event.target.closest("[data-order-money]");
   const vendorField = event.target.closest("[data-vendor-field]");
   const customerField = event.target.closest("[data-customer-field]");
@@ -6638,8 +10514,44 @@ document.addEventListener("change", (event) => {
   if (shadowAttributeInput) updateShadowAttribute(shadowAttributeInput);
   if (shadowOverrideInput) updateShadowOverride(shadowOverrideInput);
   if (templateInput) updateMarketplaceTemplate(templateInput);
+  if (exportMappingInput) updateExportMapping(exportMappingInput).catch((error) => toast(error.message));
+  if (exportMappingRowInput) markMappingDraftDirty();
+  if (exportMappingDraftInput) markMappingDraftDirty();
+  if (mappedImportFile) {
+    importMappedProducts(mappedImportFile).catch((error) => toast(error.message));
+    event.target.value = "";
+  }
+  if (shopifyStatusImportFile) {
+    importShopifyStatusFile(shopifyStatusImportFile).catch((error) => toast(error.message));
+  }
+  if (centralInventoryImportFile) {
+    const [file] = centralInventoryImportFile.files || [];
+    if (file) importInventory(file).catch((error) => toast(error.message));
+    event.target.value = "";
+  }
+  if (centralSourceSkuImportFile) {
+    const [file] = centralSourceSkuImportFile.files || [];
+    if (file) openSourceSkuImportModal(file).catch((error) => toast(error.message));
+    event.target.value = "";
+  }
+  if (centralShopifyStatusImportFile) {
+    importShopifyStatusFile(centralShopifyStatusImportFile).catch((error) => toast(error.message));
+  }
+  if (categorySkuImportFile) {
+    const [file] = categorySkuImportFile.files || [];
+    if (file) importSkuCategories(file).catch((error) => toast(error.message));
+    event.target.value = "";
+  }
+  if (mappingHeaderFile) {
+    loadMappingHeaders(mappingHeaderFile).catch((error) => toast(error.message));
+    event.target.value = "";
+  }
+  if (event.target.id === "product-export-template") {
+    selectedExportMappingId = event.target.value;
+  }
   if (channelInput) updateChannelField(channelInput);
-  if (orderMoneyInput) updateOrderMoney(orderMoneyInput);
+  if (categoryInput) updateCategoryField(categoryInput).catch((error) => toast(error.message));
+if (orderMoneyInput) updateOrderMoney(orderMoneyInput);
   if (vendorField) updateVendorField(vendorField);
   if (customerField) updateCustomerField(customerField);
   if (brandField) updateBrandField(brandField);
@@ -6651,6 +10563,16 @@ document.addEventListener("change", (event) => {
   if (vendorFileUpload) uploadVendorFile(vendorFileUpload);
 });
 
+document.addEventListener("input", (event) => {
+  const mappingDraftInput = event.target.closest("[data-export-mapping-draft-field], [data-export-mapping-draft-row-field], [data-export-mapping-draft-raw]");
+  if (!mappingDraftInput) return;
+  if (mappingDraftInput.matches("[data-export-mapping-draft-raw]")) {
+    mappingDraftInput.dataset.mappingRawDirty = "true";
+  }
+  markMappingDraftDirty();
+});
+
+hydrateStaticIcons();
 applyMenuGroupState();
 applyTheme();
 load().catch((error) => toast(error.message));

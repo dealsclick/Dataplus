@@ -2,13 +2,70 @@ const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
 const crypto = require("crypto");
+const { once } = require("events");
+const { finished } = require("stream/promises");
 const { BSON } = require("bson");
 const ftp = require("basic-ftp");
 const { readState, writeState, closePool } = require("../db");
 
 const ROOT = path.join(__dirname, "..");
+const DATA_DIR = path.join(ROOT, "data");
 const DEFAULT_LOCAL_DUMP = path.join(ROOT, "data", "imports", "products.bson.gz");
 const DEFAULT_CATALOG_PATH = path.join(ROOT, "data", "catalog", "products.ndjson");
+const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
+const IMPORT_ERROR_COLUMNS = ["row", "record_key", "field", "issue", "raw_value", "sku", "category", "supplier", "details"];
+const DUMP_REVIEW_FIELDS = new Set([
+  "barcode",
+  "vendorSku",
+  "mfrPartNumber",
+  "uom",
+  "uomQty",
+  "minQuantity",
+  "quantityIncrements",
+  "cost",
+  "price",
+  "fobPrice",
+  "msrp",
+  "stockQty",
+  "qty",
+  "stockStatus",
+  "countryOfOrigin",
+  "supplier",
+  "supplierCode"
+]);
+const DUMP_PROTECTED_CONTENT_FIELDS = new Set([
+  "title",
+  "marketplaceTitle",
+  "shortDescription",
+  "longDescription",
+  "bulletPoints",
+  "category",
+  "defaultImage",
+  "images",
+  "tags",
+  "manufacturer",
+  "seoKeywords"
+]);
+const DUMP_SOURCE_TRACE_FIELDS = new Set([
+  "sourceBrand",
+  "productManagerFields",
+  "productDumpCreatedAt",
+  "productDumpUpdatedAt",
+  "inactiveMailedAt",
+  "validatedAt",
+  "checkedImage",
+  "checkedImageUrl",
+  "checkedImageError",
+  "checkedImageSize",
+  "checkedImageTimestamp",
+  "wildcardSearch",
+  "original",
+  "originalImage",
+  "vendorDescription",
+  "updatedAt",
+  "sources",
+  "importedFrom"
+]);
 
 function loadEnv() {
   const envPath = path.join(ROOT, ".env");
@@ -58,6 +115,64 @@ function ensureParentDir(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+function escapeCsv(value) {
+  const text = String(value ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function rowsToCsv(rows = []) {
+  const headers = [...new Set(rows.flatMap((row) => Object.keys(row)))];
+  return [headers, ...rows.map((row) => headers.map((header) => row[header] ?? ""))]
+    .map((row) => row.map(escapeCsv).join(","))
+    .join("\n");
+}
+
+function standardImportError(attrs = {}) {
+  const row = {
+    row: attrs.row ?? "",
+    record_key: attrs.recordKey ?? attrs.key ?? attrs.sku ?? attrs.category ?? "",
+    field: attrs.field || "",
+    issue: attrs.issue || attrs.error || "Import issue",
+    raw_value: attrs.rawValue ?? attrs.raw_value ?? "",
+    sku: attrs.sku || "",
+    category: attrs.category || "",
+    supplier: attrs.supplier || "",
+    details: attrs.details || ""
+  };
+  for (const [key, value] of Object.entries(attrs)) {
+    if (row[key] === undefined && !["key", "error", "rawValue", "raw_value"].includes(key)) row[key] = value ?? "";
+  }
+  return row;
+}
+
+function orderedImportErrorRows(rows = []) {
+  return rows.map((row) => {
+    const normalized = standardImportError(row);
+    const ordered = {};
+    for (const column of IMPORT_ERROR_COLUMNS) ordered[column] = normalized[column] ?? "";
+    for (const [key, value] of Object.entries(normalized)) {
+      if (ordered[key] === undefined) ordered[key] = value ?? "";
+    }
+    return ordered;
+  });
+}
+
+function importErrorMessages(rows = []) {
+  return rows.map((row) => {
+    const normalized = standardImportError(row);
+    const target = normalized.record_key || normalized.sku || normalized.category || normalized.field;
+    return `${normalized.issue}${target ? `: ${target}` : ""}${normalized.row ? ` (row ${normalized.row})` : ""}`;
+  }).slice(0, 50);
+}
+
+async function writeLine(writer, line) {
+  if (writer.write(line)) return;
+  await Promise.race([
+    once(writer, "drain"),
+    once(writer, "error").then(([error]) => { throw error; })
+  ]);
+}
+
 async function downloadFromFtp(destinationPath) {
   const host = process.env.PRODUCT_DUMP_FTP_HOST;
   const user = process.env.PRODUCT_DUMP_FTP_USER;
@@ -101,6 +216,164 @@ function listValue(value) {
   const text = textValue(value);
   if (!text) return [];
   return text.split(/[|,]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function booleanValue(value, fallback = false) {
+  if (value === undefined) return fallback;
+  if (value === true || value === false) return value;
+  const text = textValue(value).toLowerCase();
+  if (["true", "1", "yes", "y"].includes(text)) return true;
+  if (["false", "0", "no", "n"].includes(text)) return false;
+  return fallback;
+}
+
+function dimensionalWeightValue(record) {
+  const length = numberValue(record.package_length || record.packageLength);
+  const width = numberValue(record.package_width || record.packageWidth);
+  const height = numberValue(record.package_height || record.packageHeight);
+  if (!(length > 0 && width > 0 && height > 0)) return 0;
+  return Math.round(((length * width * height) / 139) * 1000) / 1000;
+}
+
+function normalizedCompareValue(value) {
+  if (Array.isArray(value)) return value.map((item) => normalizedCompareValue(item)).join("|");
+  if (value && typeof value === "object") return JSON.stringify(value);
+  if (value === undefined || value === null) return "";
+  const number = Number(value);
+  if (Number.isFinite(number) && String(value).trim() !== "") return String(Number(number.toFixed(4)));
+  return String(value).trim();
+}
+
+function formatBrandName(value) {
+  const text = textValue(value).replace(/[\u2122\u00ae\u00a9]/g, "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const acronyms = new Set(["3M", "A/C", "AC", "ANSI", "BUNN", "CFC", "CFL", "CMM", "CNC", "CPR", "CPU", "DVI", "EPA", "GFCI", "HD", "HDMI", "HVAC", "ISO", "IT", "LED", "LLC", "LP", "MRO", "NEMA", "NSF", "OSHA", "PVC", "RFID", "UL", "UPS", "USB", "USA", "US", "UV", "VGA", "WiFi", "WIFI", "WD-40"]);
+  const lowerWords = new Set(["and", "of", "the", "for", "in", "on", "to", "with"]);
+  const formatPart = (part, index) => {
+    if (!part) return part;
+    const upper = part.toUpperCase();
+    const compactUpper = upper.replace(/[^A-Z0-9]/g, "");
+    if (compactUpper === "3M") return "3M";
+    if (/^([A-Z]\.){2,}[A-Z]?\.?$/i.test(part)) return upper;
+    if (/^[A-Z0-9]{2,4}$/.test(part)) return upper;
+    if (acronyms.has(upper)) return upper === "WIFI" ? "WiFi" : upper;
+    if (/^\d+[A-Z]*$/i.test(part)) return upper;
+    const lower = part.toLowerCase();
+    if (index > 0 && lowerWords.has(lower)) return lower;
+    return lower.charAt(0).toUpperCase() + lower.slice(1);
+  };
+  return text
+    .split(" ")
+    .map((word, wordIndex) => word
+      .split("/")
+      .map((slashPart) => slashPart
+        .split("-")
+        .map((part, partIndex) => formatPart(part, wordIndex + partIndex))
+        .join("-"))
+      .join("/"))
+    .join(" ");
+}
+
+function formatCategoryName(value) {
+  const text = textValue(value).replace(/[\u2122\u00ae\u00a9]/g, "").replace(/\s*>\s*/g, " > ").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const acronyms = new Set(["3D", "A/C", "AC", "ANSI", "CFC", "CFL", "CNC", "CPR", "CPU", "DVI", "EPA", "GFCI", "HD", "HDMI", "HVAC", "ISO", "IT", "LED", "MRO", "NEMA", "NSF", "OSHA", "PPE", "PVC", "RFID", "UL", "UPS", "USB", "UV", "VGA", "VFD", "WiFi", "WIFI"]);
+  const lowerWords = new Set(["and", "of", "the", "for", "in", "on", "to", "with"]);
+  const formatToken = (token, index) => {
+    if (!token || token === "&") return token;
+    const upper = token.toUpperCase();
+    if (/^([A-Z]\.){2,}[A-Z]?\.?$/i.test(token)) return upper;
+    if (acronyms.has(upper)) return upper === "WIFI" ? "WiFi" : upper;
+    if (/^\d+[A-Z]*$/i.test(token)) return upper;
+    const lower = token.toLowerCase();
+    if (index > 0 && lowerWords.has(lower)) return lower;
+    if (/^[A-Z0-9]{2,4}$/.test(token)) return upper;
+    return lower.charAt(0).toUpperCase() + lower.slice(1);
+  };
+  return text
+    .split(" > ")
+    .map((segment) => segment
+      .split(" ")
+      .map((word, wordIndex) => word
+        .split("/")
+        .map((slashPart) => slashPart
+          .split("-")
+          .map((part, partIndex) => formatToken(part, wordIndex + partIndex))
+          .join("-"))
+        .join("/"))
+      .join(" "))
+    .join(" > ");
+}
+
+function isEmptyCatalogValue(value) {
+  if (Array.isArray(value)) return value.length === 0;
+  if (value === undefined || value === null) return true;
+  if (typeof value === "number") return value === 0;
+  return String(value).trim() === "";
+}
+
+function brandLooksLikeSupplier(item = {}) {
+  const brand = textValue(item.brand).toLowerCase();
+  if (!brand) return true;
+  return [item.supplier, item.vendor, item.defaultSupplier, item.supplierCode]
+    .map((value) => textValue(value).toLowerCase())
+    .filter(Boolean)
+    .includes(brand);
+}
+
+function normalizeCatalogImportReviews(reviews = []) {
+  return (Array.isArray(reviews) ? reviews : []).map((review) => ({
+    id: review.id || crypto.randomUUID(),
+    sku: textValue(review.sku),
+    productId: textValue(review.productId),
+    field: textValue(review.field),
+    label: textValue(review.label || review.field),
+    currentValue: review.currentValue ?? "",
+    incomingValue: review.incomingValue ?? "",
+    source: textValue(review.source || "Product dump"),
+    status: textValue(review.status || "pending"),
+    createdAt: review.createdAt || new Date().toISOString(),
+    updatedAt: review.updatedAt || review.createdAt || new Date().toISOString(),
+    decidedAt: review.decidedAt || "",
+    decisionNote: review.decisionNote || ""
+  })).filter((review) => review.sku && review.field).slice(0, 5000);
+}
+
+function queueCatalogImportReview(state, item, field, incomingValue, source = "Product dump") {
+  const currentValue = item[field];
+  if (normalizedCompareValue(currentValue) === normalizedCompareValue(incomingValue)) return false;
+  state.catalogImportReviews = normalizeCatalogImportReviews(state.catalogImportReviews);
+  const pending = state.catalogImportReviews.find((review) => (
+    review.status === "pending"
+    && review.sku.toLowerCase() === String(item.sku || "").toLowerCase()
+    && review.field === field
+  ));
+  const now = new Date().toISOString();
+  if (pending) {
+    pending.productId = item.id || pending.productId;
+    pending.currentValue = currentValue ?? "";
+    pending.incomingValue = incomingValue ?? "";
+    pending.source = source;
+    pending.updatedAt = now;
+    return true;
+  }
+  state.catalogImportReviews.unshift({
+    id: crypto.randomUUID(),
+    sku: item.sku || "",
+    productId: item.id || "",
+    field,
+    label: field,
+    currentValue: currentValue ?? "",
+    incomingValue: incomingValue ?? "",
+    source,
+    status: "pending",
+    createdAt: now,
+    updatedAt: now,
+    decidedAt: "",
+    decisionNote: ""
+  });
+  state.catalogImportReviews = state.catalogImportReviews.slice(0, 5000);
+  return true;
 }
 
 function parseLooseDump(raw) {
@@ -256,6 +529,8 @@ function buildProduct(record) {
   const stockQty = numberValue(normalizedRecord.stock_qty ?? normalizedRecord.stockQty ?? normalizedRecord.qty ?? normalizedRecord.quantity);
   const minQuantity = textValue(normalizedRecord.min_quantity || normalizedRecord.minQuantity);
   const checkedImage = normalizedRecord.checked_image && typeof normalizedRecord.checked_image === "object" ? normalizedRecord.checked_image : {};
+  const sourceBrand = textValue(normalizedRecord.sourceBrand || normalizedRecord.brand);
+  const sourceCategory = formatCategoryName(normalizedRecord.category || normalizedRecord.product_type);
 
   return {
     sku,
@@ -264,11 +539,18 @@ function buildProduct(record) {
     marketplaceTitle: textValue(normalizedRecord.marketplaceTitle || normalizedRecord.name || normalizedRecord.title || sku),
     shortDescription: textValue(normalizedRecord.short_description || normalizedRecord.shortDescription),
     longDescription: textValue(normalizedRecord.description || normalizedRecord.long_description || normalizedRecord.longDescription),
-    brand: textValue(normalizedRecord.brand),
-    category: textValue(normalizedRecord.category || normalizedRecord.product_type),
+    bulletPoints: listValue(normalizedRecord.bullet_points || normalizedRecord.bulletPoints || normalizedRecord.keyFeatures || normalizedRecord.features),
+    brand: formatBrandName(sourceBrand),
+    sourceBrand,
+    brandLocked: booleanValue(normalizedRecord.brandLocked, false),
+    category: sourceCategory,
+    sourceCategory,
+    vendorCategory: sourceCategory,
+    mainCategory: "",
+    categoryVerified: false,
     condition: textValue(normalizedRecord.condition) || "New",
     status: normalizedRecord.active === false ? "Draft" : textValue(normalizedRecord.status) || "Draft",
-    active: normalizedRecord.active === undefined ? true : Boolean(normalizedRecord.active),
+    active: booleanValue(normalizedRecord.active, true),
     barcode: textValue(normalizedRecord.upc || normalizedRecord.barcode || normalizedRecord.gtin),
     defaultImage,
     images,
@@ -283,7 +565,7 @@ function buildProduct(record) {
     uomQty: textValue(normalizedRecord.uom_qty || normalizedRecord.uomQty),
     minQuantity,
     quantityIncrements: textValue(normalizedRecord.quantity_increments || normalizedRecord.quantityIncrements),
-    hazardous: normalizedRecord.hazardous === true,
+    hazardous: booleanValue(normalizedRecord.hazardous, false),
     sdsUrl: textValue(normalizedRecord.sds_url || normalizedRecord.sdsUrl),
     itemHeight: numberValue(normalizedRecord.item_height || normalizedRecord.itemHeight),
     itemLength: numberValue(normalizedRecord.item_length || normalizedRecord.itemLength),
@@ -293,6 +575,7 @@ function buildProduct(record) {
     packageLength: numberValue(normalizedRecord.package_length || normalizedRecord.packageLength),
     packageWeight: numberValue(normalizedRecord.package_weight || normalizedRecord.packageWeight),
     packageWidth: numberValue(normalizedRecord.package_width || normalizedRecord.packageWidth),
+    dimensionalWeight: numberValue(normalizedRecord.dimensional_weight || normalizedRecord.dimensionalWeight) || dimensionalWeightValue(normalizedRecord),
     qty: stockQty,
     stockQty,
     stockStatus: textValue(normalizedRecord.stock_status || normalizedRecord.stockStatus),
@@ -360,14 +643,118 @@ async function readAppState() {
   };
 }
 
-function mergeProduct(existing, product) {
-  const next = { ...existing, ...product, id: existing.id || crypto.randomUUID() };
+function normalizeImportJobs(jobs = []) {
+  return Array.isArray(jobs) ? jobs : [];
+}
+
+async function createDumpImportJob(attrs = {}) {
+  if (attrs.dryRun) return null;
+  const { state, write } = await readAppState();
+  const now = new Date().toISOString();
+  const job = {
+    id: crypto.randomUUID(),
+    section: attrs.section || "Source Catalog",
+    operation: attrs.operation || "Product dump import",
+    direction: "import",
+    status: "running",
+    fileName: attrs.fileName || "",
+    originalFileName: attrs.fileName || "",
+    originalFilePath: attrs.filePath || "",
+    errorFileName: "",
+    errorFilePath: "",
+    message: attrs.message || "Import started.",
+    details: "",
+    totalRows: 0,
+    changed: 0,
+    created: 0,
+    updated: 0,
+    missingCount: 0,
+    errors: [],
+    createdAt: now,
+    startedAt: now,
+    finishedAt: "",
+    updatedAt: now
+  };
+  state.importJobs = [job, ...normalizeImportJobs(state.importJobs)].slice(0, 200);
+  await write(state);
+  return { id: job.id, write };
+}
+
+async function finishDumpImportJob(handle, attrs = {}) {
+  if (!handle?.id) return;
+  const { state, write } = await readAppState();
+  state.importJobs = normalizeImportJobs(state.importJobs);
+  const job = state.importJobs.find((row) => row.id === handle.id);
+  if (!job) return;
+  const now = new Date().toISOString();
+  const errorRows = Array.isArray(attrs.errorRows) ? attrs.errorRows : [];
+  if (errorRows.length) {
+    const dir = path.join(IMPORT_JOB_FILE_DIR, job.id);
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, "errors.csv");
+    fs.writeFileSync(filePath, rowsToCsv(orderedImportErrorRows(errorRows)), "utf8");
+    job.errorFileName = "errors.csv";
+    job.errorFilePath = filePath;
+  }
+  delete attrs.errorRows;
+  Object.assign(job, {
+    ...attrs,
+    status: attrs.status || "success",
+    updatedAt: now,
+    finishedAt: now
+  });
+  await write(state);
+}
+
+function mergeProduct(existing, product, state) {
+  const next = { ...existing, id: existing.id || crypto.randomUUID() };
+  const sourceBrand = textValue(product.sourceBrand || product.brand);
+  if (sourceBrand) next.sourceBrand = sourceBrand;
+  if (!next.brandLocked && next.brand && !brandLooksLikeSupplier(next)) next.brandLocked = true;
+  for (const [field, incomingValue] of Object.entries(product)) {
+    if (["id", "reserved", "shadowSkus", "serialUnits", "warehouseStock"].includes(field)) continue;
+    if (field === "qty" && product.stockQty !== undefined) continue;
+    if (field === "brand") {
+      if (!next.brand || (!next.brandLocked && brandLooksLikeSupplier(next))) {
+        next.brand = formatBrandName(incomingValue);
+      } else if (next.brandLocked || normalizedCompareValue(next.brand) !== normalizedCompareValue(incomingValue)) {
+        queueCatalogImportReview(state, next, "brand", formatBrandName(incomingValue), "Product dump");
+      }
+      continue;
+    }
+    if (field === "category") {
+      const formattedCategory = formatCategoryName(incomingValue);
+      if (formattedCategory) {
+        next.sourceCategory = next.sourceCategory || formattedCategory;
+        next.vendorCategory = next.vendorCategory || formattedCategory;
+      }
+      continue;
+    }
+    if (DUMP_SOURCE_TRACE_FIELDS.has(field)) {
+      next[field] = incomingValue;
+      continue;
+    }
+    if (DUMP_REVIEW_FIELDS.has(field)) {
+      if (isEmptyCatalogValue(next[field]) && !isEmptyCatalogValue(incomingValue)) {
+        next[field] = incomingValue;
+      } else {
+        queueCatalogImportReview(state, next, field, incomingValue, "Product dump");
+      }
+      continue;
+    }
+    if (DUMP_PROTECTED_CONTENT_FIELDS.has(field)) {
+      if (isEmptyCatalogValue(next[field]) && !isEmptyCatalogValue(incomingValue)) next[field] = incomingValue;
+      continue;
+    }
+    next[field] = incomingValue;
+  }
   next.sources = { ...(existing.sources || {}), ...(product.sources || {}) };
-  next.images = product.images.length ? product.images : existing.images || [];
-  next.tags = product.tags.length ? product.tags : existing.tags || [];
+  next.images = existing.images?.length ? existing.images : product.images || [];
+  next.tags = existing.tags?.length ? existing.tags : product.tags || [];
   next.shadowSkus = Array.isArray(existing.shadowSkus) ? existing.shadowSkus : [];
   next.serialUnits = Array.isArray(existing.serialUnits) ? existing.serialUnits : [];
   next.warehouseStock = Array.isArray(existing.warehouseStock) ? existing.warehouseStock : [];
+  next.updatedAt = new Date().toISOString();
   return next;
 }
 
@@ -379,8 +766,18 @@ async function importCatalogStore(dumpPath, options) {
 
   const stats = { read: 0, importable: 0, skipped: 0 };
   const startedAt = new Date().toISOString();
+  const errorRows = [];
+  const job = await createDumpImportJob({
+    dryRun: options.dryRun,
+    section: "Source Catalog",
+    operation: options.downloadFtp ? "FTP product dump import" : "Product dump import",
+    fileName: path.basename(dumpPath),
+    filePath: dumpPath,
+    message: `Importing source catalog from ${path.basename(dumpPath)}.`
+  });
   const seen = new Set();
   const writer = options.dryRun ? null : fs.createWriteStream(tempPath, { encoding: "utf8" });
+  const writerFinished = writer ? finished(writer) : null;
 
   try {
     await forEachDumpRecord(dumpPath, { limit: options.limit }, async (record) => {
@@ -388,19 +785,39 @@ async function importCatalogStore(dumpPath, options) {
       const product = buildProduct(record);
       if (!product) {
         stats.skipped += 1;
+        errorRows.push(standardImportError({
+          row: stats.read,
+          field: "sku",
+          issue: "Missing SKU",
+          rawValue: JSON.stringify(normalizeDumpRecord(record)).slice(0, 2000)
+        }));
         return;
       }
       stats.importable += 1;
       seen.add(product.sku.toLowerCase());
       if (writer) {
-        writer.write(`${JSON.stringify({ id: product.sku, ...product })}\n`);
+        await writeLine(writer, `${JSON.stringify({ id: product.sku, ...product })}\n`);
       }
       if (stats.read % 10000 === 0) {
         process.stderr.write(`Processed ${stats.read} records (${stats.importable} catalog products, ${stats.skipped} skipped)\\r`);
       }
     });
+  } catch (error) {
+    await finishDumpImportJob(job, {
+      status: "failed",
+      message: `Product dump import failed after ${stats.read} record${stats.read === 1 ? "" : "s"}.`,
+      totalRows: stats.read,
+      changed: stats.importable,
+      missingCount: stats.skipped,
+      errors: importErrorMessages([standardImportError({ row: stats.read, issue: error.message })]),
+      errorRows: [standardImportError({ row: stats.read, issue: error.message })]
+    });
+    throw error;
   } finally {
-    if (writer) await new Promise((resolve, reject) => writer.end((error) => (error ? reject(error) : resolve())));
+    if (writer) {
+      writer.end();
+      await writerFinished;
+    }
   }
 
   if (stats.read >= 10000) process.stderr.write("\n");
@@ -419,42 +836,95 @@ async function importCatalogStore(dumpPath, options) {
     }, null, 2));
   }
 
+  await finishDumpImportJob(job, {
+    status: stats.skipped ? "warning" : "success",
+    message: `${options.dryRun ? "Dry run checked" : "Imported"} ${stats.importable} source catalog products from ${path.basename(dumpPath)}.`,
+    totalRows: stats.read,
+    changed: stats.importable,
+    created: stats.importable,
+    missingCount: stats.skipped,
+    errors: importErrorMessages(errorRows),
+    errorRows,
+    details: `${seen.size} unique SKUs written to ${path.relative(ROOT, catalogPath)}.`
+  });
   console.log(`${options.dryRun ? "Dry run:" : "Imported"} ${stats.importable} catalog products (${stats.skipped} skipped) from ${path.basename(dumpPath)}${options.dryRun ? "" : ` into ${path.relative(ROOT, catalogPath)}`}.`);
 }
 
 async function importInventoryState(dumpPath, options) {
+  const job = await createDumpImportJob({
+    dryRun: options.dryRun,
+    section: "Inventory",
+    operation: options.downloadFtp ? "FTP product dump inventory import" : "Product dump inventory import",
+    fileName: path.basename(dumpPath),
+    filePath: dumpPath,
+    message: `Importing inventory products from ${path.basename(dumpPath)}.`
+  });
   const { state, write } = await readAppState();
 
   state.inventory = Array.isArray(state.inventory) ? state.inventory : [];
+  state.catalogImportReviews = normalizeCatalogImportReviews(state.catalogImportReviews);
   const bySku = new Map(state.inventory.map((item, index) => [String(item.sku || "").toLowerCase(), { item, index }]));
   const stats = { read: 0, importable: 0, created: 0, updated: 0, skipped: 0 };
+  const errorRows = [];
 
-  await forEachDumpRecord(dumpPath, { limit: options.limit }, async (record) => {
-    stats.read += 1;
-    const product = buildProduct(record);
-    if (!product) {
-      stats.skipped += 1;
-      return;
-    }
-    stats.importable += 1;
-    const key = product.sku.toLowerCase();
-    const existing = bySku.get(key);
-    if (existing) {
-      if (!options.dryRun) state.inventory[existing.index] = mergeProduct(existing.item, product);
-      stats.updated += 1;
-    } else {
-      const next = { id: crypto.randomUUID(), ...product };
-      if (!options.dryRun) state.inventory.push(next);
-      bySku.set(key, { item: next, index: options.dryRun ? state.inventory.length : state.inventory.length - 1 });
-      stats.created += 1;
-    }
-    if (stats.read % 10000 === 0) {
-      process.stderr.write(`Processed ${stats.read} records (${stats.created} created, ${stats.updated} updated, ${stats.skipped} skipped)\\r`);
-    }
+  try {
+    await forEachDumpRecord(dumpPath, { limit: options.limit }, async (record) => {
+      stats.read += 1;
+      const product = buildProduct(record);
+      if (!product) {
+        stats.skipped += 1;
+        errorRows.push(standardImportError({
+          row: stats.read,
+          field: "sku",
+          issue: "Missing SKU",
+          rawValue: JSON.stringify(normalizeDumpRecord(record)).slice(0, 2000)
+        }));
+        return;
+      }
+      stats.importable += 1;
+      const key = product.sku.toLowerCase();
+      const existing = bySku.get(key);
+      if (existing) {
+        if (!options.dryRun) state.inventory[existing.index] = mergeProduct(existing.item, product, state);
+        stats.updated += 1;
+      } else {
+        const next = { id: crypto.randomUUID(), ...product };
+        if (!options.dryRun) state.inventory.push(next);
+        bySku.set(key, { item: next, index: options.dryRun ? state.inventory.length : state.inventory.length - 1 });
+        stats.created += 1;
+      }
+      if (stats.read % 10000 === 0) {
+        process.stderr.write(`Processed ${stats.read} records (${stats.created} created, ${stats.updated} updated, ${stats.skipped} skipped)\\r`);
+      }
+    });
+    if (stats.read >= 10000) process.stderr.write("\n");
+
+    if (!options.dryRun) await write(state);
+  } catch (error) {
+    await finishDumpImportJob(job, {
+      status: "failed",
+      message: `Product dump inventory import failed after ${stats.read} record${stats.read === 1 ? "" : "s"}.`,
+      totalRows: stats.read,
+      changed: stats.created + stats.updated,
+      created: stats.created,
+      updated: stats.updated,
+      missingCount: stats.skipped,
+      errors: importErrorMessages([standardImportError({ row: stats.read, issue: error.message })]),
+      errorRows: [standardImportError({ row: stats.read, issue: error.message })]
+    });
+    throw error;
+  }
+  await finishDumpImportJob(job, {
+    status: stats.skipped ? "warning" : "success",
+    message: `${options.dryRun ? "Dry run checked" : "Imported"} ${stats.importable} inventory products from ${path.basename(dumpPath)}.`,
+    totalRows: stats.read,
+    changed: stats.created + stats.updated,
+    created: stats.created,
+    updated: stats.updated,
+    missingCount: stats.skipped,
+    errors: importErrorMessages(errorRows),
+    errorRows
   });
-  if (stats.read >= 10000) process.stderr.write("\n");
-
-  if (!options.dryRun) await write(state);
   console.log(`${options.dryRun ? "Dry run:" : "Imported"} ${stats.importable} inventory products (${stats.created} created, ${stats.updated} updated, ${stats.skipped} skipped) from ${path.basename(dumpPath)}.`);
 }
 

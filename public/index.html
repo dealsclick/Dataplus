@@ -7,6 +7,8 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <div id="global-save-progress" class="global-save-progress" aria-hidden="true"><span></span></div>
+    <div id="global-save-status" class="global-save-status" role="status" aria-live="polite">Saving...</div>
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark">D+</span>
@@ -18,39 +20,44 @@
       </div>
       <nav aria-label="Primary">
         <span class="nav-section-label">Home</span>
-        <button class="nav-item active" data-view="dashboard">Dashboard</button>
+        <button class="nav-item active" data-view="dashboard" data-icon="layout-dashboard">Dashboard</button>
         <div class="nav-group" data-nav-group="order-management">
-          <button class="nav-item nav-parent" data-view="orders">Order Management</button>
+          <button class="nav-item nav-parent" data-view="orders" data-icon="shopping-bag">Order Management</button>
           <div class="nav-children">
-            <button class="nav-child" data-view="orders">Orders</button>
-            <button class="nav-child" data-view="drafts">Drafts</button>
-            <button class="nav-child" data-view="returns">Returns</button>
+            <button class="nav-child" data-view="orders" data-icon="shopping-cart">Orders</button>
+            <button class="nav-child" data-view="drafts" data-icon="file-pen-line">Drafts</button>
+            <button class="nav-child" data-view="returns" data-icon="undo-2">Returns</button>
           </div>
         </div>
-        <button class="nav-item" data-view="customers">Customers</button>
+        <button class="nav-item" data-view="customers" data-icon="users">Customers</button>
         <span class="nav-section-label">Operations</span>
+        <button class="nav-item" data-view="import-export" data-icon="upload">Import/Export</button>
+        <button class="nav-item" data-view="jobs" data-icon="list-check">Jobs</button>
         <div class="nav-group" data-nav-group="catalog">
-          <button class="nav-item nav-parent" data-view="catalog" data-catalog-tab-link="products">Catalog</button>
+          <button class="nav-item nav-parent" data-view="catalog" data-catalog-tab-link="products" data-icon="boxes">Catalog</button>
           <div class="nav-children">
-            <button class="nav-child" data-view="catalog" data-catalog-tab-link="products">Products</button>
-            <button class="nav-child" data-view="catalog" data-catalog-tab-link="inventory">Inventory</button>
-            <button class="nav-child" data-view="catalog" data-catalog-tab-link="templates">Templates</button>
-            <button class="nav-child" data-view="catalog" data-catalog-tab-link="readiness">Readiness</button>
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="products" data-icon="package">Products</button>
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="source" data-icon="database">Source Catalog</button>
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="reviews" data-icon="clipboard-check">Import Review</button>
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="categories" data-icon="tags">Categories</button>
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="inventory" data-icon="warehouse">Inventory</button>
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="templates" data-icon="layout-template">Templates</button>
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="readiness" data-icon="gauge">Readiness</button>
           </div>
         </div>
         <div class="nav-group" data-nav-group="purchasing">
-          <button class="nav-item nav-parent" data-view="purchasing" data-purchasing-tab-link="pos">Purchasing</button>
+          <button class="nav-item nav-parent" data-view="purchasing" data-purchasing-tab-link="pos" data-icon="truck">Purchasing</button>
           <div class="nav-children">
-            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="pos">POs</button>
-            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="vendors">Vendors</button>
-            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="brands">Brands</button>
-            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="warehouses">Warehouses</button>
+            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="pos" data-icon="clipboard-list">POs</button>
+            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="vendors" data-icon="truck">Vendors</button>
+            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="brands" data-icon="badge-check">Brands</button>
+            <button class="nav-child" data-view="purchasing" data-purchasing-tab-link="warehouses" data-icon="warehouse">Warehouses</button>
           </div>
         </div>
         <span class="nav-section-label">Insights</span>
-        <button class="nav-item" data-view="reports">Reports</button>
+        <button class="nav-item" data-view="reports" data-icon="bar-chart-3">Reports</button>
         <span class="nav-section-label">Admin</span>
-        <button class="nav-item" data-view="connections">Channels</button>
+        <button class="nav-item" data-view="connections" data-icon="radio">Channels</button>
       </nav>
     </aside>
 
@@ -61,8 +68,8 @@
           <h1 id="page-title">Dashboard</h1>
         </div>
         <div class="quick-actions">
-          <button id="theme-toggle" class="button secondary" type="button" data-toggle-theme>Dark mode</button>
-          <button id="sync-all" class="button secondary">Sync all</button>
+          <button id="theme-toggle" class="button secondary" type="button" data-toggle-theme data-icon="moon">Dark mode</button>
+          <button id="sync-all" class="button secondary" data-icon="refresh-cw">Sync all</button>
           <div id="topbar-actions-slot"></div>
         </div>
       </header>
@@ -70,26 +77,32 @@
       <section id="dashboard" class="view active">
         <div class="metric-grid">
           <article class="metric">
+            <span class="metric-symbol" data-icon="shopping-cart"></span>
             <span>Open orders</span>
             <strong id="metric-open-orders">0</strong>
           </article>
           <article class="metric">
+            <span class="metric-symbol" data-icon="package"></span>
             <span>Inventory SKUs</span>
             <strong id="metric-inventory">0</strong>
           </article>
           <article class="metric warning">
+            <span class="metric-symbol" data-icon="gauge"></span>
             <span>Low stock</span>
             <strong id="metric-low-stock">0</strong>
           </article>
           <article class="metric">
+            <span class="metric-symbol" data-icon="warehouse"></span>
             <span>Reserved units</span>
             <strong id="metric-reserved">0</strong>
           </article>
           <article class="metric">
+            <span class="metric-symbol" data-icon="dollar-sign"></span>
             <span>Sales</span>
             <strong id="metric-sales">$0</strong>
           </article>
           <article class="metric">
+            <span class="metric-symbol" data-icon="users"></span>
             <span>Customers</span>
             <strong id="metric-customers">0</strong>
           </article>
@@ -188,10 +201,10 @@
 
       <section id="purchasing" class="view">
         <div class="subnav">
-          <button class="subnav-item active" data-purchasing-tab="pos">Purchase Orders</button>
-          <button class="subnav-item" data-purchasing-tab="vendors">Vendors</button>
-          <button class="subnav-item" data-purchasing-tab="brands">Brands</button>
-          <button class="subnav-item" data-purchasing-tab="warehouses">Warehouses</button>
+          <button class="subnav-item active" data-purchasing-tab="pos" data-icon="clipboard-list">Purchase Orders</button>
+          <button class="subnav-item" data-purchasing-tab="vendors" data-icon="truck">Vendors</button>
+          <button class="subnav-item" data-purchasing-tab="brands" data-icon="badge-check">Brands</button>
+          <button class="subnav-item" data-purchasing-tab="warehouses" data-icon="warehouse">Warehouses</button>
         </div>
         <div class="toolbar">
           <input id="po-search" type="search" placeholder="Search PO, vendor, order number" />
@@ -220,22 +233,104 @@
 
       <section id="catalog" class="view">
         <div class="subnav">
-          <button class="subnav-item active" data-catalog-tab="products">Products</button>
-          <button class="subnav-item" data-catalog-tab="inventory">Inventory</button>
-          <button class="subnav-item" data-catalog-tab="templates">Templates</button>
-          <button class="subnav-item" data-catalog-tab="readiness">Readiness</button>
+          <button class="subnav-item active" data-catalog-tab="products" data-icon="package">Products</button>
+          <button class="subnav-item" data-catalog-tab="source" data-icon="database">Source Catalog</button>
+          <button class="subnav-item" data-catalog-tab="reviews" data-icon="clipboard-check">Import Review</button>
+          <button class="subnav-item" data-catalog-tab="categories" data-icon="tags">Categories</button>
+          <button class="subnav-item" data-catalog-tab="inventory" data-icon="warehouse">Inventory</button>
+          <button class="subnav-item" data-catalog-tab="templates" data-icon="layout-template">Templates</button>
+          <button class="subnav-item" data-catalog-tab="readiness" data-icon="gauge">Readiness</button>
         </div>
-        <div class="toolbar">
-          <input id="catalog-search" type="search" placeholder="Search SKU, title, brand, category" />
-          <label class="file-button">
-            Import CSV
-            <input id="inventory-import" type="file" accept=".csv,text/csv" />
-          </label>
-        </div>
+          <div class="toolbar">
+            <input id="catalog-search" type="search" placeholder="Search SKU, title, brand, category" />
+            <label class="file-button" data-icon="upload">
+              Import CSV
+              <input id="inventory-import" type="file" accept=".csv,text/csv" />
+            </label>
+            <label class="file-button source-only-control" data-icon="upload">
+              Add SKUs CSV
+              <input id="source-sku-import" type="file" accept=".csv,text/csv" />
+            </label>
+            <label class="file-button product-only-control" data-icon="upload">
+              Import Shopify Status
+              <input id="shopify-status-import" type="file" accept=".csv,text/csv" />
+            </label>
+            <label class="file-button category-only-control" data-icon="upload">
+              Import SKU Categories
+              <input id="category-sku-import" type="file" accept=".csv,text/csv" />
+            </label>
+            <label class="file-button category-only-control" data-icon="upload">
+              Import Category Mapping
+              <input id="category-mapping-import" type="file" accept=".csv,text/csv" />
+            </label>
+          </div>
+          <div class="catalog-filters">
+            <select id="catalog-filter-supplier"><option value="">All suppliers</option></select>
+            <select id="catalog-filter-active">
+              <option value="">Any active status</option>
+              <option value="true">Active source</option>
+              <option value="false">Inactive source</option>
+            </select>
+            <select id="catalog-filter-product-membership">
+              <option value="">Any catalog membership</option>
+              <option value="in-products">Already in Products</option>
+              <option value="not-in-products">Not in Products</option>
+            </select>
+            <select id="catalog-filter-stock-status"><option value="">Any stock status</option></select>
+            <select id="catalog-filter-shopify-status">
+              <option value="">Any Shopify status</option>
+              <option value="live">Live on Shopify</option>
+              <option value="missing">Missing Shopify ID</option>
+              <option value="Active">Shopify Active</option>
+              <option value="Draft">Shopify Draft</option>
+              <option value="Archived">Shopify Archived</option>
+            </select>
+            <select id="catalog-filter-has-stock">
+              <option value="">Any stock qty</option>
+              <option value="true">In stock</option>
+              <option value="false">Out of stock</option>
+            </select>
+            <select id="catalog-filter-hazardous">
+              <option value="">Any hazmat</option>
+              <option value="true">Hazardous</option>
+              <option value="false">Not hazardous</option>
+            </select>
+            <select id="catalog-filter-verified-brand" class="product-only-control">
+              <option value="">Any brand verification</option>
+              <option value="true">Verified brand</option>
+              <option value="false">Unverified brand</option>
+            </select>
+            <select id="catalog-filter-brand"><option value="">All brands</option></select>
+            <select id="catalog-filter-category"><option value="">All categories</option></select>
+            <button id="catalog-clear-filters" class="button secondary" type="button">Clear filters</button>
+          </div>
+          <div class="catalog-bulk-bar">
+            <span><strong id="catalog-selected-count">0</strong> selected</span>
+            <select id="catalog-bulk-action">
+              <option value="">Bulk action</option>
+              <option value="add-active">Add to Active Catalog</option>
+              <option value="set-active">Set active</option>
+              <option value="set-inactive">Set inactive</option>
+              <option value="set-discontinued">Set discontinued</option>
+              <option value="delete">Delete / hide selected</option>
+            </select>
+            <button id="catalog-apply-bulk" class="button secondary" type="button">Apply</button>
+          </div>
         <div id="products-list" class="catalog-list"></div>
+        <div id="source-catalog-list" class="catalog-list"></div>
+        <div id="import-review-list" class="catalog-list"></div>
+        <div id="category-list" class="catalog-list"></div>
         <div id="inventory-list" class="catalog-list"></div>
         <div id="template-list" class="catalog-list"></div>
         <div id="readiness-list" class="catalog-list"></div>
+      </section>
+
+      <section id="import-export" class="view">
+        <div id="import-export-page" class="catalog-list"></div>
+      </section>
+
+      <section id="jobs" class="view">
+        <div id="jobs-page" class="catalog-list"></div>
       </section>
 
       <section id="product-full" class="view">
@@ -972,6 +1067,102 @@
           <button class="button" type="submit">Complete return</button>
         </div>
       </form>
+    </div>
+
+    <div id="export-mapping-create-modal" class="modal-backdrop" aria-hidden="true">
+      <form id="export-mapping-create-form" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Import / Export</p>
+            <h2>New template</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-export-mapping-create-modal aria-label="Close template form">x</button>
+        </div>
+        <div class="modal-grid">
+          <label>Name<input id="export-mapping-name" name="name" required placeholder="Shopify custom export" /></label>
+          <label>Source / channel<input name="source" placeholder="Shopify, Amazon, Vendor CSV" /></label>
+          <label>Mode
+            <select name="mode">
+              <option value="both">Import + export</option>
+              <option value="import">Import only</option>
+              <option value="export">Export only</option>
+            </select>
+          </label>
+          <label class="span-2">Notes<textarea name="notes" rows="3" placeholder="Purpose, vendor file notes, or mapping reminders"></textarea></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-export-mapping-create-modal>Cancel</button>
+          <button class="button" type="submit">Create template</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="product-import-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card product-import-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Product import</p>
+            <h2 id="product-import-title">Import products</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-product-import-modal aria-label="Close product import">x</button>
+        </div>
+        <div id="product-import-content" class="product-import-content"></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-product-import-modal>Cancel</button>
+          <button type="button" class="button" data-run-product-import disabled>Import products</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="source-sku-import-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card product-import-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Source catalog</p>
+            <h2>Move SKUs to active products</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-source-sku-import-modal aria-label="Close SKU import">x</button>
+        </div>
+        <div id="source-sku-import-content" class="product-import-content"></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-source-sku-import-modal>Close</button>
+          <button type="button" class="button" data-run-source-sku-import disabled>Import SKUs</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="product-images-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card product-images-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Product media</p>
+            <h2>Manage images</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-product-images-modal aria-label="Close image manager">x</button>
+        </div>
+        <div id="product-images-content" class="product-images-content"></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-product-images-modal>Cancel</button>
+          <button type="button" class="button" data-save-product-images>Save images</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="product-bullets-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card product-bullets-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Product content</p>
+            <h2>Manage bullet points</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-product-bullets-modal aria-label="Close bullet point manager">x</button>
+        </div>
+        <div id="product-bullets-content" class="product-bullets-content"></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-product-bullets-modal>Cancel</button>
+          <button type="button" class="button" data-save-product-bullets>Save bullet points</button>
+        </div>
+      </div>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
