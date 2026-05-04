@@ -21,6 +21,7 @@ const CATALOG_INDEX_SUPPLIER_DIR = path.join(CATALOG_INDEX_DIR, "suppliers");
 const CATALOG_INDEX_SKU_DIR = path.join(CATALOG_INDEX_DIR, "sku-shards");
 const SHOPIFY_TAXONOMY_INDEX_FILE = path.join(DATA_DIR, "channel-taxonomies", "shopify", "taxonomy-index.json");
 const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
+const CONNECTOR_STATE_FILE = path.join(DATA_DIR, "connectors.json");
 const ENV_FILE = path.join(ROOT, ".env");
 
 const SOURCES = ["Temu", "eBay", "Whatnot", "TikTok Shop"];
@@ -578,6 +579,26 @@ async function writeDb(db) {
 function writeDbSync(db) {
   if (postgres.isPostgresEnabled()) return;
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+}
+
+function readConnectorStateSync() {
+  try {
+    if (!fs.existsSync(CONNECTOR_STATE_FILE)) return {};
+    const parsed = JSON.parse(fs.readFileSync(CONNECTOR_STATE_FILE, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeConnectorStateSync(state) {
+  ensureDb();
+  const next = state && typeof state === "object" && !Array.isArray(state) ? state : {};
+  fs.writeFileSync(CONNECTOR_STATE_FILE, JSON.stringify(next, null, 2));
+}
+
+function mergedConnectorState(db = {}) {
+  return { ...(db.connectorState || {}), ...readConnectorStateSync() };
 }
 
 function loadLocalEnv() {
@@ -3567,12 +3588,16 @@ function sendImportJobFile(res, job, kind) {
 }
 
 function publicState(db) {
+  const connectorState = mergedConnectorState(db);
   const safeDb = {
     ...db,
     connectorState: {
-      temuAuthorized: Boolean(db.connectorState?.temuAccessToken),
-      temuMallId: db.connectorState?.temuMallId || "",
-      temuLastOrderSync: db.connectorState?.temuLastOrderSync || null
+      temuAuthorized: Boolean(connectorState.temuAccessToken),
+      temuMallId: connectorState.temuMallId || "",
+      temuLastOrderSync: connectorState.temuLastOrderSync || null,
+      ebayAuthorized: Boolean(connectorState.ebayAccessToken || connectorState.ebayRefreshToken),
+      ebayEnvironment: process.env.EBAY_ENVIRONMENT || "production",
+      ebayLastOrderSync: connectorState.ebayLastOrderSync || null
     }
   };
   return { ...safeDb, summary: summarize(safeDb) };
@@ -3912,10 +3937,10 @@ function upsertOrder(db, incoming) {
     marketplaceOrderNumber: incomingMarketplaceNumber,
     marketplaceOrderId: incomingMarketplaceNumber,
     marketplaceReferences: existing.marketplaceReferences?.length ? existing.marketplaceReferences : incoming.marketplaceReferences,
-    productCost: existing.productCost || incoming.productCost,
-    marketplaceFees: existing.marketplaceFees || incoming.marketplaceFees,
-    shippingCost: existing.shippingCost || incoming.shippingCost,
-    refundAmount: existing.refundAmount || incoming.refundAmount
+    productCost: incoming.source === "eBay" ? incoming.productCost : existing.productCost || incoming.productCost,
+    marketplaceFees: incoming.source === "eBay" ? incoming.marketplaceFees : existing.marketplaceFees || incoming.marketplaceFees,
+    shippingCost: incoming.source === "eBay" ? incoming.shippingCost : existing.shippingCost || incoming.shippingCost,
+    refundAmount: incoming.source === "eBay" ? incoming.refundAmount : existing.refundAmount || incoming.refundAmount
   });
   return "updated";
 }
@@ -3973,6 +3998,409 @@ async function importTemuOrders(db) {
   }
 
   db.connectorState.temuLastOrderSync = now;
+  return { fetched, created, updated, errors };
+}
+
+function getEbayConfig(db = {}) {
+  const environment = String(process.env.EBAY_ENVIRONMENT || "production").toLowerCase() === "sandbox" ? "sandbox" : "production";
+  const apiBase = environment === "sandbox" ? "https://api.sandbox.ebay.com" : "https://api.ebay.com";
+  const authBase = environment === "sandbox" ? "https://auth.sandbox.ebay.com/oauth2/authorize" : "https://auth.ebay.com/oauth2/authorize";
+  const connectorState = mergedConnectorState(db);
+  return {
+    environment,
+    apiBase,
+    authBase,
+    tokenUrl: `${apiBase}/identity/v1/oauth2/token`,
+    clientId: process.env.EBAY_CLIENT_ID || "",
+    clientSecret: process.env.EBAY_CLIENT_SECRET || "",
+    ruName: process.env.EBAY_RUNAME || "",
+    scope: process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
+    accessToken: connectorState.ebayAccessToken || process.env.EBAY_ACCESS_TOKEN || "",
+    refreshToken: connectorState.ebayRefreshToken || process.env.EBAY_REFRESH_TOKEN || "",
+    accessTokenExpiresAt: connectorState.ebayAccessTokenExpiresAt || "",
+    pageSize: Number(process.env.EBAY_ORDER_PAGE_SIZE || 50),
+    lookbackDays: Number(process.env.EBAY_ORDER_LOOKBACK_DAYS || 90)
+  };
+}
+
+function missingEbayConfig(config, options = {}) {
+  const needsToken = options.requireToken !== false;
+  return [
+    ["EBAY_CLIENT_ID", config.clientId],
+    ["EBAY_CLIENT_SECRET", config.clientSecret],
+    ["EBAY_RUNAME", config.ruName],
+    ...(needsToken && !config.accessToken && !config.refreshToken ? [["EBAY_REFRESH_TOKEN", config.refreshToken]] : [])
+  ].filter(([, value]) => !value).map(([key]) => key);
+}
+
+function ebayBasicAuth(config) {
+  return Buffer.from(`${config.clientId}:${config.clientSecret}`, "utf8").toString("base64");
+}
+
+function ebayConsentUrl(db) {
+  const config = getEbayConfig(db);
+  const missing = missingEbayConfig(config, { requireToken: false });
+  if (missing.length) {
+    throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them to .env and restart the app.`);
+  }
+  db.connectorState = db.connectorState || {};
+  const stateToken = crypto.randomBytes(18).toString("hex");
+  db.connectorState.ebayOauthState = stateToken;
+  const url = new URL(config.authBase);
+  url.searchParams.set("client_id", config.clientId);
+  url.searchParams.set("redirect_uri", config.ruName);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", config.scope);
+  url.searchParams.set("state", stateToken);
+  return url.toString();
+}
+
+async function ebayTokenRequest(db, body) {
+  const config = getEbayConfig(db);
+  const missing = missingEbayConfig(config, { requireToken: false });
+  if (missing.length) {
+    throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them to .env and restart the app.`);
+  }
+  const response = await fetch(config.tokenUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: `Basic ${ebayBasicAuth(config)}`
+    },
+    body
+  });
+  const text = await response.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`eBay token endpoint returned non-JSON response (${response.status}): ${text.slice(0, 180)}`);
+  }
+  if (!response.ok) {
+    throw new Error(`eBay token error (${response.status}): ${JSON.stringify(data).slice(0, 300)}`);
+  }
+  return data;
+}
+
+function saveEbayTokenPayload(db, payload) {
+  db.connectorState = db.connectorState || {};
+  if (payload.access_token) db.connectorState.ebayAccessToken = payload.access_token;
+  if (payload.refresh_token) db.connectorState.ebayRefreshToken = payload.refresh_token;
+  const expiresIn = Number(payload.expires_in || 0);
+  if (expiresIn > 0) db.connectorState.ebayAccessTokenExpiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+  db.connectorState.ebayTokenCreatedAt = new Date().toISOString();
+}
+
+async function exchangeEbayCode(db, code, options = {}) {
+  const trimmedCode = String(code || "").trim();
+  if (!trimmedCode) throw new Error("eBay authorization code is required.");
+  const config = getEbayConfig(db);
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code: trimmedCode,
+    redirect_uri: config.ruName
+  });
+  const payload = await ebayTokenRequest(db, body);
+  if (!payload.access_token) {
+    throw new Error(`eBay token exchange did not return an access token: ${JSON.stringify(payload).slice(0, 240)}`);
+  }
+  saveEbayTokenPayload(db, payload);
+  delete db.connectorState.ebayOauthState;
+  if (options.connectorOnly) {
+    const existing = readConnectorStateSync();
+    writeConnectorStateSync({
+      ...existing,
+      ...db.connectorState,
+      ebayAuthorizedAt: new Date().toISOString()
+    });
+    return { authorized: true, environment: config.environment };
+  }
+  const connection = db.connections.find((item) => item.name === "eBay");
+  if (connection) {
+    connection.connected = true;
+    connection.lastSync = null;
+  }
+  db.syncRuns.unshift({
+    id: crypto.randomUUID(),
+    source: "eBay",
+    type: "auth",
+    status: "success",
+    message: "eBay access token created from authorization code.",
+    createdAt: new Date().toISOString()
+  });
+  await writeDb(db);
+  return { authorized: true, environment: config.environment };
+}
+
+async function refreshEbayAccessToken(db) {
+  const config = getEbayConfig(db);
+  const missing = missingEbayConfig(config, { requireToken: true });
+  if (missing.length) {
+    throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them to .env and restart the app.`);
+  }
+  if (!config.refreshToken) throw new Error("eBay refresh token is missing. Connect eBay again from the Channels page.");
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: config.refreshToken,
+    scope: config.scope
+  });
+  const payload = await ebayTokenRequest(db, body);
+  if (!payload.access_token) {
+    throw new Error(`eBay refresh did not return an access token: ${JSON.stringify(payload).slice(0, 240)}`);
+  }
+  saveEbayTokenPayload(db, payload);
+  if (postgres.isPostgresEnabled()) {
+    writeConnectorStateSync({ ...readConnectorStateSync(), ...db.connectorState });
+  }
+  return db.connectorState.ebayAccessToken;
+}
+
+async function ebayAccessToken(db) {
+  const config = getEbayConfig(db);
+  if (config.accessToken && config.accessTokenExpiresAt) {
+    const expiresAt = new Date(config.accessTokenExpiresAt).getTime();
+    if (Number.isFinite(expiresAt) && expiresAt > Date.now() + 120000) return config.accessToken;
+  }
+  if (config.accessToken && !config.refreshToken) return config.accessToken;
+  return refreshEbayAccessToken(db);
+}
+
+async function ebayRequest(db, resourcePath, options = {}) {
+  const config = getEbayConfig(db);
+  const request = async (token) => {
+    const response = await fetch(`${config.apiBase}${resourcePath}`, {
+      method: options.method || "GET",
+      headers: {
+        Accept: "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        Authorization: `Bearer ${token}`,
+        ...(options.headers || {})
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined
+    });
+    const text = await response.text();
+    let data = {};
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (error) {
+        throw new Error(`eBay returned non-JSON response (${response.status}): ${text.slice(0, 180)}`);
+      }
+    }
+    return { response, data };
+  };
+
+  let token = await ebayAccessToken(db);
+  let { response, data } = await request(token);
+  if (response.status === 401 && getEbayConfig(db).refreshToken) {
+    token = await refreshEbayAccessToken(db);
+    ({ response, data } = await request(token));
+  }
+  if (!response.ok) {
+    throw new Error(`eBay API error (${response.status}): ${JSON.stringify(data).slice(0, 300)}`);
+  }
+  return data;
+}
+
+async function ebayServerDate(config) {
+  try {
+    const response = await fetch(config.apiBase, { method: "HEAD" });
+    const header = response.headers.get("date");
+    const date = header ? new Date(header) : null;
+    if (date && Number.isFinite(date.getTime())) return date;
+  } catch {
+    // Fall back to the local clock if eBay's edge does not return a Date header.
+  }
+  return new Date();
+}
+
+function ebayAddressFromOrder(order) {
+  const shippingStep = order.fulfillmentStartInstructions?.[0]?.shippingStep || {};
+  const shipTo = shippingStep.shipTo || {};
+  const registration = order.buyer?.buyerRegistrationAddress || {};
+  const contact = shipTo.contactAddress || registration.contactAddress || {};
+  const name = shipTo.fullName || registration.fullName || order.buyer?.username || "eBay buyer";
+  return {
+    name,
+    line1: contact.addressLine1 || "",
+    line2: contact.addressLine2 || "",
+    city: contact.city || "",
+    state: contact.stateOrProvince || "",
+    postalCode: contact.postalCode || "",
+    country: contact.countryCode || "US",
+    email: shipTo.email || registration.email || "",
+    phone: shipTo.primaryPhone?.phoneNumber || registration.primaryPhone?.phoneNumber || ""
+  };
+}
+
+function mapEbayStatus(order) {
+  const cancelState = String(order.cancelStatus?.cancelState || order.cancelStatus || "").toLowerCase();
+  if (cancelState.includes("cancel")) return "canceled";
+  const fulfillment = String(order.orderFulfillmentStatus || "").toLowerCase();
+  if (fulfillment.includes("fulfilled")) return "confirmed";
+  if (fulfillment.includes("progress")) return "ready";
+  return "new";
+}
+
+function ebayRefundTotal(order) {
+  return (order.paymentSummary?.refunds || []).reduce((sum, refund) => sum + nestedMoney(refund.amount || refund.refundAmount), 0);
+}
+
+function ebayProductCostForItems(db, items) {
+  const inventory = Array.isArray(db.inventory) ? db.inventory : [];
+  return items.reduce((sum, item) => {
+    const sku = String(item.sku || "").toLowerCase();
+    const product = inventory.find((row) => String(row.sku || "").toLowerCase() === sku)
+      || inventory.find((row) => Object.values(row.sources || {}).some((value) => String(value || "").toLowerCase() === sku));
+    const unitCost = Number(product?.cost ?? product?.fobPrice ?? product?.price ?? item.cost ?? 0);
+    return sum + (Number.isFinite(unitCost) ? unitCost : 0) * Number(item.qty || 0);
+  }, 0);
+}
+
+function mapEbayOrder(order, db = {}) {
+  const address = ebayAddressFromOrder(order);
+  const items = (Array.isArray(order.lineItems) && order.lineItems.length ? order.lineItems : [{}]).map((item) => {
+    const quantity = Number(item.quantity || 1) || 1;
+    const lineTotal = nestedMoney(item.lineItemCost || item.total || item.discountedLineItemCost);
+    const lineShipping = nestedMoney(item.deliveryCost?.shippingCost);
+    return {
+      sku: String(item.sku || item.legacyItemId || item.lineItemId || order.orderId || "EBAY-SKU"),
+      title: String(item.title || "eBay item"),
+      qty: quantity,
+      price: lineTotal ? Number((lineTotal / quantity).toFixed(2)) : 0,
+      cost: 0,
+      marketplaceLineItemId: item.lineItemId || "",
+      legacyItemId: item.legacyItemId || "",
+      legacyVariationId: item.legacyVariationId || "",
+      fulfillmentStatus: item.lineItemFulfillmentStatus || "",
+      shippingPaid: lineShipping,
+      tax: (item.taxes || []).reduce((sum, tax) => sum + nestedMoney(tax.amount), 0),
+      ebayCollectAndRemitTax: (item.ebayCollectAndRemitTaxes || []).reduce((sum, tax) => sum + nestedMoney(tax.amount), 0),
+      shipBy: item.lineItemFulfillmentInstructions?.shipByDate || "",
+      minEstimatedDeliveryDate: item.lineItemFulfillmentInstructions?.minEstimatedDeliveryDate || "",
+      maxEstimatedDeliveryDate: item.lineItemFulfillmentInstructions?.maxEstimatedDeliveryDate || "",
+      itemLocation: item.itemLocation || null
+    };
+  });
+  const itemSubtotal = nestedMoney(order.pricingSummary?.priceSubtotal)
+    || items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
+  const shippingPaid = nestedMoney(order.pricingSummary?.deliveryCost);
+  const total = nestedMoney(order.pricingSummary?.total || order.paymentSummary?.payments?.[0]?.amount)
+    || itemSubtotal + shippingPaid;
+  const marketplaceFees = nestedMoney(order.totalMarketplaceFee);
+  const productCost = ebayProductCostForItems(db, items);
+  const shippingStep = order.fulfillmentStartInstructions?.[0]?.shippingStep || {};
+  const shipBy = order.lineItems?.[0]?.lineItemFulfillmentInstructions?.shipByDate
+    || shippingStep.maxEstimatedDeliveryDate
+    || order.creationDate
+    || new Date().toISOString();
+
+  return {
+    id: crypto.randomUUID(),
+    orderNumber: order.orderId || `EB-${Date.now()}`,
+    marketplaceOrderNumber: order.orderId || "",
+    marketplaceOrderId: order.orderId || "",
+    source: "eBay",
+    buyer: address.name,
+    buyerEmail: address.email,
+    phone: address.phone,
+    address: {
+      name: address.name,
+      line1: address.line1,
+      line2: address.line2,
+      city: address.city,
+      state: address.state,
+      postalCode: address.postalCode,
+      country: address.country
+    },
+    sku: items[0]?.sku || "EBAY-SKU",
+    title: items[0]?.title || "eBay order",
+    qty: items.reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1,
+    status: mapEbayStatus(order),
+    total,
+    subtotal: itemSubtotal,
+    shippingPaid,
+    productCost,
+    marketplaceFees,
+    shippingCost: 0,
+    refundAmount: ebayRefundTotal(order),
+    shippingService: shippingStep.shippingServiceCode || shippingStep.shippingCarrierCode || "eBay shipping",
+    shippingCarrier: shippingStep.shippingCarrierCode || "",
+    carrierName: shippingStep.shippingCarrierCode || "",
+    trackingNumber: "",
+    shipBy: temuDate(shipBy).slice(0, 10),
+    minEstimatedDeliveryDate: order.fulfillmentStartInstructions?.[0]?.minEstimatedDeliveryDate || "",
+    maxEstimatedDeliveryDate: order.fulfillmentStartInstructions?.[0]?.maxEstimatedDeliveryDate || "",
+    createdAt: temuDate(order.creationDate || Date.now()),
+    marketplaceUpdatedAt: temuDate(order.lastModifiedDate || Date.now()),
+    updatedAt: new Date().toISOString(),
+    notes: "Imported from eBay Fulfillment API.",
+    items,
+    external: {
+      source: "eBay",
+      orderId: order.orderId || "",
+      legacyOrderId: order.legacyOrderId || "",
+      salesRecordReference: order.salesRecordReference || "",
+      sellerId: order.sellerId || "",
+      orderFulfillmentStatus: order.orderFulfillmentStatus || "",
+      orderPaymentStatus: order.orderPaymentStatus || "",
+      totalDueSeller: nestedMoney(order.paymentSummary?.totalDueSeller),
+      totalFeeBasisAmount: nestedMoney(order.totalFeeBasisAmount),
+      totalMarketplaceFee: marketplaceFees,
+      priceSubtotal: itemSubtotal,
+      shippingPaid,
+      ebayCollectAndRemitTax: Boolean(order.ebayCollectAndRemitTax),
+      paymentCount: Array.isArray(order.paymentSummary?.payments) ? order.paymentSummary.payments.length : 0,
+      refundCount: Array.isArray(order.paymentSummary?.refunds) ? order.paymentSummary.refunds.length : 0,
+      importedAt: new Date().toISOString()
+    }
+  };
+}
+
+async function importEbayOrders(db) {
+  db.connectorState = { ...mergedConnectorState(db), ...(db.connectorState || {}) };
+  const config = getEbayConfig(db);
+  const pageSize = Math.min(200, Math.max(1, config.pageSize || 50));
+  const now = await ebayServerDate(config);
+  const lastSync = db.connectorState.ebayLastOrderSync ? new Date(db.connectorState.ebayLastOrderSync) : null;
+  const yearStart = new Date(Date.UTC(now.getUTCFullYear(), 0, 1, 0, 0, 0, 0));
+  const start = lastSync && Number.isFinite(lastSync.getTime())
+    ? new Date(Math.max(yearStart.getTime(), lastSync.getTime() - 60 * 60 * 1000))
+    : yearStart;
+  const filterName = lastSync ? "lastmodifieddate" : "creationdate";
+  const filter = `${filterName}:[${start.toISOString()}..${now.toISOString()}]`;
+  let offset = 0;
+  let created = 0;
+  let updated = 0;
+  let fetched = 0;
+  const errors = [];
+
+  while (offset <= 2000) {
+    const params = new URLSearchParams({
+      filter,
+      limit: String(pageSize),
+      offset: String(offset)
+    });
+    const data = await ebayRequest(db, `/sell/fulfillment/v1/order?${params.toString()}`);
+    const orders = Array.isArray(data.orders) ? data.orders : [];
+    for (const order of orders) {
+      try {
+        const action = upsertOrder(db, mapEbayOrder(order, db));
+        if (action === "created") created += 1;
+        if (action === "updated") updated += 1;
+        fetched += 1;
+      } catch (error) {
+        errors.push(`order ${order.orderId || "unknown"}: ${error.message}`);
+      }
+    }
+    if (!orders.length || orders.length < pageSize || !data.next) break;
+    offset += pageSize;
+  }
+
+  db.connectorState.ebayLastOrderSync = now.toISOString();
+  if (postgres.isPostgresEnabled()) {
+    writeConnectorStateSync({ ...readConnectorStateSync(), ebayLastOrderSync: db.connectorState.ebayLastOrderSync });
+  }
   return { fetched, created, updated, errors };
 }
 
@@ -5645,6 +6073,12 @@ async function handleApi(req, res) {
     const result = await exchangeTemuCode(db, body.code);
     const normalized = normalizeDb(await readDb());
     return sendJson(res, 200, { ...result, state: publicState(normalized) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/ebay/auth-url") {
+    const authUrl = ebayConsentUrl(db);
+    await writeDb(db);
+    return sendJson(res, 200, { authUrl });
   }
 
   if (req.method === "GET" && url.pathname === "/api/export-mappings") {
@@ -7862,6 +8296,28 @@ async function handleApi(req, res) {
       return sendJson(res, 200, { added: result.created, updated: result.updated, state: publicState(normalized) });
     }
 
+    if (source === "eBay") {
+      const result = await importEbayOrders(db);
+      const connection = db.connections.find((item) => item.name === source);
+      if (connection) {
+        connection.connected = true;
+        connection.lastSync = new Date().toISOString();
+      }
+      const message = `Imported ${result.created} new and updated ${result.updated} eBay order${result.fetched === 1 ? "" : "s"}.`;
+      db.syncRuns.unshift({
+        id: crypto.randomUUID(),
+        source,
+        type: "orders",
+        status: result.errors.length ? "warning" : "success",
+        message: result.errors.length ? `${message} ${result.errors.length} order rows need review.` : message,
+        createdAt: new Date().toISOString(),
+        errors: result.errors.slice(0, 10)
+      });
+      await writeDb(db);
+      const normalized = normalizeDb(db);
+      return sendJson(res, 200, { added: result.created, updated: result.updated, state: publicState(normalized) });
+    }
+
     const orders = demoOrdersFor(source);
     for (const order of orders) upsertOrder(db, order);
     const connection = db.connections.find((item) => item.name === source);
@@ -7927,6 +8383,130 @@ async function handleTemuCallback(req, res) {
   }
 }
 
+async function handleEbayStart(req, res) {
+  try {
+    if (postgres.isPostgresEnabled()) {
+      const db = { connectorState: {} };
+      const authUrl = ebayConsentUrl(db);
+      res.writeHead(302, { Location: authUrl });
+      res.end();
+      return;
+    }
+    const db = await readDb();
+    const authUrl = ebayConsentUrl(db);
+    await writeDb(db);
+    res.writeHead(302, { Location: authUrl });
+    res.end();
+  } catch (error) {
+    return sendHtml(res, 400, `
+      <!doctype html>
+      <title>eBay Setup Needed</title>
+      <body style="font-family:system-ui;padding:32px;line-height:1.5">
+        <h1>eBay setup needed</h1>
+        <p>${escapeHtml(error.message)}</p>
+        <p>Add your eBay developer values to <code>.env</code>, restart DataPlus, then try Connect eBay again.</p>
+        <p><a href="/">Return to DataPlus</a></p>
+      </body>
+    `);
+  }
+}
+
+async function handleEbayCallback(req, res) {
+  if (postgres.isPostgresEnabled()) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const code = url.searchParams.get("code");
+    const error = url.searchParams.get("error") || url.searchParams.get("error_description");
+
+    if (error) {
+      return sendHtml(res, 400, `
+        <!doctype html>
+        <title>eBay Authorization Failed</title>
+        <body style="font-family:system-ui;padding:32px">
+          <h1>eBay authorization failed</h1>
+          <p>${escapeHtml(error)}</p>
+          <p><a href="/">Return to DataPlus</a></p>
+        </body>
+      `);
+    }
+
+    try {
+      const result = await exchangeEbayCode({ connectorState: readConnectorStateSync() }, code, { connectorOnly: true });
+      return sendHtml(res, 200, `
+        <!doctype html>
+        <title>eBay Connected</title>
+        <body style="font-family:system-ui;padding:32px">
+          <h1>eBay connected</h1>
+          <p>Access token saved for ${escapeHtml(result.environment)}.</p>
+          <p><a href="/">Return to DataPlus</a></p>
+        </body>
+      `);
+    } catch (exchangeError) {
+      return sendHtml(res, 500, `
+        <!doctype html>
+        <title>eBay Token Exchange Failed</title>
+        <body style="font-family:system-ui;padding:32px">
+          <h1>eBay token exchange failed</h1>
+          <p>${escapeHtml(exchangeError.message)}</p>
+          <p><a href="/">Return to DataPlus</a></p>
+        </body>
+      `);
+    }
+  }
+
+  const db = await readDb();
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const code = url.searchParams.get("code");
+  const stateToken = url.searchParams.get("state");
+  const error = url.searchParams.get("error") || url.searchParams.get("error_description");
+
+  if (error) {
+    return sendHtml(res, 400, `
+      <!doctype html>
+      <title>eBay Authorization Failed</title>
+      <body style="font-family:system-ui;padding:32px">
+        <h1>eBay authorization failed</h1>
+        <p>${escapeHtml(error)}</p>
+        <p><a href="/">Return to DataPlus</a></p>
+      </body>
+    `);
+  }
+
+  if (db.connectorState?.ebayOauthState && stateToken !== db.connectorState.ebayOauthState) {
+    return sendHtml(res, 400, `
+      <!doctype html>
+      <title>eBay Authorization Failed</title>
+      <body style="font-family:system-ui;padding:32px">
+        <h1>eBay authorization failed</h1>
+        <p>The eBay callback state did not match. Start the connection again from DataPlus.</p>
+        <p><a href="/">Return to DataPlus</a></p>
+      </body>
+    `);
+  }
+
+  try {
+    const result = await exchangeEbayCode(db, code);
+    return sendHtml(res, 200, `
+      <!doctype html>
+      <title>eBay Connected</title>
+      <body style="font-family:system-ui;padding:32px">
+        <h1>eBay connected</h1>
+        <p>Access token saved for ${escapeHtml(result.environment)}.</p>
+        <p><a href="/">Return to DataPlus</a></p>
+      </body>
+    `);
+  } catch (exchangeError) {
+    return sendHtml(res, 500, `
+      <!doctype html>
+      <title>eBay Token Exchange Failed</title>
+      <body style="font-family:system-ui;padding:32px">
+        <h1>eBay token exchange failed</h1>
+        <p>${escapeHtml(exchangeError.message)}</p>
+        <p><a href="/">Return to DataPlus</a></p>
+      </body>
+    `);
+  }
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -7942,10 +8522,18 @@ const server = http.createServer((req, res) => {
     handleTemuCallback(req, res).catch((error) => {
       sendHtml(res, 500, `<h1>Temu callback error</h1><p>${escapeHtml(error.message)}</p>`);
     });
+  } else if (req.url.startsWith("/auth/ebay/start")) {
+    handleEbayStart(req, res).catch((error) => {
+      sendHtml(res, 500, `<h1>eBay auth start error</h1><p>${escapeHtml(error.message)}</p>`);
+    });
+  } else if (req.url.startsWith("/auth/ebay/callback")) {
+    handleEbayCallback(req, res).catch((error) => {
+      sendHtml(res, 500, `<h1>eBay callback error</h1><p>${escapeHtml(error.message)}</p>`);
+    });
   } else if (req.url.startsWith("/api/")) {
     handleApi(req, res).catch((error) => {
       console.error(error);
-      const status = error.message.includes("credentials missing") || error.message.includes("authorization code is required") ? 400 : 500;
+      const status = error.message.includes("credentials missing") || error.message.includes("authorization code is required") || error.message.includes("refresh token is missing") ? 400 : 500;
       sendJson(res, status, { error: error.message });
     });
   } else {

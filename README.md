@@ -116,6 +116,30 @@ If the redirect lands somewhere else, copy the `code` value and paste it into th
 
 The first Temu import looks back 90 days. Later imports overlap the previous run by 1 hour and upsert orders by Temu parent order number.
 
+## eBay order import
+
+Create or update your local `.env` file with your eBay Developer Program keys:
+
+```env
+EBAY_ENVIRONMENT=production
+EBAY_CLIENT_ID=your_ebay_client_id
+EBAY_CLIENT_SECRET=your_ebay_client_secret
+EBAY_RUNAME=your_ebay_redirect_uri_name
+EBAY_SCOPE=https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly
+EBAY_ORDER_LOOKBACK_DAYS=90
+EBAY_ORDER_PAGE_SIZE=50
+```
+
+In the eBay developer portal, configure the RuName accept URL to point at your running local app:
+
+```text
+http://localhost:4200/auth/ebay/callback
+```
+
+Restart DataPlus after saving `.env`, then open `Channels` > `eBay` > `Connect eBay`. After authorizing, use `Sync orders` to import real eBay seller orders into the Orders workspace.
+
+The first eBay import starts at Jan 1 of the current eBay server year. Later imports overlap the previous run by 1 hour and use eBay's last modified date filter, but never before Jan 1, so order imports stay year-to-date and updated orders are upserted instead of duplicated.
+
 ## MVP included
 
 - Dashboard for open orders, low stock, reserved units, and sync history.

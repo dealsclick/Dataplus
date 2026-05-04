@@ -1876,8 +1876,21 @@ function renderFullOrderPage() {
     .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
   const refundDue = refundDueFor(order);
   const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
-  const shippingCharge = Math.max(0, Number(order.total || 0) - subtotal);
+  const shippingCharge = Number(order.shippingPaid ?? order.external?.shippingPaid ?? Math.max(0, Number(order.total || 0) - subtotal));
   const totalUnits = Math.max(1, items.reduce((sum, line) => sum + Number(line.qty || 0), 0));
+  const marketplaceDetails = order.source === "eBay" && order.external ? `
+    <section class="shopify-card">
+      <div class="shopify-card-head">
+        <h3>eBay details</h3>
+      </div>
+      <div class="order-total-table">
+        <div><span>Seller net</span><span>totalDueSeller</span><strong>${money(order.external.totalDueSeller || 0)}</strong></div>
+        <div><span>Buyer shipping</span><span>deliveryCost</span><strong>${money(order.shippingPaid ?? order.external.shippingPaid ?? 0)}</strong></div>
+        <div><span>Fee basis</span><span>totalFeeBasisAmount</span><strong>${money(order.external.totalFeeBasisAmount || 0)}</strong></div>
+        <div><span>Payment status</span><span>${html(order.external.orderPaymentStatus || "N/A")}</span><strong>${html(order.external.orderFulfillmentStatus || "N/A")}</strong></div>
+      </div>
+    </section>
+  ` : "";
 
   target.innerHTML = `
     <div class="full-order shopify-order">
@@ -1963,6 +1976,8 @@ function renderFullOrderPage() {
             </div>
             <label>shipping_cost<input value="${money(order.shippingCost)}" readonly /></label>
           </section>
+
+          ${marketplaceDetails}
 
           <section class="shopify-card">
             <div class="shopify-card-head">
@@ -6816,32 +6831,49 @@ function renderReports() {
 }
 
 function renderConnections() {
-  $("#connection-grid").innerHTML = state.connections.map((connection) => `
-    <article class="connection-card">
-      <div class="channel-card-head">
-        <span class="channel-logo-frame">${channelLogoMarkup(connection, connection.name)}</span>
-        <h2><button class="order-link product-name-link" data-select-channel="${connection.id}">${connection.name}</button></h2>
-      </div>
-      <p>${connection.name === "Temu" && state.connectorState?.temuAuthorized
-        ? `Authorized${state.connectorState.temuMallId ? ` / Mall ${state.connectorState.temuMallId}` : ""} / Last sync ${dateLabel(connection.lastSync)}`
-        : connection.connected ? `Connected / Last sync ${dateLabel(connection.lastSync)}` : "Ready for marketplace credentials and channel settings."}</p>
-      <div class="summary-grid channel-mini-grid">
-        <span><small>Default status</small><strong>${html(connection.settings?.defaultShadowStatus || "Draft")}</strong></span>
-        <span><small>Inventory</small><strong>${connection.settings?.inventoryUpdateEnabled ? "On" : "Off"}</strong></span>
-        <span><small>Orders</small><strong>${connection.settings?.orderDownloadEnabled ? "On" : "Off"}</strong></span>
-      </div>
-      ${connection.name === "Temu" ? `
+  $("#connection-grid").innerHTML = state.connections.map((connection) => {
+    const isTemu = connection.name === "Temu";
+    const isEbay = connection.name === "eBay";
+    const temuAuthorized = isTemu && state.connectorState?.temuAuthorized;
+    const ebayAuthorized = isEbay && state.connectorState?.ebayAuthorized;
+    const connected = isEbay ? ebayAuthorized : connection.connected;
+    const statusText = temuAuthorized
+      ? `Authorized${state.connectorState.temuMallId ? ` / Mall ${state.connectorState.temuMallId}` : ""} / Last sync ${dateLabel(connection.lastSync)}`
+      : ebayAuthorized
+        ? `Authorized / ${state.connectorState?.ebayEnvironment || "production"} / Last sync ${dateLabel(connection.lastSync)}`
+        : connected
+          ? `Connected / Last sync ${dateLabel(connection.lastSync)}`
+          : "Ready for marketplace credentials and channel settings.";
+    const authBox = isTemu ? `
         <div class="auth-box">
           <label>Authorization code<input id="temu-auth-code" placeholder="Paste code from Temu redirect" /></label>
           <button class="button secondary" data-exchange-temu-code>Save token</button>
         </div>
-      ` : ""}
-      <button class="button ${connection.connected ? "secondary" : ""}" data-sync-source="${connection.name}">
-        ${connection.name === "Temu" ? "Sync orders" : connection.connected ? "Sync now" : "Connect demo"}
-      </button>
-      <button class="button secondary" data-select-channel="${connection.id}">Settings</button>
-    </article>
-  `).join("");
+      ` : isEbay ? `
+        <div class="auth-box">
+          <a class="button ${ebayAuthorized ? "secondary" : ""}" href="/auth/ebay/start">${ebayAuthorized ? "Reconnect eBay" : "Connect eBay"}</a>
+          <p class="muted">Imports paid seller orders with eBay OAuth. Tokens stay on this PC.</p>
+        </div>
+      ` : "";
+    const actionLabel = isTemu || isEbay ? "Sync orders" : connected ? "Sync now" : "Connect demo";
+    return `
+      <article class="connection-card">
+        <div class="channel-card-head">
+          <span class="channel-logo-frame">${channelLogoMarkup(connection, connection.name)}</span>
+          <h2><button class="order-link product-name-link" data-select-channel="${connection.id}">${connection.name}</button></h2>
+        </div>
+        <p>${statusText}</p>
+        <div class="summary-grid channel-mini-grid">
+          <span><small>Default status</small><strong>${html(connection.settings?.defaultShadowStatus || "Draft")}</strong></span>
+          <span><small>Inventory</small><strong>${connection.settings?.inventoryUpdateEnabled ? "On" : "Off"}</strong></span>
+          <span><small>Orders</small><strong>${connection.settings?.orderDownloadEnabled ? "On" : "Off"}</strong></span>
+        </div>
+        ${authBox}
+        <button class="button ${connected ? "secondary" : ""}" data-sync-source="${connection.name}">${actionLabel}</button>
+        <button class="button secondary" data-select-channel="${connection.id}">Settings</button>
+      </article>
+    `;
+  }).join("");
 }
 
 function renderChannelProfile() {
