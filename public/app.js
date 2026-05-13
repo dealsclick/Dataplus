@@ -784,6 +784,7 @@ function renderTopbarActions() {
     actions.push(`<button data-view-jump="connections">Open channels</button>`);
   } else if (currentViewId === "knowledge") {
     actions.push(`<button data-knowledge-tab-jump="whats-new">What's new</button>`);
+    actions.push(`<button data-knowledge-tab-jump="features">Features</button>`);
     actions.push(`<button data-knowledge-tab-jump="how-to">How to</button>`);
   } else if (currentViewId === "reports") {
     actions.push(`<button data-view-jump="orders">Open orders</button>`);
@@ -8794,6 +8795,108 @@ const KNOWLEDGE_CHANGELOG = [
   }
 ];
 
+const KNOWLEDGE_FEATURES = [
+  {
+    area: "Dashboard",
+    features: [
+      "Open order, inventory, low-stock, reserved-unit, sales, and customer summary metrics.",
+      "Recent orders to confirm with direct actions.",
+      "Recent sync activity across marketplace channels."
+    ]
+  },
+  {
+    area: "Orders",
+    features: [
+      "Queue tabs for new, processing, waiting for PO, shipped, exceptions, and completed work.",
+      "Order detail preview and full order profiles.",
+      "Bulk order selection and PO creation from selected orders.",
+      "Order status actions: approve, hold, cancel, void, done, and delete with confirmation.",
+      "Refund recording, return creation, fulfillment tracking, inventory reservation, and order duplication.",
+      "Line-item SKU mapping, unmapping, and product creation for marketplace SKUs that do not match DataPlus."
+    ]
+  },
+  {
+    area: "Drafts",
+    features: [
+      "Manual draft order creation with searchable SKU line items.",
+      "Draft editing, duplication, conversion to live orders, and PDF export.",
+      "Customer matching and repeat-customer context before conversion."
+    ]
+  },
+  {
+    area: "Returns",
+    features: [
+      "Return intake tied to orders, warehouses, refund amounts, and reasons.",
+      "Return workflow stages for approval, receiving, inspection, restock, vendor return, refund, and completion.",
+      "Image and attachment capture for return evidence.",
+      "Return analytics through Reports."
+    ]
+  },
+  {
+    area: "Customers",
+    features: [
+      "Customer profiles generated from orders and manual records.",
+      "Editable contact details, notes, repeat-customer status, and order history.",
+      "Fast search across name, email, and phone."
+    ]
+  },
+  {
+    area: "Catalog",
+    features: [
+      "Product catalog with filtering, pagination, image counts, eBay readiness, and bulk actions.",
+      "Source catalog search across the full imported vendor/product dump.",
+      "Import Review queue for deciding source-vs-local field changes.",
+      "Category management with main/source scopes, Shopify/eBay taxonomy mapping, attribute mapping, and bulk refresh.",
+      "Inventory catalog view with stock, reserved, warehouse, serial, and reorder details.",
+      "Marketplace template previews and readiness dashboards."
+    ]
+  },
+  {
+    area: "Product Details",
+    features: [
+      "Product home, content, pricing, inventory, source data, and eBay workspace tabs.",
+      "Image manager, bullet-point manager, brand guard, dimensions, and source-data backfill.",
+      "SKU rename, shadow SKU creation, marketplace aliases, and channel listing readiness.",
+      "eBay category search, item specifics, draft mapping, offer creation, publishing, and attribute sync."
+    ]
+  },
+  {
+    area: "Purchasing",
+    features: [
+      "Purchase order creation from one order, many selected orders, or vendor workflows.",
+      "PO approval, vendor submission, receiving, serial capture, attachments, and receipt history.",
+      "Vendor profiles with contacts, submission settings, file feeds, brands, and PO history.",
+      "Brand profiles with vendor relationships, logos, status controls, and catalog associations.",
+      "Warehouse profiles with locations, status, bin defaults, stock transfer, and inventory views."
+    ]
+  },
+  {
+    area: "Import / Export and Jobs",
+    features: [
+      "Mapped CSV templates for imports and exports.",
+      "Shopify status import, inventory import, source SKU promotion, category imports, and mapping-header helpers.",
+      "Job history with status, counts, original file download, and errors CSV download.",
+      "Export mapping sidecar storage so templates do not bloat the main app state."
+    ]
+  },
+  {
+    area: "Channels",
+    features: [
+      "Temu and eBay authorization and order sync flows.",
+      "Per-channel logos, defaults, pricing/inventory toggles, tracking settings, and shadow SKU settings.",
+      "eBay business policy sync, merchant location creation, listing defaults, and marketplace account settings."
+    ]
+  },
+  {
+    area: "Reports",
+    features: [
+      "Profit and loss summaries from reportable orders.",
+      "Sales performance by source.",
+      "Product performance, returns, cancellations, and exception review."
+    ]
+  }
+];
+
 const KNOWLEDGE_HOW_TO = [
   {
     title: "Connect eBay",
@@ -8804,6 +8907,17 @@ const KNOWLEDGE_HOW_TO = [
       "Confirm marketplace, currency, location, and business policy defaults.",
       "Use Connect eBay or Reconnect eBay to authorize the seller account.",
       "Run Sync eBay account settings after authorization to refresh locations and policies."
+    ]
+  },
+  {
+    title: "Sync Temu orders",
+    area: "Channels",
+    steps: [
+      "Open Channels from the sidebar.",
+      "Open Temu.",
+      "Confirm the Temu credentials are present in the local environment.",
+      "Connect or paste the authorization code if the callback lands outside DataPlus.",
+      "Run Sync orders to import recent marketplace orders."
     ]
   },
   {
@@ -8819,6 +8933,28 @@ const KNOWLEDGE_HOW_TO = [
     ]
   },
   {
+    title: "Bulk launch ready SKUs to eBay",
+    area: "Catalog",
+    steps: [
+      "Open Catalog, then Products.",
+      "Filter to products that are ready for eBay.",
+      "Select the page, filtered set, or individual products.",
+      "Choose Launch ready to eBay from the bulk action menu.",
+      "Review skipped and failed rows in the result or Jobs area."
+    ]
+  },
+  {
+    title: "Import live eBay catalog listings",
+    area: "Catalog",
+    steps: [
+      "Open Catalog, then Products.",
+      "Click Sync eBay Catalog.",
+      "Let DataPlus match live eBay SKUs, offer IDs, listing IDs, or aliases to products.",
+      "Open Import Review for unmatched or conflicting live listings.",
+      "Accept, reject, or map the review rows as needed."
+    ]
+  },
+  {
     title: "Map an order line to an existing SKU",
     area: "Orders",
     steps: [
@@ -8827,6 +8963,84 @@ const KNOWLEDGE_HOW_TO = [
       "Open SKU tools and choose Map to existing SKU.",
       "Search for the DataPlus SKU and confirm the mapping.",
       "Use a shadow mapping when the marketplace SKU should stay distinct from the parent SKU."
+    ]
+  },
+  {
+    title: "Create a product from an order line",
+    area: "Orders",
+    steps: [
+      "Open the order that has an unmapped marketplace line.",
+      "Open SKU tools for the line.",
+      "Choose Create product SKU.",
+      "Confirm the SKU and title that should become an inventory product.",
+      "Review the new product in Catalog before publishing to any channel."
+    ]
+  },
+  {
+    title: "Void an order without affecting reports",
+    area: "Orders",
+    steps: [
+      "Open the order from Orders.",
+      "Use Actions, then Void order.",
+      "Confirm the action when prompted.",
+      "DataPlus marks the order void and excludes it from reportable financial totals.",
+      "Use Delete only when the record should be removed from active order lists."
+    ]
+  },
+  {
+    title: "Create a purchase order from orders",
+    area: "Orders",
+    steps: [
+      "Open Orders.",
+      "Select one or more orders that need purchasing.",
+      "Click Create PO from selected.",
+      "Review vendor grouping and any duplicate PO warning.",
+      "Open the PO profile to approve, send, or receive inventory."
+    ]
+  },
+  {
+    title: "Receive inventory on a PO",
+    area: "Purchasing",
+    steps: [
+      "Open Purchasing, then POs.",
+      "Open the purchase order.",
+      "Click Receive inventory.",
+      "Enter received quantities, serial numbers, and location bins as needed.",
+      "Attach receiving documents or photos.",
+      "Save a draft or complete the receiving step."
+    ]
+  },
+  {
+    title: "Create a manual draft order",
+    area: "Drafts",
+    steps: [
+      "Open Drafts.",
+      "Click Create manual order.",
+      "Add customer, source, shipping, and note details.",
+      "Add line items using SKU search or manual line values.",
+      "Save the draft, then convert it to a live order when ready."
+    ]
+  },
+  {
+    title: "Create and process a return",
+    area: "Returns",
+    steps: [
+      "Open an order and choose Create return, or open Returns directly.",
+      "Enter reason, warehouse, refund amount, and line details.",
+      "Use Receive return when the item arrives.",
+      "Add inspection notes and images.",
+      "Restock, quarantine, return to vendor, refund, or complete the return workflow."
+    ]
+  },
+  {
+    title: "Promote SKUs from the source catalog",
+    area: "Catalog",
+    steps: [
+      "Open Catalog, then Source Catalog.",
+      "Search or filter by supplier, stock status, brand, or category.",
+      "Select source SKUs or upload an Add SKUs CSV.",
+      "Promote the selected SKUs into active products.",
+      "Open Products to finish images, categories, pricing, and channel readiness."
     ]
   },
   {
@@ -8841,6 +9055,40 @@ const KNOWLEDGE_HOW_TO = [
     ]
   },
   {
+    title: "Map categories for Shopify or eBay",
+    area: "Catalog",
+    steps: [
+      "Open Catalog, then Categories.",
+      "Choose Main or Source category scope.",
+      "Open a category row.",
+      "Search the Shopify or eBay taxonomy panel.",
+      "Apply the category mapping and refresh attributes when needed.",
+      "Apply the channel mapping to products after review."
+    ]
+  },
+  {
+    title: "Import category assignments",
+    area: "Catalog",
+    steps: [
+      "Open Catalog, then Categories.",
+      "Use Import SKU Categories for SKU-to-main-category files.",
+      "Use Import Category Mapping for supplier/source category mapping files.",
+      "Review changed counts and any import job errors.",
+      "Reopen Categories to verify the mapping results."
+    ]
+  },
+  {
+    title: "Create or edit an export mapping",
+    area: "Import / Export",
+    steps: [
+      "Open Import/Export.",
+      "Create a new template or open an existing one.",
+      "Map external CSV columns to DataPlus product fields.",
+      "Use defaults for static values such as Shopify commands or statuses.",
+      "Save the template, then run export or import from the same page."
+    ]
+  },
+  {
     title: "Use import job history",
     area: "Jobs",
     steps: [
@@ -8848,6 +9096,38 @@ const KNOWLEDGE_HOW_TO = [
       "Filter by section, status, or direction.",
       "Open a job row to inspect counts and errors.",
       "Download the original file or errors CSV when available."
+    ]
+  },
+  {
+    title: "Transfer stock between warehouses",
+    area: "Inventory",
+    steps: [
+      "Open Catalog, then Inventory.",
+      "Open the inventory details for a SKU.",
+      "Click Transfer stock.",
+      "Choose source warehouse, destination warehouse, quantity, and bin values.",
+      "Save the transfer and review the updated warehouse stock."
+    ]
+  },
+  {
+    title: "Update channel settings",
+    area: "Channels",
+    steps: [
+      "Open Channels.",
+      "Open the channel profile.",
+      "Edit sync toggles, pricing rules, handling time, shipping defaults, or listing defaults.",
+      "Upload or clear a channel logo when useful.",
+      "Use Sync enabled channels from the topbar when settings are ready."
+    ]
+  },
+  {
+    title: "Run product dump maintenance",
+    area: "Admin",
+    steps: [
+      "Import the product BSON dump with the product dump script.",
+      "Rebuild the source catalog index after replacing the catalog file.",
+      "Import Shopify taxonomy when category references need updating.",
+      "Use Jobs and Catalog to review import results before promoting SKUs."
     ]
   }
 ];
@@ -8860,6 +9140,32 @@ const KNOWLEDGE_WORKFLOWS = [
       ["Open eBay channel", "connections"],
       ["Open products", "catalog"],
       ["Open jobs", "jobs"]
+    ]
+  },
+  {
+    title: "Order to purchase to receiving",
+    summary: "Approve an order, create a PO, send it to the vendor, receive stock with serials/attachments, then fulfill or mark the order done.",
+    links: [
+      ["Open orders", "orders"],
+      ["Open POs", "purchasing"],
+      ["Open inventory", "catalog"]
+    ]
+  },
+  {
+    title: "Manual order intake",
+    summary: "Create a draft order, match or add the customer, add SKU lines, convert to an order, then reserve or purchase inventory.",
+    links: [
+      ["Open drafts", "drafts"],
+      ["Open customers", "customers"],
+      ["Open orders", "orders"]
+    ]
+  },
+  {
+    title: "Return resolution",
+    summary: "Create the return, receive and inspect it, attach photos, decide restock/quarantine/vendor return, then complete the customer-facing outcome.",
+    links: [
+      ["Open returns", "returns"],
+      ["Open reports", "reports"]
     ]
   },
   {
@@ -8877,6 +9183,24 @@ const KNOWLEDGE_WORKFLOWS = [
       ["Open source catalog", "catalog"],
       ["Open readiness", "catalog"]
     ]
+  },
+  {
+    title: "Category mapping cleanup",
+    summary: "Use category scopes, taxonomy search, mapping imports, and channel attribute refreshes to keep products ready for Shopify, eBay, and Matrixify exports.",
+    links: [
+      ["Open categories", "catalog"],
+      ["Open import center", "import-export"],
+      ["Open jobs", "jobs"]
+    ]
+  },
+  {
+    title: "CSV import/export review",
+    summary: "Use mapped templates to ingest supplier/channel files, inspect Jobs for errors, then download corrected exports when records are ready.",
+    links: [
+      ["Open import center", "import-export"],
+      ["Open jobs", "jobs"],
+      ["Open catalog", "catalog"]
+    ]
   }
 ];
 
@@ -8886,6 +9210,30 @@ function renderKnowledgeBase() {
   $$("[data-knowledge-tab]").forEach((button) => {
     button.classList.toggle("active", button.dataset.knowledgeTab === knowledgeTab);
   });
+  if (knowledgeTab === "features") {
+    target.innerHTML = `
+      <div class="knowledge-page">
+        <div class="knowledge-hero">
+          <div>
+            <p class="eyebrow">Feature Reference</p>
+            <h2>What DataPlus can do</h2>
+            <p class="muted">A module-by-module map of the tools available in the app.</p>
+          </div>
+        </div>
+        <div class="knowledge-feature-grid">
+          ${KNOWLEDGE_FEATURES.map((section) => `
+            <article class="knowledge-feature">
+              <h3>${html(section.area)}</h3>
+              <ul>
+                ${section.features.map((feature) => `<li>${html(feature)}</li>`).join("")}
+              </ul>
+            </article>
+          `).join("")}
+        </div>
+      </div>
+    `;
+    return;
+  }
   if (knowledgeTab === "how-to") {
     target.innerHTML = `
       <div class="knowledge-page">
