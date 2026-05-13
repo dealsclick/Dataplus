@@ -5709,6 +5709,13 @@ tbody tr:hover td {
   font-weight: 800;
 }
 
+.attribute-map-editor label.inline-check {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 8px;
+}
+
 .attribute-source-groups {
   color: var(--muted);
   font-size: 0.72rem;
@@ -5749,13 +5756,24 @@ tbody tr:hover td {
 
 .related-attribute-list label {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: 16px minmax(0, 1fr);
   align-items: flex-start;
   gap: 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
   padding: 8px 10px;
+}
+
+.related-attribute-list input[type="checkbox"],
+.attribute-map-editor .inline-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 1px 0 0;
+  padding: 0;
+  flex: 0 0 16px;
 }
 
 .related-attribute-list span {
