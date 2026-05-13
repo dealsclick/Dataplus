@@ -5395,7 +5395,8 @@ function relatedAttributeRows(row = {}) {
 
 async function loadCategoryAttributes() {
   attributeState = { ...attributeState, loading: true };
-  renderAttributesPage();
+  if (catalogTab === "attribute-groups") renderAttributeGroupsPage();
+  else renderAttributesPage();
   if (!productFieldOptions) await loadProductFieldOptions();
   const params = new URLSearchParams();
   if (attributeState.channel) params.set("channel", attributeState.channel);
@@ -5409,7 +5410,8 @@ async function loadCategoryAttributes() {
     groups: result.attributeGroups || attributeState.groups || [],
     loading: false
   };
-  renderAttributesPage();
+  if (catalogTab === "attribute-groups") renderAttributeGroupsPage();
+  else renderAttributesPage();
 }
 
 function renderAttributeGroupsPanel() {

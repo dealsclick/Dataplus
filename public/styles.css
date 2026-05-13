@@ -5701,6 +5701,18 @@ tbody tr:hover td {
   padding: 14px;
 }
 
+.attribute-groups-page {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  min-height: calc(100vh - 128px);
+}
+
+.attribute-groups-page .attribute-groups-panel {
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
 .attribute-groups-head {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) minmax(420px, 1.4fr);
@@ -5735,7 +5747,8 @@ tbody tr:hover td {
 .attribute-groups-list {
   display: grid;
   gap: 8px;
-  max-height: 320px;
+  min-height: min(560px, calc(100vh - 430px));
+  max-height: none;
   overflow: auto;
 }
 
