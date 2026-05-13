@@ -3,6 +3,7 @@ let selectedOrderId = null;
 let selectedProductId = null;
 let orderDetailVisible = false;
 let selectedOrderIds = new Set();
+let activeOrderQueue = "new";
 let purchasingTab = "pos";
 let catalogTab = "products";
 let sourceCatalogPage = 1;
@@ -15,8 +16,13 @@ let categoryState = { categories: [], total: 0, query: "", scope: "main", loadin
 let categoryScope = "main";
 let categoryRequestId = 0;
 let selectedCategoryId = null;
+let categoryViewMode = "table";
+let pendingCategoryOpenName = "";
 let shopifyTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
 let shopifyTaxonomyTimer = null;
+let ebayTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
+let productEbayTaxonomyState = { productId: null, query: "", results: [], total: 0, version: "", loading: false, searched: false };
+let masterCategoryMapModal = { productId: null, categoryName: "", categoryId: "", query: "", results: [], selected: null, loading: false, searched: false, error: "", applyScope: "sku" };
 let selectedExportMappingId = null;
 let activeExportMappingPageId = null;
 let activeImportSection = "products";
@@ -36,9 +42,10 @@ let pendingProductBulletManager = { productId: null, bulletPoints: [] };
 let productCatalogPage = 1;
 let inventoryCatalogPage = 1;
 const PRODUCT_CATALOG_PAGE_SIZE = 100;
-let productFilterOptionsCache = { inventoryCount: -1, suppliers: [], stockStatuses: [], shopifyStatuses: [], brands: [], categories: [] };
+let productFilterOptionsCache = { inventoryCount: -1, suppliers: [], stockStatuses: [], shopifyStatuses: [], ebayStatuses: [], brands: [], categories: [] };
 let inventoryById = new Map();
 let activeApiRequests = 0;
+let searchFeedbackToken = 0;
 let selectedPoId = null;
 let selectedVendorId = null;
 let selectedCustomerId = null;
@@ -67,6 +74,8 @@ let selectedDraftId = null;
 let editOrderModalId = null;
 let refundOrderModalId = null;
 let selectedReturnId = null;
+let pendingOrderSkuMap = { orderId: null, lineIndex: 0, sourceSku: "", selectedProductId: null, query: "", searched: false, loading: false };
+let orderSkuMapSearchTimer = null;
 let currentViewId = "dashboard";
 let menuGroupsExpanded = localStorage.getItem("dataplus-menu-groups-expanded") === "true";
 let themeMode = localStorage.getItem("dataplus-theme") || "light";
@@ -88,6 +97,7 @@ const LUCIDE_ICONS = {
   "database": '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/>',
   "dollar-sign": '<path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"/>',
   "edit-3": '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  "external-link": '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
   "file-pen-line": '<path d="m18 5-2.4-2.4A2 2 0 0 0 14.2 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10.4 12.6 8 15l1 1 2.4-2.4"/><path d="m14 9 1 1"/>',
   "fingerprint": '<path d="M2 12c0-2.8 0-4.2.54-5.27A5 5 0 0 1 4.73 4.54C5.8 4 7.2 4 10 4h4c2.8 0 4.2 0 5.27.54a5 5 0 0 1 2.19 2.19C22 7.8 22 9.2 22 12"/><path d="M6 12a6 6 0 0 1 12 0v2"/><path d="M9 12a3 3 0 0 1 6 0v6"/><path d="M12 12v10"/>',
   "gauge": '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
@@ -104,6 +114,7 @@ const LUCIDE_ICONS = {
   "radio": '<path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2a6 6 0 0 1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/>',
   "refresh-cw": '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>',
   "ruler": '<path d="m16 2 6 6L8 22l-6-6Z"/><path d="m7.5 10.5 2 2"/><path d="m10.5 7.5 2 2"/><path d="m13.5 4.5 2 2"/><path d="m4.5 13.5 2 2"/>',
+  "save": '<path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8A2 2 0 0 1 21 8.8V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M17 21v-7H7v7"/><path d="M7 3v5h8"/>',
   "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
   "shopping-bag": '<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
   "shopping-cart": '<circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57L21.9 7H5.12"/>',
@@ -114,6 +125,8 @@ const LUCIDE_ICONS = {
   "trash-2": '<path d="M3 6h18"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><path d="M19 6l-1 14c-.1 1-1 2-2 2H8c-1 0-1.9-1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
   "undo-2": '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
   "upload": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+  "upload-cloud": '<path d="M16 16l-4-4-4 4"/><path d="M12 12v9"/><path d="M20.4 18.4A5 5 0 0 0 18 9h-1.3A8 8 0 1 0 4 16.3"/>',
+  "x-circle": '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
   "users": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
   "warehouse": '<path d="M22 8.35V20a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8.35A2 2 0 0 1 3.26 6.5l8-3.2a2 2 0 0 1 1.48 0l8 3.2A2 2 0 0 1 22 8.35Z"/><path d="M6 18h12"/><path d="M6 14h12"/><rect width="12" height="12" x="6" y="10"/>'
 };
@@ -150,15 +163,26 @@ function hydrateStaticIcons(root = document) {
 }
 
 async function api(path, options = {}) {
+  const { feedbackLabel, ...fetchOptions } = options;
   activeApiRequests += 1;
-  setSavingIndicator(true, options.method && options.method !== "GET" ? "Saving..." : "Loading...");
+  setSavingIndicator(true, feedbackLabel || (fetchOptions.method && fetchOptions.method !== "GET" ? "Saving..." : "Loading..."));
   try {
     const response = await fetch(path, {
       headers: { "Content-Type": "application/json" },
-      ...options
+      ...fetchOptions
     });
-    if (!response.ok) throw new Error((await response.json()).error || "Request failed");
-    return response.json();
+    const payload = await response.json();
+    if (!response.ok) {
+      if (payload.job) {
+        state.importJobs = [payload.job, ...(state.importJobs || []).filter((job) => job.id !== payload.job.id)];
+        if (currentViewId === "jobs") renderJobsPage();
+      }
+      const error = new Error(payload.error || "Request failed");
+      error.apiJobLogged = Boolean(payload.apiJobLogged);
+      error.job = payload.job || null;
+      throw error;
+    }
+    return payload;
   } finally {
     activeApiRequests = Math.max(0, activeApiRequests - 1);
     if (!activeApiRequests) setSavingIndicator(false);
@@ -325,6 +349,10 @@ function profitFor(order) {
   return Number(order.total || 0) - Number(order.productCost || 0) - Number(order.marketplaceFees || 0) - Number(order.shippingCost || 0) - Number(order.refundAmount || 0);
 }
 
+function isReportableOrder(order = {}) {
+  return !["void", "canceled", "cancelled", "deleted"].includes(String(order.status || "").toLowerCase());
+}
+
 function marginPercent(profit, revenue) {
   const total = Number(revenue || 0);
   if (!total) return 0;
@@ -363,32 +391,55 @@ function returnStatusTone(status) {
 }
 
 function renderLineItemTable(items = [], options = {}) {
+  const showSkuActions = Boolean(options.orderId && options.skuActions);
   const rows = items.map((item, index) => {
     const qty = Math.max(1, Number(item.qty || 1));
     const price = Number(item.price || 0);
     const cost = Number(item.cost ?? options.costForLine?.(item, index) ?? 0);
     const lineMargin = marginPercent(price - cost, price);
+    const inventoryItem = (state.inventory || []).find((row) => String(row.sku || "").toLowerCase() === String(item.sku || "").toLowerCase());
+    const mappedFromSku = String(item.originalSku || item.mappedFromSku || "").trim();
+    const isMappedSku = Boolean(inventoryItem && mappedFromSku && mappedFromSku.toLowerCase() !== String(item.sku || "").toLowerCase());
+    const skuStatus = inventoryItem
+      ? `<small class="line-item-sku-note">${isMappedSku ? `Alias: ${html(mappedFromSku)}` : "Mapped"}</small>`
+      : showSkuActions ? `<small class="line-item-sku-note warning">Not in products</small>` : "";
     return `
-      <div class="line-item-grid-row">
-        <span class="line-item-sku">${html(item.sku || "")}</span>
+      <div class="line-item-grid-row ${showSkuActions ? "with-actions" : ""}">
+        <span class="line-item-sku">${html(item.sku || "")}${skuStatus}</span>
         <span class="line-item-title" title="${html(item.title || item.sku || "")}">${html(shortenTitle(item.title || item.sku || "", options.maxTitle || 44))}</span>
         <span>${money(price)}</span>
         <span>${money(cost)}</span>
         <span>${lineMargin.toFixed(1)}%</span>
         <span>${qty}</span>
+        ${showSkuActions ? `
+          <span class="line-item-actions">
+            ${inventoryItem
+              ? `<button class="button secondary compact-button" data-select-product="${inventoryItem.id}" data-product-target="product-full">Open SKU</button>${isMappedSku ? `<button class="button secondary compact-button" data-unmap-order-line-sku="${options.orderId}" data-line-index="${index}" data-current-sku="${html(item.sku || "")}" data-source-sku="${html(mappedFromSku)}">Unmap</button>` : ""}`
+              : `
+                <div class="action-menu line-item-action-menu">
+                  <button class="icon-button compact-kebab" data-action-menu="${options.orderId}-line-${index}" aria-label="Open SKU actions">...</button>
+                  <div class="action-popover" data-menu-for="${options.orderId}-line-${index}">
+                    <button data-map-order-line-sku="${options.orderId}" data-line-index="${index}" data-current-sku="${html(item.sku || "")}">Map to existing SKU</button>
+                    <button data-create-order-line-sku="${options.orderId}" data-line-index="${index}" data-current-sku="${html(item.sku || "")}">Create product SKU</button>
+                  </div>
+                </div>
+              `}
+          </span>
+        ` : ""}
       </div>
     `;
   }).join("");
 
   return `
-    <div class="line-item-grid">
-      <div class="line-item-grid-head">
+    <div class="line-item-grid ${showSkuActions ? "with-actions" : ""}">
+      <div class="line-item-grid-head ${showSkuActions ? "with-actions" : ""}">
         <span>SKU</span>
         <span>Shortened Product Title</span>
         <span>Price</span>
         <span>Cost</span>
         <span>Profit %</span>
         <span>Qty</span>
+        ${showSkuActions ? `<span>SKU tools</span>` : ""}
       </div>
       ${rows || `<p class="muted">No line items yet.</p>`}
     </div>
@@ -506,17 +557,33 @@ function setSavingIndicator(active, label = "Saving...") {
   progress.setAttribute("aria-hidden", active ? "false" : "true");
 }
 
+function runWithSearchFeedback(action, label = "Searching...") {
+  const token = ++searchFeedbackToken;
+  setSavingIndicator(true, label);
+  setTimeout(() => {
+    try {
+      action();
+    } finally {
+      setTimeout(() => {
+        if (token === searchFeedbackToken && !activeApiRequests) setSavingIndicator(false);
+      }, 260);
+    }
+  }, 60);
+}
+
 function closeActionMenus() {
   document.querySelectorAll(".action-popover.open").forEach((menu) => menu.classList.remove("open"));
 }
 
 function productById(id) {
-  return inventoryById.get(id) || null;
+  const key = String(id || "");
+  return inventoryById.get(id) || inventoryById.get(key) || null;
 }
 
 function setState(nextState) {
   state = nextState;
-  inventoryById = new Map((state.inventory || []).map((item) => [item.id, item]));
+  inventoryById = new Map((state.inventory || []).flatMap((item) => [[item.id, item], [String(item.id || ""), item]]));
+  productFilterOptionsCache.inventoryCount = -1;
   if (!selectedOrderId || !state.orders.some((order) => order.id === selectedOrderId)) {
     selectedOrderId = state.orders[0]?.id || null;
   }
@@ -633,6 +700,9 @@ function renderTopbarActions() {
       actions.push(`<button data-order-action="approve" data-order-id="${order.id}">Approve order</button>`);
       actions.push(`<button data-order-action="hold" data-order-id="${order.id}">Put on hold</button>`);
       actions.push(`<button data-order-action="cancel" data-order-id="${order.id}">Cancel order</button>`);
+      actions.push(`<button data-order-action="void" data-order-id="${order.id}">Void order</button>`);
+      actions.push(`<button data-order-action="done" data-order-id="${order.id}">Mark done</button>`);
+      actions.push(`<button data-order-action="delete" data-order-id="${order.id}">Delete order</button>`);
     }
   } else if (currentViewId === "purchasing") {
     actions.push(`<button data-view-jump="orders">Create from orders</button>`);
@@ -677,6 +747,7 @@ function renderTopbarActions() {
   } else if (currentViewId === "product-full") {
     const item = productById(selectedProductId);
     if (item) {
+      actions.push(`<button data-rename-product-sku="${item.id}">Rename SKU</button>`);
       actions.push(`<button data-create-shadow="${item.id}">Create shadow SKU</button>`);
       actions.push(`<button data-bulk-create-shadows="${item.id}">Create all marketplace shadows</button>`);
       actions.push(`<button data-select-product="${item.id}" data-product-target="inventory-full">View inventory details</button>`);
@@ -756,7 +827,7 @@ function renderMetrics() {
 }
 
 function renderDashboardOrders() {
-  const openOrders = state.orders.filter((order) => order.status !== "confirmed").slice(0, 5);
+  const openOrders = state.orders.filter((order) => !["confirmed", "canceled", "void"].includes(String(order.status || "").toLowerCase())).slice(0, 5);
   $("#dashboard-orders").innerHTML = openOrders.length
     ? openOrders.map((order) => `
       <div class="compact-row">
@@ -782,17 +853,229 @@ function renderSyncLog() {
   `).join("");
 }
 
-function filteredOrders() {
-  const query = $("#order-search").value.trim().toLowerCase();
-  const status = $("#order-status").value;
-  return state.orders.filter((order) => {
-    const matchesStatus = status === "all" || order.status === status;
-    const haystack = `${order.orderNumber} ${order.internalOrderNumber} ${order.marketplaceOrderNumber} ${order.marketplaceOrderId} ${order.source} ${order.buyer} ${order.customerNumber} ${order.sku} ${order.title}`.toLowerCase();
-    return matchesStatus && haystack.includes(query);
+function orderDateValue(order, key = "createdAt") {
+  const raw = order[key] || order.createdAt || order.marketplaceUpdatedAt || order.updatedAt || "";
+  const time = new Date(raw).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function orderDateInputValue(id) {
+  const value = $(id)?.value || "";
+  if (!value) return null;
+  const time = new Date(`${value}T00:00:00`).getTime();
+  return Number.isFinite(time) ? time : null;
+}
+
+function orderSearchText(order) {
+  const address = order.address || {};
+  const items = Array.isArray(order.items) ? order.items : [];
+  return [
+    order.orderNumber,
+    order.internalOrderNumber,
+    order.marketplaceOrderNumber,
+    order.marketplaceOrderId,
+    order.source,
+    order.buyer,
+    order.buyerEmail,
+    order.phone,
+    order.customerNumber,
+    order.sku,
+    order.title,
+    address.name,
+    address.line1,
+    address.line2,
+    address.city,
+    address.state,
+    address.postalCode,
+    ...items.flatMap((item) => [item.sku, item.title, item.marketplaceLineItemId, item.legacyItemId])
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+const ORDER_QUEUE_DEFINITIONS = [
+  {
+    id: "new",
+    label: "New",
+    icon: "package-plus",
+    description: "New orders",
+    matches: (order) => ["new", "ready", "pending"].includes(String(order.status || "").toLowerCase())
+  },
+  {
+    id: "processing",
+    label: "Processing",
+    icon: "clipboard-check",
+    description: "Approved and needs PO or supply decision",
+    matches: (order) => {
+      const status = String(order.status || "").toLowerCase();
+      const supply = orderSupplyState(order);
+      return !orderHasMarketplaceShipped(order) && ["approved", "confirmed"].includes(status) && !supply.poId && supply.tone !== "stock";
+    }
+  },
+  {
+    id: "waiting-po",
+    label: "Waiting for PO",
+    icon: "clipboard-list",
+    description: "PO placed, waiting for receiving",
+    matches: (order) => {
+      const po = openLinkedPoForOrder(order);
+      return !orderHasMarketplaceShipped(order) && Boolean(po) && !["received", "partially_received", "closed", "canceled"].includes(String(po.status || "").toLowerCase());
+    }
+  },
+  {
+    id: "ready-ship",
+    label: "Ready to Ship",
+    icon: "tags",
+    description: "Stock is available and order is not fulfilled",
+    matches: (order) => {
+      const status = String(order.status || "").toLowerCase();
+      return !order.trackingNumber && !orderHasMarketplaceShipped(order) && !["fulfilled", "partial_fulfilled", "canceled", "void", "done", "shipped", "delivered", "closed"].includes(status) && availableStockForOrder(order);
+    }
+  },
+  {
+    id: "complete",
+    label: "Complete",
+    icon: "archive",
+    description: "Picked, packed, and tracking added",
+    matches: (order) => ["fulfilled", "partial_fulfilled"].includes(String(order.status || "").toLowerCase()) && Boolean(order.trackingNumber)
+  },
+  {
+    id: "review",
+    label: "Review",
+    icon: "layout-panel-left",
+    description: "Hold, return, refund, data, or mapping issue",
+    matches: (order) => orderNeedsReview(order)
+  },
+  {
+    id: "done",
+    label: "Done",
+    icon: "gauge",
+    description: "Released to carrier or closed",
+    matches: (order) => !["canceled", "void"].includes(String(order.status || "").toLowerCase()) && (["done", "shipped", "delivered", "closed"].includes(String(order.status || "").toLowerCase()) || orderHasMarketplaceShipped(order) || Boolean(order.carrierReleasedAt) || Boolean(order.trackingNumber && order.shipDate))
+  },
+  {
+    id: "canceled",
+    label: "Canceled",
+    icon: "x-circle",
+    description: "Canceled or voided orders",
+    matches: (order) => ["canceled", "cancelled", "void"].includes(String(order.status || "").toLowerCase())
+  }
+];
+
+function orderHasMarketplaceShipped(order = {}) {
+  const status = String(order.external?.orderFulfillmentStatus || order.marketplaceFulfillmentStatus || "").toLowerCase();
+  return ["fulfilled", "shipped", "delivered"].some((value) => status.includes(value));
+}
+
+function orderNeedsReview(order = {}) {
+  const status = String(order.status || "").toLowerCase();
+  if (status === "hold") return true;
+  if (["canceled", "cancelled", "void"].includes(status)) return false;
+  if (refundDueFor(order) > 0) return true;
+  const linkedReturn = (state?.returns || []).some((record) => {
+    const returnStatus = String(record.status || "").toLowerCase();
+    return (record.orderId === order.id || record.orderNumber === order.orderNumber) && !["done", "resolved", "closed"].includes(returnStatus);
   });
+  if (linkedReturn) return true;
+  const items = Array.isArray(order.items) && order.items.length ? order.items : [{ sku: order.sku, title: order.title }];
+  const missingProduct = items.some((line) => line.sku && !(state?.inventory || []).some((item) => String(item.sku || "").toLowerCase() === String(line.sku || "").toLowerCase()));
+  if (missingProduct) return true;
+  const address = order.address || {};
+  return !order.buyer || !order.total || (!address.line1 && !address.postalCode && !order.shipBy);
+}
+
+function orderQueueFor(order) {
+  const priority = ["canceled", "done", "complete", "waiting-po", "ready-ship", "processing", "new", "review"];
+  const queue = priority
+    .map((id) => ORDER_QUEUE_DEFINITIONS.find((definition) => definition.id === id))
+    .find((definition) => definition?.matches(order));
+  return queue || ORDER_QUEUE_DEFINITIONS[0];
+}
+
+function orderQueueCounts() {
+  const counts = Object.fromEntries(ORDER_QUEUE_DEFINITIONS.map((definition) => [definition.id, 0]));
+  (state?.orders || []).forEach((order) => {
+    const queue = orderQueueFor(order);
+    counts[queue.id] = Number(counts[queue.id] || 0) + 1;
+  });
+  return counts;
+}
+
+function renderOrderQueues() {
+  const target = $("#order-queues");
+  if (!target) return;
+  const counts = orderQueueCounts();
+  target.innerHTML = ORDER_QUEUE_DEFINITIONS.map((queue) => `
+    <button class="order-queue-tab ${activeOrderQueue === queue.id ? "active" : ""}" type="button" data-order-queue="${queue.id}" title="${html(queue.description)}">
+      ${withIcon(queue.icon, queue.label)}
+      <strong>${counts[queue.id] || 0}</strong>
+    </button>
+  `).join("");
+}
+
+function sortOrders(orders) {
+  const sort = $("#order-sort")?.value || "created-desc";
+  const sorted = orders.slice();
+  const text = (value) => String(value || "").toLowerCase();
+  const number = (value) => Number(value || 0);
+  const compareText = (a, b) => text(a).localeCompare(text(b));
+  const compareDate = (a, b, key) => orderDateValue(a, key) - orderDateValue(b, key);
+  const compareOptionalDate = (a, b, key, direction = "asc") => {
+    const left = orderDateValue(a, key);
+    const right = orderDateValue(b, key);
+    if (!left && !right) return 0;
+    if (!left) return 1;
+    if (!right) return -1;
+    return direction === "desc" ? right - left : left - right;
+  };
+  sorted.sort((a, b) => {
+    if (sort === "created-asc") return compareDate(a, b, "createdAt");
+    if (sort === "shipby-asc") return compareOptionalDate(a, b, "shipBy") || compareDate(a, b, "createdAt");
+    if (sort === "shipby-desc") return compareOptionalDate(a, b, "shipBy", "desc") || compareDate(b, a, "createdAt");
+    if (sort === "total-desc") return number(b.total) - number(a.total);
+    if (sort === "total-asc") return number(a.total) - number(b.total);
+    if (sort === "buyer-asc") return compareText(a.buyer, b.buyer) || compareDate(b, a, "createdAt");
+    if (sort === "source-asc") return compareText(a.source, b.source) || compareDate(b, a, "createdAt");
+    if (sort === "status-asc") return compareText(a.status, b.status) || compareDate(b, a, "createdAt");
+    return compareDate(b, a, "createdAt");
+  });
+  return sorted;
+}
+
+function renderOrderSourceOptions() {
+  const select = $("#order-source");
+  if (!select) return;
+  const selected = select.value || "all";
+  const sources = [...new Set((state.orders || []).map((order) => order.source).filter(Boolean))]
+    .sort((a, b) => String(a).localeCompare(String(b)));
+  select.innerHTML = [
+    `<option value="all">All sources</option>`,
+    ...sources.map((source) => `<option value="${html(source)}">${html(source)}</option>`)
+  ].join("");
+  select.value = sources.includes(selected) ? selected : "all";
+}
+
+function filteredOrders() {
+  const query = ($("#order-search")?.value || "").trim().toLowerCase();
+  const status = $("#order-status")?.value || "all";
+  const source = $("#order-source")?.value || "all";
+  const queue = ORDER_QUEUE_DEFINITIONS.some((definition) => definition.id === activeOrderQueue) ? activeOrderQueue : "new";
+  const from = orderDateInputValue("#order-date-from");
+  const to = orderDateInputValue("#order-date-to");
+  const toEnd = to === null ? null : to + 24 * 60 * 60 * 1000 - 1;
+  const orders = state.orders.filter((order) => {
+    const matchesQueue = orderQueueFor(order).id === queue;
+    const matchesStatus = status === "all" || order.status === status;
+    const matchesSource = source === "all" || String(order.source || "").toLowerCase() === source.toLowerCase();
+    const createdAt = orderDateValue(order, "createdAt");
+    const matchesFrom = from === null || createdAt >= from;
+    const matchesTo = toEnd === null || createdAt <= toEnd;
+    return matchesQueue && matchesStatus && matchesSource && matchesFrom && matchesTo && orderSearchText(order).includes(query);
+  });
+  return sortOrders(orders);
 }
 
 function renderOrders() {
+  renderOrderSourceOptions();
+  renderOrderQueues();
   const orders = filteredOrders();
   if (!orders.some((order) => order.id === selectedOrderId)) {
     selectedOrderId = orders[0]?.id || state.orders[0]?.id || null;
@@ -852,6 +1135,9 @@ function renderOrders() {
                         <button data-order-action="approve" data-order-id="${order.id}">Approve order</button>
                         <button data-order-action="hold" data-order-id="${order.id}">Put on hold</button>
                         <button data-order-action="cancel" data-order-id="${order.id}">Cancel order</button>
+                        <button data-order-action="void" data-order-id="${order.id}">Void order</button>
+                        <button data-order-action="done" data-order-id="${order.id}">Mark done</button>
+                        <button data-order-action="delete" data-order-id="${order.id}">Delete order</button>
                         <button data-duplicate-order="${order.id}">Duplicate to draft</button>
                         <button data-create-po-order="${order.id}">Create PO</button>
                         <button data-open-order-return="${order.id}">Create return</button>
@@ -1615,7 +1901,7 @@ function renderOrderStats() {
   $("#orders-stat-total").textContent = orders.length;
   $("#orders-stat-approved").textContent = orders.filter((order) => ["approved", "confirmed"].includes(order.status)).length;
   $("#orders-stat-pending").textContent = orders.filter((order) => ["new", "ready", "hold"].includes(order.status)).length;
-  $("#orders-stat-exceptions").textContent = orders.filter((order) => ["canceled", "returned"].includes(order.status)).length + (state.returns || []).length;
+  $("#orders-stat-exceptions").textContent = orders.filter((order) => ["canceled", "returned", "void"].includes(order.status)).length + (state.returns || []).length;
 }
 
 function initials(name) {
@@ -1633,15 +1919,45 @@ function labelStatus(status) {
     approved: "Approved",
     canceled: "Canceled",
     confirmed: "Success",
+    void: "Void",
     ready: "Pending",
     new: "Pending",
     partial_fulfilled: "Partially fulfilled",
-    fulfilled: "Fulfilled"
+    fulfilled: "Fulfilled",
+    done: "Done",
+    shipped: "Shipped",
+    delivered: "Delivered",
+    closed: "Closed"
   })[status] || status;
 }
 
 function channelForOrder(order) {
   return (state.connections || []).find((connection) => String(connection.name || "").toLowerCase() === String(order.source || "").toLowerCase());
+}
+
+function marketplaceOrderUrl(order = {}) {
+  const source = String(order.source || "").trim().toLowerCase();
+  const id = String(order.marketplaceOrderId || order.marketplaceOrderNumber || order.external?.orderId || "").trim();
+  const legacyId = String(order.external?.legacyOrderId || "").trim();
+  const resolvedId = id || legacyId;
+  if (!resolvedId) return "";
+  if (source === "ebay") {
+    return `https://www.ebay.com/sh/ord/details?orderid=${encodeURIComponent(resolvedId)}`;
+  }
+  if (source === "temu") {
+    return `https://seller-us.temu.com/order-detail.html?parent_order_sn=${encodeURIComponent(resolvedId)}`;
+  }
+  if (source === "shopify") {
+    const shopDomain = String(order.external?.shopDomain || order.external?.shop || "").trim();
+    if (shopDomain) return `https://${shopDomain.replace(/^https?:\/\//, "")}/admin/orders/${encodeURIComponent(resolvedId)}`;
+  }
+  return "";
+}
+
+function marketplaceOrderLink(order = {}) {
+  const url = marketplaceOrderUrl(order);
+  if (!url) return "";
+  return `<a class="button secondary" href="${html(url)}" target="_blank" rel="noopener noreferrer">View source</a>`;
 }
 
 function channelLogoMarkup(channel, label) {
@@ -1875,9 +2191,12 @@ function renderFullOrderPage() {
     .filter((record) => record.orderId === order.id || record.orderNumber === order.orderNumber)
     .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
   const refundDue = refundDueFor(order);
-  const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
+  const lineSubtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
+  const subtotal = Number(order.subtotal ?? order.external?.priceSubtotal ?? lineSubtotal);
   const shippingCharge = Number(order.shippingPaid ?? order.external?.shippingPaid ?? Math.max(0, Number(order.total || 0) - subtotal));
+  const taxAmount = Number(order.taxAmount ?? order.external?.taxAmount ?? items.reduce((sum, item) => sum + Number(item.tax || 0), 0));
   const totalUnits = Math.max(1, items.reduce((sum, line) => sum + Number(line.qty || 0), 0));
+  const originalOrderLink = marketplaceOrderLink(order);
   const marketplaceDetails = order.source === "eBay" && order.external ? `
     <section class="shopify-card">
       <div class="shopify-card-head">
@@ -1906,8 +2225,12 @@ function renderFullOrderPage() {
           <p class="muted">${simpleDate(order.createdAt)} from ${html(order.source || "Marketplace")} ${order.marketplaceOrderNumber ? `/ ${html(order.marketplaceOrderNumber)}` : ""}</p>
         </div>
         <div class="shopify-header-actions">
+          ${originalOrderLink}
           <button class="button secondary" data-open-order-refund="${order.id}">Refund</button>
           <button class="button secondary" data-open-order-edit="${order.id}">Edit</button>
+          <button class="button secondary" data-order-action="void" data-order-id="${order.id}">Void</button>
+          <button class="button secondary" data-order-action="done" data-order-id="${order.id}">Done</button>
+          <button class="button danger" data-order-action="delete" data-order-id="${order.id}">Delete</button>
           <button class="button secondary">Print</button>
           <button class="button secondary" data-open-order-return="${order.id}">Return</button>
         </div>
@@ -1928,6 +2251,8 @@ function renderFullOrderPage() {
               ${order.shipDate ? `<p>Ship date: ${html(order.shipDate)}</p>` : ""}
             </div>
             ${renderLineItemTable(items, {
+              orderId: order.id,
+              skuActions: true,
               maxTitle: 42,
               costForLine: (item) => {
                 const inventoryItem = (state.inventory || []).find((row) => row.sku === item.sku);
@@ -1948,6 +2273,7 @@ function renderFullOrderPage() {
             <div class="order-total-table">
               <div><span>Subtotal</span><span>${items.length} item${items.length === 1 ? "" : "s"}</span><strong>${money(subtotal)}</strong></div>
               <div><span>Shipping</span><span>${html(order.shippingService || "Marketplace shipping")}</span><strong>${money(shippingCharge)}</strong></div>
+              <div><span>Tax</span><span>${html(order.source || "Channel")}</span><strong>${money(taxAmount)}</strong></div>
               <div><span>Marketplace fees</span><span>${html(order.source || "Channel")}</span><strong>${money(order.marketplaceFees)}</strong></div>
               <div><span>Total</span><span></span><strong>${money(order.total)}</strong></div>
               <div><span>Refunded</span><span>Already processed</span><strong>${money(order.refundAmount || 0)}</strong></div>
@@ -2074,6 +2400,8 @@ function renderFullOrderPage() {
               <dt>Marketplace record number</dt><dd>${html(order.marketplaceOrderNumber || order.marketplaceOrderId || "N/A")}</dd>
               <dt>Internal order number</dt><dd>${html(order.internalOrderNumber || order.orderNumber)}</dd>
               <dt>Ship by</dt><dd>${html(order.shipBy || "N/A")}</dd>
+              <dt>Carrier</dt><dd>${html(order.carrierName || order.shippingCarrier || "Not assigned")}</dd>
+              <dt>Tracking</dt><dd>${order.trackingNumber ? (order.trackingUrl ? `<a href="${html(order.trackingUrl)}" target="_blank" rel="noreferrer">${html(order.trackingNumber)}</a>` : html(order.trackingNumber)) : "Not assigned"}</dd>
               <dt>Channel account</dt><dd>${html(order.source || "N/A")}</dd>
               <dt>Reserved from</dt><dd>${html(order.reservationWarehouseName || "Not reserved")}</dd>
               <dt>Ship from</dt><dd>${html(order.fulfillmentWarehouseName || "Not assigned")}</dd>
@@ -2087,6 +2415,7 @@ function renderFullOrderPage() {
               <dt>Channel</dt><dd>${html(order.source || "N/A")}</dd>
               <dt>Order ID</dt><dd>${html(order.marketplaceOrderId || order.marketplaceOrderNumber || "N/A")}</dd>
             </dl>
+            ${originalOrderLink ? `<div class="detail-card-actions">${originalOrderLink}</div>` : `<p class="muted">Original marketplace URL is not available for this source yet.</p>`}
           </section>
 
           <section class="shopify-card">
@@ -2822,7 +3151,7 @@ function renderBrands(query = "") {
             ${brands.map((brand) => {
               const products = state.inventory.filter((item) => item.brand === brand.name);
               const productSkus = new Set(products.map((item) => item.sku));
-              const brandOrders = state.orders.filter((order) => productSkus.has(order.sku) || (order.items || []).some((item) => productSkus.has(item.sku)));
+              const brandOrders = state.orders.filter((order) => isReportableOrder(order) && (productSkus.has(order.sku) || (order.items || []).some((item) => productSkus.has(item.sku))));
               const lastOrder = brandOrders.slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
               const orderValue = brandOrders.reduce((sum, order) => sum + Number(order.total || 0), 0);
               const preferredVendor = state.vendors.find((vendor) => vendor.id === brand.preferredVendorId);
@@ -2856,7 +3185,7 @@ function renderBrandProfile() {
   selectedBrandId = brand.id;
   const products = state.inventory.filter((item) => item.brand === brand.name);
   const productSkus = new Set(products.map((item) => item.sku));
-  const brandOrders = state.orders.filter((order) => productSkus.has(order.sku) || (order.items || []).some((item) => productSkus.has(item.sku)));
+  const brandOrders = state.orders.filter((order) => isReportableOrder(order) && (productSkus.has(order.sku) || (order.items || []).some((item) => productSkus.has(item.sku))));
   const preferredVendor = state.vendors.find((vendor) => vendor.id === brand.preferredVendorId);
   const orderValue = brandOrders.reduce((sum, order) => sum + Number(order.total || 0), 0);
 
@@ -3339,7 +3668,7 @@ function renderCustomerProfile() {
     return;
   }
   selectedCustomerId = customer.id;
-  const orders = state.orders.filter((order) => order.customerId === customer.id).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const orders = state.orders.filter((order) => order.customerId === customer.id && isReportableOrder(order)).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   const tags = Array.isArray(customer.tags) ? customer.tags.join(", ") : customer.tags || "";
   const marketplaceAccounts = Array.isArray(customer.marketplaceAccounts) ? customer.marketplaceAccounts : [];
   const identities = Array.isArray(customer.identities) ? customer.identities : [];
@@ -3492,14 +3821,13 @@ function filteredCatalogItems() {
   const filters = catalogFilters();
   return state.inventory.filter((item) => {
     const shadows = (item.shadowSkus || []).map((shadow) => `${shadow.shadowSku} ${shadow.marketplace}`).join(" ");
-    const matchesSearch = `${item.sku} ${item.title} ${item.marketplaceTitle} ${item.brand} ${item.category} ${item.sourceCategory} ${item.vendorCategory} ${item.vendor} ${item.supplier} ${item.supplierCode} ${shadows}`.toLowerCase().includes(query);
+    const aliases = (item.aliases || []).map((alias) => `${alias.aliasSku} ${alias.source} ${alias.type}`).join(" ");
+    const matchesSearch = `${item.sku} ${item.title} ${item.marketplaceTitle} ${item.brand} ${item.category} ${item.sourceCategory} ${item.vendorCategory} ${item.vendor} ${item.supplier} ${item.supplierCode} ${shadows} ${aliases}`.toLowerCase().includes(query);
     if (!matchesSearch) return false;
     if (filters.supplier && String(item.supplier || item.vendor || "") !== filters.supplier) return false;
     if (filters.active && String(item.active !== false) !== filters.active) return false;
     if (filters.stockStatus && String(item.stockStatus || "") !== filters.stockStatus) return false;
-    if (filters.shopifyStatus === "live" && !(item.shopifyId && item.shopifyStatus === "Active" && item.shopifyPublished === true)) return false;
-    if (filters.shopifyStatus === "missing" && item.shopifyId) return false;
-    if (filters.shopifyStatus && !["live", "missing"].includes(filters.shopifyStatus) && String(item.shopifyStatus || "") !== filters.shopifyStatus) return false;
+    if (filters.channelStatus && !productMatchesChannelStatus(item, filters.channelStatus)) return false;
     if (filters.hasStock && String(Number(item.stockQty ?? item.qty ?? 0) > 0) !== filters.hasStock) return false;
     if (filters.hazardous && String(Boolean(item.hazardous)) !== filters.hazardous) return false;
     if (filters.verifiedBrand && String(Boolean(verifiedBrandForHandle(item))) !== filters.verifiedBrand) return false;
@@ -3516,13 +3844,79 @@ function catalogFilters() {
     active: $("#catalog-filter-active")?.value || "",
     productMembership: $("#catalog-filter-product-membership")?.value || "",
     stockStatus: $("#catalog-filter-stock-status")?.value || "",
-    shopifyStatus: catalogTab === "source" ? "" : ($("#catalog-filter-shopify-status")?.value || ""),
+    channelStatus: catalogTab === "source" ? "" : ($("#catalog-filter-shopify-status")?.value || ""),
     hasStock: $("#catalog-filter-has-stock")?.value || "",
     hazardous: $("#catalog-filter-hazardous")?.value || "",
     verifiedBrand: catalogTab === "source" ? "" : ($("#catalog-filter-verified-brand")?.value || ""),
     brand: $("#catalog-filter-brand")?.value || "",
     category: $("#catalog-filter-category")?.value || ""
   };
+}
+
+function productEbayStatus(item = {}) {
+  const listing = item.ebayListing || {};
+  const listingId = listing.listingId || item.ebayId || "";
+  if (listingId) return "Live";
+  if (listing.offerId) return "Offer";
+  if (productEbayReadiness(item).ready) return "Ready";
+  return "Not synced";
+}
+
+function productEbayReadiness(item = {}) {
+  const listing = item.ebayListing || {};
+  if (listing.listingId || item.ebayId) return { status: "live", label: "eBay live", tone: "active", ready: false, live: true, missing: [] };
+  const draft = ebayListingDraft(item);
+  const attributes = productEbayCategoryAttributes(item);
+  const missing = [...draft.missing, ...missingRequiredEbayAspects(item, attributes).map((name) => `aspect:${name}`)];
+  if (listing.offerId && !missing.length) return { status: "offer", label: "eBay offer", tone: "ready", ready: true, live: false, missing: [] };
+  if (!missing.length) return { status: "ready", label: "eBay ready", tone: "ready", ready: true, live: false, missing: [] };
+  return { status: "not-ready", label: "Not ready", tone: "draft", ready: false, live: false, missing };
+}
+
+function productMatchesChannelStatus(item = {}, status = "") {
+  const value = String(status || "");
+  if (!value) return true;
+  if (value === "shopify-live" || value === "live") return Boolean(item.shopifyId && item.shopifyStatus === "Active" && item.shopifyPublished === true);
+  if (value === "shopify-missing" || value === "missing") return !item.shopifyId;
+  if (value.startsWith("shopify:")) return String(item.shopifyStatus || "") === value.slice("shopify:".length);
+  if (value === "ebay-live") return productEbayStatus(item) === "Live";
+  if (value === "ebay-ready") return productEbayReadiness(item).status === "ready";
+  if (value === "ebay-not-ready") return productEbayReadiness(item).status === "not-ready";
+  if (value === "ebay-offer") return productEbayStatus(item) === "Offer";
+  if (value === "ebay-missing") return productEbayStatus(item) === "Not synced";
+  if (value.startsWith("ebay:")) {
+    const expected = value.slice("ebay:".length);
+    const listing = item.ebayListing || {};
+    return String(listing.ebayStatus || listing.status || productEbayStatus(item)) === expected;
+  }
+  return String(item.shopifyStatus || "") === value;
+}
+
+function fillChannelStatusOptions(select, products = []) {
+  if (!select) return;
+  const current = select.value;
+  const shopifyStatuses = [...new Set(products.map((item) => item.shopifyStatus).filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b));
+  const ebayStatuses = [...new Set(products.map((item) => item.ebayListing?.ebayStatus || item.ebayListing?.status).filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b));
+  const options = [
+    ["", "Any channel status"],
+    ["shopify-live", "Shopify live"],
+    ["shopify-missing", "Shopify missing ID"],
+    ...shopifyStatuses.map((status) => [`shopify:${status}`, `Shopify ${status}`]),
+    ["ebay-ready", "eBay ready"],
+    ["ebay-live", "eBay live"],
+    ["ebay-offer", "eBay offer created"],
+    ["ebay-not-ready", "eBay not ready"],
+    ["ebay-missing", "eBay not synced"],
+    ...ebayStatuses.map((status) => [`ebay:${status}`, `eBay ${status}`])
+  ];
+  const seen = new Set();
+  const unique = options.filter(([value]) => {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+  select.innerHTML = unique.map(([value, label]) => `<option value="${html(value)}">${html(label)}</option>`).join("");
+  if (unique.some(([value]) => value === current)) select.value = current;
 }
 
 function fillSelectOptions(select, values = [], emptyLabel = "All") {
@@ -3608,7 +4002,8 @@ async function loadProductTableAlternates(items = []) {
 function renderProductAlternatesCell(item = {}) {
   const key = String(item.sku || "").toLowerCase();
   const cache = productAlternatesCache[key];
-  if (!cache || cache.loading) return `<span class="status draft">Loading</span>`;
+  if (!cache) return `<button class="button secondary compact-button" type="button" data-load-product-alternates="${html(item.sku || "")}">Load</button>`;
+  if (cache.loading) return `<span class="status draft">Loading</span>`;
   const rows = cache.rows || [];
   if (!rows.length) return `<span class="status draft">None found</span>`;
   const vendors = [...new Set(rows.map((row) => row.supplier || row.vendor || "Unknown").filter(Boolean))];
@@ -3674,6 +4069,7 @@ function updateCatalogFilterOptions() {
       suppliers: products.map((item) => item.supplier || item.vendor),
       stockStatuses: products.map((item) => item.stockStatus),
       shopifyStatuses: products.map((item) => item.shopifyStatus),
+      ebayStatuses: products.map((item) => item.ebayListing?.ebayStatus || item.ebayListing?.status),
       brands: products.map((item) => item.brand),
       categories: products.map((item) => item.category)
     };
@@ -3682,7 +4078,7 @@ function updateCatalogFilterOptions() {
   $("#catalog-filter-supplier").style.display = "";
   fillSelectOptions($("#catalog-filter-supplier"), productFilterOptionsCache.suppliers, "All suppliers");
   fillSelectOptions($("#catalog-filter-stock-status"), productFilterOptionsCache.stockStatuses, "Any stock status");
-  fillSelectOptions($("#catalog-filter-shopify-status"), productFilterOptionsCache.shopifyStatuses, "Any Shopify status");
+  fillChannelStatusOptions($("#catalog-filter-shopify-status"), products);
   fillSelectOptions($("#catalog-filter-brand"), productFilterOptionsCache.brands, "All brands");
   fillSelectOptions($("#catalog-filter-category"), productFilterOptionsCache.categories, "All categories");
 }
@@ -3787,7 +4183,16 @@ async function loadCategories() {
     const result = await api(`/api/categories?${params.toString()}`);
     if (requestId !== categoryRequestId) return;
     categoryState = { ...result, query, scope: categoryScope, loading: false };
-    if (!selectedCategoryId || !(categoryState.categories || []).some((category) => category.id === selectedCategoryId)) {
+    if (pendingCategoryOpenName) {
+      const pendingName = pendingCategoryOpenName.trim().toLowerCase();
+      const pendingMatch = (categoryState.categories || []).find((category) => String(category.name || "").trim().toLowerCase() === pendingName);
+      if (pendingMatch) {
+        selectedCategoryId = pendingMatch.id;
+        categoryViewMode = "detail";
+        pendingCategoryOpenName = "";
+      }
+    }
+    if (categoryViewMode === "detail" && (!selectedCategoryId || !(categoryState.categories || []).some((category) => category.id === selectedCategoryId))) {
       selectedCategoryId = categoryState.categories?.[0]?.id || null;
     }
     renderCategories();
@@ -3816,15 +4221,270 @@ async function loadShopifyTaxonomyOptions(categoryId, query) {
   }
 }
 
+function openProductMasterCategory(productId) {
+  const item = productById(productId) || productById(selectedProductId);
+  const categoryName = productMasterCategoryName(item);
+  if (!item || !categoryName) {
+    toast("This SKU does not have a master category yet.");
+    return;
+  }
+  openMasterCategoryMapModal(item.id, categoryName);
+}
+
+async function loadEbayTaxonomyOptions(categoryId, query) {
+  const requestCategoryId = categoryId;
+  const requestQuery = String(query || "").trim();
+  ebayTaxonomyState = { ...ebayTaxonomyState, categoryId: requestCategoryId, query: requestQuery, loading: true };
+  renderCategories();
+  try {
+    const params = new URLSearchParams({ q: requestQuery, limit: "12" });
+    const result = await api(`/api/channel-taxonomies/ebay/categories?${params.toString()}`, { feedbackLabel: "Searching eBay categories..." });
+    if (ebayTaxonomyState.categoryId !== requestCategoryId || ebayTaxonomyState.query !== requestQuery) return;
+    ebayTaxonomyState = { categoryId: requestCategoryId, query: requestQuery, results: result.categories || [], total: result.total || 0, version: result.categoryTreeId || "", loading: false };
+    renderCategories();
+  } catch (error) {
+    if (ebayTaxonomyState.categoryId !== requestCategoryId || ebayTaxonomyState.query !== requestQuery) return;
+    ebayTaxonomyState = { categoryId: requestCategoryId, query: requestQuery, results: [], total: 0, version: "", loading: false, error: error.message };
+    renderCategories();
+  }
+}
+
+async function loadProductEbayTaxonomyOptions(productId, query) {
+  const requestProductId = productId;
+  const requestQuery = String(query || "").trim();
+  productEbayTaxonomyState = { ...productEbayTaxonomyState, productId: requestProductId, query: requestQuery, loading: true, searched: true };
+  renderProductContentPage();
+  try {
+    const params = new URLSearchParams({ q: requestQuery, limit: "12" });
+    const result = await api(`/api/channel-taxonomies/ebay/categories?${params.toString()}`, { feedbackLabel: "Searching eBay categories..." });
+    if (productEbayTaxonomyState.productId !== requestProductId || productEbayTaxonomyState.query !== requestQuery) return;
+    productEbayTaxonomyState = { productId: requestProductId, query: requestQuery, results: result.categories || [], total: result.total || 0, version: result.categoryTreeId || "", loading: false, searched: true };
+    renderProductContentPage();
+  } catch (error) {
+    if (productEbayTaxonomyState.productId !== requestProductId || productEbayTaxonomyState.query !== requestQuery) return;
+    productEbayTaxonomyState = { productId: requestProductId, query: requestQuery, results: [], total: 0, version: "", loading: false, searched: true, error: error.message };
+    renderProductContentPage();
+  }
+}
+
+function openMasterCategoryMapModal(productId, categoryName) {
+  const item = productById(productId) || productById(selectedProductId);
+  const setting = productMasterCategorySetting(item);
+  const mapping = setting?.mappings?.ebay || {};
+  masterCategoryMapModal = {
+    productId: item?.id || productId || selectedProductId || null,
+    categoryName,
+    categoryId: setting?.categoryId || setting?.id || "",
+    query: mapping.categoryPath || categoryName,
+    results: [],
+    selected: mapping.categoryId ? {
+      categoryId: mapping.categoryId,
+      categoryPath: mapping.categoryPath,
+      taxonomyVersion: mapping.taxonomyVersion || ""
+    } : null,
+    loading: false,
+    searched: false,
+    error: "",
+    applyScope: "sku"
+  };
+  renderMasterCategoryMapModal();
+  $("#master-category-map-modal")?.classList.add("show");
+  $("#master-category-map-modal")?.setAttribute("aria-hidden", "false");
+  setTimeout(() => $("#master-category-ebay-search")?.focus(), 0);
+}
+
+function closeMasterCategoryMapModal() {
+  masterCategoryMapModal = { productId: null, categoryName: "", categoryId: "", query: "", results: [], selected: null, loading: false, searched: false, error: "", applyScope: "sku" };
+  $("#master-category-map-modal")?.classList.remove("show");
+  $("#master-category-map-modal")?.setAttribute("aria-hidden", "true");
+}
+
+function renderMasterCategoryMapModal() {
+  const modal = masterCategoryMapModal;
+  const currentMapping = productMasterEbayMapping(productById(modal.productId) || {});
+  const selected = modal.selected || (currentMapping.categoryId ? {
+    categoryId: currentMapping.categoryId,
+    categoryPath: currentMapping.categoryPath,
+    taxonomyVersion: currentMapping.taxonomyVersion || ""
+  } : null);
+  const content = $("#master-category-map-content");
+  if (!content) return;
+  content.innerHTML = `
+    <div class="master-category-summary">
+      <span>
+        <small>Current master category</small>
+        <strong>${html(modal.categoryName || "No master category")}</strong>
+      </span>
+      <span class="channel-map-badge ${currentMapping.categoryId ? "mapped" : "missing"}">
+        <strong>${currentMapping.categoryId ? "Mapped" : "Missing"}</strong>
+        ${currentMapping.categoryId ? `<small>${html(currentMapping.categoryId)}</small>` : ""}
+      </span>
+    </div>
+    <div class="order-sku-map-search">
+      <label>Search eBay categories
+        <input id="master-category-ebay-search" type="search" value="${html(modal.query || "")}" placeholder="Search eBay category, e.g. reusable bags" />
+      </label>
+      <button type="button" class="button secondary" data-run-master-category-ebay-search>${withIcon("search", "Search")}</button>
+    </div>
+    <div id="master-category-ebay-results" class="order-sku-map-results master-category-results">
+      ${modal.loading ? `<div class="order-sku-map-feedback loading"><strong>Searching eBay...</strong><span>Looking through eBay taxonomy.</span></div>` : ""}
+      ${modal.error ? `<div class="order-sku-map-feedback"><strong>Search failed</strong><span>${html(modal.error)}</span></div>` : ""}
+      ${(!modal.loading && !modal.error && modal.results.length) ? modal.results.map((result) => {
+        const categoryPath = result.fullName || result.name || "";
+        const isSelected = selected?.categoryId && String(selected.categoryId) === String(result.categoryId);
+        return `
+          <button type="button" class="order-sku-map-result ${isSelected ? "selected" : ""}" data-select-master-ebay-category data-ebay-category-id="${html(result.categoryId)}" data-ebay-category-path="${html(categoryPath)}" data-ebay-tree-id="${html(result.taxonomyVersion || "")}">
+            <div>
+              <span>${html(result.name || categoryPath)}</span>
+              <small>${html(categoryPath)}</small>
+            </div>
+            <strong>${html(result.categoryId)}</strong>
+          </button>
+        `;
+      }).join("") : ""}
+      ${(!modal.loading && !modal.error && modal.searched && modal.query && modal.results.length === 0) ? `<div class="order-sku-map-feedback"><strong>No eBay categories found.</strong><span>Try a shorter keyword from the category name.</span></div>` : ""}
+    </div>
+    <div class="order-sku-map-choice" ${selected ? "" : "hidden"}>
+      <div>
+        <strong>${html(selected?.categoryId || "")}</strong>
+        <small>${html(selected?.categoryPath || "Select an eBay category above.")}</small>
+      </div>
+      <div class="order-sku-map-choice-actions">
+        <button type="button" class="button" data-submit-master-category-map ${selected?.categoryId ? "" : "disabled"}>${withIcon("save", "Map category")}</button>
+      </div>
+    </div>
+    <div class="master-category-apply-options" ${selected ? "" : "hidden"}>
+      <label class="${modal.applyScope === "sku" ? "selected" : ""}">
+        <input type="radio" name="master-category-apply-scope" value="sku" ${modal.applyScope === "sku" ? "checked" : ""} data-master-category-apply-scope />
+        <span>
+          <strong>Apply to this SKU only</strong>
+          <small>Save this eBay category on the current product.</small>
+        </span>
+      </label>
+      <label class="${modal.applyScope === "all" ? "selected" : ""}">
+        <input type="radio" name="master-category-apply-scope" value="all" ${modal.applyScope === "all" ? "checked" : ""} data-master-category-apply-scope />
+        <span>
+          <strong>Apply to all under this category</strong>
+          <small>Queue a background refresh for SKUs missing an eBay category.</small>
+        </span>
+      </label>
+    </div>
+  `;
+  const footer = $("#master-category-map-footer");
+  if (footer) {
+    footer.innerHTML = `
+      <button type="button" class="button secondary" data-close-master-category-map-modal>Cancel</button>
+      <button type="button" class="button" data-submit-master-category-map ${selected?.categoryId ? "" : "disabled"}>${withIcon("save", "Map category")}</button>
+    `;
+  }
+}
+
+async function loadMasterCategoryEbayOptions(query) {
+  const requestQuery = String(query || "").trim();
+  masterCategoryMapModal = { ...masterCategoryMapModal, query: requestQuery, loading: true, searched: true, error: "" };
+  renderMasterCategoryMapModal();
+  try {
+    const params = new URLSearchParams({ q: requestQuery, limit: "12" });
+    const result = await api(`/api/channel-taxonomies/ebay/categories?${params.toString()}`, { feedbackLabel: "Searching eBay categories..." });
+    if (masterCategoryMapModal.query !== requestQuery) return;
+    masterCategoryMapModal = { ...masterCategoryMapModal, results: result.categories || [], loading: false, error: "" };
+    renderMasterCategoryMapModal();
+  } catch (error) {
+    if (masterCategoryMapModal.query !== requestQuery) return;
+    masterCategoryMapModal = { ...masterCategoryMapModal, results: [], loading: false, error: error.message };
+    renderMasterCategoryMapModal();
+  }
+}
+
+function selectMasterCategoryEbayCategory(button) {
+  masterCategoryMapModal = {
+    ...masterCategoryMapModal,
+    selected: {
+      categoryId: button.dataset.ebayCategoryId || "",
+      categoryPath: button.dataset.ebayCategoryPath || "",
+      taxonomyVersion: button.dataset.ebayTreeId || ""
+    }
+  };
+  renderMasterCategoryMapModal();
+}
+
+async function masterCategoryRowForModal() {
+  const categoryName = String(masterCategoryMapModal.categoryName || "").trim();
+  if (!categoryName) throw new Error("No master category selected.");
+  const params = new URLSearchParams({ scope: "main", q: categoryName });
+  const result = await api(`/api/categories?${params.toString()}`, { feedbackLabel: "Loading master categories..." });
+  const row = (result.categories || []).find((category) => String(category.name || "").trim().toLowerCase() === categoryName.toLowerCase());
+  if (!row) throw new Error(`Master category not found: ${categoryName}`);
+  categoryState = { ...result, query: "", scope: "main", loading: false };
+  return row;
+}
+
+async function submitMasterCategoryMap() {
+  const selected = masterCategoryMapModal.selected;
+  if (!selected?.categoryId) {
+    toast("Select an eBay category first.");
+    return;
+  }
+  const applyScope = document.querySelector("[data-master-category-apply-scope]:checked")?.value || masterCategoryMapModal.applyScope || "sku";
+  const category = await masterCategoryRowForModal();
+  const categoryId = category.id;
+  const mapping = {
+    categoryId: selected.categoryId,
+    categoryPath: selected.categoryPath || "",
+    categoryHandle: String(selected.categoryPath || "").split(" > ").pop() || "",
+    taxonomyVersion: selected.taxonomyVersion || "",
+    notes: "Mapped from product eBay master category modal."
+  };
+  const categoryResult = await api(`/api/categories/${categoryId}`, {
+    feedbackLabel: "Saving master category mapping...",
+    method: "PATCH",
+    body: JSON.stringify({ scope: "main", channel: "ebay", mapping })
+  });
+  if (categoryResult.categories) categoryState = { ...categoryResult, query: "", scope: "main", loading: false };
+  if (applyScope === "all") {
+    const result = await api(`/api/categories/${categoryId}/apply-channel-to-products`, {
+      feedbackLabel: "Queueing SKU category refresh...",
+      method: "POST",
+      body: JSON.stringify({ scope: "main", channel: "ebay", background: true })
+    });
+    if (result.state) setState(result.state);
+    if (result.categories) categoryState = { ...result.categories, query: "", scope: "main", loading: false };
+    if (result.job) selectedImportJobId = result.job.id;
+  } else {
+    const productId = masterCategoryMapModal.productId || selectedProductId;
+    const result = await api(`/api/inventory/${productId}/ebay/listing`, {
+      feedbackLabel: "Saving SKU eBay category...",
+      method: "POST",
+      body: JSON.stringify({
+        action: "draft",
+        categoryId: selected.categoryId,
+        categoryPath: selected.categoryPath || "",
+        taxonomyVersion: selected.taxonomyVersion || ""
+      })
+    });
+    if (result.state) setState(result.state);
+    if (result.item?.id) selectedProductId = result.item.id;
+  }
+  closeMasterCategoryMapModal();
+  renderProductContentPage();
+  toast(applyScope === "all" ? "Master category mapped. SKU refresh queued in Jobs." : "Master category mapped and saved to this SKU.");
+}
+
 function renderShopifyAttributeList(attributes = []) {
   const rows = attributes.slice(0, 24);
-  if (!rows.length) return `<p class="muted">Select a Shopify category to see channel attributes.</p>`;
+  if (!rows.length) return `<p class="muted">No attributes loaded for this marketplace yet.</p>`;
   return `
     <div class="shopify-attribute-list">
       ${rows.map((attribute) => `
         <span title="${html(attribute.description || attribute.name || "")}">
           <strong>${html(attribute.name || attribute.handle || attribute.id)}</strong>
-          <small>${html(attribute.handle || attribute.id || "")}${attribute.extended ? " / extended" : ""}</small>
+          <small>${[
+            attribute.required ? "required" : attribute.recommended ? "recommended" : "",
+            attribute.handle || attribute.id || "",
+            attribute.extended ? "extended" : "",
+            attribute.valueMode || attribute.usage || ""
+          ].filter(Boolean).join(" / ")}</small>
+          ${attribute.values?.length ? `<small>${html(attribute.values.slice(0, 4).join(", "))}${attribute.values.length > 4 ? "..." : ""}</small>` : ""}
         </span>
       `).join("")}
     </div>
@@ -3832,12 +4492,221 @@ function renderShopifyAttributeList(attributes = []) {
   `;
 }
 
+function normalizedAttributeKey(value = "") {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function sourceAttributeFieldOptions() {
+  const base = productFieldOptions?.length ? productFieldOptions : [
+    { key: "brand", label: "Brand" },
+    { key: "sourceBrand", label: "Source brand" },
+    { key: "mfrPartNumber", label: "Manufacturer part number" },
+    { key: "barcode", label: "Barcode" },
+    { key: "manufacturer", label: "Manufacturer" },
+    { key: "countryOfOrigin", label: "Country of origin" },
+    { key: "lengthIn", label: "Length in" },
+    { key: "widthIn", label: "Width in" },
+    { key: "heightIn", label: "Height in" },
+    { key: "weightOz", label: "Weight oz" }
+  ];
+  const sourceDetailPaths = [
+    { key: "attributes.color", label: "Source attribute: Color" },
+    { key: "attributes.material", label: "Source attribute: Material" },
+    { key: "attributes.features", label: "Source attribute: Features" },
+    { key: "attributes.model", label: "Source attribute: Model" },
+    { key: "attributes.size", label: "Source attribute: Size" },
+    { key: "attributes.type", label: "Source attribute: Type" },
+    { key: "attributes.department", label: "Source attribute: Department" },
+    { key: "attributes.numberInPack", label: "Source attribute: Number in pack" },
+    { key: "attributes.unitType", label: "Source attribute: Unit type" }
+  ];
+  const seen = new Set();
+  return [...base, ...sourceDetailPaths].filter((field) => {
+    if (!field?.key || seen.has(field.key)) return false;
+    seen.add(field.key);
+    return true;
+  });
+}
+
+function suggestedSourceFieldForAttribute(attribute = {}) {
+  const key = normalizedAttributeKey([attribute.name, attribute.handle, attribute.id].filter(Boolean).join(" "));
+  const matches = [
+    [/^brand$/, "brand"],
+    [/^(mpn|manufacturerpartnumber|partnumber)$/, "mfrPartNumber"],
+    [/^(upc|ean|gtin|barcode)$/, "barcode"],
+    [/^manufacturer$/, "manufacturer"],
+    [/^(countryoforigin|countryregionofmanufacture)$/, "countryOfOrigin"],
+    [/^(itemlength|length)$/, "lengthIn"],
+    [/^(itemwidth|width)$/, "widthIn"],
+    [/^(itemheight|height)$/, "heightIn"],
+    [/^(itemweight|weight)$/, "weightOz"],
+    [/^color$/, "attributes.color"],
+    [/^material$/, "attributes.material"],
+    [/^features?$/, "attributes.features"],
+    [/^model$/, "attributes.model"],
+    [/^size$/, "attributes.size"],
+    [/^type$/, "attributes.type"],
+    [/^department$/, "attributes.department"],
+    [/^numberinpack$/, "attributes.numberInPack"],
+    [/^unittype$/, "attributes.unitType"]
+  ];
+  return matches.find(([pattern]) => pattern.test(key))?.[1] || "";
+}
+
+function existingAttributeMapping(mapping = {}, attribute = {}) {
+  const rows = mapping.attributeMappings || [];
+  const keys = [attribute.id, attribute.name, attribute.handle].map(normalizedAttributeKey).filter(Boolean);
+  return rows.find((row) => [row.attributeId, row.attributeName, row.attributeHandle].map(normalizedAttributeKey).some((key) => keys.includes(key))) || {};
+}
+
+function renderSourceFieldSelect(value = "", categoryId = "", channel = "", index = 0) {
+  const fields = sourceAttributeFieldOptions();
+  const hasValue = value && !fields.some((field) => field.key === value);
+  return `
+    <select data-category-attribute-map="${categoryId}" data-channel="${channel}" data-attribute-index="${index}" data-attr-field="sourceField">
+      <option value="">Do not map yet</option>
+      ${hasValue ? `<option value="${html(value)}" selected>${html(value)} (custom)</option>` : ""}
+      ${fields.map((field) => `<option value="${html(field.key)}" ${field.key === value ? "selected" : ""}>${html(field.label || field.key)} (${html(field.key)})</option>`).join("")}
+    </select>
+  `;
+}
+
+function renderChannelAttributeMapper(category, channel, label) {
+  const mapping = category.mappings?.[channel] || {};
+  const attributes = mapping.attributes || [];
+  if (!attributes.length) {
+    return `<div class="empty-state compact">Map and refresh ${html(label)} attributes before creating field mappings.</div>`;
+  }
+  const requiredCount = attributes.filter((attribute) => attribute.required).length;
+  const mappedCount = attributes.filter((attribute) => existingAttributeMapping(mapping, attribute).sourceField || suggestedSourceFieldForAttribute(attribute)).length;
+  return `
+    <div class="channel-attribute-mapper">
+      <div class="attribute-mapper-head">
+        <div>
+          <h5>${html(label)} Attribute Bridge</h5>
+          <p class="muted">Connect marketplace fields to source details or product manager fields. Fallback values are used only when the product has no source value.</p>
+        </div>
+        <span>${mappedCount.toLocaleString()} mapped or suggested / ${requiredCount.toLocaleString()} required</span>
+      </div>
+      <div class="attribute-map-table">
+        <div class="attribute-map-row header">
+          <span>Channel attribute</span>
+          <span>DataPlus source field</span>
+          <span>Fallback</span>
+          <span>Use</span>
+        </div>
+        ${attributes.map((attribute, index) => {
+          const saved = existingAttributeMapping(mapping, attribute);
+          const suggested = saved.sourceField || suggestedSourceFieldForAttribute(attribute);
+          const enabled = saved.enabled !== false;
+          return `
+            <div class="attribute-map-row ${attribute.required ? "required" : ""}">
+              <div>
+                <strong>${html(attribute.name || attribute.handle || attribute.id)}</strong>
+                <small>${[attribute.required ? "required" : attribute.recommended ? "recommended" : "optional", attribute.handle || attribute.id || "", attribute.valueMode || attribute.usage || ""].filter(Boolean).join(" / ")}</small>
+                ${attribute.values?.length ? `<small>${html(attribute.values.slice(0, 5).join(", "))}${attribute.values.length > 5 ? "..." : ""}</small>` : ""}
+                <input type="hidden" value="${html(attribute.id || "")}" data-category-attribute-map="${category.id}" data-channel="${channel}" data-attribute-index="${index}" data-attr-field="attributeId" />
+                <input type="hidden" value="${html(attribute.name || "")}" data-category-attribute-map="${category.id}" data-channel="${channel}" data-attribute-index="${index}" data-attr-field="attributeName" />
+                <input type="hidden" value="${html(attribute.handle || "")}" data-category-attribute-map="${category.id}" data-channel="${channel}" data-attribute-index="${index}" data-attr-field="attributeHandle" />
+                <input type="hidden" value="${attribute.required ? "true" : ""}" data-category-attribute-map="${category.id}" data-channel="${channel}" data-attribute-index="${index}" data-attr-field="required" />
+                <input type="hidden" value="${attribute.recommended ? "true" : ""}" data-category-attribute-map="${category.id}" data-channel="${channel}" data-attribute-index="${index}" data-attr-field="recommended" />
+              </div>
+              <div>
+                ${renderSourceFieldSelect(suggested, category.id, channel, index)}
+                ${!saved.sourceField && suggested ? `<small class="muted">Suggested from source data</small>` : ""}
+              </div>
+              <input value="${html(saved.fallbackValue || "")}" placeholder="Optional default" data-category-attribute-map="${category.id}" data-channel="${channel}" data-attribute-index="${index}" data-attr-field="fallbackValue" />
+              <label class="attribute-use-toggle"><input type="checkbox" ${enabled ? "checked" : ""} data-category-attribute-map="${category.id}" data-channel="${channel}" data-attribute-index="${index}" data-attr-field="enabled" /> Active</label>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderMarketplaceRequiredAttributes(category) {
+  const rows = [
+    ["shopify", "Shopify"],
+    ["ebay", "eBay"]
+  ];
+  return `
+    <section class="category-settings-card category-attributes-card">
+      <div class="section-head">
+        <div>
+          <h3>Marketplace Required Attributes</h3>
+          <p class="muted">These come from each marketplace taxonomy after the category is mapped.</p>
+        </div>
+        <button class="button secondary" type="button" data-sync-category-attributes="${category.id}">${withIcon("refresh-cw", "Refresh attributes")}</button>
+      </div>
+      <div class="category-attribute-marketplaces">
+        ${rows.map(([channel, label]) => {
+          const mapping = category.mappings?.[channel] || {};
+          const attributes = mapping.attributes || [];
+          const requiredCount = attributes.filter((attribute) => attribute.required).length;
+          return `
+            <section class="category-attribute-marketplace">
+              <div class="section-head">
+                <div>
+                  <h4>${html(label)}</h4>
+                  <p class="muted">${mapping.categoryPath ? html(mapping.categoryPath) : "Map this marketplace category first."}</p>
+                </div>
+                <span class="status ${attributes.length ? "active" : "hold"}">${attributes.length ? `${requiredCount} required / ${attributes.length} total` : "missing"}</span>
+              </div>
+              ${renderShopifyAttributeList(attributes)}
+              ${renderChannelAttributeMapper(category, channel, label)}
+              ${attributes.length ? `<div class="category-map-actions"><button class="button secondary" type="button" data-save-category-map="${category.id}" data-channel="${channel}">${withIcon("save", `Save ${label} attribute mapping`)}</button></div>` : ""}
+            </section>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderShopifyMappedAttributes(category) {
+  const mapping = category.mappings?.shopify || {};
+  const attributes = mapping.attributes || [];
+  const requiredCount = attributes.filter((attribute) => attribute.required).length;
+  const recommendedCount = attributes.filter((attribute) => attribute.recommended).length;
+  const isMapped = Boolean(mapping.categoryId || mapping.categoryPath || mapping.googleCategory?.id);
+  return `
+    <div class="shopify-mapped-attributes ${attributes.length ? "has-attributes" : ""}">
+      <div class="section-head">
+        <div>
+          <h4>Shopify / Google Attributes</h4>
+          <p class="muted">${isMapped ? "Loaded from the mapped Shopify taxonomy and its Google taxonomy bridge." : "Map a Shopify taxonomy category to load attributes."}</p>
+        </div>
+        <span class="status ${attributes.length ? "active" : "hold"}">${attributes.length ? `${requiredCount} required / ${attributes.length} total` : "Not loaded"}</span>
+      </div>
+      ${mapping.googleCategory?.id ? `
+        <div class="attribute-taxonomy-context">
+          <span><small>Shopify</small><strong>${html(mapping.categoryPath || mapping.categoryId || "")}</strong></span>
+          <span><small>Google ${html(mapping.googleCategory.id)}</small><strong>${html(mapping.googleCategory.breadcrumb || mapping.googleCategory.fullName || "")}</strong></span>
+        </div>
+      ` : ""}
+      ${attributes.length ? `
+        <div class="attribute-count-strip">
+          <span>${requiredCount.toLocaleString()} required</span>
+          <span>${recommendedCount.toLocaleString()} recommended</span>
+          <span>${Math.max(0, attributes.length - requiredCount - recommendedCount).toLocaleString()} optional</span>
+        </div>
+        ${renderShopifyAttributeList(attributes)}
+      ` : isMapped ? `
+        <div class="empty-state compact">No Shopify attributes loaded yet. Refresh attributes after saving the taxonomy mapping.</div>
+      ` : ""}
+    </div>
+  `;
+}
+
 function renderShopifyCategoryMapper(category) {
   const mapping = category.mappings?.shopify || {};
+  const profile = category.smartCollection || {};
   const selectedSearch = shopifyTaxonomyState.categoryId === category.id
     ? shopifyTaxonomyState
     : { query: mapping.categoryPath || "", results: [], total: 0, loading: false };
   const status = mappingStatus(category, "shopify");
+  const productType = mapping.productType || category.shopifyProductType || category.productType || categoryTypeValue(category.name);
   return `
     <section class="category-map-card shopify-taxonomy-card ${status}">
       <div class="section-head">
@@ -3845,14 +4714,16 @@ function renderShopifyCategoryMapper(category) {
           <h4>Shopify</h4>
           <p class="muted">Search Shopify's product taxonomy, then use the matching category.</p>
         </div>
-        <span class="status ${status === "mapped" ? "active" : "hold"}">${status}</span>
+        ${renderChannelMappingBadge(category, "shopify")}
       </div>
       <div class="shopify-selected-category">
         <span><small>Selected category</small><strong>${html(mapping.categoryPath || "None selected")}</strong></span>
+        ${productType ? `<div class="shopify-product-type-chip"><small>Product type</small><strong>${html(productType)}</strong></div>` : ""}
         ${mapping.categoryId ? `<code>${html(mapping.categoryId)}</code>` : ""}
         ${mapping.googleCategory?.id ? `<div class="google-category-chip"><strong>Google ${html(mapping.googleCategory.id)}</strong><small>${html(mapping.googleCategory.breadcrumb || mapping.googleCategory.fullName || "")}</small></div>` : ""}
         ${mapping.taxonomyVersion ? `<small>Taxonomy ${html(mapping.taxonomyVersion)}</small>` : ""}
       </div>
+      ${renderShopifyMappedAttributes(category)}
       <label class="shopify-taxonomy-search">Search Shopify taxonomy
         <input value="${html(selectedSearch.query || "")}" placeholder="Search category, e.g. air fryer, safety gloves" data-shopify-taxonomy-search="${category.id}" />
       </label>
@@ -3873,12 +4744,97 @@ function renderShopifyCategoryMapper(category) {
         <label>Collection / handle<input value="${html(mapping.collectionHandle || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="collectionHandle" /></label>
         <label>Notes<input value="${html(mapping.notes || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="notes" /></label>
       </div>
-      <div class="shopify-required-attributes">
-        <h5>Shopify Attributes</h5>
-        ${renderShopifyAttributeList(mapping.attributes || [])}
+      <div class="smart-collection-profile">
+        <div class="section-head">
+          <div>
+            <h4>Smart Collection Export</h4>
+            <p class="muted">These fields feed the Matrixify smart collections export. New master categories get these defaults automatically.</p>
+          </div>
+          <span class="status ${profile.enabled === false ? "hold" : "active"}">${profile.enabled === false ? "Disabled" : "Ready profile"}</span>
+        </div>
+        <div class="category-map-grid">
+          <label>Product type<input value="${html(profile.productType || productType || "")}" data-smart-collection="${category.id}" data-smart-field="productType" /></label>
+          <label>SEO handle<input value="${html(profile.handle || "")}" data-smart-collection="${category.id}" data-smart-field="handle" /></label>
+          <label>Collection title<input value="${html(profile.title || "")}" data-smart-collection="${category.id}" data-smart-field="title" /></label>
+          <label>Image URL<input value="${html(profile.imageSrc || "")}" data-smart-collection="${category.id}" data-smart-field="imageSrc" /></label>
+          <label>Published scope
+            <select data-smart-collection="${category.id}" data-smart-field="publishedScope">
+              ${["global", "web"].map((value) => `<option value="${value}" ${String(profile.publishedScope || "global").toLowerCase() === value ? "selected" : ""}>${value}</option>`).join("")}
+            </select>
+          </label>
+          <label>Sort order
+            <select data-smart-collection="${category.id}" data-smart-field="sortOrder">
+              ${["Best Selling", "Alpha Asc", "Alpha Desc", "Created Desc", "Created", "Manual"].map((value) => `<option value="${value}" ${String(profile.sortOrder || "Best Selling") === value ? "selected" : ""}>${value}</option>`).join("")}
+            </select>
+          </label>
+          <label>Rule column<input value="${html(profile.ruleProductColumn || "Type")}" data-smart-collection="${category.id}" data-smart-field="ruleProductColumn" /></label>
+          <label>Rule relation<input value="${html(profile.ruleRelation || "Equals")}" data-smart-collection="${category.id}" data-smart-field="ruleRelation" /></label>
+          <label class="span-2">SEO title tag<input value="${html(profile.titleTag || "")}" data-smart-collection="${category.id}" data-smart-field="titleTag" /></label>
+          <label class="span-2">Meta description<textarea rows="2" data-smart-collection="${category.id}" data-smart-field="descriptionTag">${html(profile.descriptionTag || "")}</textarea></label>
+          <label class="checkbox-row"><input type="checkbox" ${profile.published === false ? "" : "checked"} data-smart-collection="${category.id}" data-smart-field="published" /> Published in Matrixify export</label>
+        </div>
+      </div>
+      <div class="category-map-actions">
+        <button class="button secondary" type="button" data-save-category-map="${category.id}" data-channel="shopify">${withIcon("save", "Save Shopify mapping")}</button>
       </div>
     </section>
   `;
+}
+
+function renderEbayCategoryMapper(category) {
+  const mapping = category.mappings?.ebay || {};
+  const selectedSearch = ebayTaxonomyState.categoryId === category.id
+    ? ebayTaxonomyState
+    : { query: mapping.categoryPath || category.name || "", results: [], total: 0, loading: false };
+  const status = mappingStatus(category, "ebay");
+  return `
+    <section class="category-map-card shopify-taxonomy-card ${status}">
+      <div class="section-head">
+        <div>
+          <h4>eBay</h4>
+          <p class="muted">Search eBay taxonomy and map this DataPlus category to the closest eBay category.</p>
+        </div>
+        ${renderChannelMappingBadge(category, "ebay")}
+      </div>
+      <div class="shopify-selected-category">
+        <span><small>Selected category</small><strong>${html(mapping.categoryPath || "None selected")}</strong></span>
+        ${mapping.categoryId ? `<code>${html(mapping.categoryId)}</code>` : ""}
+        ${mapping.taxonomyVersion ? `<small>Category tree ${html(mapping.taxonomyVersion)}</small>` : ""}
+      </div>
+      <div class="shopify-taxonomy-search search-with-button">
+        <label>Search eBay taxonomy
+          <input value="${html(selectedSearch.query || ebayCategorySearchText(category.name))}" placeholder="Search category, e.g. drill bits, saw blades" data-ebay-taxonomy-search="${category.id}" />
+        </label>
+        <button class="button secondary" type="button" data-run-ebay-taxonomy-search="${category.id}">${withIcon("search", "Search")}</button>
+      </div>
+      <div class="shopify-taxonomy-results">
+        ${selectedSearch.loading ? `<div class="empty-state compact">Searching eBay...</div>` : ""}
+        ${selectedSearch.error ? `<div class="empty-state compact">${html(selectedSearch.error)}</div>` : ""}
+        ${(!selectedSearch.loading && selectedSearch.results.length) ? selectedSearch.results.map((result) => `
+          <button class="shopify-taxonomy-result" data-apply-ebay-taxonomy="${category.id}" data-ebay-category-id="${html(result.categoryId)}" data-ebay-category-path="${html(result.fullName || result.name)}" data-ebay-tree-id="${html(result.taxonomyVersion || "")}">
+            <span><strong>${html(result.name)}</strong><small>${html(result.fullName || "")}</small></span>
+            <em>${html(result.categoryId)}</em>
+          </button>
+        `).join("") : ""}
+        ${(!selectedSearch.loading && selectedSearch.query && !selectedSearch.results.length && !selectedSearch.error) ? `<div class="empty-state compact">No eBay categories found.</div>` : ""}
+      </div>
+      <div class="category-map-grid shopify-manual-fields">
+        <label>Category ID<input value="${html(mapping.categoryId || "")}" data-category-map="${category.id}" data-channel="ebay" data-map-field="categoryId" /></label>
+        <label>Category path<input value="${html(mapping.categoryPath || "")}" data-category-map="${category.id}" data-channel="ebay" data-map-field="categoryPath" /></label>
+        <label>Category name<input value="${html(mapping.categoryHandle || "")}" data-category-map="${category.id}" data-channel="ebay" data-map-field="categoryHandle" /></label>
+        <label>Notes<input value="${html(mapping.notes || "")}" data-category-map="${category.id}" data-channel="ebay" data-map-field="notes" /></label>
+      </div>
+      <div class="category-map-actions">
+        <button class="button secondary" type="button" data-save-category-map="${category.id}" data-channel="ebay">${withIcon("save", "Save eBay mapping")}</button>
+        ${mapping.categoryId ? `<button class="button secondary" type="button" data-apply-category-map-to-products="${category.id}" data-channel="ebay">${withIcon("refresh-cw", "Refresh missing SKUs")}</button>` : ""}
+      </div>
+    </section>
+  `;
+}
+
+function ebayCategorySearchText(categoryName = "") {
+  const parts = String(categoryName || "").split(">").map((part) => part.trim()).filter(Boolean);
+  return parts[parts.length - 1] || String(categoryName || "").trim();
 }
 
 async function applyShopifyTaxonomyCategory(button) {
@@ -3895,6 +4851,60 @@ async function applyShopifyTaxonomyCategory(button) {
   renderCategories();
   toast("Shopify category mapped.");
 }
+
+async function applyEbayTaxonomyCategory(button) {
+  const categoryId = button.dataset.applyEbayTaxonomy;
+  const ebayCategoryId = button.dataset.ebayCategoryId;
+  if (!categoryId || !ebayCategoryId) return;
+  const result = await api(`/api/categories/${categoryId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      scope: categoryScope,
+      channel: "ebay",
+      mapping: {
+        categoryId: ebayCategoryId,
+        categoryPath: button.dataset.ebayCategoryPath || "",
+        categoryHandle: String(button.dataset.ebayCategoryPath || "").split(" > ").pop() || "",
+        taxonomyVersion: button.dataset.ebayTreeId || "",
+        notes: "Mapped from eBay taxonomy search."
+      }
+    })
+  });
+  categoryState = { ...result, query: categoryState.query, scope: categoryScope, loading: false };
+  selectedCategoryId = categoryId;
+  ebayTaxonomyState = { categoryId, query: "", results: [], total: 0, version: "", loading: false };
+  renderCategories();
+  toast("eBay category mapped.");
+}
+
+async function autoMapEbayCategories() {
+  if (!confirm("Auto-map the top unmapped DataPlus categories to eBay suggestions? Review the results before publishing listings.")) return;
+  const result = await api("/api/channel-taxonomies/ebay/map-current", {
+    feedbackLabel: "Mapping eBay categories...",
+    method: "POST",
+    body: JSON.stringify({ scope: categoryScope, limit: 50, overwrite: false })
+  });
+  setState(result.state);
+  categoryState = { ...result.categories, query: categoryState.query, scope: categoryScope, loading: false };
+  categoryViewMode = "table";
+  renderCategories();
+  toast(`eBay auto-map: ${result.mapped} of ${result.requested} categories mapped.`);
+}
+
+async function syncCategoryAttributes(categoryId) {
+  if (!categoryId) return;
+  const result = await api(`/api/categories/${categoryId}/attributes/sync`, {
+    feedbackLabel: "Refreshing marketplace attributes...",
+    method: "POST",
+    body: JSON.stringify({ scope: categoryScope })
+  });
+  categoryState = { ...result, query: categoryState.query, scope: categoryScope, loading: false };
+  selectedCategoryId = categoryId;
+  categoryViewMode = "detail";
+  renderCategories();
+  toast("Marketplace attributes refreshed.");
+}
+
 function mappingStatus(category, channel) {
   const mapping = category.mappings?.[channel] || {};
   return mapping.categoryId || mapping.categoryPath || mapping.collectionHandle ? "mapped" : "missing";
@@ -3902,12 +4912,13 @@ function mappingStatus(category, channel) {
 
 function renderCategoryMappingFields(category, channel, label) {
   if (channel === "shopify") return renderShopifyCategoryMapper(category);
+  if (channel === "ebay") return renderEbayCategoryMapper(category);
   const mapping = category.mappings?.[channel] || {};
   return `
     <section class="category-map-card ${mappingStatus(category, channel)}">
       <div class="section-head">
         <h4>${label}</h4>
-        <span class="status ${mappingStatus(category, channel) === "mapped" ? "active" : "hold"}">${mappingStatus(category, channel)}</span>
+        ${renderChannelMappingBadge(category, channel)}
       </div>
       <div class="category-map-grid">
         <label>Category ID<input value="${html(mapping.categoryId || "")}" data-category-map="${category.id}" data-channel="${channel}" data-map-field="categoryId" /></label>
@@ -3915,12 +4926,16 @@ function renderCategoryMappingFields(category, channel, label) {
         <label>Collection / handle<input value="${html(mapping.collectionHandle || "")}" data-category-map="${category.id}" data-channel="${channel}" data-map-field="collectionHandle" /></label>
         <label>Notes<input value="${html(mapping.notes || "")}" data-category-map="${category.id}" data-channel="${channel}" data-map-field="notes" /></label>
       </div>
+      <div class="category-map-actions">
+        <button class="button secondary" type="button" data-save-category-map="${category.id}" data-channel="${channel}">${withIcon("save", `Save ${label} mapping`)}</button>
+      </div>
     </section>
   `;
 }
 
 function renderCategoryCoverage() {
   const coverage = categoryState.coverage || {};
+  const matrixify = coverage.matrixify || {};
   const pct = (part, total) => total ? `${Math.round((Number(part || 0) / Number(total || 1)) * 100)}%` : "0%";
   const attention = coverage.attention || [];
   const actionCards = [
@@ -3944,6 +4959,18 @@ function renderCategoryCoverage() {
         <span><small>Source categories</small><strong>${Number(coverage.sourceCategoryCount || 0).toLocaleString()}</strong><em>Vendor catalog categories</em></span>
         <span><small>Vendor learned maps</small><strong>${Number(coverage.vendorCategoryMappingCount || 0).toLocaleString()}</strong><em>${Number(coverage.sourceVendorCategoryMappedCount || 0).toLocaleString()} matched source paths</em></span>
       </div>
+      <div class="matrixify-readiness">
+        <div>
+          <strong>Matrixify readiness</strong>
+          <small>${Number(matrixify.readyCount || 0).toLocaleString()} ready / ${Number(matrixify.exportableCount || 0).toLocaleString()} exportable smart collections</small>
+        </div>
+        <span class="${Number(matrixify.notReadyCount || 0) ? "needs-work" : "ready"}">Needs work: ${Number(matrixify.notReadyCount || 0).toLocaleString()}</span>
+        <span class="${Number(matrixify.duplicateHandleCount || 0) ? "needs-work" : "ready"}">Duplicate handles: ${Number(matrixify.duplicateHandleCount || 0).toLocaleString()}</span>
+        <span class="${Number(matrixify.missingImageCount || 0) ? "needs-work" : "ready"}">Missing images: ${Number(matrixify.missingImageCount || 0).toLocaleString()}</span>
+        <span class="${Number(matrixify.weakSeoCount || 0) ? "needs-work" : "ready"}">SEO review: ${Number(matrixify.weakSeoCount || 0).toLocaleString()}</span>
+        <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon("clipboard-list", "Smart collections")}</a>
+        <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon("layout-panel-left", "Main menu")}</a>
+      </div>
       <div class="category-coverage-attention">
         ${actionCards.map((row) => `
           <div>
@@ -3960,13 +4987,162 @@ function renderCategoryCoverage() {
   `;
 }
 
+function renderCategoryStatus(category) {
+  const status = category.status || (category.missingMappings?.length ? "needs_review" : "mapped");
+  const tone = status === "mapped" || status === "approved" ? "active" : "hold";
+  return `<span class="status ${tone}">${html(String(status).replace("_", " "))}</span>`;
+}
+
+function renderChannelMappingBadge(category, channel) {
+  const status = mappingStatus(category, channel);
+  const mapping = category.mappings?.[channel] || {};
+  const label = status === "mapped" ? "Mapped" : "Missing";
+  const detail = mapping.categoryId || mapping.categoryPath || "";
+  return `
+    <span class="channel-map-badge ${status}">
+      <strong>${label}</strong>
+      ${detail ? `<small>${html(detail)}</small>` : ""}
+    </span>
+  `;
+}
+
+function renderCategoryChannelPills(category) {
+  const channels = [
+    ["shopify", "Shopify"],
+    ["ebay", "eBay"],
+    ["temu", "Temu"],
+    ["tiktok", "TikTok"],
+    ["whatnot", "Whatnot"]
+  ];
+  return `
+    <div class="category-channel-pills">
+      ${channels.map(([key, label]) => {
+        const status = mappingStatus(category, key);
+        const mapping = category.mappings?.[key] || {};
+        const title = mapping.categoryPath || mapping.categoryId || "Missing";
+        return `<span class="${status}" title="${html(title)}">${html(label)}</span>`;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderCategoryTable(categories, scopeLabel) {
+  return `
+    <section class="category-table-shell">
+      <div class="category-table-head">
+        <div>
+          <strong>${Number(categoryState.total || categories.length).toLocaleString()} categories</strong>
+          <small>${html(categoryScope === "source" && categoryState.indexGeneratedAt ? `Indexed ${simpleDate(categoryState.indexGeneratedAt)}` : scopeLabel)}</small>
+        </div>
+        <div class="category-table-actions">
+          <div class="category-scope-tabs" role="tablist" aria-label="Category catalog source">
+            <button type="button" class="${categoryScope === "main" ? "active" : ""}" data-category-scope="main">Main</button>
+            <button type="button" class="${categoryScope === "source" ? "active" : ""}" data-category-scope="source">Source</button>
+          </div>
+          <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon("clipboard-list", "Matrixify smart collections")}</a>
+          <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon("layout-panel-left", "Matrixify menu")}</a>
+          <button class="button secondary" type="button" data-auto-map-ebay-categories>${withIcon("search", "Auto-map eBay")}</button>
+        </div>
+      </div>
+      <div class="category-table-wrap">
+        <table class="data-table category-table">
+          <thead>
+            <tr>
+              <th>Category</th>
+              <th>Status</th>
+              <th>Products</th>
+              <th>Active</th>
+              <th>In stock</th>
+              <th>Channels</th>
+              <th>Missing</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${categories.slice(0, 500).map((category) => `
+              <tr>
+                <td>
+                  <button class="table-link category-name-link" data-select-category="${category.id}">
+                    <strong>${html(category.name)}</strong>
+                    <small>${html((category.topVendors || []).slice(0, 2).map((vendor) => vendor.name).join(" / ") || "No vendor data")}</small>
+                  </button>
+                </td>
+                <td>${renderCategoryStatus(category)}</td>
+                <td>${Number(category.productCount || 0).toLocaleString()}</td>
+                <td>${Number(category.activeProductCount || 0).toLocaleString()}</td>
+                <td>${Number(category.stockProductCount || 0).toLocaleString()}</td>
+                <td>${renderCategoryChannelPills(category)}</td>
+                <td><span class="category-missing-count ${category.missingMappings?.length ? "needs-work" : "ready"}">${category.missingMappings?.length ? `${category.missingMappings.length} missing` : "Ready"}</span></td>
+                <td><button class="button secondary compact-button" type="button" data-select-category="${category.id}">Open</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+      ${categories.length > 500 ? `<p class="muted category-table-foot">Showing first 500 matching categories. Use search to narrow the list.</p>` : ""}
+    </section>
+  `;
+}
+
+function renderCategoryDetail(selected) {
+  return `
+    <section class="category-detail-page">
+      <div class="category-detail-head">
+        <div>
+          <button class="table-link category-back-link" type="button" data-back-categories>&larr; Back to categories</button>
+          <p class="eyebrow">Internal category</p>
+          <h2>${html(selected.name)}</h2>
+          <p class="muted">${categoryScope === "main" ? "Active product catalog category. Map this to sales channels before listing." : "Full source catalog category. Use this to compare supplier coverage and future product mapping."}</p>
+        </div>
+        <div class="category-detail-actions">
+          <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon("clipboard-list", "Matrixify smart collections")}</a>
+          <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon("layout-panel-left", "Matrixify menu")}</a>
+          <button class="button secondary" type="button" data-auto-map-ebay-categories>${withIcon("search", "Auto-map eBay")}</button>
+          ${renderCategoryStatus(selected)}
+        </div>
+      </div>
+      <div class="category-metrics">
+        <span><small>Products</small><strong>${Number(selected.productCount || 0).toLocaleString()}</strong></span>
+        <span><small>Active</small><strong>${Number(selected.activeProductCount || 0).toLocaleString()}</strong></span>
+        <span><small>In stock</small><strong>${Number(selected.stockProductCount || 0).toLocaleString()}</strong></span>
+        <span><small>Hazardous</small><strong>${Number(selected.hazardousProductCount || 0).toLocaleString()}</strong></span>
+      </div>
+      <div class="category-detail-grid">
+        <section class="category-settings-card">
+          <h3>Category Settings</h3>
+          <div class="category-map-grid">
+            <label>Status<select data-category-field="status" data-category-id="${selected.id}">${["needs_review", "mapped", "approved", "paused"].map((status) => `<option value="${status}" ${selected.status === status ? "selected" : ""}>${status.replace("_", " ")}</option>`).join("")}</select></label>
+            <label class="span-2">Notes<textarea rows="3" data-category-field="notes" data-category-id="${selected.id}">${html(selected.notes || "")}</textarea></label>
+          </div>
+        </section>
+        <section class="category-settings-card">
+          <h3>Top Vendors</h3>
+          <div class="category-mini-list">${(selected.topVendors || []).slice(0, 8).map((vendor) => `<span><strong>${html(vendor.name)}</strong><small>${Number(vendor.count || 0).toLocaleString()}</small></span>`).join("") || `<p class="muted">No vendor data.</p>`}</div>
+        </section>
+        <section class="category-settings-card">
+          <h3>Top Brands</h3>
+          <div class="category-mini-list">${(selected.topBrands || []).slice(0, 8).map((brand) => `<span><strong>${html(brand.name)}</strong><small>${Number(brand.count || 0).toLocaleString()}</small></span>`).join("") || `<p class="muted">No brand data.</p>`}</div>
+        </section>
+      </div>
+      ${renderMarketplaceRequiredAttributes(selected)}
+      <div class="category-mapping-grid">
+        ${renderCategoryMappingFields(selected, "shopify", "Shopify")}
+        ${renderCategoryMappingFields(selected, "ebay", "eBay")}
+        ${renderCategoryMappingFields(selected, "whatnot", "Whatnot")}
+        ${renderCategoryMappingFields(selected, "temu", "Temu")}
+        ${renderCategoryMappingFields(selected, "tiktok", "TikTok Shop")}
+      </div>
+    </section>
+  `;
+}
+
 function renderCategories() {
   const target = $("#category-list");
   if (!target) return;
+  if (!productFieldOptions) loadProductFieldOptions().catch(() => {});
   const categories = categoryState.categories || [];
   const scopeLabel = categoryScope === "main" ? "Main catalog" : "Source catalog";
-  const selected = categories.find((category) => category.id === selectedCategoryId) || categories[0];
-  if (selected) selectedCategoryId = selected.id;
+  const selected = categories.find((category) => category.id === selectedCategoryId) || null;
   if (categoryState.loading && !categories.length) {
     target.innerHTML = `<div class="empty-state">Loading categories...</div>`;
     return;
@@ -3975,77 +5151,16 @@ function renderCategories() {
     target.innerHTML = `<div class="empty-state">${html(categoryState.error)}</div>`;
     return;
   }
+  if (categoryViewMode === "detail" && selected) {
+    target.innerHTML = renderCategoryDetail(selected);
+    return;
+  }
+  if (categoryViewMode === "detail" && !selected) {
+    categoryViewMode = "table";
+  }
   target.innerHTML = categories.length ? `
     ${renderCategoryCoverage()}
-    <div class="category-workspace">
-      <aside class="category-list-panel">
-        <div class="category-list-head">
-          <div>
-            <strong>${Number(categoryState.total || categories.length).toLocaleString()} categories</strong>
-            <small>${html(categoryScope === "source" && categoryState.indexGeneratedAt ? `Indexed ${simpleDate(categoryState.indexGeneratedAt)}` : scopeLabel)}</small>
-          </div>
-          <div class="category-scope-tabs" role="tablist" aria-label="Category catalog source">
-            <button type="button" class="${categoryScope === "main" ? "active" : ""}" data-category-scope="main">Main</button>
-            <button type="button" class="${categoryScope === "source" ? "active" : ""}" data-category-scope="source">Source</button>
-          </div>
-        </div>
-        <div class="category-list-scroll">
-          ${categories.slice(0, 500).map((category) => `
-            <button class="category-row ${category.id === selectedCategoryId ? "active" : ""}" data-select-category="${category.id}">
-              <span><strong>${html(category.name)}</strong><small>${Number(category.productCount || 0).toLocaleString()} products / ${category.mappingCount || 0} mapped</small></span>
-              <em>${category.missingMappings?.length ? `${category.missingMappings.length} missing` : "ready"}</em>
-            </button>
-          `).join("")}
-        </div>
-      </aside>
-      <section class="category-detail-panel">
-        ${selected ? `
-          <div class="category-detail-head">
-            <div>
-              <p class="eyebrow">Internal category</p>
-              <h2>${html(selected.name)}</h2>
-              <p class="muted">${categoryScope === "main" ? "Active product catalog category. Map this to Shopify and Google before listing." : "Full source catalog category. Use this to compare supplier coverage and future product mapping."}</p>
-            </div>
-            <span class="status ${selected.status === "mapped" ? "active" : "hold"}">${html(selected.status || "needs_review")}</span>
-          </div>
-          <div class="category-metrics">
-            <span><small>Products</small><strong>${Number(selected.productCount || 0).toLocaleString()}</strong></span>
-            <span><small>Active</small><strong>${Number(selected.activeProductCount || 0).toLocaleString()}</strong></span>
-            <span><small>In stock</small><strong>${Number(selected.stockProductCount || 0).toLocaleString()}</strong></span>
-            <span><small>Hazardous</small><strong>${Number(selected.hazardousProductCount || 0).toLocaleString()}</strong></span>
-          </div>
-          <div class="category-detail-grid">
-            <section class="category-settings-card">
-              <h3>Category Settings</h3>
-              <div class="category-map-grid">
-                <label>Status<select data-category-field="status" data-category-id="${selected.id}">${["needs_review", "mapped", "approved", "paused"].map((status) => `<option value="${status}" ${selected.status === status ? "selected" : ""}>${status.replace("_", " ")}</option>`).join("")}</select></label>
-                <label>Owner<input value="${html(selected.owner || "")}" data-category-field="owner" data-category-id="${selected.id}" /></label>
-                <label>Default condition<input value="${html(selected.defaults?.condition || "New")}" data-category-default="condition" data-category-id="${selected.id}" /></label>
-                <label>Shipping profile<input value="${html(selected.defaults?.shippingProfile || "")}" data-category-default="shippingProfile" data-category-id="${selected.id}" /></label>
-                <label>Country of origin<input value="${html(selected.defaults?.countryOfOrigin || "")}" data-category-default="countryOfOrigin" data-category-id="${selected.id}" /></label>
-                <label>Required attributes<textarea rows="3" data-category-field="requiredAttributes" data-category-id="${selected.id}">${html((selected.requiredAttributes || []).join("\n"))}</textarea></label>
-                <label class="span-2">Notes<textarea rows="3" data-category-field="notes" data-category-id="${selected.id}">${html(selected.notes || "")}</textarea></label>
-              </div>
-            </section>
-            <section class="category-settings-card">
-              <h3>Top Vendors</h3>
-              <div class="category-mini-list">${(selected.topVendors || []).slice(0, 8).map((vendor) => `<span><strong>${html(vendor.name)}</strong><small>${Number(vendor.count || 0).toLocaleString()}</small></span>`).join("") || `<p class="muted">No vendor data.</p>`}</div>
-            </section>
-            <section class="category-settings-card">
-              <h3>Top Brands</h3>
-              <div class="category-mini-list">${(selected.topBrands || []).slice(0, 8).map((brand) => `<span><strong>${html(brand.name)}</strong><small>${Number(brand.count || 0).toLocaleString()}</small></span>`).join("") || `<p class="muted">No brand data.</p>`}</div>
-            </section>
-          </div>
-          <div class="category-mapping-grid">
-            ${renderCategoryMappingFields(selected, "shopify", "Shopify")}
-            ${renderCategoryMappingFields(selected, "temu", "Temu")}
-            ${renderCategoryMappingFields(selected, "tiktok", "TikTok Shop")}
-            ${renderCategoryMappingFields(selected, "ebay", "eBay")}
-            ${renderCategoryMappingFields(selected, "whatnot", "Whatnot")}
-          </div>
-        ` : `<div class="empty-state">Select a category.</div>`}
-      </section>
-    </div>
+    ${renderCategoryTable(categories, scopeLabel)}
   ` : `<div class="empty-state">No categories match this search.</div>`;
 }
 
@@ -4069,6 +5184,76 @@ async function updateCategoryField(input) {
   selectedCategoryId = categoryId;
   renderCategories();
   toast("Category updated.");
+}
+
+async function saveCategoryMapping(button) {
+  const categoryId = button.dataset.saveCategoryMap;
+  const channel = button.dataset.channel;
+  if (!categoryId || !channel) return;
+  const fields = Array.from(document.querySelectorAll(`[data-category-map="${categoryId}"][data-channel="${channel}"]`));
+  const mapping = {};
+  fields.forEach((field) => {
+    if (field.dataset.mapField) mapping[field.dataset.mapField] = field.value;
+  });
+  const attributeFields = Array.from(document.querySelectorAll(`[data-category-attribute-map="${categoryId}"][data-channel="${channel}"]`));
+  const attributeMappingsByIndex = new Map();
+  attributeFields.forEach((field) => {
+    const index = field.dataset.attributeIndex;
+    const attrField = field.dataset.attrField;
+    if (index === undefined || !attrField) return;
+    const row = attributeMappingsByIndex.get(index) || {};
+    row[attrField] = field.type === "checkbox" ? field.checked : field.value;
+    attributeMappingsByIndex.set(index, row);
+  });
+  if (attributeMappingsByIndex.size) {
+    mapping.attributeMappings = [...attributeMappingsByIndex.values()]
+      .map((row) => ({
+        attributeId: row.attributeId || "",
+        attributeName: row.attributeName || "",
+        attributeHandle: row.attributeHandle || "",
+        sourceField: row.sourceField || "",
+        fallbackValue: row.fallbackValue || "",
+        required: row.required === true || row.required === "true",
+        recommended: row.recommended === true || row.recommended === "true",
+        enabled: row.enabled !== false
+      }))
+      .filter((row) => row.attributeId || row.attributeName || row.attributeHandle);
+  }
+  const smartFields = Array.from(document.querySelectorAll(`[data-smart-collection="${categoryId}"]`));
+  const smartCollection = {};
+  smartFields.forEach((field) => {
+    if (!field.dataset.smartField) return;
+    smartCollection[field.dataset.smartField] = field.type === "checkbox" ? field.checked : field.value;
+  });
+  const result = await api(`/api/categories/${categoryId}`, {
+    feedbackLabel: `Saving ${channel} category mapping...`,
+    method: "PATCH",
+    body: JSON.stringify({ scope: categoryScope, channel, mapping, smartCollection })
+  });
+  categoryState = { ...result, query: categoryState.query, scope: categoryScope, loading: false };
+  selectedCategoryId = categoryId;
+  categoryViewMode = "detail";
+  renderCategories();
+  toast(`${channel} category mapping saved.`);
+}
+
+async function applyCategoryMapToProducts(button) {
+  const categoryId = button.dataset.applyCategoryMapToProducts;
+  const channel = button.dataset.channel || "ebay";
+  if (!categoryId) return;
+  if (!confirm("Apply this category mapping to every SKU in this master category that is missing an eBay category?")) return;
+  const result = await api(`/api/categories/${categoryId}/apply-channel-to-products`, {
+    feedbackLabel: "Queueing SKU category refresh...",
+    method: "POST",
+    body: JSON.stringify({ scope: categoryScope, channel, background: true })
+  });
+  if (result.state) setState(result.state);
+  if (result.categories) categoryState = { ...result.categories, query: categoryState.query, scope: categoryScope, loading: false };
+  if (result.job) selectedImportJobId = result.job.id;
+  selectedCategoryId = categoryId;
+  categoryViewMode = "detail";
+  renderCategories();
+  toast(result.queued ? "SKU category refresh queued in Jobs." : `Updated ${Number(result.changed || 0).toLocaleString()} SKU${Number(result.changed || 0) === 1 ? "" : "s"}.`);
 }
 
 function renderCatalog() {
@@ -4116,7 +5301,10 @@ function renderCatalog() {
   }
   if (catalogTab === "categories") {
     renderCategories();
-    if (!categoryState.categories.length || categoryState.query !== ($("#catalog-search")?.value.trim() || "") || categoryState.scope !== categoryScope) loadCategories();
+    if (!categoryState.categories.length || categoryState.query !== ($("#catalog-search")?.value.trim() || "") || categoryState.scope !== categoryScope) {
+      if (!pendingCategoryOpenName) categoryViewMode = "table";
+      loadCategories();
+    }
     return;
   }
   if (catalogTab === "reviews") {
@@ -4255,8 +5443,10 @@ function updateCatalogBulkBar() {
   [...action.options].forEach((option) => {
     if (!option.value) return;
     option.disabled = catalogTab !== "source" && option.value === "add-active";
+    if (option.value === "ebay-bulk-launch") option.disabled = catalogTab !== "products";
   });
   if (catalogTab !== "source" && action.value === "add-active") action.value = "";
+  if (catalogTab !== "products" && action.value === "ebay-bulk-launch") action.value = "";
 }
 
 function clearCatalogSelection() {
@@ -4283,6 +5473,7 @@ async function loadProductFieldOptions() {
     ];
   }
   if (currentViewId === "import-export" || catalogTab === "import-export") renderImportExportMappings();
+  if (catalogTab === "categories") renderCategories();
   return productFieldOptions;
 }
 
@@ -4505,7 +5696,7 @@ function renderJobProfile(job = null) {
         <button class="button danger" type="button" data-job-stop="${html(job.id)}" ${canStop ? "" : "disabled"}>Stop</button>
       </div>
       <div class="job-profile-note">
-        ${canStop ? "This job is currently active and can be stopped." : "Run opens the matching import area. Background reruns will be connected when the runner is added."}
+        ${job.direction === "api" ? "This came from an API notification. Use the error preview and endpoint details to troubleshoot the connector." : canStop ? "This job is currently active and can be stopped." : "Run opens the matching import area. Background reruns will be connected when the runner is added."}
       </div>
       <div class="job-profile-stats">
         ${statRows.map(([label, value]) => `<span><small>${html(label)}</small><strong>${html(value)}</strong></span>`).join("")}
@@ -4515,6 +5706,7 @@ function renderJobProfile(job = null) {
         ${hasErrors ? `<a class="button secondary" href="/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv">${withIcon("download", "Errors CSV")}</a>` : `<button class="button secondary" type="button" disabled>Errors CSV</button>`}
       </div>
       ${job.message ? `<div class="job-profile-message"><strong>Status message</strong><p>${html(job.message)}</p></div>` : ""}
+      ${job.details ? `<div class="job-profile-message"><strong>Details</strong><p>${html(job.details)}</p></div>` : ""}
       ${(job.errors || []).length ? `
         <div class="job-profile-errors">
           <strong>Error preview</strong>
@@ -4579,7 +5771,7 @@ function importExportSections(templates = []) {
     { id: 'products', icon: 'package', label: 'Products', meta: `${templates.length} templates`, description: 'Mapped product imports and marketplace exports.' },
     { id: 'inventory', icon: 'warehouse', label: 'Inventory', meta: 'Stock CSV', description: 'Quantities, costs, and stock updates.' },
     { id: 'source', icon: 'database', label: 'Source Catalog', meta: 'Supplier SKUs', description: 'Move source SKUs into Products.' },
-    { id: 'categories', icon: 'tags', label: 'Categories', meta: 'Coming soon', description: 'Category mappings and taxonomy updates.' },
+    { id: 'categories', icon: 'tags', label: 'Categories', meta: 'SKU + mapping CSV', description: 'SKU categories, channel mappings, and Matrixify exports.' },
     { id: 'orders', icon: 'shopping-cart', label: 'Orders', meta: 'Coming soon', description: 'Order imports and marketplace order templates.' },
     { id: 'customers', icon: 'users', label: 'Customers', meta: 'Coming soon', description: 'Customer imports and contact updates.' },
     { id: 'queue', icon: 'list-check', label: 'Queue', meta: `${jobs.length} jobs`, description: 'Import history, warnings, and failures.' }
@@ -4673,7 +5865,51 @@ function renderImportSectionBody(sectionId, templates = []) {
     `;
   }
   if (sectionId === 'queue') return renderImportQueuePanel({ full: true });
-  if (sectionId === 'categories' || sectionId === 'orders' || sectionId === 'customers') {
+  if (sectionId === 'categories') {
+    return `
+      <section class="import-section-panel">
+        <div class="import-panel-title">
+          ${sectionIconTitle('tags', 'Category Imports / Exports')}
+          <p class="muted">SKU category imports place products into master categories. Category mapping imports connect those master categories to Shopify, eBay, and collection export rules.</p>
+        </div>
+        <div class="import-action-list">
+          <article class="import-action-row category-import-row">
+            <div>
+              <strong>Import SKU categories <span class="info-dot" title="Use this when each row is a SKU and the master category it belongs to. This changes product category assignments.">i</span></strong>
+              <small>Product-level import: SKU -> master category. Learns supplier category aliases when possible.</small>
+            </div>
+            <div class="import-template-actions">
+              <a class="button secondary" href="/api/categories/templates/sku-categories.csv">${withIcon('clipboard-list', 'Template')}</a>
+              <label class="file-button">${withIcon('upload', 'Import CSV')}<input type="file" accept=".csv,text/csv" data-category-sku-import /></label>
+            </div>
+          </article>
+          <article class="import-action-row category-import-row">
+            <div>
+              <strong>Import category mapping <span class="info-dot" title="Use this when each row is a master category and its Shopify or Google taxonomy mapping. This does not move individual SKUs.">i</span></strong>
+              <small>Category-level import: master category -> channel taxonomy, product type, and smart collection handle.</small>
+            </div>
+            <div class="import-template-actions">
+              <a class="button secondary" href="/api/categories/templates/category-mapping.csv">${withIcon('clipboard-list', 'Template')}</a>
+              <label class="file-button">${withIcon('upload', 'Import CSV')}<input type="file" accept=".csv,text/csv" data-category-mapping-import /></label>
+            </div>
+          </article>
+          <article class="import-action-row">
+            <div><strong>Matrixify smart collections <span class="info-dot" title="Exports one Smart Collection row per mapped master category. Matrixify rules use Product Column = Type, Relation = Equals, Condition = product type.">i</span></strong><small>Exports Shopify smart collections from mapped product types, including SEO handles, rule conditions, and category images when available.</small></div>
+            <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon('clipboard-list', 'Export CSV')}</a>
+          </article>
+          <article class="import-action-row">
+            <div><strong>Matrixify main menu <span class="info-dot" title="Uses the Shopify menu collection mapping file as the menu structure, then adds any newly mapped master categories automatically with SEO collection handles.">i</span></strong><small>Exports the Matrixify Menus sheet for the Shopify main menu using department, group, and collection links.</small></div>
+            <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon('layout-panel-left', 'Export CSV')}</a>
+          </article>
+          <article class="import-action-row">
+            <div><strong>Open category mappings</strong><small>Review Shopify, eBay, and other channel category mappings before exporting.</small></div>
+            <button class="button secondary" type="button" data-view="catalog" data-catalog-tab-link="categories">${withIcon('search', 'Open categories')}</button>
+          </article>
+        </div>
+      </section>
+    `;
+  }
+  if (sectionId === 'orders' || sectionId === 'customers') {
     const labels = { categories: 'Category Imports', orders: 'Order Imports', customers: 'Customer Imports' };
     const icons = { categories: 'tags', orders: 'shopping-cart', customers: 'users' };
     return `
@@ -5108,7 +6344,7 @@ function renderCatalogImportReviews() {
         <div>
           <p class="eyebrow">Import Review</p>
           <h2>Protected Catalog Changes</h2>
-          <p class="muted">Weekly dump changes for protected fields wait here before they touch cleaned product data.</p>
+          <p class="muted">Protected product changes and unmapped marketplace listings wait here before they touch cleaned product data.</p>
         </div>
         <div class="mapping-actions">
           <button class="button secondary" type="button" data-review-bulk-action="reject">Reject all pending</button>
@@ -5127,25 +6363,27 @@ function renderCatalogImportReviews() {
           <table class="catalog-table">
             <thead><tr><th>SKU</th><th>Field</th><th>Current DataPlus value</th><th>Incoming dump value</th><th>Source</th><th>Updated</th><th>Action</th></tr></thead>
             <tbody>
-              ${pending.slice(0, 300).map((review) => `
+              ${pending.slice(0, 300).map((review) => {
+                const isUnmappedEbay = review.field === "ebayCatalogMatch" && !review.productId;
+                return `
                 <tr>
-                  <td><button class="order-link product-name-link" data-review-open-product="${html(review.sku)}">${html(review.sku)}</button></td>
+                  <td>${isUnmappedEbay ? `<strong>${html(review.sku)}</strong>` : `<button class="order-link product-name-link" data-review-open-product="${html(review.sku)}">${html(review.sku)}</button>`}</td>
                   <td><strong>${html(review.label || review.field)}</strong></td>
-                  <td>${html(review.currentValue)}</td>
-                  <td>${html(review.incomingValue)}</td>
+                  <td>${html(review.currentValue)}${review.details ? `<small>${html(review.details)}</small>` : ""}</td>
+                  <td>${html(review.incomingValue)}${review.externalUrl ? `<small><a href="${html(review.externalUrl)}" target="_blank" rel="noopener">Open eBay listing</a></small>` : ""}</td>
                   <td>${html(review.source || "Product dump")}</td>
                   <td>${review.updatedAt ? simpleDate(review.updatedAt) : ""}</td>
                   <td class="review-actions">
                     <button class="button secondary compact-button" type="button" data-review-action="reject" data-review-id="${review.id}">Reject</button>
-                    <button class="button compact-button" type="button" data-review-action="accept" data-review-id="${review.id}">Accept</button>
+                    ${isUnmappedEbay ? `<button class="button compact-button" type="button" disabled>Needs mapping</button>` : `<button class="button compact-button" type="button" data-review-action="accept" data-review-id="${review.id}">Accept</button>`}
                   </td>
                 </tr>
-              `).join("")}
+              `; }).join("")}
             </tbody>
           </table>
         </div>
         ${pending.length > 300 ? `<p class="muted">Showing first 300 pending changes. Use the API bulk actions for the full queue.</p>` : ""}
-      ` : `<div class="empty-state">No pending protected changes. New weekly dump differences will appear here.</div>`}
+      ` : `<div class="empty-state">No pending protected changes. New dump differences and unmapped marketplace listings will appear here.</div>`}
       ${decided.length ? `
         <section class="review-history">
           <h3>Recent decisions</h3>
@@ -5201,7 +6439,9 @@ function renderProductsTable(items) {
     : selectedProductIds.size
       ? `${Number(selectedProductIds.size).toLocaleString()} selected`
       : `${Number(filteredCount).toLocaleString()} filtered products`;
-  loadProductTableAlternates(pageItems).catch((error) => toast(error.message));
+  const autoLoadAlternates = Boolean(appSystemSettings().autoLoadProductAlternates);
+  if (autoLoadAlternates) loadProductTableAlternates(pageItems).catch((error) => toast(error.message));
+  const alternatesLoaded = pageItems.filter((item) => productAlternatesCache[String(item.sku || "").toLowerCase()] && !productAlternatesCache[String(item.sku || "").toLowerCase()].loading).length;
   $("#products-list").innerHTML = items.length
     ? `
       <div class="catalog-selection-toolbar product-export-bar">
@@ -5213,8 +6453,10 @@ function renderProductsTable(items) {
           <button class="button secondary" type="button" data-select-products-page>Select current page</button>
           <button class="button secondary" type="button" data-select-products-filtered>Select all results</button>
           <button class="button secondary" type="button" data-clear-products-selection ${selectedCount ? "" : "disabled"}>Clear</button>
+          <button class="button secondary" type="button" data-load-product-alternates-page>${alternatesLoaded ? `Refresh alternates (${alternatesLoaded}/${pageItems.length})` : "Load alternates"}</button>
         </div>
         <div class="product-export-controls">
+          <label class="inline-toggle compact-system-setting"><input type="checkbox" ${autoLoadAlternates ? "checked" : ""} data-system-setting="autoLoadProductAlternates" /> Auto alternates</label>
           <select id="product-export-template">
             ${exportMappings.map((template) => `<option value="${template.id}" ${template.id === selectedExportMappingId ? "selected" : ""}>${html(template.name)}</option>`).join("")}
           </select>
@@ -5233,7 +6475,7 @@ function renderProductsTable(items) {
       <div class="catalog-table-wrap">
         <table class="catalog-table">
           <thead>
-            <tr><th><input type="checkbox" data-product-check-all ${pageItems.length && pageItems.every((item) => selectedProductAllFiltered || selectedProductIds.has(item.id)) ? "checked" : ""} /></th><th>Product</th><th>Readiness</th><th>Alternates</th><th>Manufacturer</th><th>Vendor SKU</th><th>Brand</th><th>Category</th><th>Status</th><th>Shopify</th><th>Shadows</th><th>Price</th><th>Images</th><th>Updated</th><th>Action</th></tr>
+            <tr><th><input type="checkbox" data-product-check-all ${pageItems.length && pageItems.every((item) => selectedProductAllFiltered || selectedProductIds.has(item.id)) ? "checked" : ""} /></th><th>Product</th><th>Readiness</th><th>Alternates</th><th>Manufacturer</th><th>Vendor SKU</th><th>Brand</th><th>Category</th><th>Status</th><th>Shopify</th><th>eBay</th><th>Shadows</th><th>Price</th><th>Images</th><th>Updated</th><th>Action</th></tr>
           </thead>
           <tbody>
             ${pageItems.map((item) => `
@@ -5251,6 +6493,7 @@ function renderProductsTable(items) {
                 <td>${html(item.category || "Uncategorized")}<small>Vendor: ${html(item.sourceCategory || item.vendorCategory || "n/a")}</small></td>
                 <td><span class="status ${String(item.status || "draft").toLowerCase()}">${html(item.status || "Draft")}</span></td>
                 <td><span class="status ${item.shopifyId && item.shopifyStatus === "Active" && item.shopifyPublished === true ? "active" : "draft"}">${html(item.shopifyStatus || (item.shopifyId ? "Synced" : "Not live"))}</span><small>${html(item.shopifyId || "No Shopify ID")}</small></td>
+                <td>${ebayListingStatusCell(item)}</td>
                 <td>${(item.shadowSkus || []).length}</td>
                 <td>${money(item.price || 0)}</td>
                 <td><span class="image-count-pill ${productImageUrls(item).length > 1 ? "has-gallery" : ""}">${productImageUrls(item).length}</span></td>
@@ -5339,6 +6582,110 @@ function productManagerValue(value) {
   return String(value);
 }
 
+function normalizedSourceFieldKey(key = "") {
+  return String(key || "").trim().replace(/[A-Z]/g, (char) => `_${char.toLowerCase()}`).replace(/[-\s]+/g, "_").replace(/^_/, "").toLowerCase();
+}
+
+function sourceFieldCanonicalKey(key = "") {
+  const normalized = normalizedSourceFieldKey(key);
+  return {
+    _id: "externalId",
+    id: "externalId",
+    name: "title",
+    title: "title",
+    short_description: "shortDescription",
+    description: "longDescription",
+    long_description: "longDescription",
+    default_image: "defaultImage",
+    image: "defaultImage",
+    image_url: "defaultImage",
+    images: "images",
+    brand: "brand",
+    manufacturer: "manufacturer",
+    mfr_part_number: "mfrPartNumber",
+    mpn: "mfrPartNumber",
+    upc: "barcode",
+    gtin: "barcode",
+    barcode: "barcode",
+    category: "category",
+    product_type: "category",
+    supplier: "supplier",
+    supplier_code: "supplierCode",
+    vendor_sku: "vendorSku",
+    alt_vendor_sku: "altVendorSku",
+    country_of_origin: "countryOfOrigin",
+    item_height: "itemHeight",
+    item_length: "itemLength",
+    item_weight: "itemWeight",
+    item_width: "itemWidth",
+    package_height: "packageHeight",
+    package_length: "packageLength",
+    package_weight: "packageWeight",
+    package_width: "packageWidth",
+    stock_qty: "stockQty",
+    stock_status: "stockStatus",
+    stock_updated_at: "stockUpdatedAt",
+    min_quantity: "reorderPoint",
+    price: "price",
+    list_price: "msrp",
+    fob_price: "cost",
+    cost: "cost",
+    sds_url: "sdsUrl",
+    original_sds_url: "originalSdsUrl",
+    hazardous: "hazardous",
+    unspsc: "unspsc",
+    tags: "tags",
+    wildcardsearch: "wildcardSearch",
+    uom: "uom",
+    uom_qty: "uomQty"
+  }[normalized] || normalized.replace(/_([a-z0-9])/g, (_, char) => char.toUpperCase());
+}
+
+function sourceFieldCategory(key = "") {
+  const normalized = normalizedSourceFieldKey(key);
+  if (/^(_id|id|sku|name|title|brand|manufacturer|mfr|mpn|upc|gtin|barcode|category|product_type|condition|active)$/.test(normalized)) return "Identity";
+  if (/(description|image|tag|feature|bullet|keyword|wildcard)/.test(normalized)) return "Content";
+  if (/(price|cost|fob|msrp|list|varis|contract|managed|private)/.test(normalized)) return "Pricing";
+  if (/(stock|qty|quantity|min_quantity|lead|leadtime|clearance)/.test(normalized)) return "Inventory";
+  if (/(height|length|width|weight|dimension|uom|package|country_of_origin)/.test(normalized)) return "Shipping";
+  if (/(supplier|vendor|sds|hazard|unspsc|ctech|zoro)/.test(normalized)) return "Supplier";
+  if (/(created|updated|validated|uploaded|mailed|timestamp|checked|original|default_supplier|item_key)/.test(normalized)) return "System";
+  return "Other";
+}
+
+function sourceFieldChannelUsage(item = {}, key = "") {
+  const normalized = normalizedSourceFieldKey(key);
+  const canonical = sourceFieldCanonicalKey(key);
+  const usage = new Set();
+  const shopifyTemplate = exportMappingForSource("shopify");
+  if ((shopifyTemplate?.mappings || []).some((row) => row.productField === canonical)) usage.add("Shopify");
+  if (["title", "marketplaceTitle", "brand", "manufacturer", "mfrPartNumber", "barcode", "category", "supplier", "vendorSku", "shortDescription", "longDescription", "tags", "defaultImage", "images"].includes(canonical)) usage.add("Product core");
+  if (["price", "cost", "msrp", "fobPrice"].includes(canonical) || /(price|cost|fob|msrp|varis)/.test(normalized)) usage.add("Pricing");
+  if (["stockQty", "stockStatus", "stockUpdatedAt", "reorderPoint"].includes(canonical) || /(stock|qty|quantity|min_quantity)/.test(normalized)) usage.add("Inventory");
+  if (["itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "countryOfOrigin", "uom", "uomQty"].includes(canonical)) usage.add("Shipping");
+  if (/(zoro|varis)/.test(normalized)) usage.add("Zoro");
+  const ebayAspectFields = new Set(["brand", "manufacturer", "mfrPartNumber", "barcode", "countryOfOrigin", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "uom", "uomQty", "color", "material", "size", "model", "features", "type"]);
+  if (ebayAspectFields.has(canonical) || /(mpn|model|color|material|size|feature|type|brand|country|height|length|width|weight)/.test(normalized)) usage.add("eBay specifics");
+  if (["title", "longDescription", "shortDescription", "price", "stockQty", "category", "condition", "defaultImage", "images"].includes(canonical)) usage.add("eBay listing");
+  if (item.brandLocked && canonical === "brand") usage.add("Locked brand");
+  return [...usage];
+}
+
+function renderSourceDataUsageSummary(item = {}, keys = []) {
+  const channelCounts = new Map();
+  for (const key of keys) {
+    for (const channel of sourceFieldChannelUsage(item, key)) {
+      channelCounts.set(channel, (channelCounts.get(channel) || 0) + 1);
+    }
+  }
+  const ordered = ["Product core", "Shopify", "eBay listing", "eBay specifics", "Pricing", "Inventory", "Shipping", "Zoro", "Locked brand"];
+  const chips = ordered
+    .filter((channel) => channelCounts.has(channel))
+    .map((channel) => `<span><strong>${html(String(channelCounts.get(channel)))}</strong>${html(channel)}</span>`)
+    .join("");
+  return chips ? `<div class="source-usage-summary">${chips}</div>` : "";
+}
+
 function renderProductManagerFields(item) {
   const fields = item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {};
   const preferredOrder = [
@@ -5419,13 +6766,37 @@ function renderProductManagerFields(item) {
 
   return keys.length
     ? `
-      <div class="product-manager-grid">
-        ${keys.map((key) => `
-          <label>
-            ${html(key)}
-            <textarea rows="${typeof fields[key] === "object" ? 4 : 2}" readonly>${html(productManagerValue(fields[key]))}</textarea>
-          </label>
-        `).join("")}
+      ${renderSourceDataUsageSummary(item, keys)}
+      <div class="source-manager-sections">
+        ${["Identity", "Content", "Pricing", "Inventory", "Shipping", "Supplier", "System", "Other"].map((group) => {
+          const groupKeys = keys.filter((key) => sourceFieldCategory(key) === group);
+          if (!groupKeys.length) return "";
+          return `
+            <section class="source-manager-section">
+              <div class="source-manager-section-head">
+                <strong>${html(group)}</strong>
+                <span>${groupKeys.length} field${groupKeys.length === 1 ? "" : "s"}</span>
+              </div>
+              <div class="source-manager-fields">
+                ${groupKeys.map((key) => {
+                  const value = productManagerValue(fields[key]);
+                  const isLong = value.length > 90 || typeof fields[key] === "object";
+                  const usage = sourceFieldChannelUsage(item, key);
+                  return `
+                    <article class="source-manager-field ${isLong ? "wide" : ""}">
+                      <div class="source-manager-field-head">
+                        <strong>${html(key)}</strong>
+                        <small>${html(sourceFieldCanonicalKey(key))}</small>
+                      </div>
+                      <div class="source-manager-value">${html(value || "empty")}</div>
+                      ${usage.length ? `<div class="source-manager-chips">${usage.map((channel) => `<span>${html(channel)}</span>`).join("")}</div>` : ""}
+                    </article>
+                  `;
+                }).join("")}
+              </div>
+            </section>
+          `;
+        }).join("")}
       </div>
     `
     : `<p class="muted">No product dump fields have been imported for this product yet.</p>`;
@@ -5452,7 +6823,7 @@ function productShadowForMarketplace(item, marketplace) {
 }
 
 function productTabButton(id, label) {
-  const icons = { home: "home", shopify: "shopping-bag", zoro: "store", shipping: "truck", pricing: "dollar-sign", source: "database", search: "search" };
+  const icons = { home: "home", shopify: "shopping-bag", ebay: "store", zoro: "store", inventory: "warehouse", shipping: "truck", pricing: "dollar-sign", source: "database", search: "search" };
   return `<button class="product-workspace-tab ${selectedProductWorkspaceTab === id ? "active" : ""}" data-product-workspace-tab="${id}">${withIcon(icons[id] || "info", label)}</button>`;
 }
 
@@ -5725,6 +7096,603 @@ function renderMarketplaceTab(item, marketplace) {
   `;
 }
 
+function ebayListingValue(item, field, fallback = "") {
+  return item.ebayListing?.[field] ?? fallback;
+}
+
+function productCostValue(item = {}) {
+  return Number(item.cost ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? 0);
+}
+
+function productBaseSellPrice(item = {}) {
+  return Number(item.msrp ?? item.retailPrice ?? item.retail_price ?? item.salePrice ?? item.sale_price ?? item.price ?? 0);
+}
+
+function roundMarketplacePrice(value, rule = "none") {
+  const price = Number(value || 0);
+  if (!(price > 0)) return 0;
+  if (rule === "nearest .99") return Math.max(0.99, Math.ceil(price) - 0.01);
+  if (rule === "nearest .95") return Math.max(0.95, Math.ceil(price) - 0.05);
+  if (rule === "round up") return Math.ceil(price);
+  return Math.round(price * 100) / 100;
+}
+
+function ebaySuggestedPrice(item = {}) {
+  const settings = ebayChannelSettings();
+  const cost = productCostValue(item);
+  const basePrice = productBaseSellPrice(item);
+  const markupPercent = Number(settings.priceMarkupPercent || 0);
+  const marginPercentSetting = Number(settings.minMarginPercent || 0);
+  const markupPrice = cost > 0 && markupPercent > 0 ? cost * (1 + markupPercent / 100) : 0;
+  const marginPrice = cost > 0 && marginPercentSetting > 0 && marginPercentSetting < 100 ? cost / (1 - marginPercentSetting / 100) : 0;
+  const candidate = Math.max(markupPrice, marginPrice, basePrice, cost);
+  return roundMarketplacePrice(candidate, settings.roundingRule || "none");
+}
+
+function ebayPricingMetrics(item = {}, draft = {}) {
+  const cost = productCostValue(item);
+  const price = Number(draft.price ?? ebaySuggestedPrice(item) ?? 0);
+  const profit = price - cost;
+  return {
+    cost,
+    price,
+    profit,
+    margin: marginPercent(profit, price),
+    suggestedPrice: ebaySuggestedPrice(item)
+  };
+}
+
+function ebayQuantityPlan(item = {}) {
+  const settings = ebayChannelSettings();
+  const listing = item.ebayListing || {};
+  const onHand = Math.max(0, Math.floor(Number(item.qty ?? 0)));
+  const sourceStock = Math.max(0, Math.floor(Number(item.stockQty ?? item.qty ?? 0)));
+  const reserved = Math.max(0, Math.floor(Number(item.reserved || 0)));
+  const available = Math.max(0, onHand - reserved);
+  const safetyQty = Math.max(0, Math.floor(Number(settings.defaultSafetyQty || 0)));
+  const maxSellableQty = Math.max(0, Math.floor(Number(settings.defaultMaxSellableQty || 0)));
+  const mode = settings.ebayQuantityMode || "available";
+  const sourceQty = mode === "stockQty" ? sourceStock : mode === "qty" ? onHand : available;
+  const afterSafety = Math.max(0, sourceQty - safetyQty);
+  const calculatedQty = maxSellableQty > 0 ? Math.min(afterSafety, maxSellableQty) : afterSafety;
+  const savedQty = listing.quantity !== undefined && listing.quantity !== null && String(listing.quantity) !== ""
+    ? Math.max(0, Math.floor(Number(listing.quantity || 0)))
+    : null;
+  const manualQty = savedQty !== null && (savedQty > 0 || calculatedQty <= 0) ? savedQty : null;
+  return {
+    onHand,
+    reserved,
+    available,
+    sourceStock,
+    safetyQty,
+    maxSellableQty,
+    sourceQty,
+    calculatedQty,
+    quantity: manualQty !== null ? manualQty : calculatedQty,
+    isManual: manualQty !== null,
+    ignoredZeroOverride: savedQty === 0 && calculatedQty > 0,
+    mode,
+    modeLabel: ({ available: "Available qty", qty: "On hand qty", stockQty: "Source stock qty" })[mode] || "Available qty"
+  };
+}
+
+function ebayListingField(label, field, item, options = {}) {
+  const value = ebayListingValue(item, field, options.fallback ?? "");
+  const attrs = `data-ebay-listing-field="${field}" data-product-id="${item.id}"`;
+  if (options.textarea) {
+    return `<label>${label}<textarea rows="${options.rows || 3}" ${attrs}>${html(typeof value === "object" ? JSON.stringify(value, null, 2) : value)}</textarea></label>`;
+  }
+  const type = options.type || "text";
+  const step = options.step ? ` step="${options.step}"` : "";
+  const min = options.min !== undefined ? ` min="${options.min}"` : "";
+  return `<label>${label}<input type="${type}"${step}${min} value="${html(value)}" ${attrs} /></label>`;
+}
+
+function ebayListingImageUrls(item = {}) {
+  return [item.defaultImage, ...(Array.isArray(item.images) ? item.images : [])].filter(Boolean).map(String).filter((url, index, list) => list.indexOf(url) === index);
+}
+
+function ebayListingDefaultCategoryId(item = {}) {
+  const setting = productMasterCategorySetting(item);
+  return String(setting?.mappings?.ebay?.categoryId || setting?.ebay?.categoryId || "").trim();
+}
+
+function ebayListingDefaultCategoryPath(item = {}) {
+  const setting = productMasterCategorySetting(item);
+  return String(setting?.mappings?.ebay?.categoryPath || "").trim();
+}
+
+function productMasterCategoryName(item = {}) {
+  return [
+    item.category,
+    item.mainCategory,
+    item.internalCategory,
+    item.productCategory,
+    item.verifiedCategory,
+    item.sourceCategory,
+    item.vendorCategory
+  ].map((value) => String(value || "").trim()).find(Boolean) || "";
+}
+
+function productMasterCategorySetting(item = {}) {
+  const categoryName = productMasterCategoryName(item).toLowerCase();
+  if (!categoryName) return null;
+  return (state.categorySettings || []).find((row) => String(row.name || row.category || "").trim().toLowerCase() === categoryName) || null;
+}
+
+function productMasterEbayMapping(item = {}) {
+  return productMasterCategorySetting(item)?.mappings?.ebay || {};
+}
+
+function productEbayCategoryAttributes(item = {}) {
+  const listing = item.ebayListing || {};
+  if (Array.isArray(listing.categoryAttributes) && listing.categoryAttributes.length) return listing.categoryAttributes;
+  if (Array.isArray(listing.attributes) && listing.attributes.length) return listing.attributes;
+  const masterAttributes = productMasterEbayMapping(item)?.attributes;
+  return Array.isArray(masterAttributes) ? masterAttributes : [];
+}
+
+function parseEbayAspectDraft(value, item = {}) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return { ...value };
+  const text = String(value || "").trim();
+  if (text) {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return { ...parsed };
+    } catch {
+      // Keep going with base product fallbacks.
+    }
+  }
+  const aspects = {};
+  if (item.brand) aspects.Brand = [String(item.brand)];
+  if (item.mfrPartNumber) aspects.MPN = [String(item.mfrPartNumber)];
+  return aspects;
+}
+
+function ebayAspectKey(value = "") {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function isLockedBrandAspect(item = {}, attributeOrName = {}) {
+  const name = typeof attributeOrName === "string" ? attributeOrName : attributeOrName.name || attributeOrName.handle || attributeOrName.id || "";
+  return Boolean(item.brandLocked && item.brand && ebayAspectKey(name) === "brand");
+}
+
+function sourceDataSources(item = {}) {
+  return [
+    item,
+    item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {},
+    item.original && typeof item.original === "object" ? item.original : {},
+    item.attributes && typeof item.attributes === "object" ? item.attributes : {}
+  ];
+}
+
+function sourceDataValue(item = {}, keys = []) {
+  const sourceKeys = [...new Set(keys.flatMap((key) => {
+    const text = String(key || "").trim();
+    const camel = text.replace(/[-_]+([a-z0-9])/g, (_, char) => char.toUpperCase());
+    const snake = text.replace(/[A-Z]/g, (char) => `_${char.toLowerCase()}`).replace(/[-\s]+/g, "_").replace(/^_/, "");
+    const kebab = snake.replace(/_/g, "-");
+    return [text, camel, snake, kebab];
+  }).filter(Boolean))];
+  for (const source of sourceDataSources(item)) {
+    for (const key of sourceKeys) {
+      const value = String(key || "").includes(".")
+        ? String(key).split(".").reduce((cursor, part) => (cursor && typeof cursor === "object" ? cursor[part] : undefined), source)
+        : source?.[key];
+      if (Array.isArray(value) && value.length) return value.join(", ");
+      if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
+    }
+  }
+  return "";
+}
+
+function productAttributeMappingFor(item = {}, attribute = {}, channel = "ebay") {
+  const mapping = productMasterCategorySetting(item)?.mappings?.[channel] || {};
+  const keys = [attribute.id, attribute.name, attribute.handle].map(ebayAspectKey).filter(Boolean);
+  return (mapping.attributeMappings || []).find((row) => [row.attributeId, row.attributeName, row.attributeHandle].map(ebayAspectKey).some((key) => keys.includes(key))) || null;
+}
+
+function ebayProductAspectValue(item = {}, attribute = {}) {
+  const name = attribute.name || attribute.handle || attribute.id || "";
+  const key = ebayAspectKey(name);
+  if (key === "brand" && item.brandLocked && item.brand) return String(item.brand).trim();
+  const attributeMapping = productAttributeMappingFor(item, attribute, "ebay");
+  if (attributeMapping && attributeMapping.enabled !== false) {
+    const mappedValue = attributeMapping.sourceField ? sourceDataValue(item, [attributeMapping.sourceField]) : "";
+    if (mappedValue) return mappedValue;
+    if (attributeMapping.fallbackValue) return String(attributeMapping.fallbackValue).trim();
+  }
+  const candidates = {
+    brand: ["brand", "vendor"],
+    mpn: ["mfrPartNumber", "manufacturerPartNumber", "mpn", "model"],
+    model: ["model", "mfrPartNumber", "sku"],
+    color: ["color", "colour"],
+    material: ["material"],
+    size: ["size"],
+    type: ["type", "productType"],
+    countryoforigin: ["countryOfOrigin", "originCountry"],
+    numberinpack: ["packQty", "packageQty", "uomQty"],
+    unitquantity: ["uomQty", "unitQuantity", "qty"],
+    unittype: ["uom", "unitType"],
+    itemlength: ["length", "itemLength"],
+    itemwidth: ["width", "itemWidth"],
+    itemheight: ["height", "itemHeight"],
+    features: ["features", "tags"],
+    department: ["department"],
+    californiaprop65warning: ["prop65Warning", "californiaProp65Warning"]
+  }[key] || [];
+  const value = sourceDataValue(item, [...candidates, name, key, attribute.handle, attribute.id]);
+  if (!value) return "";
+  if (/^item(length|width|height)$/.test(key) && /^-?\d+(\.\d+)?$/.test(value)) return `${value} in`;
+  return value;
+}
+
+function ebayAspectCurrentValue(aspects = {}, item = {}, attribute = {}) {
+  const name = attribute.name || attribute.handle || attribute.id || "";
+  if (isLockedBrandAspect(item, name)) return String(item.brand || "").trim();
+  const matchKey = Object.keys(aspects).find((key) => ebayAspectKey(key) === ebayAspectKey(name));
+  const raw = matchKey ? aspects[matchKey] : undefined;
+  if (Array.isArray(raw)) return raw.join(", ");
+  if (raw !== undefined && raw !== null) return String(raw);
+  return ebayProductAspectValue(item, attribute);
+}
+
+function ebayAspectsForProduct(item = {}, attributes = []) {
+  const aspects = parseEbayAspectDraft(item.ebayListing?.aspects, item);
+  if (item.brandLocked && item.brand) aspects.Brand = [String(item.brand).trim()];
+  for (const attribute of attributes || []) {
+    const name = attribute.name || attribute.handle || attribute.id || "";
+    if (!name) continue;
+    const current = ebayAspectCurrentValue(aspects, item, attribute);
+    if (current && !Object.keys(aspects).some((key) => ebayAspectKey(key) === ebayAspectKey(name))) {
+      aspects[name] = [current];
+    }
+  }
+  return aspects;
+}
+
+function missingRequiredEbayAspects(item = {}, attributes = []) {
+  const aspects = ebayAspectsForProduct(item, attributes);
+  return (attributes || [])
+    .filter((attribute) => attribute.required)
+    .map((attribute) => attribute.name || attribute.handle || attribute.id || "")
+    .filter((name) => name && !ebayAspectCurrentValue(aspects, item, { name }));
+}
+
+function renderEbayAttributeEditor(item = {}, attributes = []) {
+  if (!attributes.length) return `<p class="muted">No attributes loaded for this marketplace yet.</p>`;
+  const aspects = ebayAspectsForProduct(item, attributes);
+  return `
+    <div class="ebay-attribute-editor">
+      ${attributes.map((attribute, index) => {
+        const name = attribute.name || attribute.handle || attribute.id || "";
+        const value = ebayAspectCurrentValue(aspects, item, attribute);
+        const productValue = ebayProductAspectValue(item, attribute);
+        const lockedBrand = isLockedBrandAspect(item, attribute);
+        const missingRequired = attribute.required && !String(value || "").trim();
+        const listId = `ebay-aspect-options-${html(item.id)}-${index}`;
+        return `
+          <label class="${[attribute.required ? "required" : "", missingRequired ? "missing" : "", lockedBrand ? "locked" : ""].filter(Boolean).join(" ")}">
+            <span>
+              <strong>${html(name)}</strong>
+              <small>${[attribute.required ? "required" : "recommended", attribute.handle || attribute.id || "", attribute.valueMode || attribute.usage || ""].filter(Boolean).join(" / ")}</small>
+              ${lockedBrand ? `<small>Locked from main product brand</small>` : ""}
+              ${productValue ? `<small>Product value: ${html(productValue)}</small>` : ""}
+            </span>
+            <input value="${html(value)}" placeholder="${html(attribute.values?.slice(0, 3).join(", ") || "Enter value")}" list="${listId}" data-ebay-aspect-field="${html(name)}" data-product-id="${html(item.id)}" ${lockedBrand ? "readonly" : ""} />
+            ${attribute.values?.length ? `<datalist id="${listId}">${attribute.values.slice(0, 40).map((option) => `<option value="${html(option)}"></option>`).join("")}</datalist>` : ""}
+          </label>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function ebayChannelSettings() {
+  return (state.connections || []).find((channel) => String(channel.name || "").toLowerCase() === "ebay")?.settings || {};
+}
+
+function appSystemSettings() {
+  return state.systemSettings || {};
+}
+
+function ebayListingStatusCell(item = {}) {
+  const listing = item.ebayListing || {};
+  const readiness = productEbayReadiness(item);
+  const listingId = listing.listingId || item.ebayId || "";
+  const status = readiness.live ? "Live" : readiness.label.replace(/^eBay\s+/i, "");
+  const tone = readiness.tone;
+  const url = listing.listingUrl || (listingId ? `https://www.ebay.com/itm/${encodeURIComponent(listingId)}` : "");
+  const suggested = ebaySuggestedPrice(item);
+  const saved = Number(listing.price || 0);
+  const priceNote = suggested > 0
+    ? `eBay price ${money(suggested)}${saved > 0 && Math.abs(saved - suggested) >= 0.01 ? ` / draft ${money(saved)}` : ""}`
+    : readiness.missing.slice(0, 2).map(ebayMissingLabel).join(", ") || "No eBay price";
+  return `
+    <span class="status ${tone}">${html(status)}</span>
+    <small>${url ? `<a href="${html(url)}" target="_blank" rel="noopener">${html(listingId)}</a>` : html(listing.offerId || priceNote || "No eBay ID")}</small>
+  `;
+}
+
+function ebayListingDraft(item = {}) {
+  const listing = item.ebayListing || {};
+  const channelSettings = ebayChannelSettings();
+  const defaults = { ...(state.connectorState?.ebayListingDefaults || {}), ...channelSettings };
+  const quantityPlan = ebayQuantityPlan(item);
+  const draft = {
+    marketplaceId: ebayListingValue(item, "marketplaceId", defaults.ebayMarketplaceId || defaults.marketplaceId || "EBAY_US"),
+    merchantLocationKey: ebayListingValue(item, "merchantLocationKey", defaults.ebayMerchantLocationKey || defaults.merchantLocationKey || ""),
+    categoryId: ebayListingValue(item, "categoryId", defaults.ebayDefaultCategoryId || ebayListingDefaultCategoryId(item)),
+    paymentPolicyId: ebayListingValue(item, "paymentPolicyId", defaults.ebayPaymentPolicyId || defaults.paymentPolicyId || ""),
+    returnPolicyId: ebayListingValue(item, "returnPolicyId", defaults.ebayReturnPolicyId || defaults.returnPolicyId || ""),
+    fulfillmentPolicyId: ebayListingValue(item, "fulfillmentPolicyId", defaults.ebayFulfillmentPolicyId || defaults.fulfillmentPolicyId || ""),
+    quantity: Number(ebayListingValue(item, "quantity", quantityPlan.calculatedQty)),
+    price: Number(ebayListingValue(item, "price", ebaySuggestedPrice(item))),
+    imageCount: ebayListingImageUrls(item).length,
+    offerId: listing.offerId || "",
+    listingId: listing.listingId || "",
+    listingUrl: listing.listingUrl || (listing.listingId ? `https://www.ebay.com/itm/${encodeURIComponent(listing.listingId)}` : "")
+  };
+  const missing = [];
+  for (const key of ["merchantLocationKey", "categoryId", "paymentPolicyId", "returnPolicyId", "fulfillmentPolicyId"]) {
+    if (!draft[key]) missing.push(key);
+  }
+  if (!(draft.price > 0)) missing.push("price");
+  if (!(draft.quantity > 0)) missing.push("quantity");
+  if (!draft.imageCount) missing.push("image");
+  return { ...draft, missing };
+}
+
+function ebayMissingLabel(key) {
+  return ({
+    merchantLocationKey: "Location",
+    categoryId: "Category",
+    paymentPolicyId: "Payment policy",
+    returnPolicyId: "Return policy",
+    fulfillmentPolicyId: "Fulfillment policy",
+    price: "Price",
+    quantity: "Quantity",
+    image: "Image"
+  })[key] || (String(key || "").startsWith("aspect:") ? `Item specific: ${String(key).slice(7)}` : key);
+}
+
+function renderEbayListingTab(item) {
+  const listing = item.ebayListing || {};
+  const draft = ebayListingDraft(item);
+  const pricing = ebayPricingMetrics(item, draft);
+  const quantityPlan = ebayQuantityPlan(item);
+  const ebaySettings = ebayChannelSettings();
+  const masterEbayMapping = productMasterEbayMapping(item);
+  const categoryAttributes = productEbayCategoryAttributes(item);
+  const requiredAttributeCount = categoryAttributes.filter((attribute) => attribute.required).length;
+  const missingRequiredAspects = missingRequiredEbayAspects(item, categoryAttributes);
+  const readinessMissing = [...draft.missing, ...missingRequiredAspects.map((name) => `aspect:${name}`)];
+  const aspectDraft = ebayAspectsForProduct(item, categoryAttributes);
+  const status = listing.listingId ? "published" : listing.offerId ? "offer created" : "not created";
+  const draftStatus = listing.draftSavedAt && !listing.offerId && !listing.listingId ? "draft saved" : status;
+  const selectedProductSearch = productEbayTaxonomyState.productId === item.id
+    ? productEbayTaxonomyState
+    : { query: listing.categoryPath || ebayListingDefaultCategoryPath(item) || item.category || item.title || "", results: [], total: 0, loading: false, searched: false };
+  return `
+    <div class="product-tab-grid">
+      <section class="product-panel span-2">
+        <div class="section-head product-section-head">
+          <div>
+            <h3>eBay Listing</h3>
+            <p class="muted">${listing.listingId ? `Listing ${html(listing.listingId)}` : listing.offerId ? `Offer ${html(listing.offerId)}` : "Create an eBay inventory item and offer from this product."}</p>
+          </div>
+          <span class="status ${listing.listingId ? "active" : listing.offerId ? "ready" : listing.draftSavedAt ? "ready" : "draft"}">${html(draftStatus)}</span>
+        </div>
+        <div class="ebay-listing-summary">
+          <span><small>Cost</small><strong>${money(pricing.cost)}</strong></span>
+          <span><small>eBay price</small><strong>${money(pricing.price)}</strong></span>
+          <span><small>Profit</small><strong>${money(pricing.profit)}</strong></span>
+          <span><small>Margin</small><strong>${Number(pricing.margin || 0).toFixed(1)}%</strong></span>
+          <span><small>Qty</small><strong>${Number(draft.quantity || 0).toLocaleString()}</strong></span>
+          <span><small>Images</small><strong>${Number(draft.imageCount || 0).toLocaleString()}</strong></span>
+          <span><small>Offer</small><strong>${html(draft.offerId || "Not created")}</strong></span>
+          <span><small>Listing</small><strong>${html(draft.listingId || "Not live")}</strong></span>
+        </div>
+        <div class="ebay-pricing-rule">
+          <span>Store rule: ${Number(ebaySettings.minMarginPercent || 0)}% minimum margin, ${Number(ebaySettings.priceMarkupPercent || 0)}% markup, ${html(ebaySettings.roundingRule || "none")} rounding.</span>
+          <button class="button secondary" type="button" data-use-ebay-suggested-price="${item.id}" data-price="${pricing.suggestedPrice}">${withIcon("dollar-sign", `Use suggested ${money(pricing.suggestedPrice)}`)}</button>
+        </div>
+        <div class="ebay-quantity-plan">
+          <span><small>On hand</small><strong>${quantityPlan.onHand.toLocaleString()}</strong></span>
+          <span><small>Reserved</small><strong>${quantityPlan.reserved.toLocaleString()}</strong></span>
+          <span><small>Available</small><strong>${quantityPlan.available.toLocaleString()}</strong></span>
+          <span><small>Safety</small><strong>${quantityPlan.safetyQty.toLocaleString()}</strong></span>
+          <span><small>Max sellable</small><strong>${quantityPlan.maxSellableQty ? quantityPlan.maxSellableQty.toLocaleString() : "No cap"}</strong></span>
+          <span><small>eBay qty</small><strong>${Number(draft.quantity || 0).toLocaleString()}</strong></span>
+          <div class="ebay-quantity-note">
+            <span>${quantityPlan.isManual ? "Manual eBay quantity override is active." : quantityPlan.ignoredZeroOverride ? `Ignoring saved zero and calculating from ${html(quantityPlan.modeLabel)}.` : `Calculated from ${html(quantityPlan.modeLabel)}.`}</span>
+            <button class="button secondary" type="button" data-use-ebay-calculated-qty="${item.id}" data-qty="${quantityPlan.calculatedQty}">${withIcon("refresh-cw", `Use calculated ${quantityPlan.calculatedQty.toLocaleString()}`)}</button>
+          </div>
+        </div>
+        <div class="ebay-readiness ${readinessMissing.length ? "missing" : "ready"}">
+          <strong>${readinessMissing.length ? "Missing before publish" : "Ready to publish"}</strong>
+          <div class="product-workspace-chips">
+            ${readinessMissing.length ? readinessMissing.map((key) => `<span>${html(ebayMissingLabel(key))}</span>`).join("") : `<span>eBay setup complete</span>`}
+          </div>
+          ${!masterEbayMapping.categoryId ? `
+            <div class="product-editor-actions compact-actions">
+              <button class="button secondary" type="button" data-open-product-master-category="${item.id}">${withIcon("tags", "Map master category")}</button>
+            </div>
+          ` : ""}
+        </div>
+        <div class="product-form-grid">
+          ${ebayListingField("Marketplace", "marketplaceId", item, { fallback: draft.marketplaceId || "EBAY_US" })}
+          ${ebayListingField("Merchant location key", "merchantLocationKey", item, { fallback: draft.merchantLocationKey })}
+          ${ebayListingField("eBay category ID", "categoryId", item, { fallback: draft.categoryId })}
+          ${ebayListingField("eBay category path", "categoryPath", item, { fallback: listing.categoryPath || ebayListingDefaultCategoryPath(item) })}
+          ${ebayListingField("Condition", "condition", item, { fallback: ebayChannelSettings().ebayDefaultCondition || "NEW" })}
+          ${ebayListingField("eBay quantity", "quantity", item, { type: "number", min: 0, step: "1", fallback: quantityPlan.calculatedQty })}
+          ${ebayListingField("eBay price", "price", item, { type: "number", min: 0, step: "0.01", fallback: pricing.suggestedPrice })}
+          ${ebayListingField("Currency", "currency", item, { fallback: ebayChannelSettings().ebayCurrency || state.connectorState?.ebayListingDefaults?.currency || "USD" })}
+        </div>
+        <div class="product-ebay-category-picker">
+          <div class="shopify-taxonomy-search search-with-button">
+            <label>Search eBay category
+              <input value="${html(selectedProductSearch.query || "")}" placeholder="Search eBay category, e.g. sheet metal screws" data-product-ebay-taxonomy-search="${item.id}" />
+            </label>
+            <button class="button secondary" type="button" data-run-product-ebay-taxonomy-search="${item.id}">${withIcon("search", "Search")}</button>
+          </div>
+          <div class="shopify-taxonomy-results">
+            ${selectedProductSearch.loading ? `<div class="empty-state compact">Searching eBay...</div>` : ""}
+            ${selectedProductSearch.error ? `<div class="empty-state compact">${html(selectedProductSearch.error)}</div>` : ""}
+            ${(!selectedProductSearch.loading && selectedProductSearch.results.length) ? selectedProductSearch.results.map((result) => `
+              <button class="shopify-taxonomy-result" data-apply-product-ebay-taxonomy="${item.id}" data-ebay-category-id="${html(result.categoryId)}" data-ebay-category-path="${html(result.fullName || result.name)}" data-ebay-tree-id="${html(result.taxonomyVersion || "")}">
+                <span><strong>${html(result.name)}</strong><small>${html(result.fullName || "")}</small></span>
+                <em>${html(result.categoryId)}</em>
+              </button>
+            `).join("") : ""}
+            ${(!selectedProductSearch.loading && selectedProductSearch.searched && selectedProductSearch.query && !selectedProductSearch.results.length && !selectedProductSearch.error) ? `<div class="empty-state compact">No eBay categories found.</div>` : ""}
+          </div>
+        </div>
+        <div class="product-field-stack">
+          ${ebayListingField("Listing description", "listingDescription", item, { textarea: true, rows: 6, fallback: item.longDescription || item.shortDescription || item.title || "" })}
+          ${ebayListingField("Item specifics", "aspects", item, { textarea: true, rows: 5, fallback: aspectDraft })}
+        </div>
+        <section class="ebay-attribute-panel">
+          <div class="section-head">
+            <div>
+              <h4>eBay Category Attributes</h4>
+              <p class="muted">${draft.categoryId ? `Category ${html(draft.categoryId)}` : "Add an eBay category to load required attributes."}</p>
+            </div>
+            <div class="product-editor-actions compact-actions">
+              <span class="status ${missingRequiredAspects.length ? "hold" : categoryAttributes.length ? "active" : "hold"}">${categoryAttributes.length ? `${missingRequiredAspects.length ? `${missingRequiredAspects.length} missing / ` : ""}${requiredAttributeCount} required / ${categoryAttributes.length} total` : "not loaded"}</span>
+              ${draft.categoryId ? `<button class="button secondary" type="button" data-sync-product-ebay-attributes="${item.id}">${withIcon("refresh-cw", categoryAttributes.length ? "Refresh attributes" : "Load attributes")}</button>` : ""}
+            </div>
+          </div>
+          ${renderEbayAttributeEditor(item, categoryAttributes)}
+        </section>
+        <div class="product-editor-actions detail-card-actions">
+          <button class="button secondary" data-ebay-listing-action="draft" data-product-id="${item.id}">${withIcon("save", "Save SKU mapping")}</button>
+        </div>
+      </section>
+      <section class="product-panel">
+        <h3>Business Policies</h3>
+        <div class="product-field-stack compact-fields">
+          ${ebayListingField("Payment policy ID", "paymentPolicyId", item, { fallback: draft.paymentPolicyId })}
+          ${ebayListingField("Return policy ID", "returnPolicyId", item, { fallback: draft.returnPolicyId })}
+          ${ebayListingField("Fulfillment policy ID", "fulfillmentPolicyId", item, { fallback: draft.fulfillmentPolicyId })}
+        </div>
+      </section>
+      <section class="product-panel">
+        <h3>Listing Actions</h3>
+        <p class="muted">Create offer saves the eBay inventory item and creates or updates the unpublished fixed-price offer. Publish makes it live.</p>
+        <div class="product-editor-actions compact-actions">
+          ${draft.listingUrl ? `<a class="button secondary" href="${html(draft.listingUrl)}" target="_blank" rel="noopener">${withIcon("external-link", "Open on eBay")}</a>` : ""}
+          <button class="button secondary" data-ebay-listing-action="offer" data-product-id="${item.id}">${withIcon("save", draft.offerId ? "Update offer" : "Create offer")}</button>
+          <button class="button" data-ebay-listing-action="publish" data-product-id="${item.id}">${withIcon("upload-cloud", "Publish listing")}</button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderProductInventoryTab(item) {
+  const available = Number(item.qty || 0) - Number(item.reserved || 0);
+  const grossProfit = Number(item.price || 0) - Number(item.cost || 0);
+  const ledger = (state.inventoryLedger || []).filter((row) => row.productId === item.id || row.sku === item.sku).slice(0, 8);
+  const warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
+  return `
+    <div class="product-tab-grid">
+      <section class="product-panel span-2">
+        <div class="section-head product-section-head">
+          <div>
+            <h3>Inventory</h3>
+            <p class="muted">${html(item.sku || "")} / ${html(item.title || item.marketplaceTitle || "Untitled product")}</p>
+          </div>
+          <button class="button secondary" type="button" data-open-inventory-transfer="${item.id}">${withIcon("warehouse", "Transfer stock")}</button>
+        </div>
+        <div class="summary-grid product-home-summary">
+          <span><small>On hand</small><strong>${Number(item.qty || 0)}</strong></span>
+          <span><small>Reserved</small><strong>${Number(item.reserved || 0)}</strong></span>
+          <span><small>Available</small><strong>${available}</strong></span>
+          <span><small>Reorder point</small><strong>${Number(item.reorderPoint || 0)}</strong></span>
+          <span><small>Supplier stock</small><strong>${Number(item.stockQty ?? item.qty ?? 0)}</strong></span>
+          <span><small>Stock status</small><strong>${html(item.stockStatus || "Unknown")}</strong></span>
+        </div>
+      </section>
+      <section class="product-panel span-2">
+        <h3>Warehouse Stock</h3>
+        <div class="table-wrap compact-table">
+          <table>
+            <thead><tr><th>Warehouse</th><th>Bin</th><th>On hand</th><th>Reserved</th><th>Available</th><th>Reorder</th><th>Updated</th></tr></thead>
+            <tbody>
+              ${(state.warehouses || []).map((warehouse) => {
+                const stock = warehouseStock.find((row) => row.warehouseId === warehouse.id) || {
+                  warehouseId: warehouse.id,
+                  warehouseName: warehouse.name,
+                  locationBin: ((warehouse.bins || []).find((bin) => bin.isDefault) || (warehouse.bins || [])[0] || {}).code || "",
+                  qty: 0,
+                  reserved: 0,
+                  reorderPoint: 0,
+                  updatedAt: ""
+                };
+                const rowAvailable = Number(stock.qty || 0) - Number(stock.reserved || 0);
+                return `
+                  <tr>
+                    <td><button class="order-link" data-select-warehouse="${warehouse.id}">${html(warehouse.name)}</button></td>
+                    <td><input value="${html(stock.locationBin || "")}" data-warehouse-stock-field="locationBin" data-product-id="${item.id}" data-warehouse-id="${warehouse.id}" /></td>
+                    <td><input type="number" min="0" value="${Number(stock.qty || 0)}" data-warehouse-stock-field="qty" data-product-id="${item.id}" data-warehouse-id="${warehouse.id}" /></td>
+                    <td><input type="number" min="0" value="${Number(stock.reserved || 0)}" data-warehouse-stock-field="reserved" data-product-id="${item.id}" data-warehouse-id="${warehouse.id}" /></td>
+                    <td><span class="status ${rowAvailable <= Number(stock.reorderPoint || 0) ? "hold" : "active"}">${rowAvailable}</span></td>
+                    <td><input type="number" min="0" value="${Number(stock.reorderPoint || 0)}" data-warehouse-stock-field="reorderPoint" data-product-id="${item.id}" data-warehouse-id="${warehouse.id}" /></td>
+                    <td>${stock.updatedAt ? simpleDate(stock.updatedAt) : "Not set"}</td>
+                  </tr>
+                `;
+              }).join("") || `<tr><td colspan="7">No warehouses configured.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="product-panel">
+        <h3>Supplier Stock Feed</h3>
+        <div class="product-field-stack compact-fields">
+          ${productFieldLabel("Supplier stock qty", "stockQty", item, { type: "number", min: 0 })}
+          ${productFieldLabel("Supplier stock status", "stockStatus", item)}
+          ${productFieldLabel("Stock updated", "stockUpdatedAt", item)}
+          ${productFieldLabel("Supplier code", "supplierCode", item)}
+        </div>
+      </section>
+      <section class="product-panel">
+        <h3>Inventory Value</h3>
+        <div class="summary-grid">
+          <span><small>On-hand cost</small><strong>${money(Number(item.cost || 0) * Number(item.qty || 0))}</strong></span>
+          <span><small>Available sales</small><strong>${money(Number(item.price || 0) * available)}</strong></span>
+          <span><small>Gross profit</small><strong>${money(grossProfit * available)}</strong></span>
+          <span><small>Vendor</small><strong>${html(item.vendor || item.supplier || "No vendor")}</strong></span>
+        </div>
+      </section>
+      <section class="product-panel span-2">
+        <h3>Stock Ledger</h3>
+        <div class="table-wrap compact-table">
+          <table>
+            <thead><tr><th>Date</th><th>Type</th><th>Warehouse</th><th>Reference</th><th>Qty change</th><th>On hand</th><th>Reserved</th><th>Reason</th></tr></thead>
+            <tbody>
+              ${ledger.map((row) => `
+                <tr>
+                  <td>${dateLabel(row.createdAt)}</td>
+                  <td>${html(row.type || "adjustment")}</td>
+                  <td>${html(row.warehouseName || row.locationBin || "Global")}</td>
+                  <td>${html(row.referenceNumber || row.source || "")}</td>
+                  <td><strong>${Number(row.quantityChange || 0) > 0 ? "+" : ""}${Number(row.quantityChange || 0)}</strong></td>
+                  <td>${Number(row.qtyBefore || 0)} -> ${Number(row.qtyAfter || 0)}</td>
+                  <td>${Number(row.reservedBefore || 0)} -> ${Number(row.reservedAfter || 0)}</td>
+                  <td>${html(row.reason || "")}</td>
+                </tr>
+              `).join("") || `<tr><td colspan="8">No stock movement yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function renderZoroTab(item) {
   return `
     <div class="product-tab-grid">
@@ -5774,6 +7742,7 @@ function renderShippingTab(item) {
 
 function renderPricingTab(item, grossProfit, margin) {
   const shadows = item.shadowSkus || [];
+  const aliases = item.aliases || [];
   return `
     <div class="product-tab-grid">
       <section class="product-panel">
@@ -5805,7 +7774,46 @@ function renderPricingTab(item, grossProfit, margin) {
           </table>
         </div>
       </section>
+      <section class="product-panel span-2">
+        <h3>SKU Aliases</h3>
+        <div class="table-wrap compact-table">
+          <table>
+            <thead><tr><th>Alias SKU</th><th>Source</th><th>Type</th><th>Created from</th><th>Status</th></tr></thead>
+            <tbody>
+              ${aliases.map((alias) => `
+                <tr>
+                  <td>${html(alias.aliasSku || "")}</td>
+                  <td>${html(alias.source || "")}</td>
+                  <td>${html(alias.type || "direct")}</td>
+                  <td>${html(alias.createdFromOrderNumber || alias.createdFromOrderId || "Manual")}</td>
+                  <td><span class="status ${alias.active === false ? "inactive" : "active"}">${alias.active === false ? "Inactive" : "Active"}</span></td>
+                </tr>
+              `).join("") || `<tr><td colspan="5">No aliases mapped yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
+  `;
+}
+
+function renderProductAliasesSection(item = {}) {
+  const aliases = item.aliases || [];
+  return `
+    <section class="product-section-card product-section-aliases">
+      <div class="product-section-title">${sectionIconTitle("tags", "SKU Aliases")}<span>${aliases.filter((alias) => alias.active !== false).length} active</span></div>
+      <div class="product-alias-list">
+        ${aliases.map((alias) => `
+          <div class="product-alias-row">
+            <div>
+              <strong>${html(alias.aliasSku || "")}</strong>
+              <small>${html([alias.source, alias.type, alias.createdFromOrderNumber || alias.createdFromOrderId].filter(Boolean).join(" / ") || "Alias")}</small>
+            </div>
+            <span class="status ${alias.active === false ? "inactive" : "active"}">${alias.active === false ? "Inactive" : "Active"}</span>
+          </div>
+        `).join("") || `<p class="muted">No SKU aliases mapped yet.</p>`}
+      </div>
+    </section>
   `;
 }
 
@@ -5833,7 +7841,7 @@ function renderBrandGuard(item = {}) {
 }
 
 function renderProductHomeTab(item, context) {
-  const { images, galleryImage, tagsText, readiness, activeStatus, stockQty, shadowCount, grossProfit, margin } = context;
+  const { images, galleryImage, tagsText, readiness, activeStatus, stockQty, shadowCount, aliasCount, grossProfit, margin } = context;
   return `
     <div class="product-home-grid">
       <div class="product-home-side">
@@ -5880,6 +7888,7 @@ function renderProductHomeTab(item, context) {
               ${renderProductBulletSection(item)}
             </div>
           </section>
+          ${renderProductAliasesSection(item)}
         </div>
         <div class="product-home-column">
           <section class="product-section-card product-section-green">
@@ -5905,7 +7914,7 @@ function renderProductHomeTab(item, context) {
               <span><small>Margin</small><strong>${margin.toFixed(1)}%</strong></span>
               <span><small>Stock</small><strong>${countLabel(stockQty)}</strong></span>
               <span><small>Shadows</small><strong>${shadowCount}</strong></span>
-              <span><small>Readiness</small><strong>${readiness.score}%</strong></span>
+              <span><small>Aliases</small><strong>${aliasCount}</strong></span>
             </div>
           </section>
           <section class="product-section-card product-section-purple">
@@ -6119,13 +8128,18 @@ function renderProductContentPage() {
   const activeStatus = item.active === false ? "Inactive source" : "Active source";
   const stockQty = Number(item.stockQty ?? item.qty ?? 0);
   const shadowCount = (item.shadowSkus || []).length;
+  const aliasCount = (item.aliases || []).filter((alias) => alias.active !== false).length;
   const readiness = productReadiness(item);
-  const context = { images, defaultImage, galleryImage, tagsText, readiness, activeStatus, stockQty, shadowCount, grossProfit, margin };
+  const context = { images, defaultImage, galleryImage, tagsText, readiness, activeStatus, stockQty, shadowCount, aliasCount, grossProfit, margin };
   let activeTabContent = "";
   if (selectedProductWorkspaceTab === "shopify") {
     activeTabContent = renderMarketplaceTab(item, "shopify");
+  } else if (selectedProductWorkspaceTab === "ebay") {
+    activeTabContent = renderEbayListingTab(item);
   } else if (selectedProductWorkspaceTab === "zoro") {
     activeTabContent = renderZoroTab(item);
+  } else if (selectedProductWorkspaceTab === "inventory") {
+    activeTabContent = renderProductInventoryTab(item);
   } else if (selectedProductWorkspaceTab === "shipping") {
     activeTabContent = renderShippingTab(item);
   } else if (selectedProductWorkspaceTab === "pricing") {
@@ -6148,7 +8162,10 @@ function renderProductContentPage() {
           </div>
         </section>
         <section class="product-panel span-2">
-          <h3>Raw Product Manager Fields</h3>
+          <div class="section-head">
+            <h3>Raw Product Manager Fields</h3>
+            <button class="button secondary" type="button" data-backfill-source-data="${html(item.id)}">${withIcon("refresh-cw", "Backfill source data")}</button>
+          </div>
           ${renderProductManagerFields(item)}
         </section>
       </div>
@@ -6190,14 +8207,16 @@ function renderProductContentPage() {
           </div>
         </div>
         <div class="product-editor-actions">
-          <button class="button secondary" data-select-product="${item.id}" data-product-target="inventory-full">${withIcon("warehouse", "Inventory")}</button>
+          <button class="button secondary" data-product-workspace-tab="inventory">${withIcon("warehouse", "Inventory")}</button>
           <button class="button" data-create-shadow="${item.id}">${withIcon("plus", "Create shadow")}</button>
         </div>
       </div>
       <div class="product-workspace-tabs">
         ${productTabButton("home", "Product Home")}
         ${productTabButton("shopify", "Shopify")}
+        ${productTabButton("ebay", "eBay")}
         ${productTabButton("zoro", "Zoro")}
+        ${productTabButton("inventory", "Inventory")}
         ${productTabButton("shipping", "Shipping Preferences")}
         ${productTabButton("pricing", "Pricing Management")}
         ${productTabButton("source", "Source Details")}
@@ -6752,17 +8771,24 @@ function groupBy(list, keyFn) {
 }
 
 function renderReports() {
-  const orders = state.orders;
+  const orders = state.orders.filter(isReportableOrder);
+  const reportableOrderIds = new Set(orders.map((order) => order.id));
+  const reportableOrderNumbers = new Set(orders.map((order) => order.orderNumber).filter(Boolean));
+  const reportableReturns = (state.returns || []).filter((item) => {
+    if (item.orderId) return reportableOrderIds.has(item.orderId);
+    if (item.orderNumber) return reportableOrderNumbers.has(item.orderNumber);
+    return true;
+  });
   const sales = orders.reduce((sum, order) => sum + Number(order.total || 0), 0);
   const productCost = orders.reduce((sum, order) => sum + Number(order.productCost || 0), 0);
   const fees = orders.reduce((sum, order) => sum + Number(order.marketplaceFees || 0), 0);
   const shipping = orders.reduce((sum, order) => sum + Number(order.shippingCost || 0), 0);
-  const refunds = orders.reduce((sum, order) => sum + Number(order.refundAmount || 0), 0) + (state.returns || []).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const refunds = orders.reduce((sum, order) => sum + Number(order.refundAmount || 0), 0) + reportableReturns.reduce((sum, item) => sum + Number(item.amount || 0), 0);
   const profit = sales - productCost - fees - shipping - refunds;
 
   $("#report-sales").textContent = money(sales);
   $("#report-profit").textContent = money(profit);
-  $("#report-returns").textContent = String((state.returns || []).length);
+  $("#report-returns").textContent = String(reportableReturns.length);
   $("#report-cancellations").textContent = String((state.cancellations || []).length);
 
   const sourceGroups = groupBy(orders, (order) => order.source);
@@ -6884,7 +8910,127 @@ function renderChannelProfile() {
     return;
   }
   const settings = channel.settings || {};
+  const isEbay = String(channel.name || "").toLowerCase() === "ebay";
   const channelShadows = allShadowRows().filter((row) => String(row.shadow.marketplace || "").toLowerCase() === String(channel.name || "").toLowerCase());
+  const optionRows = (rows = [], valueKey = "id", labelKey = "name", current = "") => rows.map((row) => {
+    const value = row[valueKey] || "";
+    const label = [row[labelKey] || value, value].filter(Boolean).join(" / ");
+    return `<option value="${html(value)}" ${String(current || "") === String(value || "") ? "selected" : ""}>${html(label)}</option>`;
+  }).join("");
+  const fallbackOption = (rows = [], valueKey = "id", current = "") => {
+    if (!current || rows.some((row) => String(row[valueKey] || "") === String(current))) return "";
+    return `<option value="${html(current)}" selected>${html(current)}</option>`;
+  };
+  const ebaySettingsPanel = isEbay ? `
+        <section class="full-card span-2 channel-settings-card">
+          <div class="section-head channel-settings-head">
+            <div>
+              <h3>eBay Listing API Defaults</h3>
+              <p class="muted">These values are used when creating offers, publishing listings, and importing the live eBay catalog.</p>
+            </div>
+            <button class="button secondary" type="button" data-sync-ebay-account-settings="${channel.id}">${withIcon("refresh-cw", "Sync eBay account settings")}</button>
+          </div>
+          <div class="channel-settings-layout">
+            <div class="channel-settings-main">
+              <div class="channel-settings-group">
+                <div class="channel-settings-group-head">
+                  <strong>Account</strong>
+                  <span>Marketplace, currency, and fulfillment origin.</span>
+                </div>
+                <div class="channel-settings-grid account-grid">
+                  <label>Marketplace ID<input value="${html(settings.ebayMarketplaceId || "EBAY_US")}" data-channel-field="ebayMarketplaceId" data-channel-id="${channel.id}" /></label>
+                  <label>Currency<input value="${html(settings.ebayCurrency || "USD")}" data-channel-field="ebayCurrency" data-channel-id="${channel.id}" /></label>
+                  <label class="wide-field">Merchant location<select data-channel-field="ebayMerchantLocationKey" data-channel-id="${channel.id}">
+                    <option value="">Select location</option>
+                    ${optionRows(settings.ebayMerchantLocations || [], "merchantLocationKey", "name", settings.ebayMerchantLocationKey)}
+                    ${fallbackOption(settings.ebayMerchantLocations || [], "merchantLocationKey", settings.ebayMerchantLocationKey)}
+                  </select></label>
+                </div>
+              </div>
+              <div class="channel-settings-group">
+                <div class="channel-settings-group-head">
+                  <strong>Business Policies</strong>
+                  <span>Required by eBay before offers can publish.</span>
+                </div>
+                <div class="channel-settings-grid policy-grid">
+                  <label>Payment policy<select data-channel-field="ebayPaymentPolicyId" data-channel-id="${channel.id}">
+                    <option value="">Select payment policy</option>
+                    ${optionRows(settings.ebayPaymentPolicies || [], "id", "name", settings.ebayPaymentPolicyId)}
+                    ${fallbackOption(settings.ebayPaymentPolicies || [], "id", settings.ebayPaymentPolicyId)}
+                  </select></label>
+                  <label>Return policy<select data-channel-field="ebayReturnPolicyId" data-channel-id="${channel.id}">
+                    <option value="">Select return policy</option>
+                    ${optionRows(settings.ebayReturnPolicies || [], "id", "name", settings.ebayReturnPolicyId)}
+                    ${fallbackOption(settings.ebayReturnPolicies || [], "id", settings.ebayReturnPolicyId)}
+                  </select></label>
+                  <label>Fulfillment policy<select data-channel-field="ebayFulfillmentPolicyId" data-channel-id="${channel.id}">
+                    <option value="">Select fulfillment policy</option>
+                    ${optionRows(settings.ebayFulfillmentPolicies || [], "id", "name", settings.ebayFulfillmentPolicyId)}
+                    ${fallbackOption(settings.ebayFulfillmentPolicies || [], "id", settings.ebayFulfillmentPolicyId)}
+                  </select></label>
+                </div>
+              </div>
+              <div class="channel-settings-group">
+                <div class="channel-settings-group-head">
+                  <strong>Listing Defaults</strong>
+                  <span>Used when creating new eBay inventory items and offers.</span>
+                </div>
+                <div class="channel-settings-grid listing-grid">
+                  <label>Default condition<select data-channel-field="ebayDefaultCondition" data-channel-id="${channel.id}">
+                    ${["NEW", "LIKE_NEW", "NEW_OTHER", "NEW_WITH_DEFECTS", "CERTIFIED_REFURBISHED", "EXCELLENT_REFURBISHED", "VERY_GOOD_REFURBISHED", "GOOD_REFURBISHED", "SELLER_REFURBISHED", "USED_EXCELLENT", "USED_VERY_GOOD", "USED_GOOD", "USED_ACCEPTABLE", "FOR_PARTS_OR_NOT_WORKING"].map((condition) => `<option value="${condition}" ${settings.ebayDefaultCondition === condition ? "selected" : ""}>${condition.replaceAll("_", " ")}</option>`).join("")}
+                  </select></label>
+                  <label>Default category ID<input value="${html(settings.ebayDefaultCategoryId || "")}" data-channel-field="ebayDefaultCategoryId" data-channel-id="${channel.id}" /></label>
+                  <label>Listing format<select data-channel-field="ebayListingFormat" data-channel-id="${channel.id}">
+                    ${["FIXED_PRICE"].map((format) => `<option value="${format}" ${settings.ebayListingFormat === format ? "selected" : ""}>${format.replace("_", " ")}</option>`).join("")}
+                  </select></label>
+                  <label>Quantity source<select data-channel-field="ebayQuantityMode" data-channel-id="${channel.id}">
+                    ${[["available", "Available qty"], ["qty", "On hand qty"], ["stockQty", "Source stock qty"]].map(([value, label]) => `<option value="${value}" ${settings.ebayQuantityMode === value ? "selected" : ""}>${label}</option>`).join("")}
+                  </select></label>
+                  <label>Description source<select data-channel-field="ebayDescriptionSource" data-channel-id="${channel.id}">
+                    ${[["longDescription", "Long description"], ["shortDescription", "Short description"], ["title", "Title only"]].map(([value, label]) => `<option value="${value}" ${settings.ebayDescriptionSource === value ? "selected" : ""}>${label}</option>`).join("")}
+                  </select></label>
+                  <label>Max images<input type="number" min="1" max="24" value="${Number(settings.ebayMaxImages || 12)}" data-channel-field="ebayMaxImages" data-channel-id="${channel.id}" /></label>
+                </div>
+                <div class="channel-toggle-grid ebay-toggle-grid">
+                  ${[
+                    ["ebayRequireImage", "Require image before publish"],
+                    ["ebayBestOfferEnabled", "Enable best offer"],
+                    ["ebayAutoPublish", "Auto-publish after offer creation"]
+                  ].map(([field, label]) => `<label><input type="checkbox" ${settings[field] ? "checked" : ""} data-channel-field="${field}" data-channel-id="${channel.id}" /> ${label}</label>`).join("")}
+                </div>
+              </div>
+            </div>
+            <aside class="channel-settings-aside">
+              <div class="channel-sync-panel">
+                <strong>Account Sync</strong>
+                <p class="muted">${settings.ebayAccountSettingsSyncedAt ? `Last sync ${dateLabel(settings.ebayAccountSettingsSyncedAt)}.` : "Sync after reconnecting eBay with Sell Account and Sell Inventory permissions."}</p>
+              </div>
+              <form id="ebay-location-form" class="channel-location-form">
+                <strong>Create Location</strong>
+                <label>Location key<input name="merchantLocationKey" value="${html(settings.ebayMerchantLocationKey || "SI-WAREHOUSE")}" required /></label>
+                <label>Name<input name="name" value="SI Warehouse" required /></label>
+                <label>Address<input name="addressLine1" value="388 South Ave" required /></label>
+                <div class="channel-location-row">
+                  <label>City<input name="city" value="Staten Island" required /></label>
+                  <label>State<input name="state" value="NY" required /></label>
+                </div>
+                <div class="channel-location-row">
+                  <label>Postal<input name="postalCode" value="10303" required /></label>
+                  <label>Country<input name="country" value="US" required /></label>
+                </div>
+                <label>Phone<input name="phone" placeholder="Optional" /></label>
+                <button class="button secondary" type="submit">${withIcon("warehouse", "Create eBay location")}</button>
+              </form>
+              <div class="channel-stat-strip">
+                <span><small>Locations</small><strong>${Number((settings.ebayMerchantLocations || []).length).toLocaleString()}</strong></span>
+                <span><small>Payment</small><strong>${Number((settings.ebayPaymentPolicies || []).length).toLocaleString()}</strong></span>
+                <span><small>Returns</small><strong>${Number((settings.ebayReturnPolicies || []).length).toLocaleString()}</strong></span>
+                <span><small>Fulfillment</small><strong>${Number((settings.ebayFulfillmentPolicies || []).length).toLocaleString()}</strong></span>
+              </div>
+            </aside>
+          </div>
+        </section>
+  ` : "";
   target.innerHTML = `
     <div class="full-order">
       <div class="full-order-head">
@@ -6922,6 +9068,7 @@ function renderChannelProfile() {
             <label>Default shipping service<input value="${html(settings.defaultShippingService || "")}" data-channel-field="defaultShippingService" data-channel-id="${channel.id}" /></label>
           </div>
         </section>
+        ${ebaySettingsPanel}
         <section class="full-card span-2">
           <h3>Automation Settings</h3>
           <div class="channel-toggle-grid">
@@ -6938,10 +9085,11 @@ function renderChannelProfile() {
           </div>
         </section>
         <section class="full-card span-2">
-          <h3>Pricing Rules</h3>
+          <h3>${channel.name === "eBay" ? "eBay Pricing Rules" : "Pricing Rules"}</h3>
+          <p class="muted">${channel.name === "eBay" ? "Used as the default eBay listing price when a SKU does not have a manual eBay price." : "Used for marketplace price suggestions and channel updates."}</p>
           <div class="form-grid">
-            <label>Price markup %<input type="number" step="0.01" value="${Number(settings.priceMarkupPercent || 0)}" data-channel-field="priceMarkupPercent" data-channel-id="${channel.id}" /></label>
-            <label>Minimum margin %<input type="number" step="0.01" value="${Number(settings.minMarginPercent || 0)}" data-channel-field="minMarginPercent" data-channel-id="${channel.id}" /></label>
+            <label>Storewide markup %<input type="number" step="0.01" value="${Number(settings.priceMarkupPercent || 0)}" data-channel-field="priceMarkupPercent" data-channel-id="${channel.id}" /></label>
+            <label>Minimum profit margin %<input type="number" step="0.01" value="${Number(settings.minMarginPercent || 0)}" data-channel-field="minMarginPercent" data-channel-id="${channel.id}" /></label>
             <label>Rounding rule<select data-channel-field="roundingRule" data-channel-id="${channel.id}">
               ${["none", "nearest .99", "nearest .95", "round up"].map((rule) => `<option value="${rule}" ${settings.roundingRule === rule ? "selected" : ""}>${rule}</option>`).join("")}
             </select></label>
@@ -7052,10 +9200,372 @@ async function confirmOrder(id) {
 }
 
 async function runOrderAction(id, action) {
-  const result = await api(`/api/orders/${id}/action`, { method: "POST", body: JSON.stringify({ action }) });
-  selectedOrderId = id;
+  const order = state.orders.find((row) => row.id === id);
+  if (!order) return;
+  const payload = { action };
+  if (action === "void") {
+    if (!confirm(`Void ${order.orderNumber}? It will stay visible but imports will not update or reopen it.`)) return;
+    payload.note = "Order voided by admin.";
+  }
+  if (action === "delete") {
+    const expected = order.internalOrderNumber || order.orderNumber;
+    const confirmation = prompt(`Delete ${expected}? This hides the order and blocks future imports from recreating it. Type ${expected} to confirm.`);
+    if (confirmation !== expected) return;
+    payload.confirmation = confirmation;
+    payload.note = "Order deleted by admin.";
+  }
+  const result = await api(`/api/orders/${id}/action`, { method: "POST", body: JSON.stringify(payload) });
+  selectedOrderId = result.deleted ? (result.state.orders[0]?.id || null) : id;
+  if (result.deleted) selectedOrderIds.delete(id);
   setState(result.state);
-  toast(`Order ${labelStatus(result.order.status).toLowerCase()}.`);
+  toast(result.deleted ? "Order deleted and protected from reimport." : `Order ${labelStatus(result.order.status).toLowerCase()}.`);
+}
+
+function compactSkuText(value = "") {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function orderSkuSearchTokens(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2);
+}
+
+function searchableProductText(product = {}) {
+  const seen = new Set();
+  const values = [];
+  const visit = (value) => {
+    if (value === null || value === undefined) return;
+    if (["string", "number", "boolean"].includes(typeof value)) {
+      values.push(String(value));
+      return;
+    }
+    if (typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      value.slice(0, 40).forEach(visit);
+      return;
+    }
+    Object.entries(value).slice(0, 80).forEach(([key, child]) => {
+      values.push(key);
+      visit(child);
+    });
+  };
+  visit(product);
+  return values.join(" ").toLowerCase();
+}
+
+function scoreOrderSkuCandidate(product, query = "", sourceSku = "") {
+  const compactQuery = compactSkuText(query);
+  const compactSource = compactSkuText(sourceSku);
+  const compactSku = compactSkuText(product.sku);
+  const haystack = searchableProductText(product);
+  let score = 0;
+  if (compactQuery && compactSku === compactQuery) score += 100;
+  if (compactQuery && (compactSku.includes(compactQuery) || compactQuery.includes(compactSku))) score += 45;
+  if (!compactQuery && compactSource && compactSku === compactSource) score += 120;
+  if (!compactQuery && compactSource && (compactSku.includes(compactSource) || compactSource.includes(compactSku))) score += 55;
+  const tokens = orderSkuSearchTokens(query || sourceSku);
+  for (const token of tokens) {
+    if (String(product.sku || "").toLowerCase().includes(token)) score += 18;
+    if (haystack.includes(token)) score += 8;
+  }
+  if (score > 0 && Number(product.qty || 0) > 0) score += 2;
+  return score;
+}
+
+function orderSkuMapCandidates() {
+  const query = pendingOrderSkuMap.query || "";
+  const sourceSku = pendingOrderSkuMap.sourceSku || "";
+  const products = state.inventory || [];
+  const queryText = query.trim().toLowerCase();
+  if (queryText.length < 2) return [];
+  const tokens = orderSkuSearchTokens(query);
+  let scored = products
+    .map((product) => {
+      const haystack = searchableProductText(product);
+      const tokenMatches = tokens.filter((token) => haystack.includes(token)).length;
+      return { product, score: scoreOrderSkuCandidate(product, query, sourceSku) + tokenMatches * 6, haystack };
+    })
+    .filter(({ score, haystack }) => score > 0 || haystack.includes(queryText) || tokens.some((token) => haystack.includes(token)))
+    .sort((a, b) => b.score - a.score || String(a.product.sku || "").localeCompare(String(b.product.sku || "")));
+  return scored.slice(0, 14);
+}
+
+function renderOrderSkuMapResults() {
+  const results = $("#order-sku-map-results");
+  const choice = $("#order-sku-map-choice");
+  if (!results) return;
+  choice.hidden = !pendingOrderSkuMap.selectedProductId;
+  if (choice && pendingOrderSkuMap.selectedProductId) {
+    const selected = productById(pendingOrderSkuMap.selectedProductId);
+    choice.innerHTML = selected ? `
+      <div>
+        <span class="muted">Map ${html(pendingOrderSkuMap.sourceSku || "this order SKU")} to</span>
+        <strong>${html(selected.sku)}</strong>
+      </div>
+      <div class="order-sku-map-choice-actions">
+        <button type="button" class="button secondary" data-submit-order-sku-map="direct">Direct SKU</button>
+        <button type="button" class="button" data-submit-order-sku-map="shadow">Shadow SKU child</button>
+      </div>
+    ` : "";
+  }
+  if (pendingOrderSkuMap.loading) {
+    results.innerHTML = `<div class="order-sku-map-feedback loading"><strong>Searching products...</strong><span>Checking active product records.</span></div>`;
+    return;
+  }
+  if (!pendingOrderSkuMap.searched) {
+    results.innerHTML = `<div class="order-sku-map-feedback"><strong>Ready to search</strong><span>Enter a SKU, title, brand, category, supplier, or similar product text, then click Search.</span></div>`;
+    return;
+  }
+  if (!(state.inventory || []).length) {
+    results.innerHTML = `<div class="empty-state compact">No products are loaded yet. Refresh the page after the state finishes loading.</div>`;
+    return;
+  }
+  if ((pendingOrderSkuMap.query || "").trim().length < 2) {
+    results.innerHTML = `<div class="empty-state compact">Enter at least 2 characters to search products.</div>`;
+    return;
+  }
+  const candidates = orderSkuMapCandidates();
+  if (!candidates.length) {
+    results.innerHTML = `<div class="empty-state compact">No results found for "${html(pendingOrderSkuMap.query)}". Try SKU, product title, brand, or supplier text.</div>`;
+    return;
+  }
+  results.innerHTML = candidates.map(({ product, score }) => `
+    <div class="order-sku-map-result ${String(pendingOrderSkuMap.selectedProductId || "") === String(product.id || "") ? "selected" : ""}">
+      <div>
+        <strong>${html(product.sku)}</strong>
+        <span>${html(shortenTitle(product.title || product.marketplaceTitle || "Untitled product", 76))}</span>
+        <small>${html([product.brand, product.category, product.vendor, product.supplier].filter(Boolean).join(" / ") || "No product metadata")} ${score ? `Match ${Math.round(score)}` : ""}</small>
+      </div>
+      <button type="button" class="button secondary compact-button" data-select-order-sku-map-product="${html(product.id)}">Map to this</button>
+    </div>
+  `).join("");
+}
+
+function openOrderSkuMapModal(orderId, lineIndex, currentSku = "") {
+  pendingOrderSkuMap = { orderId, lineIndex: Number(lineIndex), sourceSku: currentSku || "", selectedProductId: null, query: "", searched: false, loading: false };
+  $("#order-sku-map-source").textContent = currentSku || "Blank SKU";
+  $("#order-sku-map-search").value = currentSku || "";
+  $("#order-sku-map-modal").classList.add("show");
+  $("#order-sku-map-modal").setAttribute("aria-hidden", "false");
+  renderOrderSkuMapResults();
+  setTimeout(() => $("#order-sku-map-search")?.focus(), 0);
+}
+
+function closeOrderSkuMapModal() {
+  $("#order-sku-map-modal")?.classList.remove("show");
+  $("#order-sku-map-modal")?.setAttribute("aria-hidden", "true");
+  if (orderSkuMapSearchTimer) clearTimeout(orderSkuMapSearchTimer);
+  orderSkuMapSearchTimer = null;
+  pendingOrderSkuMap = { orderId: null, lineIndex: 0, sourceSku: "", selectedProductId: null, query: "", searched: false, loading: false };
+}
+
+function runOrderSkuMapSearch() {
+  if (orderSkuMapSearchTimer) clearTimeout(orderSkuMapSearchTimer);
+  pendingOrderSkuMap.query = $("#order-sku-map-search")?.value || "";
+  pendingOrderSkuMap.selectedProductId = null;
+  pendingOrderSkuMap.searched = true;
+  pendingOrderSkuMap.loading = true;
+  renderOrderSkuMapResults();
+  orderSkuMapSearchTimer = setTimeout(() => {
+    orderSkuMapSearchTimer = null;
+    pendingOrderSkuMap.loading = false;
+    renderOrderSkuMapResults();
+  }, 300);
+}
+
+async function submitOrderSkuMap(mappingType) {
+  const product = productById(pendingOrderSkuMap.selectedProductId);
+  if (!pendingOrderSkuMap.orderId || !product) return;
+  const orderId = pendingOrderSkuMap.orderId;
+  const lineIndex = pendingOrderSkuMap.lineIndex;
+  const sourceSku = pendingOrderSkuMap.sourceSku;
+  const result = await api(`/api/orders/${orderId}/items/${lineIndex}/map-sku`, {
+    method: "POST",
+    body: JSON.stringify({
+      targetSku: product.sku,
+      sourceSku,
+      mappingType
+    })
+  });
+  selectedOrderId = orderId;
+  setState(result.state);
+  closeOrderSkuMapModal();
+  toast(mappingType === "shadow"
+    ? `Created shadow SKU ${result.shadow?.shadowSku || sourceSku} under ${result.product.sku}.`
+    : `Mapped order line to ${result.product.sku}.`);
+}
+
+async function mapOrderLineSku(orderId, lineIndex, currentSku = "") {
+  openOrderSkuMapModal(orderId, lineIndex, currentSku);
+}
+
+async function unmapOrderLineSku(orderId, lineIndex, currentSku = "", sourceSku = "") {
+  const label = sourceSku || "the original imported SKU";
+  if (!confirm(`Unmap ${currentSku || "this line"} and restore ${label}?`)) return;
+  const result = await api(`/api/orders/${orderId}/items/${lineIndex}/unmap-sku`, {
+    method: "POST",
+    body: JSON.stringify({ sourceSku })
+  });
+  selectedOrderId = orderId;
+  setState(result.state);
+  toast(`Order line restored to ${sourceSku || "original SKU"}.`);
+}
+
+async function renameProductSku(productId) {
+  const item = productById(productId);
+  if (!item) return;
+  const newSku = prompt("Enter the corrected parent SKU:", item.sku || "");
+  if (!newSku || newSku.trim() === item.sku) return;
+  if (!confirm(`Rename parent SKU ${item.sku} to ${newSku.trim()}? The old SKU will be saved as an alias.`)) return;
+  const result = await api(`/api/inventory/${productId}/rename-sku`, {
+    method: "POST",
+    body: JSON.stringify({ newSku: newSku.trim() })
+  });
+  selectedProductId = result.item.id;
+  setState(result.state);
+  showView("product-full");
+  toast(`Renamed SKU to ${result.item.sku}. Old SKU saved as an alias.`);
+}
+
+async function backfillProductSourceData(productId) {
+  const result = await api(`/api/inventory/${productId}/source-data/backfill`, {
+    feedbackLabel: "Backfilling source data...",
+    method: "POST",
+    body: JSON.stringify({})
+  });
+  selectedProductId = productId;
+  if (result.state) setState(result.state);
+  render();
+  toast(result.changed ? "Source data backfilled." : "Source data is already loaded.");
+}
+
+async function createOrderLineSku(orderId, lineIndex, currentSku = "") {
+  const sku = prompt("Create product SKU from this order line:", currentSku || "");
+  if (!sku) return;
+  const result = await api(`/api/orders/${orderId}/items/${lineIndex}/create-sku`, {
+    method: "POST",
+    body: JSON.stringify({ sku: sku.trim() })
+  });
+  selectedOrderId = orderId;
+  selectedProductId = result.product?.id || selectedProductId;
+  setState(result.state);
+  toast(`Created product SKU ${result.product.sku}.`);
+}
+
+function ebayListingFormPayload(productId, action) {
+  syncEbayAttributeInputsToAspects(productId);
+  const payload = { action };
+  $$(`[data-ebay-listing-field][data-product-id="${productId}"]`).forEach((field) => {
+    const key = field.dataset.ebayListingField;
+    payload[key] = ["price", "quantity"].includes(key) ? Number(field.value || 0) : field.value;
+  });
+  if (String(productEbayTaxonomyState.productId || "") === String(productId) && productEbayTaxonomyState.version) {
+    payload.taxonomyVersion = productEbayTaxonomyState.version;
+  }
+  return payload;
+}
+
+function syncEbayAttributeInputsToAspects(productId) {
+  const item = productById(productId) || {};
+  const aspectsInput = document.querySelector(`[data-ebay-listing-field="aspects"][data-product-id="${productId}"]`);
+  if (!aspectsInput) return;
+  let aspects = {};
+  try {
+    const parsed = JSON.parse(aspectsInput.value || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) aspects = parsed;
+  } catch {
+    aspects = {};
+  }
+  $$(`[data-ebay-aspect-field][data-product-id="${productId}"]`).forEach((input) => {
+    const name = input.dataset.ebayAspectField || "";
+    const value = isLockedBrandAspect(item, name) ? String(item.brand || "").trim() : String(input.value || "").trim();
+    if (!name) return;
+    const existingKey = Object.keys(aspects).find((key) => ebayAspectKey(key) === ebayAspectKey(name));
+    const key = existingKey || name;
+    if (value) {
+      aspects[key] = [value];
+    } else if (existingKey) {
+      delete aspects[existingKey];
+    }
+  });
+  if (item.brandLocked && item.brand) aspects.Brand = [String(item.brand).trim()];
+  aspectsInput.value = JSON.stringify(aspects, null, 2);
+}
+
+function applyProductEbayTaxonomy(button) {
+  const productId = button.dataset.applyProductEbayTaxonomy;
+  const categoryId = button.dataset.ebayCategoryId || "";
+  const categoryPath = button.dataset.ebayCategoryPath || "";
+  const treeId = button.dataset.ebayTreeId || "";
+  const idInput = document.querySelector(`[data-ebay-listing-field="categoryId"][data-product-id="${productId}"]`);
+  const pathInput = document.querySelector(`[data-ebay-listing-field="categoryPath"][data-product-id="${productId}"]`);
+  const aspectsInput = document.querySelector(`[data-ebay-listing-field="aspects"][data-product-id="${productId}"]`);
+  if (idInput) idInput.value = categoryId;
+  if (pathInput) pathInput.value = categoryPath;
+  const item = productById(productId);
+  const currentAspects = aspectsInput?.value || "";
+  productEbayTaxonomyState = { productId, query: categoryPath, results: [], total: 0, version: treeId, loading: false, searched: false };
+  if (item) {
+    item.ebayListing = {
+      ...(item.ebayListing || {}),
+      categoryId,
+      categoryPath,
+      taxonomyVersion: treeId,
+      aspects: currentAspects || item.ebayListing?.aspects || { Brand: item.brand ? [item.brand] : [] }
+    };
+  }
+  renderProductContentPage();
+  toast("eBay category selected. Click Save SKU mapping to keep it.");
+}
+
+async function runEbayListingAction(productId, action) {
+  const item = productById(productId);
+  if (!item) return;
+  if (action === "publish" && !confirm(`Publish ${item.sku} as a live eBay listing?`)) return;
+  const label = action === "publish" ? "Publishing eBay listing..." : action === "draft" ? "Saving SKU eBay mapping..." : "Saving eBay offer...";
+  setSavingIndicator(true, label);
+  try {
+    const result = await api(`/api/inventory/${productId}/ebay/listing`, {
+      feedbackLabel: label,
+      method: "POST",
+      body: JSON.stringify(ebayListingFormPayload(productId, action))
+    });
+    selectedProductId = result.item.id;
+    setState(result.state);
+    toast(action === "publish" ? `eBay listing published${result.ebayListing.listingId ? `: ${result.ebayListing.listingId}` : "."}` : action === "draft" ? "SKU eBay mapping saved." : "eBay offer saved.");
+  } finally {
+    if (!activeApiRequests) setSavingIndicator(false);
+  }
+}
+
+async function syncProductEbayAttributes(productId) {
+  const result = await api(`/api/inventory/${productId}/ebay/attributes/sync`, {
+    feedbackLabel: "Loading eBay attributes...",
+    method: "POST",
+    body: JSON.stringify({})
+  });
+  if (result.state) setState(result.state);
+  if (result.item?.id) selectedProductId = result.item.id;
+  renderProductContentPage();
+  toast(`Loaded ${Number(result.attributes?.length || 0)} eBay attributes.`);
+}
+
+async function runEbayCatalogImport() {
+  if (!confirm("Import live eBay catalog/offers and map them to DataPlus products?")) return;
+  const result = await api("/api/ebay/catalog-import", {
+    feedbackLabel: "Importing eBay catalog...",
+    method: "POST",
+    body: JSON.stringify({})
+  });
+  setState(result.state);
+  catalogTab = result.unmapped ? "reviews" : "products";
+  showView("catalog");
+  renderCatalog();
+  toast(`eBay catalog sync: ${result.matched || 0} mapped, ${result.unmapped || 0} need review.`);
 }
 
 function toggleOtherCarrierFields() {
@@ -7224,7 +9734,12 @@ async function submitInventoryTransfer(form) {
   selectedProductId = productId;
   closeInventoryTransferModal();
   setState(result.state);
-  showView("inventory-full");
+  if (currentViewId === "product-full") {
+    selectedProductWorkspaceTab = "inventory";
+    renderProductContentPage();
+  } else {
+    showView("inventory-full");
+  }
   toast("Transfer completed.");
 }
 
@@ -8688,7 +11203,7 @@ async function updateChannelField(input) {
   const field = input.dataset.channelField;
   let value = input.value;
   if (input.type === "checkbox") value = input.checked;
-  if (["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "minMarginPercent"].includes(field)) value = Number(input.value || 0);
+  if (["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "minMarginPercent", "ebayMaxImages"].includes(field)) value = Number(input.value || 0);
   const result = await api(`/api/channels/${channel.id}`, {
     method: "PATCH",
     body: JSON.stringify({ [field]: value })
@@ -8696,6 +11211,51 @@ async function updateChannelField(input) {
   selectedChannelId = result.channel.id;
   setState(result.state);
   toast("Channel settings updated.");
+}
+
+async function syncEbayAccountSettings(channelId) {
+  const result = await api("/api/ebay/account-settings/sync", {
+    feedbackLabel: "Syncing eBay settings...",
+    method: "POST",
+    body: JSON.stringify({})
+  });
+  selectedChannelId = result.channel?.id || channelId || selectedChannelId;
+  setState(result.state);
+  showView("channel-full");
+  const failureCount = (result.failures || []).length;
+  if (failureCount) {
+    toast(`eBay settings sync logged ${failureCount} API issue${failureCount === 1 ? "" : "s"} in Jobs.`);
+  } else {
+    toast(`eBay settings synced: ${(result.merchantLocations || []).length} locations, ${(result.fulfillmentPolicies || []).length} fulfillment policies.`);
+  }
+}
+
+async function updateSystemSetting(input) {
+  const field = input.dataset.systemSetting;
+  if (!field) return;
+  let value = input.value;
+  if (input.type === "checkbox") value = input.checked;
+  const result = await api("/api/system-settings", {
+    method: "PATCH",
+    body: JSON.stringify({ [field]: value })
+  });
+  if (result.state) setState(result.state);
+  renderCatalog();
+  toast("System setting updated.");
+}
+
+async function createEbayLocation(form) {
+  const payload = Object.fromEntries(new FormData(form).entries());
+  const result = await api("/api/ebay/locations", {
+    feedbackLabel: "Creating eBay location...",
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+  selectedChannelId = result.channel?.id || selectedChannelId;
+  setState(result.state);
+  showView("channel-full");
+  const locationCount = result.syncResult?.merchantLocations?.length ?? result.channel?.settings?.ebayMerchantLocations?.length ?? 0;
+  toast(`eBay location ${result.merchantLocationKey} created. Locations: ${locationCount}.`);
 }
 
 async function uploadChannelLogo(input) {
@@ -8952,6 +11512,27 @@ async function applyCatalogBulkAction() {
 
   const ids = selectedProductAllFiltered ? filteredCatalogItems().map((item) => item.id) : [...selectedProductIds];
   if (!ids.length) return toast("Select active products first.");
+  if (action === "ebay-bulk-launch") {
+    const selectedItems = ids.map((id) => (state.inventory || []).find((item) => item.id === id)).filter(Boolean);
+    const readyItems = selectedItems.filter((item) => productEbayReadiness(item).ready);
+    const blocked = selectedItems.length - readyItems.length;
+    if (!readyItems.length) return toast("No selected products are eBay ready.");
+    const launchItems = readyItems.slice(0, 200);
+    const limitNote = readyItems.length > launchItems.length ? ` Only the first ${launchItems.length} will run in this batch.` : "";
+    if (blocked && !confirm(`${blocked} selected product${blocked === 1 ? "" : "s"} are not eBay ready and will be skipped. Launch ${readyItems.length} ready product${readyItems.length === 1 ? "" : "s"} to eBay using channel pricing?${limitNote}`)) return;
+    if (!blocked && !confirm(`Launch ${readyItems.length} eBay-ready product${readyItems.length === 1 ? "" : "s"} using current eBay channel pricing?${limitNote}`)) return;
+    const result = await api("/api/inventory/ebay/bulk-launch", {
+      feedbackLabel: "Launching eBay listings...",
+      method: "POST",
+      body: JSON.stringify({ ids: launchItems.map((item) => item.id), useChannelPricing: true })
+    });
+    setState(result.state);
+    selectedProductIds.clear();
+    selectedProductAllFiltered = false;
+    renderCatalog();
+    toast(`eBay launch complete: ${result.launched || 0} launched, ${result.skipped || 0} skipped, ${result.failed || 0} failed.`);
+    return;
+  }
   if (action === "delete" && !confirm(`Delete ${ids.length} product${ids.length === 1 ? "" : "s"} from Products?`)) return;
   const result = await api("/api/inventory/bulk", {
     method: "POST",
@@ -8969,7 +11550,8 @@ function productActionMessage(action, count) {
     delete: "Deleted",
     "set-active": "Set active",
     "set-inactive": "Set inactive",
-    "set-discontinued": "Set discontinued"
+    "set-discontinued": "Set discontinued",
+    "ebay-bulk-launch": "Launched to eBay"
   }[action] || "Updated";
   return `${label} ${count} product${count === 1 ? "" : "s"}.`;
 }
@@ -9066,19 +11648,43 @@ document.addEventListener("click", (event) => {
   const orderButton = event.target.closest("[data-select-order]");
   const poButton = event.target.closest("[data-select-po]");
   const productButton = event.target.closest("[data-select-product]");
+  const renameProductSkuButton = event.target.closest("[data-rename-product-sku]");
   const productWorkspaceTabButton = event.target.closest("[data-product-workspace-tab]");
+  const ebayListingActionButton = event.target.closest("[data-ebay-listing-action]");
+  const useEbaySuggestedPriceButton = event.target.closest("[data-use-ebay-suggested-price]");
+  const useEbayCalculatedQtyButton = event.target.closest("[data-use-ebay-calculated-qty]");
+  const syncProductEbayAttributesButton = event.target.closest("[data-sync-product-ebay-attributes]");
+  const openProductMasterCategoryButton = event.target.closest("[data-open-product-master-category]");
+  const runProductEbayTaxonomySearchButton = event.target.closest("[data-run-product-ebay-taxonomy-search]");
+  const applyProductEbayTaxonomyButton = event.target.closest("[data-apply-product-ebay-taxonomy]");
   const shadowButton = event.target.closest("[data-select-shadow]");
   const templateButton = event.target.closest("[data-select-template]");
   const categoryButton = event.target.closest("[data-select-category]");
+  const backCategoriesButton = event.target.closest("[data-back-categories]");
   const categoryScopeButton = event.target.closest("[data-category-scope]");
+  const syncCategoryAttributesButton = event.target.closest("[data-sync-category-attributes]");
+  const saveCategoryMapButton = event.target.closest("[data-save-category-map]");
+  const applyCategoryMapToProductsButton = event.target.closest("[data-apply-category-map-to-products]");
   const clearJobFiltersButton = event.target.closest("[data-clear-job-filters]");
   const channelButton = event.target.closest("[data-select-channel]");
   const exchangeTemuButton = event.target.closest("[data-exchange-temu-code]");
   const actionMenuButton = event.target.closest("[data-action-menu]");
   const orderActionButton = event.target.closest("[data-order-action]");
+  const mapOrderLineSkuButton = event.target.closest("[data-map-order-line-sku]");
+  const unmapOrderLineSkuButton = event.target.closest("[data-unmap-order-line-sku]");
+  const createOrderLineSkuButton = event.target.closest("[data-create-order-line-sku]");
+  const closeOrderSkuMapButton = event.target.closest("[data-close-order-sku-map-modal]");
+  const runOrderSkuMapSearchButton = event.target.closest("[data-run-order-sku-map-search]");
+  const selectOrderSkuMapProductButton = event.target.closest("[data-select-order-sku-map-product]");
+  const submitOrderSkuMapButton = event.target.closest("[data-submit-order-sku-map]");
+  const closeMasterCategoryMapButton = event.target.closest("[data-close-master-category-map-modal]");
+  const runMasterCategoryEbaySearchButton = event.target.closest("[data-run-master-category-ebay-search]");
+  const selectMasterEbayCategoryButton = event.target.closest("[data-select-master-ebay-category]");
+  const submitMasterCategoryMapButton = event.target.closest("[data-submit-master-category-map]");
   const openDetailButton = event.target.closest("[data-open-detail]");
   const addNoteButton = event.target.closest("[data-add-order-note]");
   const orderCheck = event.target.closest("[data-order-check]");
+  const orderQueueButton = event.target.closest("[data-order-queue]");
   const createPoOrder = event.target.closest("[data-create-po-order]");
   const createPoSelected = event.target.closest("[data-create-po-selected]");
   const clearOrderSelection = event.target.closest("[data-clear-order-selection]");
@@ -9090,6 +11696,9 @@ document.addEventListener("click", (event) => {
   const promoteCatalogButton = event.target.closest("[data-promote-catalog-sku]");
   const sourceRowActionButton = event.target.closest("[data-source-row-action]");
   const applyShopifyTaxonomyButton = event.target.closest("[data-apply-shopify-taxonomy]");
+  const applyEbayTaxonomyButton = event.target.closest("[data-apply-ebay-taxonomy]");
+  const runEbayTaxonomySearchButton = event.target.closest("[data-run-ebay-taxonomy-search]");
+  const autoMapEbayCategoriesButton = event.target.closest("[data-auto-map-ebay-categories]");
   const reviewActionButton = event.target.closest("[data-review-action]");
   const reviewBulkActionButton = event.target.closest("[data-review-bulk-action]");
   const reviewOpenProductButton = event.target.closest("[data-review-open-product]");
@@ -9113,6 +11722,7 @@ document.addEventListener("click", (event) => {
   const selectImportJobButton = event.target.closest("[data-select-import-job]");
   const stopJobButton = event.target.closest("[data-job-stop]");
   const runJobButton = event.target.closest("[data-job-run]");
+  const syncEbaySettingsButton = event.target.closest("[data-sync-ebay-account-settings]");
   const exportProductsButton = event.target.closest("[data-export-products]");
   const exportSourceProductsButton = event.target.closest("[data-export-source-products]");
   const copyFieldButton = event.target.closest("[data-copy-field]");
@@ -9133,6 +11743,8 @@ document.addEventListener("click", (event) => {
   const selectProductsPageButton = event.target.closest("[data-select-products-page]");
   const selectProductsFilteredButton = event.target.closest("[data-select-products-filtered]");
   const clearProductsSelectionButton = event.target.closest("[data-clear-products-selection]");
+  const loadProductAlternatesPageButton = event.target.closest("[data-load-product-alternates-page]");
+  const loadProductAlternatesButton = event.target.closest("[data-load-product-alternates]");
   const vendorButton = event.target.closest("[data-select-vendor]");
   const brandButton = event.target.closest("[data-select-brand]");
   const customerButton = event.target.closest("[data-select-customer]");
@@ -9228,19 +11840,43 @@ document.addEventListener("click", (event) => {
   const addProductBulletButton = event.target.closest("[data-add-product-bullet]");
   const removeProductBulletButton = event.target.closest("[data-remove-product-bullet]");
   const saveProductBulletsButton = event.target.closest("[data-save-product-bullets]");
+  const backfillSourceDataButton = event.target.closest("[data-backfill-source-data]");
 
   if (categoryButton) {
     selectedCategoryId = categoryButton.dataset.selectCategory;
+    categoryViewMode = "detail";
     shopifyTaxonomyState = { categoryId: selectedCategoryId, query: "", results: [], total: 0, version: "", loading: false };
+    ebayTaxonomyState = { categoryId: selectedCategoryId, query: "", results: [], total: 0, version: "", loading: false };
+    renderCategories();
+    return;
+  }
+  if (backCategoriesButton) {
+    categoryViewMode = "table";
+    shopifyTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
+    ebayTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
     renderCategories();
     return;
   }
   if (categoryScopeButton) {
     categoryScope = categoryScopeButton.dataset.categoryScope === "source" ? "source" : "main";
     selectedCategoryId = null;
+    categoryViewMode = "table";
     shopifyTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
+    ebayTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
     categoryRequestId += 1;
     loadCategories();
+    return;
+  }
+  if (syncCategoryAttributesButton) {
+    syncCategoryAttributes(syncCategoryAttributesButton.dataset.syncCategoryAttributes).catch((error) => toast(error.message));
+    return;
+  }
+  if (saveCategoryMapButton) {
+    saveCategoryMapping(saveCategoryMapButton).catch((error) => toast(error.message));
+    return;
+  }
+  if (applyCategoryMapToProductsButton) {
+    applyCategoryMapToProducts(applyCategoryMapToProductsButton).catch((error) => toast(error.message));
     return;
   }
   if (clearJobFiltersButton) {
@@ -9250,6 +11886,20 @@ document.addEventListener("click", (event) => {
   }
   if (applyShopifyTaxonomyButton) {
     applyShopifyTaxonomyCategory(applyShopifyTaxonomyButton).catch((error) => toast(error.message));
+    return;
+  }
+  if (runEbayTaxonomySearchButton) {
+    const categoryId = runEbayTaxonomySearchButton.dataset.runEbayTaxonomySearch;
+    const input = Array.from(document.querySelectorAll("[data-ebay-taxonomy-search]")).find((item) => item.dataset.ebayTaxonomySearch === categoryId);
+    loadEbayTaxonomyOptions(categoryId, input?.value || "").catch((error) => toast(error.message));
+    return;
+  }
+  if (applyEbayTaxonomyButton) {
+    applyEbayTaxonomyCategory(applyEbayTaxonomyButton).catch((error) => toast(error.message));
+    return;
+  }
+  if (autoMapEbayCategoriesButton) {
+    autoMapEbayCategories().catch((error) => toast(error.message));
     return;
   }
   if (reviewActionButton) {
@@ -9267,6 +11917,65 @@ document.addEventListener("click", (event) => {
   if (productWorkspaceTabButton) {
     selectedProductWorkspaceTab = productWorkspaceTabButton.dataset.productWorkspaceTab || "home";
     renderProductContentPage();
+    return;
+  }
+  if (ebayListingActionButton) {
+    runEbayListingAction(ebayListingActionButton.dataset.productId, ebayListingActionButton.dataset.ebayListingAction).catch((error) => toast(error.message));
+    return;
+  }
+  if (useEbaySuggestedPriceButton) {
+    const productId = useEbaySuggestedPriceButton.dataset.useEbaySuggestedPrice;
+    const price = Number(useEbaySuggestedPriceButton.dataset.price || 0);
+    const input = $(`[data-ebay-listing-field="price"][data-product-id="${productId}"]`);
+    if (input) {
+      input.value = price.toFixed(2);
+      syncEbayAttributeInputsToAspects(productId);
+      toast(`Suggested eBay price applied: ${money(price)}. Click Save SKU mapping or Create offer to keep it.`);
+    }
+    return;
+  }
+  if (useEbayCalculatedQtyButton) {
+    const productId = useEbayCalculatedQtyButton.dataset.useEbayCalculatedQty;
+    const qty = Math.max(0, Math.floor(Number(useEbayCalculatedQtyButton.dataset.qty || 0)));
+    const input = $(`[data-ebay-listing-field="quantity"][data-product-id="${productId}"]`);
+    if (input) {
+      input.value = String(qty);
+      toast(`Calculated eBay quantity applied: ${qty.toLocaleString()}. Click Save SKU mapping or Create offer to keep it.`);
+    }
+    return;
+  }
+  if (syncProductEbayAttributesButton) {
+    syncProductEbayAttributes(syncProductEbayAttributesButton.dataset.syncProductEbayAttributes).catch((error) => toast(error.message));
+    return;
+  }
+  if (openProductMasterCategoryButton) {
+    openProductMasterCategory(openProductMasterCategoryButton.dataset.openProductMasterCategory);
+    return;
+  }
+  if (runProductEbayTaxonomySearchButton) {
+    const productId = runProductEbayTaxonomySearchButton.dataset.runProductEbayTaxonomySearch;
+    const input = document.querySelector(`[data-product-ebay-taxonomy-search="${productId}"]`);
+    loadProductEbayTaxonomyOptions(productId, input?.value || "").catch((error) => toast(error.message));
+    return;
+  }
+  if (applyProductEbayTaxonomyButton) {
+    applyProductEbayTaxonomy(applyProductEbayTaxonomyButton);
+    return;
+  }
+  if (closeMasterCategoryMapButton) {
+    closeMasterCategoryMapModal();
+    return;
+  }
+  if (runMasterCategoryEbaySearchButton) {
+    loadMasterCategoryEbayOptions($("#master-category-ebay-search")?.value || "").catch((error) => toast(error.message));
+    return;
+  }
+  if (selectMasterEbayCategoryButton) {
+    selectMasterCategoryEbayCategory(selectMasterEbayCategoryButton);
+    return;
+  }
+  if (submitMasterCategoryMapButton) {
+    submitMasterCategoryMap().catch((error) => toast(error.message));
     return;
   }
   if (productGalleryButton) {
@@ -9341,6 +12050,10 @@ document.addEventListener("click", (event) => {
     saveProductBulletsModal().catch((error) => toast(error.message));
     return;
   }
+  if (backfillSourceDataButton) {
+    backfillProductSourceData(backfillSourceDataButton.dataset.backfillSourceData).catch((error) => toast(error.message));
+    return;
+  }
   if (importSectionButton) {
     activeImportSection = importSectionButton.dataset.importSection || "products";
     renderImportExportMappings();
@@ -9357,6 +12070,10 @@ document.addEventListener("click", (event) => {
   }
   if (stopJobButton && !stopJobButton.disabled) {
     stopImportJob(stopJobButton.dataset.jobStop).catch((error) => toast(error.message));
+    return;
+  }
+  if (syncEbaySettingsButton) {
+    syncEbayAccountSettings(syncEbaySettingsButton.dataset.syncEbayAccountSettings).catch((error) => toast(error.message));
     return;
   }
   if (runJobButton) {
@@ -10063,6 +12780,22 @@ document.addEventListener("click", (event) => {
     updateCatalogBulkBar();
     return;
   }
+  if (loadProductAlternatesPageButton) {
+    const items = filteredCatalogItems();
+    const pageStart = (productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
+    const pageItems = items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
+    loadProductTableAlternates(pageItems).catch((error) => toast(error.message));
+    renderProductsTable(items);
+    return;
+  }
+  if (loadProductAlternatesButton) {
+    const sku = loadProductAlternatesButton.dataset.loadProductAlternates;
+    loadProductAlternates(sku).then(() => {
+      if (catalogTab === "products") renderProductsTable(filteredCatalogItems());
+    }).catch((error) => toast(error.message));
+    renderProductsTable(filteredCatalogItems());
+    return;
+  }
   if (productRowActionButton) {
     closeActionMenus();
     runProductRowAction(productRowActionButton.dataset.productId, productRowActionButton.dataset.productRowAction).catch((error) => toast(error.message));
@@ -10073,6 +12806,13 @@ document.addEventListener("click", (event) => {
     if (orderCheck.checked) selectedOrderIds.add(orderCheck.dataset.orderCheck);
     else selectedOrderIds.delete(orderCheck.dataset.orderCheck);
     renderBulkOrderBar();
+    return;
+  }
+  if (orderQueueButton) {
+    event.stopPropagation();
+    activeOrderQueue = orderQueueButton.dataset.orderQueue || "new";
+    selectedOrderIds.clear();
+    runWithSearchFeedback(renderOrders, `Opening ${orderQueueButton.textContent.trim()} queue...`);
     return;
   }
   if (createPoOrder) {
@@ -10098,6 +12838,38 @@ document.addEventListener("click", (event) => {
   if (orderActionButton) {
     event.stopPropagation();
     runOrderAction(orderActionButton.dataset.orderId, orderActionButton.dataset.orderAction);
+    return;
+  }
+  if (mapOrderLineSkuButton) {
+    event.stopPropagation();
+    mapOrderLineSku(mapOrderLineSkuButton.dataset.mapOrderLineSku, mapOrderLineSkuButton.dataset.lineIndex, mapOrderLineSkuButton.dataset.currentSku).catch((error) => toast(error.message));
+    return;
+  }
+  if (unmapOrderLineSkuButton) {
+    event.stopPropagation();
+    unmapOrderLineSku(unmapOrderLineSkuButton.dataset.unmapOrderLineSku, unmapOrderLineSkuButton.dataset.lineIndex, unmapOrderLineSkuButton.dataset.currentSku, unmapOrderLineSkuButton.dataset.sourceSku).catch((error) => toast(error.message));
+    return;
+  }
+  if (createOrderLineSkuButton) {
+    event.stopPropagation();
+    createOrderLineSku(createOrderLineSkuButton.dataset.createOrderLineSku, createOrderLineSkuButton.dataset.lineIndex, createOrderLineSkuButton.dataset.currentSku).catch((error) => toast(error.message));
+    return;
+  }
+  if (closeOrderSkuMapButton) {
+    closeOrderSkuMapModal();
+    return;
+  }
+  if (runOrderSkuMapSearchButton) {
+    runOrderSkuMapSearch();
+    return;
+  }
+  if (selectOrderSkuMapProductButton) {
+    pendingOrderSkuMap.selectedProductId = selectOrderSkuMapProductButton.dataset.selectOrderSkuMapProduct;
+    renderOrderSkuMapResults();
+    return;
+  }
+  if (submitOrderSkuMapButton) {
+    submitOrderSkuMap(submitOrderSkuMapButton.dataset.submitOrderSkuMap).catch((error) => toast(error.message));
     return;
   }
   if (viewButton) {
@@ -10144,6 +12916,10 @@ document.addEventListener("click", (event) => {
       renderCatalog();
     }
   }
+  if (renameProductSkuButton) {
+    renameProductSku(renameProductSkuButton.dataset.renameProductSku).catch((error) => toast(error.message));
+    return;
+  }
   if (shadowButton) {
     selectedProductId = shadowButton.dataset.parentProduct || selectedProductId;
     selectedShadowId = shadowButton.dataset.selectShadow;
@@ -10165,15 +12941,33 @@ $("#sync-all").addEventListener("click", async () => {
   }
 });
 
-$("#order-search").addEventListener("input", renderOrders);
-$("#order-status").addEventListener("change", renderOrders);
-$("#draft-search")?.addEventListener("input", renderDrafts);
-$("#return-search")?.addEventListener("input", renderReturnsManagement);
+$("#ebay-catalog-import")?.addEventListener("click", () => {
+  runEbayCatalogImport().catch((error) => toast(error.message));
+});
+
+$("#order-search").addEventListener("input", () => runWithSearchFeedback(renderOrders, "Searching orders..."));
+$("#order-source").addEventListener("change", () => runWithSearchFeedback(renderOrders, "Filtering orders..."));
+$("#order-status").addEventListener("change", () => runWithSearchFeedback(renderOrders, "Filtering orders..."));
+$("#order-date-from").addEventListener("change", () => runWithSearchFeedback(renderOrders, "Filtering orders..."));
+$("#order-date-to").addEventListener("change", () => runWithSearchFeedback(renderOrders, "Filtering orders..."));
+$("#order-sort").addEventListener("change", () => runWithSearchFeedback(renderOrders, "Sorting orders..."));
+$("#order-filter-clear").addEventListener("click", () => {
+  $("#order-search").value = "";
+  $("#order-source").value = "all";
+  $("#order-status").value = "all";
+  $("#order-date-from").value = "";
+  $("#order-date-to").value = "";
+  $("#order-sort").value = "created-desc";
+  activeOrderQueue = "new";
+  runWithSearchFeedback(renderOrders, "Clearing order filters...");
+});
+$("#draft-search")?.addEventListener("input", () => runWithSearchFeedback(renderDrafts, "Searching drafts..."));
+$("#return-search")?.addEventListener("input", () => runWithSearchFeedback(renderReturnsManagement, "Searching returns..."));
 document.addEventListener("input", (event) => {
   const jobsSearch = event.target.closest("#jobs-search");
   if (!jobsSearch) return;
   jobsFilter.query = jobsSearch.value;
-  renderJobsPage();
+  runWithSearchFeedback(renderJobsPage, "Searching jobs...");
 });
 document.addEventListener("change", (event) => {
   const section = event.target.closest("#jobs-filter-section");
@@ -10183,25 +12977,27 @@ document.addEventListener("change", (event) => {
   if (section) jobsFilter.section = section.value;
   if (status) jobsFilter.status = status.value;
   if (direction) jobsFilter.direction = direction.value;
-  renderJobsPage();
+  runWithSearchFeedback(renderJobsPage, "Filtering jobs...");
 });
 $("#toggle-order-detail")?.addEventListener("click", () => {
   orderDetailVisible = !orderDetailVisible;
   $("#toggle-order-detail").textContent = orderDetailVisible ? "Hide details" : "Show details";
   renderOrders();
 });
-$("#customer-search").addEventListener("input", renderCustomers);
-$("#po-search").addEventListener("input", renderPurchaseOrders);
+$("#customer-search").addEventListener("input", () => runWithSearchFeedback(renderCustomers, "Searching customers..."));
+$("#po-search").addEventListener("input", () => runWithSearchFeedback(renderPurchaseOrders, "Searching purchasing..."));
 $("#catalog-search").addEventListener("input", () => {
-  if (catalogTab === "source") sourceCatalogPage = 1;
-  if (catalogTab === "products") productCatalogPage = 1;
-  if (catalogTab === "inventory") inventoryCatalogPage = 1;
-  if (catalogTab === "categories") categoryRequestId += 1;
-  selectedSourceSkus.clear();
-  selectedSourceAllFiltered = false;
-  selectedProductIds.clear();
-  selectedProductAllFiltered = false;
-  renderCatalog();
+  runWithSearchFeedback(() => {
+    if (catalogTab === "source") sourceCatalogPage = 1;
+    if (catalogTab === "products") productCatalogPage = 1;
+    if (catalogTab === "inventory") inventoryCatalogPage = 1;
+    if (catalogTab === "categories") categoryRequestId += 1;
+    selectedSourceSkus.clear();
+    selectedSourceAllFiltered = false;
+    selectedProductIds.clear();
+    selectedProductAllFiltered = false;
+    renderCatalog();
+  }, "Searching catalog...");
 });
 [
   "#catalog-filter-supplier",
@@ -10216,10 +13012,12 @@ $("#catalog-search").addEventListener("input", () => {
   "#catalog-filter-category"
 ].forEach((selector) => {
   $(selector)?.addEventListener("change", () => {
-    sourceCatalogPage = 1;
-    productCatalogPage = 1;
-    inventoryCatalogPage = 1;
-    clearCatalogSelection();
+    runWithSearchFeedback(() => {
+      sourceCatalogPage = 1;
+      productCatalogPage = 1;
+      inventoryCatalogPage = 1;
+      clearCatalogSelection();
+    }, "Filtering catalog...");
   });
 });
 $("#catalog-clear-filters")?.addEventListener("click", () => {
@@ -10232,7 +13030,7 @@ $("#catalog-clear-filters")?.addEventListener("click", () => {
   sourceCatalogPage = 1;
   productCatalogPage = 1;
   inventoryCatalogPage = 1;
-  clearCatalogSelection();
+  runWithSearchFeedback(clearCatalogSelection, "Clearing catalog filters...");
 });
 $("#catalog-apply-bulk")?.addEventListener("click", applyCatalogBulkAction);
 $("#inventory-import").addEventListener("change", (event) => {
@@ -10316,6 +13114,12 @@ $("#po-receive-form")?.addEventListener("submit", (event) => {
   $("#po-receive-mode").value = $("#po-receive-mode").value || "final";
   submitPoReceive(event.currentTarget).catch((error) => toast(error.message));
 });
+document.addEventListener("submit", (event) => {
+  const ebayLocationForm = event.target.closest("#ebay-location-form");
+  if (!ebayLocationForm) return;
+  event.preventDefault();
+  createEbayLocation(ebayLocationForm).catch((error) => toast(error.message));
+});
 $("#order-return-form")?.addEventListener("submit", (event) => {
   event.preventDefault();
   submitOrderReturn(event.currentTarget).catch((error) => toast(error.message));
@@ -10396,6 +13200,26 @@ document.addEventListener("input", (event) => {
     const query = shopifySearch.value;
     shopifyTaxonomyState = { ...shopifyTaxonomyState, categoryId, query };
     shopifyTaxonomyTimer = setTimeout(() => loadShopifyTaxonomyOptions(categoryId, query), 300);
+    return;
+  }
+  const ebaySearch = event.target.closest("[data-ebay-taxonomy-search]");
+  if (ebaySearch) {
+    ebayTaxonomyState = { ...ebayTaxonomyState, categoryId: ebaySearch.dataset.ebayTaxonomySearch, query: ebaySearch.value };
+    return;
+  }
+  const productEbaySearch = event.target.closest("[data-product-ebay-taxonomy-search]");
+  if (productEbaySearch) {
+    productEbayTaxonomyState = { ...productEbayTaxonomyState, productId: productEbaySearch.dataset.productEbayTaxonomySearch, query: productEbaySearch.value, searched: false };
+    return;
+  }
+  const ebayAspectField = event.target.closest("[data-ebay-aspect-field]");
+  if (ebayAspectField) {
+    syncEbayAttributeInputsToAspects(ebayAspectField.dataset.productId);
+    return;
+  }
+  const masterCategoryEbaySearch = event.target.closest("#master-category-ebay-search");
+  if (masterCategoryEbaySearch) {
+    masterCategoryMapModal = { ...masterCategoryMapModal, query: masterCategoryEbaySearch.value };
     return;
   }
   const draftField = event.target.closest("[data-draft-line-field]");
@@ -10490,8 +13314,37 @@ document.addEventListener("change", (event) => {
     $("#po-receive-location").value = defaultBinForWarehouse(receiveWarehouseSelect.value)?.code || "";
     return;
   }
+  const masterCategoryApplyScope = event.target.closest("[data-master-category-apply-scope]");
+  if (masterCategoryApplyScope) {
+    masterCategoryMapModal = { ...masterCategoryMapModal, applyScope: masterCategoryApplyScope.value || "sku" };
+    renderMasterCategoryMapModal();
+    return;
+  }
 });
 document.addEventListener("keydown", (event) => {
+  if (event.target.closest("#order-sku-map-search") && event.key === "Enter") {
+    event.preventDefault();
+    runOrderSkuMapSearch();
+    return;
+  }
+  const ebaySearchInput = event.target.closest("[data-ebay-taxonomy-search]");
+  if (ebaySearchInput && event.key === "Enter") {
+    event.preventDefault();
+    loadEbayTaxonomyOptions(ebaySearchInput.dataset.ebayTaxonomySearch, ebaySearchInput.value).catch((error) => toast(error.message));
+    return;
+  }
+  const productEbaySearchInput = event.target.closest("[data-product-ebay-taxonomy-search]");
+  if (productEbaySearchInput && event.key === "Enter") {
+    event.preventDefault();
+    loadProductEbayTaxonomyOptions(productEbaySearchInput.dataset.productEbayTaxonomySearch, productEbaySearchInput.value).catch((error) => toast(error.message));
+    return;
+  }
+  const masterCategoryEbaySearchInput = event.target.closest("#master-category-ebay-search");
+  if (masterCategoryEbaySearchInput && event.key === "Enter") {
+    event.preventDefault();
+    loadMasterCategoryEbayOptions(masterCategoryEbaySearchInput.value).catch((error) => toast(error.message));
+    return;
+  }
   const serialInput = event.target.closest("[data-serial-input]");
   if (serialInput && event.key === "Enter") {
     event.preventDefault();
@@ -10527,10 +13380,12 @@ document.addEventListener("change", (event) => {
   const centralSourceSkuImportFile = event.target.closest("[data-central-source-sku-import]");
   const centralShopifyStatusImportFile = event.target.closest("[data-central-shopify-status-import]");
   const categorySkuImportFile = event.target.closest("[data-category-sku-import]");
+  const categoryMappingImportFile = event.target.closest("[data-category-mapping-import]");
   const mappingHeaderFile = event.target.closest("[data-load-mapping-headers]");
   const channelInput = event.target.closest("[data-channel-field]");
-  const categoryInput = event.target.closest("[data-category-field], [data-category-default], [data-category-map]");
+  const categoryInput = event.target.closest("[data-category-field], [data-category-default]");
   const orderMoneyInput = event.target.closest("[data-order-money]");
+  const systemSettingInput = event.target.closest("[data-system-setting]");
   const vendorField = event.target.closest("[data-vendor-field]");
   const customerField = event.target.closest("[data-customer-field]");
   const brandField = event.target.closest("[data-brand-field]");
@@ -10574,6 +13429,11 @@ document.addEventListener("change", (event) => {
     if (file) importSkuCategories(file).catch((error) => toast(error.message));
     event.target.value = "";
   }
+  if (categoryMappingImportFile) {
+    const [file] = categoryMappingImportFile.files || [];
+    if (file) importCategoryMappings(file).catch((error) => toast(error.message));
+    event.target.value = "";
+  }
   if (mappingHeaderFile) {
     loadMappingHeaders(mappingHeaderFile).catch((error) => toast(error.message));
     event.target.value = "";
@@ -10582,6 +13442,7 @@ document.addEventListener("change", (event) => {
     selectedExportMappingId = event.target.value;
   }
   if (channelInput) updateChannelField(channelInput);
+  if (systemSettingInput) updateSystemSetting(systemSettingInput).catch((error) => toast(error.message));
   if (categoryInput) updateCategoryField(categoryInput).catch((error) => toast(error.message));
 if (orderMoneyInput) updateOrderMoney(orderMoneyInput);
   if (vendorField) updateVendorField(vendorField);

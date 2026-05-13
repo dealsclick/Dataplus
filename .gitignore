@@ -1,6 +1,7 @@
 .env
 node_modules/
 npm-debug.log*
+outputs/
 
 # Local runtime data and backups
 data/

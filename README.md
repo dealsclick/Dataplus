@@ -125,7 +125,14 @@ EBAY_ENVIRONMENT=production
 EBAY_CLIENT_ID=your_ebay_client_id
 EBAY_CLIENT_SECRET=your_ebay_client_secret
 EBAY_RUNAME=your_ebay_redirect_uri_name
-EBAY_SCOPE=https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly
+EBAY_SCOPE=https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly
+EBAY_APP_SCOPE=https://api.ebay.com/oauth/api_scope
+EBAY_MARKETPLACE_ID=EBAY_US
+EBAY_CURRENCY=USD
+EBAY_MERCHANT_LOCATION_KEY=your_ebay_inventory_location_key
+EBAY_PAYMENT_POLICY_ID=your_ebay_payment_policy_id
+EBAY_RETURN_POLICY_ID=your_ebay_return_policy_id
+EBAY_FULFILLMENT_POLICY_ID=your_ebay_fulfillment_policy_id
 EBAY_ORDER_LOOKBACK_DAYS=90
 EBAY_ORDER_PAGE_SIZE=50
 ```

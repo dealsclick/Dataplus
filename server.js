@@ -1,4 +1,5 @@
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -10,7 +11,13 @@ const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
 const DATA_DIR = path.join(ROOT, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
+const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
+const CATEGORY_CACHE_FILE = path.join(DATA_DIR, "category-cache.json");
+const CATEGORY_CACHE_VERSION = 5;
 const CATALOG_FILE = path.join(DATA_DIR, "catalog", "products.ndjson");
+const MATRIXIFY_SMART_COLLECTION_DATA_FILE = path.join(ROOT, "outputs", "matrixify-smart-collections", "smart-collections-data.json");
+const MATRIXIFY_MENU_MAPPING_FILE = path.join(DATA_DIR, "templates", "shopify-menu-collection-mapping.csv");
+const MATRIXIFY_MENU_IMPORT_TEMPLATE_FILE = path.join(DATA_DIR, "templates", "matrixify-main-menu-import.csv");
 const CATALOG_MANIFEST_FILE = `${CATALOG_FILE}.manifest.json`;
 const CATALOG_VENDOR_INDEX_FILE = path.join(DATA_DIR, "catalog", "vendors.json");
 const CATALOG_CATEGORY_INDEX_FILE = path.join(DATA_DIR, "catalog", "categories.json");
@@ -23,6 +30,7 @@ const SHOPIFY_TAXONOMY_INDEX_FILE = path.join(DATA_DIR, "channel-taxonomies", "s
 const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
 const CONNECTOR_STATE_FILE = path.join(DATA_DIR, "connectors.json");
 const ENV_FILE = path.join(ROOT, ".env");
+let dbCache = { mtimeMs: 0, data: null };
 
 const SOURCES = ["Temu", "eBay", "Whatnot", "TikTok Shop"];
 const ORDER_PREFIX = "DP";
@@ -219,7 +227,26 @@ const DEFAULT_CHANNEL_SETTINGS = {
   autoCreateShadow: false,
   priceMarkupPercent: 0,
   minMarginPercent: 0,
-  roundingRule: "none"
+  roundingRule: "none",
+  ebayMarketplaceId: "EBAY_US",
+  ebayCurrency: "USD",
+  ebayMerchantLocationKey: "",
+  ebayPaymentPolicyId: "",
+  ebayReturnPolicyId: "",
+  ebayFulfillmentPolicyId: "",
+  ebayDefaultCondition: "NEW",
+  ebayDefaultCategoryId: "",
+  ebayListingFormat: "FIXED_PRICE",
+  ebayQuantityMode: "available",
+  ebayDescriptionSource: "longDescription",
+  ebayMaxImages: 12,
+  ebayAutoPublish: false,
+  ebayRequireImage: true,
+  ebayBestOfferEnabled: false
+};
+
+const DEFAULT_SYSTEM_SETTINGS = {
+  autoLoadProductAlternates: false
 };
 
 const DEFAULT_MARKETPLACE_TEMPLATES = [
@@ -318,6 +345,7 @@ const DEFAULT_MARKETPLACE_TEMPLATES = [
 ];
 
 let catalogFacetCache = null;
+let categoryResponseCache = new Map();
 
 loadLocalEnv();
 
@@ -559,13 +587,32 @@ function ensureDb() {
 async function readDb() {
   ensureDb();
   const stored = postgres.isPostgresEnabled() ? await postgres.readState() : null;
+  if (!stored && dbCache.data) {
+    const stats = fs.statSync(DB_FILE);
+    if (stats.mtimeMs === dbCache.mtimeMs) return dbCache.data;
+  }
   const db = stored || JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+  db.exportMappings = readExportMappingsStore(db.exportMappings);
   const normalized = normalizeDb(db);
   if (normalized.__normalizedChanged) {
     delete normalized.__normalizedChanged;
     await writeDb(normalized);
   }
+  if (!stored) dbCache = { mtimeMs: fs.statSync(DB_FILE).mtimeMs, data: normalized };
   return normalized;
+}
+
+async function readDbFast() {
+  ensureDb();
+  const stored = postgres.isPostgresEnabled() ? await postgres.readState() : null;
+  if (!stored && dbCache.data) {
+    const stats = fs.statSync(DB_FILE);
+    if (stats.mtimeMs === dbCache.mtimeMs) return dbCache.data;
+  }
+  const db = stored || JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+  db.exportMappings = readExportMappingsStore(db.exportMappings);
+  if (!stored) dbCache = { mtimeMs: fs.statSync(DB_FILE).mtimeMs, data: db };
+  return db;
 }
 
 async function writeDb(db) {
@@ -574,11 +621,17 @@ async function writeDb(db) {
     return;
   }
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+  dbCache = { mtimeMs: fs.statSync(DB_FILE).mtimeMs, data: db };
 }
 
 function writeDbSync(db) {
   if (postgres.isPostgresEnabled()) return;
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+  dbCache = { mtimeMs: fs.statSync(DB_FILE).mtimeMs, data: db };
+}
+
+function isReportableOrder(order = {}) {
+  return !["void", "canceled", "cancelled", "deleted"].includes(String(order.status || "").toLowerCase());
 }
 
 function readConnectorStateSync() {
@@ -757,7 +810,11 @@ function normalizeCatalogImportReviews(reviews = []) {
     createdAt: review.createdAt || new Date().toISOString(),
     updatedAt: review.updatedAt || review.createdAt || new Date().toISOString(),
     decidedAt: review.decidedAt || "",
-    decisionNote: review.decisionNote || ""
+    decisionNote: review.decisionNote || "",
+    details: review.details || "",
+    externalUrl: review.externalUrl || "",
+    externalId: review.externalId || "",
+    rawData: review.rawData && typeof review.rawData === "object" ? review.rawData : null
   })).filter((review) => review.sku && review.field).slice(0, 5000);
 }
 
@@ -793,6 +850,60 @@ function queueCatalogImportReview(db, item, field, incomingValue, source = "Prod
     updatedAt: now,
     decidedAt: "",
     decisionNote: ""
+  });
+  db.catalogImportReviews = db.catalogImportReviews.slice(0, 5000);
+  return true;
+}
+
+function queueUnmappedEbayCatalogReview(db, row) {
+  db.catalogImportReviews = normalizeCatalogImportReviews(db.catalogImportReviews);
+  const sku = String(row.sku || "").trim();
+  if (!sku) return false;
+  const externalId = row.listingId || row.offerId || sku;
+  const pending = db.catalogImportReviews.find((review) => (
+    review.status === "pending"
+    && review.field === "ebayCatalogMatch"
+    && (
+      (review.externalId && externalId && review.externalId === externalId)
+      || review.sku.toLowerCase() === sku.toLowerCase()
+    )
+  ));
+  const now = new Date().toISOString();
+  const title = row.title || row.description || "Untitled eBay listing";
+  const incomingValue = JSON.stringify({
+    sku,
+    title,
+    price: row.price,
+    quantity: row.quantity,
+    offerId: row.offerId,
+    listingId: row.listingId,
+    status: row.status
+  });
+  const payload = {
+    sku,
+    productId: "",
+    field: "ebayCatalogMatch",
+    label: "eBay listing not mapped",
+    currentValue: "No matching DataPlus product",
+    incomingValue,
+    source: "eBay catalog",
+    status: "pending",
+    updatedAt: now,
+    details: `Live eBay SKU ${sku} did not match a DataPlus SKU, alias, offer ID, or listing ID.`,
+    externalUrl: row.listingUrl || "",
+    externalId,
+    rawData: row
+  };
+  if (pending) {
+    Object.assign(pending, payload, { id: pending.id, createdAt: pending.createdAt || now });
+    return true;
+  }
+  db.catalogImportReviews.unshift({
+    id: crypto.randomUUID(),
+    createdAt: now,
+    decidedAt: "",
+    decisionNote: "",
+    ...payload
   });
   db.catalogImportReviews = db.catalogImportReviews.slice(0, 5000);
   return true;
@@ -864,8 +975,10 @@ function normalizeDb(db) {
   db.sourceCatalogOverrides = normalizeSourceCatalogOverrides(db.sourceCatalogOverrides);
   db.vendorCategoryMappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings);
   db.catalogImportReviews = normalizeCatalogImportReviews(db.catalogImportReviews);
+  db.deletedOrders = Array.isArray(db.deletedOrders) ? db.deletedOrders : [];
   db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
   db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
+  db.systemSettings = { ...DEFAULT_SYSTEM_SETTINGS, ...(db.systemSettings || {}) };
   db.connections = (db.connections || SOURCES.map((name) => ({ id: crypto.randomUUID(), name }))).map(normalizeChannel);
 
   db.inventory = (db.inventory || []).map((item) => {
@@ -978,10 +1091,11 @@ function normalizeDb(db) {
       serialUnits: Array.isArray(item.serialUnits) ? item.serialUnits : [],
       warehouseStock: Array.isArray(item.warehouseStock) ? item.warehouseStock : [],
       shadowSkus: Array.isArray(item.shadowSkus) ? item.shadowSkus.map((shadow) => normalizeShadowSku(shadow, item)) : [],
+      aliases: normalizeProductAliases(item.aliases, item),
       attributes: item.attributes || {}
     };
 
-    const merged = { ...item, ...product, images: product.images, tags: product.tags, serialUnits: product.serialUnits, warehouseStock: product.warehouseStock, shadowSkus: product.shadowSkus };
+    const merged = { ...item, ...product, images: product.images, tags: product.tags, serialUnits: product.serialUnits, warehouseStock: product.warehouseStock, shadowSkus: product.shadowSkus, aliases: product.aliases };
     if (!merged.brandLocked && merged.brand && !brandLooksLikeSupplier(merged)) {
       merged.brandLocked = true;
       changed = true;
@@ -1069,6 +1183,18 @@ function normalizeDb(db) {
     enriched.marketplaceReferences = enriched.marketplaceReferences?.length ? enriched.marketplaceReferences : [
       { source: enriched.source, type: "order", value: enriched.marketplaceOrderNumber, primary: true }
     ].filter((reference) => reference.value);
+    if (enriched.trackingNumber) {
+      const inferredCarrier = inferCarrierFromTracking(enriched.trackingNumber, enriched.shippingCarrier);
+      if (inferredCarrier && String(enriched.shippingCarrier || "").toUpperCase() !== String(inferredCarrier).toUpperCase()) {
+        enriched.shippingCarrier = inferredCarrier;
+        enriched.carrierName = displayCarrierName(inferredCarrier);
+        enriched.trackingUrl = trackingUrlForCarrier(inferredCarrier, enriched.trackingNumber);
+        changed = true;
+      } else if (!enriched.trackingUrl) {
+        enriched.trackingUrl = trackingUrlForCarrier(enriched.shippingCarrier, enriched.trackingNumber);
+        if (enriched.trackingUrl) changed = true;
+      }
+    }
     enriched.refunds = (Array.isArray(enriched.refunds) ? enriched.refunds : []).map((refund) => ({
       ...refund,
       items: (Array.isArray(refund.items) ? refund.items : []).map((item, index) => ({
@@ -1083,6 +1209,7 @@ function normalizeDb(db) {
     if (!order.internalOrderNumber || !order.customerId || !order.items || order.productCost === undefined || !order.address) changed = true;
     return enriched;
   });
+  if (backfillAliasesFromMappedOrders(db)) changed = true;
 
   const customerResult = normalizeCustomers(db);
   if (customerResult.changed) changed = true;
@@ -1319,12 +1446,126 @@ function normalizeShadowSku(shadow = {}, parent = {}) {
   };
 }
 
+function normalizeProductAlias(alias = {}, parent = {}) {
+  const aliasSku = String(alias.aliasSku || alias.sku || alias.value || "").trim();
+  if (!aliasSku) return null;
+  const createdAt = alias.createdAt || new Date().toISOString();
+  return {
+    id: alias.id || crypto.randomUUID(),
+    parentSku: alias.parentSku || parent.sku || "",
+    aliasSku,
+    source: String(alias.source || alias.marketplace || "").trim(),
+    type: String(alias.type || alias.mode || "direct").trim().toLowerCase(),
+    active: alias.active !== false,
+    createdFromOrderId: alias.createdFromOrderId || alias.orderId || "",
+    createdFromOrderNumber: alias.createdFromOrderNumber || alias.orderNumber || "",
+    createdFromLineIndex: Number(alias.createdFromLineIndex ?? alias.lineIndex ?? -1),
+    createdAt,
+    updatedAt: alias.updatedAt || createdAt,
+    notes: String(alias.notes || "").trim()
+  };
+}
+
+function normalizeProductAliases(aliases = [], parent = {}) {
+  const seen = new Set();
+  return (Array.isArray(aliases) ? aliases : [])
+    .map((alias) => normalizeProductAlias(alias, parent))
+    .filter(Boolean)
+    .filter((alias) => {
+      const key = alias.aliasSku.toLowerCase();
+      if (key === String(parent.sku || "").toLowerCase()) return false;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function skuMatchesProduct(product = {}, sku = "") {
+  const key = String(sku || "").trim().toLowerCase();
+  if (!key) return false;
+  if (String(product.sku || "").trim().toLowerCase() === key) return true;
+  if ((product.aliases || []).some((alias) => alias.active !== false && String(alias.aliasSku || "").trim().toLowerCase() === key)) return true;
+  if ((product.shadowSkus || []).some((shadow) => String(shadow.shadowSku || "").trim().toLowerCase() === key)) return true;
+  return Object.values(product.sources || {}).some((value) => String(value || "").trim().toLowerCase() === key);
+}
+
+function findInventoryBySkuOrAlias(db = {}, sku = "") {
+  return (db.inventory || []).find((product) => skuMatchesProduct(product, sku)) || null;
+}
+
+function findAliasOwner(db = {}, aliasSku = "") {
+  const key = String(aliasSku || "").trim().toLowerCase();
+  if (!key) return null;
+  for (const product of db.inventory || []) {
+    const alias = (product.aliases || []).find((row) => String(row.aliasSku || "").trim().toLowerCase() === key);
+    if (alias) return { product, alias };
+  }
+  return null;
+}
+
+function addProductAlias(db, product, aliasSku, body = {}) {
+  const value = String(aliasSku || "").trim();
+  if (!value || String(product.sku || "").toLowerCase() === value.toLowerCase()) return null;
+  const owner = findAliasOwner(db, value);
+  if (owner && owner.product.id !== product.id) throw new Error(`Alias SKU ${value} already belongs to ${owner.product.sku}.`);
+  product.aliases = normalizeProductAliases(product.aliases, product);
+  const existing = product.aliases.find((alias) => String(alias.aliasSku || "").toLowerCase() === value.toLowerCase());
+  if (existing) {
+    existing.active = true;
+    existing.updatedAt = new Date().toISOString();
+    return existing;
+  }
+  const alias = normalizeProductAlias({
+    aliasSku: value,
+    parentSku: product.sku,
+    source: body.source || body.marketplace || "",
+    type: body.type || body.mode || "direct",
+    createdFromOrderId: body.createdFromOrderId || "",
+    createdFromOrderNumber: body.createdFromOrderNumber || "",
+    createdFromLineIndex: body.createdFromLineIndex,
+    notes: body.notes || ""
+  }, product);
+  product.aliases.push(alias);
+  product.updatedAt = new Date().toISOString();
+  return alias;
+}
+
+function backfillAliasesFromMappedOrders(db = {}) {
+  let changed = false;
+  for (const order of db.orders || []) {
+    const items = orderLineItems(order);
+    for (let index = 0; index < items.length; index += 1) {
+      const line = items[index];
+      const aliasSku = String(line.originalSku || line.mappedFromSku || line.shadowSku || "").trim();
+      const parentSku = String(line.parentSku || line.sku || "").trim();
+      if (!aliasSku || !parentSku || aliasSku.toLowerCase() === parentSku.toLowerCase()) continue;
+      const product = (db.inventory || []).find((item) => String(item.sku || "").toLowerCase() === parentSku.toLowerCase());
+      if (!product) continue;
+      try {
+        const before = (product.aliases || []).length;
+        addProductAlias(db, product, aliasSku, {
+          source: order.source,
+          type: String(line.skuMappingMode || "").includes("shadow") ? "shadow" : "direct",
+          createdFromOrderId: order.id,
+          createdFromOrderNumber: order.orderNumber,
+          createdFromLineIndex: index,
+          notes: "Backfilled from mapped order line"
+        });
+        if ((product.aliases || []).length !== before) changed = true;
+      } catch {
+        // Alias conflicts are left for manual review instead of blocking app startup.
+      }
+    }
+  }
+  return changed;
+}
+
 function normalizeChannel(channel = {}) {
   const settings = { ...DEFAULT_CHANNEL_SETTINGS, ...(channel.settings || {}) };
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "minMarginPercent"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "minMarginPercent", "ebayMaxImages"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   return {
@@ -1490,6 +1731,57 @@ function normalizeExportMappings(templates = []) {
     if (!DEFAULT_EXPORT_MAPPINGS.some((defaults) => defaults.id.toLowerCase() === key)) merged.push(normalizeExportMapping(template));
   }
   return merged;
+}
+
+function readExportMappingsStore(fallback = []) {
+  if (fs.existsSync(EXPORT_MAPPINGS_FILE)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(EXPORT_MAPPINGS_FILE, "utf8"));
+      return normalizeExportMappings(Array.isArray(parsed) ? parsed : parsed.exportMappings || []);
+    } catch {
+      return normalizeExportMappings(fallback);
+    }
+  }
+  return normalizeExportMappings(fallback);
+}
+
+function readExportMappingsFastStore() {
+  if (fs.existsSync(EXPORT_MAPPINGS_FILE)) return readExportMappingsStore([]);
+  const normalized = normalizeExportMappings([]);
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(EXPORT_MAPPINGS_FILE, JSON.stringify(normalized, null, 2));
+  } catch {
+    // Keep serving built-in mappings if the sidecar cannot be created yet.
+  }
+  return normalized;
+}
+
+async function readExportMappingsApiStore() {
+  if (fs.existsSync(EXPORT_MAPPINGS_FILE)) return readExportMappingsStore([]);
+  let fallback = [];
+  if (postgres.isPostgresEnabled()) {
+    try {
+      fallback = await postgres.readStateField("exportMappings") || [];
+    } catch {
+      fallback = [];
+    }
+  }
+  const normalized = normalizeExportMappings(fallback);
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(EXPORT_MAPPINGS_FILE, JSON.stringify(normalized, null, 2));
+  } catch {
+    // The API can still return built-ins/legacy mappings even if the sidecar write fails.
+  }
+  return normalized;
+}
+
+async function writeExportMappingsStore(exportMappings = []) {
+  const normalized = normalizeExportMappings(exportMappings);
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(EXPORT_MAPPINGS_FILE, JSON.stringify(normalized, null, 2));
+  return normalized;
 }
 
 function categoryMappingForProduct(db, item, channel = "shopify") {
@@ -1716,6 +2008,709 @@ function categoryTypeValue(value) {
   return parts.slice(-2).join(" > ") || parts[0] || "";
 }
 
+function smartCollectionTitle(productType = "") {
+  const parts = String(productType || "")
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.at(-1) || String(productType || "").trim();
+}
+
+function smartCollectionHandle(productType = "") {
+  return String(productType || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-")
+    .toLowerCase()
+    .slice(0, 240);
+}
+
+function cleanSeoText(value = "") {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .trim();
+}
+
+function truncateSeoText(value = "", max = 155) {
+  const text = cleanSeoText(value);
+  if (text.length <= max) return text;
+  const sliced = text.slice(0, max + 1);
+  const cut = sliced.lastIndexOf(" ");
+  return cleanSeoText(`${sliced.slice(0, cut > 60 ? cut : max).replace(/[,.;&-]+$/g, "")}.`);
+}
+
+function smartCollectionSeoTitle(title = "") {
+  const cleanTitle = cleanSeoText(title);
+  const suffix = "on Sale";
+  const value = cleanTitle.toLowerCase().includes("sale") ? cleanTitle : `${cleanTitle} ${suffix}`;
+  return truncateSeoText(value, 70);
+}
+
+function smartCollectionSeoDescription(title = "", productType = "") {
+  const cleanTitle = cleanSeoText(title);
+  const typeParts = String(productType || "")
+    .split(">")
+    .map((part) => cleanSeoText(part))
+    .filter(Boolean);
+  const parent = typeParts.length > 1 ? typeParts[typeParts.length - 2] : "";
+  const base = parent && parent.toLowerCase() !== cleanTitle.toLowerCase()
+    ? `${cleanTitle} on sale for ${parent}. Shop quality ${cleanTitle.toLowerCase()} with fast ordering, reliable supply, and sharp everyday pricing.`
+    : `${cleanTitle} on sale. Shop quality ${cleanTitle.toLowerCase()} with fast ordering, reliable supply, and sharp everyday pricing.`;
+  return truncateSeoText(base, 155);
+}
+
+function normalizeSmartCollectionProfile(profile = {}, categoryName = "") {
+  const productType = categoryTypeValue(profile.productType || profile.ruleCondition || categoryName);
+  const title = String(profile.title || smartCollectionTitle(productType)).trim();
+  const legacyTitle = title;
+  const legacyDescription = `${title} products from DataPlus. Browse ${productType} with current catalog availability.`.slice(0, 155);
+  const titleTag = !profile.titleTag || profile.titleTag === legacyTitle
+    ? smartCollectionSeoTitle(title)
+    : profile.titleTag;
+  const descriptionTag = !profile.descriptionTag || profile.descriptionTag === legacyDescription || /dataplus/i.test(profile.descriptionTag)
+    ? smartCollectionSeoDescription(title, productType)
+    : profile.descriptionTag;
+  return {
+    enabled: profile.enabled !== false,
+    productType,
+    handle: smartCollectionHandle(profile.handle || productType),
+    title,
+    bodyHtml: profile.bodyHtml || profile.bodyHTML || "",
+    sortOrder: profile.sortOrder || "Best Selling",
+    templateSuffix: profile.templateSuffix || "",
+    published: profile.published === undefined ? true : Boolean(profile.published),
+    publishedScope: profile.publishedScope || "global",
+    mustMatch: profile.mustMatch || "all conditions",
+    ruleProductColumn: profile.ruleProductColumn || "Type",
+    ruleRelation: profile.ruleRelation || "Equals",
+    imageSrc: profile.imageSrc || profile.image || "",
+    imageAltText: profile.imageAltText || title,
+    titleTag,
+    descriptionTag
+  };
+}
+
+function productImageUrl(item = {}) {
+  const images = [
+    item.defaultImage,
+    item.checkedImageUrl,
+    item.originalImage,
+    item.checkedImage?.url,
+    item.productManagerFields?.default_image,
+    item.productManagerFields?.checked_image?.url,
+    ...(Array.isArray(item.images) ? item.images : []),
+    ...(Array.isArray(item.productManagerFields?.images) ? item.productManagerFields.images : [])
+  ];
+  return images.map((image) => String(image || "").trim()).find((image) => /^https?:\/\//i.test(image)) || "";
+}
+
+function productTimestamp(item = {}) {
+  for (const value of [
+    item.updatedAt,
+    item.productDumpUpdatedAt,
+    item.validatedAt,
+    item.productManagerFields?.updated_at,
+    item.createdAt,
+    item.productDumpCreatedAt,
+    item.productManagerFields?.created_at
+  ]) {
+    const timestamp = Date.parse(value || "");
+    if (Number.isFinite(timestamp)) return timestamp;
+  }
+  return 0;
+}
+
+async function latestCatalogImagesByProductType() {
+  const byType = new Map();
+  if (!fs.existsSync(CATALOG_FILE)) return byType;
+  const rl = readline.createInterface({
+    input: fs.createReadStream(CATALOG_FILE, { encoding: "utf8" }),
+    crlfDelay: Infinity
+  });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    let item;
+    try {
+      item = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const productType = categoryTypeValue(item.category || item.mainCategory || item.productManagerFields?.category || "");
+    if (!productType) continue;
+    const image = productImageUrl(item);
+    if (!image) continue;
+    const timestamp = productTimestamp(item);
+    const current = byType.get(productType);
+    if (!current || timestamp > current.timestamp) byType.set(productType, { image, timestamp });
+  }
+  return byType;
+}
+
+function matrixifySmartCollectionCacheByType() {
+  if (!fs.existsSync(MATRIXIFY_SMART_COLLECTION_DATA_FILE)) return new Map();
+  try {
+    const data = JSON.parse(fs.readFileSync(MATRIXIFY_SMART_COLLECTION_DATA_FILE, "utf8"));
+    return new Map((data.rows || [])
+      .filter((row) => row.productType)
+      .map((row) => [row.productType, row]));
+  } catch {
+    return new Map();
+  }
+}
+
+async function matrixifySmartCollectionRows() {
+  const categoryData = await publicCategoriesFast("", "main");
+  const cachedRowsByType = matrixifySmartCollectionCacheByType();
+  const seenHandles = new Set();
+  return (categoryData.categories || [])
+    .filter((category) => Number(category.productCount || 0) > 0)
+    .filter((category) => category.mappings?.shopify?.categoryId || category.mappings?.shopify?.categoryPath)
+    .map((category) => {
+      const productType = categoryTypeValue(category.name);
+      const profile = normalizeSmartCollectionProfile(category.smartCollection || {}, category.name);
+      const ruleCondition = profile.productType || productType;
+      const title = profile.title || smartCollectionTitle(ruleCondition);
+      const handle = profile.handle || smartCollectionHandle(ruleCondition);
+      const image = profile.imageSrc || cachedRowsByType.get(ruleCondition)?.image || "";
+      return {
+        "Handle": handle,
+        "Command": "MERGE",
+        "Title": title,
+        "Body HTML": profile.bodyHtml || "",
+        "Sort Order": profile.sortOrder || "Best Selling",
+        "Template Suffix": profile.templateSuffix || "",
+        "Published": profile.published ? "TRUE" : "FALSE",
+        "Published Scope": profile.publishedScope || "global",
+        "Image Src": image,
+        "Image Alt Text": profile.imageAltText || title,
+        "Must Match": profile.mustMatch || "all conditions",
+        "Rule: Product Column": profile.ruleProductColumn || "Type",
+        "Rule: Relation": profile.ruleRelation || "Equals",
+        "Rule: Condition": ruleCondition,
+        "Product: ID": "",
+        "Product: Handle": "",
+        "Product: Position": "",
+        "Metafield: title_tag [string]": profile.titleTag || title,
+        "Metafield: description_tag [string]": profile.descriptionTag || smartCollectionSeoDescription(title, ruleCondition),
+        "Metafield: custom.fda_approved [boolean]": ""
+      };
+    })
+    .filter((row) => row.Handle && row.Title && row["Rule: Condition"])
+    .filter((row) => {
+      if (seenHandles.has(row.Handle)) return false;
+      seenHandles.add(row.Handle);
+      return true;
+    })
+    .sort((a, b) => a.Handle.localeCompare(b.Handle));
+}
+
+const MATRIXIFY_MENU_COLUMNS = [
+  "ID",
+  "Handle",
+  "Command",
+  "Title",
+  "Is Default",
+  "Top Row",
+  "Row #",
+  "Menu Item: ID",
+  "Menu Item: Title",
+  "Menu Item: Command",
+  "Menu Item: Resource Type",
+  "Menu Item: Resource ID",
+  "Menu Item: Resource Handle",
+  "Menu Item: Collection Tags",
+  "Menu Item: URL",
+  "Menu Item: Parent ID",
+  "Menu Item: Parent Title",
+  "Menu Item: Position"
+];
+
+function readShopifyMenuCollectionMapping() {
+  if (!fs.existsSync(MATRIXIFY_MENU_MAPPING_FILE)) return [];
+  try {
+    return parseCsv(fs.readFileSync(MATRIXIFY_MENU_MAPPING_FILE, "utf8"));
+  } catch {
+    return [];
+  }
+}
+
+function menuMappingLookup(rows = []) {
+  const map = new Map();
+  const add = (key, row) => {
+    const normalized = String(key || "").trim().toLowerCase();
+    if (normalized && !map.has(normalized)) map.set(normalized, row);
+  };
+  for (const row of rows) {
+    add(row["Product Type Rule"], row);
+    add(row["Original Full Category Path"], row);
+    add(row["Collection Handle"], row);
+    add(row["Collection URL"], row);
+    add(row["Menu Path"], row);
+  }
+  return map;
+}
+
+function readMatrixifyMenuImportTemplate() {
+  if (!fs.existsSync(MATRIXIFY_MENU_IMPORT_TEMPLATE_FILE)) return [];
+  try {
+    return parseCsv(fs.readFileSync(MATRIXIFY_MENU_IMPORT_TEMPLATE_FILE, "utf8"));
+  } catch {
+    return [];
+  }
+}
+
+function matrixifyMenuTemplateIds(rows = []) {
+  const ids = new Map();
+  let maxId = 999;
+  const add = (key, value) => {
+    const id = String(value || "").trim();
+    if (!key || !id) return;
+    ids.set(key, id);
+    const numeric = Number(id);
+    if (Number.isFinite(numeric)) maxId = Math.max(maxId, numeric);
+  };
+  for (const row of rows) {
+    const id = row["Menu Item: ID"];
+    const title = String(row["Menu Item: Title"] || "").trim();
+    const parentId = String(row["Menu Item: Parent ID"] || "").trim();
+    const parentTitle = String(row["Menu Item: Parent Title"] || "").trim();
+    const resourceHandle = String(row["Menu Item: Resource Handle"] || "").trim();
+    const resourceType = String(row["Menu Item: Resource Type"] || "").trim().toUpperCase();
+    if (resourceType === "COLLECTION" && resourceHandle) add(`collection|${resourceHandle.toLowerCase()}`, id);
+    if (resourceType === "HTTP" && title && !parentId && !parentTitle) add(`department|${title.toLowerCase()}`, id);
+    if (resourceType === "HTTP" && title && (parentId || parentTitle)) add(`group|${parentTitle.toLowerCase()}|${title.toLowerCase()}`, id);
+  }
+  return {
+    next() {
+      maxId += 1;
+      return String(maxId);
+    },
+    getOrCreate(key) {
+      const normalized = String(key || "").toLowerCase();
+      if (ids.has(normalized)) return ids.get(normalized);
+      const id = this.next();
+      ids.set(normalized, id);
+      return id;
+    }
+  };
+}
+
+function matrixifyMenuTemplateOrder(rows = []) {
+  const order = new Map();
+  let index = 0;
+  const add = (key) => {
+    const normalized = String(key || "").toLowerCase();
+    if (normalized && !order.has(normalized)) {
+      index += 1;
+      order.set(normalized, index);
+    }
+  };
+  for (const row of rows) {
+    const title = String(row["Menu Item: Title"] || "").trim();
+    const parentTitle = String(row["Menu Item: Parent Title"] || "").trim();
+    const resourceHandle = String(row["Menu Item: Resource Handle"] || "").trim();
+    const resourceType = String(row["Menu Item: Resource Type"] || "").trim().toUpperCase();
+    if (resourceType === "COLLECTION" && resourceHandle) add(`collection|${resourceHandle}`);
+    if (resourceType === "HTTP" && title && !parentTitle) add(`department|${title}`);
+    if (resourceType === "HTTP" && title && parentTitle) add(`group|${parentTitle}|${title}`);
+  }
+  return {
+    value(key) {
+      return order.get(String(key || "").toLowerCase()) || 999999;
+    }
+  };
+}
+
+function matrixifyMenuTemplateTitles(rows = []) {
+  const titles = new Map();
+  const add = (key, value) => {
+    const normalized = String(key || "").toLowerCase();
+    const title = String(value || "").trim();
+    if (normalized && title && !titles.has(normalized)) titles.set(normalized, title);
+  };
+  for (const row of rows) {
+    const title = String(row["Menu Item: Title"] || "").trim();
+    const parentTitle = String(row["Menu Item: Parent Title"] || "").trim();
+    const resourceHandle = String(row["Menu Item: Resource Handle"] || "").trim();
+    const resourceType = String(row["Menu Item: Resource Type"] || "").trim().toUpperCase();
+    if (resourceType === "COLLECTION" && resourceHandle) add(`collection|${resourceHandle}`, title);
+    if (resourceType === "HTTP" && title && !parentTitle) add(`department|${title}`, title);
+    if (resourceType === "HTTP" && title && parentTitle) add(`group|${parentTitle}|${title}`, title);
+  }
+  return {
+    value(key, fallback = "") {
+      return titles.get(String(key || "").toLowerCase()) || fallback;
+    }
+  };
+}
+
+function matrixifyMenuEntryMap(entries = []) {
+  const map = new Map();
+  for (const entry of entries) {
+    if (entry.collectionHandle) map.set(String(entry.collectionHandle).toLowerCase(), entry);
+  }
+  return map;
+}
+
+function categoryMenuDefaults(category = {}, profile = {}) {
+  const parts = String(category.name || profile.productType || "")
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const productTypeParts = String(profile.productType || categoryTypeValue(category.name))
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const top = parts[0] || productTypeParts[0] || "Catalog";
+  const group = parts[1] || productTypeParts[0] || top;
+  const title = profile.title || smartCollectionTitle(profile.productType || category.name);
+  return {
+    topDepartment: top,
+    menuGroup: group,
+    collectionTitle: title,
+    menuPath: [top, group, title].filter(Boolean).join(" > "),
+    label: title,
+    productType: profile.productType || categoryTypeValue(category.name),
+    originalCategoryPath: category.name || ""
+  };
+}
+
+function matrixifyMenuItemId(...parts) {
+  return smartCollectionHandle(parts.filter(Boolean).join("-"));
+}
+
+async function matrixifyMenuRows() {
+  const categoryData = await publicCategoriesFast("", "main");
+  const seedMap = menuMappingLookup(readShopifyMenuCollectionMapping());
+  const templateRows = readMatrixifyMenuImportTemplate();
+  const idRegistry = matrixifyMenuTemplateIds(templateRows);
+  const orderRegistry = matrixifyMenuTemplateOrder(templateRows);
+  const titleRegistry = matrixifyMenuTemplateTitles(templateRows);
+  const entries = (categoryData.categories || [])
+    .filter((category) => Number(category.productCount || 0) > 0)
+    .filter((category) => category.mappings?.shopify?.categoryId || category.mappings?.shopify?.categoryPath)
+    .map((category) => {
+      const profile = normalizeSmartCollectionProfile(category.smartCollection || {}, category.name);
+      const handle = profile.handle || smartCollectionHandle(profile.productType || category.name);
+      const seed = seedMap.get(String(profile.productType || "").toLowerCase())
+        || seedMap.get(String(category.name || "").toLowerCase())
+        || seedMap.get(String(handle || "").toLowerCase())
+        || null;
+      const defaults = categoryMenuDefaults(category, profile);
+      const topDepartment = seed?.["Top Menu Department"] || defaults.topDepartment;
+      const menuGroup = seed?.["Menu Group"] || defaults.menuGroup;
+      const collectionHandle = seed?.["Collection Handle"] || handle;
+      return {
+        topDepartment,
+        menuGroup,
+        collectionTitle: seed?.["Collection Title"] || defaults.collectionTitle,
+        label: titleRegistry.value(`collection|${collectionHandle}`, seed?.["Shopify Menu Item Label"] || seed?.["Collection Title"] || defaults.label),
+        linkType: seed?.["Shopify Link Type"] || "Collection",
+        collectionUrl: seed?.["Collection URL"] || `/collections/${handle}`,
+        collectionHandle,
+        productType: seed?.["Product Type Rule"] || defaults.productType,
+        originalCategoryPath: seed?.["Original Full Category Path"] || defaults.originalCategoryPath,
+        menuPath: seed?.["Menu Path"] || defaults.menuPath
+      };
+    })
+    .filter((entry) => entry.collectionHandle && entry.label)
+    .sort((a, b) => {
+      const departmentDiff = orderRegistry.value(`department|${a.topDepartment}`) - orderRegistry.value(`department|${b.topDepartment}`);
+      if (departmentDiff) return departmentDiff;
+      const groupDiff = orderRegistry.value(`group|${a.topDepartment}|${a.menuGroup}`) - orderRegistry.value(`group|${b.topDepartment}|${b.menuGroup}`);
+      if (groupDiff) return groupDiff;
+      const collectionDiff = orderRegistry.value(`collection|${a.collectionHandle}`) - orderRegistry.value(`collection|${b.collectionHandle}`);
+      if (collectionDiff) return collectionDiff;
+      return [a.topDepartment, a.menuGroup, a.label].join(" > ").localeCompare([b.topDepartment, b.menuGroup, b.label].join(" > "));
+    });
+  if (templateRows.length) {
+    const entryByHandle = matrixifyMenuEntryMap(entries);
+    const rows = templateRows.map((row, index) => {
+      const next = Object.fromEntries(MATRIXIFY_MENU_COLUMNS.map((column) => [column, row[column] ?? ""]));
+      next["Row #"] = index + 1;
+      const handle = String(next["Menu Item: Resource Handle"] || "").trim().toLowerCase();
+      const entry = handle ? entryByHandle.get(handle) : null;
+      if (entry) {
+        next["Menu Item: Resource Handle"] = entry.collectionHandle;
+        next["Menu Item: Title"] = titleRegistry.value(`collection|${entry.collectionHandle}`, next["Menu Item: Title"] || entry.label);
+        next["Menu Item: Resource Type"] = "COLLECTION";
+        next["Menu Item: URL"] = "";
+        entryByHandle.delete(handle);
+      }
+      return next;
+    });
+    const departmentIds = new Map();
+    const groupIds = new Map();
+    const leafPosition = new Map();
+    let rowNumber = rows.length;
+    for (const row of rows) {
+      const type = String(row["Menu Item: Resource Type"] || "").trim().toUpperCase();
+      const title = String(row["Menu Item: Title"] || "").trim();
+      const parentTitle = String(row["Menu Item: Parent Title"] || "").trim();
+      const id = String(row["Menu Item: ID"] || "").trim();
+      if (!title || !id) continue;
+      if (type === "HTTP" && !parentTitle) departmentIds.set(title.toLowerCase(), id);
+      if (type === "HTTP" && parentTitle) groupIds.set(`${parentTitle.toLowerCase()}|${title.toLowerCase()}`, id);
+      if (type === "COLLECTION" && parentTitle) {
+        const key = `${String(row["Menu Item: Parent ID"] || "").trim()}|${parentTitle.toLowerCase()}`;
+        leafPosition.set(key, Math.max(leafPosition.get(key) || 0, Number(row["Menu Item: Position"] || 0)));
+      }
+    }
+    for (const entry of entryByHandle.values()) {
+      const departmentTitle = titleRegistry.value(`department|${entry.topDepartment}`, entry.topDepartment);
+      let departmentId = departmentIds.get(departmentTitle.toLowerCase());
+      if (!departmentId) {
+        departmentId = idRegistry.getOrCreate(`department|${departmentTitle}`);
+        departmentIds.set(departmentTitle.toLowerCase(), departmentId);
+        const position = [...departmentIds.keys()].length;
+        rows.push({
+          "Handle": "main-menu",
+          "Command": "MERGE",
+          "Title": "Main menu",
+          "Row #": ++rowNumber,
+          "Menu Item: ID": departmentId,
+          "Menu Item: Title": departmentTitle,
+          "Menu Item: Command": "MERGE",
+          "Menu Item: Resource Type": "HTTP",
+          "Menu Item: URL": "#",
+          "Menu Item: Position": position
+        });
+      }
+      const groupTitle = titleRegistry.value(`group|${entry.topDepartment}|${entry.menuGroup}`, entry.menuGroup);
+      const groupKey = `${departmentTitle.toLowerCase()}|${groupTitle.toLowerCase()}`;
+      let groupId = groupIds.get(groupKey);
+      if (!groupId) {
+        groupId = idRegistry.getOrCreate(`group|${departmentTitle}|${groupTitle}`);
+        groupIds.set(groupKey, groupId);
+        rows.push({
+          "Handle": "main-menu",
+          "Command": "MERGE",
+          "Title": "Main menu",
+          "Row #": ++rowNumber,
+          "Menu Item: ID": groupId,
+          "Menu Item: Title": groupTitle,
+          "Menu Item: Command": "MERGE",
+          "Menu Item: Resource Type": "HTTP",
+          "Menu Item: URL": "#",
+          "Menu Item: Parent ID": departmentId,
+          "Menu Item: Parent Title": departmentTitle,
+          "Menu Item: Position": [...groupIds.keys()].filter((key) => key.startsWith(`${departmentTitle.toLowerCase()}|`)).length
+        });
+      }
+      const leafKey = `${groupId}|${groupTitle.toLowerCase()}`;
+      const position = (leafPosition.get(leafKey) || 0) + 1;
+      leafPosition.set(leafKey, position);
+      rows.push({
+        "Handle": "main-menu",
+        "Command": "MERGE",
+        "Title": "Main menu",
+        "Row #": ++rowNumber,
+        "Menu Item: ID": idRegistry.getOrCreate(`collection|${entry.collectionHandle}`),
+        "Menu Item: Title": entry.label,
+        "Menu Item: Command": "MERGE",
+        "Menu Item: Resource Type": "COLLECTION",
+        "Menu Item: Resource Handle": entry.collectionHandle,
+        "Menu Item: Parent ID": groupId,
+        "Menu Item: Parent Title": groupTitle,
+        "Menu Item: Position": position
+      });
+    }
+    return rows.map((row, index) => Object.fromEntries(MATRIXIFY_MENU_COLUMNS.map((column) => [column, column === "Row #" ? index + 1 : row[column] ?? ""])));
+  }
+  const rows = [];
+  let rowNumber = 1;
+  rows.push({
+    "ID": "",
+    "Handle": "main-menu",
+    "Command": "MERGE",
+    "Title": "Main menu",
+    "Is Default": "",
+    "Top Row": "",
+    "Row #": rowNumber
+  });
+  const seenDepartments = new Set();
+  const seenGroups = new Set();
+  const departmentPosition = new Map();
+  const groupPosition = new Map();
+  const leafPosition = new Map();
+  for (const entry of entries) {
+    const departmentId = idRegistry.getOrCreate(`department|${entry.topDepartment}`);
+    const departmentTitle = titleRegistry.value(`department|${entry.topDepartment}`, entry.topDepartment);
+    if (!seenDepartments.has(departmentId)) {
+      seenDepartments.add(departmentId);
+      const position = (departmentPosition.size || 0) + 1;
+      departmentPosition.set(entry.topDepartment, position);
+      rows.push({
+        "Handle": "main-menu",
+        "Command": "MERGE",
+        "Title": "Main menu",
+        "Is Default": "",
+        "Top Row": "",
+        "Row #": ++rowNumber,
+        "Menu Item: ID": departmentId,
+        "Menu Item: Title": departmentTitle,
+        "Menu Item: Command": "MERGE",
+        "Menu Item: Resource Type": "HTTP",
+        "Menu Item: URL": "#",
+        "Menu Item: Position": position
+      });
+    }
+    const groupId = idRegistry.getOrCreate(`group|${entry.topDepartment}|${entry.menuGroup}`);
+    const groupTitle = titleRegistry.value(`group|${entry.topDepartment}|${entry.menuGroup}`, entry.menuGroup);
+    if (!seenGroups.has(groupId)) {
+      seenGroups.add(groupId);
+      const groupKey = entry.topDepartment;
+      const position = (groupPosition.get(groupKey) || 0) + 1;
+      groupPosition.set(groupKey, position);
+      rows.push({
+        "Handle": "main-menu",
+        "Command": "MERGE",
+        "Title": "Main menu",
+        "Is Default": "",
+        "Top Row": "",
+        "Row #": ++rowNumber,
+        "Menu Item: ID": groupId,
+        "Menu Item: Title": groupTitle,
+        "Menu Item: Command": "MERGE",
+        "Menu Item: Resource Type": "HTTP",
+        "Menu Item: URL": "#",
+        "Menu Item: Parent ID": departmentId,
+        "Menu Item: Parent Title": departmentTitle,
+        "Menu Item: Position": position
+      });
+    }
+    const leafKey = `${entry.topDepartment} > ${entry.menuGroup}`;
+    const position = (leafPosition.get(leafKey) || 0) + 1;
+    leafPosition.set(leafKey, position);
+    rows.push({
+      "Handle": "main-menu",
+      "Command": "MERGE",
+      "Title": "Main menu",
+      "Is Default": "",
+      "Top Row": "",
+      "Row #": ++rowNumber,
+      "Menu Item: ID": idRegistry.getOrCreate(`collection|${entry.collectionHandle}`),
+      "Menu Item: Title": entry.label,
+      "Menu Item: Command": "MERGE",
+      "Menu Item: Resource Type": "COLLECTION",
+      "Menu Item: Resource Handle": entry.collectionHandle,
+      "Menu Item: URL": "",
+      "Menu Item: Parent ID": groupId,
+      "Menu Item: Parent Title": groupTitle,
+      "Menu Item: Position": position
+    });
+  }
+  return rows.map((row) => Object.fromEntries(MATRIXIFY_MENU_COLUMNS.map((column) => [column, row[column] ?? ""])));
+}
+
+function matrixifySmartCollectionReadiness(mainRows = [], settings = []) {
+  const cachedRowsByType = matrixifySmartCollectionCacheByType();
+  const settingForName = (name) => settings.find((row) => formatCategoryName(row.name).toLowerCase() === formatCategoryName(name).toLowerCase());
+  const rows = mainRows
+    .filter((row) => Number(row.productCount || 0) > 0)
+    .map((row) => {
+      const setting = settingForName(row.name) || {};
+      const shopify = normalizeChannelCategoryMapping(setting.mappings?.shopify || {});
+      const profile = normalizeSmartCollectionProfile(setting.smartCollection || {}, row.name);
+      const image = profile.imageSrc || cachedRowsByType.get(profile.productType)?.image || "";
+      const mapped = Boolean(shopify.categoryId || shopify.categoryPath);
+      return {
+        category: row.name,
+        products: row.productCount || 0,
+        shopify_category: shopify.categoryPath || "",
+        shopify_category_id: shopify.categoryId || "",
+        product_type: profile.productType || "",
+        collection_handle: profile.handle || "",
+        collection_title: profile.title || "",
+        title_tag: profile.titleTag || "",
+        description_tag: profile.descriptionTag || "",
+        image_src: image,
+        ready: Boolean(mapped && profile.productType && profile.handle && profile.title),
+        missing_shopify: !mapped,
+        missing_product_type: !profile.productType,
+        missing_image: !image
+      };
+    });
+  const handleCounts = new Map();
+  const titleTagCounts = new Map();
+  const descriptionCounts = new Map();
+  for (const row of rows.filter((row) => !row.missing_shopify && row.collection_handle)) {
+    handleCounts.set(row.collection_handle, (handleCounts.get(row.collection_handle) || 0) + 1);
+  }
+  for (const row of rows.filter((row) => !row.missing_shopify)) {
+    if (row.title_tag) titleTagCounts.set(row.title_tag.toLowerCase(), (titleTagCounts.get(row.title_tag.toLowerCase()) || 0) + 1);
+    if (row.description_tag) descriptionCounts.set(row.description_tag.toLowerCase(), (descriptionCounts.get(row.description_tag.toLowerCase()) || 0) + 1);
+  }
+  for (const row of rows) {
+    row.duplicate_handle = Boolean(row.collection_handle && handleCounts.get(row.collection_handle) > 1);
+    row.duplicate_title_tag = Boolean(row.title_tag && titleTagCounts.get(row.title_tag.toLowerCase()) > 1);
+    row.duplicate_description_tag = Boolean(row.description_tag && descriptionCounts.get(row.description_tag.toLowerCase()) > 1);
+    row.weak_title_tag = !row.title_tag || row.title_tag.length < 18 || row.title_tag.length > 70 || /dataplus|products from|browse now/i.test(row.title_tag);
+    row.weak_description_tag = !row.description_tag || row.description_tag.length < 80 || row.description_tag.length > 160 || /dataplus|products from|browse now/i.test(row.description_tag);
+  }
+  const exportable = rows.filter((row) => !row.missing_shopify);
+  const notReady = exportable.filter((row) => !row.ready || row.duplicate_handle || row.weak_title_tag || row.weak_description_tag || row.duplicate_title_tag || row.duplicate_description_tag);
+  return {
+    rows,
+    exportableCount: exportable.length,
+    readyCount: exportable.length - notReady.length,
+    notReadyCount: notReady.length,
+    missingShopifyCount: rows.filter((row) => row.missing_shopify).length,
+    duplicateHandleCount: rows.filter((row) => row.duplicate_handle).length,
+    missingProductTypeCount: exportable.filter((row) => row.missing_product_type).length,
+    missingImageCount: exportable.filter((row) => row.missing_image).length,
+    weakSeoCount: exportable.filter((row) => row.weak_title_tag || row.weak_description_tag || row.duplicate_title_tag || row.duplicate_description_tag).length
+  };
+}
+
+function matrixifyMenuReviewRows(rows = []) {
+  const itemRows = rows.filter((row) => row["Menu Item: ID"] || row["Menu Item: Title"] || row["Menu Item: Resource Handle"]);
+  const idCounts = new Map();
+  const parentTitleCounts = new Map();
+  const handleCounts = new Map();
+  for (const row of itemRows) {
+    const id = String(row["Menu Item: ID"] || "").trim();
+    const parentKey = `${String(row["Menu Item: Parent ID"] || "").trim()}|${String(row["Menu Item: Parent Title"] || "").trim().toLowerCase()}|${String(row["Menu Item: Title"] || "").trim().toLowerCase()}`;
+    const handle = String(row["Menu Item: Resource Handle"] || "").trim().toLowerCase();
+    if (id) idCounts.set(id, (idCounts.get(id) || 0) + 1);
+    if (row["Menu Item: Title"]) parentTitleCounts.set(parentKey, (parentTitleCounts.get(parentKey) || 0) + 1);
+    if (handle) handleCounts.set(handle, (handleCounts.get(handle) || 0) + 1);
+  }
+  const issues = [];
+  for (const row of itemRows) {
+    const id = String(row["Menu Item: ID"] || "").trim();
+    const title = String(row["Menu Item: Title"] || "").trim();
+    const type = String(row["Menu Item: Resource Type"] || "").trim().toUpperCase();
+    const handle = String(row["Menu Item: Resource Handle"] || "").trim();
+    const url = String(row["Menu Item: URL"] || "").trim();
+    const parentKey = `${String(row["Menu Item: Parent ID"] || "").trim()}|${String(row["Menu Item: Parent Title"] || "").trim().toLowerCase()}|${title.toLowerCase()}`;
+    const add = (issue, severity = "warning") => issues.push({
+      row_number: row["Row #"] || "",
+      menu_item_id: id,
+      title,
+      parent_title: row["Menu Item: Parent Title"] || "",
+      resource_type: type,
+      resource_handle: handle,
+      issue,
+      severity
+    });
+    if (!id) add("Menu item is missing an ID", "error");
+    if (id && idCounts.get(id) > 1) add("Duplicate Menu Item ID", "error");
+    if (!title) add("Menu item is missing a title", "error");
+    if (title && parentTitleCounts.get(parentKey) > 1) add("Duplicate menu title under the same parent", "warning");
+    if (type === "COLLECTION" && !handle) add("Collection menu item is missing Resource Handle", "error");
+    if (type === "COLLECTION" && url) add("Collection menu item should use Resource Handle, not URL", "warning");
+    if (handle && handleCounts.get(handle.toLowerCase()) > 1) add("Duplicate collection handle in menu", "warning");
+    if (type === "HTTP" && !url) add("HTTP menu item is missing URL", "warning");
+    if (!["", "HTTP", "COLLECTION"].includes(type)) add("Unsupported Matrixify menu resource type", "error");
+  }
+  return issues;
+}
+
 function formatMappedExportValue(value, mapping = {}, item = {}) {
   const column = String(mapping.externalColumn || "");
   if (/^(Variant Barcode|Barcode|UPC|GTIN|EAN)$/i.test(column)) return barcodeTextValue(value);
@@ -1840,32 +2835,36 @@ function findProductForShopifyRecord(record, maps) {
   return { item: null, payload, matchBy: "" };
 }
 function normalizeCategorySettings(settings = []) {
-  return (Array.isArray(settings) ? settings : []).map((category) => ({
-    id: category.id || crypto.randomUUID(),
-    categoryId: category.categoryId || category.id || "",
-    name: formatCategoryName(category.name || "Uncategorized"),
-    status: category.status || "needs_review",
-    owner: category.owner || "",
-    notes: category.notes || "",
-    mappings: {
-      shopify: normalizeChannelCategoryMapping(category.mappings?.shopify),
-      temu: normalizeChannelCategoryMapping(category.mappings?.temu),
-      tiktok: normalizeChannelCategoryMapping(category.mappings?.tiktok),
-      ebay: normalizeChannelCategoryMapping(category.mappings?.ebay),
-      whatnot: normalizeChannelCategoryMapping(category.mappings?.whatnot)
-    },
-    defaults: {
-      condition: category.defaults?.condition || "New",
-      countryOfOrigin: category.defaults?.countryOfOrigin || "",
-      hazardousAllowed: Boolean(category.defaults?.hazardousAllowed),
-      packageWeightRequired: category.defaults?.packageWeightRequired !== false,
-      shippingProfile: category.defaults?.shippingProfile || "",
-      returnPolicy: category.defaults?.returnPolicy || ""
-    },
-    requiredAttributes: Array.isArray(category.requiredAttributes) ? category.requiredAttributes : [],
-    updatedAt: category.updatedAt || category.createdAt || new Date().toISOString(),
-    createdAt: category.createdAt || new Date().toISOString()
-  }));
+  return (Array.isArray(settings) ? settings : []).map((category) => {
+    const name = formatCategoryName(category.name || "Uncategorized");
+    return {
+      id: category.id || crypto.randomUUID(),
+      categoryId: category.categoryId || category.id || "",
+      name,
+      status: category.status || "needs_review",
+      owner: category.owner || "",
+      notes: category.notes || "",
+      mappings: {
+        shopify: normalizeChannelCategoryMapping(category.mappings?.shopify),
+        temu: normalizeChannelCategoryMapping(category.mappings?.temu),
+        tiktok: normalizeChannelCategoryMapping(category.mappings?.tiktok),
+        ebay: normalizeChannelCategoryMapping(category.mappings?.ebay),
+        whatnot: normalizeChannelCategoryMapping(category.mappings?.whatnot)
+      },
+      smartCollection: normalizeSmartCollectionProfile(category.smartCollection || category.shopifyCollection || {}, name),
+      defaults: {
+        condition: category.defaults?.condition || "New",
+        countryOfOrigin: category.defaults?.countryOfOrigin || "",
+        hazardousAllowed: Boolean(category.defaults?.hazardousAllowed),
+        packageWeightRequired: category.defaults?.packageWeightRequired !== false,
+        shippingProfile: category.defaults?.shippingProfile || "",
+        returnPolicy: category.defaults?.returnPolicy || ""
+      },
+      requiredAttributes: Array.isArray(category.requiredAttributes) ? category.requiredAttributes : [],
+      updatedAt: category.updatedAt || category.createdAt || new Date().toISOString(),
+      createdAt: category.createdAt || new Date().toISOString()
+    };
+  });
 }
 
 function categoryIdentity(value, scope = "source") {
@@ -1875,6 +2874,19 @@ function categoryIdentity(value, scope = "source") {
 }
 
 function normalizeChannelCategoryMapping(mapping = {}) {
+  const attributeMappings = Array.isArray(mapping.attributeMappings) ? mapping.attributeMappings.map((row) => ({
+    id: row.id || crypto.randomUUID(),
+    attributeId: row.attributeId || row.attributeName || row.attributeHandle || "",
+    attributeName: row.attributeName || row.attributeId || row.attributeHandle || "",
+    attributeHandle: row.attributeHandle || "",
+    sourceField: row.sourceField || "",
+    fallbackValue: row.fallbackValue || "",
+    transform: row.transform || "",
+    required: Boolean(row.required),
+    recommended: Boolean(row.recommended),
+    enabled: row.enabled !== false,
+    notes: row.notes || ""
+  })).filter((row) => row.attributeId || row.attributeName || row.attributeHandle) : [];
   return {
     categoryId: mapping.categoryId || "",
     categoryPath: mapping.categoryPath || "",
@@ -1892,8 +2904,14 @@ function normalizeChannelCategoryMapping(mapping = {}) {
       name: attribute.name || "",
       handle: attribute.handle || "",
       description: attribute.description || "",
-      extended: Boolean(attribute.extended)
+      extended: Boolean(attribute.extended),
+      required: Boolean(attribute.required),
+      recommended: Boolean(attribute.recommended),
+      usage: attribute.usage || "",
+      valueMode: attribute.valueMode || "",
+      values: Array.isArray(attribute.values) ? attribute.values.slice(0, 20).map((value) => String(value || "").trim()).filter(Boolean) : []
     })).filter((attribute) => attribute.id || attribute.name) : [],
+    attributeMappings,
     status: mapping.status || (mapping.categoryId || mapping.categoryPath ? "mapped" : "missing"),
     notes: mapping.notes || ""
   };
@@ -1991,6 +3009,182 @@ function enrichShopifyCategoryMapping(mapping = {}) {
   };
 }
 
+async function ebayDefaultCategoryTreeId(db, marketplaceId = "EBAY_US") {
+  const data = await ebayRequest(db, `/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=${encodeURIComponent(marketplaceId || "EBAY_US")}`, { tokenType: "app" });
+  return String(data.categoryTreeId || "").trim();
+}
+
+function ebaySuggestionPath(suggestion = {}) {
+  const ancestors = Array.isArray(suggestion.categoryTreeNodeAncestors) ? suggestion.categoryTreeNodeAncestors : [];
+  const path = ancestors.slice().reverse().map((node) => node.categoryName).filter(Boolean);
+  const leaf = suggestion.category?.categoryName;
+  if (leaf) path.push(leaf);
+  return path.filter((value, index, list) => list.indexOf(value) === index).join(" > ");
+}
+
+function compactEbayCategorySuggestion(suggestion = {}, treeId = "") {
+  const category = suggestion.category || {};
+  return {
+    id: String(category.categoryId || "").trim(),
+    categoryId: String(category.categoryId || "").trim(),
+    name: category.categoryName || "",
+    fullName: ebaySuggestionPath(suggestion),
+    path: ebaySuggestionPath(suggestion).split(" > ").filter(Boolean),
+    taxonomyVersion: treeId,
+    source: "eBay"
+  };
+}
+
+async function searchEbayTaxonomy(db, query = "", limit = 12, marketplaceId = "EBAY_US") {
+  const q = String(query || "").trim();
+  if (!q) return { channel: "ebay", marketplaceId, categoryTreeId: "", total: 0, categories: [] };
+  const max = Math.max(1, Math.min(Number(limit || 12), 25));
+  const categoryTreeId = await ebayDefaultCategoryTreeId(db, marketplaceId);
+  if (!categoryTreeId) throw new Error("eBay category tree ID was not returned.");
+  const data = await ebayRequest(db, `/commerce/taxonomy/v1/category_tree/${encodeURIComponent(categoryTreeId)}/get_category_suggestions?q=${encodeURIComponent(q)}`, { tokenType: "app" });
+  const suggestions = Array.isArray(data.categorySuggestions) ? data.categorySuggestions : [];
+  return {
+    channel: "ebay",
+    marketplaceId,
+    categoryTreeId,
+    total: suggestions.length,
+    categories: suggestions.slice(0, max).map((suggestion) => compactEbayCategorySuggestion(suggestion, categoryTreeId)).filter((row) => row.categoryId)
+  };
+}
+
+function compactEbayAspect(aspect = {}) {
+  const constraint = aspect.aspectConstraint || {};
+  const name = aspect.localizedAspectName || "";
+  const usage = constraint.aspectUsage || "";
+  return {
+    id: name,
+    name,
+    handle: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
+    description: [
+      constraint.aspectDataType,
+      constraint.itemToAspectCardinality,
+      constraint.aspectMode
+    ].filter(Boolean).join(" / "),
+    required: Boolean(constraint.aspectRequired),
+    recommended: usage === "RECOMMENDED",
+    usage,
+    valueMode: constraint.aspectMode || "",
+    values: Array.isArray(aspect.aspectValues) ? aspect.aspectValues.map((value) => value.localizedValue).filter(Boolean).slice(0, 20) : []
+  };
+}
+
+async function ebayCategoryAspects(db, categoryId = "", options = {}) {
+  const id = String(categoryId || "").trim();
+  if (!id) return [];
+  const marketplaceId = options.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || "EBAY_US";
+  const categoryTreeId = options.categoryTreeId || await ebayDefaultCategoryTreeId(db, marketplaceId);
+  if (!categoryTreeId) throw new Error("eBay category tree ID was not returned.");
+  const data = await ebayRequest(db, `/commerce/taxonomy/v1/category_tree/${encodeURIComponent(categoryTreeId)}/get_item_aspects_for_category?category_id=${encodeURIComponent(id)}`, { tokenType: "app" });
+  const aspects = Array.isArray(data.aspects) ? data.aspects : [];
+  return aspects.map(compactEbayAspect).filter((aspect) => aspect.name);
+}
+
+async function enrichEbayCategoryMapping(db, mapping = {}) {
+  const categoryId = String(mapping.categoryId || "").trim();
+  if (!categoryId) return mapping;
+  try {
+    const attributes = await ebayCategoryAspects(db, categoryId, { categoryTreeId: mapping.taxonomyVersion || "" });
+    return { ...mapping, attributes };
+  } catch (error) {
+    return {
+      ...mapping,
+      notes: [mapping.notes, `eBay aspects sync failed: ${error.message}`].filter(Boolean).join(" ")
+    };
+  }
+}
+
+function ebayCategorySearchQuery(categoryName = "") {
+  const parts = String(categoryName || "").split(">").map((part) => part.trim()).filter(Boolean);
+  return parts[parts.length - 1] || parts.join(" ") || String(categoryName || "").trim();
+}
+
+function ebayCategoryAutoSearchQuery(categoryName = "") {
+  return String(categoryName || "")
+    .replace(/[>&/]+/g, " ")
+    .replace(/[,\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function ebayCategoryTokens(value = "") {
+  const stop = new Set(["and", "or", "the", "for", "with", "of", "to", "a", "an", "other", "accessories", "supplies"]);
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 2 && !stop.has(token));
+}
+
+function scoreEbayCategoryMatch(sourceCategory = "", suggestion = {}) {
+  const sourceTokens = new Set(ebayCategoryTokens(sourceCategory));
+  const targetTokens = ebayCategoryTokens(`${suggestion.name || ""} ${suggestion.fullName || ""}`);
+  let score = 0;
+  targetTokens.forEach((token) => {
+    if (sourceTokens.has(token)) score += 3;
+  });
+  const source = String(sourceCategory || "").toLowerCase();
+  const path = String(suggestion.fullName || suggestion.name || "").toLowerCase();
+  if (/business|industrial|hardware|plumbing|metalworking|tools|food service|janitorial|maintenance/.test(source) && path.includes("business & industrial")) score += 4;
+  if (/tools|hardware|fasteners|plumbing|metalworking/.test(source) && /tools|hardware|fasteners|plumbing|metalworking|building materials/.test(path)) score += 3;
+  if (/food service|hospitality|restaurant/.test(source) && /restaurant|food service|commercial kitchen/.test(path)) score += 5;
+  if (/janitorial|cleaning|maintenance/.test(source) && /cleaning|janitorial|maintenance/.test(path)) score += 5;
+  if (/business|industrial|hardware|plumbing|metalworking|tools|food service|janitorial|maintenance/.test(source) && /art|crafts|collectibles|books|jewelry/.test(path)) score -= 6;
+  return score;
+}
+
+function bestEbayCategoryMatch(sourceCategory = "", categories = []) {
+  return categories
+    .map((category, index) => ({ category, index, score: scoreEbayCategoryMatch(sourceCategory, category) }))
+    .sort((a, b) => b.score - a.score || a.index - b.index)[0]?.category || categories[0] || null;
+}
+
+async function autoMapEbayCategories(db, options = {}) {
+  const scope = options.scope === "source" ? "source" : "main";
+  const overwrite = Boolean(options.overwrite);
+  const limit = Math.max(1, Math.min(Number(options.limit || 50), 250));
+  const marketplaceId = options.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || "EBAY_US";
+  const rows = publicCategories(db, "", scope).categories
+    .filter((category) => overwrite || !(category.mappings?.ebay?.categoryId))
+    .sort((a, b) => Number(b.productCount || 0) - Number(a.productCount || 0))
+    .slice(0, limit);
+  const results = [];
+  let mapped = 0;
+  for (const row of rows) {
+    const query = ebayCategoryAutoSearchQuery(row.name) || ebayCategorySearchQuery(row.name);
+    try {
+      const search = await searchEbayTaxonomy(db, query, 5, marketplaceId);
+      const match = bestEbayCategoryMatch(row.name, search.categories);
+      if (!match) {
+        results.push({ category: row.name, query, status: "missing", message: "No eBay suggestion returned." });
+        continue;
+      }
+      const setting = findOrCreateCategorySetting(db, row.name);
+      const previousEbayMapping = setting.mappings?.ebay || {};
+      setting.mappings.ebay = normalizeChannelCategoryMapping({
+        ...setting.mappings.ebay,
+        categoryId: match.categoryId,
+        categoryPath: match.fullName || match.name,
+        categoryHandle: match.name,
+        taxonomyVersion: search.categoryTreeId,
+        status: "needs_review",
+        notes: `Auto-suggested from eBay taxonomy for "${query}". Review before publishing listings.`
+      });
+      if (setting.status !== "mapped" || /auto-mapped|auto-suggested/i.test(previousEbayMapping.notes || "")) setting.status = "needs_review";
+      setting.updatedAt = new Date().toISOString();
+      mapped += 1;
+      results.push({ category: row.name, query, status: "needs_review", ebayCategoryId: match.categoryId, ebayCategoryPath: match.fullName || match.name });
+    } catch (error) {
+      results.push({ category: row.name, query, status: "error", message: error.message });
+    }
+  }
+  return { requested: rows.length, mapped, results, scope, marketplaceId };
+}
+
 function findOrCreateCategorySetting(db, categoryName) {
   db.categorySettings = normalizeCategorySettings(db.categorySettings);
   const identity = categoryIdentity(categoryName, "main");
@@ -2045,6 +3239,7 @@ function publicCategoryRow(category, settings, scope) {
       ebay: normalizeChannelCategoryMapping(mappings.ebay),
       whatnot: normalizeChannelCategoryMapping(mappings.whatnot)
     },
+    smartCollection: normalizeSmartCollectionProfile(saved.smartCollection || saved.shopifyCollection || {}, categoryName),
     defaults: normalizeCategorySettings([{ ...saved, name: categoryName, categoryId: category.id }])[0].defaults,
     requiredAttributes: Array.isArray(saved.requiredAttributes) ? saved.requiredAttributes : [],
     mappingCount,
@@ -2140,6 +3335,9 @@ function categoryCoverage(db) {
     return !(saved?.mappings?.shopify?.categoryPath || saved?.mappings?.shopify?.categoryId);
   });
   const pathMissingTaxonomy = shopifyMapped.filter((row) => row.mappings?.shopify?.categoryPath && !row.mappings?.shopify?.categoryId);
+  const matrixifyReadiness = matrixifySmartCollectionReadiness(mainRows, settings);
+  const { rows: matrixifyRows, ...matrixify } = matrixifyReadiness;
+  const menuIssues = matrixifyMenuReviewRows(readMatrixifyMenuImportTemplate());
   return {
     mainCategoryCount: mappedMainNames.size,
     sourceCategoryCount: sourceCategoryNames.size,
@@ -2153,10 +3351,15 @@ function categoryCoverage(db) {
     activeUncategorizedProductCount: activeUncategorizedProducts.length,
     vendorCategoryMappingCount: Object.keys(vendorMappings).length,
     sourceVendorCategoryMappedCount: [...learnedVendorCategoryNames].filter((name) => sourceCategoryNames.has(name)).length,
+    matrixify,
     attention: [
       { key: "missing-shopify", label: "Main categories missing Shopify mapping", count: unmappedMainRows.length, sample: unmappedMainRows.slice(0, 5).map((row) => row.name) },
       { key: "missing-taxonomy-id", label: "Shopify paths missing taxonomy ID", count: pathMissingTaxonomy.length, sample: pathMissingTaxonomy.slice(0, 5).map((row) => row.name) },
-      { key: "uncategorized-products", label: "Products missing verified Main category", count: uncategorizedProducts.length, sample: uncategorizedProducts.slice(0, 5).map((item) => item.sku || item.title).filter(Boolean) }
+      { key: "uncategorized-products", label: "Products missing verified Main category", count: uncategorizedProducts.length, sample: uncategorizedProducts.slice(0, 5).map((item) => item.sku || item.title).filter(Boolean) },
+      { key: "matrixify-duplicates", label: "Matrixify duplicate handles", count: matrixify.duplicateHandleCount, sample: matrixifyRows.filter((row) => row.duplicate_handle).slice(0, 5).map((row) => row.collection_handle) },
+      { key: "matrixify-missing-images", label: "Matrixify rows missing images", count: matrixify.missingImageCount, sample: matrixifyRows.filter((row) => !row.missing_shopify && row.missing_image).slice(0, 5).map((row) => row.category) },
+      { key: "matrixify-seo-review", label: "Matrixify SEO needs review", count: matrixify.weakSeoCount, sample: matrixifyRows.filter((row) => row.weak_title_tag || row.weak_description_tag || row.duplicate_title_tag || row.duplicate_description_tag).slice(0, 5).map((row) => row.collection_title) },
+      { key: "matrixify-menu-review", label: "Matrixify menu needs review", count: menuIssues.length, sample: menuIssues.slice(0, 5).map((row) => row.title || row.menu_item_id) }
     ]
   };
 }
@@ -2213,6 +3416,42 @@ function categoryCoverageRows(db, issue) {
         updated_at: row.updatedAt || ""
       }));
   }
+  if (issue === "matrixify-duplicates") {
+    return matrixifySmartCollectionReadiness(mainRows, settings).rows
+      .filter((row) => row.duplicate_handle)
+      .map((row) => ({ ...row, issue: "Duplicate Matrixify collection handle" }));
+  }
+  if (issue === "matrixify-missing-images") {
+    return matrixifySmartCollectionReadiness(mainRows, settings).rows
+      .filter((row) => !row.missing_shopify && row.missing_image)
+      .map((row) => ({ ...row, issue: "Matrixify collection image is missing" }));
+  }
+  if (issue === "matrixify-seo-review") {
+    return matrixifySmartCollectionReadiness(mainRows, settings).rows
+      .filter((row) => !row.missing_shopify)
+      .filter((row) => row.weak_title_tag || row.weak_description_tag || row.duplicate_title_tag || row.duplicate_description_tag)
+      .map((row) => ({
+        category: row.category,
+        collection_handle: row.collection_handle,
+        collection_title: row.collection_title,
+        product_type: row.product_type,
+        title_tag: row.title_tag,
+        title_length: String(row.title_tag || "").length,
+        description_tag: row.description_tag,
+        description_length: String(row.description_tag || "").length,
+        duplicate_title_tag: row.duplicate_title_tag ? "true" : "false",
+        duplicate_description_tag: row.duplicate_description_tag ? "true" : "false",
+        issue: [
+          row.weak_title_tag ? "Weak title tag" : "",
+          row.weak_description_tag ? "Weak description tag" : "",
+          row.duplicate_title_tag ? "Duplicate title tag" : "",
+          row.duplicate_description_tag ? "Duplicate description tag" : ""
+        ].filter(Boolean).join("; ")
+      }));
+  }
+  if (issue === "matrixify-menu-review") {
+    return matrixifyMenuReviewRows(readMatrixifyMenuImportTemplate());
+  }
   return [];
 }
 
@@ -2221,7 +3460,11 @@ function coverageIssueLabel(issue) {
     "missing-shopify": "missing-shopify-mappings",
     "missing-taxonomy-id": "shopify-paths-missing-taxonomy-id",
     "uncategorized-products": "uncategorized-products",
-    "vendor-category-mappings": "vendor-category-mappings"
+    "vendor-category-mappings": "vendor-category-mappings",
+    "matrixify-duplicates": "matrixify-duplicate-handles",
+    "matrixify-missing-images": "matrixify-missing-images",
+    "matrixify-seo-review": "matrixify-seo-review",
+    "matrixify-menu-review": "matrixify-menu-review"
   }[issue] || "category-coverage";
 }
 
@@ -2280,6 +3523,88 @@ function publicCategories(db, query = "", scope = "source") {
     indexGeneratedAt: source.index.generatedAt || "",
     catalogImportedAt: source.index.catalogImportedAt || ""
   };
+}
+
+async function publicCategoriesFast(query = "", scope = "source") {
+  const normalizedScope = scope === "main" ? "main" : "source";
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const key = `${normalizedScope}|${normalizedQuery}`;
+  const now = Date.now();
+  const cached = categoryResponseCache.get(key);
+  if (cached && now - cached.createdAt < 10 * 60_000) return cached.data;
+  const stored = readCategoryResponseCacheFile();
+  if (stored?.[normalizedScope]) {
+    const data = filterCategoryResponse(stored[normalizedScope], query, normalizedScope);
+    categoryResponseCache.set(key, { createdAt: Date.now(), data });
+    return data;
+  }
+  let db;
+  if (postgres.isPostgresEnabled() && normalizedScope === "source") {
+    const [categorySettings, vendorCategoryMappings] = await Promise.all([
+      postgres.readStateField("categorySettings"),
+      postgres.readStateField("vendorCategoryMappings")
+    ]);
+    db = { inventory: [], categorySettings, vendorCategoryMappings };
+  } else {
+    db = postgres.isPostgresEnabled()
+      ? await postgres.readCategoryState()
+      : await readDbFast();
+  }
+  const fullData = publicCategories(db, "", normalizedScope);
+  if (normalizedScope === "source" && stored?.main?.coverage) fullData.coverage = stored.main.coverage;
+  const data = normalizedQuery ? filterCategoryResponse(fullData, query, normalizedScope) : fullData;
+  writeCategoryResponseCacheFile(normalizedScope, fullData);
+  categoryResponseCache.set(key, { createdAt: Date.now(), data });
+  if (categoryResponseCache.size > 50) {
+    const oldest = [...categoryResponseCache.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt).slice(0, 10);
+    for (const [oldKey] of oldest) categoryResponseCache.delete(oldKey);
+  }
+  return data;
+}
+
+function readCategoryResponseCacheFile() {
+  if (!fs.existsSync(CATEGORY_CACHE_FILE)) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(CATEGORY_CACHE_FILE, "utf8"));
+    return data.cacheVersion === CATEGORY_CACHE_VERSION ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCategoryResponseCacheFile(scope, data) {
+  try {
+    const current = readCategoryResponseCacheFile() || {};
+    current.cacheVersion = CATEGORY_CACHE_VERSION;
+    current[scope] = { ...data, cachedAt: new Date().toISOString() };
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(CATEGORY_CACHE_FILE, JSON.stringify(current));
+  } catch {
+    // Category reads can still use the in-memory cache if the sidecar write fails.
+  }
+}
+
+function filterCategoryResponse(data = {}, query = "", scope = "source") {
+  const q = String(query || "").trim().toLowerCase();
+  const categories = Array.isArray(data.categories) ? data.categories : [];
+  const filtered = q
+    ? categories.filter((category) => `${category.name} ${category.status} ${category.notes} ${(category.topVendors || []).map((v) => v.name).join(" ")}`.toLowerCase().includes(q))
+    : categories;
+  return {
+    ...data,
+    categories: filtered,
+    total: filtered.length,
+    scope
+  };
+}
+
+function clearCategoryResponseCache() {
+  categoryResponseCache = new Map();
+  try {
+    if (fs.existsSync(CATEGORY_CACHE_FILE)) fs.unlinkSync(CATEGORY_CACHE_FILE);
+  } catch {
+    // Cache invalidation is best-effort; the in-memory cache is cleared above.
+  }
 }
 
 function findPublicCategory(db, categoryId, scope = "source") {
@@ -3047,7 +4372,7 @@ function normalizeCustomers(db) {
 
   for (const customer of customerMap.values()) {
     normalizeCustomerLists(customer);
-    const orders = ordersByCustomer.get(customer.id) || [];
+    const orders = (ordersByCustomer.get(customer.id) || []).filter(isReportableOrder);
     const sorted = orders.slice().sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
     customer.totalOrders = orders.length;
     customer.lifetimeValue = orders.reduce((sum, order) => sum + Number(order.total || 0), 0);
@@ -3402,7 +4727,10 @@ function serveStatic(req, res) {
     ".svg": "image/svg+xml"
   }[ext] || "application/octet-stream";
 
-  res.writeHead(200, { "Content-Type": contentType });
+  res.writeHead(200, {
+    "Content-Type": contentType,
+    "Cache-Control": "no-store, max-age=0"
+  });
   fs.createReadStream(filePath).pipe(res);
 }
 
@@ -3564,6 +4892,90 @@ function attachImportJobErrorsFile(job, rows = []) {
   return job;
 }
 
+function apiErrorStatus(error = {}) {
+  const message = String(error.message || "");
+  const explicitStatus = message.match(/\b(?:HTTP|error)\s*\(?(\d{3})\)?/i)?.[1];
+  if (explicitStatus) return Number(explicitStatus);
+  return message.includes("credentials missing")
+    || message.includes("authorization code is required")
+    || message.includes("refresh token is missing")
+    || message.includes("eBay listing is missing")
+    ? 400 : 500;
+}
+
+function apiErrorJobContext(req, error = {}, status = 500) {
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const pathName = url.pathname;
+  const message = String(error.message || "API request failed");
+  const isEbay = pathName.includes("/ebay") || /eBay/i.test(message);
+  let operation = "API notification";
+  let section = "System";
+  let source = "API";
+  if (isEbay) {
+    source = "eBay";
+    section = "Channels";
+    operation = "eBay API notification";
+  }
+  if (pathName === "/api/ebay/catalog-import") {
+    section = "Products";
+    operation = "eBay catalog sync failed";
+  } else if (/\/api\/inventory\/[^/]+\/ebay\/listing/.test(pathName)) {
+    section = "Products";
+    operation = "eBay listing API failed";
+  } else if (pathName.includes("/connections/sync")) {
+    operation = "Channel sync API failed";
+  }
+  return { pathName, method: req.method || "GET", operation, section, source, status, message };
+}
+
+async function recordApiErrorJob(req, error = {}, status = 500) {
+  try {
+    const context = apiErrorJobContext(req, error, status);
+    const db = normalizeDb(await readDbFast());
+    const details = [
+      `${context.method} ${context.pathName}`,
+      `HTTP ${context.status}`,
+      context.message
+    ].join(" | ");
+    const job = createImportJob(db, {
+      section: context.section,
+      operation: context.operation,
+      direction: "api",
+      status: "failed",
+      fileName: context.pathName,
+      message: context.message,
+      details,
+      totalRows: 1,
+      missingCount: 1,
+      errors: [context.message]
+    });
+    finishImportJob(job, {
+      status: "failed",
+      message: context.message,
+      details,
+      totalRows: 1,
+      missingCount: 1,
+      errors: [context.message]
+    });
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+    db.syncRuns.unshift({
+      id: crypto.randomUUID(),
+      importJobId: job.id,
+      source: context.source,
+      type: "api",
+      status: "failed",
+      message: context.message,
+      createdAt: new Date().toISOString(),
+      errors: [context.message]
+    });
+    await writeDb(db);
+    return normalizeImportJob(job);
+  } catch (logError) {
+    console.error("Unable to record API error job", logError);
+    return null;
+  }
+}
+
 function findImportJob(db, id) {
   db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
   return db.importJobs.find((job) => job.id === id);
@@ -3587,28 +4999,241 @@ function sendImportJobFile(res, job, kind) {
   return true;
 }
 
+const PUBLIC_SOURCE_FIELD_KEYS = [
+  "_id",
+  "sku",
+  "active",
+  "brand",
+  "category",
+  "created_at",
+  "updated_at",
+  "default_image",
+  "images",
+  "description",
+  "short_description",
+  "hazardous",
+  "item_height",
+  "item_length",
+  "item_weight",
+  "item_width",
+  "list_price",
+  "price",
+  "fob_price",
+  "manufacturer",
+  "mfr_part_number",
+  "min_quantity",
+  "name",
+  "package_height",
+  "package_length",
+  "package_weight",
+  "package_width",
+  "quantity_increments",
+  "sds_url",
+  "supplier",
+  "supplier_code",
+  "tags",
+  "unspsc",
+  "uom",
+  "uom_qty",
+  "upc",
+  "vendor_sku",
+  "zoro_sku",
+  "zoro_price",
+  "zoro_leadtime",
+  "zoro_minimum_qty",
+  "varis_contract_price",
+  "varis_list_price",
+  "varis_od_managed_price",
+  "varis_non_od_managed_price",
+  "varis_od_private_price",
+  "varis_non_od_private_price",
+  "wildcardSearch",
+  "stock_qty",
+  "stock_status",
+  "stock_updated_at",
+  "original_image",
+  "default_supplier",
+  "last_prices_update_at",
+  "last_prices_update_by",
+  "lead_time",
+  "leadtime",
+  "suppliers",
+  "alt_vendor_sku",
+  "country_of_origin",
+  "original_sds_url",
+  "inactive_mailed_at",
+  "checked_image",
+  "validated_at",
+  "item_key",
+  "item_clearance_indicator",
+  "ctech_id",
+  "ctech_id_last_export",
+  "vendor_descripton",
+  "vendor_description",
+  "uploaded_by"
+];
+
+function compactPublicSourceValue(value) {
+  if (value === undefined || value === null) return value;
+  if (Array.isArray(value)) {
+    return value.slice(0, 12).map((entry) => {
+      if (!entry || typeof entry !== "object") return entry;
+      return String(JSON.stringify(entry)).slice(0, 240);
+    });
+  }
+  if (typeof value === "object") return String(JSON.stringify(value)).slice(0, 1000);
+  if (typeof value === "string") return value.length > 4000 ? value.slice(0, 4000) : value;
+  return value;
+}
+
+function publicSourceManagerFields(item = {}) {
+  const sources = [
+    item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {},
+    item.original && typeof item.original === "object" ? item.original : {}
+  ];
+  const fields = {};
+  for (const key of PUBLIC_SOURCE_FIELD_KEYS) {
+    for (const source of sources) {
+      if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined && source[key] !== null && source[key] !== "") {
+        fields[key] = compactPublicSourceValue(source[key]);
+        break;
+      }
+    }
+  }
+  return fields;
+}
+
+function publicConnection(connection = {}) {
+  const logoDataUrl = String(connection.logoDataUrl || "");
+  return {
+    ...connection,
+    logoDataUrl: logoDataUrl.length <= 120000 ? logoDataUrl : "",
+    settings: { ...DEFAULT_CHANNEL_SETTINGS, ...(connection.settings || {}) }
+  };
+}
+
+function publicEbayListing(listing = null) {
+  if (!listing || typeof listing !== "object") return null;
+  return {
+    status: listing.status || "",
+    offerId: listing.offerId || "",
+    listingId: listing.listingId || "",
+    listingUrl: listing.listingUrl || "",
+    marketplaceId: listing.marketplaceId || "",
+    merchantLocationKey: listing.merchantLocationKey || "",
+    categoryId: listing.categoryId || "",
+    categoryPath: listing.categoryPath || "",
+    taxonomyVersion: listing.taxonomyVersion || "",
+    condition: listing.condition || "",
+    quantity: listing.quantity,
+    price: listing.price,
+    currency: listing.currency || "",
+    paymentPolicyId: listing.paymentPolicyId || "",
+    returnPolicyId: listing.returnPolicyId || "",
+    fulfillmentPolicyId: listing.fulfillmentPolicyId || "",
+    bestOfferEnabled: Boolean(listing.bestOfferEnabled),
+    updatedAt: listing.updatedAt || "",
+    attributesSyncedAt: listing.attributesSyncedAt || ""
+  };
+}
+
+function publicInventoryItem(item = {}) {
+  return {
+    id: item.id,
+    sku: item.sku,
+    title: item.title,
+    marketplaceTitle: item.marketplaceTitle,
+    externalId: item.externalId,
+    brand: item.brand,
+    sourceBrand: item.sourceBrand,
+    brandLocked: Boolean(item.brandLocked),
+    manufacturer: item.manufacturer,
+    mfrPartNumber: item.mfrPartNumber,
+    vendorSku: item.vendorSku,
+    barcode: item.barcode,
+    category: item.category,
+    mainCategory: item.mainCategory,
+    categoryVerified: item.categoryVerified,
+    sourceCategory: item.sourceCategory,
+    vendorCategory: item.vendorCategory,
+    supplier: item.supplier,
+    supplierCode: item.supplierCode,
+    vendor: item.vendor,
+    unspsc: item.unspsc,
+    uom: item.uom,
+    uomQty: item.uomQty,
+    hazardous: Boolean(item.hazardous),
+    sdsUrl: item.sdsUrl,
+    originalSdsUrl: item.originalSdsUrl,
+    validatedAt: item.validatedAt,
+    stockStatus: item.stockStatus,
+    stockUpdatedAt: item.stockUpdatedAt,
+    condition: item.condition,
+    status: item.status,
+    active: item.active,
+    qty: Number(item.qty || 0),
+    stockQty: Number(item.stockQty || 0),
+    reserved: Number(item.reserved || 0),
+    price: Number(item.price || 0),
+    cost: Number(item.cost || 0),
+    msrp: Number(item.msrp || 0),
+    fobPrice: Number(item.fobPrice || 0),
+    itemHeight: Number(item.itemHeight || 0),
+    itemLength: Number(item.itemLength || 0),
+    itemWeight: Number(item.itemWeight || 0),
+    itemWidth: Number(item.itemWidth || 0),
+    packageHeight: Number(item.packageHeight || 0),
+    packageLength: Number(item.packageLength || 0),
+    packageWeight: Number(item.packageWeight || 0),
+    packageWidth: Number(item.packageWidth || 0),
+    countryOfOrigin: item.countryOfOrigin || "",
+    defaultImage: item.defaultImage,
+    images: Array.isArray(item.images) ? item.images.slice(0, 4) : [],
+    ebayListing: publicEbayListing(item.ebayListing),
+    productManagerFields: {},
+    original: null,
+    attributes: {},
+    aliases: Array.isArray(item.aliases) ? item.aliases : [],
+    shadowSkus: Array.isArray(item.shadowSkus) ? item.shadowSkus : []
+  };
+}
+
 function publicState(db) {
   const connectorState = mergedConnectorState(db);
+  const ebaySettings = ebayChannelSettings(db);
   const safeDb = {
     ...db,
+    systemSettings: { ...DEFAULT_SYSTEM_SETTINGS, ...(db.systemSettings || {}) },
+    connections: (db.connections || []).map(publicConnection),
+    inventory: (db.inventory || []).map(publicInventoryItem),
+    sourceCatalogOverrides: {},
     connectorState: {
       temuAuthorized: Boolean(connectorState.temuAccessToken),
       temuMallId: connectorState.temuMallId || "",
       temuLastOrderSync: connectorState.temuLastOrderSync || null,
       ebayAuthorized: Boolean(connectorState.ebayAccessToken || connectorState.ebayRefreshToken),
       ebayEnvironment: process.env.EBAY_ENVIRONMENT || "production",
-      ebayLastOrderSync: connectorState.ebayLastOrderSync || null
+      ebayLastOrderSync: connectorState.ebayLastOrderSync || null,
+      ebayListingDefaults: {
+        marketplaceId: ebaySettings.ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US",
+        merchantLocationKey: ebaySettings.ebayMerchantLocationKey || process.env.EBAY_MERCHANT_LOCATION_KEY || "",
+        paymentPolicyId: ebaySettings.ebayPaymentPolicyId || process.env.EBAY_PAYMENT_POLICY_ID || "",
+        returnPolicyId: ebaySettings.ebayReturnPolicyId || process.env.EBAY_RETURN_POLICY_ID || "",
+        fulfillmentPolicyId: ebaySettings.ebayFulfillmentPolicyId || process.env.EBAY_FULFILLMENT_POLICY_ID || "",
+        currency: ebaySettings.ebayCurrency || process.env.EBAY_CURRENCY || "USD"
+      }
     }
   };
   return { ...safeDb, summary: summarize(safeDb) };
 }
 
 function summarize(db) {
-  const openOrders = db.orders.filter((order) => order.status !== "confirmed").length;
+  const activeOrders = db.orders.filter(isReportableOrder);
+  const openOrders = activeOrders.filter((order) => order.status !== "confirmed").length;
   const lowStock = db.inventory.filter((item) => item.qty - item.reserved <= item.reorderPoint).length;
   const reserved = db.inventory.reduce((sum, item) => sum + Number(item.reserved || 0), 0);
-  const sales = db.orders.reduce((sum, order) => sum + Number(order.total || 0), 0);
-  const profit = db.orders.reduce((sum, order) => {
+  const sales = activeOrders.reduce((sum, order) => sum + Number(order.total || 0), 0);
+  const profit = activeOrders.reduce((sum, order) => {
     return sum + Number(order.total || 0) - Number(order.productCost || 0) - Number(order.marketplaceFees || 0) - Number(order.shippingCost || 0) - Number(order.refundAmount || 0);
   }, 0);
   const customers = db.customers || [];
@@ -3825,7 +5450,17 @@ function nestedMoney(value) {
   if (value === undefined || value === null || value === "") return 0;
   if (typeof value === "number") return value;
   if (typeof value === "string") return Number(value) || 0;
-  return Number(value.amount ?? value.centAmount / 100 ?? value.value ?? value.price ?? 0) || 0;
+  for (const key of ["amount", "value", "convertedFromValue", "price"]) {
+    if (value[key] !== undefined && value[key] !== null && value[key] !== "") {
+      const parsed = Number(value[key]);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  if (value.centAmount !== undefined && value.centAmount !== null && value.centAmount !== "") {
+    const parsed = Number(value.centAmount) / 100;
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
 }
 
 function temuDate(value) {
@@ -3909,12 +5544,375 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
   };
 }
 
+function orderIdentityValues(order = {}) {
+  return [
+    order.marketplaceOrderNumber,
+    order.marketplaceOrderId,
+    order.external?.orderId,
+    order.external?.parentOrderSn,
+    order.external?.legacyOrderId,
+    order.orderNumber,
+    order.internalOrderNumber
+  ].filter(Boolean).map((value) => String(value).trim()).filter(Boolean);
+}
+
+function deletedOrderMatches(order = {}, incoming = {}) {
+  const source = String(incoming.source || "").toLowerCase();
+  if (!source || String(order.source || "").toLowerCase() !== source) return false;
+  const incomingValues = new Set(orderIdentityValues(incoming).map((value) => value.toLowerCase()));
+  return orderIdentityValues(order).some((value) => incomingValues.has(value.toLowerCase()));
+}
+
+function isDeletedMarketplaceOrder(db, incoming) {
+  db.deletedOrders = Array.isArray(db.deletedOrders) ? db.deletedOrders : [];
+  return db.deletedOrders.some((record) => deletedOrderMatches(record, incoming));
+}
+
+function deletedOrderTombstone(order = {}, body = {}) {
+  return {
+    id: crypto.randomUUID(),
+    source: order.source || "",
+    internalOrderNumber: order.internalOrderNumber || order.orderNumber || "",
+    orderNumber: order.orderNumber || "",
+    displayOrderNumber: order.displayOrderNumber || order.orderNumber || "",
+    marketplaceOrderNumber: order.marketplaceOrderNumber || "",
+    marketplaceOrderId: order.marketplaceOrderId || order.marketplaceOrderNumber || "",
+    marketplaceReferences: Array.isArray(order.marketplaceReferences) ? order.marketplaceReferences : [],
+    buyer: order.buyer || "",
+    total: Number(order.total || 0),
+    status: "deleted",
+    deletedAt: new Date().toISOString(),
+    deletedBy: body.user || "Luis",
+    reason: String(body.reason || body.note || "Admin deleted order").trim(),
+    snapshot: {
+      createdAt: order.createdAt || "",
+      shipBy: order.shipBy || "",
+      itemCount: Array.isArray(order.items) ? order.items.length : 0
+    }
+  };
+}
+
+function orderLineItems(order = {}) {
+  return Array.isArray(order.items) && order.items.length
+    ? order.items
+    : [{ sku: order.sku, title: order.title, qty: order.qty, price: Number(order.total || 0) / Math.max(1, Number(order.qty || 1)) }];
+}
+
+function updateOrderLineSku(order, lineIndex, nextSku, body = {}) {
+  const items = orderLineItems(order);
+  const line = items[lineIndex];
+  if (!line) throw new Error("Order line not found.");
+  const previousSku = String(line.sku || "").trim();
+  line.originalSku = line.originalSku || previousSku;
+  line.mappedFromSku = previousSku;
+  line.sku = nextSku;
+  line.skuMappedAt = new Date().toISOString();
+  line.skuMappedBy = body.user || "Luis";
+  if (body.mode) line.skuMappingMode = body.mode;
+  if (body.shadowSku) line.shadowSku = body.shadowSku;
+  else delete line.shadowSku;
+  if (body.shadowId) line.shadowId = body.shadowId;
+  else delete line.shadowId;
+  if (body.parentSku) line.parentSku = body.parentSku;
+  else delete line.parentSku;
+  order.items = items;
+  if (lineIndex === 0 || String(order.sku || "").toLowerCase() === previousSku.toLowerCase()) order.sku = nextSku;
+  order.updatedAt = new Date().toISOString();
+  addOrderTimeline(order, {
+    type: "sku",
+    title: "SKU mapped",
+    message: `${previousSku || "Blank SKU"} mapped to ${nextSku}.`,
+    user: body.user || "Luis"
+  });
+  return line;
+}
+
+function unmapOrderLineSku(db, order, lineIndex, body = {}) {
+  const items = orderLineItems(order);
+  const line = items[lineIndex];
+  if (!line) throw new Error("Order line not found.");
+  const mappedSku = String(line.sku || "").trim();
+  const sourceSku = String(line.originalSku || line.mappedFromSku || body.sourceSku || "").trim();
+  if (!sourceSku || sourceSku.toLowerCase() === mappedSku.toLowerCase()) throw new Error("This order line is not mapped.");
+  const product = findInventoryBySkuOrAlias(db, mappedSku);
+  if (product) {
+    const aliasKey = sourceSku.toLowerCase();
+    product.aliases = (product.aliases || []).filter((alias) => {
+      if (String(alias.aliasSku || "").toLowerCase() !== aliasKey) return true;
+      const sameOrder = !alias.createdFromOrderId || alias.createdFromOrderId === order.id;
+      const sameLine = Number(alias.createdFromLineIndex ?? -1) < 0 || Number(alias.createdFromLineIndex) === Number(lineIndex);
+      return !(sameOrder && sameLine);
+    });
+    if (line.shadowId) {
+      product.shadowSkus = (product.shadowSkus || []).filter((shadow) => {
+        if (shadow.id !== line.shadowId) return true;
+        const attrs = shadow.marketplaceAttributes || {};
+        return attrs.sourceOrderId && attrs.sourceOrderId !== order.id;
+      });
+    }
+    product.updatedAt = new Date().toISOString();
+  }
+  line.sku = sourceSku;
+  line.mappedFromSku = "";
+  delete line.parentSku;
+  delete line.shadowSku;
+  delete line.shadowId;
+  line.skuMappingMode = "unmapped";
+  line.skuUnmappedAt = new Date().toISOString();
+  line.skuUnmappedBy = body.user || "Luis";
+  order.items = items;
+  if (lineIndex === 0 || String(order.sku || "").toLowerCase() === mappedSku.toLowerCase()) order.sku = sourceSku;
+  order.updatedAt = new Date().toISOString();
+  addOrderTimeline(order, {
+    type: "sku",
+    title: "SKU unmapped",
+    message: `${mappedSku || "Mapped SKU"} restored to ${sourceSku}.`,
+    user: body.user || "Luis"
+  });
+  return { line, product };
+}
+
+function findShadowSkuOwner(db, shadowSku) {
+  const key = String(shadowSku || "").trim().toLowerCase();
+  if (!key) return null;
+  for (const product of db.inventory || []) {
+    const shadow = (product.shadowSkus || []).find((row) => String(row.shadowSku || "").trim().toLowerCase() === key);
+    if (shadow) return { product, shadow };
+  }
+  return null;
+}
+
+function createShadowSkuFromOrderLine(db, product, order, line, body = {}) {
+  const shadowSku = String(body.sourceSku || line.originalSku || line.mappedFromSku || line.sku || "").trim();
+  if (!shadowSku) throw new Error("Source SKU is required for a shadow SKU.");
+  const existingOwner = findShadowSkuOwner(db, shadowSku);
+  if (existingOwner && existingOwner.product.id !== product.id) {
+    throw new Error(`Shadow SKU ${shadowSku} already belongs to ${existingOwner.product.sku}.`);
+  }
+  if (existingOwner) return existingOwner.shadow;
+  product.shadowSkus = Array.isArray(product.shadowSkus) ? product.shadowSkus : [];
+  const marketplace = String(body.marketplace || order.source || "Marketplace").trim();
+  const shadow = normalizeShadowSku(applyChannelDefaultsToShadow(db, {
+    shadowSku,
+    marketplace,
+    price: Number(line.price ?? product.price ?? 0),
+    status: "Draft",
+    notes: `Created from ${order.orderNumber || order.id}.`,
+    marketplaceAttributes: {
+      sourceOrderId: order.id,
+      sourceOrderNumber: order.orderNumber || "",
+      sourceOrderLineIndex: Number(body.lineIndex ?? -1),
+      marketplaceOrderNumber: order.marketplaceOrderNumber || "",
+      orderLineSku: shadowSku
+    }
+  }, marketplace), product);
+  product.shadowSkus.push(shadow);
+  product.updatedAt = new Date().toISOString();
+  return shadow;
+}
+
+function createInventoryFromOrderLine(db, order, line, sku, body = {}) {
+  const existing = (db.inventory || []).find((item) => String(item.sku || "").toLowerCase() === sku.toLowerCase());
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  const product = {
+    id: crypto.randomUUID(),
+    sku,
+    title: body.title || line.title || sku,
+    marketplaceTitle: line.title || body.title || sku,
+    price: Number(line.price || 0),
+    cost: Number(body.cost || line.cost || 0),
+    msrp: Number(body.msrp || line.price || 0),
+    qty: Number(body.qty || 0),
+    reserved: 0,
+    reorderPoint: 0,
+    brand: "",
+    category: "",
+    condition: "New",
+    status: "Draft",
+    active: true,
+    barcode: "",
+    shortDescription: "",
+    longDescription: "",
+    images: [],
+    tags: [String(order.source || "Order").toLowerCase()].filter(Boolean),
+    vendor: "",
+    sources: {
+      [String(order.source || "order").toLowerCase()]: line.originalSku || line.sku || sku
+    },
+    createdAt: now,
+    updatedAt: now
+  };
+  db.inventory.unshift(product);
+  return product;
+}
+
+function releaseOrderReservation(db, order, body = {}) {
+  const qty = Number(order.reservedQty || 0);
+  if (!(qty > 0)) return false;
+  const item = (db.inventory || []).find((row) => row.sku === order.sku);
+  const warehouse = (db.warehouses || []).find((row) => row.id === order.reservationWarehouseId);
+  if (!item || !warehouse) return false;
+  const stockRow = ensureInventoryWarehouseStock(item, warehouse);
+  const reservedBefore = Number(stockRow.reserved || 0);
+  const releaseQty = Math.min(qty, reservedBefore);
+  if (!(releaseQty > 0)) return false;
+  stockRow.reserved = Math.max(0, reservedBefore - releaseQty);
+  stockRow.updatedAt = new Date().toISOString();
+  syncInventoryTotalsFromWarehouses(item);
+  item.updatedAt = new Date().toISOString();
+  order.reservedQty = 0;
+  order.reservationReleasedAt = new Date().toISOString();
+  addInventoryLedger(db, item, {
+    type: "order_reservation_release",
+    source: "order",
+    referenceId: order.id,
+    referenceNumber: order.orderNumber,
+    warehouseId: warehouse.id,
+    warehouseName: warehouse.name,
+    locationBin: stockRow.locationBin || "",
+    quantityChange: 0,
+    reservedChange: -releaseQty,
+    qtyBefore: Number(stockRow.qty || 0),
+    qtyAfter: Number(stockRow.qty || 0),
+    reservedBefore,
+    reservedAfter: stockRow.reserved,
+    reason: body.note || `Released reservation for ${order.orderNumber}`,
+    user: body.user || "Luis"
+  });
+  return true;
+}
+
+function applyOrderSkuAliases(db, order = {}) {
+  const items = orderLineItems(order);
+  for (let index = 0; index < items.length; index += 1) {
+    const line = items[index];
+    const importedSku = String(line.sku || "").trim();
+    const product = findInventoryBySkuOrAlias(db, importedSku);
+    if (!product || String(product.sku || "").toLowerCase() === importedSku.toLowerCase()) continue;
+    line.originalSku = line.originalSku || importedSku;
+    line.mappedFromSku = importedSku;
+    line.sku = product.sku;
+    line.parentSku = product.sku;
+    const alias = (product.aliases || []).find((row) => row.active !== false && String(row.aliasSku || "").toLowerCase() === importedSku.toLowerCase());
+    const shadow = (product.shadowSkus || []).find((row) => String(row.shadowSku || "").toLowerCase() === importedSku.toLowerCase());
+    if (shadow) {
+      line.shadowSku = shadow.shadowSku;
+      line.shadowId = shadow.id;
+    }
+    line.skuMappingMode = shadow ? "shadow-alias" : alias?.type ? `${alias.type}-alias` : "alias";
+    line.skuMappedAt = line.skuMappedAt || new Date().toISOString();
+    line.skuMappedBy = line.skuMappedBy || "Alias";
+    if (index === 0) order.sku = product.sku;
+  }
+  order.items = items;
+}
+
+function reapplyAliasesToOrders(db = {}) {
+  let changed = 0;
+  for (const order of db.orders || []) {
+    const before = JSON.stringify(order.items || []);
+    const beforeSku = order.sku || "";
+    applyOrderSkuAliases(db, order);
+    if (before !== JSON.stringify(order.items || []) || beforeSku !== (order.sku || "")) {
+      order.updatedAt = new Date().toISOString();
+      changed += 1;
+    }
+  }
+  return changed;
+}
+
+function renameSkuInLineList(lines = [], oldSku, newSku) {
+  let changed = false;
+  for (const line of lines || []) {
+    if (String(line.sku || "").toLowerCase() === oldSku.toLowerCase()) {
+      line.sku = newSku;
+      changed = true;
+    }
+    if (String(line.parentSku || "").toLowerCase() === oldSku.toLowerCase()) {
+      line.parentSku = newSku;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function renameProductSku(db, product, newSku, body = {}) {
+  const oldSku = String(product.sku || "").trim();
+  const nextSku = String(newSku || "").trim();
+  if (!nextSku) throw new Error("New SKU is required.");
+  if (oldSku.toLowerCase() === nextSku.toLowerCase()) throw new Error("New SKU must be different.");
+  const conflict = (db.inventory || []).find((item) => item.id !== product.id && skuMatchesProduct(item, nextSku));
+  if (conflict) throw new Error(`SKU ${nextSku} already belongs to ${conflict.sku}.`);
+
+  addProductAlias(db, product, oldSku, {
+    source: "Internal",
+    type: "renamed",
+    notes: body.reason || `Renamed parent SKU to ${nextSku}`
+  });
+
+  product.sku = nextSku;
+  product.aliases = normalizeProductAliases(product.aliases, product).map((alias) => ({ ...alias, parentSku: nextSku }));
+  product.shadowSkus = (product.shadowSkus || []).map((shadow) => ({ ...shadow, parentSku: nextSku }));
+  product.sources = { ...(product.sources || {}) };
+  product.updatedAt = new Date().toISOString();
+
+  let ordersChanged = 0;
+  for (const order of db.orders || []) {
+    let changed = false;
+    if (String(order.sku || "").toLowerCase() === oldSku.toLowerCase()) {
+      order.sku = nextSku;
+      changed = true;
+    }
+    if (renameSkuInLineList(order.items || [], oldSku, nextSku)) changed = true;
+    if (renameSkuInLineList(order.fulfillmentLines || [], oldSku, nextSku)) changed = true;
+    for (const refund of order.refunds || []) {
+      if (renameSkuInLineList(refund.items || [], oldSku, nextSku)) changed = true;
+    }
+    if (changed) {
+      order.updatedAt = new Date().toISOString();
+      ordersChanged += 1;
+    }
+  }
+
+  let purchaseOrdersChanged = 0;
+  for (const po of db.purchaseOrders || []) {
+    if (renameSkuInLineList(po.items || [], oldSku, nextSku)) {
+      po.updatedAt = new Date().toISOString();
+      purchaseOrdersChanged += 1;
+    }
+  }
+
+  let returnsChanged = 0;
+  for (const record of db.returns || []) {
+    let changed = false;
+    if (String(record.sku || "").toLowerCase() === oldSku.toLowerCase()) {
+      record.sku = nextSku;
+      changed = true;
+    }
+    if (renameSkuInLineList(record.items || [], oldSku, nextSku)) changed = true;
+    if (changed) {
+      record.updatedAt = new Date().toISOString();
+      returnsChanged += 1;
+    }
+  }
+
+  for (const entry of db.inventoryLedger || []) {
+    if (String(entry.sku || "").toLowerCase() === oldSku.toLowerCase()) entry.sku = nextSku;
+  }
+
+  return { oldSku, newSku: nextSku, ordersChanged, purchaseOrdersChanged, returnsChanged };
+}
+
 function upsertOrder(db, incoming) {
+  if (isDeletedMarketplaceOrder(db, incoming)) return "skipped";
+  applyOrderSkuAliases(db, incoming);
   const incomingMarketplaceNumber = incoming.marketplaceOrderNumber || incoming.marketplaceOrderId || incoming.orderNumber;
   const existing = db.orders.find((order) => {
     const existingMarketplaceNumber = order.marketplaceOrderNumber || order.marketplaceOrderId;
     return order.source === incoming.source && existingMarketplaceNumber === incomingMarketplaceNumber;
   });
+  if (existing?.status === "void") return "skipped";
   if (!existing) {
     incoming.internalOrderNumber = nextOrderNumber(db);
     incoming.orderNumber = incoming.internalOrderNumber;
@@ -3940,7 +5938,17 @@ function upsertOrder(db, incoming) {
     productCost: incoming.source === "eBay" ? incoming.productCost : existing.productCost || incoming.productCost,
     marketplaceFees: incoming.source === "eBay" ? incoming.marketplaceFees : existing.marketplaceFees || incoming.marketplaceFees,
     shippingCost: incoming.source === "eBay" ? incoming.shippingCost : existing.shippingCost || incoming.shippingCost,
-    refundAmount: incoming.source === "eBay" ? incoming.refundAmount : existing.refundAmount || incoming.refundAmount
+    refundAmount: incoming.source === "eBay" ? incoming.refundAmount : existing.refundAmount || incoming.refundAmount,
+    subtotal: incoming.source === "eBay" ? incoming.subtotal : existing.subtotal || incoming.subtotal,
+    shippingPaid: incoming.source === "eBay" ? incoming.shippingPaid : existing.shippingPaid || incoming.shippingPaid,
+    taxAmount: incoming.source === "eBay" ? incoming.taxAmount : existing.taxAmount || incoming.taxAmount,
+    trackingNumber: incoming.trackingNumber || existing.trackingNumber,
+    trackingUrl: incoming.trackingUrl || existing.trackingUrl,
+    shippingCarrier: incoming.shippingCarrier || existing.shippingCarrier,
+    carrierName: incoming.carrierName || existing.carrierName,
+    shippingService: incoming.shippingService || existing.shippingService,
+    shipDate: incoming.shipDate || existing.shipDate,
+    shipments: Array.isArray(incoming.shipments) && incoming.shipments.length ? incoming.shipments : existing.shipments
   });
   return "updated";
 }
@@ -3959,6 +5967,7 @@ async function importTemuOrders(db) {
   let pageNumber = 1;
   let created = 0;
   let updated = 0;
+  let skipped = 0;
   let fetched = 0;
   const errors = [];
 
@@ -3990,6 +5999,7 @@ async function importTemuOrders(db) {
       const action = upsertOrder(db, mapTemuOrder(listOrder, detail, shipping));
       if (action === "created") created += 1;
       if (action === "updated") updated += 1;
+      if (action === "skipped") skipped += 1;
       fetched += 1;
     }
 
@@ -3998,7 +6008,7 @@ async function importTemuOrders(db) {
   }
 
   db.connectorState.temuLastOrderSync = now;
-  return { fetched, created, updated, errors };
+  return { fetched, created, updated, skipped, errors };
 }
 
 function getEbayConfig(db = {}) {
@@ -4014,7 +6024,10 @@ function getEbayConfig(db = {}) {
     clientId: process.env.EBAY_CLIENT_ID || "",
     clientSecret: process.env.EBAY_CLIENT_SECRET || "",
     ruName: process.env.EBAY_RUNAME || "",
-    scope: process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
+    scope: process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly",
+    appScope: process.env.EBAY_APP_SCOPE || "https://api.ebay.com/oauth/api_scope",
+    appAccessToken: connectorState.ebayAppAccessToken || process.env.EBAY_APP_ACCESS_TOKEN || "",
+    appAccessTokenExpiresAt: connectorState.ebayAppAccessTokenExpiresAt || "",
     accessToken: connectorState.ebayAccessToken || process.env.EBAY_ACCESS_TOKEN || "",
     refreshToken: connectorState.ebayRefreshToken || process.env.EBAY_REFRESH_TOKEN || "",
     accessTokenExpiresAt: connectorState.ebayAccessTokenExpiresAt || "",
@@ -4025,16 +6038,82 @@ function getEbayConfig(db = {}) {
 
 function missingEbayConfig(config, options = {}) {
   const needsToken = options.requireToken !== false;
+  const needsRuName = options.requireRuName !== false;
   return [
     ["EBAY_CLIENT_ID", config.clientId],
     ["EBAY_CLIENT_SECRET", config.clientSecret],
-    ["EBAY_RUNAME", config.ruName],
+    ...(needsRuName ? [["EBAY_RUNAME", config.ruName]] : []),
     ...(needsToken && !config.accessToken && !config.refreshToken ? [["EBAY_REFRESH_TOKEN", config.refreshToken]] : [])
   ].filter(([, value]) => !value).map(([key]) => key);
 }
 
 function ebayBasicAuth(config) {
   return Buffer.from(`${config.clientId}:${config.clientSecret}`, "utf8").toString("base64");
+}
+
+function ebayLocaleForMarketplace(marketplaceId = "EBAY_US") {
+  return ({
+    EBAY_US: "en-US",
+    EBAY_CA: "en-CA",
+    EBAY_GB: "en-GB",
+    EBAY_AU: "en-AU",
+    EBAY_DE: "de-DE",
+    EBAY_FR: "fr-FR",
+    EBAY_IT: "it-IT",
+    EBAY_ES: "es-ES"
+  })[String(marketplaceId || "").toUpperCase()] || "en-US";
+}
+
+function normalizeEbayLocale(value, marketplaceId = "EBAY_US") {
+  const raw = String(value || "").trim().replace("_", "-");
+  if (/^[a-z]{2}-[A-Z]{2}$/.test(raw)) return raw;
+  if (/^[a-z]{2}$/.test(raw)) return ebayLocaleForMarketplace(marketplaceId).startsWith(`${raw}-`) ? ebayLocaleForMarketplace(marketplaceId) : `${raw}-${raw.toUpperCase()}`;
+  return ebayLocaleForMarketplace(marketplaceId);
+}
+
+function ebayRawRequest(urlString, options = {}) {
+  const url = new URL(urlString);
+  const bodyText = options.body === undefined ? "" : JSON.stringify(options.body);
+  const headers = { ...(options.headers || {}) };
+  if (bodyText) headers["Content-Length"] = Buffer.byteLength(bodyText);
+  return new Promise((resolve, reject) => {
+    const request = https.request({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || undefined,
+      path: `${url.pathname}${url.search}`,
+      method: options.method || "GET",
+      headers,
+      timeout: Number(options.timeoutMs || 25000)
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        let data = {};
+        if (text) {
+          try {
+            data = JSON.parse(text);
+          } catch (error) {
+            return reject(new Error(`eBay returned non-JSON response (${response.statusCode}): ${text.slice(0, 180)}`));
+          }
+        }
+        resolve({
+          response: {
+            ok: response.statusCode >= 200 && response.statusCode < 300,
+            status: response.statusCode
+          },
+          data
+        });
+      });
+    });
+    request.on("timeout", () => {
+      request.destroy(new Error(`eBay API error (504): request timed out for ${url.pathname}${url.search}`));
+    });
+    request.on("error", reject);
+    if (bodyText) request.write(bodyText);
+    request.end();
+  });
 }
 
 function ebayConsentUrl(db) {
@@ -4055,9 +6134,9 @@ function ebayConsentUrl(db) {
   return url.toString();
 }
 
-async function ebayTokenRequest(db, body) {
+async function ebayTokenRequest(db, body, options = {}) {
   const config = getEbayConfig(db);
-  const missing = missingEbayConfig(config, { requireToken: false });
+  const missing = missingEbayConfig(config, { requireToken: false, requireRuName: options.requireRuName !== false });
   if (missing.length) {
     throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them to .env and restart the app.`);
   }
@@ -4080,6 +6159,14 @@ async function ebayTokenRequest(db, body) {
     throw new Error(`eBay token error (${response.status}): ${JSON.stringify(data).slice(0, 300)}`);
   }
   return data;
+}
+
+function saveEbayAppTokenPayload(db, payload) {
+  db.connectorState = db.connectorState || {};
+  if (payload.access_token) db.connectorState.ebayAppAccessToken = payload.access_token;
+  const expiresIn = Number(payload.expires_in || 0);
+  if (expiresIn > 0) db.connectorState.ebayAppAccessTokenExpiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+  db.connectorState.ebayAppTokenCreatedAt = new Date().toISOString();
 }
 
 function saveEbayTokenPayload(db, payload) {
@@ -4139,12 +6226,22 @@ async function refreshEbayAccessToken(db) {
     throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them to .env and restart the app.`);
   }
   if (!config.refreshToken) throw new Error("eBay refresh token is missing. Connect eBay again from the Channels page.");
-  const body = new URLSearchParams({
+  const scopedBody = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: config.refreshToken,
     scope: config.scope
   });
-  const payload = await ebayTokenRequest(db, body);
+  let payload;
+  try {
+    payload = await ebayTokenRequest(db, scopedBody);
+  } catch (error) {
+    if (!String(error.message || "").includes("invalid_scope")) throw error;
+    const unscopedBody = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: config.refreshToken
+    });
+    payload = await ebayTokenRequest(db, unscopedBody);
+  }
   if (!payload.access_token) {
     throw new Error(`eBay refresh did not return an access token: ${JSON.stringify(payload).slice(0, 240)}`);
   }
@@ -4165,41 +6262,85 @@ async function ebayAccessToken(db) {
   return refreshEbayAccessToken(db);
 }
 
+async function ebayAppAccessToken(db) {
+  const config = getEbayConfig(db);
+  if (config.appAccessToken && config.appAccessTokenExpiresAt) {
+    const expiresAt = new Date(config.appAccessTokenExpiresAt).getTime();
+    if (Number.isFinite(expiresAt) && expiresAt > Date.now() + 120000) return config.appAccessToken;
+  }
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    scope: config.appScope
+  });
+  const payload = await ebayTokenRequest(db, body, { requireRuName: false });
+  if (!payload.access_token) {
+    throw new Error(`eBay app token request did not return an access token: ${JSON.stringify(payload).slice(0, 240)}`);
+  }
+  saveEbayAppTokenPayload(db, payload);
+  if (postgres.isPostgresEnabled()) {
+    writeConnectorStateSync({ ...readConnectorStateSync(), ...db.connectorState });
+  }
+  return db.connectorState.ebayAppAccessToken;
+}
+
 async function ebayRequest(db, resourcePath, options = {}) {
   const config = getEbayConfig(db);
+  const marketplaceId = options.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
+  const optionHeaders = options.headers || {};
+  const acceptLanguage = ebayLocaleForMarketplace(marketplaceId);
   const request = async (token) => {
-    const response = await fetch(`${config.apiBase}${resourcePath}`, {
-      method: options.method || "GET",
-      headers: {
-        Accept: "application/json",
-        ...(options.body ? { "Content-Type": "application/json" } : {}),
-        Authorization: `Bearer ${token}`,
-        ...(options.headers || {})
-      },
-      body: options.body ? JSON.stringify(options.body) : undefined
-    });
-    const text = await response.text();
-    let data = {};
-    if (text) {
-      try {
-        data = JSON.parse(text);
-      } catch (error) {
-        throw new Error(`eBay returned non-JSON response (${response.status}): ${text.slice(0, 180)}`);
-      }
+    try {
+      return await ebayRawRequest(`${config.apiBase}${resourcePath}`, {
+        method: options.method || "GET",
+        timeoutMs: options.timeoutMs || 25000,
+        headers: {
+          Accept: "application/json",
+          "Accept-Language": acceptLanguage,
+          "X-EBAY-C-MARKETPLACE-ID": String(marketplaceId || "EBAY_US").trim(),
+          ...(options.body ? { "Content-Type": "application/json" } : {}),
+          ...(options.body ? { "Content-Language": acceptLanguage } : {}),
+          Authorization: `Bearer ${token}`,
+          ...Object.fromEntries(Object.entries(optionHeaders).filter(([key]) => !/^accept-language$/i.test(key) && !/^content-language$/i.test(key)))
+        },
+        body: options.body
+      });
+    } catch (error) {
+      if (/request timed out/i.test(String(error.message || ""))) throw new Error(`eBay API error (504): request timed out for ${resourcePath}`);
+      throw error;
     }
-    return { response, data };
   };
 
-  let token = await ebayAccessToken(db);
+  let token = options.tokenType === "app" ? await ebayAppAccessToken(db) : await ebayAccessToken(db);
   let { response, data } = await request(token);
-  if (response.status === 401 && getEbayConfig(db).refreshToken) {
+  if (response.status === 401 && options.tokenType === "app") {
+    token = await ebayAppAccessToken(db);
+    ({ response, data } = await request(token));
+  } else if (response.status === 401 && getEbayConfig(db).refreshToken) {
     token = await refreshEbayAccessToken(db);
     ({ response, data } = await request(token));
   }
   if (!response.ok) {
-    throw new Error(`eBay API error (${response.status}): ${JSON.stringify(data).slice(0, 300)}`);
+    const detail = JSON.stringify(data).slice(0, 300);
+    const permissionHint = response.status === 403 && /insufficient permissions|access denied/i.test(detail)
+      ? (options.tokenType === "app"
+        ? " Confirm the application has the general eBay OAuth scope enabled: https://api.ebay.com/oauth/api_scope."
+        : " Reconnect eBay from Channels so the seller token is reissued with https://api.ebay.com/oauth/api_scope/sell.inventory.")
+      : "";
+    const error = new Error(`eBay API error (${response.status}) on ${options.method || "GET"} ${resourcePath}: ${detail}${permissionHint}`);
+    error.status = response.status;
+    error.ebayData = data;
+    error.resourcePath = resourcePath;
+    error.method = options.method || "GET";
+    throw error;
   }
   return data;
+}
+
+async function ebayShippingFulfillments(db, orderId) {
+  const id = String(orderId || "").trim();
+  if (!id) return [];
+  const data = await ebayRequest(db, `/sell/fulfillment/v1/order/${encodeURIComponent(id)}/shipping_fulfillment`);
+  return Array.isArray(data.fulfillments) ? data.fulfillments : [];
 }
 
 async function ebayServerDate(config) {
@@ -4233,11 +6374,41 @@ function ebayAddressFromOrder(order) {
   };
 }
 
+function displayCarrierName(carrier = "") {
+  const value = String(carrier || "").trim();
+  const upper = value.toUpperCase();
+  if (upper === "USPS") return "USPS";
+  if (upper === "UPS") return "UPS";
+  if (upper === "FEDEX" || upper === "FED_EX") return "FedEx";
+  if (upper === "DHL") return "DHL";
+  if (upper === "ONTRAC") return "OnTrac";
+  return value;
+}
+
+function inferCarrierFromTracking(trackingNumber = "", fallback = "") {
+  const tracking = String(trackingNumber || "").trim().toUpperCase().replace(/\s+/g, "");
+  if (/^1Z[0-9A-Z]{10,}$/.test(tracking)) return "UPS";
+  if (/^(94|93|92|95|96|82)\d{18,}$/.test(tracking)) return "USPS";
+  if (/^\d{12}$/.test(tracking) || /^\d{15}$/.test(tracking) || /^\d{20}$/.test(tracking)) return "FedEx";
+  return fallback;
+}
+
+function trackingUrlForCarrier(carrier = "", trackingNumber = "") {
+  const tracking = String(trackingNumber || "").trim();
+  if (!tracking) return "";
+  const upper = String(inferCarrierFromTracking(tracking, carrier) || "").toUpperCase();
+  if (upper === "USPS") return `https://tools.usps.com/go/TrackConfirmAction?tLabels=${encodeURIComponent(tracking)}`;
+  if (upper === "UPS") return `https://www.ups.com/track?tracknum=${encodeURIComponent(tracking)}`;
+  if (upper === "FEDEX" || upper === "FED_EX") return `https://www.fedex.com/fedextrack/?trknbr=${encodeURIComponent(tracking)}`;
+  if (upper === "DHL") return `https://www.dhl.com/us-en/home/tracking.html?tracking-id=${encodeURIComponent(tracking)}`;
+  return "";
+}
+
 function mapEbayStatus(order) {
   const cancelState = String(order.cancelStatus?.cancelState || order.cancelStatus || "").toLowerCase();
   if (cancelState.includes("cancel")) return "canceled";
   const fulfillment = String(order.orderFulfillmentStatus || "").toLowerCase();
-  if (fulfillment.includes("fulfilled")) return "confirmed";
+  if (fulfillment.includes("fulfilled")) return "shipped";
   if (fulfillment.includes("progress")) return "ready";
   return "new";
 }
@@ -4246,23 +6417,1064 @@ function ebayRefundTotal(order) {
   return (order.paymentSummary?.refunds || []).reduce((sum, refund) => sum + nestedMoney(refund.amount || refund.refundAmount), 0);
 }
 
+function ebayLineTaxTotal(item = {}) {
+  const sellerTaxes = (item.taxes || []).reduce((sum, tax) => sum + nestedMoney(tax.amount), 0);
+  const collectRemitTaxes = (item.ebayCollectAndRemitTaxes || []).reduce((sum, tax) => sum + nestedMoney(tax.amount), 0);
+  return sellerTaxes + collectRemitTaxes;
+}
+
+function ebayTrackingFromOrder(order = {}, fulfillments = []) {
+  const records = [];
+  for (const fulfillment of fulfillments || []) {
+    records.push({
+      fulfillmentId: fulfillment.fulfillmentId || "",
+      trackingNumber: fulfillment.shipmentTrackingNumber || fulfillment.trackingNumber || "",
+      carrier: fulfillment.shippingCarrierCode || fulfillment.carrierCode || "",
+      service: fulfillment.shippingServiceCode || "",
+      shippedDate: fulfillment.shippedDate || "",
+      lineItemIds: (fulfillment.lineItems || []).map((line) => line.lineItemId).filter(Boolean)
+    });
+  }
+  for (const item of order.lineItems || []) {
+    for (const linked of item.linkedOrderLineItems || []) {
+      for (const shipment of linked.shipments || []) {
+        records.push({
+          fulfillmentId: "",
+          trackingNumber: shipment.shipmentTrackingNumber || "",
+          carrier: shipment.shippingCarrierCode || "",
+          service: "",
+          shippedDate: "",
+          lineItemIds: [linked.lineItemId || item.lineItemId].filter(Boolean)
+        });
+      }
+    }
+  }
+  const clean = records
+    .map((record) => ({
+      ...record,
+      trackingNumber: String(record.trackingNumber || "").trim(),
+      carrier: inferCarrierFromTracking(record.trackingNumber, String(record.carrier || "").trim()),
+      service: String(record.service || "").trim()
+    }))
+    .filter((record) => record.trackingNumber || record.carrier || record.service);
+  return {
+    records: clean,
+    primary: clean.find((record) => record.trackingNumber) || clean[0] || null
+  };
+}
+
 function ebayProductCostForItems(db, items) {
   const inventory = Array.isArray(db.inventory) ? db.inventory : [];
   return items.reduce((sum, item) => {
-    const sku = String(item.sku || "").toLowerCase();
-    const product = inventory.find((row) => String(row.sku || "").toLowerCase() === sku)
-      || inventory.find((row) => Object.values(row.sources || {}).some((value) => String(value || "").toLowerCase() === sku));
+    const product = findInventoryBySkuOrAlias({ inventory }, item.sku);
     const unitCost = Number(product?.cost ?? product?.fobPrice ?? product?.price ?? item.cost ?? 0);
     return sum + (Number.isFinite(unitCost) ? unitCost : 0) * Number(item.qty || 0);
   }, 0);
 }
 
-function mapEbayOrder(order, db = {}) {
+function ebayListingCategoryId(db, item, config = {}) {
+  if (config.categoryId) return String(config.categoryId).trim();
+  if (item.ebayListing?.categoryId) return String(item.ebayListing.categoryId).trim();
+  const channelSettings = ebayChannelSettings(db);
+  if (channelSettings.ebayDefaultCategoryId) return String(channelSettings.ebayDefaultCategoryId).trim();
+  const categoryName = formatCategoryName(item.category || item.mainCategory || "");
+  const setting = (db.categorySettings || []).find((row) => formatCategoryName(row.name || row.category || "") === categoryName);
+  return String(setting?.mappings?.ebay?.categoryId || setting?.ebay?.categoryId || "").trim();
+}
+
+function ebayChannelSettings(db = {}) {
+  const channel = findChannelByName(db, "eBay");
+  return { ...DEFAULT_CHANNEL_SETTINGS, ...(channel?.settings || {}) };
+}
+
+function marketplaceItemCost(item = {}) {
+  return Number(sourceNumberValue(item.cost ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? 0));
+}
+
+function marketplaceBaseSellPrice(item = {}) {
+  return Number(sourceNumberValue(item.msrp ?? item.retailPrice ?? item.retail_price ?? item.salePrice ?? item.sale_price ?? item.price ?? 0));
+}
+
+function roundMarketplacePrice(value, rule = "none") {
+  const price = Number(value || 0);
+  if (!(price > 0)) return 0;
+  if (rule === "nearest .99") return Math.max(0.99, Math.ceil(price) - 0.01);
+  if (rule === "nearest .95") return Math.max(0.95, Math.ceil(price) - 0.05);
+  if (rule === "round up") return Math.ceil(price);
+  return Math.round(price * 100) / 100;
+}
+
+function marketplaceSuggestedPrice(item = {}, settings = {}) {
+  const cost = marketplaceItemCost(item);
+  const basePrice = marketplaceBaseSellPrice(item);
+  const markupPercent = Number(settings.priceMarkupPercent || 0);
+  const marginPercent = Number(settings.minMarginPercent || 0);
+  const markupPrice = cost > 0 && markupPercent > 0 ? cost * (1 + markupPercent / 100) : 0;
+  const marginPrice = cost > 0 && marginPercent > 0 && marginPercent < 100 ? cost / (1 - marginPercent / 100) : 0;
+  const candidate = Math.max(markupPrice, marginPrice, basePrice, cost);
+  return roundMarketplacePrice(candidate, settings.roundingRule || "none");
+}
+
+function marketplaceListingQuantity(item = {}, settings = {}) {
+  const onHand = Math.max(0, Math.floor(Number(item.qty ?? 0)));
+  const sourceStock = Math.max(0, Math.floor(Number(item.stockQty ?? item.qty ?? 0)));
+  const reserved = Math.max(0, Math.floor(Number(item.reserved || 0)));
+  const available = Math.max(0, onHand - reserved);
+  const sourceQty = settings.ebayQuantityMode === "stockQty" ? sourceStock : settings.ebayQuantityMode === "qty" ? onHand : available;
+  const safetyQty = Math.max(0, Math.floor(Number(settings.defaultSafetyQty || 0)));
+  const maxSellableQty = Math.max(0, Math.floor(Number(settings.defaultMaxSellableQty || 0)));
+  const afterSafety = Math.max(0, sourceQty - safetyQty);
+  return maxSellableQty > 0 ? Math.min(afterSafety, maxSellableQty) : afterSafety;
+}
+
+function ebayListingDescription(item = {}, config = {}) {
+  if (config.listingDescription) return String(config.listingDescription).trim();
+  const source = String(config.ebayDescriptionSource || config.descriptionSource || ebayChannelSettings(config.db || {}).ebayDescriptionSource || "longDescription");
+  if (source === "shortDescription") return String(item.shortDescription || item.title || item.sku || "").trim();
+  if (source === "title") return String(item.marketplaceTitle || item.title || item.sku || "").trim();
+  return String(item.longDescription || item.shortDescription || item.marketplaceTitle || item.title || item.sku || "").trim();
+}
+
+function parseEbayAspects(value, item = {}) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  const text = String(value || "").trim();
+  const aspects = {};
+  if (text) {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      // Fall through to "Name: Value" parsing.
+    }
+    for (const line of text.split(/\r?\n/)) {
+      const [name, ...rest] = line.split(":");
+      const valueText = rest.join(":").trim();
+      if (name && valueText) aspects[name.trim()] = [valueText];
+    }
+  }
+  if (item.brandLocked && item.brand) {
+    aspects.Brand = [String(item.brand)];
+  } else if (item.brand && !Object.keys(aspects).some((key) => String(key || "").trim().toLowerCase() === "brand")) {
+    aspects.Brand = [String(item.brand)];
+  }
+  if (item.mfrPartNumber) aspects.MPN = [String(item.mfrPartNumber)];
+  return aspects;
+}
+
+function ebayAspectKey(value = "") {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function ebayAspectHasValue(aspects = {}, name = "") {
+  const target = ebayAspectKey(name);
+  const matchKey = Object.keys(aspects || {}).find((key) => ebayAspectKey(key) === target);
+  if (!matchKey) return false;
+  const value = aspects[matchKey];
+  if (Array.isArray(value)) return value.some((entry) => String(entry || "").trim());
+  return value !== undefined && value !== null && String(value).trim();
+}
+
+function sourceDataSources(item = {}) {
+  return [
+    item,
+    item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {},
+    item.original && typeof item.original === "object" ? item.original : {},
+    item.attributes && typeof item.attributes === "object" ? item.attributes : {}
+  ];
+}
+
+function hasSourceManagerData(item = {}) {
+  return Boolean(
+    item.productManagerFields && typeof item.productManagerFields === "object" && Object.keys(item.productManagerFields).length
+  ) || Boolean(
+    item.original && typeof item.original === "object" && Object.keys(item.original).length
+  );
+}
+
+async function enrichItemWithCatalogSource(db, item = {}) {
+  if (!item || hasSourceManagerData(item)) return item;
+  const catalogProduct = await findCatalogProductBySku(item.sku, db);
+  const normalized = normalizeCatalogProductForInventory(catalogProduct || {});
+  if (!normalized) return item;
+  const productManagerFields = normalized.productManagerFields && typeof normalized.productManagerFields === "object" ? normalized.productManagerFields : {};
+  const original = normalized.original && typeof normalized.original === "object" ? normalized.original : productManagerFields;
+  if (!Object.keys(productManagerFields).length && !Object.keys(original || {}).length) return item;
+  item.productManagerFields = productManagerFields;
+  item.original = original;
+  item.attributes = item.attributes && typeof item.attributes === "object" && Object.keys(item.attributes).length ? item.attributes : normalized.attributes || {};
+  for (const field of ["itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "countryOfOrigin"]) {
+    if ((item[field] === undefined || item[field] === null || item[field] === "" || Number(item[field] || 0) === 0) && normalized[field]) item[field] = normalized[field];
+  }
+  item.updatedAt = new Date().toISOString();
+  return item;
+}
+
+function sourceDataValue(item = {}, keys = []) {
+  const sourceKeys = [...new Set(keys.flatMap((key) => {
+    const text = String(key || "").trim();
+    const camel = text.replace(/[-_]+([a-z0-9])/g, (_, char) => char.toUpperCase());
+    const snake = text.replace(/[A-Z]/g, (char) => `_${char.toLowerCase()}`).replace(/[-\s]+/g, "_").replace(/^_/, "");
+    const kebab = snake.replace(/_/g, "-");
+    return [text, camel, snake, kebab];
+  }).filter(Boolean))];
+  for (const source of sourceDataSources(item)) {
+    for (const key of sourceKeys) {
+      const value = String(key || "").includes(".")
+        ? String(key).split(".").reduce((cursor, part) => (cursor && typeof cursor === "object" ? cursor[part] : undefined), source)
+        : source?.[key];
+      if (Array.isArray(value) && value.length) return value.join(", ");
+      if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
+    }
+  }
+  return "";
+}
+
+function categorySettingForProduct(db = {}, item = {}) {
+  const categoryName = formatCategoryName(item.category || item.mainCategory || "");
+  if (!categoryName) return null;
+  return (db.categorySettings || []).find((row) => formatCategoryName(row.name || row.category || "") === categoryName) || null;
+}
+
+function mappedAttributeSourceValue(item = {}, mapping = {}, attribute = {}) {
+  if (!mapping || mapping.enabled === false) return "";
+  const field = String(mapping.sourceField || "").trim();
+  const value = field ? sourceDataValue(item, [field]) : "";
+  if (value) return value;
+  return String(mapping.fallbackValue || "").trim();
+}
+
+function attributeMappingForAspect(attributeMappings = [], attribute = {}) {
+  const keys = [attribute.id, attribute.name, attribute.handle].map(ebayAspectKey).filter(Boolean);
+  return (attributeMappings || []).find((mapping) => [mapping.attributeId, mapping.attributeName, mapping.attributeHandle].map(ebayAspectKey).some((key) => keys.includes(key))) || null;
+}
+
+function ebayAspectSourceValue(item = {}, attribute = {}) {
+  const name = attribute.name || attribute.handle || attribute.id || "";
+  const key = ebayAspectKey(name);
+  const candidates = {
+    brand: ["brand", "sourceBrand", "manufacturer", "vendor"],
+    mpn: ["mfrPartNumber", "manufacturerPartNumber", "mfr_part_number", "mpn", "model", "vendorSku"],
+    model: ["model", "mfrPartNumber", "mfr_part_number", "sku"],
+    color: ["color", "colour"],
+    material: ["material"],
+    size: ["size"],
+    type: ["type", "productType", "product_type"],
+    countryoforigin: ["countryOfOrigin", "country_of_origin", "originCountry"],
+    numberinpack: ["packQty", "packageQty", "uomQty", "uom_qty", "quantityIncrements"],
+    unitquantity: ["uomQty", "uom_qty", "unitQuantity", "qty"],
+    unittype: ["uom", "unitType"],
+    itemlength: ["itemLength", "item_length", "length", "lengthIn", "packageLength", "package_length"],
+    itemwidth: ["itemWidth", "item_width", "width", "widthIn", "packageWidth", "package_width"],
+    itemheight: ["itemHeight", "item_height", "height", "heightIn", "packageHeight", "package_height"],
+    features: ["features", "tags", "bulletPoints"],
+    department: ["department"],
+    californiaprop65warning: ["prop65Warning", "californiaProp65Warning"]
+  }[key] || [];
+  const value = sourceDataValue(item, [...candidates, name, attribute.handle, attribute.id]);
+  if (!value) return "";
+  if (/^item(length|width|height)$/.test(key) && /^-?\d+(\.\d+)?$/.test(value)) return `${value} in`;
+  return value;
+}
+
+function enrichEbayAspectsFromSource(item = {}, aspects = {}, attributes = [], attributeMappings = []) {
+  const next = { ...(aspects || {}) };
+  for (const attribute of attributes || []) {
+    const name = attribute.name || attribute.handle || attribute.id || "";
+    if (!name || ebayAspectHasValue(next, name)) continue;
+    const mapped = attributeMappingForAspect(attributeMappings, attribute);
+    const value = mappedAttributeSourceValue(item, mapped, attribute) || ebayAspectSourceValue(item, attribute);
+    if (value) next[name] = [value];
+  }
+  return next;
+}
+
+function missingRequiredEbayAspects(config = {}) {
+  const attributes = Array.isArray(config.categoryAttributes) ? config.categoryAttributes : [];
+  return attributes
+    .filter((attribute) => attribute.required)
+    .map((attribute) => attribute.name || attribute.id || attribute.handle || "")
+    .filter((name) => name && !ebayAspectHasValue(config.aspects, name));
+}
+
+function ebayListingConfig(db, item, body = {}) {
+  const saved = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const channelSettings = ebayChannelSettings(db);
+  const merged = { ...saved, ...body };
+  const price = body.useChannelPricing === true
+    ? Number(marketplaceSuggestedPrice(item, channelSettings))
+    : Number(merged.price ?? marketplaceSuggestedPrice(item, channelSettings));
+  const defaultQuantity = marketplaceListingQuantity(item, channelSettings);
+  const requestedQuantity = merged.quantity !== undefined && merged.quantity !== null && String(merged.quantity) !== ""
+    ? Math.max(0, Math.floor(Number(merged.quantity || 0)))
+    : null;
+  const quantity = requestedQuantity !== null && (requestedQuantity > 0 || defaultQuantity <= 0)
+    ? requestedQuantity
+    : Math.max(0, Math.floor(Number(defaultQuantity || 0)));
+  const categorySetting = categorySettingForProduct(db, item);
+  const masterEbayMapping = categorySetting?.mappings?.ebay || {};
+  const categoryAttributes = Array.isArray(merged.categoryAttributes) && merged.categoryAttributes.length
+    ? merged.categoryAttributes
+    : Array.isArray(saved.categoryAttributes) && saved.categoryAttributes.length
+      ? saved.categoryAttributes
+      : Array.isArray(masterEbayMapping.attributes) ? masterEbayMapping.attributes : [];
+  const aspectMappings = Array.isArray(masterEbayMapping.attributeMappings) ? masterEbayMapping.attributeMappings : [];
+  const aspects = enrichEbayAspectsFromSource(item, parseEbayAspects(merged.aspects || merged.itemSpecifics, item), categoryAttributes, aspectMappings);
+  return {
+    marketplaceId: String(merged.marketplaceId || channelSettings.ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US").trim(),
+    merchantLocationKey: String(merged.merchantLocationKey || channelSettings.ebayMerchantLocationKey || process.env.EBAY_MERCHANT_LOCATION_KEY || "").trim(),
+    categoryId: ebayListingCategoryId(db, item, merged),
+    categoryPath: String(merged.categoryPath || "").trim(),
+    taxonomyVersion: String(merged.taxonomyVersion || "").trim(),
+    condition: String(merged.condition || channelSettings.ebayDefaultCondition || "NEW").trim(),
+    paymentPolicyId: String(merged.paymentPolicyId || channelSettings.ebayPaymentPolicyId || process.env.EBAY_PAYMENT_POLICY_ID || "").trim(),
+    returnPolicyId: String(merged.returnPolicyId || channelSettings.ebayReturnPolicyId || process.env.EBAY_RETURN_POLICY_ID || "").trim(),
+    fulfillmentPolicyId: String(merged.fulfillmentPolicyId || channelSettings.ebayFulfillmentPolicyId || process.env.EBAY_FULFILLMENT_POLICY_ID || "").trim(),
+    currency: String(merged.currency || channelSettings.ebayCurrency || process.env.EBAY_CURRENCY || "USD").trim(),
+    format: String(merged.format || channelSettings.ebayListingFormat || "FIXED_PRICE").trim(),
+    bestOfferEnabled: merged.bestOfferEnabled !== undefined ? Boolean(merged.bestOfferEnabled) : Boolean(channelSettings.ebayBestOfferEnabled),
+    requireImage: merged.requireImage !== undefined ? Boolean(merged.requireImage) : channelSettings.ebayRequireImage !== false,
+    maxImages: Math.max(1, Math.min(24, Number(merged.maxImages || channelSettings.ebayMaxImages || 12))),
+    price,
+    quantity,
+    listingDescription: ebayListingDescription(item, { ...merged, db, ebayDescriptionSource: channelSettings.ebayDescriptionSource }),
+    aspects,
+    categoryAttributes,
+    offerId: String(merged.offerId || saved.offerId || "").trim(),
+    listingId: String(merged.listingId || saved.listingId || "").trim()
+  };
+}
+
+async function ebayListingReadiness(db, item = {}) {
+  await enrichItemWithCatalogSource(db, item);
+  const config = ebayListingConfig(db, item, { useChannelPricing: true });
+  const missing = validateEbayListingConfig(config, true, item);
+  const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const listingId = String(listing.listingId || item.ebayId || "").trim();
+  const offerId = String(listing.offerId || "").trim();
+  const status = listingId ? "live" : missing.length ? "not-ready" : offerId ? "offer" : "ready";
+  return {
+    status,
+    ready: status === "ready" || status === "offer",
+    live: Boolean(listingId),
+    missing,
+    price: config.price,
+    quantity: config.quantity
+  };
+}
+
+async function saveEbayListingDraft(db, item, body = {}) {
+  await enrichItemWithCatalogSource(db, item);
+  const config = ebayListingConfig(db, item, body);
+  const now = new Date().toISOString();
+  const existing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  let categoryAttributes = Array.isArray(existing.categoryAttributes) ? existing.categoryAttributes : [];
+  if (config.categoryId && (String(existing.categoryId || "") !== String(config.categoryId || "") || !categoryAttributes.length)) {
+    try {
+      categoryAttributes = await ebayCategoryAspects(db, config.categoryId, { categoryTreeId: config.taxonomyVersion || "" });
+    } catch (error) {
+      categoryAttributes = Array.isArray(existing.categoryAttributes) ? existing.categoryAttributes : [];
+      config.notes = [config.notes, `eBay aspects sync failed: ${error.message}`].filter(Boolean).join(" ");
+    }
+  }
+  item.ebayListing = {
+    ...existing,
+    ...config,
+    categoryAttributes,
+    offerId: existing.offerId || config.offerId || "",
+    listingId: existing.listingId || config.listingId || "",
+    listingUrl: existing.listingUrl || ebayListingUrl(existing.listingId || config.listingId || "", config.marketplaceId),
+    status: existing.listingId ? "published" : existing.offerId ? "offer" : "draft",
+    draftSavedAt: now,
+    updatedAt: now
+  };
+  item.sources = { ...(item.sources || {}), eBay: item.ebayListing.listingId || item.ebayListing.offerId || item.sku };
+  item.updatedAt = now;
+  return item.ebayListing;
+}
+
+function applyChannelCategoryMappingToProducts(db, source, channel = "ebay") {
+  const normalizedChannel = String(channel || "ebay").trim().toLowerCase();
+  if (normalizedChannel !== "ebay") throw new Error("Only eBay category refresh is supported right now.");
+  const category = findOrCreateCategorySetting(db, source.name);
+  const mapping = normalizeChannelCategoryMapping(category.mappings?.ebay || {});
+  if (!mapping.categoryId) throw new Error("Map and save the eBay category before refreshing SKUs.");
+  const now = new Date().toISOString();
+  const sourceName = formatCategoryName(source.name || "").toLowerCase();
+  let changed = 0;
+  for (const item of db.inventory || []) {
+    const itemCategory = formatCategoryName(item.category || item.mainCategory || "").toLowerCase();
+    if (!itemCategory || itemCategory !== sourceName) continue;
+    const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+    if (listing.categoryId) continue;
+    item.ebayListing = {
+      ...listing,
+      marketplaceId: listing.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US",
+      categoryId: mapping.categoryId,
+      categoryPath: mapping.categoryPath,
+      categoryHandle: mapping.categoryHandle,
+      taxonomyVersion: mapping.taxonomyVersion,
+      categoryAttributes: Array.isArray(mapping.attributes) ? mapping.attributes : listing.categoryAttributes || [],
+      status: listing.status || "draft",
+      draftSavedAt: listing.draftSavedAt || now,
+      updatedAt: now
+    };
+    item.updatedAt = now;
+    changed += 1;
+  }
+  return { changed, mapping };
+}
+
+function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", channel = "ebay") {
+  setTimeout(async () => {
+    try {
+      const db = normalizeDb(await readDbFast());
+      const job = findImportJob(db, jobId);
+      if (!job) return;
+      job.status = "running";
+      job.startedAt = job.startedAt || new Date().toISOString();
+      job.updatedAt = new Date().toISOString();
+      job.message = job.message || "Refreshing SKU category mappings.";
+      await writeDb(db);
+
+      const workingDb = normalizeDb(await readDbFast());
+      const workingJob = findImportJob(workingDb, jobId);
+      const source = findPublicCategory(workingDb, sourceId, scope);
+      if (!source) throw new Error("Master category was not found for SKU refresh.");
+      const result = applyChannelCategoryMappingToProducts(workingDb, source, channel);
+      const message = `Applied ${channel} category mapping to ${result.changed} SKU${result.changed === 1 ? "" : "s"} in ${source.name}.`;
+      finishImportJob(workingJob, {
+        status: "success",
+        message,
+        details: `${source.name} | ${result.mapping.categoryId} | ${result.mapping.categoryPath || ""}`,
+        totalRows: result.changed,
+        changed: result.changed
+      });
+      workingDb.syncRuns = Array.isArray(workingDb.syncRuns) ? workingDb.syncRuns : [];
+      workingDb.syncRuns.unshift({
+        id: crypto.randomUUID(),
+        importJobId: workingJob.id,
+        source: "Categories",
+        type: "category-mapping-refresh",
+        status: "success",
+        message,
+        createdAt: new Date().toISOString()
+      });
+      await writeDb(normalizeDb(workingDb));
+    } catch (error) {
+      try {
+        const db = normalizeDb(await readDbFast());
+        const job = findImportJob(db, jobId);
+        if (job) {
+          finishImportJob(job, {
+            status: "failed",
+            message: error.message,
+            errors: [error.message],
+            missingCount: 1
+          });
+          db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+          db.syncRuns.unshift({
+            id: crypto.randomUUID(),
+            importJobId: job.id,
+            source: "Categories",
+            type: "category-mapping-refresh",
+            status: "failed",
+            message: error.message,
+            createdAt: new Date().toISOString(),
+            errors: [error.message]
+          });
+          await writeDb(normalizeDb(db));
+        }
+      } catch (writeError) {
+        console.error("Unable to finish category mapping job", writeError);
+      }
+    }
+  }, 0);
+}
+
+function ebayListingUrl(listingId, marketplaceId = "EBAY_US") {
+  const id = String(listingId || "").trim();
+  if (!id) return "";
+  const host = String(marketplaceId || "").toUpperCase() === "EBAY_US" ? "www.ebay.com" : "www.ebay.com";
+  return `https://${host}/itm/${encodeURIComponent(id)}`;
+}
+
+function ebayOfferListingId(offer = {}) {
+  return String(
+    offer.listingId
+    || offer.listing?.listingId
+    || offer.listing?.listing_id
+    || offer.publishListingId
+    || ""
+  ).trim();
+}
+
+function ebayOfferStatus(offer = {}) {
+  return String(
+    offer.status
+    || offer.offerStatus
+    || offer.listingStatus
+    || offer.listing?.listingStatus
+    || offer.listing?.status
+    || (ebayOfferListingId(offer) ? "PUBLISHED" : "OFFER")
+  ).trim();
+}
+
+function ebayOfferPrice(offer = {}) {
+  return Number(
+    offer.pricingSummary?.price?.value
+    ?? offer.price?.value
+    ?? offer.price
+    ?? 0
+  ) || 0;
+}
+
+function ebayOfferCurrency(offer = {}) {
+  return String(offer.pricingSummary?.price?.currency || offer.price?.currency || process.env.EBAY_CURRENCY || "USD").trim();
+}
+
+function ebayCatalogRowFromOffer(offer = {}, inventoryItem = {}) {
+  const sku = String(offer.sku || inventoryItem.sku || "").trim();
+  const product = inventoryItem.product || {};
+  const marketplaceId = String(offer.marketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US").trim();
+  const listingId = ebayOfferListingId(offer);
+  const status = ebayOfferStatus(offer);
+  const quantity = Number(
+    offer.availableQuantity
+    ?? inventoryItem.availability?.shipToLocationAvailability?.quantity
+    ?? 0
+  ) || 0;
+  return {
+    sku,
+    offerId: String(offer.offerId || "").trim(),
+    listingId,
+    listingUrl: ebayListingUrl(listingId, marketplaceId),
+    status,
+    live: Boolean(listingId) || /published|active|listed/i.test(status),
+    marketplaceId,
+    categoryId: String(offer.categoryId || "").trim(),
+    merchantLocationKey: String(offer.merchantLocationKey || "").trim(),
+    quantity,
+    price: ebayOfferPrice(offer),
+    currency: ebayOfferCurrency(offer),
+    title: String(product.title || offer.title || sku).trim(),
+    description: String(product.description || offer.listingDescription || "").trim(),
+    brand: product.brand || "",
+    mpn: product.mpn || "",
+    aspects: product.aspects || {},
+    imageUrls: Array.isArray(product.imageUrls) ? product.imageUrls : [],
+    rawOffer: offer,
+    rawInventoryItem: inventoryItem
+  };
+}
+
+async function fetchEbayOffers(db) {
+  const offers = [];
+  const limit = 200;
+  for (let offset = 0; offset <= 5000; offset += limit) {
+    const data = await ebayRequest(db, `/sell/inventory/v1/offer?limit=${limit}&offset=${offset}`);
+    const page = Array.isArray(data.offers) ? data.offers : Array.isArray(data.offerSummaries) ? data.offerSummaries : [];
+    offers.push(...page);
+    if (!page.length || page.length < limit || offers.length >= Number(data.total || Infinity)) break;
+  }
+  return offers;
+}
+
+async function fetchEbayInventoryItems(db) {
+  const items = [];
+  const limit = 200;
+  for (let offset = 0; offset <= 5000; offset += limit) {
+    const data = await ebayRequest(db, `/sell/inventory/v1/inventory_item?limit=${limit}&offset=${offset}`);
+    const page = Array.isArray(data.inventoryItems) ? data.inventoryItems : [];
+    items.push(...page);
+    if (!page.length || page.length < limit || items.length >= Number(data.total || Infinity)) break;
+  }
+  return items;
+}
+
+async function fetchEbayAccountSettings(db) {
+  const settings = ebayChannelSettings(db);
+  const marketplaceId = settings.ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
+  const [locationsResult, paymentResult, returnResult, fulfillmentResult] = await Promise.allSettled([
+    ebayRequest(db, "/sell/inventory/v1/location?limit=200&offset=0"),
+    ebayRequest(db, `/sell/account/v1/payment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`),
+    ebayRequest(db, `/sell/account/v1/return_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`),
+    ebayRequest(db, `/sell/account/v1/fulfillment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`)
+  ]);
+  const unwrap = (result, keys) => {
+    if (result.status !== "fulfilled") return [];
+    for (const key of keys) {
+      if (Array.isArray(result.value?.[key])) return result.value[key];
+    }
+    return [];
+  };
+  const failures = [locationsResult, paymentResult, returnResult, fulfillmentResult]
+    .filter((result) => result.status === "rejected")
+    .map((result) => result.reason?.message || String(result.reason || "eBay settings request failed"));
+  return {
+    marketplaceId,
+    merchantLocations: unwrap(locationsResult, ["locations", "inventoryLocations"]).map((location) => ({
+      merchantLocationKey: location.merchantLocationKey || location.name || "",
+      name: location.name || location.merchantLocationKey || "",
+      status: location.locationStatus || location.status || "",
+      type: location.locationTypes?.join(", ") || location.locationType || ""
+    })).filter((location) => location.merchantLocationKey),
+    paymentPolicies: unwrap(paymentResult, ["paymentPolicies"]).map((policy) => ({
+      id: policy.paymentPolicyId || policy.policyId || "",
+      name: policy.name || "",
+      categoryTypes: policy.categoryTypes || []
+    })).filter((policy) => policy.id),
+    returnPolicies: unwrap(returnResult, ["returnPolicies"]).map((policy) => ({
+      id: policy.returnPolicyId || policy.policyId || "",
+      name: policy.name || "",
+      categoryTypes: policy.categoryTypes || []
+    })).filter((policy) => policy.id),
+    fulfillmentPolicies: unwrap(fulfillmentResult, ["fulfillmentPolicies"]).map((policy) => ({
+      id: policy.fulfillmentPolicyId || policy.policyId || "",
+      name: policy.name || "",
+      categoryTypes: policy.categoryTypes || []
+    })).filter((policy) => policy.id),
+    failures
+  };
+}
+
+async function syncEbayAccountSettings(db) {
+  const channel = findChannelByName(db, "eBay");
+  if (!channel) throw new Error("eBay channel settings were not found.");
+  const result = await fetchEbayAccountSettings(db);
+  const fetchedCount = result.merchantLocations.length
+    + result.paymentPolicies.length
+    + result.returnPolicies.length
+    + result.fulfillmentPolicies.length;
+  const failures = Array.isArray(result.failures) ? result.failures.filter(Boolean) : [];
+  channel.settings = { ...DEFAULT_CHANNEL_SETTINGS, ...(channel.settings || {}) };
+  channel.settings.ebayMarketplaceId = result.marketplaceId;
+  channel.settings.ebayAccountSettingsSyncedAt = new Date().toISOString();
+  channel.settings.ebayMerchantLocations = result.merchantLocations;
+  channel.settings.ebayPaymentPolicies = result.paymentPolicies;
+  channel.settings.ebayReturnPolicies = result.returnPolicies;
+  channel.settings.ebayFulfillmentPolicies = result.fulfillmentPolicies;
+  if (!channel.settings.ebayMerchantLocationKey && result.merchantLocations.length) channel.settings.ebayMerchantLocationKey = result.merchantLocations[0].merchantLocationKey;
+  if (!channel.settings.ebayPaymentPolicyId && result.paymentPolicies.length) channel.settings.ebayPaymentPolicyId = result.paymentPolicies[0].id;
+  if (!channel.settings.ebayReturnPolicyId && result.returnPolicies.length) channel.settings.ebayReturnPolicyId = result.returnPolicies[0].id;
+  if (!channel.settings.ebayFulfillmentPolicyId && result.fulfillmentPolicies.length) channel.settings.ebayFulfillmentPolicyId = result.fulfillmentPolicies[0].id;
+  Object.assign(channel, normalizeChannel(channel));
+  if (failures.length) {
+    const status = fetchedCount ? "warning" : "failed";
+    const message = fetchedCount
+      ? `Synced ${fetchedCount} eBay account setting${fetchedCount === 1 ? "" : "s"} with ${failures.length} API warning${failures.length === 1 ? "" : "s"}.`
+      : `eBay account settings sync failed: ${failures[0]}`;
+    const job = createImportJob(db, {
+      section: "Channels",
+      operation: "eBay account settings sync",
+      direction: "api",
+      fileName: "eBay Account API",
+      totalRows: 4,
+      message
+    });
+    finishImportJob(job, {
+      status,
+      message,
+      totalRows: 4,
+      changed: fetchedCount,
+      missingCount: failures.length,
+      errors: failures
+    });
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+    db.syncRuns.unshift({
+      id: crypto.randomUUID(),
+      importJobId: job.id,
+      source: "eBay",
+      type: "api",
+      status,
+      message,
+      createdAt: new Date().toISOString(),
+      errors: failures.slice(0, 10)
+    });
+    result.job = job;
+  }
+  return result;
+}
+
+function ebayLocationPayload(body = {}) {
+  const addressLine1 = String(body.addressLine1 || "388 South Ave").trim();
+  const city = String(body.city || "Staten Island").trim();
+  const stateOrProvince = String(body.state || body.stateOrProvince || "NY").trim();
+  const postalCode = String(body.postalCode || "10303").trim();
+  const country = String(body.country || "US").trim().toUpperCase();
+  const name = String(body.name || "SI Warehouse").trim();
+  if (!name) throw new Error("Location name is required.");
+  if (!addressLine1 || !city || !stateOrProvince || !postalCode || !country) {
+    throw new Error("A full ship-from address is required for the eBay location.");
+  }
+  return {
+    name,
+    merchantLocationStatus: "ENABLED",
+    locationTypes: ["WAREHOUSE"],
+    location: {
+      address: {
+        addressLine1,
+        addressLine2: String(body.addressLine2 || "").trim() || undefined,
+        city,
+        stateOrProvince,
+        postalCode,
+        country
+      }
+    },
+    phone: String(body.phone || "").trim() || undefined
+  };
+}
+
+async function createOrEnableEbayLocation(db, body = {}) {
+  const channel = findChannelByName(db, "eBay");
+  if (!channel) throw new Error("eBay channel settings were not found.");
+  const merchantLocationKey = String(body.merchantLocationKey || body.locationKey || "SI-WAREHOUSE")
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toUpperCase();
+  if (!merchantLocationKey) throw new Error("Merchant location key is required.");
+  const payload = ebayLocationPayload(body);
+  await ebayRequest(db, `/sell/inventory/v1/location/${encodeURIComponent(merchantLocationKey)}`, {
+    method: "POST",
+    body: payload
+  });
+  await ebayRequest(db, `/sell/inventory/v1/location/${encodeURIComponent(merchantLocationKey)}/enable`, {
+    method: "POST"
+  });
+  channel.settings = { ...DEFAULT_CHANNEL_SETTINGS, ...(channel.settings || {}) };
+  channel.settings.ebayMerchantLocationKey = merchantLocationKey;
+  channel.settings.ebayLocationCreatedAt = new Date().toISOString();
+  Object.assign(channel, normalizeChannel(channel));
+  const syncResult = await syncEbayAccountSettings(db);
+  return { merchantLocationKey, location: payload, syncResult };
+}
+
+function findInventoryByEbayCatalogRow(db = {}, row = {}) {
+  const bySku = findInventoryBySkuOrAlias(db, row.sku);
+  if (bySku) return { item: bySku, matchBy: "sku" };
+  const listingKey = String(row.listingId || "").trim().toLowerCase();
+  const offerKey = String(row.offerId || "").trim().toLowerCase();
+  for (const item of db.inventory || []) {
+    const saved = item.ebayListing || {};
+    const source = item.sources?.eBay || item.ebayId || "";
+    if (listingKey && [
+      saved.listingId,
+      item.ebayId,
+      source
+    ].some((value) => String(value || "").trim().toLowerCase() === listingKey)) return { item, matchBy: "listingId" };
+    if (offerKey && [
+      saved.offerId,
+      source
+    ].some((value) => String(value || "").trim().toLowerCase() === offerKey)) return { item, matchBy: "offerId" };
+  }
+  return { item: null, matchBy: "" };
+}
+
+function applyEbayCatalogRowToProduct(db, item, row, matchBy = "sku") {
+  const now = new Date().toISOString();
+  const previous = JSON.stringify(item.ebayListing || {});
+  item.ebayListing = {
+    ...(item.ebayListing || {}),
+    marketplaceId: row.marketplaceId,
+    merchantLocationKey: row.merchantLocationKey || item.ebayListing?.merchantLocationKey || "",
+    categoryId: row.categoryId || item.ebayListing?.categoryId || "",
+    price: row.price || item.ebayListing?.price || 0,
+    quantity: row.quantity,
+    currency: row.currency || item.ebayListing?.currency || "USD",
+    offerId: row.offerId || item.ebayListing?.offerId || "",
+    listingId: row.listingId || item.ebayListing?.listingId || "",
+    listingUrl: row.listingUrl || item.ebayListing?.listingUrl || "",
+    status: row.live ? "published" : "offer",
+    ebayStatus: row.status,
+    importedFromEbayAt: now,
+    matchBy
+  };
+  item.ebayId = item.ebayListing.listingId || item.ebayId || "";
+  item.sources = { ...(item.sources || {}), eBay: item.ebayListing.listingId || item.ebayListing.offerId || row.sku };
+  if (row.sku && String(row.sku).toLowerCase() !== String(item.sku || "").toLowerCase()) {
+    try {
+      addProductAlias(db, item, row.sku, {
+        source: "eBay",
+        type: "direct",
+        notes: `Mapped from eBay catalog sync by ${matchBy}.`
+      });
+    } catch {
+      queueUnmappedEbayCatalogReview(db, { ...row, status: `${row.status || ""} / alias conflict`.trim() });
+    }
+  }
+  if (row.title && (!item.marketplaceTitle || matchBy === "sku")) item.marketplaceTitle = item.marketplaceTitle || row.title;
+  item.updatedAt = now;
+  return previous !== JSON.stringify(item.ebayListing || {});
+}
+
+async function importEbayCatalog(db) {
+  const offers = await fetchEbayOffers(db);
+  let inventoryItems = [];
+  try {
+    inventoryItems = await fetchEbayInventoryItems(db);
+  } catch {
+    inventoryItems = [];
+  }
+  const inventoryBySku = new Map(inventoryItems.map((item) => [String(item.sku || "").toLowerCase(), item]));
+  const rows = offers
+    .map((offer) => ebayCatalogRowFromOffer(offer, inventoryBySku.get(String(offer.sku || "").toLowerCase()) || {}))
+    .filter((row) => row.sku);
+  const job = createImportJob(db, {
+    section: "Products",
+    operation: "eBay catalog sync",
+    direction: "import",
+    fileName: "eBay Inventory API",
+    totalRows: rows.length,
+    message: `Importing ${rows.length} eBay offer${rows.length === 1 ? "" : "s"}.`
+  });
+  let matched = 0;
+  let updated = 0;
+  let live = 0;
+  const errorRows = [];
+  for (const row of rows) {
+    if (row.live) live += 1;
+    const { item, matchBy } = findInventoryByEbayCatalogRow(db, row);
+    if (!item) {
+      queueUnmappedEbayCatalogReview(db, row);
+      errorRows.push(standardImportError({
+        sku: row.sku,
+        recordKey: row.listingId || row.offerId || row.sku,
+        field: "sku",
+        issue: "No matching DataPlus product found",
+        rawValue: JSON.stringify({ sku: row.sku, offerId: row.offerId, listingId: row.listingId, title: row.title }),
+        details: row.listingUrl || ""
+      }));
+      continue;
+    }
+    matched += 1;
+    if (applyEbayCatalogRowToProduct(db, item, row, matchBy)) updated += 1;
+  }
+  attachImportJobErrorsFile(job, errorRows);
+  const status = errorRows.length ? "warning" : "success";
+  const message = `Mapped ${matched} of ${rows.length} eBay offer${rows.length === 1 ? "" : "s"} (${live} live)${errorRows.length ? `; ${errorRows.length} need review.` : "."}`;
+  finishImportJob(job, {
+    status,
+    message,
+    totalRows: rows.length,
+    changed: updated,
+    missingCount: errorRows.length,
+    errors: importErrorMessages(errorRows)
+  });
+  db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+  db.syncRuns.unshift({
+    id: crypto.randomUUID(),
+    importJobId: job.id,
+    source: "eBay",
+    type: "catalog",
+    status,
+    message,
+    createdAt: new Date().toISOString(),
+    errors: importErrorMessages(errorRows).slice(0, 10)
+  });
+  const connection = (db.connections || []).find((item) => item.name === "eBay");
+  if (connection) {
+    connection.connected = true;
+    connection.lastSync = new Date().toISOString();
+    connection.lastCatalogSync = connection.lastSync;
+  }
+  return { fetched: rows.length, live, matched, updated, unmapped: errorRows.length, job };
+}
+
+function validateEbayListingConfig(config, publish = false, item = {}) {
+  const missing = [];
+  for (const [key, value] of [
+    ["merchantLocationKey", config.merchantLocationKey],
+    ["categoryId", config.categoryId],
+    ["paymentPolicyId", config.paymentPolicyId],
+    ["returnPolicyId", config.returnPolicyId],
+    ["fulfillmentPolicyId", config.fulfillmentPolicyId]
+  ]) {
+    if (!value) missing.push(key);
+  }
+  if (!(config.price > 0)) missing.push("price");
+  if (publish && !(config.quantity > 0)) missing.push("quantity");
+  if (publish) {
+    for (const name of missingRequiredEbayAspects(config)) {
+      missing.push(`item specific ${name}`);
+    }
+  }
+  if (publish && config.requireImage !== false && !ebayProductImageUrls(item).length) missing.push("image");
+  return missing;
+}
+
+async function assertEbayInventoryPermission(db) {
+  try {
+    await ebayRequest(db, "/sell/inventory/v1/inventory_item?limit=1&offset=0", { timeoutMs: 15000 });
+  } catch (error) {
+    if (/25709|Accept-Language/i.test(String(error.message || ""))) {
+      return;
+    }
+    if (/403|insufficient permissions|access denied/i.test(String(error.message || ""))) {
+      throw new Error("eBay listing permission check failed: reconnect eBay from Channels and approve the Sell Inventory permission (https://api.ebay.com/oauth/api_scope/sell.inventory).");
+    }
+    throw error;
+  }
+}
+
+function ebayInventoryItemPayload(item, config) {
+  const images = ebayProductImageUrls(item).slice(0, config.maxImages || 12);
+  return {
+    availability: {
+      shipToLocationAvailability: {
+        quantity: config.quantity
+      }
+    },
+    condition: config.condition,
+    product: {
+      title: String(item.marketplaceTitle || item.title || item.sku).slice(0, 80),
+      description: config.listingDescription || item.shortDescription || item.title || item.sku,
+      aspects: config.aspects,
+      brand: item.brand || undefined,
+      mpn: item.mfrPartNumber || item.vendorSku || undefined,
+      imageUrls: images.length ? images : undefined
+    }
+  };
+}
+
+function ebayMinimalInventoryItemPayload(item, config) {
+  return {
+    availability: {
+      shipToLocationAvailability: {
+        quantity: config.quantity
+      }
+    },
+    condition: config.condition,
+    product: {
+      title: String(item.marketplaceTitle || item.title || item.sku).slice(0, 80),
+      description: config.listingDescription || item.shortDescription || item.title || item.sku
+    }
+  };
+}
+
+function ebayProductImageUrls(item = {}) {
+  return [
+    item.defaultImage,
+    item.default_image,
+    ...(Array.isArray(item.images) ? item.images : parseList(item.images))
+  ].filter(Boolean).map(String).filter((url, index, list) => list.indexOf(url) === index);
+}
+
+function ebayOfferPayload(item, config) {
+  const payload = {
+    sku: item.sku,
+    marketplaceId: config.marketplaceId,
+    format: config.format || "FIXED_PRICE",
+    availableQuantity: config.quantity,
+    categoryId: config.categoryId,
+    merchantLocationKey: config.merchantLocationKey,
+    listingDescription: config.listingDescription,
+    listingPolicies: {
+      paymentPolicyId: config.paymentPolicyId,
+      returnPolicyId: config.returnPolicyId,
+      fulfillmentPolicyId: config.fulfillmentPolicyId
+    },
+    pricingSummary: {
+      price: {
+        currency: config.currency,
+        value: String(Number(config.price || 0).toFixed(2))
+      }
+    },
+    listingDuration: "GTC"
+  };
+  if (config.bestOfferEnabled) payload.bestOfferTerms = { bestOfferEnabled: true };
+  return payload;
+}
+
+function ebayOfferIdFromError(error = {}) {
+  const errors = Array.isArray(error.ebayData?.errors) ? error.ebayData.errors : [];
+  for (const row of errors) {
+    const params = Array.isArray(row.parameters) ? row.parameters : [];
+    const offerParam = params.find((param) => String(param.name || "").toLowerCase() === "offerid");
+    if (offerParam?.value) return String(offerParam.value).trim();
+  }
+  const match = String(error.message || "").match(/"offerId","value":"([^"]+)"/i)
+    || String(error.message || "").match(/offerId["']?\s*[:=]\s*["']?([0-9]+)/i);
+  return match ? match[1] : "";
+}
+
+async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
+  const publish = Boolean(options.publish);
+  await enrichItemWithCatalogSource(db, item);
+  const config = ebayListingConfig(db, item, body);
+  const missing = validateEbayListingConfig(config, publish, item);
+  if (missing.length) throw new Error(`eBay listing is missing: ${missing.join(", ")}.`);
+  try {
+    await ebayRequest(db, `/sell/inventory/v1/inventory_item/${encodeURIComponent(item.sku)}`, {
+      method: "PUT",
+      body: ebayInventoryItemPayload(item, config)
+    });
+  } catch (error) {
+    if (!(Number(error.status || 0) >= 500 && /25001|Core Inventory Service internal error/i.test(String(error.message || "")))) throw error;
+    if (publish) {
+      throw new Error(`eBay inventory item update failed before publish. Save the offer first, review required item specifics, then publish. Original eBay error: ${error.message}`);
+    }
+    await ebayRequest(db, `/sell/inventory/v1/inventory_item/${encodeURIComponent(item.sku)}`, {
+      method: "PUT",
+      body: ebayMinimalInventoryItemPayload(item, config)
+    });
+    config.inventoryPayloadMode = "minimal";
+  }
+
+  let offer = {};
+  if (config.offerId) {
+    await ebayRequest(db, `/sell/inventory/v1/offer/${encodeURIComponent(config.offerId)}`, {
+      method: "PUT",
+      body: ebayOfferPayload(item, config)
+    });
+    offer.offerId = config.offerId;
+  } else {
+    try {
+      offer = await ebayRequest(db, "/sell/inventory/v1/offer", {
+        method: "POST",
+        body: ebayOfferPayload(item, config)
+      });
+    } catch (error) {
+      const existingOfferId = /Offer entity already exists/i.test(String(error.message || "")) ? ebayOfferIdFromError(error) : "";
+      if (!existingOfferId) throw error;
+      config.offerId = existingOfferId;
+      await ebayRequest(db, `/sell/inventory/v1/offer/${encodeURIComponent(existingOfferId)}`, {
+        method: "PUT",
+        body: ebayOfferPayload(item, config)
+      });
+      offer = { offerId: existingOfferId };
+    }
+  }
+
+  let published = null;
+  const offerId = offer.offerId || config.offerId;
+  if (publish) {
+    published = await ebayRequest(db, `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, { method: "POST" });
+  }
+
+  const now = new Date().toISOString();
+  item.ebayListing = {
+    ...config,
+    offerId,
+    listingId: published?.listingId || config.listingId || "",
+    listingUrl: ebayListingUrl(published?.listingId || config.listingId || "", config.marketplaceId),
+    status: published?.listingId ? "published" : "offer",
+    updatedAt: now,
+    publishedAt: published?.listingId ? now : config.publishedAt || ""
+  };
+  item.ebayId = item.ebayListing.listingId || item.ebayId || "";
+  item.sources = { ...(item.sources || {}), eBay: item.ebayListing.listingId || item.ebayListing.offerId || item.sku };
+  item.updatedAt = now;
+  return { config: item.ebayListing, offer, published };
+}
+
+function mapEbayOrder(order, db = {}, fulfillments = []) {
   const address = ebayAddressFromOrder(order);
+  const tracking = ebayTrackingFromOrder(order, fulfillments);
   const items = (Array.isArray(order.lineItems) && order.lineItems.length ? order.lineItems : [{}]).map((item) => {
     const quantity = Number(item.quantity || 1) || 1;
     const lineTotal = nestedMoney(item.lineItemCost || item.total || item.discountedLineItemCost);
     const lineShipping = nestedMoney(item.deliveryCost?.shippingCost);
+    const lineTax = ebayLineTaxTotal(item);
     return {
       sku: String(item.sku || item.legacyItemId || item.lineItemId || order.orderId || "EBAY-SKU"),
       title: String(item.title || "eBay item"),
@@ -4274,7 +7486,8 @@ function mapEbayOrder(order, db = {}) {
       legacyVariationId: item.legacyVariationId || "",
       fulfillmentStatus: item.lineItemFulfillmentStatus || "",
       shippingPaid: lineShipping,
-      tax: (item.taxes || []).reduce((sum, tax) => sum + nestedMoney(tax.amount), 0),
+      tax: lineTax,
+      sellerTax: (item.taxes || []).reduce((sum, tax) => sum + nestedMoney(tax.amount), 0),
       ebayCollectAndRemitTax: (item.ebayCollectAndRemitTaxes || []).reduce((sum, tax) => sum + nestedMoney(tax.amount), 0),
       shipBy: item.lineItemFulfillmentInstructions?.shipByDate || "",
       minEstimatedDeliveryDate: item.lineItemFulfillmentInstructions?.minEstimatedDeliveryDate || "",
@@ -4285,11 +7498,17 @@ function mapEbayOrder(order, db = {}) {
   const itemSubtotal = nestedMoney(order.pricingSummary?.priceSubtotal)
     || items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
   const shippingPaid = nestedMoney(order.pricingSummary?.deliveryCost);
+  const taxAmount = nestedMoney(order.pricingSummary?.tax)
+    || items.reduce((sum, item) => sum + Number(item.tax || 0), 0);
   const total = nestedMoney(order.pricingSummary?.total || order.paymentSummary?.payments?.[0]?.amount)
-    || itemSubtotal + shippingPaid;
+    || itemSubtotal + shippingPaid + taxAmount;
   const marketplaceFees = nestedMoney(order.totalMarketplaceFee);
   const productCost = ebayProductCostForItems(db, items);
   const shippingStep = order.fulfillmentStartInstructions?.[0]?.shippingStep || {};
+  const shippingCarrier = tracking.primary?.carrier || shippingStep.shippingCarrierCode || "";
+  const shippingService = tracking.primary?.service || shippingStep.shippingServiceCode || shippingCarrier || "eBay shipping";
+  const trackingNumber = tracking.primary?.trackingNumber || "";
+  const shippedDate = tracking.primary?.shippedDate || "";
   const shipBy = order.lineItems?.[0]?.lineItemFulfillmentInstructions?.shipByDate
     || shippingStep.maxEstimatedDeliveryDate
     || order.creationDate
@@ -4320,14 +7539,19 @@ function mapEbayOrder(order, db = {}) {
     total,
     subtotal: itemSubtotal,
     shippingPaid,
+    taxAmount,
     productCost,
     marketplaceFees,
     shippingCost: 0,
     refundAmount: ebayRefundTotal(order),
-    shippingService: shippingStep.shippingServiceCode || shippingStep.shippingCarrierCode || "eBay shipping",
-    shippingCarrier: shippingStep.shippingCarrierCode || "",
-    carrierName: shippingStep.shippingCarrierCode || "",
-    trackingNumber: "",
+    shippingService,
+    shippingCarrier,
+    carrierName: displayCarrierName(shippingCarrier),
+    trackingNumber,
+    trackingUrl: trackingUrlForCarrier(shippingCarrier, trackingNumber),
+    trackingImportedAt: trackingNumber ? new Date().toISOString() : "",
+    shipments: tracking.records,
+    shipDate: shippedDate ? temuDate(shippedDate).slice(0, 10) : "",
     shipBy: temuDate(shipBy).slice(0, 10),
     minEstimatedDeliveryDate: order.fulfillmentStartInstructions?.[0]?.minEstimatedDeliveryDate || "",
     maxEstimatedDeliveryDate: order.fulfillmentStartInstructions?.[0]?.maxEstimatedDeliveryDate || "",
@@ -4344,11 +7568,22 @@ function mapEbayOrder(order, db = {}) {
       sellerId: order.sellerId || "",
       orderFulfillmentStatus: order.orderFulfillmentStatus || "",
       orderPaymentStatus: order.orderPaymentStatus || "",
+      fulfillmentCount: fulfillments.length,
+      shipmentCount: tracking.records.length,
+      trackingNumbers: tracking.records.map((record) => record.trackingNumber).filter(Boolean),
+      shippedDate,
       totalDueSeller: nestedMoney(order.paymentSummary?.totalDueSeller),
       totalFeeBasisAmount: nestedMoney(order.totalFeeBasisAmount),
       totalMarketplaceFee: marketplaceFees,
       priceSubtotal: itemSubtotal,
       shippingPaid,
+      taxAmount,
+      pricingSummary: {
+        priceSubtotal: itemSubtotal,
+        deliveryCost: shippingPaid,
+        tax: taxAmount,
+        total
+      },
       ebayCollectAndRemitTax: Boolean(order.ebayCollectAndRemitTax),
       paymentCount: Array.isArray(order.paymentSummary?.payments) ? order.paymentSummary.payments.length : 0,
       refundCount: Array.isArray(order.paymentSummary?.refunds) ? order.paymentSummary.refunds.length : 0,
@@ -4364,20 +7599,36 @@ async function importEbayOrders(db) {
   const now = await ebayServerDate(config);
   const lastSync = db.connectorState.ebayLastOrderSync ? new Date(db.connectorState.ebayLastOrderSync) : null;
   const yearStart = new Date(Date.UTC(now.getUTCFullYear(), 0, 1, 0, 0, 0, 0));
-  const start = lastSync && Number.isFinite(lastSync.getTime())
+  const hasMoneyGaps = (db.orders || []).some((order) => (
+    String(order.source || "").toLowerCase() === "ebay"
+    && !(Number(order.total || 0) > 0)
+    && !(Number(order.subtotal || 0) > 0)
+    && !(Number(order.shippingPaid || 0) > 0)
+  ));
+  const hasTrackingGaps = (db.orders || []).some((order) => {
+    if (String(order.source || "").toLowerCase() !== "ebay") return false;
+    const status = String(order.status || "").toLowerCase();
+    const inferred = inferCarrierFromTracking(order.trackingNumber, order.shippingCarrier);
+    return (["confirmed", "fulfilled", "shipped", "ready"].includes(status) && !order.trackingNumber)
+      || (order.trackingNumber && inferred && String(order.shippingCarrier || "").toUpperCase() !== String(inferred || "").toUpperCase());
+  });
+  const repairMode = hasMoneyGaps || hasTrackingGaps;
+  const start = lastSync && Number.isFinite(lastSync.getTime()) && !repairMode
     ? new Date(Math.max(yearStart.getTime(), lastSync.getTime() - 60 * 60 * 1000))
     : yearStart;
-  const filterName = lastSync ? "lastmodifieddate" : "creationdate";
+  const filterName = lastSync && !repairMode ? "lastmodifieddate" : "creationdate";
   const filter = `${filterName}:[${start.toISOString()}..${now.toISOString()}]`;
   let offset = 0;
   let created = 0;
   let updated = 0;
+  let skipped = 0;
   let fetched = 0;
   const errors = [];
 
   while (offset <= 2000) {
     const params = new URLSearchParams({
       filter,
+      fieldGroups: "TAX_BREAKDOWN",
       limit: String(pageSize),
       offset: String(offset)
     });
@@ -4385,9 +7636,18 @@ async function importEbayOrders(db) {
     const orders = Array.isArray(data.orders) ? data.orders : [];
     for (const order of orders) {
       try {
-        const action = upsertOrder(db, mapEbayOrder(order, db));
+        let fulfillments = [];
+        try {
+          if (order.orderId && (order.fulfillmentHrefs?.length || String(order.orderFulfillmentStatus || "").toLowerCase() !== "not_started")) {
+            fulfillments = await ebayShippingFulfillments(db, order.orderId);
+          }
+        } catch (fulfillmentError) {
+          errors.push(`fulfillment ${order.orderId || "unknown"}: ${fulfillmentError.message}`);
+        }
+        const action = upsertOrder(db, mapEbayOrder(order, db, fulfillments));
         if (action === "created") created += 1;
         if (action === "updated") updated += 1;
+        if (action === "skipped") skipped += 1;
         fetched += 1;
       } catch (error) {
         errors.push(`order ${order.orderId || "unknown"}: ${error.message}`);
@@ -4401,7 +7661,7 @@ async function importEbayOrders(db) {
   if (postgres.isPostgresEnabled()) {
     writeConnectorStateSync({ ...readConnectorStateSync(), ebayLastOrderSync: db.connectorState.ebayLastOrderSync });
   }
-  return { fetched, created, updated, errors };
+  return { fetched, created, updated, skipped, errors };
 }
 
 function parseList(value) {
@@ -4448,7 +7708,7 @@ function inventoryPayloadFromRecord(record) {
 }
 
 function applyInventoryPatch(item, body) {
-  const textFields = ["sku", "title", "marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
+  const textFields = ["title", "marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
   const numberFields = ["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
 
   for (const field of textFields) {
@@ -4833,6 +8093,24 @@ function skuShardName(sku) {
   return (key.slice(0, 2) || "__").padEnd(2, "_");
 }
 
+async function readCatalogProductFromSkuIndex(sku) {
+  const key = String(sku || "").trim().toLowerCase();
+  const index = readSourceCatalogIndexManifest();
+  if (!key || !index) return null;
+  const shardPath = path.join(CATALOG_INDEX_SKU_DIR, `${skuShardName(key)}.ndjson`);
+  if (!fs.existsSync(shardPath)) return null;
+  const rl = readline.createInterface({ input: fs.createReadStream(shardPath, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    let row;
+    try { row = JSON.parse(line); } catch { continue; }
+    if (String(row[0] || "").toLowerCase() !== key) continue;
+    rl.close();
+    return readCatalogProductAtOffset(row[1]);
+  }
+  return null;
+}
+
 async function readCatalogProductAtOffset(offset) {
   const handle = await fs.promises.open(CATALOG_FILE, "r");
   try {
@@ -4861,6 +8139,9 @@ async function readCatalogProductAtOffset(offset) {
 function normalizeCatalogProductForInventory(record) {
   const sku = sourceTextValue(record._id || record.sku || record.SKU || record.id);
   if (!sku) return null;
+  const originalSourceRecord = record && typeof record === "object" ? { ...record } : {};
+  delete originalSourceRecord.productManagerFields;
+  delete originalSourceRecord.original;
   const defaultImage = sourceTextValue(record.defaultImage || record.default_image || record.image || record.image_url);
   const images = [...new Set([defaultImage, ...sourceListValue(record.images || record.image_urls)].filter(Boolean))];
   const stockQty = sourceNumberValue(record.stockQty ?? record.stock_qty ?? record.qty ?? record.quantity);
@@ -4939,8 +8220,8 @@ function normalizeCatalogProductForInventory(record) {
     checkedImageTimestamp: sourceTextValue(checkedImage?.timestamp),
     originalImage: sourceTextValue(record.originalImage || record.original_image),
     countryOfOrigin: sourceTextValue(record.countryOfOrigin || record.country_of_origin),
-    original: record.original === undefined ? null : record.original,
-    productManagerFields: record.productManagerFields && typeof record.productManagerFields === "object" ? record.productManagerFields : {},
+    original: record.original === undefined ? originalSourceRecord : record.original,
+    productManagerFields: record.productManagerFields && typeof record.productManagerFields === "object" ? record.productManagerFields : originalSourceRecord,
     sources: { ...(record.sources || {}), catalog: sku },
     importedFrom: record.importedFrom || "source catalog",
     updatedAt: new Date().toISOString()
@@ -5403,6 +8684,8 @@ async function findCatalogProductBySku(sku, db = {}) {
   const overrides = sourceCatalogOverrideMap(db);
   const vendorMappings = vendorCategoryMappingMap(db);
   const productsBySku = inventoryBySkuMap(db);
+  const indexedProduct = await readCatalogProductFromSkuIndex(key);
+  if (indexedProduct) return decorateSourceCatalogProduct(indexedProduct, overrides, productsBySku, vendorMappings);
   const rl = readline.createInterface({
     input: fs.createReadStream(CATALOG_FILE, { encoding: "utf8" }),
     crlfDelay: Infinity
@@ -5427,8 +8710,8 @@ async function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split("/").filter(Boolean);
 
-  if (postgres.isPostgresEnabled() && parts[0] === "api" && parts[1] === "export-mappings" && !parts[3]) {
-    let exportMappings = normalizeExportMappings(await postgres.readStateField("exportMappings"));
+  if (parts[0] === "api" && parts[1] === "export-mappings" && !parts[3]) {
+    let exportMappings = await readExportMappingsApiStore();
     if (req.method === "GET" && parts.length === 2) {
       return sendJson(res, 200, { exportMappings });
     }
@@ -5446,7 +8729,7 @@ async function handleApi(req, res) {
         notes: body.notes || ""
       });
       exportMappings.unshift(template);
-      await postgres.writeStateField("exportMappings", exportMappings);
+      exportMappings = await writeExportMappingsStore(exportMappings);
       return sendJson(res, 200, { template, exportMappings });
     }
     if (req.method === "PATCH" && parts[2]) {
@@ -5458,8 +8741,7 @@ async function handleApi(req, res) {
       }
       if (body.mappings !== undefined) template.mappings = parseMappingRows(body.mappings).map(normalizeExportMappingRow).filter((row) => row.externalColumn);
       template.updatedAt = new Date().toISOString();
-      exportMappings = normalizeExportMappings(exportMappings);
-      await postgres.writeStateField("exportMappings", exportMappings);
+      exportMappings = await writeExportMappingsStore(exportMappings);
       return sendJson(res, 200, { template: normalizeExportMapping(template), exportMappings });
     }
     if (req.method === "DELETE" && parts[2]) {
@@ -5469,7 +8751,7 @@ async function handleApi(req, res) {
       const before = exportMappings.length;
       exportMappings = exportMappings.filter((row) => row.id !== parts[2]);
       if (exportMappings.length === before) return notFound(res);
-      await postgres.writeStateField("exportMappings", exportMappings);
+      exportMappings = await writeExportMappingsStore(exportMappings);
       return sendJson(res, 200, { exportMappings });
     }
   }
@@ -5478,10 +8760,81 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { fields: PRODUCT_MAPPING_FIELDS });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/state") {
+    const db = await readDbFast();
+    return sendJson(res, 200, publicState(db));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/categories") {
+    return sendJson(res, 200, await publicCategoriesFast(url.searchParams.get("q") || "", url.searchParams.get("scope") || "source"));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/categories/export/matrixify-smart-collections.csv") {
+    const rows = await matrixifySmartCollectionRows();
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=matrixify-smart_collections-product-types.csv"
+    });
+    return res.end(rowsToCsv(rows));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/categories/export/matrixify-menu.csv") {
+    const rows = await matrixifyMenuRows();
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=matrixify-shopify-menus.csv"
+    });
+    return res.end([MATRIXIFY_MENU_COLUMNS, ...rows.map((row) => MATRIXIFY_MENU_COLUMNS.map((column) => row[column] ?? ""))]
+      .map((row) => row.map(escapeCsv).join(","))
+      .join("\n"));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/categories/templates/sku-categories.csv") {
+    const rows = [{
+      sku: "BUSB2215852GEC",
+      category: "Hardware > Fasteners > Sheet Metal Screws"
+    }];
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=sku-categories-template.csv"
+    });
+    return res.end(rowsToCsv(rows));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/categories/templates/category-mapping.csv") {
+    const rows = [{
+      category: "Hardware > Fasteners > Sheet Metal Screws",
+      product_type: "Fasteners > Sheet Metal Screws",
+      collection_title: "Sheet Metal Screws",
+      collection_handle: "fasteners-sheet-metal-screws",
+      shopify_category_id: "gid://shopify/TaxonomyCategory/ha-1-6",
+      shopify_category_path: "Hardware > Building Consumables > Fasteners",
+      google_category_id: "503740",
+      google_category_path: "Hardware > Building Consumables > Fasteners",
+      status: "mapped",
+      notes: "Sample row. Replace with your master category and channel taxonomy mapping."
+    }];
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=category-mapping-template.csv"
+    });
+    return res.end(rowsToCsv(rows));
+  }
+
   const db = await readDb();
 
-  if (req.method === "GET" && url.pathname === "/api/state") {
-    return sendJson(res, 200, publicState(db));
+  if (req.method === "PATCH" && url.pathname === "/api/system-settings") {
+    const body = await parseBody(req);
+    db.systemSettings = { ...DEFAULT_SYSTEM_SETTINGS, ...(db.systemSettings || {}) };
+    for (const field of Object.keys(DEFAULT_SYSTEM_SETTINGS)) {
+      if (body[field] === undefined) continue;
+      if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "boolean") db.systemSettings[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
+      else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") db.systemSettings[field] = Number(body[field] || 0);
+      else db.systemSettings[field] = String(body[field] || "");
+    }
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { systemSettings: normalized.systemSettings, state: publicState(normalized) });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/import-jobs') {
@@ -5715,6 +9068,7 @@ async function handleApi(req, res) {
     catalogFacetCache = null;
     const normalized = normalizeDb(db);
     await writeDb(normalized);
+    clearCategoryResponseCache();
     return sendJson(res, 200, {
       requested: records.length,
       changed: seen.size,
@@ -5763,6 +9117,8 @@ async function handleApi(req, res) {
       const shopifyCategoryPath = csvValue(record, ["shopify_category", "shopify_category_path", "shopifyCategory", "shopifyCategoryPath", "Shopify Category", "Shopify Category Path", "Shopify Path", "shopify path", "shopify", "Shopify", "SHOPIFY"]);
       const shopifyCategoryHandle = csvValue(record, ["shopify_category_handle", "shopifyCategoryHandle", "Shopify Category Handle", "shopify handle"]);
       const shopifyCollectionHandle = csvValue(record, ["collection_handle", "collectionHandle", "Collection Handle", "shopify_collection_handle"]);
+      const smartProductType = csvValue(record, ["product_type", "productType", "Product Type", "shopify_product_type"]);
+      const smartCollectionTitle = csvValue(record, ["collection_title", "collectionTitle", "Collection Title", "title", "Title"]);
       const googleCategoryId = csvValue(record, ["google_category_id", "googleCategoryId", "Google Category ID", "Google ID", "google id"]);
       const googleCategoryPath = csvValue(record, ["google_category_path", "googleCategoryPath", "Google Category Path", "Google Path", "google_product_category", "google product category"]);
       const notes = csvValue(record, ["notes", "Notes"]);
@@ -5796,6 +9152,12 @@ async function handleApi(req, res) {
       if (!dryRun) {
         const category = findOrCreateCategorySetting(db, categoryName);
         category.mappings.shopify = normalizeChannelCategoryMapping({ ...category.mappings.shopify, ...mapping });
+        category.smartCollection = normalizeSmartCollectionProfile({
+          ...category.smartCollection,
+          productType: smartProductType || category.smartCollection?.productType || categoryName,
+          title: smartCollectionTitle || category.smartCollection?.title || "",
+          handle: shopifyCollectionHandle || category.smartCollection?.handle || ""
+        }, categoryName);
         category.status = status || "mapped";
         if (owner) category.owner = owner;
         if (notes) category.notes = notes;
@@ -5829,6 +9191,7 @@ async function handleApi(req, res) {
     });
     const normalized = normalizeDb(db);
     await writeDb(normalized);
+    clearCategoryResponseCache();
     return sendJson(res, 200, {
       requested: records.length,
       changed,
@@ -5841,6 +9204,74 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/shopify/categories") {
     return sendJson(res, 200, searchShopifyTaxonomy(url.searchParams.get("q") || "", url.searchParams.get("limit") || 20));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/categories") {
+    const settings = ebayChannelSettings(db);
+    const result = await searchEbayTaxonomy(
+      db,
+      url.searchParams.get("q") || "",
+      url.searchParams.get("limit") || 12,
+      url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US"
+    );
+    return sendJson(res, 200, result);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/ebay/map-current") {
+    const body = await parseBody(req);
+    const result = await autoMapEbayCategories(db, body);
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, {
+      ...result,
+      categories: publicCategories(normalized, "", body.scope || "main"),
+      state: publicState(normalized)
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "apply-channel-to-products") {
+    const body = await parseBody(req);
+    const scope = body.scope || url.searchParams.get("scope") || "main";
+    const source = findPublicCategory(db, parts[2], scope);
+    if (!source) return notFound(res);
+    if (body.background === true || String(body.background || "").toLowerCase() === "true") {
+      const category = findOrCreateCategorySetting(db, source.name);
+      const mapping = normalizeChannelCategoryMapping(category.mappings?.[body.channel || "ebay"] || {});
+      if (!mapping.categoryId) return sendJson(res, 400, { error: "Map and save the eBay category before refreshing SKUs." });
+      const job = createImportJob(db, {
+        section: "Categories",
+        operation: "eBay category SKU refresh",
+        direction: "import",
+        status: "queued",
+        fileName: source.name,
+        message: `Queued SKU category refresh for ${source.name}.`,
+        details: `${source.name} | ${mapping.categoryId} | ${mapping.categoryPath || ""}`
+      });
+      const normalized = normalizeDb(db);
+      await writeDb(normalized);
+      clearCategoryResponseCache();
+      scheduleChannelCategoryMappingJob(job.id, source.id, scope, body.channel || "ebay");
+      return sendJson(res, 202, {
+        queued: true,
+        job: normalized.importJobs.find((row) => row.id === job.id) || job,
+        state: publicState(normalized)
+      });
+    }
+    let result;
+    try {
+      result = applyChannelCategoryMappingToProducts(db, source, body.channel || "ebay");
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, {
+      ...result,
+      categories: publicCategories(normalized, url.searchParams.get("q") || "", scope),
+      state: publicState(normalized)
+    });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "categories" && parts[2]) {
@@ -5862,7 +9293,21 @@ async function handleApi(req, res) {
       if (body.channel === "shopify" && mapping.categoryId) {
         mapping = enrichShopifyCategoryMapping(mapping);
       }
+      if (body.channel === "ebay" && mapping.categoryId) {
+        mapping = await enrichEbayCategoryMapping(db, { ...category.mappings.ebay, ...mapping });
+      }
       category.mappings[body.channel] = normalizeChannelCategoryMapping({ ...category.mappings[body.channel], ...mapping });
+      if (body.channel === "shopify") {
+        category.smartCollection = normalizeSmartCollectionProfile({
+          ...category.smartCollection,
+          productType: body.smartCollection?.productType || category.smartCollection?.productType || source.name,
+          title: body.smartCollection?.title || category.smartCollection?.title || "",
+          handle: mapping.collectionHandle || body.smartCollection?.handle || category.smartCollection?.handle || ""
+        }, source.name);
+      }
+    }
+    if (body.smartCollection && typeof body.smartCollection === "object") {
+      category.smartCollection = normalizeSmartCollectionProfile({ ...category.smartCollection, ...body.smartCollection }, source.name);
     }
     if (body.defaults && typeof body.defaults === "object") {
       category.defaults = normalizeCategorySettings([{ ...category, defaults: { ...category.defaults, ...body.defaults } }])[0].defaults;
@@ -5872,6 +9317,30 @@ async function handleApi(req, res) {
     }
     category.updatedAt = new Date().toISOString();
     await writeDb(db);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", scope));
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "attributes" && parts[4] === "sync") {
+    const body = await parseBody(req);
+    const scope = body.scope || url.searchParams.get("scope") || "main";
+    const source = findPublicCategory(db, parts[2], scope);
+    if (!source) return notFound(res);
+    db.categorySettings = normalizeCategorySettings(db.categorySettings);
+    let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
+    if (!category) {
+      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name }])[0];
+      db.categorySettings.push(category);
+    }
+    if (category.mappings?.shopify?.categoryId) {
+      category.mappings.shopify = normalizeChannelCategoryMapping(enrichShopifyCategoryMapping(category.mappings.shopify));
+    }
+    if (category.mappings?.ebay?.categoryId) {
+      category.mappings.ebay = normalizeChannelCategoryMapping(await enrichEbayCategoryMapping(db, category.mappings.ebay));
+    }
+    category.updatedAt = new Date().toISOString();
+    await writeDb(db);
+    clearCategoryResponseCache();
     return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", scope));
   }
 
@@ -6068,6 +9537,45 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { changed, state: publicState(normalized) });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/inventory/ebay/bulk-launch") {
+    const body = await parseBody(req);
+    const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map(String).filter(Boolean))].slice(0, 200);
+    if (!ids.length) return sendJson(res, 400, { error: "Select eBay-ready products first." });
+    const idSet = new Set(ids);
+    const results = [];
+    let launched = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const item of db.inventory || []) {
+      if (!idSet.has(String(item.id))) continue;
+      try {
+        const readiness = await ebayListingReadiness(db, item);
+        if (!readiness.ready) {
+          skipped += 1;
+          results.push({ id: item.id, sku: item.sku, status: "skipped", missing: readiness.missing });
+          continue;
+        }
+        const result = await createOrUpdateEbayListing(db, item, { useChannelPricing: true }, { publish: true });
+        launched += 1;
+        results.push({
+          id: item.id,
+          sku: item.sku,
+          status: result.config?.listingId ? "live" : "offer",
+          offerId: result.config?.offerId || "",
+          listingId: result.config?.listingId || "",
+          price: result.config?.price || readiness.price,
+          quantity: result.config?.quantity || readiness.quantity
+        });
+      } catch (error) {
+        failed += 1;
+        results.push({ id: item.id, sku: item.sku, status: "failed", error: error.message });
+      }
+    }
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { launched, skipped, failed, results, state: publicState(normalized) });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/temu/exchange-code") {
     const body = await parseBody(req);
     const result = await exchangeTemuCode(db, body.code);
@@ -6081,14 +9589,48 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { authUrl });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/ebay/catalog-import") {
+    const result = await importEbayCatalog(db);
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, {
+      ...result,
+      job: normalized.importJobs.find((row) => row.id === result.job?.id) || result.job,
+      state: publicState(normalized)
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/account-settings/sync") {
+    const result = await syncEbayAccountSettings(db);
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, {
+      ...result,
+      channel: normalized.connections.find((row) => row.name === "eBay"),
+      state: publicState(normalized)
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/locations") {
+    const body = await parseBody(req);
+    const result = await createOrEnableEbayLocation(db, body);
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, {
+      ...result,
+      channel: normalized.connections.find((row) => row.name === "eBay"),
+      state: publicState(normalized)
+    });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/export-mappings") {
-    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    db.exportMappings = readExportMappingsStore(db.exportMappings);
     return sendJson(res, 200, { exportMappings: db.exportMappings });
   }
 
   if (req.method === "POST" && url.pathname === "/api/export-mappings") {
     const body = await parseBody(req);
-    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    db.exportMappings = readExportMappingsStore(db.exportMappings);
     const template = normalizeExportMapping({
       name: body.name || `${body.source || "Custom"} Product Mapping`,
       source: body.source || "Custom",
@@ -6102,13 +9644,13 @@ async function handleApi(req, res) {
       notes: body.notes || ""
     });
     db.exportMappings.unshift(template);
-    await writeDb(db);
+    db.exportMappings = await writeExportMappingsStore(db.exportMappings);
     return sendJson(res, 200, { template, exportMappings: db.exportMappings });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "export-mappings" && parts[2]) {
     const body = await parseBody(req);
-    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    db.exportMappings = readExportMappingsStore(db.exportMappings);
     const template = db.exportMappings.find((row) => row.id === parts[2]);
     if (!template) return notFound(res);
     for (const field of ["name", "source", "mode", "status", "notes"]) {
@@ -6116,21 +9658,19 @@ async function handleApi(req, res) {
     }
     if (body.mappings !== undefined) template.mappings = parseMappingRows(body.mappings).map(normalizeExportMappingRow).filter((row) => row.externalColumn);
     template.updatedAt = new Date().toISOString();
-    await writeDb(db);
-    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    db.exportMappings = await writeExportMappingsStore(db.exportMappings);
     return sendJson(res, 200, { template: normalizeExportMapping(template), exportMappings: db.exportMappings });
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "export-mappings" && parts[2]) {
-    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    db.exportMappings = readExportMappingsStore(db.exportMappings);
     if (DEFAULT_EXPORT_MAPPINGS.some((defaults) => defaults.id === parts[2])) {
       return sendJson(res, 400, { error: "Built-in mappings can be deactivated or duplicated, but not deleted." });
     }
     const before = db.exportMappings.length;
     db.exportMappings = db.exportMappings.filter((row) => row.id !== parts[2]);
     if (db.exportMappings.length === before) return notFound(res);
-    await writeDb(db);
-    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    db.exportMappings = await writeExportMappingsStore(db.exportMappings);
     return sendJson(res, 200, { exportMappings: db.exportMappings });
   }
 
@@ -6570,6 +10110,91 @@ async function handleApi(req, res) {
     }
     await writeDb(db);
     return sendJson(res, 200, { item, summary: summarize(db) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "source-data" && parts[4] === "backfill") {
+    const item = db.inventory.find((row) => row.id === parts[2]);
+    if (!item) return notFound(res);
+    const before = hasSourceManagerData(item);
+    await enrichItemWithCatalogSource(db, item);
+    if (!hasSourceManagerData(item)) return sendJson(res, 404, { error: "No source catalog row was found for this SKU." });
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    const updated = normalized.inventory.find((row) => row.id === item.id);
+    return sendJson(res, 200, { item: updated, state: publicState(normalized), changed: !before });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "rename-sku") {
+    const body = await parseBody(req);
+    const item = db.inventory.find((row) => row.id === parts[2]);
+    if (!item) return notFound(res);
+    let result;
+    try {
+      result = renameProductSku(db, item, body.newSku || body.sku, body);
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, {
+      item: normalized.inventory.find((row) => row.id === item.id) || item,
+      rename: result,
+      state: publicState(normalized)
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "ebay" && parts[4] === "listing") {
+    const body = await parseBody(req);
+    const item = db.inventory.find((row) => row.id === parts[2]);
+    if (!item) return notFound(res);
+    const action = String(body.action || "offer").toLowerCase();
+    if (!["draft", "offer", "publish"].includes(action)) return sendJson(res, 400, { error: "Unsupported eBay listing action." });
+    if (action === "draft") {
+      const config = await saveEbayListingDraft(db, item, body);
+      const normalized = normalizeDb(db);
+      await writeDb(normalized);
+      return sendJson(res, 200, {
+        item: normalized.inventory.find((row) => row.id === item.id) || item,
+        ebayListing: config,
+        draft: true,
+        state: publicState(normalized)
+      });
+    }
+    const result = await createOrUpdateEbayListing(db, item, body, { publish: action === "publish" });
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, {
+      item: normalized.inventory.find((row) => row.id === item.id) || item,
+      ebayListing: result.config,
+      offer: result.offer,
+      published: result.published,
+      state: publicState(normalized)
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "ebay" && parts[4] === "attributes" && parts[5] === "sync") {
+    const item = db.inventory.find((row) => row.id === parts[2]);
+    if (!item) return notFound(res);
+    const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+    const categoryId = String(listing.categoryId || ebayListingCategoryId(db, item, listing) || "").trim();
+    if (!categoryId) return sendJson(res, 400, { error: "Add an eBay category before loading attributes." });
+    const attributes = await ebayCategoryAspects(db, categoryId, { categoryTreeId: listing.taxonomyVersion || "" });
+    const now = new Date().toISOString();
+    item.ebayListing = {
+      ...listing,
+      categoryId,
+      categoryAttributes: attributes,
+      attributesSyncedAt: now,
+      updatedAt: now
+    };
+    item.updatedAt = now;
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, {
+      item: normalized.inventory.find((row) => row.id === item.id) || item,
+      attributes,
+      state: publicState(normalized)
+    });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "warehouse-stock" && parts[4]) {
@@ -7687,8 +11312,30 @@ async function handleApi(req, res) {
     const nextStatus = {
       approve: "approved",
       hold: "hold",
-      cancel: "canceled"
+      cancel: "canceled",
+      void: "void",
+      done: "done"
     }[action];
+    if (action === "delete") {
+      const confirmation = String(body.confirmation || "").trim();
+      const expected = order.internalOrderNumber || order.orderNumber;
+      if (confirmation !== expected) {
+        return sendJson(res, 400, { error: `Type ${expected} to delete this order.` });
+      }
+      db.deletedOrders = Array.isArray(db.deletedOrders) ? db.deletedOrders : [];
+      if (!db.deletedOrders.some((record) => deletedOrderMatches(record, order))) {
+        db.deletedOrders.unshift(deletedOrderTombstone(order, body));
+      }
+      releaseOrderReservation(db, order, body);
+      db.purchaseOrders = (db.purchaseOrders || []).map((po) => ({
+        ...po,
+        orderIds: Array.isArray(po.orderIds) ? po.orderIds.filter((id) => id !== order.id) : [],
+        orderNumbers: Array.isArray(po.orderNumbers) ? po.orderNumbers.filter((number) => number !== order.orderNumber) : []
+      }));
+      db.orders = db.orders.filter((row) => row.id !== order.id);
+      await writeDb(db);
+      return sendJson(res, 200, { deleted: true, deletedOrderId: order.id, state: publicState(db) });
+    }
     if (!nextStatus) return sendJson(res, 400, { error: "Unsupported order action." });
 
     order.status = nextStatus;
@@ -7697,6 +11344,14 @@ async function handleApi(req, res) {
     if (action === "approve") order.approvedAt = order.actionedAt;
     if (action === "hold") order.holdAt = order.actionedAt;
     if (action === "cancel") order.canceledAt = order.actionedAt;
+    if (action === "done") order.doneAt = order.actionedAt;
+    if (action === "void") {
+      order.voidedAt = order.actionedAt;
+      order.voidedBy = body.user || "Luis";
+      order.financialExcludedAt = order.financialExcludedAt || order.actionedAt;
+      order.financialExcludedReason = order.financialExcludedReason || "void";
+      releaseOrderReservation(db, order, body);
+    }
     addOrderTimeline(order, {
       type: "status",
       title: `Order ${nextStatus}`,
@@ -7706,6 +11361,89 @@ async function handleApi(req, res) {
 
     await writeDb(db);
     return sendJson(res, 200, { order, state: publicState(db) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[3] === "items" && parts[5] === "map-sku") {
+    const body = await parseBody(req);
+    const order = db.orders.find((row) => row.id === parts[2]);
+    if (!order) return notFound(res);
+    const targetSku = String(body.targetSku || body.sku || "").trim();
+    if (!targetSku) return sendJson(res, 400, { error: "Target SKU is required." });
+    const product = findInventoryBySkuOrAlias(db, targetSku);
+    if (!product) return sendJson(res, 400, { error: `Inventory SKU ${targetSku} was not found.` });
+    const lineIndex = Number(parts[4]);
+    if (!Number.isInteger(lineIndex) || lineIndex < 0) return sendJson(res, 400, { error: "Valid line index is required." });
+    const items = orderLineItems(order);
+    const currentLine = items[lineIndex];
+    if (!currentLine) return sendJson(res, 404, { error: "Order line not found." });
+    const mappingType = String(body.mappingType || body.mode || "direct").toLowerCase();
+    let shadow = null;
+    const mode = mappingType === "shadow" ? "shadow" : "direct";
+    if (mode === "shadow") {
+      try {
+        shadow = createShadowSkuFromOrderLine(db, product, order, currentLine, { ...body, lineIndex });
+      } catch (error) {
+        return sendJson(res, 400, { error: error.message });
+      }
+    }
+    let alias = null;
+    try {
+      alias = addProductAlias(db, product, String(body.sourceSku || currentLine.originalSku || currentLine.mappedFromSku || currentLine.sku || "").trim(), {
+        source: order.source,
+        type: mode,
+        createdFromOrderId: order.id,
+        createdFromOrderNumber: order.orderNumber,
+        createdFromLineIndex: lineIndex,
+        notes: `${mode} mapping from order ${order.orderNumber || order.id}`
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    const line = updateOrderLineSku(order, lineIndex, product.sku, {
+      ...body,
+      mode,
+      parentSku: product.sku,
+      shadowSku: shadow?.shadowSku || "",
+      shadowId: shadow?.id || ""
+    });
+    line.title = line.title || product.title || product.sku;
+    const ordersRemapped = reapplyAliasesToOrders(db);
+    await writeDb(db);
+    return sendJson(res, 200, { order, product, shadow, alias, ordersRemapped, state: publicState(db) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[3] === "items" && parts[5] === "unmap-sku") {
+    const body = await parseBody(req);
+    const order = db.orders.find((row) => row.id === parts[2]);
+    if (!order) return notFound(res);
+    const lineIndex = Number(parts[4]);
+    if (!Number.isInteger(lineIndex) || lineIndex < 0) return sendJson(res, 400, { error: "Valid line index is required." });
+    let result;
+    try {
+      result = unmapOrderLineSku(db, order, lineIndex, body);
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    await writeDb(db);
+    return sendJson(res, 200, { order, product: result.product, state: publicState(db) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[3] === "items" && parts[5] === "create-sku") {
+    const body = await parseBody(req);
+    const order = db.orders.find((row) => row.id === parts[2]);
+    if (!order) return notFound(res);
+    const lineIndex = Number(parts[4]);
+    if (!Number.isInteger(lineIndex) || lineIndex < 0) return sendJson(res, 400, { error: "Valid line index is required." });
+    const items = orderLineItems(order);
+    const line = items[lineIndex];
+    if (!line) return sendJson(res, 404, { error: "Order line not found." });
+    const sku = String(body.sku || line.sku || "").trim();
+    if (!sku) return sendJson(res, 400, { error: "SKU is required." });
+    const product = createInventoryFromOrderLine(db, order, line, sku, body);
+    updateOrderLineSku(order, lineIndex, product.sku, { ...body, mode: "created" });
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { order: normalized.orders.find((row) => row.id === order.id), product: normalized.inventory.find((item) => item.id === product.id || item.sku === product.sku), state: publicState(normalized) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[3] === "fulfill") {
@@ -8281,7 +12019,7 @@ async function handleApi(req, res) {
         connection.connected = true;
         connection.lastSync = new Date().toISOString();
       }
-      const message = `Imported ${result.created} new and updated ${result.updated} Temu order${result.fetched === 1 ? "" : "s"}.`;
+      const message = `Imported ${result.created} new and updated ${result.updated} Temu order${result.fetched === 1 ? "" : "s"}${result.skipped ? `; skipped ${result.skipped} void/deleted` : ""}.`;
       db.syncRuns.unshift({
         id: crypto.randomUUID(),
         source,
@@ -8303,7 +12041,7 @@ async function handleApi(req, res) {
         connection.connected = true;
         connection.lastSync = new Date().toISOString();
       }
-      const message = `Imported ${result.created} new and updated ${result.updated} eBay order${result.fetched === 1 ? "" : "s"}.`;
+      const message = `Imported ${result.created} new and updated ${result.updated} eBay order${result.fetched === 1 ? "" : "s"}${result.skipped ? `; skipped ${result.skipped} void/deleted` : ""}.`;
       db.syncRuns.unshift({
         id: crypto.randomUUID(),
         source,
@@ -8531,10 +12269,11 @@ const server = http.createServer((req, res) => {
       sendHtml(res, 500, `<h1>eBay callback error</h1><p>${escapeHtml(error.message)}</p>`);
     });
   } else if (req.url.startsWith("/api/")) {
-    handleApi(req, res).catch((error) => {
+    handleApi(req, res).catch(async (error) => {
       console.error(error);
-      const status = error.message.includes("credentials missing") || error.message.includes("authorization code is required") || error.message.includes("refresh token is missing") ? 400 : 500;
-      sendJson(res, status, { error: error.message });
+      const status = apiErrorStatus(error);
+      const job = await recordApiErrorJob(req, error, status);
+      if (!res.headersSent) sendJson(res, status, { error: error.message, apiJobLogged: Boolean(job), job });
     });
   } else {
     serveStatic(req, res);

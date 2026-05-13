@@ -68,6 +68,41 @@ async function readStateField(field) {
   return result.rows[0]?.value;
 }
 
+async function readCategoryState() {
+  const client = getPool();
+  if (!client) return null;
+  await initDatabase();
+  const result = await client.query(`
+    select json_build_object(
+      'inventory', coalesce((
+        select json_agg(json_build_object(
+          'sku', item ->> 'sku',
+          'title', item ->> 'title',
+          'marketplaceTitle', item ->> 'marketplaceTitle',
+          'category', item ->> 'category',
+          'mainCategory', item ->> 'mainCategory',
+          'sourceCategory', item ->> 'sourceCategory',
+          'vendorCategory', item ->> 'vendorCategory',
+          'categoryVerified', item -> 'categoryVerified',
+          'active', item -> 'active',
+          'stockQty', item -> 'stockQty',
+          'qty', item -> 'qty',
+          'hazardous', item -> 'hazardous',
+          'supplier', item ->> 'supplier',
+          'vendor', item ->> 'vendor',
+          'brand', item ->> 'brand'
+        ))
+        from json_array_elements(data -> 'inventory') item
+      ), '[]'::json),
+      'categorySettings', coalesce(data -> 'categorySettings', '[]'::json),
+      'vendorCategoryMappings', coalesce(data -> 'vendorCategoryMappings', '{}'::json)
+    ) as data
+    from app_state
+    where id = 1
+  `);
+  return result.rows[0]?.data || null;
+}
+
 async function writeState(data) {
   const client = getPool();
   if (!client) return false;
@@ -109,6 +144,7 @@ module.exports = {
   closePool,
   getDatabaseUrl,
   initDatabase,
+  readCategoryState,
   isPostgresEnabled,
   readState,
   readStateField,

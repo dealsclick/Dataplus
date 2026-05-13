@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DataPlus</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=queues-20260504-5" />
   </head>
   <body>
     <div id="global-save-progress" class="global-save-progress" aria-hidden="true"><span></span></div>
@@ -128,19 +128,54 @@
 
       <section id="orders" class="view">
         <div class="orders-command">
-          <div class="toolbar">
-            <input id="order-search" type="search" placeholder="Search orders, buyers, SKUs" />
-            <select id="order-status">
-              <option value="all">All statuses</option>
-              <option value="new">New</option>
-              <option value="ready">Ready</option>
-              <option value="approved">Approved</option>
-              <option value="hold">On hold</option>
-              <option value="canceled">Canceled</option>
-              <option value="confirmed">Confirmed</option>
-            </select>
+          <div class="order-filter-grid">
+            <label class="order-filter-search">Search
+              <input id="order-search" type="search" placeholder="Name, order #, phone, SKU" />
+            </label>
+            <label>Source
+              <select id="order-source">
+                <option value="all">All sources</option>
+              </select>
+            </label>
+            <label>Status
+              <select id="order-status">
+                <option value="all">All statuses</option>
+                <option value="new">New</option>
+                <option value="ready">Ready</option>
+                <option value="approved">Approved</option>
+                <option value="hold">On hold</option>
+                <option value="canceled">Canceled</option>
+                <option value="confirmed">Confirmed</option>
+                <option value="partial_fulfilled">Partially fulfilled</option>
+                <option value="fulfilled">Fulfilled</option>
+                <option value="done">Done</option>
+                <option value="shipped">Shipped</option>
+                <option value="void">Void</option>
+              </select>
+            </label>
+            <label>From
+              <input id="order-date-from" type="date" />
+            </label>
+            <label>To
+              <input id="order-date-to" type="date" />
+            </label>
+            <label>Sort
+              <select id="order-sort">
+                <option value="created-desc">Newest first</option>
+                <option value="created-asc">Oldest first</option>
+                <option value="shipby-asc">Ship by soonest</option>
+                <option value="shipby-desc">Ship by latest</option>
+                <option value="total-desc">Total high to low</option>
+                <option value="total-asc">Total low to high</option>
+                <option value="buyer-asc">Customer A to Z</option>
+                <option value="source-asc">Source A to Z</option>
+                <option value="status-asc">Status A to Z</option>
+              </select>
+            </label>
+            <button id="order-filter-clear" class="button secondary" type="button">Clear</button>
           </div>
         </div>
+        <div id="order-queues" class="order-queue-tabs" aria-label="Order queues"></div>
         <div id="bulk-order-bar" class="bulk-bar">
           <span><strong id="bulk-order-count">0</strong> selected</span>
           <small>Use Actions to approve, hold, cancel, or create a PO.</small>
@@ -255,6 +290,7 @@
               Import Shopify Status
               <input id="shopify-status-import" type="file" accept=".csv,text/csv" />
             </label>
+            <button id="ebay-catalog-import" class="button secondary product-only-control" type="button" data-icon="store">Sync eBay Catalog</button>
             <label class="file-button category-only-control" data-icon="upload">
               Import SKU Categories
               <input id="category-sku-import" type="file" accept=".csv,text/csv" />
@@ -278,12 +314,7 @@
             </select>
             <select id="catalog-filter-stock-status"><option value="">Any stock status</option></select>
             <select id="catalog-filter-shopify-status">
-              <option value="">Any Shopify status</option>
-              <option value="live">Live on Shopify</option>
-              <option value="missing">Missing Shopify ID</option>
-              <option value="Active">Shopify Active</option>
-              <option value="Draft">Shopify Draft</option>
-              <option value="Archived">Shopify Archived</option>
+              <option value="">Any channel status</option>
             </select>
             <select id="catalog-filter-has-stock">
               <option value="">Any stock qty</option>
@@ -312,6 +343,7 @@
               <option value="set-active">Set active</option>
               <option value="set-inactive">Set inactive</option>
               <option value="set-discontinued">Set discontinued</option>
+              <option value="ebay-bulk-launch">Launch ready to eBay</option>
               <option value="delete">Delete / hide selected</option>
             </select>
             <button id="catalog-apply-bulk" class="button secondary" type="button">Apply</button>
@@ -669,6 +701,47 @@
           <button class="button" type="submit">Create shadow</button>
         </div>
       </form>
+    </div>
+
+    <div id="order-sku-map-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card order-sku-map-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Order SKU mapping</p>
+            <h2>Map to existing SKU</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-order-sku-map-modal aria-label="Close SKU mapping">x</button>
+        </div>
+        <div class="order-sku-map-summary">
+          <span>Source SKU</span>
+          <strong id="order-sku-map-source">-</strong>
+        </div>
+        <div class="order-sku-map-search">
+          <label>Search products
+            <input id="order-sku-map-search" type="search" placeholder="Search SKU, title, brand, category" />
+          </label>
+          <button type="button" class="button secondary" data-run-order-sku-map-search>Search</button>
+        </div>
+        <div id="order-sku-map-results" class="order-sku-map-results"></div>
+        <div id="order-sku-map-choice" class="order-sku-map-choice" hidden></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-order-sku-map-modal>Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="master-category-map-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card master-category-map-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Master category</p>
+            <h2>Map eBay category</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-master-category-map-modal aria-label="Close category mapping">x</button>
+        </div>
+        <div id="master-category-map-content" class="master-category-map-content"></div>
+        <div id="master-category-map-footer" class="modal-actions"></div>
+      </div>
     </div>
 
     <div id="fulfillment-modal" class="modal-backdrop" aria-hidden="true">
@@ -1166,6 +1239,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js"></script>
+    <script src="/app.js?v=queues-20260504-5"></script>
   </body>
 </html>
