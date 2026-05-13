@@ -2,6 +2,19 @@
 
 Local MVP for managing marketplace inventory and orders across Temu, eBay, Whatnot, TikTok Shop, and future channels.
 
+## Changelog
+
+### 2026-05-13
+
+- Added eBay listing operations for product SKUs, including draft mapping, offer creation, publishing, category search, item specifics, pricing defaults, quantity planning, and bulk launch for eBay-ready products.
+- Expanded eBay channel setup with seller account sync, merchant location creation, business policy selection, marketplace/currency defaults, listing format, condition, image, and best-offer settings.
+- Added eBay catalog import to pull live offers/listings back into DataPlus, map them to products where possible, and queue unmatched catalog reviews.
+- Upgraded order management with queue views, order actions for void/done/delete, financial exclusion for voided orders, better reportable-order handling, and SKU mapping tools for marketplace order lines.
+- Added product SKU operations for renaming SKUs, creating shadow SKUs, backfilling source catalog data, and preserving aliases from mapped marketplace order lines.
+- Expanded catalog and category management with table/card views, eBay taxonomy mapping, channel category refresh, attribute mapping, Matrixify smart collection/menu review tools, and bulk category workflows.
+- Improved import/export operations with saved import job files, original/error downloads, mapped CSV templates, Shopify status import, and export mapping sidecar storage.
+- Improved startup and state payload performance by ignoring generated `outputs/`, trimming oversized public state payloads, compacting eBay listing data, and caching local JSON reads in memory.
+
 ## Run locally
 
 ```powershell
