@@ -3092,6 +3092,76 @@ function writeAttributeMappingStore(store = {}) {
   return normalized;
 }
 
+function attributeSemanticKey(value = "") {
+  const key = String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (!key) return "";
+  if (["color", "colors", "colour", "colours", "finishcolor", "productcolor"].includes(key)) return "color";
+  if (["material", "materials", "primarymaterial"].includes(key)) return "material";
+  if (["function", "functions", "features", "feature", "functionality", "functionalities", "functional", "airfryerfunctions"].includes(key)) return "features";
+  if (["size", "productsize", "itemsize"].includes(key)) return "size";
+  if (["model", "modelnumber"].includes(key)) return "model";
+  if (["brand", "brandname"].includes(key)) return "brand";
+  if (["mpn", "manufacturerpartnumber", "partnumber"].includes(key)) return "mpn";
+  if (["upc", "ean", "gtin", "barcode"].includes(key)) return "barcode";
+  if (["dim", "dims"].includes(key) || /(length|width|height|depth|dimension|dimensions)/.test(key)) return "dimensions";
+  if (["wt", "lbs", "pounds"].includes(key) || /(weight|weights|mass)/.test(key)) return "weight";
+  if (/(capacity|volume)/.test(key)) return "capacity";
+  if (/(watt|voltage|amp|power)/.test(key)) return "electrical";
+  return key;
+}
+
+function scheduleAttributeMappingPropagationJob(seed = {}) {
+  setTimeout(async () => {
+    let db;
+    let job;
+    try {
+      db = normalizeDb(await readDbFast());
+      job = createImportJob(db, {
+        id: seed.jobId,
+        section: "Categories",
+        operation: "Attribute mapping propagation",
+        direction: "mapping",
+        status: "running",
+        fileName: seed.mainCategory || seed.channel || "attribute-mapping",
+        message: `Applying ${seed.channel || "marketplace"} attribute mapping rules in the background.`,
+        details: `${seed.mainCategory || ""} | ${seed.attributeName || ""}`.trim()
+      });
+      await writeDb(db);
+      const mainCategory = formatCategoryName(seed.mainCategory || "").toLowerCase();
+      const categories = Array.isArray(seed.categories) ? seed.categories.map((name) => formatCategoryName(name).toLowerCase()).filter(Boolean) : [];
+      const categorySet = new Set([mainCategory, ...categories].filter(Boolean));
+      const affectedProducts = (db.inventory || []).filter((item) => {
+        const itemCategory = formatCategoryName(item.category || item.mainCategory || "").toLowerCase();
+        return categorySet.has(itemCategory);
+      }).length;
+      finishImportJob(job, {
+        status: "success",
+        totalRows: Number(seed.mappingCount || 1),
+        changed: Number(seed.mappingCount || 1),
+        message: `Saved ${Number(seed.mappingCount || 1).toLocaleString()} attribute mapping rule${Number(seed.mappingCount || 1) === 1 ? "" : "s"}. ${affectedProducts.toLocaleString()} SKU${affectedProducts === 1 ? "" : "s"} will use them when marketplace output is generated.`,
+        details: `${seed.channel || ""} | ${seed.mainCategory || ""} | ${categorySet.size} categor${categorySet.size === 1 ? "y" : "ies"} | ${affectedProducts} affected SKUs`
+      });
+      await writeDb(db);
+    } catch (error) {
+      try {
+        db = db || normalizeDb(await readDbFast());
+        job = job || createImportJob(db, {
+          id: seed.jobId,
+          section: "Categories",
+          operation: "Attribute mapping propagation",
+          direction: "mapping",
+          status: "running",
+          fileName: seed.mainCategory || seed.channel || "attribute-mapping"
+        });
+        finishImportJob(job, { status: "failed", message: error.message, errors: [error.message], missingCount: 1 });
+        await writeDb(db);
+      } catch (writeError) {
+        console.error("Unable to finish attribute mapping job", writeError);
+      }
+    }
+  }, 0);
+}
+
 function applyStoredAttributeMappingsToCategory(category = {}) {
   const categoryName = formatCategoryName(category.name || category.category || "");
   if (!categoryName) return category;
@@ -9259,8 +9329,7 @@ async function handleApi(req, res) {
     if (!["shopify", "ebay", "temu", "tiktok", "whatnot"].includes(channel)) return sendJson(res, 400, { error: "Unknown marketplace channel." });
     const mainCategory = formatCategoryName(body.mainCategory || "");
     if (!mainCategory) return sendJson(res, 400, { error: "Main category is required." });
-    const incoming = {
-      id: body.id || crypto.randomUUID(),
+    const baseIncoming = {
       attributeId: String(body.attributeId || "").trim(),
       attributeName: String(body.attributeName || "").trim(),
       attributeHandle: String(body.attributeHandle || "").trim(),
@@ -9270,17 +9339,50 @@ async function handleApi(req, res) {
       recommended: body.recommended === true || String(body.recommended || "").toLowerCase() === "true",
       enabled: body.enabled === undefined ? true : body.enabled === true || String(body.enabled).toLowerCase() === "true"
     };
-    if (!incoming.attributeId && !incoming.attributeName && !incoming.attributeHandle) return sendJson(res, 400, { error: "Attribute identity is required." });
+    const relatedMappings = Array.isArray(body.relatedMappings) ? body.relatedMappings.slice(0, 50) : [];
+    const incomingRows = [
+      { id: body.id || crypto.randomUUID(), categoryName: mainCategory, channel, ...baseIncoming },
+      ...relatedMappings.map((row) => ({
+        id: row.id || crypto.randomUUID(),
+        categoryName: formatCategoryName(row.mainCategory || row.categoryName || mainCategory),
+        channel: String(row.channel || channel).trim().toLowerCase(),
+        attributeId: String(row.attributeId || "").trim(),
+        attributeName: String(row.attributeName || "").trim(),
+        attributeHandle: String(row.attributeHandle || "").trim(),
+        sourceField: baseIncoming.sourceField,
+        fallbackValue: baseIncoming.fallbackValue,
+        required: row.required === true || String(row.required || "").toLowerCase() === "true",
+        recommended: row.recommended === true || String(row.recommended || "").toLowerCase() === "true",
+        enabled: baseIncoming.enabled
+      }))
+    ].filter((row) => row.categoryName && ["shopify", "ebay", "temu", "tiktok", "whatnot"].includes(row.channel) && (row.attributeId || row.attributeName || row.attributeHandle));
+    if (!incomingRows.length) return sendJson(res, 400, { error: "Attribute identity is required." });
     const now = new Date().toISOString();
     const store = readAttributeMappingStore();
-    const storeRow = { ...incoming, categoryName: mainCategory, channel, updatedAt: now, createdAt: incoming.createdAt || now };
-    store[attributeMappingStoreKey(mainCategory, channel, storeRow)] = { ...(store[attributeMappingStoreKey(mainCategory, channel, storeRow)] || {}), ...storeRow };
+    const savedRows = incomingRows.map((incoming) => {
+      const storeRow = { ...incoming, semanticKey: attributeSemanticKey([incoming.attributeName, incoming.attributeHandle, incoming.attributeId].filter(Boolean).join(" ")), updatedAt: now, createdAt: incoming.createdAt || now };
+      const key = attributeMappingStoreKey(storeRow.categoryName, storeRow.channel, storeRow);
+      store[key] = { ...(store[key] || {}), ...storeRow };
+      return store[key];
+    });
     writeAttributeMappingStore(store);
     clearCategoryResponseCache();
+    const jobId = crypto.randomUUID();
+    scheduleAttributeMappingPropagationJob({
+      jobId,
+      channel,
+      mainCategory,
+      attributeName: savedRows[0]?.attributeName || savedRows[0]?.attributeHandle || "",
+      categories: [...new Set(savedRows.map((row) => row.categoryName).filter(Boolean))],
+      mappingCount: savedRows.length
+    });
     return sendJson(res, 200, {
-      mapping: normalizeChannelCategoryMapping({ attributeMappings: [storeRow] }).attributeMappings[0],
+      mapping: normalizeChannelCategoryMapping({ attributeMappings: [savedRows[0]] }).attributeMappings[0],
+      relatedMappings: normalizeChannelCategoryMapping({ attributeMappings: savedRows.slice(1) }).attributeMappings,
       categoryId: parts[2],
-      channel
+      channel,
+      queued: true,
+      job: { id: jobId, status: "queued" }
     });
   }
 
@@ -9837,55 +9939,6 @@ async function handleApi(req, res) {
       ...result,
       categories: publicCategories(normalized, url.searchParams.get("q") || "", url.searchParams.get("scope") || "main"),
       state: publicState(normalized)
-    });
-  }
-
-  if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "attribute-mapping") {
-    const body = await parseBody(req);
-    const scope = body.scope || url.searchParams.get("scope") || "main";
-    let source = findPublicCategory(db, parts[2], scope);
-    if (!source && body.mainCategory) {
-      const identity = categoryIdentity(body.mainCategory, "main");
-      source = { id: identity.id, categoryId: identity.id, name: identity.name };
-    }
-    if (!source) return notFound(res);
-    db.categorySettings = normalizeCategorySettings(db.categorySettings);
-    let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
-    if (!category) {
-      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name }])[0];
-      db.categorySettings.push(category);
-    }
-    const channel = String(body.channel || "").trim().toLowerCase();
-    if (!category.mappings[channel]) return sendJson(res, 400, { error: "Unknown marketplace channel." });
-    const incoming = {
-      id: body.id || crypto.randomUUID(),
-      attributeId: String(body.attributeId || "").trim(),
-      attributeName: String(body.attributeName || "").trim(),
-      attributeHandle: String(body.attributeHandle || "").trim(),
-      sourceField: String(body.sourceField || "").trim(),
-      fallbackValue: String(body.fallbackValue || "").trim(),
-      required: body.required === true || String(body.required || "").toLowerCase() === "true",
-      recommended: body.recommended === true || String(body.recommended || "").toLowerCase() === "true",
-      enabled: body.enabled === undefined ? true : body.enabled === true || String(body.enabled).toLowerCase() === "true"
-    };
-    if (!incoming.attributeId && !incoming.attributeName && !incoming.attributeHandle) return sendJson(res, 400, { error: "Attribute identity is required." });
-    const now = new Date().toISOString();
-    const store = readAttributeMappingStore();
-    const storeRow = {
-      ...incoming,
-      categoryName: source.name,
-      channel,
-      updatedAt: now,
-      createdAt: incoming.createdAt || now
-    };
-    const storeKey = attributeMappingStoreKey(source.name, channel, storeRow);
-    store[storeKey] = { ...(store[storeKey] || {}), ...storeRow };
-    writeAttributeMappingStore(store);
-    clearCategoryResponseCache();
-    return sendJson(res, 200, {
-      mapping: normalizeChannelCategoryMapping({ attributeMappings: [storeRow] }).attributeMappings[0],
-      categoryId: source.id,
-      channel
     });
   }
 

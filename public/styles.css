@@ -5716,6 +5716,53 @@ tbody tr:hover td {
   text-transform: none;
 }
 
+.related-attribute-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-subdued);
+  padding: 12px;
+}
+
+.related-attribute-panel > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.related-attribute-panel strong {
+  color: var(--ink);
+}
+
+.related-attribute-panel small {
+  color: var(--muted);
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.related-attribute-list {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.related-attribute-list label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 8px 10px;
+}
+
+.related-attribute-list span {
+  display: grid;
+  gap: 3px;
+}
+
 .attribute-destination-card {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

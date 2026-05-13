@@ -5334,6 +5334,43 @@ function filteredAttributeRows() {
   });
 }
 
+function attributeSemanticKey(value = "") {
+  const key = String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (!key) return "";
+  if (["color", "colors", "colour", "colours", "finishcolor", "productcolor"].includes(key)) return "color";
+  if (["material", "materials", "primarymaterial"].includes(key)) return "material";
+  if (["function", "functions", "features", "feature", "functionality", "functionalities", "functional", "airfryerfunctions"].includes(key)) return "features";
+  if (["size", "productsize", "itemsize"].includes(key)) return "size";
+  if (["model", "modelnumber"].includes(key)) return "model";
+  if (["brand", "brandname"].includes(key)) return "brand";
+  if (["mpn", "manufacturerpartnumber", "partnumber"].includes(key)) return "mpn";
+  if (["upc", "ean", "gtin", "barcode"].includes(key)) return "barcode";
+  if (["dim", "dims"].includes(key) || /(length|width|height|depth|dimension|dimensions)/.test(key)) return "dimensions";
+  if (["wt", "lbs", "pounds"].includes(key) || /(weight|weights|mass)/.test(key)) return "weight";
+  if (/(capacity|volume)/.test(key)) return "capacity";
+  if (/(watt|voltage|amp|power)/.test(key)) return "electrical";
+  return key;
+}
+
+function attributeRowSemanticKey(row = {}) {
+  return attributeSemanticKey([row.Attribute, row["Attribute Handle"], row["Attribute ID"]].filter(Boolean).join(" "));
+}
+
+function relatedAttributeRows(row = {}) {
+  const key = attributeRowSemanticKey(row);
+  if (!key) return [];
+  const sameIdentity = (candidate) => (
+    candidate === row ||
+    (candidate["Main Category"] === row["Main Category"] &&
+      candidate.Marketplace === row.Marketplace &&
+      candidate.Attribute === row.Attribute &&
+      candidate["Attribute ID"] === row["Attribute ID"])
+  );
+  return (attributeState.rows || [])
+    .filter((candidate) => !sameIdentity(candidate) && attributeRowSemanticKey(candidate) === key)
+    .slice(0, 24);
+}
+
 async function loadCategoryAttributes() {
   attributeState = { ...attributeState, loading: true };
   renderAttributesPage();
@@ -5422,6 +5459,7 @@ function renderAttributeMappingModal() {
   if (!pendingAttributeMapping) return "";
   const row = pendingAttributeMapping;
   const selected = row["Mapped Source Field"] || suggestedSourceFieldForAttribute({ id: row["Attribute ID"], name: row.Attribute, handle: row["Attribute Handle"] });
+  const relatedRows = relatedAttributeRows(row);
   return `
     <div class="modal-backdrop show" aria-hidden="false">
       <form class="modal-card attribute-map-modal" data-attribute-map-form>
@@ -5450,6 +5488,25 @@ function renderAttributeMappingModal() {
             <input id="attribute-map-enabled" type="checkbox" ${row["Mapping Enabled"] === "false" ? "" : "checked"}>
             Active mapping
           </label>
+          <div class="related-attribute-panel">
+            <div>
+              <strong>Related attributes</strong>
+              <small>Same meaning across categories or marketplaces. Select any that should use this same canonical source.</small>
+            </div>
+            ${relatedRows.length ? `
+              <div class="related-attribute-list">
+                ${relatedRows.map((related, index) => `
+                  <label>
+                    <input type="checkbox" data-related-attribute-index="${index}">
+                    <span>
+                      <strong>${html(related.Attribute || "")}</strong>
+                      <small>${html([channelLabel(related.Marketplace), related["Main Category"], related["Mapped Source Field"] ? `mapped: ${related["Mapped Source Field"]}` : "not mapped"].filter(Boolean).join(" / "))}</small>
+                    </span>
+                  </label>
+                `).join("")}
+              </div>
+            ` : `<p class="muted">No related attributes found yet.</p>`}
+          </div>
         </div>
         <div class="modal-actions">
           <button type="button" class="button secondary" data-close-attribute-map-modal>Cancel</button>
@@ -5485,6 +5542,10 @@ function closeAttributeMappingModal() {
 async function saveAttributeMapping() {
   if (!pendingAttributeMapping) return;
   const row = pendingAttributeMapping;
+  const relatedRows = relatedAttributeRows(row);
+  const selectedRelated = Array.from(document.querySelectorAll("[data-related-attribute-index]:checked"))
+    .map((input) => relatedRows[Number(input.dataset.relatedAttributeIndex)])
+    .filter(Boolean);
   const categoryId = row["Category ID"];
   if (!categoryId) throw new Error("Category ID is missing for this attribute row.");
   const body = {
@@ -5499,7 +5560,17 @@ async function saveAttributeMapping() {
     recommended: row.Recommended === "true",
     sourceField: $("#attribute-map-source-field")?.value || "",
     fallbackValue: $("#attribute-map-fallback")?.value.trim() || "",
-    enabled: $("#attribute-map-enabled")?.checked !== false
+    enabled: $("#attribute-map-enabled")?.checked !== false,
+    relatedMappings: selectedRelated.map((related) => ({
+      channel: related.Marketplace || "",
+      mainCategory: related["Main Category"] || "",
+      categoryId: related["Category ID"] || "",
+      attributeId: related["Attribute ID"] || "",
+      attributeName: related.Attribute || "",
+      attributeHandle: related["Attribute Handle"] || "",
+      required: related.Required === "true",
+      recommended: related.Recommended === "true"
+    }))
   };
   const result = await api(`/api/categories/${encodeURIComponent(categoryId)}/attribute-mapping`, {
     feedbackLabel: "Saving attribute mapping...",
@@ -5509,10 +5580,16 @@ async function saveAttributeMapping() {
   row["Mapped Source Field"] = body.sourceField;
   row["Fallback Value"] = body.fallbackValue;
   row["Mapping Enabled"] = body.enabled ? "true" : "false";
+  selectedRelated.forEach((related) => {
+    related["Mapped Source Field"] = body.sourceField;
+    related["Fallback Value"] = body.fallbackValue;
+    related["Mapping Enabled"] = body.enabled ? "true" : "false";
+  });
   attributeState.mappedCount = (attributeState.rows || []).filter((item) => item["Mapped Source Field"] || item["Fallback Value"]).length;
   pendingAttributeMapping = null;
   renderAttributesPage();
-  toast("Attribute mapping saved.");
+  const relatedCount = selectedRelated.length;
+  toast(result?.queued ? `Attribute mapping saved. Background job queued${relatedCount ? ` for ${relatedCount + 1} attributes` : ""}.` : "Attribute mapping saved.");
 }
 
 function renderCatalog() {
