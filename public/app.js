@@ -18,6 +18,7 @@ let categoryRequestId = 0;
 let selectedCategoryId = null;
 let categoryViewMode = "table";
 let attributeState = { rows: [], total: 0, mappedCount: 0, requiredCount: 0, channel: "", query: "", loading: false };
+let pendingAttributeMapping = null;
 let pendingCategoryOpenName = "";
 let shopifyTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
 let shopifyTaxonomyTimer = null;
@@ -4543,6 +4544,37 @@ function sourceAttributeFieldOptions() {
   });
 }
 
+function groupedCanonicalSourceOptions() {
+  const definitions = sourceAttributeFieldOptions();
+  const groupForField = (field) => {
+    if (field.key.startsWith("attributes.")) return "Source catalog attributes";
+    if (["sourceBrand", "sourceCategory", "vendorCategory", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "leadTime", "leadtime", "fobPrice", "ctechId", "vendorDescription"].includes(field.key)) return "Source catalog fields";
+    return "Main product fields";
+  };
+  return definitions.reduce((groups, field) => {
+    const group = groupForField(field);
+    groups[group] = groups[group] || [];
+    groups[group].push(field);
+    return groups;
+  }, {});
+}
+
+function renderCanonicalSourceSelect(value = "", id = "attribute-map-source-field") {
+  return `<select id="${html(id)}">${renderCanonicalSourceOptions(value)}</select>`;
+}
+
+function renderCanonicalSourceOptions(value = "") {
+  const groups = groupedCanonicalSourceOptions();
+  return `
+    <option value="">Do not map yet</option>
+    ${Object.entries(groups).map(([label, fields]) => `
+      <optgroup label="${html(label)}">
+        ${fields.map((field) => `<option value="${html(field.key)}" ${field.key === value ? "selected" : ""}>${html(field.label || field.key)} (${html(field.key)})</option>`).join("")}
+      </optgroup>
+    `).join("")}
+  `;
+}
+
 function suggestedSourceFieldForAttribute(attribute = {}) {
   const key = normalizedAttributeKey([attribute.name, attribute.handle, attribute.id].filter(Boolean).join(" "));
   const matches = [
@@ -4575,13 +4607,9 @@ function existingAttributeMapping(mapping = {}, attribute = {}) {
 }
 
 function renderSourceFieldSelect(value = "", categoryId = "", channel = "", index = 0) {
-  const fields = sourceAttributeFieldOptions();
-  const hasValue = value && !fields.some((field) => field.key === value);
   return `
     <select data-category-attribute-map="${categoryId}" data-channel="${channel}" data-attribute-index="${index}" data-attr-field="sourceField">
-      <option value="">Do not map yet</option>
-      ${hasValue ? `<option value="${html(value)}" selected>${html(value)} (custom)</option>` : ""}
-      ${fields.map((field) => `<option value="${html(field.key)}" ${field.key === value ? "selected" : ""}>${html(field.label || field.key)} (${html(field.key)})</option>`).join("")}
+      ${renderCanonicalSourceOptions(value)}
     </select>
   `;
 }
@@ -5309,6 +5337,7 @@ function filteredAttributeRows() {
 async function loadCategoryAttributes() {
   attributeState = { ...attributeState, loading: true };
   renderAttributesPage();
+  if (!productFieldOptions) await loadProductFieldOptions();
   const params = new URLSearchParams();
   if (attributeState.channel) params.set("channel", attributeState.channel);
   const result = await api(`/api/categories/attributes${params.toString() ? `?${params.toString()}` : ""}`, { feedbackLabel: "Loading attributes..." });
@@ -5361,10 +5390,13 @@ function renderAttributesPage() {
                 <th>Required</th>
                 <th>Mapped To</th>
                 <th>Fallback</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              ${rows.slice(0, 700).map((row) => `
+              ${rows.slice(0, 700).map((row) => {
+                const rowIndex = attributeState.rows.indexOf(row);
+                return `
                 <tr>
                   <td><strong>${html(row["Main Category"] || "")}</strong><small>${Number(row["Product Count"] || 0).toLocaleString()} products</small></td>
                   <td>${html(channelLabel(row.Marketplace || ""))}</td>
@@ -5373,14 +5405,58 @@ function renderAttributesPage() {
                   <td><span class="status ${row.Required === "true" ? "hold" : row.Recommended === "true" ? "pending" : "active"}">${row.Required === "true" ? "Required" : row.Recommended === "true" ? "Recommended" : "Optional"}</span></td>
                   <td>${html(row["Mapped Source Field"] || "") || `<span class="muted">Not mapped</span>`}</td>
                   <td>${html(row["Fallback Value"] || "")}</td>
+                  <td><button class="button secondary compact-button" type="button" data-edit-attribute-mapping="${rowIndex}">Edit</button></td>
                 </tr>
-              `).join("") || `<tr><td colspan="7">No attribute rows found.</td></tr>`}
+              `; }).join("") || `<tr><td colspan="8">No attribute rows found.</td></tr>`}
             </tbody>
           </table>
         </div>
         ${rows.length > 700 ? `<p class="muted category-table-foot">Showing first 700 matching attributes. Use search or marketplace filter to narrow the list.</p>` : ""}
       `}
+      ${renderAttributeMappingModal()}
     </section>
+  `;
+}
+
+function renderAttributeMappingModal() {
+  if (!pendingAttributeMapping) return "";
+  const row = pendingAttributeMapping;
+  const selected = row["Mapped Source Field"] || suggestedSourceFieldForAttribute({ id: row["Attribute ID"], name: row.Attribute, handle: row["Attribute Handle"] });
+  return `
+    <div class="modal-backdrop show" aria-hidden="false">
+      <form class="modal-card attribute-map-modal" data-attribute-map-form>
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">${html(channelLabel(row.Marketplace))} destination attribute</p>
+            <h2>${html(row.Attribute || "Marketplace attribute")}</h2>
+            <p class="muted">${html(row["Main Category"] || "")}</p>
+          </div>
+          <button type="button" class="icon-button" data-close-attribute-map-modal aria-label="Close attribute mapper">x</button>
+        </div>
+        <div class="attribute-map-editor">
+          <div class="attribute-destination-card">
+            <span><small>Marketplace category</small><strong>${html(row["Marketplace Category"] || row["Marketplace Category ID"] || "")}</strong></span>
+            <span><small>Requirement</small><strong>${row.Required === "true" ? "Required" : row.Recommended === "true" ? "Recommended" : "Optional"}</strong></span>
+            ${row["Allowed Values"] ? `<span class="span-2"><small>Allowed values</small><strong>${html(row["Allowed Values"])}</strong></span>` : ""}
+          </div>
+          <label>Canonical DataPlus source
+            <span class="attribute-source-groups">Main product fields / Source catalog fields / Source catalog attributes</span>
+            ${renderCanonicalSourceSelect(selected)}
+          </label>
+          <label>Fallback value
+            <input id="attribute-map-fallback" value="${html(row["Fallback Value"] || "")}" placeholder="Used only when source value is empty">
+          </label>
+          <label class="inline-check">
+            <input id="attribute-map-enabled" type="checkbox" ${row["Mapping Enabled"] === "false" ? "" : "checked"}>
+            Active mapping
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-attribute-map-modal>Cancel</button>
+          <button type="button" class="button primary" data-save-attribute-map>${withIcon("save", "Save mapping")}</button>
+        </div>
+      </form>
+    </div>
   `;
 }
 
@@ -5392,6 +5468,51 @@ function channelLabel(channel = "") {
     tiktok: "TikTok",
     whatnot: "Whatnot"
   }[String(channel || "").toLowerCase()] || channel || "Marketplace";
+}
+
+function openAttributeMappingModal(index) {
+  const row = attributeState.rows[Number(index)];
+  if (!row) return;
+  pendingAttributeMapping = row;
+  renderAttributesPage();
+}
+
+function closeAttributeMappingModal() {
+  pendingAttributeMapping = null;
+  renderAttributesPage();
+}
+
+async function saveAttributeMapping() {
+  if (!pendingAttributeMapping) return;
+  const row = pendingAttributeMapping;
+  const categoryId = row["Category ID"];
+  if (!categoryId) throw new Error("Category ID is missing for this attribute row.");
+  const body = {
+    scope: "main",
+    returnChannel: attributeState.channel || "",
+    channel: row.Marketplace,
+    mainCategory: row["Main Category"] || "",
+    attributeId: row["Attribute ID"] || "",
+    attributeName: row.Attribute || "",
+    attributeHandle: row["Attribute Handle"] || "",
+    required: row.Required === "true",
+    recommended: row.Recommended === "true",
+    sourceField: $("#attribute-map-source-field")?.value || "",
+    fallbackValue: $("#attribute-map-fallback")?.value.trim() || "",
+    enabled: $("#attribute-map-enabled")?.checked !== false
+  };
+  const result = await api(`/api/categories/${encodeURIComponent(categoryId)}/attribute-mapping`, {
+    feedbackLabel: "Saving attribute mapping...",
+    method: "POST",
+    body: JSON.stringify(body)
+  });
+  row["Mapped Source Field"] = body.sourceField;
+  row["Fallback Value"] = body.fallbackValue;
+  row["Mapping Enabled"] = body.enabled ? "true" : "false";
+  attributeState.mappedCount = (attributeState.rows || []).filter((item) => item["Mapped Source Field"] || item["Fallback Value"]).length;
+  pendingAttributeMapping = null;
+  renderAttributesPage();
+  toast("Attribute mapping saved.");
 }
 
 function renderCatalog() {
@@ -12787,6 +12908,9 @@ document.addEventListener("click", (event) => {
   const saveCategoryMapButton = event.target.closest("[data-save-category-map]");
   const applyCategoryMapToProductsButton = event.target.closest("[data-apply-category-map-to-products]");
   const learnSourceCategoryMappingsButton = event.target.closest("[data-learn-source-category-mappings]");
+  const editAttributeMappingButton = event.target.closest("[data-edit-attribute-mapping]");
+  const closeAttributeMapModalButton = event.target.closest("[data-close-attribute-map-modal]");
+  const saveAttributeMapButton = event.target.closest("[data-save-attribute-map]");
   const clearJobFiltersButton = event.target.closest("[data-clear-job-filters]");
   const channelButton = event.target.closest("[data-select-channel]");
   const exchangeTemuButton = event.target.closest("[data-exchange-temu-code]");
@@ -13015,6 +13139,18 @@ document.addEventListener("click", (event) => {
   }
   if (learnSourceCategoryMappingsButton) {
     learnSourceCategoryMappings(learnSourceCategoryMappingsButton).catch((error) => toast(error.message));
+    return;
+  }
+  if (editAttributeMappingButton) {
+    openAttributeMappingModal(editAttributeMappingButton.dataset.editAttributeMapping);
+    return;
+  }
+  if (closeAttributeMapModalButton) {
+    closeAttributeMappingModal();
+    return;
+  }
+  if (saveAttributeMapButton) {
+    saveAttributeMapping().catch((error) => toast(error.message));
     return;
   }
   if (clearJobFiltersButton) {
@@ -14218,6 +14354,14 @@ document.addEventListener("change", (event) => {
   if (direction) jobsFilter.direction = direction.value;
   runWithSearchFeedback(renderJobsPage, "Filtering jobs...");
 });
+
+document.addEventListener("submit", (event) => {
+  const attributeMapForm = event.target.closest("[data-attribute-map-form]");
+  if (!attributeMapForm) return;
+  event.preventDefault();
+  saveAttributeMapping().catch((error) => toast(error.message));
+});
+
 $("#toggle-order-detail")?.addEventListener("click", () => {
   orderDetailVisible = !orderDetailVisible;
   $("#toggle-order-detail").textContent = orderDetailVisible ? "Hide details" : "Show details";

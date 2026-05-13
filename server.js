@@ -12,6 +12,7 @@ const PUBLIC_DIR = path.join(ROOT, "public");
 const DATA_DIR = path.join(ROOT, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
+const ATTRIBUTE_MAPPINGS_FILE = path.join(DATA_DIR, "attribute-mappings.json");
 const CATEGORY_CACHE_FILE = path.join(DATA_DIR, "category-cache.json");
 const CATEGORY_CACHE_VERSION = 5;
 const CATALOG_FILE = path.join(DATA_DIR, "catalog", "products.ndjson");
@@ -3046,6 +3047,70 @@ function normalizeChannelCategoryMapping(mapping = {}) {
   };
 }
 
+function attributeMappingStoreKey(categoryName = "", channel = "", mapping = {}) {
+  const categoryKey = formatCategoryName(categoryName).toLowerCase();
+  const channelKey = String(channel || "").trim().toLowerCase();
+  const attributeKey = [mapping.attributeId, mapping.attributeName, mapping.attributeHandle]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .find(Boolean);
+  return categoryKey && channelKey && attributeKey ? `${categoryKey}::${channelKey}::${attributeKey}` : "";
+}
+
+function normalizeAttributeMappingStore(rows = []) {
+  const source = Array.isArray(rows) ? rows : Object.values(rows || {});
+  const result = {};
+  for (const row of source) {
+    const mapping = normalizeChannelCategoryMapping({ attributeMappings: [row] }).attributeMappings[0];
+    const categoryName = formatCategoryName(row.categoryName || row.mainCategory || row["Main Category"] || "");
+    const channel = String(row.channel || row.marketplace || row.Marketplace || "").trim().toLowerCase();
+    const key = attributeMappingStoreKey(categoryName, channel, mapping);
+    if (!key) continue;
+    result[key] = {
+      ...mapping,
+      categoryName,
+      channel,
+      updatedAt: row.updatedAt || new Date().toISOString(),
+      createdAt: row.createdAt || row.updatedAt || new Date().toISOString()
+    };
+  }
+  return result;
+}
+
+function readAttributeMappingStore() {
+  if (!fs.existsSync(ATTRIBUTE_MAPPINGS_FILE)) return {};
+  try {
+    return normalizeAttributeMappingStore(JSON.parse(fs.readFileSync(ATTRIBUTE_MAPPINGS_FILE, "utf8")));
+  } catch {
+    return {};
+  }
+}
+
+function writeAttributeMappingStore(store = {}) {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  const normalized = normalizeAttributeMappingStore(store);
+  fs.writeFileSync(ATTRIBUTE_MAPPINGS_FILE, JSON.stringify(Object.values(normalized), null, 2));
+  return normalized;
+}
+
+function applyStoredAttributeMappingsToCategory(category = {}) {
+  const categoryName = formatCategoryName(category.name || category.category || "");
+  if (!categoryName) return category;
+  const store = readAttributeMappingStore();
+  const next = { ...category, mappings: { ...(category.mappings || {}) } };
+  for (const channel of ["shopify", "ebay", "temu", "tiktok", "whatnot"]) {
+    const mapping = normalizeChannelCategoryMapping(next.mappings[channel] || {});
+    const rows = Array.isArray(mapping.attributeMappings) ? mapping.attributeMappings.slice() : [];
+    for (const stored of Object.values(store).filter((row) => row.channel === channel && formatCategoryName(row.categoryName).toLowerCase() === categoryName.toLowerCase())) {
+      const key = attributeMappingStoreKey(categoryName, channel, stored);
+      const index = rows.findIndex((row) => attributeMappingStoreKey(categoryName, channel, row) === key);
+      if (index >= 0) rows[index] = { ...rows[index], ...stored };
+      else rows.push(stored);
+    }
+    next.mappings[channel] = normalizeChannelCategoryMapping({ ...mapping, attributeMappings: rows });
+  }
+  return next;
+}
+
 function readCatalogCategoryIndex() {
   if (!fs.existsSync(CATALOG_CATEGORY_INDEX_FILE)) return { categories: [], categoryCount: 0, generatedAt: "" };
   try {
@@ -3330,7 +3395,8 @@ function findOrCreateCategorySetting(db, categoryName) {
 }
 
 function categorySavedSettings(settings, category) {
-  return settings.get(category.id) || settings.get(category.categoryId) || settings.get(`name:${formatCategoryName(category.name || "").toLowerCase()}`) || {};
+  const saved = settings.get(category.id) || settings.get(category.categoryId) || settings.get(`name:${formatCategoryName(category.name || "").toLowerCase()}`) || {};
+  return saved.name ? applyStoredAttributeMappingsToCategory(saved) : saved;
 }
 
 function categoryMappingSummary(category, saved) {
@@ -3589,7 +3655,8 @@ function masterCategoryMappingRows(db = {}) {
   const vendorMappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings);
   const mainRows = aggregateMainCatalogCategories(db);
   const mainByName = new Map(mainRows.map((row) => [formatCategoryName(row.name).toLowerCase(), row]));
-  for (const setting of settings) {
+  for (const rawSetting of settings) {
+    const setting = applyStoredAttributeMappingsToCategory(rawSetting);
     const name = formatCategoryName(setting.name);
     if (name && !mainByName.has(name.toLowerCase())) {
       mainByName.set(name.toLowerCase(), {
@@ -3662,7 +3729,8 @@ function marketplaceCategoryAttributeRows(db = {}, options = {}) {
   const channelFilter = String(options.channel || "").trim().toLowerCase();
   const allowedChannels = channelFilter && channels.includes(channelFilter) ? [channelFilter] : channels;
   const rows = [];
-  for (const setting of settings) {
+  for (const rawSetting of settings) {
+    const setting = applyStoredAttributeMappingsToCategory(rawSetting);
     const mainCategory = formatCategoryName(setting.name);
     if (!mainCategory) continue;
     const main = mainByName.get(mainCategory.toLowerCase()) || {};
@@ -3673,6 +3741,7 @@ function marketplaceCategoryAttributeRows(db = {}, options = {}) {
       const addRow = (attribute = {}, mapped = {}) => {
         rows.push({
           "Main Category": mainCategory,
+          "Category ID": categoryIdentity(mainCategory, "main").id,
           "Marketplace": channel,
           "Marketplace Category": mapping.categoryPath || mapping.categoryId || "",
           "Marketplace Category ID": mapping.categoryId || "",
@@ -6887,7 +6956,8 @@ function sourceDataValue(item = {}, keys = []) {
 function categorySettingForProduct(db = {}, item = {}) {
   const categoryName = formatCategoryName(item.category || item.mainCategory || "");
   if (!categoryName) return null;
-  return (db.categorySettings || []).find((row) => formatCategoryName(row.name || row.category || "") === categoryName) || null;
+  const setting = (db.categorySettings || []).find((row) => formatCategoryName(row.name || row.category || "") === categoryName) || null;
+  return setting ? applyStoredAttributeMappingsToCategory(setting) : null;
 }
 
 function mappedAttributeSourceValue(item = {}, mapping = {}, attribute = {}) {
@@ -9183,6 +9253,37 @@ async function handleApi(req, res) {
     return res.end(rowsToCsv(rows));
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "attribute-mapping") {
+    const body = await parseBody(req);
+    const channel = String(body.channel || "").trim().toLowerCase();
+    if (!["shopify", "ebay", "temu", "tiktok", "whatnot"].includes(channel)) return sendJson(res, 400, { error: "Unknown marketplace channel." });
+    const mainCategory = formatCategoryName(body.mainCategory || "");
+    if (!mainCategory) return sendJson(res, 400, { error: "Main category is required." });
+    const incoming = {
+      id: body.id || crypto.randomUUID(),
+      attributeId: String(body.attributeId || "").trim(),
+      attributeName: String(body.attributeName || "").trim(),
+      attributeHandle: String(body.attributeHandle || "").trim(),
+      sourceField: String(body.sourceField || "").trim(),
+      fallbackValue: String(body.fallbackValue || "").trim(),
+      required: body.required === true || String(body.required || "").toLowerCase() === "true",
+      recommended: body.recommended === true || String(body.recommended || "").toLowerCase() === "true",
+      enabled: body.enabled === undefined ? true : body.enabled === true || String(body.enabled).toLowerCase() === "true"
+    };
+    if (!incoming.attributeId && !incoming.attributeName && !incoming.attributeHandle) return sendJson(res, 400, { error: "Attribute identity is required." });
+    const now = new Date().toISOString();
+    const store = readAttributeMappingStore();
+    const storeRow = { ...incoming, categoryName: mainCategory, channel, updatedAt: now, createdAt: incoming.createdAt || now };
+    store[attributeMappingStoreKey(mainCategory, channel, storeRow)] = { ...(store[attributeMappingStoreKey(mainCategory, channel, storeRow)] || {}), ...storeRow };
+    writeAttributeMappingStore(store);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, {
+      mapping: normalizeChannelCategoryMapping({ attributeMappings: [storeRow] }).attributeMappings[0],
+      categoryId: parts[2],
+      channel
+    });
+  }
+
   const db = await readDb();
 
   if (req.method === "POST" && url.pathname === "/api/knowledge/articles") {
@@ -9736,6 +9837,55 @@ async function handleApi(req, res) {
       ...result,
       categories: publicCategories(normalized, url.searchParams.get("q") || "", url.searchParams.get("scope") || "main"),
       state: publicState(normalized)
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "attribute-mapping") {
+    const body = await parseBody(req);
+    const scope = body.scope || url.searchParams.get("scope") || "main";
+    let source = findPublicCategory(db, parts[2], scope);
+    if (!source && body.mainCategory) {
+      const identity = categoryIdentity(body.mainCategory, "main");
+      source = { id: identity.id, categoryId: identity.id, name: identity.name };
+    }
+    if (!source) return notFound(res);
+    db.categorySettings = normalizeCategorySettings(db.categorySettings);
+    let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
+    if (!category) {
+      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name }])[0];
+      db.categorySettings.push(category);
+    }
+    const channel = String(body.channel || "").trim().toLowerCase();
+    if (!category.mappings[channel]) return sendJson(res, 400, { error: "Unknown marketplace channel." });
+    const incoming = {
+      id: body.id || crypto.randomUUID(),
+      attributeId: String(body.attributeId || "").trim(),
+      attributeName: String(body.attributeName || "").trim(),
+      attributeHandle: String(body.attributeHandle || "").trim(),
+      sourceField: String(body.sourceField || "").trim(),
+      fallbackValue: String(body.fallbackValue || "").trim(),
+      required: body.required === true || String(body.required || "").toLowerCase() === "true",
+      recommended: body.recommended === true || String(body.recommended || "").toLowerCase() === "true",
+      enabled: body.enabled === undefined ? true : body.enabled === true || String(body.enabled).toLowerCase() === "true"
+    };
+    if (!incoming.attributeId && !incoming.attributeName && !incoming.attributeHandle) return sendJson(res, 400, { error: "Attribute identity is required." });
+    const now = new Date().toISOString();
+    const store = readAttributeMappingStore();
+    const storeRow = {
+      ...incoming,
+      categoryName: source.name,
+      channel,
+      updatedAt: now,
+      createdAt: incoming.createdAt || now
+    };
+    const storeKey = attributeMappingStoreKey(source.name, channel, storeRow);
+    store[storeKey] = { ...(store[storeKey] || {}), ...storeRow };
+    writeAttributeMappingStore(store);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, {
+      mapping: normalizeChannelCategoryMapping({ attributeMappings: [storeRow] }).attributeMappings[0],
+      categoryId: source.id,
+      channel
     });
   }
 
