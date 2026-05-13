@@ -5710,10 +5710,15 @@ tbody tr:hover td {
 }
 
 .attribute-map-editor label.inline-check {
-  display: inline-flex;
-  width: fit-content;
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-subdued);
+  padding: 10px 12px;
 }
 
 .attribute-source-groups {

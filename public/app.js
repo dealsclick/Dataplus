@@ -5485,8 +5485,8 @@ function renderAttributeMappingModal() {
             <input id="attribute-map-fallback" value="${html(row["Fallback Value"] || "")}" placeholder="Used only when source value is empty">
           </label>
           <label class="inline-check">
+            <span>Active mapping</span>
             <input id="attribute-map-enabled" type="checkbox" ${row["Mapping Enabled"] === "false" ? "" : "checked"}>
-            Active mapping
           </label>
           <div class="related-attribute-panel">
             <div>
