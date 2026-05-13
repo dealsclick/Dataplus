@@ -102,6 +102,7 @@ const LUCIDE_ICONS = {
   "clipboard-list": '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/>',
   "copy": '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   "database": '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/>',
+  "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/>',
   "dollar-sign": '<path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"/>',
   "edit-3": '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   "external-link": '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
@@ -4981,6 +4982,7 @@ function renderCategoryCoverage() {
         <span class="${Number(matrixify.duplicateHandleCount || 0) ? "needs-work" : "ready"}">Duplicate handles: ${Number(matrixify.duplicateHandleCount || 0).toLocaleString()}</span>
         <span class="${Number(matrixify.missingImageCount || 0) ? "needs-work" : "ready"}">Missing images: ${Number(matrixify.missingImageCount || 0).toLocaleString()}</span>
         <span class="${Number(matrixify.weakSeoCount || 0) ? "needs-work" : "ready"}">SEO review: ${Number(matrixify.weakSeoCount || 0).toLocaleString()}</span>
+        <a class="button secondary" href="/api/categories/export/master-category-mapping.csv">${withIcon("download", "Master mapping")}</a>
         <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon("clipboard-list", "Smart collections")}</a>
         <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon("layout-panel-left", "Main menu")}</a>
       </div>
@@ -5052,6 +5054,7 @@ function renderCategoryTable(categories, scopeLabel) {
             <button type="button" class="${categoryScope === "main" ? "active" : ""}" data-category-scope="main">Main</button>
             <button type="button" class="${categoryScope === "source" ? "active" : ""}" data-category-scope="source">Source</button>
           </div>
+          <a class="button secondary" href="/api/categories/export/master-category-mapping.csv">${withIcon("download", "Master mapping")}</a>
           <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon("clipboard-list", "Matrixify smart collections")}</a>
           <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon("layout-panel-left", "Matrixify menu")}</a>
           <button class="button secondary" type="button" data-learn-source-category-mappings="all">${withIcon("refresh-cw", "Learn source maps")}</button>
@@ -5111,6 +5114,7 @@ function renderCategoryDetail(selected) {
         <div class="category-detail-actions">
           <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon("clipboard-list", "Matrixify smart collections")}</a>
           <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon("layout-panel-left", "Matrixify menu")}</a>
+          <a class="button secondary" href="/api/categories/export/master-category-mapping.csv">${withIcon("download", "Master mapping")}</a>
           <button class="button secondary" type="button" data-auto-map-ebay-categories>${withIcon("search", "Auto-map eBay")}</button>
           ${categoryScope === "main" ? `<button class="button secondary" type="button" data-learn-source-category-mappings="${html(selected.id)}">${withIcon("refresh-cw", "Map source catalog")}</button>` : ""}
           ${renderCategoryStatus(selected)}

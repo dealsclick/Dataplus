@@ -3584,6 +3584,72 @@ function categoryCoverageRows(db, issue) {
   return [];
 }
 
+function masterCategoryMappingRows(db = {}) {
+  const settings = normalizeCategorySettings(db.categorySettings);
+  const vendorMappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings);
+  const mainRows = aggregateMainCatalogCategories(db);
+  const mainByName = new Map(mainRows.map((row) => [formatCategoryName(row.name).toLowerCase(), row]));
+  for (const setting of settings) {
+    const name = formatCategoryName(setting.name);
+    if (name && !mainByName.has(name.toLowerCase())) {
+      mainByName.set(name.toLowerCase(), {
+        name,
+        productCount: 0,
+        activeProductCount: 0,
+        stockProductCount: 0
+      });
+    }
+  }
+  const rows = [];
+  const mappingsByMain = new Map();
+  for (const mapping of Object.values(vendorMappings)) {
+    const mainCategory = formatCategoryName(mapping.mainCategory);
+    if (!mainCategory) continue;
+    const key = mainCategory.toLowerCase();
+    if (!mappingsByMain.has(key)) mappingsByMain.set(key, []);
+    mappingsByMain.get(key).push(mapping);
+  }
+  for (const [key, main] of mainByName.entries()) {
+    const setting = settings.find((row) => formatCategoryName(row.name).toLowerCase() === key) || {};
+    const shopify = normalizeChannelCategoryMapping(setting.mappings?.shopify || {});
+    const ebay = normalizeChannelCategoryMapping(setting.mappings?.ebay || {});
+    const learnedMappings = (mappingsByMain.get(key) || []).sort((a, b) => String(a.supplier).localeCompare(String(b.supplier)) || String(a.vendorCategory).localeCompare(String(b.vendorCategory)));
+    const base = {
+      "Main Category": main.name,
+      "Source Supplier": "",
+      "Source Category": "",
+      "Shopify": shopify.categoryPath || shopify.categoryId || "",
+      "Shopify Category ID": shopify.categoryId || "",
+      "eBay": ebay.categoryPath || ebay.categoryId || "",
+      "eBay Category ID": ebay.categoryId || "",
+      "Product Count": main.productCount || 0,
+      "Active Products": main.activeProductCount || 0,
+      "Stock Products": main.stockProductCount || 0,
+      "Mapping Status": setting.status || "",
+      "Source Match Count": "",
+      "Source Conflict Count": "",
+      "Sample SKU": "",
+      "Updated At": setting.updatedAt || ""
+    };
+    if (!learnedMappings.length) {
+      rows.push(base);
+      continue;
+    }
+    for (const mapping of learnedMappings) {
+      rows.push({
+        ...base,
+        "Source Supplier": mapping.supplier || "",
+        "Source Category": mapping.vendorCategory || "",
+        "Source Match Count": mapping.matchCount || 0,
+        "Source Conflict Count": mapping.conflictCount || 0,
+        "Sample SKU": mapping.sampleSku || "",
+        "Updated At": mapping.updatedAt || base["Updated At"]
+      });
+    }
+  }
+  return rows.sort((a, b) => String(a["Main Category"]).localeCompare(String(b["Main Category"])) || String(a["Source Supplier"]).localeCompare(String(b["Source Supplier"])) || String(a["Source Category"]).localeCompare(String(b["Source Category"])));
+}
+
 function coverageIssueLabel(issue) {
   return {
     "missing-shopify": "missing-shopify-mappings",
@@ -8990,6 +9056,16 @@ async function handleApi(req, res) {
     return res.end([MATRIXIFY_MENU_COLUMNS, ...rows.map((row) => MATRIXIFY_MENU_COLUMNS.map((column) => row[column] ?? ""))]
       .map((row) => row.map(escapeCsv).join(","))
       .join("\n"));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/categories/export/master-category-mapping.csv") {
+    const db = await readDbFast();
+    const rows = masterCategoryMappingRows(db);
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=dataplus-master-category-mapping.csv"
+    });
+    return res.end(rowsToCsv(rows));
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories/templates/sku-categories.csv") {
