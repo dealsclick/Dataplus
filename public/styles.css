@@ -5692,6 +5692,64 @@ tbody tr:hover td {
   color: var(--muted);
 }
 
+.attribute-groups-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 14px;
+}
+
+.attribute-groups-head {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(420px, 1.4fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.attribute-groups-head > div:first-child,
+.attribute-group-row > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.attribute-groups-head strong,
+.attribute-group-row strong {
+  color: var(--ink);
+}
+
+.attribute-groups-head small,
+.attribute-group-row small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.attribute-group-add {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.7fr) minmax(180px, 1fr) auto;
+  gap: 8px;
+}
+
+.attribute-groups-list {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.attribute-group-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.9fr) minmax(140px, 0.65fr) minmax(240px, 1.35fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-subdued);
+  padding: 10px;
+}
+
 .attribute-map-modal {
   width: min(760px, calc(100vw - 32px));
 }

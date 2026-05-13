@@ -13,6 +13,7 @@ const DATA_DIR = path.join(ROOT, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
 const ATTRIBUTE_MAPPINGS_FILE = path.join(DATA_DIR, "attribute-mappings.json");
+const ATTRIBUTE_GROUPS_FILE = path.join(DATA_DIR, "attribute-groups.json");
 const CATEGORY_CACHE_FILE = path.join(DATA_DIR, "category-cache.json");
 const CATEGORY_CACHE_VERSION = 5;
 const CATALOG_FILE = path.join(DATA_DIR, "catalog", "products.ndjson");
@@ -3092,22 +3093,90 @@ function writeAttributeMappingStore(store = {}) {
   return normalized;
 }
 
+const DEFAULT_ATTRIBUTE_GROUPS = [
+  { id: "color", label: "Color", aliases: ["color", "colors", "colour", "colours", "finish color", "product color"] },
+  { id: "dimensions", label: "Dimensions", aliases: ["dim", "dims", "dimension", "dimensions", "length", "width", "height", "depth"] },
+  { id: "weight", label: "Weight", aliases: ["weight", "weights", "mass", "wt", "lbs", "pounds"] },
+  { id: "features", label: "Features / functionality", aliases: ["function", "functions", "feature", "features", "functionality", "functionalities", "functional", "air fryer functions"] },
+  { id: "material", label: "Material", aliases: ["material", "materials", "primary material"] },
+  { id: "size", label: "Size", aliases: ["size", "product size", "item size"] },
+  { id: "brand", label: "Brand", aliases: ["brand", "brand name"] },
+  { id: "model", label: "Model", aliases: ["model", "model number"] },
+  { id: "mpn", label: "MPN", aliases: ["mpn", "manufacturer part number", "part number"] },
+  { id: "barcode", label: "Barcode", aliases: ["upc", "ean", "gtin", "barcode"] },
+  { id: "capacity", label: "Capacity / volume", aliases: ["capacity", "volume"] },
+  { id: "electrical", label: "Electrical", aliases: ["watt", "watts", "wattage", "voltage", "amp", "amps", "power"] }
+];
+
+function attributeGroupToken(value = "") {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function normalizeAttributeGroup(row = {}) {
+  const label = String(row.label || row.name || row.id || "").trim();
+  const id = attributeGroupToken(row.id || label);
+  const aliasSource = Array.isArray(row.aliases) ? row.aliases : String(row.aliases || "").split(/[\n,]/);
+  const aliases = [...new Set([label, ...aliasSource].map((alias) => String(alias || "").trim()).filter(Boolean))];
+  return id && label ? {
+    id,
+    label,
+    aliases,
+    updatedAt: row.updatedAt || new Date().toISOString(),
+    createdAt: row.createdAt || row.updatedAt || new Date().toISOString()
+  } : null;
+}
+
+function normalizeAttributeGroups(rows = []) {
+  const merged = new Map();
+  for (const row of DEFAULT_ATTRIBUTE_GROUPS) {
+    const group = normalizeAttributeGroup(row);
+    if (group) merged.set(group.id, group);
+  }
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const group = normalizeAttributeGroup(row);
+    if (!group) continue;
+    const existing = merged.get(group.id);
+    merged.set(group.id, existing ? { ...existing, ...group, aliases: [...new Set([...(existing.aliases || []), ...(group.aliases || [])])] } : group);
+  }
+  return [...merged.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function readAttributeGroups() {
+  if (!fs.existsSync(ATTRIBUTE_GROUPS_FILE)) return normalizeAttributeGroups();
+  try {
+    return normalizeAttributeGroups(JSON.parse(fs.readFileSync(ATTRIBUTE_GROUPS_FILE, "utf8")));
+  } catch {
+    return normalizeAttributeGroups();
+  }
+}
+
+function writeAttributeGroups(groups = []) {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  const normalized = normalizeAttributeGroups(groups);
+  fs.writeFileSync(ATTRIBUTE_GROUPS_FILE, JSON.stringify(normalized, null, 2));
+  return normalized;
+}
+
 function attributeSemanticKey(value = "") {
-  const key = String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const key = attributeGroupToken(value);
   if (!key) return "";
-  if (["color", "colors", "colour", "colours", "finishcolor", "productcolor"].includes(key)) return "color";
-  if (["material", "materials", "primarymaterial"].includes(key)) return "material";
-  if (["function", "functions", "features", "feature", "functionality", "functionalities", "functional", "airfryerfunctions"].includes(key)) return "features";
-  if (["size", "productsize", "itemsize"].includes(key)) return "size";
-  if (["model", "modelnumber"].includes(key)) return "model";
-  if (["brand", "brandname"].includes(key)) return "brand";
-  if (["mpn", "manufacturerpartnumber", "partnumber"].includes(key)) return "mpn";
-  if (["upc", "ean", "gtin", "barcode"].includes(key)) return "barcode";
-  if (["dim", "dims"].includes(key) || /(length|width|height|depth|dimension|dimensions)/.test(key)) return "dimensions";
-  if (["wt", "lbs", "pounds"].includes(key) || /(weight|weights|mass)/.test(key)) return "weight";
+  for (const group of readAttributeGroups()) {
+    const aliases = Array.isArray(group.aliases) ? group.aliases : [];
+    if (aliases.some((alias) => attributeGroupToken(alias) === key)) return group.id;
+  }
+  if (/(length|width|height|depth|dimension|dimensions)/.test(key)) return "dimensions";
+  if (/(weight|weights|mass)/.test(key)) return "weight";
   if (/(capacity|volume)/.test(key)) return "capacity";
   if (/(watt|voltage|amp|power)/.test(key)) return "electrical";
   return key;
+}
+
+function attributeIdentitySemanticKey(row = {}) {
+  for (const value of [row.attributeName, row.attributeHandle, row.attributeId, row.Attribute, row["Attribute Handle"], row["Attribute ID"]]) {
+    const key = attributeSemanticKey(value);
+    if (key) return key;
+  }
+  return "";
 }
 
 function scheduleAttributeMappingPropagationJob(seed = {}) {
@@ -9238,6 +9307,26 @@ async function handleApi(req, res) {
     return sendJson(res, 200, await publicCategoriesFast(url.searchParams.get("q") || "", url.searchParams.get("scope") || "source"));
   }
 
+  if (req.method === "GET" && url.pathname === "/api/categories/attribute-groups") {
+    return sendJson(res, 200, { groups: readAttributeGroups() });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/categories/attribute-groups") {
+    const body = await parseBody(req);
+    const incoming = normalizeAttributeGroup({
+      id: body.id,
+      label: body.label || body.name,
+      aliases: body.aliases
+    });
+    if (!incoming) return sendJson(res, 400, { error: "Attribute group name is required." });
+    const groups = readAttributeGroups();
+    const index = groups.findIndex((group) => group.id === incoming.id);
+    if (index >= 0) groups[index] = { ...groups[index], ...incoming, updatedAt: new Date().toISOString(), createdAt: groups[index].createdAt };
+    else groups.push(incoming);
+    const saved = writeAttributeGroups(groups);
+    return sendJson(res, 200, { group: saved.find((group) => group.id === incoming.id), groups: saved });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/categories/attributes") {
     const db = await readDbFast();
     const rows = marketplaceCategoryAttributeRows(db, { channel: url.searchParams.get("channel") || "" });
@@ -9245,7 +9334,8 @@ async function handleApi(req, res) {
       rows,
       total: rows.length,
       mappedCount: rows.filter((row) => row["Mapped Source Field"] || row["Fallback Value"]).length,
-      requiredCount: rows.filter((row) => row.Required === "true").length
+      requiredCount: rows.filter((row) => row.Required === "true").length,
+      attributeGroups: readAttributeGroups()
     });
   }
 
@@ -9360,7 +9450,7 @@ async function handleApi(req, res) {
     const now = new Date().toISOString();
     const store = readAttributeMappingStore();
     const savedRows = incomingRows.map((incoming) => {
-      const storeRow = { ...incoming, semanticKey: attributeSemanticKey([incoming.attributeName, incoming.attributeHandle, incoming.attributeId].filter(Boolean).join(" ")), updatedAt: now, createdAt: incoming.createdAt || now };
+      const storeRow = { ...incoming, semanticKey: attributeIdentitySemanticKey(incoming), updatedAt: now, createdAt: incoming.createdAt || now };
       const key = attributeMappingStoreKey(storeRow.categoryName, storeRow.channel, storeRow);
       store[key] = { ...(store[key] || {}), ...storeRow };
       return store[key];

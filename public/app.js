@@ -17,7 +17,7 @@ let categoryScope = "main";
 let categoryRequestId = 0;
 let selectedCategoryId = null;
 let categoryViewMode = "table";
-let attributeState = { rows: [], total: 0, mappedCount: 0, requiredCount: 0, channel: "", query: "", loading: false };
+let attributeState = { rows: [], total: 0, mappedCount: 0, requiredCount: 0, channel: "", query: "", loading: false, groups: [] };
 let pendingAttributeMapping = null;
 let pendingCategoryOpenName = "";
 let shopifyTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
@@ -5337,6 +5337,10 @@ function filteredAttributeRows() {
 function attributeSemanticKey(value = "") {
   const key = String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
   if (!key) return "";
+  for (const group of attributeState.groups || []) {
+    const aliases = Array.isArray(group.aliases) ? group.aliases : [];
+    if (aliases.some((alias) => String(alias || "").toLowerCase().replace(/[^a-z0-9]+/g, "") === key)) return group.id || key;
+  }
   if (["color", "colors", "colour", "colours", "finishcolor", "productcolor"].includes(key)) return "color";
   if (["material", "materials", "primarymaterial"].includes(key)) return "material";
   if (["function", "functions", "features", "feature", "functionality", "functionalities", "functional", "airfryerfunctions"].includes(key)) return "features";
@@ -5352,8 +5356,25 @@ function attributeSemanticKey(value = "") {
   return key;
 }
 
+function attributeGroupStats() {
+  const stats = new Map();
+  for (const row of attributeState.rows || []) {
+    const key = attributeRowSemanticKey(row);
+    if (!key) continue;
+    const current = stats.get(key) || { rows: 0, mapped: 0 };
+    current.rows += 1;
+    if (row["Mapped Source Field"] || row["Fallback Value"]) current.mapped += 1;
+    stats.set(key, current);
+  }
+  return stats;
+}
+
 function attributeRowSemanticKey(row = {}) {
-  return attributeSemanticKey([row.Attribute, row["Attribute Handle"], row["Attribute ID"]].filter(Boolean).join(" "));
+  for (const value of [row.Attribute, row["Attribute Handle"], row["Attribute ID"]]) {
+    const key = attributeSemanticKey(value);
+    if (key) return key;
+  }
+  return "";
 }
 
 function relatedAttributeRows(row = {}) {
@@ -5384,9 +5405,46 @@ async function loadCategoryAttributes() {
     total: Number(result.total || 0),
     mappedCount: Number(result.mappedCount || 0),
     requiredCount: Number(result.requiredCount || 0),
+    groups: result.attributeGroups || attributeState.groups || [],
     loading: false
   };
   renderAttributesPage();
+}
+
+function renderAttributeGroupsPanel() {
+  const groups = attributeState.groups || [];
+  const stats = attributeGroupStats();
+  return `
+    <div class="attribute-groups-panel">
+      <div class="attribute-groups-head">
+        <div>
+          <strong>Attribute groups</strong>
+          <small>Manage how the system recognizes related marketplace attributes.</small>
+        </div>
+        <div class="attribute-group-add">
+          <input id="attribute-group-name" placeholder="New group name">
+          <input id="attribute-group-aliases" placeholder="Aliases, comma separated">
+          <button class="button secondary" type="button" data-save-attribute-group="new">Add group</button>
+        </div>
+      </div>
+      <div class="attribute-groups-list">
+        ${groups.map((group) => {
+          const groupStats = stats.get(group.id) || { rows: 0, mapped: 0 };
+          return `
+            <div class="attribute-group-row">
+              <div>
+                <strong>${html(group.label || group.id)}</strong>
+                <small>${Number(groupStats.rows || 0).toLocaleString()} matching attributes / ${Number(groupStats.mapped || 0).toLocaleString()} mapped</small>
+              </div>
+              <input data-attribute-group-label="${html(group.id)}" value="${html(group.label || "")}">
+              <input data-attribute-group-aliases="${html(group.id)}" value="${html((group.aliases || []).join(", "))}">
+              <button class="button secondary compact-button" type="button" data-save-attribute-group="${html(group.id)}">Save</button>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </div>
+  `;
 }
 
 function renderAttributesPage() {
@@ -5415,6 +5473,7 @@ function renderAttributesPage() {
         <span><small>Mapped</small><strong>${Number(attributeState.mappedCount || 0).toLocaleString()}</strong><em>Source field or fallback</em></span>
         <span><small>Required</small><strong>${Number(attributeState.requiredCount || 0).toLocaleString()}</strong><em>Marketplace required attributes</em></span>
       </div>
+      ${renderAttributeGroupsPanel()}
       ${attributeState.loading ? `<div class="empty-state">Loading attributes...</div>` : `
         <div class="category-table-wrap attribute-table-wrap">
           <table class="data-table category-table attribute-review-table">
@@ -5590,6 +5649,22 @@ async function saveAttributeMapping() {
   renderAttributesPage();
   const relatedCount = selectedRelated.length;
   toast(result?.queued ? `Attribute mapping saved. Background job queued${relatedCount ? ` for ${relatedCount + 1} attributes` : ""}.` : "Attribute mapping saved.");
+}
+
+async function saveAttributeGroup(id = "") {
+  const isNew = id === "new";
+  const label = isNew ? $("#attribute-group-name")?.value.trim() : document.querySelector(`[data-attribute-group-label="${CSS.escape(id)}"]`)?.value.trim();
+  const aliasesValue = isNew ? $("#attribute-group-aliases")?.value : document.querySelector(`[data-attribute-group-aliases="${CSS.escape(id)}"]`)?.value;
+  const aliases = String(aliasesValue || "").split(/[\n,]/).map((alias) => alias.trim()).filter(Boolean);
+  if (!label) throw new Error("Attribute group name is required.");
+  const result = await api("/api/categories/attribute-groups", {
+    feedbackLabel: "Saving attribute group...",
+    method: "POST",
+    body: JSON.stringify({ id: isNew ? "" : id, label, aliases })
+  });
+  attributeState = { ...attributeState, groups: result.groups || [] };
+  renderAttributesPage();
+  toast("Attribute group saved.");
 }
 
 function renderCatalog() {
@@ -12988,6 +13063,7 @@ document.addEventListener("click", (event) => {
   const editAttributeMappingButton = event.target.closest("[data-edit-attribute-mapping]");
   const closeAttributeMapModalButton = event.target.closest("[data-close-attribute-map-modal]");
   const saveAttributeMapButton = event.target.closest("[data-save-attribute-map]");
+  const saveAttributeGroupButton = event.target.closest("[data-save-attribute-group]");
   const clearJobFiltersButton = event.target.closest("[data-clear-job-filters]");
   const channelButton = event.target.closest("[data-select-channel]");
   const exchangeTemuButton = event.target.closest("[data-exchange-temu-code]");
@@ -13228,6 +13304,10 @@ document.addEventListener("click", (event) => {
   }
   if (saveAttributeMapButton) {
     saveAttributeMapping().catch((error) => toast(error.message));
+    return;
+  }
+  if (saveAttributeGroupButton) {
+    saveAttributeGroup(saveAttributeGroupButton.dataset.saveAttributeGroup).catch((error) => toast(error.message));
     return;
   }
   if (clearJobFiltersButton) {
