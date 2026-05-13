@@ -8078,6 +8078,80 @@ function normalizeVendorCategoryMappings(mappings = {}) {
   return result;
 }
 
+function learnVendorCategoryMappingsFromProducts(db = {}, options = {}) {
+  const now = new Date().toISOString();
+  const mappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings);
+  const scopeCategory = formatCategoryName(options.categoryName || "").toLowerCase();
+  const candidates = new Map();
+  for (const item of Array.isArray(db.inventory) ? db.inventory : []) {
+    const mainCategory = formatCategoryName(item.mainCategory || (item.categoryVerified ? item.category : ""));
+    if (!mainCategory || item.categoryVerified === false) continue;
+    if (scopeCategory && mainCategory.toLowerCase() !== scopeCategory) continue;
+    const supplier = sourceTextValue(item.supplier || item.vendor || item.defaultSupplier);
+    const vendorCategory = formatCategoryName(item.sourceCategory || item.vendorCategory || "");
+    const key = vendorCategoryMappingKey(supplier, vendorCategory);
+    if (!key) continue;
+    if (!candidates.has(key)) {
+      candidates.set(key, {
+        supplier,
+        vendorCategory,
+        sampleSku: item.sku || "",
+        products: 0,
+        categories: new Map()
+      });
+    }
+    const candidate = candidates.get(key);
+    candidate.products += 1;
+    candidate.categories.set(mainCategory, (candidate.categories.get(mainCategory) || 0) + 1);
+    if (!candidate.sampleSku && item.sku) candidate.sampleSku = item.sku;
+  }
+  let created = 0;
+  let refreshed = 0;
+  let conflicts = 0;
+  const samples = [];
+  for (const [key, candidate] of candidates.entries()) {
+    const rankedCategories = [...candidate.categories.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const [mainCategory, matchCount] = rankedCategories[0] || ["", 0];
+    const categoryConflictCount = Math.max(0, rankedCategories.length - 1);
+    const existing = mappings[key];
+    if (existing && formatCategoryName(existing.mainCategory).toLowerCase() !== mainCategory.toLowerCase()) {
+      conflicts += 1;
+      mappings[key] = {
+        ...existing,
+        conflictCount: Math.max(Number(existing.conflictCount || 0), candidate.products),
+        updatedAt: now
+      };
+      if (samples.length < 10) samples.push({ supplier: candidate.supplier, vendorCategory: candidate.vendorCategory, mainCategory, existingMainCategory: existing.mainCategory, status: "conflict" });
+      continue;
+    }
+    mappings[key] = {
+      ...(existing || {}),
+      supplier: candidate.supplier,
+      vendorCategory: candidate.vendorCategory,
+      mainCategory,
+      categoryVerified: true,
+      source: existing?.source || "verified-product-catalog",
+      sampleSku: existing?.sampleSku || candidate.sampleSku,
+      matchCount,
+      conflictCount: Math.max(Number(existing?.conflictCount || 0), categoryConflictCount),
+      updatedAt: now,
+      createdAt: existing?.createdAt || now
+    };
+    if (existing) refreshed += 1;
+    else created += 1;
+    if (samples.length < 10) samples.push({ supplier: candidate.supplier, vendorCategory: candidate.vendorCategory, mainCategory, matchCount, status: existing ? "refreshed" : "created" });
+  }
+  db.vendorCategoryMappings = mappings;
+  return {
+    scannedProducts: Array.isArray(db.inventory) ? db.inventory.length : 0,
+    candidateMappings: candidates.size,
+    created,
+    refreshed,
+    conflicts,
+    samples
+  };
+}
+
 function sourceCatalogOverrideMap(db = {}) {
   db.sourceCatalogOverrides = normalizeSourceCatalogOverrides(db.sourceCatalogOverrides);
   return db.sourceCatalogOverrides;
@@ -9474,6 +9548,34 @@ async function handleApi(req, res) {
     return sendJson(res, 200, {
       ...result,
       categories: publicCategories(normalized, url.searchParams.get("q") || "", scope),
+      state: publicState(normalized)
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "learn-source-mappings") {
+    const body = await parseBody(req);
+    const scope = body.scope || url.searchParams.get("scope") || "main";
+    const source = findPublicCategory(db, parts[2], scope);
+    if (!source) return notFound(res);
+    const result = learnVendorCategoryMappingsFromProducts(db, { categoryName: source.name });
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, {
+      ...result,
+      categories: publicCategories(normalized, url.searchParams.get("q") || "", scope),
+      state: publicState(normalized)
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/categories/learn-source-mappings") {
+    const result = learnVendorCategoryMappingsFromProducts(db);
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, {
+      ...result,
+      categories: publicCategories(normalized, url.searchParams.get("q") || "", url.searchParams.get("scope") || "main"),
       state: publicState(normalized)
     });
   }

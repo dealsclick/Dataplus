@@ -5054,6 +5054,7 @@ function renderCategoryTable(categories, scopeLabel) {
           </div>
           <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon("clipboard-list", "Matrixify smart collections")}</a>
           <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon("layout-panel-left", "Matrixify menu")}</a>
+          <button class="button secondary" type="button" data-learn-source-category-mappings="all">${withIcon("refresh-cw", "Learn source maps")}</button>
           <button class="button secondary" type="button" data-auto-map-ebay-categories>${withIcon("search", "Auto-map eBay")}</button>
         </div>
       </div>
@@ -5111,6 +5112,7 @@ function renderCategoryDetail(selected) {
           <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon("clipboard-list", "Matrixify smart collections")}</a>
           <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon("layout-panel-left", "Matrixify menu")}</a>
           <button class="button secondary" type="button" data-auto-map-ebay-categories>${withIcon("search", "Auto-map eBay")}</button>
+          ${categoryScope === "main" ? `<button class="button secondary" type="button" data-learn-source-category-mappings="${html(selected.id)}">${withIcon("refresh-cw", "Map source catalog")}</button>` : ""}
           ${renderCategoryStatus(selected)}
         </div>
       </div>
@@ -5267,6 +5269,28 @@ async function applyCategoryMapToProducts(button) {
   categoryViewMode = "detail";
   renderCategories();
   toast(result.queued ? "SKU category refresh queued in Jobs." : `Updated ${Number(result.changed || 0).toLocaleString()} SKU${Number(result.changed || 0) === 1 ? "" : "s"}.`);
+}
+
+async function learnSourceCategoryMappings(button) {
+  const target = button.dataset.learnSourceCategoryMappings || "all";
+  const isAll = target === "all";
+  const confirmText = isAll
+    ? "Learn source catalog category mappings from every verified product with a main category?"
+    : "Learn source catalog category mappings from products in this main category?";
+  if (!confirm(confirmText)) return;
+  const path = isAll
+    ? `/api/categories/learn-source-mappings?scope=${encodeURIComponent(categoryScope)}`
+    : `/api/categories/${encodeURIComponent(target)}/learn-source-mappings`;
+  const result = await api(path, {
+    feedbackLabel: "Learning source category mappings...",
+    method: "POST",
+    body: JSON.stringify({ scope: categoryScope })
+  });
+  if (result.state) setState(result.state);
+  if (result.categories) categoryState = { ...result.categories, query: categoryState.query, scope: categoryScope, loading: false };
+  if (!isAll) selectedCategoryId = target;
+  renderCategories();
+  toast(`Learned ${Number(result.created || 0).toLocaleString()} new source map${Number(result.created || 0) === 1 ? "" : "s"}; refreshed ${Number(result.refreshed || 0).toLocaleString()}.`);
 }
 
 function renderCatalog() {
@@ -12655,6 +12679,7 @@ document.addEventListener("click", (event) => {
   const syncCategoryAttributesButton = event.target.closest("[data-sync-category-attributes]");
   const saveCategoryMapButton = event.target.closest("[data-save-category-map]");
   const applyCategoryMapToProductsButton = event.target.closest("[data-apply-category-map-to-products]");
+  const learnSourceCategoryMappingsButton = event.target.closest("[data-learn-source-category-mappings]");
   const clearJobFiltersButton = event.target.closest("[data-clear-job-filters]");
   const channelButton = event.target.closest("[data-select-channel]");
   const exchangeTemuButton = event.target.closest("[data-exchange-temu-code]");
@@ -12879,6 +12904,10 @@ document.addEventListener("click", (event) => {
   }
   if (applyCategoryMapToProductsButton) {
     applyCategoryMapToProducts(applyCategoryMapToProductsButton).catch((error) => toast(error.message));
+    return;
+  }
+  if (learnSourceCategoryMappingsButton) {
+    learnSourceCategoryMappings(learnSourceCategoryMappingsButton).catch((error) => toast(error.message));
     return;
   }
   if (clearJobFiltersButton) {
