@@ -3670,8 +3670,14 @@ tbody tr:hover td {
   .channel-settings-grid.policy-grid,
   .channel-settings-grid.listing-grid,
   .channel-toggle-grid,
-  .channel-stat-strip {
+  .channel-stat-strip,
+  .knowledge-release,
+  .knowledge-workflow {
     grid-template-columns: 1fr;
+  }
+
+  .knowledge-link-row {
+    justify-content: flex-start;
   }
 
   .return-receive-primary-grid {
@@ -6443,6 +6449,120 @@ tbody tr:hover td {
 .empty-state.compact {
   padding: 12px;
   min-height: 0;
+}
+
+.knowledge-page {
+  display: grid;
+  gap: 16px;
+}
+
+.knowledge-hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.knowledge-hero h2 {
+  margin: 0 0 6px;
+  color: var(--ink);
+  font-size: 1.25rem;
+}
+
+.knowledge-changelog,
+.knowledge-workflow-list {
+  display: grid;
+  gap: 12px;
+}
+
+.knowledge-release,
+.knowledge-workflow {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 18px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.knowledge-release-date {
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 850;
+}
+
+.knowledge-release h3,
+.knowledge-guide h3,
+.knowledge-workflow h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1rem;
+}
+
+.knowledge-release ul,
+.knowledge-guide ol {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  color: var(--muted);
+}
+
+.knowledge-release li,
+.knowledge-guide li {
+  margin: 8px 0;
+  line-height: 1.45;
+}
+
+.knowledge-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.knowledge-guide {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.knowledge-guide-head {
+  display: grid;
+  gap: 6px;
+}
+
+.knowledge-guide-head span {
+  width: fit-content;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+
+.knowledge-workflow {
+  grid-template-columns: minmax(0, 1fr) minmax(220px, auto);
+  align-items: center;
+}
+
+.knowledge-workflow p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.knowledge-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 @media (max-width: 900px) {

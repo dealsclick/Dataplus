@@ -77,6 +77,7 @@ let selectedReturnId = null;
 let pendingOrderSkuMap = { orderId: null, lineIndex: 0, sourceSku: "", selectedProductId: null, query: "", searched: false, loading: false };
 let orderSkuMapSearchTimer = null;
 let currentViewId = "dashboard";
+let knowledgeTab = "whats-new";
 let menuGroupsExpanded = localStorage.getItem("dataplus-menu-groups-expanded") === "true";
 let themeMode = localStorage.getItem("dataplus-theme") || "light";
 let jobsFilter = { query: "", section: "", status: "", direction: "" };
@@ -90,6 +91,7 @@ const LUCIDE_ICONS = {
   "arrow-left": '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
   "badge-check": '<path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.78 4.78 4 4 0 0 1-6.74 0 4 4 0 0 1-4.78-4.78 4 4 0 0 1 0-6.75Z"/><path d="m9 12 2 2 4-4"/>',
   "bar-chart-3": '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+  "book-open": '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3 3 3 0 0 1 3-3h5a2 2 0 0 1 2 2v12a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3Z"/>',
   "boxes": '<path d="M2.97 12.92 12 17.5l9.03-4.58"/><path d="M2.97 17.92 12 22.5l9.03-4.58"/><path d="M12 2 2.97 6.58 12 11.16l9.03-4.58L12 2Z"/>',
   "clipboard-check": '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
   "clipboard-list": '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/>',
@@ -118,6 +120,7 @@ const LUCIDE_ICONS = {
   "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
   "shopping-bag": '<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
   "shopping-cart": '<circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57L21.9 7H5.12"/>',
+  "sparkles": '<path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/>',
   "store": '<path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M15 22v-6a3 3 0 0 0-6 0v6"/><path d="M2 7h20"/><path d="M2 7v3a2 2 0 1 0 4 0V7"/><path d="M6 7v3a2 2 0 1 0 4 0V7"/><path d="M10 7v3a2 2 0 1 0 4 0V7"/><path d="M14 7v3a2 2 0 1 0 4 0V7"/><path d="M18 7v3a2 2 0 1 0 4 0V7"/>',
   "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
   "tags": '<path d="M9 5H2v7l8.29 8.29a2.83 2.83 0 0 0 4 0l3-3a2.83 2.83 0 0 0 0-4Z"/><path d="M6 9.01V9"/><path d="m15 5 6.3 6.3a2.4 2.4 0 0 1 0 3.4L19 17"/>',
@@ -637,7 +640,7 @@ function showView(id) {
       (id === "catalog" && button.dataset.catalogTabLink === catalogTab);
     button.classList.toggle("active", active);
   });
-  $("#page-title").textContent = ({ dashboard: "Dashboard", orders: "Orders", drafts: "Drafts", "draft-full": "Draft Details", returns: "Returns", "return-full": "Return Details", "order-full": "Order Details", purchasing: "Purchasing", "po-full": "Purchase Order", "vendor-full": "Vendor Profile", "brand-full": "Brand Profile", "warehouse-full": "Warehouse Profile", catalog: "Catalog", jobs: "Jobs", "import-export": "Import / Export", "product-full": "Product Details", "shadow-full": "Shadow SKU Details", "template-full": "Template Preview", "inventory-full": "Inventory Details", "customer-full": "Customer Profile", customers: "Customers", inventory: "Inventory", reports: "Reports", connections: "Channels", "channel-full": "Channel Settings" })[id];
+  $("#page-title").textContent = ({ dashboard: "Dashboard", orders: "Orders", drafts: "Drafts", "draft-full": "Draft Details", returns: "Returns", "return-full": "Return Details", "order-full": "Order Details", purchasing: "Purchasing", "po-full": "Purchase Order", "vendor-full": "Vendor Profile", "brand-full": "Brand Profile", "warehouse-full": "Warehouse Profile", catalog: "Catalog", jobs: "Jobs", "import-export": "Import / Export", "product-full": "Product Details", "shadow-full": "Shadow SKU Details", "template-full": "Template Preview", "inventory-full": "Inventory Details", "customer-full": "Customer Profile", customers: "Customers", inventory: "Inventory", reports: "Reports", knowledge: "Knowledge Base", connections: "Channels", "channel-full": "Channel Settings" })[id];
   if (id === "order-full") renderFullOrderPage();
   if (id === "drafts") renderDrafts();
   if (id === "draft-full") renderDraftOrderPage();
@@ -655,6 +658,7 @@ function showView(id) {
   if (id === "inventory-full") renderInventoryProductPage();
   if (id === "channel-full") renderChannelProfile();
   if (id === "customer-full") renderCustomerProfile();
+  if (id === "knowledge") renderKnowledgeBase();
   renderTopbarActions();
 }
 
@@ -778,6 +782,9 @@ function renderTopbarActions() {
   } else if (currentViewId === "connections" || currentViewId === "channel-full") {
     actions.push(`<button id="topbar-sync-trigger" data-topbar-sync>Sync enabled channels</button>`);
     actions.push(`<button data-view-jump="connections">Open channels</button>`);
+  } else if (currentViewId === "knowledge") {
+    actions.push(`<button data-knowledge-tab-jump="whats-new">What's new</button>`);
+    actions.push(`<button data-knowledge-tab-jump="how-to">How to</button>`);
   } else if (currentViewId === "reports") {
     actions.push(`<button data-view-jump="orders">Open orders</button>`);
     actions.push(`<a href="/api/export/inventory">Download inventory CSV</a>`);
@@ -8770,6 +8777,195 @@ function groupBy(list, keyFn) {
   }, {});
 }
 
+const KNOWLEDGE_CHANGELOG = [
+  {
+    date: "2026-05-13",
+    title: "Marketplace workflow update",
+    changes: [
+      "Added eBay listing operations for product SKUs: draft mapping, offer creation, publishing, category search, item specifics, pricing defaults, quantity planning, and bulk launch.",
+      "Expanded eBay channel setup with seller account sync, merchant location creation, business policy selection, marketplace/currency defaults, listing format, condition, image, and best-offer settings.",
+      "Added eBay catalog import to map live offers/listings back to DataPlus products and queue unmatched catalog reviews.",
+      "Upgraded order management with queue views, void/done/delete actions, financial exclusion for voided orders, and SKU mapping tools for marketplace order lines.",
+      "Added SKU tools for renaming SKUs, creating shadow SKUs, backfilling source catalog data, and preserving aliases from mapped marketplace order lines.",
+      "Expanded catalog/category management with eBay taxonomy mapping, channel category refresh, attribute mapping, Matrixify smart collection/menu review tools, and bulk workflows.",
+      "Improved import/export operations with saved job files, original/error downloads, mapped CSV templates, Shopify status import, and export mapping sidecar storage.",
+      "Improved app performance by ignoring generated outputs, trimming public state payloads, compacting eBay listing data, and caching local JSON reads in memory."
+    ]
+  }
+];
+
+const KNOWLEDGE_HOW_TO = [
+  {
+    title: "Connect eBay",
+    area: "Channels",
+    steps: [
+      "Open Channels from the sidebar.",
+      "Open eBay.",
+      "Confirm marketplace, currency, location, and business policy defaults.",
+      "Use Connect eBay or Reconnect eBay to authorize the seller account.",
+      "Run Sync eBay account settings after authorization to refresh locations and policies."
+    ]
+  },
+  {
+    title: "Prepare a SKU for eBay",
+    area: "Catalog",
+    steps: [
+      "Open Catalog, then Products.",
+      "Open the SKU and switch to the eBay tab.",
+      "Choose or search for the eBay category.",
+      "Load item specifics and fill required values.",
+      "Use suggested price and calculated quantity when they fit the listing.",
+      "Save SKU mapping, create the offer, then publish when readiness is complete."
+    ]
+  },
+  {
+    title: "Map an order line to an existing SKU",
+    area: "Orders",
+    steps: [
+      "Open Orders and select an order.",
+      "Find a line marked Not in products.",
+      "Open SKU tools and choose Map to existing SKU.",
+      "Search for the DataPlus SKU and confirm the mapping.",
+      "Use a shadow mapping when the marketplace SKU should stay distinct from the parent SKU."
+    ]
+  },
+  {
+    title: "Review catalog import changes",
+    area: "Catalog",
+    steps: [
+      "Open Catalog, then Import Review.",
+      "Filter pending review rows.",
+      "Open the product when you need context.",
+      "Accept changes that should update DataPlus fields.",
+      "Reject changes that should remain as source-only differences."
+    ]
+  },
+  {
+    title: "Use import job history",
+    area: "Jobs",
+    steps: [
+      "Open Jobs from the sidebar.",
+      "Filter by section, status, or direction.",
+      "Open a job row to inspect counts and errors.",
+      "Download the original file or errors CSV when available."
+    ]
+  }
+];
+
+const KNOWLEDGE_WORKFLOWS = [
+  {
+    title: "Launch products to eBay",
+    summary: "Map categories, complete item specifics, verify pricing/quantity, then publish individually or in bulk from the product catalog.",
+    links: [
+      ["Open eBay channel", "connections"],
+      ["Open products", "catalog"],
+      ["Open jobs", "jobs"]
+    ]
+  },
+  {
+    title: "Keep orders financially clean",
+    summary: "Use void for orders that should be excluded from reporting, done for completed work, and delete only when the order should be removed with a tombstone.",
+    links: [
+      ["Open orders", "orders"],
+      ["Open reports", "reports"]
+    ]
+  },
+  {
+    title: "Promote source catalog SKUs",
+    summary: "Use Source Catalog to find vendor products, promote selected SKUs into active products, then manage readiness and channel mappings in Products.",
+    links: [
+      ["Open source catalog", "catalog"],
+      ["Open readiness", "catalog"]
+    ]
+  }
+];
+
+function renderKnowledgeBase() {
+  const target = $("#knowledge-content");
+  if (!target) return;
+  $$("[data-knowledge-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.knowledgeTab === knowledgeTab);
+  });
+  if (knowledgeTab === "how-to") {
+    target.innerHTML = `
+      <div class="knowledge-page">
+        <div class="knowledge-hero">
+          <div>
+            <p class="eyebrow">Knowledge Base</p>
+            <h2>How to run common workflows</h2>
+            <p class="muted">Step-by-step references for daily marketplace operations.</p>
+          </div>
+        </div>
+        <div class="knowledge-guide-grid">
+          ${KNOWLEDGE_HOW_TO.map((guide) => `
+            <article class="knowledge-guide">
+              <div class="knowledge-guide-head">
+                <span>${html(guide.area)}</span>
+                <h3>${html(guide.title)}</h3>
+              </div>
+              <ol>
+                ${guide.steps.map((step) => `<li>${html(step)}</li>`).join("")}
+              </ol>
+            </article>
+          `).join("")}
+        </div>
+      </div>
+    `;
+    return;
+  }
+  if (knowledgeTab === "workflows") {
+    target.innerHTML = `
+      <div class="knowledge-page">
+        <div class="knowledge-hero">
+          <div>
+            <p class="eyebrow">Playbooks</p>
+            <h2>Operational workflows</h2>
+            <p class="muted">Short paths through connected areas of DataPlus.</p>
+          </div>
+        </div>
+        <div class="knowledge-workflow-list">
+          ${KNOWLEDGE_WORKFLOWS.map((workflow) => `
+            <article class="knowledge-workflow">
+              <div>
+                <h3>${html(workflow.title)}</h3>
+                <p>${html(workflow.summary)}</p>
+              </div>
+              <div class="knowledge-link-row">
+                ${workflow.links.map(([label, view]) => `<button class="button secondary" type="button" data-view-jump="${html(view)}">${html(label)}</button>`).join("")}
+              </div>
+            </article>
+          `).join("")}
+        </div>
+      </div>
+    `;
+    return;
+  }
+  target.innerHTML = `
+    <div class="knowledge-page">
+      <div class="knowledge-hero">
+        <div>
+          <p class="eyebrow">What's New</p>
+          <h2>Latest DataPlus changes</h2>
+          <p class="muted">Feature notes and operational changes for users.</p>
+        </div>
+      </div>
+      <div class="knowledge-changelog">
+        ${KNOWLEDGE_CHANGELOG.map((release) => `
+          <article class="knowledge-release">
+            <div class="knowledge-release-date">${html(release.date)}</div>
+            <div>
+              <h3>${html(release.title)}</h3>
+              <ul>
+                ${release.changes.map((change) => `<li>${html(change)}</li>`).join("")}
+              </ul>
+            </div>
+          </article>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
 function renderReports() {
   const orders = state.orders.filter(isReportableOrder);
   const reportableOrderIds = new Set(orders.map((order) => order.id));
@@ -9132,6 +9328,7 @@ function render() {
   renderCatalog();
   renderJobsPage();
   renderReports();
+  renderKnowledgeBase();
   renderConnections();
   renderTopbarActions();
   if ($("#order-full").classList.contains("active")) renderFullOrderPage();
@@ -9149,6 +9346,7 @@ function render() {
   if ($("#inventory-full").classList.contains("active")) renderInventoryProductPage();
   if ($("#channel-full").classList.contains("active")) renderChannelProfile();
   if ($("#customer-full").classList.contains("active")) renderCustomerProfile();
+  if ($("#knowledge").classList.contains("active")) renderKnowledgeBase();
 }
 
 async function load() {
@@ -11692,6 +11890,8 @@ document.addEventListener("click", (event) => {
   const toggleOrderDetailAction = event.target.closest("[data-toggle-order-detail-action]");
   const purchasingTabButton = event.target.closest("[data-purchasing-tab]");
   const catalogTabButton = event.target.closest("[data-catalog-tab]");
+  const knowledgeTabButton = event.target.closest("[data-knowledge-tab]");
+  const knowledgeTabJumpButton = event.target.closest("[data-knowledge-tab-jump]");
   const sourcePageButton = event.target.closest("[data-source-page]");
   const promoteCatalogButton = event.target.closest("[data-promote-catalog-sku]");
   const sourceRowActionButton = event.target.closest("[data-source-row-action]");
@@ -12870,6 +13070,17 @@ document.addEventListener("click", (event) => {
   }
   if (submitOrderSkuMapButton) {
     submitOrderSkuMap(submitOrderSkuMapButton.dataset.submitOrderSkuMap).catch((error) => toast(error.message));
+    return;
+  }
+  if (knowledgeTabButton) {
+    knowledgeTab = knowledgeTabButton.dataset.knowledgeTab || "whats-new";
+    renderKnowledgeBase();
+    return;
+  }
+  if (knowledgeTabJumpButton) {
+    knowledgeTab = knowledgeTabJumpButton.dataset.knowledgeTabJump || "whats-new";
+    showView("knowledge");
+    renderKnowledgeBase();
     return;
   }
   if (viewButton) {
