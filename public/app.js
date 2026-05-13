@@ -5473,7 +5473,6 @@ function renderAttributesPage() {
         <span><small>Mapped</small><strong>${Number(attributeState.mappedCount || 0).toLocaleString()}</strong><em>Source field or fallback</em></span>
         <span><small>Required</small><strong>${Number(attributeState.requiredCount || 0).toLocaleString()}</strong><em>Marketplace required attributes</em></span>
       </div>
-      ${renderAttributeGroupsPanel()}
       ${attributeState.loading ? `<div class="empty-state">Loading attributes...</div>` : `
         <div class="category-table-wrap attribute-table-wrap">
           <table class="data-table category-table attribute-review-table">
@@ -5510,6 +5509,29 @@ function renderAttributesPage() {
         ${rows.length > 700 ? `<p class="muted category-table-foot">Showing first 700 matching attributes. Use search or marketplace filter to narrow the list.</p>` : ""}
       `}
       ${renderAttributeMappingModal()}
+    </section>
+  `;
+}
+
+function renderAttributeGroupsPage() {
+  const target = $("#attribute-groups-list");
+  if (!target) return;
+  target.innerHTML = `
+    <section class="attribute-groups-page">
+      <div class="category-coverage-head">
+        <div>
+          <p class="eyebrow">Related attribute logic</p>
+          <h3>Attribute groups</h3>
+          <p class="muted">Manage aliases that teach the mapper which marketplace attributes mean the same thing.</p>
+        </div>
+      </div>
+      <div class="category-coverage-grid">
+        <span><small>Groups</small><strong>${Number((attributeState.groups || []).length).toLocaleString()}</strong><em>Editable alias sets</em></span>
+        <span><small>Attributes scanned</small><strong>${Number(attributeState.total || 0).toLocaleString()}</strong><em>Used for match counts</em></span>
+        <span><small>Mapped</small><strong>${Number(attributeState.mappedCount || 0).toLocaleString()}</strong><em>Source field or fallback</em></span>
+      </div>
+      ${renderAttributeGroupsPanel()}
+      ${attributeState.loading ? `<div class="empty-state">Loading attribute groups...</div>` : ""}
     </section>
   `;
 }
@@ -5663,7 +5685,8 @@ async function saveAttributeGroup(id = "") {
     body: JSON.stringify({ id: isNew ? "" : id, label, aliases })
   });
   attributeState = { ...attributeState, groups: result.groups || [] };
-  renderAttributesPage();
+  if (catalogTab === "attribute-groups") renderAttributeGroupsPage();
+  else renderAttributesPage();
   toast("Attribute group saved.");
 }
 
@@ -5694,6 +5717,7 @@ function renderCatalog() {
   $("#import-review-list").style.display = catalogTab === "reviews" ? "block" : "none";
   $("#category-list").style.display = catalogTab === "categories" ? "block" : "none";
   $("#attribute-list").style.display = catalogTab === "attributes" ? "block" : "none";
+  $("#attribute-groups-list").style.display = catalogTab === "attribute-groups" ? "block" : "none";
   const catalogImportExportList = $("#import-export-list");
   if (catalogImportExportList) catalogImportExportList.style.display = catalogTab === "import-export" ? "block" : "none";
   $("#inventory-list").style.display = catalogTab === "inventory" ? "block" : "none";
@@ -5721,6 +5745,11 @@ function renderCatalog() {
   }
   if (catalogTab === "attributes") {
     renderAttributesPage();
+    if (!attributeState.rows.length && !attributeState.loading) loadCategoryAttributes().catch((error) => toast(error.message));
+    return;
+  }
+  if (catalogTab === "attribute-groups") {
+    renderAttributeGroupsPage();
     if (!attributeState.rows.length && !attributeState.loading) loadCategoryAttributes().catch((error) => toast(error.message));
     return;
   }
