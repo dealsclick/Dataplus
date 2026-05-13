@@ -3612,6 +3612,7 @@ function masterCategoryMappingRows(db = {}) {
   for (const [key, main] of mainByName.entries()) {
     const setting = settings.find((row) => formatCategoryName(row.name).toLowerCase() === key) || {};
     const shopify = normalizeChannelCategoryMapping(setting.mappings?.shopify || {});
+    const smartCollection = normalizeSmartCollectionProfile(setting.smartCollection || setting.shopifyCollection || {}, main.name);
     const ebay = normalizeChannelCategoryMapping(setting.mappings?.ebay || {});
     const learnedMappings = (mappingsByMain.get(key) || []).sort((a, b) => String(a.supplier).localeCompare(String(b.supplier)) || String(a.vendorCategory).localeCompare(String(b.vendorCategory)));
     const base = {
@@ -3620,6 +3621,9 @@ function masterCategoryMappingRows(db = {}) {
       "Source Category": "",
       "Shopify": shopify.categoryPath || shopify.categoryId || "",
       "Shopify Category ID": shopify.categoryId || "",
+      "Shopify Product Type": smartCollection.productType || "",
+      "Shopify Collection": smartCollection.title || "",
+      "Shopify Collection Handle": smartCollection.handle || shopify.collectionHandle || "",
       "eBay": ebay.categoryPath || ebay.categoryId || "",
       "eBay Category ID": ebay.categoryId || "",
       "Product Count": main.productCount || 0,
