@@ -961,6 +961,62 @@ function applyProtectedSourceProduct(db, existing, incoming, source = "Source ca
   return existing;
 }
 
+const KNOWLEDGE_CATEGORIES = new Set(["whats-new", "features", "how-to", "workflows"]);
+
+function slugifyKnowledgeTitle(value) {
+  const slug = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || `article-${Date.now()}`;
+}
+
+function normalizeKnowledgeBlocks(blocks = []) {
+  if (!Array.isArray(blocks)) return [];
+  return blocks
+    .map((block) => {
+      const type = String(block?.type || "paragraph").trim() || "paragraph";
+      const data = block && typeof block.data === "object" && !Array.isArray(block.data) ? block.data : {};
+      return {
+        id: String(block?.id || crypto.randomUUID()),
+        type,
+        data
+      };
+    })
+    .slice(0, 250);
+}
+
+function normalizeKnowledgeArticle(article = {}) {
+  const now = new Date().toISOString();
+  const title = String(article.title || "Untitled article").trim() || "Untitled article";
+  const createdAt = article.createdAt || now;
+  const updatedAt = article.updatedAt || createdAt;
+  const category = KNOWLEDGE_CATEGORIES.has(article.category) ? article.category : "how-to";
+  return {
+    id: String(article.id || crypto.randomUUID()),
+    title,
+    slug: String(article.slug || slugifyKnowledgeTitle(title)).trim() || slugifyKnowledgeTitle(title),
+    category,
+    area: String(article.area || "").trim(),
+    summary: String(article.summary || "").trim(),
+    tags: sourceListValue(article.tags || []).map((tag) => String(tag).trim()).filter(Boolean).slice(0, 24),
+    status: String(article.status || "published").toLowerCase() === "draft" ? "draft" : "published",
+    blocks: normalizeKnowledgeBlocks(article.blocks || []),
+    archived: Boolean(article.archived || false),
+    createdAt,
+    updatedAt,
+    createdBy: String(article.createdBy || "DataPlus").trim() || "DataPlus",
+    updatedBy: String(article.updatedBy || article.createdBy || "DataPlus").trim() || "DataPlus"
+  };
+}
+
+function normalizeKnowledgeArticles(articles = []) {
+  return Array.isArray(articles)
+    ? articles.map(normalizeKnowledgeArticle).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+    : [];
+}
+
 function normalizeDb(db) {
   let changed = false;
   db.sequence = db.sequence || {};
@@ -978,6 +1034,7 @@ function normalizeDb(db) {
   db.deletedOrders = Array.isArray(db.deletedOrders) ? db.deletedOrders : [];
   db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
   db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
+  db.knowledgeArticles = normalizeKnowledgeArticles(db.knowledgeArticles);
   db.systemSettings = { ...DEFAULT_SYSTEM_SETTINGS, ...(db.systemSettings || {}) };
   db.connections = (db.connections || SOURCES.map((name) => ({ id: crypto.randomUUID(), name }))).map(normalizeChannel);
 
@@ -8822,6 +8879,53 @@ async function handleApi(req, res) {
   }
 
   const db = await readDb();
+
+  if (req.method === "POST" && url.pathname === "/api/knowledge/articles") {
+    const body = await parseBody(req);
+    const now = new Date().toISOString();
+    const article = normalizeKnowledgeArticle({
+      ...body,
+      id: undefined,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: body.createdBy || "Luis",
+      updatedBy: body.updatedBy || body.createdBy || "Luis"
+    });
+    db.knowledgeArticles = normalizeKnowledgeArticles([article, ...(db.knowledgeArticles || [])]);
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { article, state: publicState(normalized) });
+  }
+
+  if (parts[0] === "api" && parts[1] === "knowledge" && parts[2] === "articles" && parts[3]) {
+    db.knowledgeArticles = normalizeKnowledgeArticles(db.knowledgeArticles);
+    const article = db.knowledgeArticles.find((row) => row.id === parts[3]);
+    if (!article) return notFound(res);
+    if (req.method === "PATCH") {
+      const body = await parseBody(req);
+      for (const field of ["title", "area", "summary", "status", "category"]) {
+        if (body[field] !== undefined) article[field] = body[field];
+      }
+      if (body.tags !== undefined) article.tags = body.tags;
+      if (body.blocks !== undefined) article.blocks = body.blocks;
+      article.slug = body.slug || slugifyKnowledgeTitle(article.title);
+      article.updatedAt = new Date().toISOString();
+      article.updatedBy = String(body.updatedBy || "Luis").trim() || "Luis";
+      const normalizedArticle = normalizeKnowledgeArticle(article);
+      db.knowledgeArticles = db.knowledgeArticles.map((row) => row.id === normalizedArticle.id ? normalizedArticle : row);
+      const normalized = normalizeDb(db);
+      await writeDb(normalized);
+      return sendJson(res, 200, { article: normalizedArticle, state: publicState(normalized) });
+    }
+    if (req.method === "DELETE") {
+      article.archived = true;
+      article.updatedAt = new Date().toISOString();
+      article.updatedBy = "Luis";
+      const normalized = normalizeDb(db);
+      await writeDb(normalized);
+      return sendJson(res, 200, { article: normalizeKnowledgeArticle(article), state: publicState(normalized) });
+    }
+  }
 
   if (req.method === "PATCH" && url.pathname === "/api/system-settings") {
     const body = await parseBody(req);

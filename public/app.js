@@ -78,6 +78,10 @@ let pendingOrderSkuMap = { orderId: null, lineIndex: 0, sourceSku: "", selectedP
 let orderSkuMapSearchTimer = null;
 let currentViewId = "dashboard";
 let knowledgeTab = "whats-new";
+let knowledgeSearch = "";
+let selectedKnowledgeArticleId = null;
+let editingKnowledgeArticleId = null;
+let knowledgeEditor = null;
 let menuGroupsExpanded = localStorage.getItem("dataplus-menu-groups-expanded") === "true";
 let themeMode = localStorage.getItem("dataplus-theme") || "light";
 let jobsFilter = { query: "", section: "", status: "", direction: "" };
@@ -9204,114 +9208,399 @@ const KNOWLEDGE_WORKFLOWS = [
   }
 ];
 
+function knowledgeListBlock(items = [], style = "unordered") {
+  return { type: "list", data: { style, items } };
+}
+
+function knowledgeParagraph(text) {
+  return { type: "paragraph", data: { text } };
+}
+
+function defaultKnowledgeArticles() {
+  const articles = [];
+  for (const release of KNOWLEDGE_CHANGELOG) {
+    articles.push({
+      id: `default-changelog-${release.date}`,
+      title: release.title,
+      slug: `changelog-${release.date}`,
+      category: "whats-new",
+      area: "Release Notes",
+      summary: `Released ${release.date}.`,
+      tags: ["changelog", "new features"],
+      status: "published",
+      createdAt: `${release.date}T12:00:00.000Z`,
+      updatedAt: `${release.date}T12:00:00.000Z`,
+      source: "default",
+      blocks: [knowledgeListBlock(release.changes, "unordered")]
+    });
+  }
+  for (const section of KNOWLEDGE_FEATURES) {
+    articles.push({
+      id: `default-feature-${section.area.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      title: `${section.area} feature reference`,
+      slug: `features-${section.area.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      category: "features",
+      area: section.area,
+      summary: `Capabilities available in ${section.area}.`,
+      tags: ["features", section.area],
+      status: "published",
+      createdAt: "2026-05-13T12:00:00.000Z",
+      updatedAt: "2026-05-13T12:00:00.000Z",
+      source: "default",
+      blocks: [knowledgeListBlock(section.features, "unordered")]
+    });
+  }
+  for (const guide of KNOWLEDGE_HOW_TO) {
+    articles.push({
+      id: `default-how-to-${guide.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      title: guide.title,
+      slug: `how-to-${guide.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      category: "how-to",
+      area: guide.area,
+      summary: `Step-by-step guide for ${guide.title.toLowerCase()}.`,
+      tags: ["how to", guide.area],
+      status: "published",
+      createdAt: "2026-05-13T12:00:00.000Z",
+      updatedAt: "2026-05-13T12:00:00.000Z",
+      source: "default",
+      blocks: [knowledgeListBlock(guide.steps, "ordered")]
+    });
+  }
+  for (const workflow of KNOWLEDGE_WORKFLOWS) {
+    articles.push({
+      id: `default-workflow-${workflow.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      title: workflow.title,
+      slug: `workflow-${workflow.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      category: "workflows",
+      area: "Workflow",
+      summary: workflow.summary,
+      tags: ["workflow"],
+      status: "published",
+      createdAt: "2026-05-13T12:00:00.000Z",
+      updatedAt: "2026-05-13T12:00:00.000Z",
+      source: "default",
+      blocks: [
+        knowledgeParagraph(workflow.summary),
+        { type: "checklist", data: { items: workflow.links.map(([label, view]) => ({ text: `${label}: ${view}`, checked: false })) } }
+      ]
+    });
+  }
+  return articles;
+}
+
+function allKnowledgeArticles() {
+  const persisted = (state?.knowledgeArticles || []).filter((article) => !article.archived);
+  const persistedSlugs = new Set(persisted.map((article) => article.slug).filter(Boolean));
+  const defaults = defaultKnowledgeArticles().filter((article) => !persistedSlugs.has(article.slug));
+  return [...persisted, ...defaults].sort((a, b) => {
+    if (a.category !== b.category) return a.category.localeCompare(b.category);
+    return String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")) || a.title.localeCompare(b.title);
+  });
+}
+
+function knowledgeCategoryLabel(category) {
+  return {
+    "whats-new": "What's New",
+    features: "Features",
+    "how-to": "How To",
+    workflows: "Workflows"
+  }[category] || "Knowledge";
+}
+
+function filterKnowledgeArticles() {
+  const query = knowledgeSearch.trim().toLowerCase();
+  return allKnowledgeArticles().filter((article) => {
+    if (article.category !== knowledgeTab) return false;
+    if (!query) return true;
+    const haystack = [
+      article.title,
+      article.area,
+      article.summary,
+      ...(article.tags || []),
+      ...(article.blocks || []).map((block) => JSON.stringify(block.data || {}))
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function currentKnowledgeArticle(articles = filterKnowledgeArticles()) {
+  if (selectedKnowledgeArticleId) {
+    const selected = articles.find((article) => article.id === selectedKnowledgeArticleId);
+    if (selected) return selected;
+  }
+  return articles[0] || null;
+}
+
+function renderKnowledgeArticleBlocks(blocks = []) {
+  if (!blocks.length) return `<p class="muted">No article content yet.</p>`;
+  return blocks.map((block) => {
+    const data = block.data || {};
+    if (block.type === "header") {
+      const level = Math.min(4, Math.max(2, Number(data.level || 2)));
+      return `<h${level}>${html(data.text || "")}</h${level}>`;
+    }
+    if (block.type === "list") {
+      const items = Array.isArray(data.items) ? data.items : [];
+      const tag = data.style === "ordered" ? "ol" : "ul";
+      return `<${tag}>${items.map((item) => `<li>${html(typeof item === "string" ? item : item?.content || item?.text || "")}</li>`).join("")}</${tag}>`;
+    }
+    if (block.type === "checklist") {
+      const items = Array.isArray(data.items) ? data.items : [];
+      return `<ul class="knowledge-checklist">${items.map((item) => `<li>${item.checked ? iconMarkup("badge-check") : iconMarkup("info")}<span>${html(item.text || "")}</span></li>`).join("")}</ul>`;
+    }
+    if (block.type === "image") {
+      const url = data.file?.url || data.url || "";
+      if (!url) return "";
+      return `<figure class="knowledge-media"><img src="${html(url)}" alt="${html(data.caption || "Knowledge article image")}"><figcaption>${html(data.caption || "")}</figcaption></figure>`;
+    }
+    if (block.type === "embed") {
+      const source = data.embed || data.source || "";
+      if (!source) return "";
+      return `<div class="knowledge-embed"><iframe src="${html(source)}" title="${html(data.caption || "Embedded media")}" loading="lazy" allowfullscreen></iframe><small>${html(data.caption || data.service || "")}</small></div>`;
+    }
+    if (block.type === "delimiter") return `<hr>`;
+    return `<p>${html(data.text || "")}</p>`;
+  }).join("");
+}
+
+function renderKnowledgeArticleList(articles, selectedArticle) {
+  return articles.map((article) => `
+    <button class="knowledge-article-row ${selectedArticle?.id === article.id ? "active" : ""}" type="button" data-select-knowledge-article="${html(article.id)}">
+      <span>${html(article.area || knowledgeCategoryLabel(article.category))}</span>
+      <strong>${html(article.title)}</strong>
+      <small>${html(article.summary || "Open article")}</small>
+    </button>
+  `).join("") || `<div class="empty-state">No articles match this view.</div>`;
+}
+
+function renderKnowledgeEditor(article) {
+  const isNew = !article;
+  const draft = article || {
+    title: "",
+    category: knowledgeTab,
+    area: "",
+    summary: "",
+    status: "draft",
+    tags: [],
+    blocks: [{ type: "paragraph", data: { text: "" } }]
+  };
+  return `
+    <article class="knowledge-editor-shell">
+      <div class="knowledge-editor-head">
+        <div>
+          <p class="eyebrow">${isNew ? "New Article" : "Edit Article"}</p>
+          <h2>${isNew ? "Create a knowledge article" : html(draft.title)}</h2>
+        </div>
+        <div class="knowledge-editor-actions">
+          <button class="button secondary" type="button" data-cancel-knowledge-edit>Cancel</button>
+          <button class="button primary" type="button" data-save-knowledge-article>${withIcon("save", "Save article")}</button>
+        </div>
+      </div>
+      <div class="knowledge-editor-fields">
+        <label>Title<input id="knowledge-editor-title" value="${html(draft.title)}" placeholder="Article title"></label>
+        <label>Category
+          <select id="knowledge-editor-category">
+            ${["whats-new", "features", "how-to", "workflows"].map((category) => `<option value="${category}" ${draft.category === category ? "selected" : ""}>${knowledgeCategoryLabel(category)}</option>`).join("")}
+          </select>
+        </label>
+        <label>Area<input id="knowledge-editor-area" value="${html(draft.area || "")}" placeholder="Orders, Catalog, Channels..."></label>
+        <label>Status
+          <select id="knowledge-editor-status">
+            <option value="draft" ${draft.status === "draft" ? "selected" : ""}>Draft</option>
+            <option value="published" ${draft.status !== "draft" ? "selected" : ""}>Published</option>
+          </select>
+        </label>
+        <label class="span-2">Summary<textarea id="knowledge-editor-summary" rows="2" placeholder="Short description">${html(draft.summary || "")}</textarea></label>
+        <label>Tags<input id="knowledge-editor-tags" value="${html((draft.tags || []).join(", "))}" placeholder="how to, orders, ebay"></label>
+      </div>
+      <div id="knowledge-editorjs" class="knowledge-editor"></div>
+      <textarea id="knowledge-editor-fallback" class="knowledge-editor-fallback" rows="14">${html(JSON.stringify(draft.blocks || [], null, 2))}</textarea>
+    </article>
+  `;
+}
+
 function renderKnowledgeBase() {
   const target = $("#knowledge-content");
   if (!target) return;
   $$("[data-knowledge-tab]").forEach((button) => {
     button.classList.toggle("active", button.dataset.knowledgeTab === knowledgeTab);
   });
-  if (knowledgeTab === "features") {
-    target.innerHTML = `
-      <div class="knowledge-page">
-        <div class="knowledge-hero">
-          <div>
-            <p class="eyebrow">Feature Reference</p>
-            <h2>What DataPlus can do</h2>
-            <p class="muted">A module-by-module map of the tools available in the app.</p>
-          </div>
-        </div>
-        <div class="knowledge-feature-grid">
-          ${KNOWLEDGE_FEATURES.map((section) => `
-            <article class="knowledge-feature">
-              <h3>${html(section.area)}</h3>
-              <ul>
-                ${section.features.map((feature) => `<li>${html(feature)}</li>`).join("")}
-              </ul>
-            </article>
-          `).join("")}
-        </div>
-      </div>
-    `;
-    return;
-  }
-  if (knowledgeTab === "how-to") {
-    target.innerHTML = `
-      <div class="knowledge-page">
-        <div class="knowledge-hero">
-          <div>
-            <p class="eyebrow">Knowledge Base</p>
-            <h2>How to run common workflows</h2>
-            <p class="muted">Step-by-step references for daily marketplace operations.</p>
-          </div>
-        </div>
-        <div class="knowledge-guide-grid">
-          ${KNOWLEDGE_HOW_TO.map((guide) => `
-            <article class="knowledge-guide">
-              <div class="knowledge-guide-head">
-                <span>${html(guide.area)}</span>
-                <h3>${html(guide.title)}</h3>
-              </div>
-              <ol>
-                ${guide.steps.map((step) => `<li>${html(step)}</li>`).join("")}
-              </ol>
-            </article>
-          `).join("")}
-        </div>
-      </div>
-    `;
-    return;
-  }
-  if (knowledgeTab === "workflows") {
-    target.innerHTML = `
-      <div class="knowledge-page">
-        <div class="knowledge-hero">
-          <div>
-            <p class="eyebrow">Playbooks</p>
-            <h2>Operational workflows</h2>
-            <p class="muted">Short paths through connected areas of DataPlus.</p>
-          </div>
-        </div>
-        <div class="knowledge-workflow-list">
-          ${KNOWLEDGE_WORKFLOWS.map((workflow) => `
-            <article class="knowledge-workflow">
-              <div>
-                <h3>${html(workflow.title)}</h3>
-                <p>${html(workflow.summary)}</p>
-              </div>
-              <div class="knowledge-link-row">
-                ${workflow.links.map(([label, view]) => `<button class="button secondary" type="button" data-view-jump="${html(view)}">${html(label)}</button>`).join("")}
-              </div>
-            </article>
-          `).join("")}
-        </div>
-      </div>
-    `;
-    return;
-  }
+  const articles = filterKnowledgeArticles();
+  const selectedArticle = currentKnowledgeArticle(articles);
+  if (selectedArticle) selectedKnowledgeArticleId = selectedArticle.id;
+  const categorySummary = {
+    "whats-new": "Release notes and visible changes users should know about.",
+    features: "A module-by-module reference of what DataPlus can do.",
+    "how-to": "Step-by-step articles for common work.",
+    workflows: "Playbooks that connect multiple areas of the app."
+  }[knowledgeTab];
+  const editingArticle = editingKnowledgeArticleId === "__new__"
+    ? null
+    : allKnowledgeArticles().find((article) => article.id === editingKnowledgeArticleId);
+
   target.innerHTML = `
     <div class="knowledge-page">
       <div class="knowledge-hero">
         <div>
-          <p class="eyebrow">What's New</p>
-          <h2>Latest DataPlus changes</h2>
-          <p class="muted">Feature notes and operational changes for users.</p>
+          <p class="eyebrow">${knowledgeCategoryLabel(knowledgeTab)}</p>
+          <h2>Knowledge Base</h2>
+          <p class="muted">${html(categorySummary)}</p>
+        </div>
+        <div class="knowledge-hero-actions">
+          <label class="search-box">
+            ${iconMarkup("search")}
+            <input data-knowledge-search value="${html(knowledgeSearch)}" placeholder="Search articles">
+          </label>
+          <button class="button primary" type="button" data-new-knowledge-article>${withIcon("plus", "New article")}</button>
         </div>
       </div>
-      <div class="knowledge-changelog">
-        ${KNOWLEDGE_CHANGELOG.map((release) => `
-          <article class="knowledge-release">
-            <div class="knowledge-release-date">${html(release.date)}</div>
-            <div>
-              <h3>${html(release.title)}</h3>
-              <ul>
-                ${release.changes.map((change) => `<li>${html(change)}</li>`).join("")}
-              </ul>
+      ${editingKnowledgeArticleId ? renderKnowledgeEditor(editingArticle) : `
+        <div class="knowledge-workspace">
+          <aside class="knowledge-sidebar">
+            <div class="knowledge-sidebar-head">
+              <strong>${articles.length} article${articles.length === 1 ? "" : "s"}</strong>
+              <small>${html(knowledgeCategoryLabel(knowledgeTab))}</small>
             </div>
+            <div class="knowledge-article-list">
+              ${renderKnowledgeArticleList(articles, selectedArticle)}
+            </div>
+          </aside>
+          <article class="knowledge-article-view">
+            ${selectedArticle ? `
+              <div class="knowledge-article-head">
+                <div>
+                  <p class="eyebrow">${html(selectedArticle.area || knowledgeCategoryLabel(selectedArticle.category))}</p>
+                  <h2>${html(selectedArticle.title)}</h2>
+                  <p>${html(selectedArticle.summary || "")}</p>
+                </div>
+                <div class="knowledge-article-actions">
+                  <span class="status ${selectedArticle.status === "draft" ? "hold" : "confirmed"}">${html(selectedArticle.status || "published")}</span>
+                  <button class="button secondary" type="button" data-edit-knowledge-article="${html(selectedArticle.id)}">${withIcon("edit-3", "Edit")}</button>
+                  ${selectedArticle.source === "default" ? "" : `<button class="button danger" type="button" data-delete-knowledge-article="${html(selectedArticle.id)}">Archive</button>`}
+                </div>
+              </div>
+              <div class="knowledge-article-meta">
+                ${(selectedArticle.tags || []).map((tag) => `<span>${html(tag)}</span>`).join("")}
+                <small>Updated ${simpleDate(selectedArticle.updatedAt || selectedArticle.createdAt)}</small>
+              </div>
+              <div class="knowledge-article-body">
+                ${renderKnowledgeArticleBlocks(selectedArticle.blocks || [])}
+              </div>
+            ` : `<div class="empty-state">Create the first article in this section.</div>`}
           </article>
-        `).join("")}
-      </div>
+        </div>
+      `}
     </div>
   `;
+  if (editingKnowledgeArticleId) setTimeout(() => mountKnowledgeEditor(editingArticle), 0);
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("Could not read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function mountKnowledgeEditor(article) {
+  const holder = $("#knowledge-editorjs");
+  const fallback = $("#knowledge-editor-fallback");
+  if (!holder || !fallback) return;
+  if (knowledgeEditor?.destroy) {
+    try { await knowledgeEditor.destroy(); } catch {}
+  }
+  knowledgeEditor = null;
+  const blocks = article?.blocks || [{ type: "paragraph", data: { text: "" } }];
+  if (!window.EditorJS) {
+    fallback.hidden = false;
+    return;
+  }
+  fallback.hidden = true;
+  const tools = {};
+  if (window.Header) tools.header = window.Header;
+  if (window.EditorjsList || window.List) tools.list = window.EditorjsList || window.List;
+  if (window.Checklist) tools.checklist = window.Checklist;
+  if (window.Embed) tools.embed = window.Embed;
+  if (window.ImageTool) {
+    tools.image = {
+      class: window.ImageTool,
+      config: {
+        uploader: {
+          async uploadByFile(file) {
+            return { success: 1, file: { url: await fileToDataUrl(file) } };
+          },
+          async uploadByUrl(url) {
+            return { success: 1, file: { url } };
+          }
+        }
+      }
+    };
+  }
+  knowledgeEditor = new window.EditorJS({
+    holder,
+    data: { blocks },
+    tools,
+    placeholder: "Write the article. Add headings, lists, images, or video embeds.",
+    minHeight: 220
+  });
+}
+
+async function readKnowledgeEditorBlocks() {
+  const fallback = $("#knowledge-editor-fallback");
+  if (knowledgeEditor?.save) {
+    const output = await knowledgeEditor.save();
+    return Array.isArray(output.blocks) ? output.blocks : [];
+  }
+  if (!fallback) return [];
+  try {
+    const parsed = JSON.parse(fallback.value || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    throw new Error("Fallback article blocks must be valid JSON.");
+  }
+}
+
+async function saveKnowledgeArticle() {
+  const existing = editingKnowledgeArticleId && editingKnowledgeArticleId !== "__new__"
+    ? allKnowledgeArticles().find((article) => article.id === editingKnowledgeArticleId)
+    : null;
+  const title = $("#knowledge-editor-title")?.value.trim() || "";
+  if (!title) throw new Error("Article title is required.");
+  const body = {
+    title,
+    category: $("#knowledge-editor-category")?.value || knowledgeTab,
+    area: $("#knowledge-editor-area")?.value.trim() || "",
+    status: $("#knowledge-editor-status")?.value || "draft",
+    summary: $("#knowledge-editor-summary")?.value.trim() || "",
+    tags: ($("#knowledge-editor-tags")?.value || "").split(",").map((tag) => tag.trim()).filter(Boolean),
+    blocks: await readKnowledgeEditorBlocks()
+  };
+  const isDefaultArticle = existing?.source === "default";
+  const result = existing && !isDefaultArticle
+    ? await api(`/api/knowledge/articles/${encodeURIComponent(existing.id)}`, { method: "PATCH", body: JSON.stringify(body), feedbackLabel: "Saving article..." })
+    : await api("/api/knowledge/articles", { method: "POST", body: JSON.stringify(body), feedbackLabel: "Saving article..." });
+  if (result.state) setState(result.state);
+  selectedKnowledgeArticleId = result.article?.id || selectedKnowledgeArticleId;
+  knowledgeTab = body.category;
+  editingKnowledgeArticleId = null;
+  renderKnowledgeBase();
+  toast(isDefaultArticle ? "Default article saved as an editable copy." : "Knowledge article saved.");
+}
+
+async function archiveKnowledgeArticle(articleId) {
+  const article = allKnowledgeArticles().find((row) => row.id === articleId);
+  if (!article || article.source === "default") {
+    toast("Built-in articles can be edited by saving a copy.");
+    return;
+  }
+  if (!confirm(`Archive "${article.title}"?`)) return;
+  const result = await api(`/api/knowledge/articles/${encodeURIComponent(article.id)}`, { method: "DELETE", feedbackLabel: "Archiving article..." });
+  if (result.state) setState(result.state);
+  selectedKnowledgeArticleId = null;
+  renderKnowledgeBase();
+  toast("Knowledge article archived.");
 }
 
 function renderReports() {
@@ -12240,6 +12529,12 @@ document.addEventListener("click", (event) => {
   const catalogTabButton = event.target.closest("[data-catalog-tab]");
   const knowledgeTabButton = event.target.closest("[data-knowledge-tab]");
   const knowledgeTabJumpButton = event.target.closest("[data-knowledge-tab-jump]");
+  const selectKnowledgeArticleButton = event.target.closest("[data-select-knowledge-article]");
+  const newKnowledgeArticleButton = event.target.closest("[data-new-knowledge-article]");
+  const editKnowledgeArticleButton = event.target.closest("[data-edit-knowledge-article]");
+  const saveKnowledgeArticleButton = event.target.closest("[data-save-knowledge-article]");
+  const cancelKnowledgeEditButton = event.target.closest("[data-cancel-knowledge-edit]");
+  const deleteKnowledgeArticleButton = event.target.closest("[data-delete-knowledge-article]");
   const sourcePageButton = event.target.closest("[data-source-page]");
   const promoteCatalogButton = event.target.closest("[data-promote-catalog-sku]");
   const sourceRowActionButton = event.target.closest("[data-source-row-action]");
@@ -13422,13 +13717,46 @@ document.addEventListener("click", (event) => {
   }
   if (knowledgeTabButton) {
     knowledgeTab = knowledgeTabButton.dataset.knowledgeTab || "whats-new";
+    selectedKnowledgeArticleId = null;
+    editingKnowledgeArticleId = null;
     renderKnowledgeBase();
     return;
   }
   if (knowledgeTabJumpButton) {
     knowledgeTab = knowledgeTabJumpButton.dataset.knowledgeTabJump || "whats-new";
+    selectedKnowledgeArticleId = null;
+    editingKnowledgeArticleId = null;
     showView("knowledge");
     renderKnowledgeBase();
+    return;
+  }
+  if (selectKnowledgeArticleButton) {
+    selectedKnowledgeArticleId = selectKnowledgeArticleButton.dataset.selectKnowledgeArticle;
+    editingKnowledgeArticleId = null;
+    renderKnowledgeBase();
+    return;
+  }
+  if (newKnowledgeArticleButton) {
+    editingKnowledgeArticleId = "__new__";
+    renderKnowledgeBase();
+    return;
+  }
+  if (editKnowledgeArticleButton) {
+    editingKnowledgeArticleId = editKnowledgeArticleButton.dataset.editKnowledgeArticle;
+    renderKnowledgeBase();
+    return;
+  }
+  if (cancelKnowledgeEditButton) {
+    editingKnowledgeArticleId = null;
+    renderKnowledgeBase();
+    return;
+  }
+  if (saveKnowledgeArticleButton) {
+    saveKnowledgeArticle().catch((error) => toast(error.message));
+    return;
+  }
+  if (deleteKnowledgeArticleButton) {
+    archiveKnowledgeArticle(deleteKnowledgeArticleButton.dataset.deleteKnowledgeArticle).catch((error) => toast(error.message));
     return;
   }
   if (viewButton) {
@@ -13523,6 +13851,20 @@ $("#order-filter-clear").addEventListener("click", () => {
 $("#draft-search")?.addEventListener("input", () => runWithSearchFeedback(renderDrafts, "Searching drafts..."));
 $("#return-search")?.addEventListener("input", () => runWithSearchFeedback(renderReturnsManagement, "Searching returns..."));
 document.addEventListener("input", (event) => {
+  const knowledgeSearchInput = event.target.closest("[data-knowledge-search]");
+  if (knowledgeSearchInput) {
+    knowledgeSearch = knowledgeSearchInput.value;
+    selectedKnowledgeArticleId = null;
+    renderKnowledgeBase();
+    setTimeout(() => {
+      const input = document.querySelector("[data-knowledge-search]");
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    }, 0);
+    return;
+  }
   const jobsSearch = event.target.closest("#jobs-search");
   if (!jobsSearch) return;
   jobsFilter.query = jobsSearch.value;
