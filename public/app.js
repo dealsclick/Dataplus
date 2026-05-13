@@ -17,7 +17,7 @@ let categoryScope = "main";
 let categoryRequestId = 0;
 let selectedCategoryId = null;
 let categoryViewMode = "table";
-let attributeState = { rows: [], total: 0, mappedCount: 0, requiredCount: 0, channel: "", query: "", loading: false, groups: [] };
+let attributeState = { rows: [], total: 0, mappedCount: 0, requiredCount: 0, channel: "", query: "", loading: false, groups: [], editingGroupId: "" };
 let pendingAttributeMapping = null;
 let pendingCategoryOpenName = "";
 let shopifyTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
@@ -5431,15 +5431,21 @@ function renderAttributeGroupsPanel() {
       <div class="attribute-groups-list">
         ${groups.map((group) => {
           const groupStats = stats.get(group.id) || { rows: 0, mapped: 0 };
+          const isEditing = attributeState.editingGroupId === group.id;
           return `
-            <div class="attribute-group-row">
+            <div class="attribute-group-row ${isEditing ? "editing" : ""}">
               <div>
                 <strong>${html(group.label || group.id)}</strong>
                 <small>${Number(groupStats.rows || 0).toLocaleString()} matching attributes / ${Number(groupStats.mapped || 0).toLocaleString()} mapped</small>
               </div>
-              <input data-attribute-group-label="${html(group.id)}" value="${html(group.label || "")}">
-              <input data-attribute-group-aliases="${html(group.id)}" value="${html((group.aliases || []).join(", "))}">
-              <button class="button secondary compact-button" type="button" data-save-attribute-group="${html(group.id)}">Save</button>
+              <input data-attribute-group-label="${html(group.id)}" value="${html(group.label || "")}" ${isEditing ? "" : "readonly"} aria-label="${html(group.label || group.id)} group label">
+              <input data-attribute-group-aliases="${html(group.id)}" value="${html((group.aliases || []).join(", "))}" ${isEditing ? "" : "readonly"} aria-label="${html(group.label || group.id)} aliases">
+              <div class="attribute-group-actions">
+                ${isEditing ? `
+                  <button class="button primary compact-button" type="button" data-save-attribute-group="${html(group.id)}">Save</button>
+                  <button class="button secondary compact-button" type="button" data-cancel-attribute-group-edit>Cancel</button>
+                ` : `<button class="button secondary compact-button" type="button" data-edit-attribute-group="${html(group.id)}">Edit</button>`}
+              </div>
             </div>
           `;
         }).join("")}
@@ -5685,7 +5691,7 @@ async function saveAttributeGroup(id = "") {
     method: "POST",
     body: JSON.stringify({ id: isNew ? "" : id, label, aliases })
   });
-  attributeState = { ...attributeState, groups: result.groups || [] };
+  attributeState = { ...attributeState, groups: result.groups || [], editingGroupId: "" };
   if (catalogTab === "attribute-groups") renderAttributeGroupsPage();
   else renderAttributesPage();
   toast("Attribute group saved.");
@@ -13093,6 +13099,8 @@ document.addEventListener("click", (event) => {
   const editAttributeMappingButton = event.target.closest("[data-edit-attribute-mapping]");
   const closeAttributeMapModalButton = event.target.closest("[data-close-attribute-map-modal]");
   const saveAttributeMapButton = event.target.closest("[data-save-attribute-map]");
+  const editAttributeGroupButton = event.target.closest("[data-edit-attribute-group]");
+  const cancelAttributeGroupEditButton = event.target.closest("[data-cancel-attribute-group-edit]");
   const saveAttributeGroupButton = event.target.closest("[data-save-attribute-group]");
   const clearJobFiltersButton = event.target.closest("[data-clear-job-filters]");
   const channelButton = event.target.closest("[data-select-channel]");
@@ -13334,6 +13342,19 @@ document.addEventListener("click", (event) => {
   }
   if (saveAttributeMapButton) {
     saveAttributeMapping().catch((error) => toast(error.message));
+    return;
+  }
+  if (editAttributeGroupButton) {
+    attributeState = { ...attributeState, editingGroupId: editAttributeGroupButton.dataset.editAttributeGroup };
+    renderAttributeGroupsPage();
+    setTimeout(() => {
+      document.querySelector(`[data-attribute-group-aliases="${CSS.escape(attributeState.editingGroupId)}"]`)?.focus();
+    }, 0);
+    return;
+  }
+  if (cancelAttributeGroupEditButton) {
+    attributeState = { ...attributeState, editingGroupId: "" };
+    renderAttributeGroupsPage();
     return;
   }
   if (saveAttributeGroupButton) {

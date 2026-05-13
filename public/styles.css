@@ -5741,13 +5741,32 @@ tbody tr:hover td {
 
 .attribute-group-row {
   display: grid;
-  grid-template-columns: minmax(160px, 0.9fr) minmax(140px, 0.65fr) minmax(240px, 1.35fr) auto;
+  grid-template-columns: minmax(160px, 0.9fr) minmax(140px, 0.65fr) minmax(240px, 1.35fr) minmax(86px, auto);
   gap: 8px;
   align-items: center;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel-subdued);
   padding: 10px;
+}
+
+.attribute-group-row.editing {
+  border-color: rgba(0, 118, 255, 0.35);
+  background: #ffffff;
+}
+
+.attribute-group-row input[readonly] {
+  cursor: default;
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink);
+  box-shadow: none;
+}
+
+.attribute-group-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .attribute-map-modal {
