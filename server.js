@@ -961,7 +961,31 @@ function applyProtectedSourceProduct(db, existing, incoming, source = "Source ca
   return existing;
 }
 
-const KNOWLEDGE_CATEGORIES = new Set(["whats-new", "features", "how-to", "workflows"]);
+const DEFAULT_KNOWLEDGE_CATEGORIES = [
+  { id: "whats-new", label: "What's New", active: true },
+  { id: "features", label: "Features", active: true },
+  { id: "how-to", label: "How To", active: true },
+  { id: "workflows", label: "Workflows", active: true }
+];
+
+const DEFAULT_KNOWLEDGE_AREAS = [
+  "Admin",
+  "Catalog",
+  "Channels",
+  "Customers",
+  "Dashboard",
+  "Drafts",
+  "Import / Export",
+  "Inventory",
+  "Jobs",
+  "Orders",
+  "Product Details",
+  "Purchasing",
+  "Reports",
+  "Returns",
+  "Release Notes",
+  "Workflow"
+].map((label) => ({ id: slugifyKnowledgeTitle(label), label, active: true }));
 
 function slugifyKnowledgeTitle(value) {
   const slug = String(value || "")
@@ -970,6 +994,36 @@ function slugifyKnowledgeTitle(value) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return slug || `article-${Date.now()}`;
+}
+
+function normalizeKnowledgeSettingItem(item = {}, fallbackLabel = "") {
+  const label = String(item.label || item.name || fallbackLabel || item.id || "").trim();
+  if (!label) return null;
+  return {
+    id: String(item.id || slugifyKnowledgeTitle(label)).trim() || slugifyKnowledgeTitle(label),
+    label,
+    active: item.active === undefined ? true : Boolean(item.active)
+  };
+}
+
+function normalizeKnowledgeSettings(settings = {}) {
+  const mergeItems = (customItems, defaultItems, sort = false) => {
+    const map = new Map();
+    for (const item of defaultItems) {
+      const normalized = normalizeKnowledgeSettingItem(item);
+      if (normalized) map.set(normalized.id, normalized);
+    }
+    for (const item of Array.isArray(customItems) ? customItems : []) {
+      const normalized = normalizeKnowledgeSettingItem(item);
+      if (normalized) map.set(normalized.id, normalized);
+    }
+    const items = Array.from(map.values());
+    return sort ? items.sort((a, b) => a.label.localeCompare(b.label)) : items;
+  };
+  return {
+    categories: mergeItems(settings.categories, DEFAULT_KNOWLEDGE_CATEGORIES),
+    areas: mergeItems(settings.areas, DEFAULT_KNOWLEDGE_AREAS, true)
+  };
 }
 
 function normalizeKnowledgeBlocks(blocks = []) {
@@ -992,7 +1046,7 @@ function normalizeKnowledgeArticle(article = {}) {
   const title = String(article.title || "Untitled article").trim() || "Untitled article";
   const createdAt = article.createdAt || now;
   const updatedAt = article.updatedAt || createdAt;
-  const category = KNOWLEDGE_CATEGORIES.has(article.category) ? article.category : "how-to";
+  const category = String(article.category || "how-to").trim() || "how-to";
   return {
     id: String(article.id || crypto.randomUUID()),
     title,
@@ -1017,6 +1071,23 @@ function normalizeKnowledgeArticles(articles = []) {
     : [];
 }
 
+function knowledgeSettingIds(settings, key) {
+  return new Set((settings?.[key] || []).filter((item) => item.active !== false).map((item) => item.id));
+}
+
+function validateKnowledgeArticleSettings(db, body = {}) {
+  db.knowledgeSettings = normalizeKnowledgeSettings(db.knowledgeSettings);
+  const categoryIds = knowledgeSettingIds(db.knowledgeSettings, "categories");
+  const areaIds = knowledgeSettingIds(db.knowledgeSettings, "areas");
+  if (!categoryIds.has(String(body.category || ""))) {
+    return `Choose a managed knowledge category before saving.`;
+  }
+  if (!areaIds.has(String(body.area || ""))) {
+    return `Choose a managed knowledge area before saving.`;
+  }
+  return "";
+}
+
 function normalizeDb(db) {
   let changed = false;
   db.sequence = db.sequence || {};
@@ -1034,6 +1105,7 @@ function normalizeDb(db) {
   db.deletedOrders = Array.isArray(db.deletedOrders) ? db.deletedOrders : [];
   db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
   db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
+  db.knowledgeSettings = normalizeKnowledgeSettings(db.knowledgeSettings);
   db.knowledgeArticles = normalizeKnowledgeArticles(db.knowledgeArticles);
   db.systemSettings = { ...DEFAULT_SYSTEM_SETTINGS, ...(db.systemSettings || {}) };
   db.connections = (db.connections || SOURCES.map((name) => ({ id: crypto.randomUUID(), name }))).map(normalizeChannel);
@@ -8882,6 +8954,8 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/knowledge/articles") {
     const body = await parseBody(req);
+    const settingsError = validateKnowledgeArticleSettings(db, body);
+    if (settingsError) return sendJson(res, 400, { error: settingsError });
     const now = new Date().toISOString();
     const article = normalizeKnowledgeArticle({
       ...body,
@@ -8897,12 +8971,38 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { article, state: publicState(normalized) });
   }
 
+  if (req.method === "PATCH" && url.pathname === "/api/knowledge/settings") {
+    const body = await parseBody(req);
+    const nextSettings = normalizeKnowledgeSettings({
+      ...db.knowledgeSettings,
+      categories: body.categories === undefined ? db.knowledgeSettings?.categories : body.categories,
+      areas: body.areas === undefined ? db.knowledgeSettings?.areas : body.areas
+    });
+    const activeCategoryIds = knowledgeSettingIds(nextSettings, "categories");
+    const activeAreaIds = knowledgeSettingIds(nextSettings, "areas");
+    const liveArticles = normalizeKnowledgeArticles(db.knowledgeArticles).filter((article) => !article.archived);
+    const categoryInUse = liveArticles.find((article) => !activeCategoryIds.has(article.category));
+    if (categoryInUse) {
+      return sendJson(res, 400, { error: `Category "${categoryInUse.category}" is still used by "${categoryInUse.title}".` });
+    }
+    const areaInUse = liveArticles.find((article) => !activeAreaIds.has(article.area));
+    if (areaInUse) {
+      return sendJson(res, 400, { error: `Area "${areaInUse.area}" is still used by "${areaInUse.title}".` });
+    }
+    db.knowledgeSettings = nextSettings;
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    return sendJson(res, 200, { knowledgeSettings: normalized.knowledgeSettings, state: publicState(normalized) });
+  }
+
   if (parts[0] === "api" && parts[1] === "knowledge" && parts[2] === "articles" && parts[3]) {
     db.knowledgeArticles = normalizeKnowledgeArticles(db.knowledgeArticles);
     const article = db.knowledgeArticles.find((row) => row.id === parts[3]);
     if (!article) return notFound(res);
     if (req.method === "PATCH") {
       const body = await parseBody(req);
+      const settingsError = validateKnowledgeArticleSettings(db, { ...article, ...body });
+      if (settingsError) return sendJson(res, 400, { error: settingsError });
       for (const field of ["title", "area", "summary", "status", "category"]) {
         if (body[field] !== undefined) article[field] = body[field];
       }

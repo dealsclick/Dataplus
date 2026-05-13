@@ -82,6 +82,7 @@ let knowledgeSearch = "";
 let selectedKnowledgeArticleId = null;
 let editingKnowledgeArticleId = null;
 let knowledgeEditor = null;
+let managingKnowledgeSettings = false;
 let menuGroupsExpanded = localStorage.getItem("dataplus-menu-groups-expanded") === "true";
 let themeMode = localStorage.getItem("dataplus-theme") || "light";
 let jobsFilter = { query: "", section: "", status: "", direction: "" };
@@ -9216,6 +9217,60 @@ function knowledgeParagraph(text) {
   return { type: "paragraph", data: { text } };
 }
 
+const DEFAULT_KNOWLEDGE_CATEGORY_SETTINGS = [
+  { id: "whats-new", label: "What's New", active: true },
+  { id: "features", label: "Features", active: true },
+  { id: "how-to", label: "How To", active: true },
+  { id: "workflows", label: "Workflows", active: true }
+];
+
+const DEFAULT_KNOWLEDGE_AREA_SETTINGS = [
+  "Admin",
+  "Catalog",
+  "Channels",
+  "Customers",
+  "Dashboard",
+  "Drafts",
+  "Import / Export",
+  "Inventory",
+  "Jobs",
+  "Orders",
+  "Product Details",
+  "Purchasing",
+  "Reports",
+  "Returns",
+  "Release Notes",
+  "Workflow"
+].map((label) => ({ id: label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""), label, active: true }));
+
+function knowledgeSettings() {
+  const merge = (defaults, custom, sort = false) => {
+    const map = new Map(defaults.map((item) => [item.id, { ...item }]));
+    for (const item of Array.isArray(custom) ? custom : []) {
+      if (!item?.id || !item?.label) continue;
+      map.set(item.id, { id: item.id, label: item.label, active: item.active !== false });
+    }
+    const items = Array.from(map.values());
+    return sort ? items.sort((a, b) => a.label.localeCompare(b.label)) : items;
+  };
+  return {
+    categories: merge(DEFAULT_KNOWLEDGE_CATEGORY_SETTINGS, state?.knowledgeSettings?.categories),
+    areas: merge(DEFAULT_KNOWLEDGE_AREA_SETTINGS, state?.knowledgeSettings?.areas, true)
+  };
+}
+
+function activeKnowledgeCategories() {
+  return knowledgeSettings().categories.filter((item) => item.active !== false);
+}
+
+function activeKnowledgeAreas() {
+  return knowledgeSettings().areas.filter((item) => item.active !== false);
+}
+
+function knowledgeAreaLabel(areaId) {
+  return knowledgeSettings().areas.find((item) => item.id === areaId || item.label === areaId)?.label || areaId || "Knowledge";
+}
+
 function defaultKnowledgeArticles() {
   const articles = [];
   for (const release of KNOWLEDGE_CHANGELOG) {
@@ -9224,7 +9279,7 @@ function defaultKnowledgeArticles() {
       title: release.title,
       slug: `changelog-${release.date}`,
       category: "whats-new",
-      area: "Release Notes",
+      area: "release-notes",
       summary: `Released ${release.date}.`,
       tags: ["changelog", "new features"],
       status: "published",
@@ -9240,7 +9295,7 @@ function defaultKnowledgeArticles() {
       title: `${section.area} feature reference`,
       slug: `features-${section.area.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
       category: "features",
-      area: section.area,
+      area: section.area.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""),
       summary: `Capabilities available in ${section.area}.`,
       tags: ["features", section.area],
       status: "published",
@@ -9256,7 +9311,7 @@ function defaultKnowledgeArticles() {
       title: guide.title,
       slug: `how-to-${guide.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
       category: "how-to",
-      area: guide.area,
+      area: guide.area.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""),
       summary: `Step-by-step guide for ${guide.title.toLowerCase()}.`,
       tags: ["how to", guide.area],
       status: "published",
@@ -9272,7 +9327,7 @@ function defaultKnowledgeArticles() {
       title: workflow.title,
       slug: `workflow-${workflow.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
       category: "workflows",
-      area: "Workflow",
+      area: "workflow",
       summary: workflow.summary,
       tags: ["workflow"],
       status: "published",
@@ -9299,12 +9354,7 @@ function allKnowledgeArticles() {
 }
 
 function knowledgeCategoryLabel(category) {
-  return {
-    "whats-new": "What's New",
-    features: "Features",
-    "how-to": "How To",
-    workflows: "Workflows"
-  }[category] || "Knowledge";
+  return knowledgeSettings().categories.find((item) => item.id === category)?.label || category || "Knowledge";
 }
 
 function filterKnowledgeArticles() {
@@ -9314,7 +9364,7 @@ function filterKnowledgeArticles() {
     if (!query) return true;
     const haystack = [
       article.title,
-      article.area,
+      knowledgeAreaLabel(article.area),
       article.summary,
       ...(article.tags || []),
       ...(article.blocks || []).map((block) => JSON.stringify(block.data || {}))
@@ -9366,7 +9416,7 @@ function renderKnowledgeArticleBlocks(blocks = []) {
 function renderKnowledgeArticleList(articles, selectedArticle) {
   return articles.map((article) => `
     <button class="knowledge-article-row ${selectedArticle?.id === article.id ? "active" : ""}" type="button" data-select-knowledge-article="${html(article.id)}">
-      <span>${html(article.area || knowledgeCategoryLabel(article.category))}</span>
+      <span>${html(knowledgeAreaLabel(article.area) || knowledgeCategoryLabel(article.category))}</span>
       <strong>${html(article.title)}</strong>
       <small>${html(article.summary || "Open article")}</small>
     </button>
@@ -9378,7 +9428,7 @@ function renderKnowledgeEditor(article) {
   const draft = article || {
     title: "",
     category: knowledgeTab,
-    area: "",
+    area: activeKnowledgeAreas()[0]?.id || "",
     summary: "",
     status: "draft",
     tags: [],
@@ -9400,10 +9450,14 @@ function renderKnowledgeEditor(article) {
         <label>Title<input id="knowledge-editor-title" value="${html(draft.title)}" placeholder="Article title"></label>
         <label>Category
           <select id="knowledge-editor-category">
-            ${["whats-new", "features", "how-to", "workflows"].map((category) => `<option value="${category}" ${draft.category === category ? "selected" : ""}>${knowledgeCategoryLabel(category)}</option>`).join("")}
+            ${activeKnowledgeCategories().map((category) => `<option value="${html(category.id)}" ${draft.category === category.id ? "selected" : ""}>${html(category.label)}</option>`).join("")}
           </select>
         </label>
-        <label>Area<input id="knowledge-editor-area" value="${html(draft.area || "")}" placeholder="Orders, Catalog, Channels..."></label>
+        <label>Area
+          <select id="knowledge-editor-area">
+            ${activeKnowledgeAreas().map((area) => `<option value="${html(area.id)}" ${draft.area === area.id || draft.area === area.label ? "selected" : ""}>${html(area.label)}</option>`).join("")}
+          </select>
+        </label>
         <label>Status
           <select id="knowledge-editor-status">
             <option value="draft" ${draft.status === "draft" ? "selected" : ""}>Draft</option>
@@ -9419,12 +9473,71 @@ function renderKnowledgeEditor(article) {
   `;
 }
 
+function renderKnowledgeCategoryNav() {
+  const nav = $("#knowledge .subnav");
+  if (!nav) return;
+  nav.innerHTML = activeKnowledgeCategories().map((category) => `
+    <button class="subnav-item ${knowledgeTab === category.id ? "active" : ""}" data-knowledge-tab="${html(category.id)}" data-icon="${category.id === "whats-new" ? "sparkles" : category.id === "features" ? "layout-dashboard" : category.id === "workflows" ? "list-check" : "book-open"}">${html(category.label)}</button>
+  `).join("");
+  hydrateStaticIcons(nav);
+}
+
+function renderKnowledgeSettingsPanel() {
+  const settings = knowledgeSettings();
+  const itemRows = (items, type) => items.map((item) => `
+    <div class="knowledge-setting-row">
+      <input data-knowledge-setting-label="${type}" data-knowledge-setting-id="${html(item.id)}" value="${html(item.label)}" aria-label="${html(type)} label">
+      <label class="inline-check">
+        <input type="checkbox" data-knowledge-setting-active="${type}" data-knowledge-setting-id="${html(item.id)}" ${item.active !== false ? "checked" : ""}>
+        Active
+      </label>
+    </div>
+  `).join("");
+  return `
+    <article class="knowledge-settings-panel">
+      <div class="knowledge-editor-head">
+        <div>
+          <p class="eyebrow">Knowledge Settings</p>
+          <h2>Manage categories and areas</h2>
+          <p class="muted">Use these lists to keep article organization consistent.</p>
+        </div>
+        <div class="knowledge-editor-actions">
+          <button class="button secondary" type="button" data-cancel-knowledge-settings>Cancel</button>
+          <button class="button primary" type="button" data-save-knowledge-settings>${withIcon("save", "Save settings")}</button>
+        </div>
+      </div>
+      <div class="knowledge-settings-grid">
+        <section>
+          <h3>Categories</h3>
+          <div class="knowledge-setting-list">${itemRows(settings.categories, "categories")}</div>
+          <div class="knowledge-setting-add">
+            <input id="knowledge-new-category" placeholder="New category">
+            <button class="button secondary" type="button" data-add-knowledge-setting="categories">${withIcon("plus", "Add")}</button>
+          </div>
+        </section>
+        <section>
+          <h3>Areas</h3>
+          <div class="knowledge-setting-list">${itemRows(settings.areas, "areas")}</div>
+          <div class="knowledge-setting-add">
+            <input id="knowledge-new-area" placeholder="New area">
+            <button class="button secondary" type="button" data-add-knowledge-setting="areas">${withIcon("plus", "Add")}</button>
+          </div>
+        </section>
+      </div>
+    </article>
+  `;
+}
+
 function renderKnowledgeBase() {
   const target = $("#knowledge-content");
   if (!target) return;
+  renderKnowledgeCategoryNav();
   $$("[data-knowledge-tab]").forEach((button) => {
     button.classList.toggle("active", button.dataset.knowledgeTab === knowledgeTab);
   });
+  if (!activeKnowledgeCategories().some((category) => category.id === knowledgeTab)) {
+    knowledgeTab = activeKnowledgeCategories()[0]?.id || "how-to";
+  }
   const articles = filterKnowledgeArticles();
   const selectedArticle = currentKnowledgeArticle(articles);
   if (selectedArticle) selectedKnowledgeArticleId = selectedArticle.id;
@@ -9451,10 +9564,11 @@ function renderKnowledgeBase() {
             ${iconMarkup("search")}
             <input data-knowledge-search value="${html(knowledgeSearch)}" placeholder="Search articles">
           </label>
+          <button class="button secondary" type="button" data-manage-knowledge-settings>${withIcon("file-pen-line", "Manage")}</button>
           <button class="button primary" type="button" data-new-knowledge-article>${withIcon("plus", "New article")}</button>
         </div>
       </div>
-      ${editingKnowledgeArticleId ? renderKnowledgeEditor(editingArticle) : `
+      ${managingKnowledgeSettings ? renderKnowledgeSettingsPanel() : editingKnowledgeArticleId ? renderKnowledgeEditor(editingArticle) : `
         <div class="knowledge-workspace">
           <aside class="knowledge-sidebar">
             <div class="knowledge-sidebar-head">
@@ -9469,7 +9583,7 @@ function renderKnowledgeBase() {
             ${selectedArticle ? `
               <div class="knowledge-article-head">
                 <div>
-                  <p class="eyebrow">${html(selectedArticle.area || knowledgeCategoryLabel(selectedArticle.category))}</p>
+                  <p class="eyebrow">${html(knowledgeAreaLabel(selectedArticle.area) || knowledgeCategoryLabel(selectedArticle.category))}</p>
                   <h2>${html(selectedArticle.title)}</h2>
                   <p>${html(selectedArticle.summary || "")}</p>
                 </div>
@@ -9571,7 +9685,7 @@ async function saveKnowledgeArticle() {
   const body = {
     title,
     category: $("#knowledge-editor-category")?.value || knowledgeTab,
-    area: $("#knowledge-editor-area")?.value.trim() || "",
+    area: $("#knowledge-editor-area")?.value || "",
     status: $("#knowledge-editor-status")?.value || "draft",
     summary: $("#knowledge-editor-summary")?.value.trim() || "",
     tags: ($("#knowledge-editor-tags")?.value || "").split(",").map((tag) => tag.trim()).filter(Boolean),
@@ -9587,6 +9701,47 @@ async function saveKnowledgeArticle() {
   editingKnowledgeArticleId = null;
   renderKnowledgeBase();
   toast(isDefaultArticle ? "Default article saved as an editable copy." : "Knowledge article saved.");
+}
+
+function collectKnowledgeSettings() {
+  const settings = knowledgeSettings();
+  const collect = (type) => settings[type].map((item) => {
+    const labelInput = document.querySelector(`[data-knowledge-setting-label="${type}"][data-knowledge-setting-id="${CSS.escape(item.id)}"]`);
+    const activeInput = document.querySelector(`[data-knowledge-setting-active="${type}"][data-knowledge-setting-id="${CSS.escape(item.id)}"]`);
+    return {
+      id: item.id,
+      label: labelInput?.value.trim() || item.label,
+      active: activeInput ? activeInput.checked : item.active !== false
+    };
+  }).filter((item) => item.label);
+  return { categories: collect("categories"), areas: collect("areas") };
+}
+
+function addKnowledgeSetting(type) {
+  const input = type === "categories" ? $("#knowledge-new-category") : $("#knowledge-new-area");
+  const label = input?.value.trim() || "";
+  if (!label) return;
+  const id = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || `item-${Date.now()}`;
+  const next = collectKnowledgeSettings();
+  if (next[type].some((item) => item.id === id || item.label.toLowerCase() === label.toLowerCase())) {
+    toast("That option already exists.");
+    return;
+  }
+  next[type].push({ id, label, active: true });
+  state.knowledgeSettings = next;
+  renderKnowledgeBase();
+}
+
+async function saveKnowledgeSettings() {
+  const next = collectKnowledgeSettings();
+  if (!next.categories.some((item) => item.active)) throw new Error("At least one category must stay active.");
+  if (!next.areas.some((item) => item.active)) throw new Error("At least one area must stay active.");
+  const result = await api("/api/knowledge/settings", { method: "PATCH", body: JSON.stringify(next), feedbackLabel: "Saving knowledge settings..." });
+  if (result.state) setState(result.state);
+  managingKnowledgeSettings = false;
+  if (!activeKnowledgeCategories().some((item) => item.id === knowledgeTab)) knowledgeTab = activeKnowledgeCategories()[0]?.id || "how-to";
+  renderKnowledgeBase();
+  toast("Knowledge settings saved.");
 }
 
 async function archiveKnowledgeArticle(articleId) {
@@ -12535,6 +12690,10 @@ document.addEventListener("click", (event) => {
   const saveKnowledgeArticleButton = event.target.closest("[data-save-knowledge-article]");
   const cancelKnowledgeEditButton = event.target.closest("[data-cancel-knowledge-edit]");
   const deleteKnowledgeArticleButton = event.target.closest("[data-delete-knowledge-article]");
+  const manageKnowledgeSettingsButton = event.target.closest("[data-manage-knowledge-settings]");
+  const cancelKnowledgeSettingsButton = event.target.closest("[data-cancel-knowledge-settings]");
+  const saveKnowledgeSettingsButton = event.target.closest("[data-save-knowledge-settings]");
+  const addKnowledgeSettingButton = event.target.closest("[data-add-knowledge-setting]");
   const sourcePageButton = event.target.closest("[data-source-page]");
   const promoteCatalogButton = event.target.closest("[data-promote-catalog-sku]");
   const sourceRowActionButton = event.target.closest("[data-source-row-action]");
@@ -13719,6 +13878,7 @@ document.addEventListener("click", (event) => {
     knowledgeTab = knowledgeTabButton.dataset.knowledgeTab || "whats-new";
     selectedKnowledgeArticleId = null;
     editingKnowledgeArticleId = null;
+    managingKnowledgeSettings = false;
     renderKnowledgeBase();
     return;
   }
@@ -13726,6 +13886,7 @@ document.addEventListener("click", (event) => {
     knowledgeTab = knowledgeTabJumpButton.dataset.knowledgeTabJump || "whats-new";
     selectedKnowledgeArticleId = null;
     editingKnowledgeArticleId = null;
+    managingKnowledgeSettings = false;
     showView("knowledge");
     renderKnowledgeBase();
     return;
@@ -13733,16 +13894,19 @@ document.addEventListener("click", (event) => {
   if (selectKnowledgeArticleButton) {
     selectedKnowledgeArticleId = selectKnowledgeArticleButton.dataset.selectKnowledgeArticle;
     editingKnowledgeArticleId = null;
+    managingKnowledgeSettings = false;
     renderKnowledgeBase();
     return;
   }
   if (newKnowledgeArticleButton) {
     editingKnowledgeArticleId = "__new__";
+    managingKnowledgeSettings = false;
     renderKnowledgeBase();
     return;
   }
   if (editKnowledgeArticleButton) {
     editingKnowledgeArticleId = editKnowledgeArticleButton.dataset.editKnowledgeArticle;
+    managingKnowledgeSettings = false;
     renderKnowledgeBase();
     return;
   }
@@ -13757,6 +13921,25 @@ document.addEventListener("click", (event) => {
   }
   if (deleteKnowledgeArticleButton) {
     archiveKnowledgeArticle(deleteKnowledgeArticleButton.dataset.deleteKnowledgeArticle).catch((error) => toast(error.message));
+    return;
+  }
+  if (manageKnowledgeSettingsButton) {
+    managingKnowledgeSettings = true;
+    editingKnowledgeArticleId = null;
+    renderKnowledgeBase();
+    return;
+  }
+  if (cancelKnowledgeSettingsButton) {
+    managingKnowledgeSettings = false;
+    renderKnowledgeBase();
+    return;
+  }
+  if (saveKnowledgeSettingsButton) {
+    saveKnowledgeSettings().catch((error) => toast(error.message));
+    return;
+  }
+  if (addKnowledgeSettingButton) {
+    addKnowledgeSetting(addKnowledgeSettingButton.dataset.addKnowledgeSetting);
     return;
   }
   if (viewButton) {

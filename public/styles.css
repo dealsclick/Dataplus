@@ -6634,7 +6634,8 @@ tbody tr:hover td {
 
 .knowledge-sidebar,
 .knowledge-article-view,
-.knowledge-editor-shell {
+.knowledge-editor-shell,
+.knowledge-settings-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -6813,6 +6814,54 @@ tbody tr:hover td {
   padding: 18px;
 }
 
+.knowledge-settings-panel {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+}
+
+.knowledge-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.knowledge-settings-grid section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.knowledge-settings-grid h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1rem;
+}
+
+.knowledge-setting-list {
+  display: grid;
+  gap: 8px;
+}
+
+.knowledge-setting-row,
+.knowledge-setting-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 .knowledge-editor-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6862,7 +6911,10 @@ tbody tr:hover td {
   }
 
   .knowledge-workspace,
-  .knowledge-editor-fields {
+  .knowledge-editor-fields,
+  .knowledge-settings-grid,
+  .knowledge-setting-row,
+  .knowledge-setting-add {
     grid-template-columns: 1fr;
   }
 
