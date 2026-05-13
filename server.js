@@ -3654,6 +3654,62 @@ function masterCategoryMappingRows(db = {}) {
   return rows.sort((a, b) => String(a["Main Category"]).localeCompare(String(b["Main Category"])) || String(a["Source Supplier"]).localeCompare(String(b["Source Supplier"])) || String(a["Source Category"]).localeCompare(String(b["Source Category"])));
 }
 
+function marketplaceCategoryAttributeRows(db = {}, options = {}) {
+  const settings = normalizeCategorySettings(db.categorySettings);
+  const mainRows = aggregateMainCatalogCategories(db);
+  const mainByName = new Map(mainRows.map((row) => [formatCategoryName(row.name).toLowerCase(), row]));
+  const channels = ["shopify", "ebay", "temu", "tiktok", "whatnot"];
+  const channelFilter = String(options.channel || "").trim().toLowerCase();
+  const allowedChannels = channelFilter && channels.includes(channelFilter) ? [channelFilter] : channels;
+  const rows = [];
+  for (const setting of settings) {
+    const mainCategory = formatCategoryName(setting.name);
+    if (!mainCategory) continue;
+    const main = mainByName.get(mainCategory.toLowerCase()) || {};
+    for (const channel of allowedChannels) {
+      const mapping = normalizeChannelCategoryMapping(setting.mappings?.[channel] || {});
+      const attributes = Array.isArray(mapping.attributes) ? mapping.attributes : [];
+      const attributeMappings = Array.isArray(mapping.attributeMappings) ? mapping.attributeMappings : [];
+      const addRow = (attribute = {}, mapped = {}) => {
+        rows.push({
+          "Main Category": mainCategory,
+          "Marketplace": channel,
+          "Marketplace Category": mapping.categoryPath || mapping.categoryId || "",
+          "Marketplace Category ID": mapping.categoryId || "",
+          "Attribute": attribute.name || mapped.attributeName || mapped.attributeHandle || mapped.attributeId || "",
+          "Attribute ID": attribute.id || mapped.attributeId || "",
+          "Attribute Handle": attribute.handle || mapped.attributeHandle || "",
+          "Required": attribute.required || mapped.required ? "true" : "false",
+          "Recommended": attribute.recommended || mapped.recommended ? "true" : "false",
+          "Value Mode": attribute.valueMode || attribute.usage || "",
+          "Allowed Values": Array.isArray(attribute.values) ? attribute.values.join(" | ") : "",
+          "Mapped Source Field": mapped.sourceField || "",
+          "Fallback Value": mapped.fallbackValue || "",
+          "Mapping Enabled": mapped.enabled === false ? "false" : mapped.sourceField || mapped.fallbackValue ? "true" : "",
+          "Product Count": main.productCount || 0,
+          "Updated At": setting.updatedAt || ""
+        });
+      };
+      if (!attributes.length && mapping.categoryId) {
+        addRow({}, {});
+        continue;
+      }
+      const usedMappingKeys = new Set();
+      for (const attribute of attributes) {
+        const keys = [attribute.id, attribute.name, attribute.handle].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+        const mapped = attributeMappings.find((row) => [row.attributeId, row.attributeName, row.attributeHandle].map((value) => String(value || "").trim().toLowerCase()).some((key) => keys.includes(key))) || {};
+        if (mapped.id) usedMappingKeys.add(mapped.id);
+        addRow(attribute, mapped);
+      }
+      for (const mapped of attributeMappings) {
+        if (mapped.id && usedMappingKeys.has(mapped.id)) continue;
+        addRow({}, mapped);
+      }
+    }
+  }
+  return rows.sort((a, b) => String(a["Main Category"]).localeCompare(String(b["Main Category"])) || String(a.Marketplace).localeCompare(String(b.Marketplace)) || String(a.Attribute).localeCompare(String(b.Attribute)));
+}
+
 function coverageIssueLabel(issue) {
   return {
     "missing-shopify": "missing-shopify-mappings",
@@ -9042,6 +9098,17 @@ async function handleApi(req, res) {
     return sendJson(res, 200, await publicCategoriesFast(url.searchParams.get("q") || "", url.searchParams.get("scope") || "source"));
   }
 
+  if (req.method === "GET" && url.pathname === "/api/categories/attributes") {
+    const db = await readDbFast();
+    const rows = marketplaceCategoryAttributeRows(db, { channel: url.searchParams.get("channel") || "" });
+    return sendJson(res, 200, {
+      rows,
+      total: rows.length,
+      mappedCount: rows.filter((row) => row["Mapped Source Field"] || row["Fallback Value"]).length,
+      requiredCount: rows.filter((row) => row.Required === "true").length
+    });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/categories/export/matrixify-smart-collections.csv") {
     const rows = await matrixifySmartCollectionRows();
     res.writeHead(200, {
@@ -9068,6 +9135,18 @@ async function handleApi(req, res) {
     res.writeHead(200, {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": "attachment; filename=dataplus-master-category-mapping.csv"
+    });
+    return res.end(rowsToCsv(rows));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/categories/export/marketplace-attributes.csv") {
+    const db = await readDbFast();
+    const channel = url.searchParams.get("channel") || "";
+    const rows = marketplaceCategoryAttributeRows(db, { channel });
+    const suffix = channel ? `-${channel}` : "";
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename=dataplus-marketplace-category-attributes${suffix}.csv`
     });
     return res.end(rowsToCsv(rows));
   }

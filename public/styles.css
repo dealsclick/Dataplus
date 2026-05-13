@@ -5665,6 +5665,33 @@ tbody tr:hover td {
   overflow: auto;
 }
 
+.attribute-review-page {
+  display: grid;
+  gap: 14px;
+}
+
+.attribute-review-page #attribute-channel-filter {
+  min-width: 150px;
+}
+
+.attribute-review-page #attribute-search {
+  min-width: 260px;
+}
+
+.attribute-table-wrap {
+  max-height: calc(100vh - 300px);
+}
+
+.attribute-review-table td {
+  vertical-align: top;
+}
+
+.attribute-review-table td small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+}
+
 .category-table {
   min-width: 1120px;
 }

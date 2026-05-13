@@ -17,6 +17,7 @@ let categoryScope = "main";
 let categoryRequestId = 0;
 let selectedCategoryId = null;
 let categoryViewMode = "table";
+let attributeState = { rows: [], total: 0, mappedCount: 0, requiredCount: 0, channel: "", query: "", loading: false };
 let pendingCategoryOpenName = "";
 let shopifyTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
 let shopifyTaxonomyTimer = null;
@@ -5297,6 +5298,102 @@ async function learnSourceCategoryMappings(button) {
   toast(`Learned ${Number(result.created || 0).toLocaleString()} new source map${Number(result.created || 0) === 1 ? "" : "s"}; refreshed ${Number(result.refreshed || 0).toLocaleString()}.`);
 }
 
+function filteredAttributeRows() {
+  const query = String(attributeState.query || "").trim().toLowerCase();
+  return (attributeState.rows || []).filter((row) => {
+    if (!query) return true;
+    return Object.values(row).join(" ").toLowerCase().includes(query);
+  });
+}
+
+async function loadCategoryAttributes() {
+  attributeState = { ...attributeState, loading: true };
+  renderAttributesPage();
+  const params = new URLSearchParams();
+  if (attributeState.channel) params.set("channel", attributeState.channel);
+  const result = await api(`/api/categories/attributes${params.toString() ? `?${params.toString()}` : ""}`, { feedbackLabel: "Loading attributes..." });
+  attributeState = {
+    ...attributeState,
+    rows: result.rows || [],
+    total: Number(result.total || 0),
+    mappedCount: Number(result.mappedCount || 0),
+    requiredCount: Number(result.requiredCount || 0),
+    loading: false
+  };
+  renderAttributesPage();
+}
+
+function renderAttributesPage() {
+  const target = $("#attribute-list");
+  if (!target) return;
+  const rows = filteredAttributeRows();
+  const exportQuery = attributeState.channel ? `?channel=${encodeURIComponent(attributeState.channel)}` : "";
+  target.innerHTML = `
+    <section class="attribute-review-page">
+      <div class="category-coverage-head">
+        <div>
+          <p class="eyebrow">Marketplace attributes</p>
+          <h3>Attribute mapping review</h3>
+        </div>
+        <div class="category-table-actions">
+          <select id="attribute-channel-filter">
+            <option value="" ${attributeState.channel ? "" : "selected"}>All marketplaces</option>
+            ${["shopify", "ebay", "temu", "tiktok", "whatnot"].map((channel) => `<option value="${channel}" ${attributeState.channel === channel ? "selected" : ""}>${channelLabel(channel)}</option>`).join("")}
+          </select>
+          <input id="attribute-search" type="search" value="${html(attributeState.query || "")}" placeholder="Search category, attribute, field">
+          <a class="button secondary" href="/api/categories/export/marketplace-attributes.csv${exportQuery}">${withIcon("download", "Export attributes")}</a>
+        </div>
+      </div>
+      <div class="category-coverage-grid">
+        <span><small>Total rows</small><strong>${Number(attributeState.total || 0).toLocaleString()}</strong><em>${rows.length.toLocaleString()} visible</em></span>
+        <span><small>Mapped</small><strong>${Number(attributeState.mappedCount || 0).toLocaleString()}</strong><em>Source field or fallback</em></span>
+        <span><small>Required</small><strong>${Number(attributeState.requiredCount || 0).toLocaleString()}</strong><em>Marketplace required attributes</em></span>
+      </div>
+      ${attributeState.loading ? `<div class="empty-state">Loading attributes...</div>` : `
+        <div class="category-table-wrap attribute-table-wrap">
+          <table class="data-table category-table attribute-review-table">
+            <thead>
+              <tr>
+                <th>Main Category</th>
+                <th>Marketplace</th>
+                <th>Marketplace Category</th>
+                <th>Attribute</th>
+                <th>Required</th>
+                <th>Mapped To</th>
+                <th>Fallback</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.slice(0, 700).map((row) => `
+                <tr>
+                  <td><strong>${html(row["Main Category"] || "")}</strong><small>${Number(row["Product Count"] || 0).toLocaleString()} products</small></td>
+                  <td>${html(channelLabel(row.Marketplace || ""))}</td>
+                  <td>${html(row["Marketplace Category"] || "")}<small>${html(row["Marketplace Category ID"] || "")}</small></td>
+                  <td><strong>${html(row.Attribute || "")}</strong><small>${html([row["Attribute Handle"], row["Value Mode"]].filter(Boolean).join(" / "))}</small></td>
+                  <td><span class="status ${row.Required === "true" ? "hold" : row.Recommended === "true" ? "pending" : "active"}">${row.Required === "true" ? "Required" : row.Recommended === "true" ? "Recommended" : "Optional"}</span></td>
+                  <td>${html(row["Mapped Source Field"] || "") || `<span class="muted">Not mapped</span>`}</td>
+                  <td>${html(row["Fallback Value"] || "")}</td>
+                </tr>
+              `).join("") || `<tr><td colspan="7">No attribute rows found.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+        ${rows.length > 700 ? `<p class="muted category-table-foot">Showing first 700 matching attributes. Use search or marketplace filter to narrow the list.</p>` : ""}
+      `}
+    </section>
+  `;
+}
+
+function channelLabel(channel = "") {
+  return {
+    shopify: "Shopify",
+    ebay: "eBay",
+    temu: "Temu",
+    tiktok: "TikTok",
+    whatnot: "Whatnot"
+  }[String(channel || "").toLowerCase()] || channel || "Marketplace";
+}
+
 function renderCatalog() {
   if (!state) return;
   document.querySelectorAll("[data-catalog-tab]").forEach((button) => button.classList.toggle("active", button.dataset.catalogTab === catalogTab));
@@ -5323,6 +5420,7 @@ function renderCatalog() {
   $("#source-catalog-list").style.display = catalogTab === "source" ? "block" : "none";
   $("#import-review-list").style.display = catalogTab === "reviews" ? "block" : "none";
   $("#category-list").style.display = catalogTab === "categories" ? "block" : "none";
+  $("#attribute-list").style.display = catalogTab === "attributes" ? "block" : "none";
   const catalogImportExportList = $("#import-export-list");
   if (catalogImportExportList) catalogImportExportList.style.display = catalogTab === "import-export" ? "block" : "none";
   $("#inventory-list").style.display = catalogTab === "inventory" ? "block" : "none";
@@ -5346,6 +5444,11 @@ function renderCatalog() {
       if (!pendingCategoryOpenName) categoryViewMode = "table";
       loadCategories();
     }
+    return;
+  }
+  if (catalogTab === "attributes") {
+    renderAttributesPage();
+    if (!attributeState.rows.length && !attributeState.loading) loadCategoryAttributes().catch((error) => toast(error.message));
     return;
   }
   if (catalogTab === "reviews") {
@@ -14067,6 +14170,19 @@ $("#order-filter-clear").addEventListener("click", () => {
 $("#draft-search")?.addEventListener("input", () => runWithSearchFeedback(renderDrafts, "Searching drafts..."));
 $("#return-search")?.addEventListener("input", () => runWithSearchFeedback(renderReturnsManagement, "Searching returns..."));
 document.addEventListener("input", (event) => {
+  const attributeSearch = event.target.closest("#attribute-search");
+  if (attributeSearch) {
+    attributeState = { ...attributeState, query: attributeSearch.value };
+    renderAttributesPage();
+    setTimeout(() => {
+      const input = $("#attribute-search");
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    }, 0);
+    return;
+  }
   const knowledgeSearchInput = event.target.closest("[data-knowledge-search]");
   if (knowledgeSearchInput) {
     knowledgeSearch = knowledgeSearchInput.value;
@@ -14087,6 +14203,12 @@ document.addEventListener("input", (event) => {
   runWithSearchFeedback(renderJobsPage, "Searching jobs...");
 });
 document.addEventListener("change", (event) => {
+  const attributeChannel = event.target.closest("#attribute-channel-filter");
+  if (attributeChannel) {
+    attributeState = { ...attributeState, channel: attributeChannel.value, rows: [] };
+    loadCategoryAttributes().catch((error) => toast(error.message));
+    return;
+  }
   const section = event.target.closest("#jobs-filter-section");
   const status = event.target.closest("#jobs-filter-status");
   const direction = event.target.closest("#jobs-filter-direction");
