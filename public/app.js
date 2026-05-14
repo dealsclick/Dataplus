@@ -7609,6 +7609,71 @@ function suggestedChannelPrice(item = {}, channelName = "") {
   return roundMarketplacePrice(Math.max(markupPrice, marginPrice, basePrice, cost), settings.roundingRule || "none");
 }
 
+function pricingCalculationParts(item = {}, channelName = "Shopify") {
+  const settings = channelSettingsByName(channelName);
+  const cost = productCostValue(item);
+  const listPrice = productBaseSellPrice(item);
+  const markupPercent = Number(settings.priceMarkupPercent || 0);
+  const marginPercentSetting = Number(settings.minMarginPercent || 0);
+  const markupPrice = cost > 0 && markupPercent > 0 ? cost * (1 + markupPercent / 100) : 0;
+  const marginPrice = cost > 0 && marginPercentSetting > 0 && marginPercentSetting < 100 ? cost / (1 - marginPercentSetting / 100) : 0;
+  const candidates = [
+    { label: `${markupPercent.toFixed(2)}% markup`, value: markupPrice },
+    { label: `${marginPercentSetting.toFixed(2)}% minimum margin`, value: marginPrice },
+    { label: "List price floor", value: listPrice },
+    { label: "Cost floor", value: cost }
+  ].filter((row) => row.value > 0);
+  const selected = candidates.reduce((best, row) => row.value > best.value ? row : best, { label: "No price rule", value: 0 });
+  return {
+    settings,
+    cost,
+    listPrice,
+    markupPercent,
+    marginPercentSetting,
+    markupPrice: roundMarketplacePrice(markupPrice, settings.roundingRule || "none"),
+    marginPrice: roundMarketplacePrice(marginPrice, settings.roundingRule || "none"),
+    price: suggestedChannelPrice(item, channelName),
+    selected
+  };
+}
+
+function priceUpdateLabel(item = {}) {
+  const date = item.lastPricesUpdateAt || item.productDumpUpdatedAt || item.updatedAt || "";
+  if (!date) return "No price update recorded";
+  const by = item.lastPricesUpdateBy ? ` by ${html(item.lastPricesUpdateBy)}` : "";
+  return `Last price update ${dateLabel(date)}${by}`;
+}
+
+function renderCostField(item = {}) {
+  return `
+    <label class="product-cost-field">Cost
+      <input type="number" step="0.01" value="${html(item.cost ?? "")}" data-product-field="cost" data-product-id="${item.id}" />
+      <small>${priceUpdateLabel(item)}</small>
+    </label>
+  `;
+}
+
+function renderPricingFeedback(item = {}) {
+  const website = pricingCalculationParts(item, "Shopify");
+  const listText = website.listPrice > 0 ? `List price is ${money(website.listPrice)} from the source catalog.` : "No source list price is available.";
+  return `
+    <div class="pricing-feedback">
+      <div>
+        <strong>Website price calculation</strong>
+        <span>Cost ${money(website.cost)} x ${(1 + website.markupPercent / 100).toFixed(2)} = ${money(website.markupPrice)} using the Shopify/website markup rule.</span>
+      </div>
+      <div>
+        <strong>Rule guardrails</strong>
+        <span>${listText} Channel suggestions use the highest eligible value from markup, minimum margin, list price, and cost.</span>
+      </div>
+      <div>
+        <strong>Cost freshness</strong>
+        <span>${priceUpdateLabel(item)}</span>
+      </div>
+    </div>
+  `;
+}
+
 function ebayPricingMetrics(item = {}, draft = {}) {
   const cost = productCostValue(item);
   const price = Number(draft.price ?? ebaySuggestedPrice(item) ?? 0);
@@ -8234,10 +8299,11 @@ function renderPricingTab(item, grossProfit, margin) {
         <h3>Base Pricing</h3>
         <div class="product-price-grid">
           ${productFieldLabel("Website price", "price", item, { type: "number", step: "0.01" })}
-          ${productFieldLabel("Cost", "cost", item, { type: "number", step: "0.01" })}
+          ${renderCostField(item)}
           ${productFieldLabel("List price", "listPrice", item, { type: "number", step: "0.01" })}
           ${productFieldLabel("FOB", "fobPrice", item, { type: "number", step: "0.01" })}
         </div>
+        ${renderPricingFeedback(item)}
         <div class="product-margin-box"><small>Gross profit</small><strong>${money(grossProfit)}</strong><span>${margin.toFixed(1)}% margin</span></div>
       </section>
       <section class="product-panel span-2">
@@ -8251,7 +8317,7 @@ function renderPricingTab(item, grossProfit, margin) {
                   <td>${html(row.name)}</td>
                   <td>${Number(row.markup).toFixed(2)}%</td>
                   <td><strong>${money(row.price)}</strong></td>
-                  <td>Cost ${money(productCostValue(item))} / List ${money(productBaseSellPrice(item))}</td>
+                  <td>${html(pricingCalculationParts(item, row.name).selected.label)} / Cost ${money(productCostValue(item))} / List ${money(productBaseSellPrice(item))}</td>
                 </tr>
               `).join("")}
             </tbody>
@@ -8409,10 +8475,11 @@ function renderProductHomeTab(item, context) {
             <div class="product-section-title">${sectionIconTitle("dollar-sign", "Pricing")}<span>${money(grossProfit)} profit</span></div>
             <div class="product-row-fields">
               ${productFieldLabel("Website price", "price", item, { type: "number", step: "0.01" })}
-              ${productFieldLabel("Cost", "cost", item, { type: "number", step: "0.01" })}
+              ${renderCostField(item)}
               ${productFieldLabel("List price", "listPrice", item, { type: "number", step: "0.01" })}
               ${productFieldLabel("FOB", "fobPrice", item, { type: "number", step: "0.01" })}
             </div>
+            ${renderPricingFeedback(item)}
             <div class="summary-grid product-home-summary pricing-summary">
               <span><small>Margin</small><strong>${margin.toFixed(1)}%</strong></span>
               <span><small>Stock</small><strong>${countLabel(stockQty)}</strong></span>

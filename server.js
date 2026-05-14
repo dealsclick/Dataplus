@@ -5663,6 +5663,8 @@ function publicInventoryItem(item = {}) {
     validatedAt: item.validatedAt,
     stockStatus: item.stockStatus,
     stockUpdatedAt: item.stockUpdatedAt,
+    lastPricesUpdateAt: item.lastPricesUpdateAt,
+    lastPricesUpdateBy: item.lastPricesUpdateBy,
     condition: item.condition,
     status: item.status,
     active: item.active,
@@ -8655,6 +8657,8 @@ function catalogSummary(product = {}) {
     zoroPrice: Number(product.zoroPrice || 0),
     varisContractPrice: Number(product.varisContractPrice || 0),
     countryOfOrigin: product.countryOfOrigin || "",
+    lastPricesUpdateAt: product.lastPricesUpdateAt || product.productDumpUpdatedAt || "",
+    lastPricesUpdateBy: product.lastPricesUpdateBy || "",
     productManagerFieldCount: product.productManagerFields ? Object.keys(product.productManagerFields).length : 0
   };
 }

@@ -5287,6 +5287,44 @@ tbody tr:hover td {
   margin-top: 12px;
 }
 
+.product-cost-field small {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.25;
+}
+
+.pricing-feedback {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.pricing-feedback div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfafc;
+  padding: 10px;
+}
+
+.pricing-feedback strong,
+.pricing-feedback span {
+  display: block;
+}
+
+.pricing-feedback strong {
+  color: var(--ink);
+  font-size: 0.82rem;
+  margin-bottom: 3px;
+}
+
+.pricing-feedback span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
 .product-advanced-panel details {
   border-top: 1px solid var(--line);
   padding: 12px 0;
