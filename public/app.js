@@ -7331,6 +7331,13 @@ function shopifyHandleForProduct(item) {
     .replace(/-+/g, "-");
 }
 
+function shopifyTitleForProduct(item = {}) {
+  return [item.brand, item.mfrPartNumber, item.marketplaceTitle || item.title || item.sku]
+    .map((part) => String(part || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
 function cleanExportNumber(value, decimals = 3) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return "";
@@ -7442,7 +7449,10 @@ function formatMappedExportValue(value, mapping = {}, item = {}) {
 
 function productMappedValue(item, mapping = {}) {
   const field = mapping.productField;
+  const source = String(mapping.templateSource || mapping.source || "").trim().toLowerCase();
+  const column = String(mapping.externalColumn || "").trim();
   if (String(mapping.externalColumn || "").trim().toLowerCase() === "handle") return shopifyHandleForProduct(item);
+  if (source === "shopify" && /^Title$/i.test(column)) return shopifyTitleForProduct(item);
   if (!field) return mapping.defaultValue || "";
   if (field === "available") return Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0);
   if (field === "vendor") return item.vendor ?? item.supplier ?? "";
@@ -7472,11 +7482,12 @@ function renderMappedProductField(item, mapping = {}) {
   const field = mapping.productField || "";
   const definition = mappedFieldDefinition(field);
   const computedFields = new Set(["available", "shopifyHandle", "shopifyCategoryId", "shopifyCategoryPath", "googleCategoryId", "googleCategoryBreadcrumb", "sources"]);
-  const editable = field && !computedFields.has(field) && definition?.type !== "computed" && definition?.type !== "category";
+  const isShopifyComputedTitle = String(mapping.templateSource || mapping.source || "").toLowerCase() === "shopify" && /^Title$/i.test(String(mapping.externalColumn || ""));
+  const editable = field && !isShopifyComputedTitle && !computedFields.has(field) && definition?.type !== "computed" && definition?.type !== "category";
   const value = productMappedValue(item, mapping);
   const isLong = String(value || "").length > 100 || /description|body|html|seo|tags/i.test(`${mapping.externalColumn || ""} ${field}`);
   const meta = [
-    field ? `DataPlus: ${field}` : "Not mapped",
+    isShopifyComputedTitle ? "Shopify format: Brand + MPN + current title" : field ? `DataPlus: ${field}` : "Not mapped",
     mapping.defaultValue ? `Default: ${mapping.defaultValue}` : ""
   ].filter(Boolean).join(" | ");
   const control = isLong
@@ -7509,7 +7520,7 @@ function renderMarketplaceTab(item, marketplace) {
         </div>
         ${mappedFields.length ? `
           <div class="mapped-product-field-grid">
-            ${mappedFields.map((mapping) => renderMappedProductField(item, mapping)).join("")}
+            ${mappedFields.map((mapping) => renderMappedProductField(item, { ...mapping, templateSource: template.source })).join("")}
           </div>
         ` : `
           <div class="product-form-grid">
