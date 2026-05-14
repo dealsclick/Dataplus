@@ -2093,9 +2093,18 @@ function shopifyCompareAtPrice(item = {}) {
   return shopifyMoneyValue(price * (1 + percent / 100));
 }
 
+function shopifyExportTitle(item = {}) {
+  return [item.brand, item.mfrPartNumber, item.marketplaceTitle || item.title || item.sku]
+    .map((part) => sanitizeProductTitle(part))
+    .filter(Boolean)
+    .join(" ");
+}
+
 function productFieldValue(db, item, field, mapping = {}) {
   const column = String(mapping.externalColumn || "").trim();
+  const source = String(mapping.templateSource || mapping.source || "").trim().toLowerCase();
   if (String(mapping.externalColumn || "").trim().toLowerCase() === "handle") return shopifyHandleForProduct(item);
+  if (source === "shopify" && /^Title$/i.test(column)) return shopifyExportTitle(item);
   if (/^Variant Price$/i.test(column)) return shopifyVariantPrice(item);
   if (/^Variant Compare At Price$/i.test(column) || field === "shopifyCompareAtPrice") return shopifyCompareAtPrice(item);
   if (field === "available") return Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0);
@@ -2953,7 +2962,7 @@ function mappedRecordToProductPayload(record, template) {
 function mappedProductsCsv(db, template, items) {
   const headers = (template.mappings || []).map((mapping) => mapping.externalColumn);
   const rows = items.map((item) => (template.mappings || []).map((mapping) => {
-    const value = productFieldValue(db, item, mapping.productField, mapping);
+    const value = productFieldValue(db, item, mapping.productField, { ...mapping, templateSource: template.source, templateId: template.id });
     const formatted = formatMappedExportValue(value, mapping, item);
     return formatted === "" || formatted === undefined || formatted === null ? mapping.defaultValue || "" : formatted;
   }));
