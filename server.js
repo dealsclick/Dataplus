@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const readline = require("readline");
+const zlib = require("zlib");
 const postgres = require("./db");
 
 const PORT = process.env.PORT || 4173;
@@ -12,6 +13,7 @@ const PUBLIC_DIR = path.join(ROOT, "public");
 const DATA_DIR = path.join(ROOT, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
+const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
 const ATTRIBUTE_MAPPINGS_FILE = path.join(DATA_DIR, "attribute-mappings.json");
 const ATTRIBUTE_GROUPS_FILE = path.join(DATA_DIR, "attribute-groups.json");
 const CATEGORY_CACHE_FILE = path.join(DATA_DIR, "category-cache.json");
@@ -33,6 +35,7 @@ const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
 const CONNECTOR_STATE_FILE = path.join(DATA_DIR, "connectors.json");
 const ENV_FILE = path.join(ROOT, ".env");
 let dbCache = { mtimeMs: 0, data: null };
+let publicStateJsonCache = null;
 
 const SOURCES = ["Temu", "eBay", "Whatnot", "TikTok Shop"];
 const ORDER_PREFIX = "DP";
@@ -634,6 +637,7 @@ async function readDbFast() {
 }
 
 async function writeDb(db) {
+  publicStateJsonCache = null;
   if (postgres.isPostgresEnabled()) {
     await postgres.writeState(db);
     return;
@@ -643,6 +647,7 @@ async function writeDb(db) {
 }
 
 function writeDbSync(db) {
+  publicStateJsonCache = null;
   if (postgres.isPostgresEnabled()) return;
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
   dbCache = { mtimeMs: fs.statSync(DB_FILE).mtimeMs, data: db };
@@ -1125,7 +1130,7 @@ function normalizeDb(db) {
   db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
   db.knowledgeSettings = normalizeKnowledgeSettings(db.knowledgeSettings);
   db.knowledgeArticles = normalizeKnowledgeArticles(db.knowledgeArticles);
-  db.systemSettings = { ...DEFAULT_SYSTEM_SETTINGS, ...(db.systemSettings || {}) };
+  db.systemSettings = readSystemSettingsStore(db.systemSettings);
   db.connections = (db.connections || SOURCES.map((name) => ({ id: crypto.randomUUID(), name }))).map(normalizeChannel);
   const websitePriceSettings = findChannelByName(db, "Shopify")?.settings || db.connections[0]?.settings || DEFAULT_CHANNEL_SETTINGS;
   const websiteMarkupPercent = Number(websitePriceSettings.priceMarkupPercent || DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent);
@@ -1956,6 +1961,28 @@ async function writeExportMappingsStore(exportMappings = []) {
   const normalized = normalizeExportMappings(exportMappings);
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(EXPORT_MAPPINGS_FILE, JSON.stringify(normalized, null, 2));
+  return normalized;
+}
+
+function normalizeSystemSettings(settings = {}) {
+  return { ...DEFAULT_SYSTEM_SETTINGS, ...(settings && typeof settings === "object" ? settings : {}) };
+}
+
+function readSystemSettingsStore(fallback = {}) {
+  if (fs.existsSync(SYSTEM_SETTINGS_FILE)) {
+    try {
+      return normalizeSystemSettings(JSON.parse(fs.readFileSync(SYSTEM_SETTINGS_FILE, "utf8")));
+    } catch {
+      return normalizeSystemSettings(fallback);
+    }
+  }
+  return normalizeSystemSettings(fallback);
+}
+
+function writeSystemSettingsStore(settings = {}) {
+  const normalized = normalizeSystemSettings(settings);
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(SYSTEM_SETTINGS_FILE, JSON.stringify(normalized, null, 2));
   return normalized;
 }
 
@@ -5174,8 +5201,19 @@ function updateCustomerProfile(customer, body) {
 }
 
 function sendJson(res, status, data) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(data));
+  sendJsonText(res, status, JSON.stringify(data));
+}
+
+function sendJsonText(res, status, text, req = null) {
+  const headers = { "Content-Type": "application/json; charset=utf-8" };
+  if (req && /\bgzip\b/i.test(String(req.headers["accept-encoding"] || "")) && Buffer.byteLength(text) > 1024) {
+    const body = zlib.gzipSync(text);
+    res.writeHead(status, { ...headers, "Content-Encoding": "gzip", "Vary": "Accept-Encoding" });
+    res.end(body);
+    return;
+  }
+  res.writeHead(status, headers);
+  res.end(text);
 }
 
 function sendHtml(res, status, html) {
@@ -5777,6 +5815,27 @@ function publicState(db) {
     }
   };
   return { ...safeDb, summary: summarize(safeDb) };
+}
+
+function publicStateJson(db) {
+  const dbMtime = postgres.isPostgresEnabled() ? 0 : (fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).mtimeMs : 0);
+  const settingsMtime = fs.existsSync(SYSTEM_SETTINGS_FILE) ? fs.statSync(SYSTEM_SETTINGS_FILE).mtimeMs : 0;
+  if (
+    publicStateJsonCache &&
+    publicStateJsonCache.dbMtime === dbMtime &&
+    publicStateJsonCache.settingsMtime === settingsMtime
+  ) {
+    return publicStateJsonCache.text;
+  }
+  const text = JSON.stringify(publicState(db));
+  publicStateJsonCache = { dbMtime, settingsMtime, text };
+  return text;
+}
+
+function publicStateGzip(db) {
+  const text = publicStateJson(db);
+  if (!publicStateJsonCache.gzip) publicStateJsonCache.gzip = zlib.gzipSync(text);
+  return publicStateJsonCache.gzip;
 }
 
 function summarize(db) {
@@ -9420,7 +9479,12 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/state") {
     const db = await readDbFast();
-    return sendJson(res, 200, publicState(db));
+    if (/\bgzip\b/i.test(String(req.headers["accept-encoding"] || ""))) {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Content-Encoding": "gzip", "Vary": "Accept-Encoding" });
+      res.end(publicStateGzip(db));
+      return;
+    }
+    return sendJsonText(res, 200, publicStateJson(db), req);
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories") {
@@ -9596,6 +9660,21 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "PATCH" && url.pathname === "/api/system-settings") {
+    const body = await parseBody(req);
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    for (const field of Object.keys(DEFAULT_SYSTEM_SETTINGS)) {
+      if (body[field] === undefined) continue;
+      if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "boolean") current[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
+      else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") current[field] = Number(body[field] || 0);
+      else current[field] = String(body[field] || "");
+    }
+    const systemSettings = writeSystemSettingsStore(current);
+    publicStateJsonCache = null;
+    if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    return sendJson(res, 200, { systemSettings });
+  }
+
   const db = await readDb();
 
   if (req.method === "POST" && url.pathname === "/api/knowledge/articles") {
@@ -9671,20 +9750,6 @@ async function handleApi(req, res) {
       await writeDb(normalized);
       return sendJson(res, 200, { article: normalizeKnowledgeArticle(article), state: publicState(normalized) });
     }
-  }
-
-  if (req.method === "PATCH" && url.pathname === "/api/system-settings") {
-    const body = await parseBody(req);
-    db.systemSettings = { ...DEFAULT_SYSTEM_SETTINGS, ...(db.systemSettings || {}) };
-    for (const field of Object.keys(DEFAULT_SYSTEM_SETTINGS)) {
-      if (body[field] === undefined) continue;
-      if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "boolean") db.systemSettings[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
-      else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") db.systemSettings[field] = Number(body[field] || 0);
-      else db.systemSettings[field] = String(body[field] || "");
-    }
-    const normalized = normalizeDb(db);
-    await writeDb(normalized);
-    return sendJson(res, 200, { systemSettings: normalized.systemSettings, state: publicState(normalized) });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/import-jobs') {

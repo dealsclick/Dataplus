@@ -12803,6 +12803,7 @@ async function updateSystemSetting(input) {
     body: JSON.stringify({ [field]: value })
   });
   if (result.state) setState(result.state);
+  else if (result.systemSettings) state.systemSettings = result.systemSettings;
   renderCatalog();
   toast("System setting updated.");
 }
