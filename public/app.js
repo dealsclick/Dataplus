@@ -5922,7 +5922,9 @@ async function loadProductFieldOptions() {
       { key: "sku", label: "SKU" },
       { key: "title", label: "Title" },
       { key: "marketplaceTitle", label: "Marketplace title" },
-      { key: "price", label: "Price" },
+      { key: "price", label: "Website price" },
+      { key: "listPrice", label: "List price" },
+      { key: "cost", label: "Cost" },
       { key: "qty", label: "Quantity" },
       { key: "available", label: "Available" }
     ];
@@ -7532,8 +7534,9 @@ function renderMarketplaceTab(item, marketplace) {
             <label>Shadow price<input type="number" step="0.01" value="${Number(shadow.price || 0)}" data-shadow-field="price" data-product-id="${item.id}" data-shadow-id="${shadow.id}" /></label>
             <label>Status<select data-shadow-field="status" data-product-id="${item.id}" data-shadow-id="${shadow.id}">${["Draft", "Active", "Paused"].map((status) => `<option ${String(shadow.status || "Draft") === status ? "selected" : ""}>${status}</option>`).join("")}</select></label>
           ` : `
-            ${productFieldLabel("Base price", "price", item, { type: "number", step: "0.01" })}
+            ${productFieldLabel("Website price", "price", item, { type: "number", step: "0.01" })}
             ${productFieldLabel("Cost", "cost", item, { type: "number", step: "0.01" })}
+            ${productFieldLabel("List price", "listPrice", item, { type: "number", step: "0.01" })}
           `}
         </div>
       </section>
@@ -7556,11 +7559,11 @@ function ebayListingValue(item, field, fallback = "") {
 }
 
 function productCostValue(item = {}) {
-  return Number(item.cost ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? 0);
+  return Number(item.sourceCost ?? item.cost ?? item.price ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? 0);
 }
 
 function productBaseSellPrice(item = {}) {
-  return Number(item.msrp ?? item.retailPrice ?? item.retail_price ?? item.salePrice ?? item.sale_price ?? item.price ?? 0);
+  return Number(item.listPrice ?? item.msrp ?? item.retailPrice ?? item.retail_price ?? item.salePrice ?? item.sale_price ?? item.websitePrice ?? item.price ?? 0);
 }
 
 function roundMarketplacePrice(value, rule = "none") {
@@ -7582,6 +7585,28 @@ function ebaySuggestedPrice(item = {}) {
   const marginPrice = cost > 0 && marginPercentSetting > 0 && marginPercentSetting < 100 ? cost / (1 - marginPercentSetting / 100) : 0;
   const candidate = Math.max(markupPrice, marginPrice, basePrice, cost);
   return roundMarketplacePrice(candidate, settings.roundingRule || "none");
+}
+
+function channelSettingsByName(name = "") {
+  const key = String(name || "").toLowerCase();
+  const connection = (state.connections || []).find((channel) => String(channel.name || "").toLowerCase() === key);
+  return {
+    priceMarkupPercent: 60,
+    minMarginPercent: 0,
+    roundingRule: "none",
+    ...(connection?.settings || {})
+  };
+}
+
+function suggestedChannelPrice(item = {}, channelName = "") {
+  const settings = channelSettingsByName(channelName);
+  const cost = productCostValue(item);
+  const basePrice = productBaseSellPrice(item);
+  const markupPercent = Number(settings.priceMarkupPercent || 0);
+  const marginPercentSetting = Number(settings.minMarginPercent || 0);
+  const markupPrice = cost > 0 && markupPercent > 0 ? cost * (1 + markupPercent / 100) : 0;
+  const marginPrice = cost > 0 && marginPercentSetting > 0 && marginPercentSetting < 100 ? cost / (1 - marginPercentSetting / 100) : 0;
+  return roundMarketplacePrice(Math.max(markupPrice, marginPrice, basePrice, cost), settings.roundingRule || "none");
 }
 
 function ebayPricingMetrics(item = {}, draft = {}) {
@@ -8198,17 +8223,40 @@ function renderShippingTab(item) {
 function renderPricingTab(item, grossProfit, margin) {
   const shadows = item.shadowSkus || [];
   const aliases = item.aliases || [];
+  const channelPrices = ["Shopify", "eBay", "Temu", "TikTok Shop", "Whatnot"].map((name) => ({
+    name,
+    price: suggestedChannelPrice(item, name),
+    markup: Number(channelSettingsByName(name).priceMarkupPercent || 0)
+  }));
   return `
     <div class="product-tab-grid">
       <section class="product-panel">
         <h3>Base Pricing</h3>
         <div class="product-price-grid">
-          ${productFieldLabel("Price", "price", item, { type: "number", step: "0.01" })}
+          ${productFieldLabel("Website price", "price", item, { type: "number", step: "0.01" })}
           ${productFieldLabel("Cost", "cost", item, { type: "number", step: "0.01" })}
-          ${productFieldLabel("MSRP", "msrp", item, { type: "number", step: "0.01" })}
+          ${productFieldLabel("List price", "listPrice", item, { type: "number", step: "0.01" })}
           ${productFieldLabel("FOB", "fobPrice", item, { type: "number", step: "0.01" })}
         </div>
         <div class="product-margin-box"><small>Gross profit</small><strong>${money(grossProfit)}</strong><span>${margin.toFixed(1)}% margin</span></div>
+      </section>
+      <section class="product-panel span-2">
+        <h3>Website / Channel Price Rules</h3>
+        <div class="catalog-table-wrap compact-availability">
+          <table class="catalog-table">
+            <thead><tr><th>Channel</th><th>Markup</th><th>Calculated price</th><th>Base</th></tr></thead>
+            <tbody>
+              ${channelPrices.map((row) => `
+                <tr>
+                  <td>${html(row.name)}</td>
+                  <td>${Number(row.markup).toFixed(2)}%</td>
+                  <td><strong>${money(row.price)}</strong></td>
+                  <td>Cost ${money(productCostValue(item))} / List ${money(productBaseSellPrice(item))}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
       </section>
       <section class="product-panel span-2">
         <h3>Marketplace Pricing</h3>
@@ -8360,9 +8408,9 @@ function renderProductHomeTab(item, context) {
           <section class="product-section-card product-section-teal">
             <div class="product-section-title">${sectionIconTitle("dollar-sign", "Pricing")}<span>${money(grossProfit)} profit</span></div>
             <div class="product-row-fields">
-              ${productFieldLabel("Price", "price", item, { type: "number", step: "0.01" })}
+              ${productFieldLabel("Website price", "price", item, { type: "number", step: "0.01" })}
               ${productFieldLabel("Cost", "cost", item, { type: "number", step: "0.01" })}
-              ${productFieldLabel("MSRP", "msrp", item, { type: "number", step: "0.01" })}
+              ${productFieldLabel("List price", "listPrice", item, { type: "number", step: "0.01" })}
               ${productFieldLabel("FOB", "fobPrice", item, { type: "number", step: "0.01" })}
             </div>
             <div class="summary-grid product-home-summary pricing-summary">
@@ -10516,9 +10564,9 @@ function renderChannelProfile() {
         </section>
         <section class="full-card span-2">
           <h3>${channel.name === "eBay" ? "eBay Pricing Rules" : "Pricing Rules"}</h3>
-          <p class="muted">${channel.name === "eBay" ? "Used as the default eBay listing price when a SKU does not have a manual eBay price." : "Used for marketplace price suggestions and channel updates."}</p>
+          <p class="muted">${channel.name === "eBay" ? "Used as the default eBay listing price when a SKU does not have a manual eBay price." : "Used for website and marketplace price suggestions and channel updates."}</p>
           <div class="form-grid">
-            <label>Storewide markup %<input type="number" step="0.01" value="${Number(settings.priceMarkupPercent || 0)}" data-channel-field="priceMarkupPercent" data-channel-id="${channel.id}" /></label>
+            <label>Website/channel markup %<input type="number" step="0.01" value="${Number(settings.priceMarkupPercent || 0)}" data-channel-field="priceMarkupPercent" data-channel-id="${channel.id}" /></label>
             <label>Minimum profit margin %<input type="number" step="0.01" value="${Number(settings.minMarginPercent || 0)}" data-channel-field="minMarginPercent" data-channel-id="${channel.id}" /></label>
             <label>Rounding rule<select data-channel-field="roundingRule" data-channel-id="${channel.id}">
               ${["none", "nearest .99", "nearest .95", "round up"].map((rule) => `<option value="${rule}" ${settings.roundingRule === rule ? "selected" : ""}>${rule}</option>`).join("")}
@@ -12165,7 +12213,7 @@ async function updateProductField(input) {
   const item = state.inventory.find((row) => row.id === input.dataset.productId);
   if (!item) return;
   const field = input.dataset.productField;
-  const numericFields = new Set(["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"]);
+  const numericFields = new Set(["qty", "reserved", "reorderPoint", "price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"]);
   const booleanFields = new Set(["hazardous", "active", "brandLocked"]);
   let value = input.value;
   if (numericFields.has(field)) value = Number(input.value);

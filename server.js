@@ -60,9 +60,12 @@ const PRODUCT_MAPPING_FIELDS = [
   { key: "condition", label: "Condition", type: "text" },
   { key: "status", label: "Status", type: "text" },
   { key: "active", label: "Active", type: "boolean" },
-  { key: "price", label: "Price", type: "number" },
+  { key: "price", label: "Website price", type: "number" },
+  { key: "websitePrice", label: "Website price", type: "number" },
   { key: "cost", label: "Cost", type: "number" },
-  { key: "msrp", label: "MSRP", type: "number" },
+  { key: "sourceCost", label: "Source cost", type: "number" },
+  { key: "listPrice", label: "List price", type: "number" },
+  { key: "msrp", label: "MSRP / list price", type: "number" },
   { key: "qty", label: "Quantity", type: "number" },
   { key: "reserved", label: "Reserved", type: "number" },
   { key: "available", label: "Available", type: "computed" },
@@ -107,7 +110,10 @@ const DUMP_REVIEW_FIELDS = new Set([
   "minQuantity",
   "quantityIncrements",
   "cost",
+  "sourceCost",
   "price",
+  "websitePrice",
+  "listPrice",
   "fobPrice",
   "msrp",
   "stockQty",
@@ -227,7 +233,8 @@ const DEFAULT_CHANNEL_SETTINGS = {
   trackingUpdateEnabled: true,
   cancellationNotificationEnabled: true,
   autoCreateShadow: false,
-  priceMarkupPercent: 0,
+  priceMarkupPercent: 60,
+  pricingRuleVersion: 1,
   minMarginPercent: 0,
   roundingRule: "none",
   ebayMarketplaceId: "EBAY_US",
@@ -250,6 +257,13 @@ const DEFAULT_CHANNEL_SETTINGS = {
 const DEFAULT_SYSTEM_SETTINGS = {
   autoLoadProductAlternates: false
 };
+
+function pricedFromCost(cost, markupPercent = DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent) {
+  const numericCost = Number(sourceNumberValue(cost));
+  const numericMarkup = Number(markupPercent || 0);
+  if (!(numericCost > 0)) return 0;
+  return Math.round((numericCost * (1 + numericMarkup / 100)) * 100) / 100;
+}
 
 const DEFAULT_MARKETPLACE_TEMPLATES = [
   {
@@ -1111,17 +1125,25 @@ function normalizeDb(db) {
   db.knowledgeArticles = normalizeKnowledgeArticles(db.knowledgeArticles);
   db.systemSettings = { ...DEFAULT_SYSTEM_SETTINGS, ...(db.systemSettings || {}) };
   db.connections = (db.connections || SOURCES.map((name) => ({ id: crypto.randomUUID(), name }))).map(normalizeChannel);
+  const websitePriceSettings = findChannelByName(db, "Shopify")?.settings || db.connections[0]?.settings || DEFAULT_CHANNEL_SETTINGS;
+  const websiteMarkupPercent = Number(websitePriceSettings.priceMarkupPercent || DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent);
 
   db.inventory = (db.inventory || []).map((item) => {
     const defaults = PRODUCT_DEFAULTS[item.sku] || {};
     const categoryVerified = sourceBooleanValue(item.categoryVerified ?? item.mainCategoryVerified, Boolean(defaults.category));
     const currentCategory = formatCategoryName(item.category ?? defaults.category ?? "");
     const sourceCategory = formatCategoryName(item.sourceCategory ?? item.vendorCategory ?? item.productManagerFields?.category ?? item.original?.category ?? (categoryVerified ? "" : currentCategory));
+    const sourceCost = sourceCatalogCost({ ...defaults, ...item });
+    const listPrice = Number(sourceNumberValue(item.listPrice ?? item.list_price ?? item.msrp ?? defaults.msrp ?? 0));
+    const websitePrice = Number(sourceNumberValue(item.websitePrice ?? item.shopifyPrice ?? item.channelPrice ?? pricedFromCost(sourceCost, websiteMarkupPercent)));
     const product = {
       title: item.title ?? item.name ?? defaults.title ?? item.sku ?? "",
-      price: Number(sourceNumberValue(item.price ?? item.sale_price ?? item.sell_price ?? defaults.price ?? 0)),
-      cost: Number(sourceNumberValue(item.cost ?? item.fob_price ?? item.wholesale_price ?? defaults.cost ?? 0)),
-      msrp: Number(sourceNumberValue(item.msrp ?? item.list_price ?? defaults.msrp ?? 0)),
+      price: websitePrice,
+      websitePrice,
+      cost: sourceCost,
+      sourceCost,
+      listPrice,
+      msrp: listPrice,
       brand: formatBrandName(item.brand ?? defaults.brand ?? ""),
       sourceBrand: item.sourceBrand ?? item.productManagerFields?.brand ?? item.original?.brand ?? item.brand ?? "",
       brandLocked: Boolean(item.brandLocked ?? false),
@@ -1692,8 +1714,13 @@ function backfillAliasesFromMappedOrders(db = {}) {
 }
 
 function normalizeChannel(channel = {}) {
-  const settings = { ...DEFAULT_CHANNEL_SETTINGS, ...(channel.settings || {}) };
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "minMarginPercent", "ebayMaxImages"]) {
+  const rawSettings = channel.settings || {};
+  const settings = { ...DEFAULT_CHANNEL_SETTINGS, ...rawSettings };
+  if (rawSettings.pricingRuleVersion !== 1 && Number(settings.priceMarkupPercent || 0) <= 0) {
+    settings.priceMarkupPercent = DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
+  }
+  settings.pricingRuleVersion = 1;
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages"]) {
     settings[field] = Number(settings[field] || 0);
   }
   for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled"]) {
@@ -5568,10 +5595,11 @@ function publicSourceManagerFields(item = {}) {
 
 function publicConnection(connection = {}) {
   const logoDataUrl = String(connection.logoDataUrl || "");
+  const normalized = normalizeChannel(connection);
   return {
-    ...connection,
+    ...normalized,
     logoDataUrl: logoDataUrl.length <= 120000 ? logoDataUrl : "",
-    settings: { ...DEFAULT_CHANNEL_SETTINGS, ...(connection.settings || {}) }
+    settings: normalized.settings
   };
 }
 
@@ -5601,6 +5629,10 @@ function publicEbayListing(listing = null) {
 }
 
 function publicInventoryItem(item = {}) {
+  const cost = sourceCatalogCost(item);
+  const listPrice = Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0));
+  const rawPrice = Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
+  const websitePrice = rawPrice > cost ? rawPrice : pricedFromCost(cost);
   return {
     id: item.id,
     sku: item.sku,
@@ -5637,9 +5669,12 @@ function publicInventoryItem(item = {}) {
     qty: Number(item.qty || 0),
     stockQty: Number(item.stockQty || 0),
     reserved: Number(item.reserved || 0),
-    price: Number(item.price || 0),
-    cost: Number(item.cost || 0),
-    msrp: Number(item.msrp || 0),
+    price: websitePrice,
+    websitePrice,
+    cost,
+    sourceCost: cost,
+    listPrice,
+    msrp: listPrice,
     fobPrice: Number(item.fobPrice || 0),
     itemHeight: Number(item.itemHeight || 0),
     itemLength: Number(item.itemLength || 0),
@@ -6951,11 +6986,11 @@ function ebayChannelSettings(db = {}) {
 }
 
 function marketplaceItemCost(item = {}) {
-  return Number(sourceNumberValue(item.cost ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? 0));
+  return Number(sourceNumberValue(item.sourceCost ?? item.cost ?? item.price ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? 0));
 }
 
 function marketplaceBaseSellPrice(item = {}) {
-  return Number(sourceNumberValue(item.msrp ?? item.retailPrice ?? item.retail_price ?? item.salePrice ?? item.sale_price ?? item.price ?? 0));
+  return Number(sourceNumberValue(item.listPrice ?? item.msrp ?? item.retailPrice ?? item.retail_price ?? item.salePrice ?? item.sale_price ?? item.websitePrice ?? item.price ?? 0));
 }
 
 function roundMarketplacePrice(value, rule = "none") {
@@ -8143,7 +8178,7 @@ function inventoryPayloadFromRecord(record) {
   };
   const payload = {};
   const textFields = ["marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
-  const numberFields = ["price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "reorderPoint", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
+  const numberFields = ["price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "reorderPoint", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
 
   for (const field of textFields) {
     if (record[field] !== undefined) payload[field] = String(record[field]).trim();
@@ -8157,6 +8192,12 @@ function inventoryPayloadFromRecord(record) {
   for (const field of numberFields) {
     if (record[field] !== undefined && Number.isFinite(Number(record[field]))) payload[field] = Number(record[field]);
   }
+  if (payload.price !== undefined && payload.websitePrice === undefined) payload.websitePrice = payload.price;
+  if (payload.websitePrice !== undefined && payload.price === undefined) payload.price = payload.websitePrice;
+  if (payload.cost !== undefined && payload.sourceCost === undefined) payload.sourceCost = payload.cost;
+  if (payload.sourceCost !== undefined && payload.cost === undefined) payload.cost = payload.sourceCost;
+  if (payload.listPrice !== undefined && payload.msrp === undefined) payload.msrp = payload.listPrice;
+  if (payload.msrp !== undefined && payload.listPrice === undefined) payload.listPrice = payload.msrp;
   if (record.hazardous !== undefined) payload.hazardous = record.hazardous === true || String(record.hazardous).toLowerCase() === "true";
   if (record.active !== undefined) payload.active = record.active === true || String(record.active).toLowerCase() === "true";
   if (record.brandLocked !== undefined) payload.brandLocked = record.brandLocked === true || String(record.brandLocked).toLowerCase() === "true";
@@ -8173,7 +8214,7 @@ function inventoryPayloadFromRecord(record) {
 
 function applyInventoryPatch(item, body) {
   const textFields = ["title", "marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
-  const numberFields = ["qty", "reserved", "reorderPoint", "price", "cost", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
+  const numberFields = ["qty", "reserved", "reorderPoint", "price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
 
   for (const field of textFields) {
     if (body[field] !== undefined) item[field] = String(body[field]);
@@ -8191,6 +8232,12 @@ function applyInventoryPatch(item, body) {
   for (const field of numberFields) {
     if (body[field] !== undefined && Number.isFinite(Number(body[field]))) item[field] = Number(body[field]);
   }
+  if (body.price !== undefined) item.websitePrice = item.price;
+  if (body.websitePrice !== undefined) item.price = item.websitePrice;
+  if (body.cost !== undefined) item.sourceCost = item.cost;
+  if (body.sourceCost !== undefined) item.cost = item.sourceCost;
+  if (body.listPrice !== undefined) item.msrp = item.listPrice;
+  if (body.msrp !== undefined) item.listPrice = item.msrp;
   if (body.hazardous !== undefined) item.hazardous = body.hazardous === true || String(body.hazardous).toLowerCase() === "true";
   if (body.active !== undefined) item.active = body.active === true || String(body.active).toLowerCase() === "true";
   if (body.brandLocked !== undefined) item.brandLocked = body.brandLocked === true || String(body.brandLocked).toLowerCase() === "true";
@@ -8552,7 +8599,21 @@ function decorateSourceCatalogProduct(product = {}, overrides = {}, productsBySk
   };
 }
 
+function sourceCatalogCost(product = {}) {
+  const sourceCost = Number(sourceNumberValue(product.sourceCost));
+  if (sourceCost > 0) return sourceCost;
+  const cost = Number(sourceNumberValue(product.cost));
+  const price = Number(sourceNumberValue(product.price));
+  const listPrice = Number(sourceNumberValue(product.listPrice ?? product.msrp));
+  const appearsToBeRawDumpPrice = price > 0 && listPrice > 0 && price <= listPrice && (!cost || cost >= price);
+  if (appearsToBeRawDumpPrice) return price;
+  return cost || price || 0;
+}
+
 function catalogSummary(product = {}) {
+  const cost = sourceCatalogCost(product);
+  const listPrice = Number(sourceNumberValue(product.listPrice ?? product.msrp ?? 0));
+  const websitePrice = Number(sourceNumberValue(product.websitePrice ?? 0)) || pricedFromCost(cost);
   return {
     id: product.id || product.sku,
     sku: product.sku || "",
@@ -8573,9 +8634,12 @@ function catalogSummary(product = {}) {
     supplierCode: product.supplierCode || "",
     stockStatus: product.stockStatus || "",
     hazardous: Boolean(product.hazardous),
-    price: Number(product.price || 0),
-    cost: Number(product.cost || 0),
-    msrp: Number(product.msrp || 0),
+    price: websitePrice,
+    websitePrice,
+    cost,
+    sourceCost: cost,
+    listPrice,
+    msrp: listPrice,
     stockQty: Number(product.stockQty ?? product.qty ?? 0),
     active: product.active !== false,
     status: product.status || "Draft",
@@ -10679,14 +10743,16 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/export/inventory") {
-    const headers = ["sku", "title", "marketplaceTitle", "price", "cost", "msrp", "qty", "reserved", "available", "reorderPoint", "brand", "category", "condition", "status", "barcode", "shortDescription", "longDescription", "images", "tags", "weightOz", "lengthIn", "widthIn", "heightIn", "vendor", "seoKeywords", "sources"];
+    const headers = ["sku", "title", "marketplaceTitle", "websitePrice", "cost", "listPrice", "msrp", "price", "qty", "reserved", "available", "reorderPoint", "brand", "category", "condition", "status", "barcode", "shortDescription", "longDescription", "images", "tags", "weightOz", "lengthIn", "widthIn", "heightIn", "vendor", "seoKeywords", "sources"];
     const rows = db.inventory.map((item) => [
       item.sku,
       item.title,
       item.marketplaceTitle,
-      item.price,
+      item.websitePrice ?? item.price,
       item.cost,
+      item.listPrice ?? item.msrp,
       item.msrp,
+      item.price,
       item.qty,
       item.reserved,
       item.qty - item.reserved,

@@ -524,8 +524,9 @@ function buildProduct(record) {
 
   const defaultImage = textValue(normalizedRecord.default_image || normalizedRecord.defaultImage || normalizedRecord.image || normalizedRecord.image_url);
   const images = [...new Set([defaultImage, ...listValue(normalizedRecord.images || normalizedRecord.image_urls)].filter(Boolean))];
-  const price = numberValue(normalizedRecord.price || normalizedRecord.sale_price || normalizedRecord.sell_price);
-  const cost = numberValue(normalizedRecord.cost || normalizedRecord.fob_price || normalizedRecord.wholesale_price);
+  const sourceCost = numberValue(normalizedRecord.price || normalizedRecord.cost || normalizedRecord.fob_price || normalizedRecord.wholesale_price);
+  const listPrice = numberValue(normalizedRecord.list_price || normalizedRecord.msrp);
+  const websitePrice = sourceCost > 0 ? Math.round((sourceCost * 1.6) * 100) / 100 : 0;
   const stockQty = numberValue(normalizedRecord.stock_qty ?? normalizedRecord.stockQty ?? normalizedRecord.qty ?? normalizedRecord.quantity);
   const minQuantity = textValue(normalizedRecord.min_quantity || normalizedRecord.minQuantity);
   const checkedImage = normalizedRecord.checked_image && typeof normalizedRecord.checked_image === "object" ? normalizedRecord.checked_image : {};
@@ -584,9 +585,12 @@ function buildProduct(record) {
     ctechId: textValue(normalizedRecord.ctech_id || normalizedRecord.ctechId),
     ctechIdLastExport: textValue(normalizedRecord.ctech_id_last_export || normalizedRecord.ctechIdLastExport),
     fobPrice: numberValue(normalizedRecord.fob_price || normalizedRecord.fobPrice),
-    price,
-    cost,
-    msrp: numberValue(normalizedRecord.list_price || normalizedRecord.msrp),
+    price: websitePrice,
+    websitePrice,
+    cost: sourceCost,
+    sourceCost,
+    listPrice,
+    msrp: listPrice,
     wildcardSearch: textValue(normalizedRecord.wildcardSearch),
     tags: listValue(normalizedRecord.tags),
     attributes: normalizedRecord.attributes && typeof normalizedRecord.attributes === "object" ? normalizedRecord.attributes : {},
