@@ -6906,14 +6906,19 @@ function renderProductsTable(items) {
           <strong>Product selection</strong>
           <small>${html(selectionLabel)} / showing ${Number(pageItems.length).toLocaleString()}</small>
         </div>
-        <div class="selection-actions">
-          <button class="button secondary" type="button" data-select-products-page>Select current page</button>
-          <button class="button secondary" type="button" data-select-products-filtered>Select all results</button>
-          <button class="button secondary" type="button" data-clear-products-selection ${selectedCount ? "" : "disabled"}>Clear</button>
-          <button class="button secondary" type="button" data-load-product-alternates-page>${alternatesLoaded ? `Refresh alternates (${alternatesLoaded}/${pageItems.length})` : "Load alternates"}</button>
+        <div class="product-selection-actions">
+          <div class="selection-actions">
+            <button class="button secondary" type="button" data-select-products-page>Select current page</button>
+            <button class="button secondary" type="button" data-select-products-filtered>Select all results</button>
+            <button class="button secondary" type="button" data-clear-products-selection ${selectedCount ? "" : "disabled"}>Clear</button>
+          </div>
+          <div class="alternate-actions">
+            <button class="button secondary compact-button" type="button" data-load-product-alternates-page>${alternatesLoaded ? `Refresh alternates (${alternatesLoaded}/${pageItems.length})` : "Load alternates"}</button>
+            <label class="auto-alternates-toggle"><input type="checkbox" ${autoLoadAlternates ? "checked" : ""} data-system-setting="autoLoadProductAlternates" /> Auto alternates</label>
+          </div>
         </div>
         <div class="product-export-controls">
-          <label class="inline-toggle compact-system-setting"><input type="checkbox" ${autoLoadAlternates ? "checked" : ""} data-system-setting="autoLoadProductAlternates" /> Auto alternates</label>
+          <span class="export-control-label">Export products</span>
           <select id="product-export-template">
             ${exportMappings.map((template) => `<option value="${template.id}" ${template.id === selectedExportMappingId ? "selected" : ""}>${html(template.name)}</option>`).join("")}
           </select>

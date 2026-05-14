@@ -7816,7 +7816,7 @@ tbody tr:hover td {
 }
 
 .product-export-bar {
-  grid-template-columns: minmax(220px, 1fr) minmax(430px, auto) minmax(420px, 0.9fr);
+  grid-template-columns: minmax(190px, 0.6fr) minmax(360px, auto) minmax(280px, 0.75fr);
   padding: 14px 16px;
 }
 
@@ -7850,6 +7850,12 @@ tbody tr:hover td {
   white-space: nowrap;
 }
 
+.product-selection-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+
 .product-export-bar .selection-actions {
   justify-content: center;
   flex-wrap: nowrap;
@@ -7875,11 +7881,67 @@ tbody tr:hover td {
   box-shadow: var(--shadow-soft);
 }
 
+.alternate-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.alternate-actions .compact-button {
+  min-height: 32px;
+  padding: 6px 11px;
+}
+
+.auto-alternates-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.auto-alternates-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--blue);
+}
+
 .product-export-controls {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto;
+  grid-template-columns: 1fr auto;
   align-items: center;
   gap: 10px;
+}
+
+.export-control-label {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+@media (max-width: 1320px) {
+  .product-export-bar {
+    grid-template-columns: 1fr;
+  }
+
+  .product-selection-actions {
+    justify-items: flex-start;
+  }
+
+  .alternate-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .product-export-controls {
+    max-width: 460px;
+  }
 }
 
 .product-export-controls .button {
