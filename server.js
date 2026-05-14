@@ -83,6 +83,7 @@ const PRODUCT_MAPPING_FIELDS = [
   { key: "shopifyId", label: "Shopify ID", type: "text" },
   { key: "shopifyVariantId", label: "Shopify variant ID", type: "text" },
   { key: "shopifyStatus", label: "Shopify status", type: "text" },
+  { key: "shopifyCompareAtPrice", label: "Shopify compare-at price", type: "computed" },
   { key: "shopifyPublished", label: "Shopify published", type: "boolean" },
   { key: "shopifyPublishedAt", label: "Shopify published at", type: "text" },
   { key: "shopifyUpdatedAt", label: "Shopify updated at", type: "text" },
@@ -176,6 +177,7 @@ const DEFAULT_EXPORT_MAPPINGS = [
       { externalColumn: "Tags", productField: "tags" },
       { externalColumn: "Variant SKU", productField: "sku" },
       { externalColumn: "Variant Price", productField: "price" },
+      { externalColumn: "Variant Compare At Price", productField: "shopifyCompareAtPrice" },
       { externalColumn: "Variant Inventory Qty", productField: "available" },
       { externalColumn: "Image Src", productField: "defaultImage" },
       { externalColumn: "Status", productField: "status" }
@@ -1880,10 +1882,25 @@ function normalizeExportMapping(template = {}) {
   };
 }
 
+function mergeDefaultExportMappings(defaultTemplate = {}, existingTemplate = {}) {
+  const existing = normalizeExportMapping({ ...defaultTemplate, ...existingTemplate });
+  const existingByColumn = new Map(existing.mappings.map((row) => [row.externalColumn.toLowerCase(), row]));
+  const orderedDefaults = parseMappingRows(defaultTemplate.mappings)
+    .map(normalizeExportMappingRow)
+    .filter((row) => row.externalColumn)
+    .map((row) => existingByColumn.get(row.externalColumn.toLowerCase()) || row);
+  const defaultColumns = new Set(orderedDefaults.map((row) => row.externalColumn.toLowerCase()));
+  const customRows = existing.mappings.filter((row) => !defaultColumns.has(row.externalColumn.toLowerCase()));
+  return normalizeExportMapping({
+    ...existing,
+    mappings: [...orderedDefaults, ...customRows]
+  });
+}
+
 function normalizeExportMappings(templates = []) {
   const input = Array.isArray(templates) ? templates : [];
   const existing = new Map(input.map((template) => [String(template.id || template.name || "").toLowerCase(), template]));
-  const merged = DEFAULT_EXPORT_MAPPINGS.map((defaults) => normalizeExportMapping({ ...defaults, ...(existing.get(defaults.id.toLowerCase()) || {}) }));
+  const merged = DEFAULT_EXPORT_MAPPINGS.map((defaults) => mergeDefaultExportMappings(defaults, existing.get(defaults.id.toLowerCase()) || {}));
   for (const template of input) {
     const key = String(template.id || "").toLowerCase();
     if (!DEFAULT_EXPORT_MAPPINGS.some((defaults) => defaults.id.toLowerCase() === key)) merged.push(normalizeExportMapping(template));
@@ -2053,8 +2070,34 @@ function sanitizeProductHtml(value) {
   return text.split(/\n{2,}/).map((paragraph) => `<p>${escapeHtml(paragraph.trim())}</p>`).join("");
 }
 
+function shopifyMoneyValue(value) {
+  const number = Number(sourceNumberValue(value));
+  if (!(number > 0)) return "";
+  return number.toFixed(2);
+}
+
+function shopifyVariantPrice(item = {}) {
+  return shopifyMoneyValue(item.websitePrice ?? item.price);
+}
+
+function deterministicMarkupPercent(seed = "") {
+  const hash = crypto.createHash("sha1").update(String(seed || "")).digest();
+  const bucket = hash.readUInt16BE(0) / 65535;
+  return 20 + (bucket * 20);
+}
+
+function shopifyCompareAtPrice(item = {}) {
+  const price = Number(sourceNumberValue(item.websitePrice ?? item.price));
+  if (!(price > 0)) return "";
+  const percent = deterministicMarkupPercent(item.sku || item.id || item.title);
+  return shopifyMoneyValue(price * (1 + percent / 100));
+}
+
 function productFieldValue(db, item, field, mapping = {}) {
+  const column = String(mapping.externalColumn || "").trim();
   if (String(mapping.externalColumn || "").trim().toLowerCase() === "handle") return shopifyHandleForProduct(item);
+  if (/^Variant Price$/i.test(column)) return shopifyVariantPrice(item);
+  if (/^Variant Compare At Price$/i.test(column) || field === "shopifyCompareAtPrice") return shopifyCompareAtPrice(item);
   if (field === "available") return Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0);
   if (field === "vendor") return item.vendor ?? item.supplier ?? "";
   if (field === "qty") return item.qty ?? item.stockQty ?? "";
