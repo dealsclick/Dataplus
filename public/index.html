@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DataPlus</title>
-    <link rel="stylesheet" href="/styles.css?v=queues-20260504-5" />
+    <link rel="stylesheet" href="/styles.css?v=sku-change-tracking-20260520-1" />
   </head>
   <body>
     <div id="global-save-progress" class="global-save-progress" aria-hidden="true"><span></span></div>
@@ -38,8 +38,9 @@
           <div class="nav-children">
             <button class="nav-child" data-view="catalog" data-catalog-tab-link="products" data-icon="package">Products</button>
             <button class="nav-child" data-view="catalog" data-catalog-tab-link="source" data-icon="database">Source Catalog</button>
-            <button class="nav-child" data-view="catalog" data-catalog-tab-link="reviews" data-icon="clipboard-check">Import Review</button>
-            <button class="nav-child" data-view="catalog" data-catalog-tab-link="categories" data-icon="tags">Categories</button>
+          <button class="nav-child" data-view="catalog" data-catalog-tab-link="reviews" data-icon="clipboard-check">Import Review</button>
+            <button class="nav-child" data-view="catalog" data-catalog-tab-link="changes" data-icon="activity">SKU Changes</button>
+          <button class="nav-child" data-view="catalog" data-catalog-tab-link="categories" data-icon="tags">Categories</button>
             <button class="nav-child" data-view="catalog" data-catalog-tab-link="attributes" data-icon="list-check">Attributes</button>
             <button class="nav-child" data-view="catalog" data-catalog-tab-link="attribute-groups" data-icon="network">Attribute Groups</button>
             <button class="nav-child" data-view="catalog" data-catalog-tab-link="inventory" data-icon="warehouse">Inventory</button>
@@ -61,6 +62,7 @@
         <button class="nav-item" data-view="knowledge" data-icon="book-open">Knowledge Base</button>
         <span class="nav-section-label">Admin</span>
         <button class="nav-item" data-view="connections" data-icon="radio">Channels</button>
+        <button class="nav-item" data-view="system-settings" data-icon="settings">System Settings</button>
       </nav>
     </aside>
 
@@ -274,6 +276,7 @@
           <button class="subnav-item active" data-catalog-tab="products" data-icon="package">Products</button>
           <button class="subnav-item" data-catalog-tab="source" data-icon="database">Source Catalog</button>
           <button class="subnav-item" data-catalog-tab="reviews" data-icon="clipboard-check">Import Review</button>
+          <button class="subnav-item" data-catalog-tab="changes" data-icon="activity">SKU Changes</button>
           <button class="subnav-item" data-catalog-tab="categories" data-icon="tags">Categories</button>
           <button class="subnav-item" data-catalog-tab="attributes" data-icon="list-check">Attributes</button>
           <button class="subnav-item" data-catalog-tab="attribute-groups" data-icon="network">Groups</button>
@@ -331,6 +334,11 @@
               <option value="true">Hazardous</option>
               <option value="false">Not hazardous</option>
             </select>
+            <select id="catalog-filter-discontinued">
+              <option value="">Any discontinued status</option>
+              <option value="true">To be discontinued</option>
+              <option value="false">Not discontinued</option>
+            </select>
             <select id="catalog-filter-verified-brand" class="product-only-control">
               <option value="">Any brand verification</option>
               <option value="true">Verified brand</option>
@@ -356,6 +364,7 @@
         <div id="products-list" class="catalog-list"></div>
         <div id="source-catalog-list" class="catalog-list"></div>
         <div id="import-review-list" class="catalog-list"></div>
+        <div id="catalog-changes-list" class="catalog-list"></div>
         <div id="category-list" class="catalog-list"></div>
         <div id="attribute-list" class="catalog-list"></div>
         <div id="attribute-groups-list" class="catalog-list"></div>
@@ -464,6 +473,10 @@
 
       <section id="connections" class="view">
         <div id="connection-grid" class="connection-grid"></div>
+      </section>
+
+      <section id="system-settings" class="view">
+        <div id="system-settings-page"></div>
       </section>
 
       <section id="channel-full" class="view">
@@ -1187,6 +1200,23 @@
       </form>
     </div>
 
+    <div id="product-export-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card product-export-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Products</p>
+            <h2>Export products</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-product-export-modal aria-label="Close product export">x</button>
+        </div>
+        <div id="product-export-modal-content"></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-product-export-modal>Cancel</button>
+          <button type="button" class="button" data-run-product-export-modal>Export CSV</button>
+        </div>
+      </div>
+    </div>
+
     <div id="product-import-modal" class="modal-backdrop" aria-hidden="true">
       <div class="modal-card product-import-modal-card">
         <div class="modal-head">
@@ -1262,6 +1292,6 @@
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/checklist@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/embed@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/image@latest"></script>
-    <script src="/app.js?v=attribute-groups-height-20260513-1"></script>
+    <script src="/app.js?v=custom-export-format-20260531-1"></script>
   </body>
 </html>

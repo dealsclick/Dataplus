@@ -1,6 +1,7 @@
 let state = null;
 let selectedOrderId = null;
 let selectedProductId = null;
+let selectedProductEditMode = false;
 let orderDetailVisible = false;
 let selectedOrderIds = new Set();
 let activeOrderQueue = "new";
@@ -10,6 +11,30 @@ let sourceCatalogPage = 1;
 let sourceCatalogState = { items: [], totalMatches: 0, hasMore: false, manifest: null, query: "", loading: false };
 let sourceCatalogRequestId = 0;
 let sourceCatalogFacets = null;
+let sourceSearchIndexStatus = null;
+let catalogChangeState = {
+  rows: [],
+  summary: null,
+  tracking: null,
+  facets: { fields: [], sources: [], vendors: [] },
+  total: 0,
+  page: 1,
+  limit: 100,
+  loading: false,
+  error: "",
+  loaded: false,
+  filters: { q: "", field: "", source: "", vendor: "", direction: "", from: "", to: "" }
+};
+let dataQualityState = {
+  summary: null,
+  issues: [],
+  rows: [],
+  total: 0,
+  loading: false,
+  loaded: false,
+  error: "",
+  filters: { q: "", issue: "", type: "", channel: "", status: "" }
+};
 let selectedSourceSuppliers = new Set();
 let supplierMultiOpen = false;
 let categoryState = { categories: [], total: 0, query: "", scope: "main", loading: false };
@@ -36,7 +61,23 @@ let selectedSourceAllFiltered = false;
 let pendingSourceSkuImport = { fileName: "", csv: "", skus: [], result: null, running: false, error: "" };
 let selectedProductIds = new Set();
 let selectedProductAllFiltered = false;
+let productExportModalState = {
+  mode: "profile",
+  step: "columns",
+  templateId: "",
+  profileName: "",
+  source: "Custom",
+  formatType: "normal",
+  selectedFields: new Set(["sku", "title", "brand", "vendor", "price", "available"]),
+  columnSearch: "",
+  saveProfile: false,
+  fileName: "products.csv"
+};
 let productAlternatesCache = {};
+let productDetailCache = {};
+let inventoryLoadPromise = null;
+let categorySettingsLoadPromise = null;
+let ordersLoadPromise = null;
 let selectedProductWorkspaceTab = "home";
 let selectedProductGalleryImageById = {};
 let pendingProductImageManager = { productId: null, images: [], defaultImage: "" };
@@ -44,6 +85,9 @@ let pendingProductBulletManager = { productId: null, bulletPoints: [] };
 let productCatalogPage = 1;
 let inventoryCatalogPage = 1;
 const PRODUCT_CATALOG_PAGE_SIZE = 100;
+let productCatalogState = { items: [], total: 0, page: 1, limit: PRODUCT_CATALOG_PAGE_SIZE, loading: false, loaded: false, query: "", filtersKey: "", storage: "" };
+let inventoryCatalogState = { items: [], total: 0, page: 1, limit: PRODUCT_CATALOG_PAGE_SIZE, loading: false, loaded: false, query: "", filtersKey: "", storage: "" };
+let inventoryFacetsState = { loaded: false, loading: false, facets: null };
 let productFilterOptionsCache = { inventoryCount: -1, suppliers: [], stockStatuses: [], shopifyStatuses: [], ebayStatuses: [], brands: [], categories: [] };
 let inventoryById = new Map();
 let activeApiRequests = 0;
@@ -87,8 +131,10 @@ let knowledgeEditor = null;
 let managingKnowledgeSettings = false;
 let menuGroupsExpanded = localStorage.getItem("dataplus-menu-groups-expanded") === "true";
 let themeMode = localStorage.getItem("dataplus-theme") || "light";
-let jobsFilter = { query: "", section: "", status: "", direction: "" };
+let jobsFilter = { query: "", section: "", status: "", direction: "", channel: "", endpoint: "" };
 let selectedImportJobId = null;
+let channelApiLogState = { channel: "", logs: [], loading: false, loaded: false, error: "", filters: { q: "", status: "", transport: "" } };
+let systemSettingsEditMode = false;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -100,9 +146,11 @@ const LUCIDE_ICONS = {
   "bar-chart-3": '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
   "book-open": '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3 3 3 0 0 1 3-3h5a2 2 0 0 1 2 2v12a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3Z"/>',
   "boxes": '<path d="M2.97 12.92 12 17.5l9.03-4.58"/><path d="M2.97 17.92 12 22.5l9.03-4.58"/><path d="M12 2 2.97 6.58 12 11.16l9.03-4.58L12 2Z"/>',
+  "check": '<path d="M20 6 9 17l-5-5"/>',
   "clipboard-check": '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
   "clipboard-list": '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/>',
   "copy": '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  "database-backup": '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v7c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12v5c0 1.66 4.03 3 9 3h1"/><path d="M16 19h6"/><path d="m19 16 3 3-3 3"/>',
   "database": '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/>',
   "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/>',
   "dollar-sign": '<path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"/>',
@@ -127,6 +175,7 @@ const LUCIDE_ICONS = {
   "ruler": '<path d="m16 2 6 6L8 22l-6-6Z"/><path d="m7.5 10.5 2 2"/><path d="m10.5 7.5 2 2"/><path d="m13.5 4.5 2 2"/><path d="m4.5 13.5 2 2"/>',
   "save": '<path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8A2 2 0 0 1 21 8.8V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M17 21v-7H7v7"/><path d="M7 3v5h8"/>',
   "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  "settings": '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/>',
   "shopping-bag": '<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
   "shopping-cart": '<circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57L21.9 7H5.12"/>',
   "sparkles": '<path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/>',
@@ -243,6 +292,10 @@ function productImageUrls(item = {}) {
   ].map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
+function productImageCount(item = {}) {
+  return productImageUrls(item).length || Number(item.imageCount || 0);
+}
+
 function productEditableImageUrls(item = {}) {
   const images = Array.isArray(item.images)
     ? item.images
@@ -292,11 +345,77 @@ function calculateDimensionalWeight(item = {}) {
   return Math.round(((length * width * height) / 139) * 1000) / 1000;
 }
 
+const SYSTEM_DEFAULT_DIMENSION_IN = 5;
+const SYSTEM_DEFAULT_WEIGHT_LB = 5;
+const DIMENSION_WEIGHT_FIELDS = new Set(["itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth"]);
+
+function productSourceContainers(item = {}) {
+  return [
+    { container: item, source: "manual_entered", label: "Manual entered" },
+    { container: item.productManagerFields || {}, source: "data_dump", label: "Data dump" },
+    { container: item.productManagerFields?.original || {}, source: "data_dump", label: "Data dump" },
+    { container: item.original || {}, source: "data_dump", label: "Data dump" },
+    ...(Array.isArray(item.sourceCatalogMatches)
+      ? item.sourceCatalogMatches.flatMap((match) => [
+        { container: match, source: "data_dump", label: "Data dump" },
+        { container: match?.raw || {}, source: "data_dump", label: "Data dump" }
+      ])
+      : [])
+  ];
+}
+
+function productSourceNumberDetail(item = {}, keys = [], options = {}) {
+  const defaultValue = Number(options.defaultValue || 0);
+  for (const entry of productSourceContainers(item)) {
+    const container = entry.container;
+    if (!container || typeof container !== "object") continue;
+    for (const key of keys) {
+      const number = Number(sourceNumberValue(container[key]));
+      if (Number.isFinite(number) && number > 0) {
+        const sourceOverride = item.dimensionWeightSources?.[key]?.source || item.dimensionWeightSource?.[key];
+        if (entry.source === "manual_entered" && sourceOverride) {
+          const source = String(sourceOverride);
+          return { value: number, source, label: source === "manual_import" ? "Manual import" : "Manual entered", verified: true, defaulted: false };
+        }
+        if (entry.source === "manual_entered") {
+          const dataDumpMatch = productSourceContainers(item).some((candidate) => {
+            if (candidate.source !== "data_dump" || !candidate.container || typeof candidate.container !== "object") return false;
+            const candidateValue = Number(sourceNumberValue(candidate.container[key]));
+            return Number.isFinite(candidateValue) && Math.abs(candidateValue - number) < 0.0001;
+          });
+          if (dataDumpMatch) return { value: number, source: "data_dump", label: "Data dump", verified: true, defaulted: false };
+        }
+        return { value: number, source: entry.source, label: entry.label, verified: true, defaulted: false };
+      }
+    }
+  }
+  return defaultValue > 0
+    ? { value: defaultValue, source: "system_default", label: "System default", verified: false, defaulted: true }
+    : { value: 0, source: "missing", label: "Missing", verified: false, defaulted: false };
+}
+
+function dimensionWeightFieldDetail(item = {}, field = "") {
+  const axis = String(field).replace(/^(item|package)/, "").toLowerCase();
+  const isPackage = /^package/.test(field);
+  if (/weight/i.test(field)) return shopifyWeightSourceDetail(item, isPackage);
+  return productSourceNumberDetail(item, [field, `${isPackage ? "package" : "item"}_${axis}`, `${axis}In`, `${axis}_in`], { defaultValue: SYSTEM_DEFAULT_DIMENSION_IN });
+}
+
+function dimensionSourceBadge(item = {}, field = "") {
+  const detail = dimensionWeightFieldDetail(item, field);
+  const className = detail.defaulted ? "default" : detail.source === "data_dump" ? "data" : "manual";
+  const suffix = detail.defaulted ? ` (${cleanExportNumber(detail.value, 3)} ${/weight/i.test(field) ? "lb" : "in"})` : "";
+  const title = detail.defaulted
+    ? "No saved value found. Marketplace exports use this unverified system default."
+    : `Value source: ${detail.label}.`;
+  return `<em class="dimension-source-badge ${className}" title="${html(title)}">${html(detail.label)}${html(suffix)}</em>`;
+}
+
 function productDimensionInput(label, field, item) {
   return `
     <label>
-      <span>${html(label)}</span>
-      <input type="number" step="0.001" value="${html(item[field] ?? 0)}" data-product-field="${field}" data-product-dimension-field="${field}" data-product-id="${item.id}" />
+      <span>${html(label)} ${dimensionSourceBadge(item, field)}</span>
+      <input type="number" step="0.001" value="${html(item[field] ?? 0)}" data-product-field="${field}" data-product-dimension-field="${field}" data-product-id="${item.id}"${editableAttr()} />
     </label>
   `;
 }
@@ -324,7 +443,7 @@ function renderProductDimensionsCard(item) {
           </div>
         </div>
         <div class="dimension-group">
-          <div class="dimension-group-title"><strong>Weights</strong><span>Calculated from package dimensions</span></div>
+          <div class="dimension-group-title"><strong>Weights</strong><span>Item vs package weight</span></div>
           <div class="dimension-weight-grid">
             ${productDimensionInput("Item weight", "itemWeight", item)}
             ${productDimensionInput("Package weight", "packageWeight", item)}
@@ -592,8 +711,41 @@ function productById(id) {
   return inventoryById.get(id) || inventoryById.get(key) || null;
 }
 
+function mergeInventoryItem(item = {}) {
+  if (!item?.id || !state?.inventory) return item;
+  const index = state.inventory.findIndex((row) => row.id === item.id || String(row.sku || "").toLowerCase() === String(item.sku || "").toLowerCase());
+  if (index >= 0) state.inventory[index] = { ...state.inventory[index], ...item };
+  else state.inventory.unshift(item);
+  const merged = index >= 0 ? state.inventory[index] : item;
+  inventoryById.set(merged.id, merged);
+  inventoryById.set(String(merged.id || ""), merged);
+  if (merged.sku) inventoryById.set(String(merged.sku || "").toLowerCase(), merged);
+  productDetailCache[String(merged.id)] = merged;
+  return merged;
+}
+
 function setState(nextState) {
-  state = nextState;
+  const previousState = state || {};
+  const preserveInventoryPage = Array.isArray(nextState?.inventory)
+    && nextState.inventory.length === 0
+    && nextState.inventoryLoaded === false
+    && Array.isArray(previousState.inventory)
+    && previousState.inventory.length > 0;
+  state = {
+    ...nextState,
+    inventory: preserveInventoryPage ? previousState.inventory : (nextState?.inventory || []),
+    inventoryLoaded: preserveInventoryPage ? previousState.inventoryLoaded : nextState?.inventoryLoaded,
+    importJobs: Array.isArray(nextState?.importJobs) && nextState.importJobs.length
+      ? nextState.importJobs
+      : (Array.isArray(previousState.importJobs) ? previousState.importJobs : nextState?.importJobs || []),
+    workerStatus: nextState?.workerStatus && Object.keys(nextState.workerStatus || {}).length
+      ? nextState.workerStatus
+      : (previousState.workerStatus || nextState?.workerStatus || {})
+  };
+  productDetailCache = {};
+  inventoryLoadPromise = null;
+  categorySettingsLoadPromise = null;
+  ordersLoadPromise = null;
   inventoryById = new Map((state.inventory || []).flatMap((item) => [[item.id, item], [String(item.id || ""), item]]));
   productFilterOptionsCache.inventoryCount = -1;
   if (!selectedOrderId || !state.orders.some((order) => order.id === selectedOrderId)) {
@@ -649,7 +801,7 @@ function showView(id) {
       (id === "catalog" && button.dataset.catalogTabLink === catalogTab);
     button.classList.toggle("active", active);
   });
-  $("#page-title").textContent = ({ dashboard: "Dashboard", orders: "Orders", drafts: "Drafts", "draft-full": "Draft Details", returns: "Returns", "return-full": "Return Details", "order-full": "Order Details", purchasing: "Purchasing", "po-full": "Purchase Order", "vendor-full": "Vendor Profile", "brand-full": "Brand Profile", "warehouse-full": "Warehouse Profile", catalog: "Catalog", jobs: "Jobs", "import-export": "Import / Export", "product-full": "Product Details", "shadow-full": "Shadow SKU Details", "template-full": "Template Preview", "inventory-full": "Inventory Details", "customer-full": "Customer Profile", customers: "Customers", inventory: "Inventory", reports: "Reports", knowledge: "Knowledge Base", connections: "Channels", "channel-full": "Channel Settings" })[id];
+  $("#page-title").textContent = ({ dashboard: "Dashboard", orders: "Orders", drafts: "Drafts", "draft-full": "Draft Details", returns: "Returns", "return-full": "Return Details", "order-full": "Order Details", purchasing: "Purchasing", "po-full": "Purchase Order", "vendor-full": "Vendor Profile", "brand-full": "Brand Profile", "warehouse-full": "Warehouse Profile", catalog: "Catalog", jobs: "Jobs", "import-export": "Import / Export", "product-full": "Product Details", "shadow-full": "Shadow SKU Details", "template-full": "Template Preview", "inventory-full": "Inventory Details", "customer-full": "Customer Profile", customers: "Customers", inventory: "Inventory", reports: "Reports", knowledge: "Knowledge Base", connections: "Channels", "channel-full": "Channel Settings", "system-settings": "System Settings" })[id];
   if (id === "order-full") renderFullOrderPage();
   if (id === "drafts") renderDrafts();
   if (id === "draft-full") renderDraftOrderPage();
@@ -660,15 +812,45 @@ function showView(id) {
   if (id === "brand-full") renderBrandProfile();
   if (id === "warehouse-full") renderWarehouseProfile();
   if (id === "import-export") renderImportExportMappings();
-  if (id === "jobs") renderJobsPage();
+  if (id === "jobs") {
+    renderJobsLoadingPage();
+    refreshImportJobs({ silent: true }).catch(() => {});
+  }
   if (id === "product-full") renderProductContentPage();
   if (id === "shadow-full") renderShadowSkuPage();
   if (id === "template-full") renderTemplatePreviewPage();
   if (id === "inventory-full") renderInventoryProductPage();
   if (id === "channel-full") renderChannelProfile();
+  if (id === "system-settings") renderSystemSettingsPage();
   if (id === "customer-full") renderCustomerProfile();
   if (id === "knowledge") renderKnowledgeBase();
   renderTopbarActions();
+}
+
+function renderJobsLoadingPage(message = "Checking jobs and worker status...") {
+  const target = $("#jobs-page");
+  if (!target) return;
+  target.innerHTML = `
+    <div class="jobs-page">
+      <section class="jobs-command-bar">
+        <div class="jobs-command-top">
+          <div class="jobs-command-head">
+            <div>
+              <p class="eyebrow">Operations</p>
+              <h2>Jobs</h2>
+              <p class="muted">${html(message)}</p>
+            </div>
+          </div>
+          <div class="jobs-actions">
+            <button class="button secondary" type="button" disabled>${withIcon("refresh-cw", "Refresh jobs")}</button>
+            <button class="button secondary" type="button" disabled>${withIcon("sparkles", "Clean stale")}</button>
+            <button class="button secondary" type="button" disabled>${withIcon("database-backup", "Backup Postgres")}</button>
+          </div>
+        </div>
+        <div class="empty-state">Loading queue, files, API issues, and worker heartbeat...</div>
+      </section>
+    </div>
+  `;
 }
 
 function renderTopbarActions() {
@@ -752,6 +934,7 @@ function renderTopbarActions() {
     actions.push(catalogTab === "inventory"
       ? `<a href="/api/export/inventory">Download inventory CSV</a>`
       : `<button data-view="catalog" data-catalog-tab-link="inventory">Open inventory</button>`);
+    actions.push(`<button data-sync-shopify-status-all>Sync Shopify status</button>`);
     actions.push(`<button data-view="catalog" data-catalog-tab-link="products">Open products</button>`);
     actions.push(`<button data-view="catalog" data-catalog-tab-link="readiness">Open readiness</button>`);
   } else if (currentViewId === "jobs") {
@@ -760,6 +943,9 @@ function renderTopbarActions() {
   } else if (currentViewId === "product-full") {
     const item = productById(selectedProductId);
     if (item) {
+      actions.push(`<button data-export-product-shopify="${item.id}">Export to Shopify</button>`);
+      actions.push(`<button data-export-product-template="${item.id}">Export template</button>`);
+      if (item.shopifyId) actions.push(`<button data-sync-product-shopify-status="${item.id}">Sync Shopify status</button>`);
       actions.push(`<button data-rename-product-sku="${item.id}">Rename SKU</button>`);
       actions.push(`<button data-create-shadow="${item.id}">Create shadow SKU</button>`);
       actions.push(`<button data-bulk-create-shadows="${item.id}">Create all marketplace shadows</button>`);
@@ -791,6 +977,10 @@ function renderTopbarActions() {
   } else if (currentViewId === "connections" || currentViewId === "channel-full") {
     actions.push(`<button id="topbar-sync-trigger" data-topbar-sync>Sync enabled channels</button>`);
     actions.push(`<button data-view-jump="connections">Open channels</button>`);
+    actions.push(`<button data-view-jump="system-settings">System settings</button>`);
+  } else if (currentViewId === "system-settings") {
+    actions.push(`<button data-toggle-system-settings-edit>${systemSettingsEditMode ? "Done editing" : "Edit settings"}</button>`);
+    actions.push(`<button data-view-jump="connections">Open channels</button>`);
   } else if (currentViewId === "knowledge") {
     actions.push(`<button data-knowledge-tab-jump="whats-new">What's new</button>`);
     actions.push(`<button data-knowledge-tab-jump="features">Features</button>`);
@@ -804,6 +994,7 @@ function renderTopbarActions() {
     actions.push(`<button data-view-jump="catalog">Open catalog</button>`);
   }
   target.innerHTML = `
+    ${renderExportNotifications()}
     <div class="action-menu topbar-action-menu">
       <button class="button" data-action-menu="topbar-actions">${withIcon("more-horizontal", "Actions")}</button>
       <div class="action-popover" data-menu-for="topbar-actions">
@@ -1091,6 +1282,17 @@ function filteredOrders() {
 }
 
 function renderOrders() {
+  if (!$("#orders")?.classList.contains("active")) return;
+  if (!state.ordersLoaded) {
+    $("#orders-list").innerHTML = `<div class="empty-state">Loading orders...</div>`;
+    ensureOrdersLoaded()
+      .then(() => renderOrders())
+      .catch((error) => {
+        $("#orders-list").innerHTML = `<div class="empty-state">Unable to load orders: ${html(error.message)}</div>`;
+        toast(error.message);
+      });
+    return;
+  }
   renderOrderSourceOptions();
   renderOrderQueues();
   const orders = filteredOrders();
@@ -3834,6 +4036,12 @@ function renderCustomerProfile() {
 }
 
 function filteredCatalogItems() {
+  if (catalogTab === "products" && productCatalogState.loaded) {
+    return state.inventory || [];
+  }
+  if (catalogTab === "inventory" && inventoryCatalogState.loaded) {
+    return state.inventory || [];
+  }
   const query = $("#catalog-search")?.value.trim().toLowerCase() || "";
   const filters = catalogFilters();
   return state.inventory.filter((item) => {
@@ -3847,6 +4055,7 @@ function filteredCatalogItems() {
     if (filters.channelStatus && !productMatchesChannelStatus(item, filters.channelStatus)) return false;
     if (filters.hasStock && String(Number(item.stockQty ?? item.qty ?? 0) > 0) !== filters.hasStock) return false;
     if (filters.hazardous && String(Boolean(item.hazardous)) !== filters.hazardous) return false;
+    if (filters.toBeDiscontinued && String(Boolean(item.toBeDiscontinued || item.closeoutEligible)) !== filters.toBeDiscontinued) return false;
     if (filters.verifiedBrand && String(Boolean(verifiedBrandForHandle(item))) !== filters.verifiedBrand) return false;
     if (filters.brand && String(item.brand || "") !== filters.brand) return false;
     if (filters.category && String(item.category || "") !== filters.category) return false;
@@ -3864,6 +4073,7 @@ function catalogFilters() {
     channelStatus: catalogTab === "source" ? "" : ($("#catalog-filter-shopify-status")?.value || ""),
     hasStock: $("#catalog-filter-has-stock")?.value || "",
     hazardous: $("#catalog-filter-hazardous")?.value || "",
+    toBeDiscontinued: $("#catalog-filter-discontinued")?.value || "",
     verifiedBrand: catalogTab === "source" ? "" : ($("#catalog-filter-verified-brand")?.value || ""),
     brand: $("#catalog-filter-brand")?.value || "",
     category: $("#catalog-filter-category")?.value || ""
@@ -3893,9 +4103,18 @@ function productEbayReadiness(item = {}) {
 function productMatchesChannelStatus(item = {}, status = "") {
   const value = String(status || "");
   if (!value) return true;
-  if (value === "shopify-live" || value === "live") return Boolean(item.shopifyId && item.shopifyStatus === "Active" && item.shopifyPublished === true);
-  if (value === "shopify-missing" || value === "missing") return !item.shopifyId;
-  if (value.startsWith("shopify:")) return String(item.shopifyStatus || "") === value.slice("shopify:".length);
+  if (value === "shopify-live" || value === "live") return Boolean(isShopifyLinked(item) && String(item.shopifyStatus || "").toLowerCase() === "active" && item.shopifyPublished === true);
+  if (value === "shopify-linked") return isShopifyLinked(item);
+  if (value === "shopify-published") return isShopifyLinked(item) && item.shopifyPublished === true;
+  if (value === "shopify-unpublished") return isShopifyLinked(item) && item.shopifyPublished === false;
+  if (value === "shopify-sync-graphql") return String(item.shopifySyncSource || "").toLowerCase() === "graphql";
+  if (value === "shopify-sync-manual") return String(item.shopifySyncSource || "").toLowerCase() === "manual_upload";
+  if (value === "shopify-sync-failed") return String(item.shopifySyncSource || "").toLowerCase() === "failed";
+  if (value === "shopify-ready") return productShopifyReadiness(item).status === "ready";
+  if (value === "shopify-not-ready") return productShopifyReadiness(item).status === "not-ready";
+  if (value === "shopify-missing" || value === "missing") return !isShopifyLinked(item);
+  if (value.startsWith("shopify:")) return String(item.shopifyStatus || "").toLowerCase() === value.slice("shopify:".length).toLowerCase();
+  if (value.startsWith("shopify-")) return String(item.shopifyStatus || "").toLowerCase() === value.slice("shopify-".length).toLowerCase();
   if (value === "ebay-live") return productEbayStatus(item) === "Live";
   if (value === "ebay-ready") return productEbayReadiness(item).status === "ready";
   if (value === "ebay-not-ready") return productEbayReadiness(item).status === "not-ready";
@@ -3906,17 +4125,52 @@ function productMatchesChannelStatus(item = {}, status = "") {
     const listing = item.ebayListing || {};
     return String(listing.ebayStatus || listing.status || productEbayStatus(item)) === expected;
   }
-  return String(item.shopifyStatus || "") === value;
+  return String(item.shopifyStatus || "").toLowerCase() === value.toLowerCase();
 }
 
-function fillChannelStatusOptions(select, products = []) {
+function isShopifyLinked(item = {}) {
+  return Boolean(String(item.shopifyId || "").trim());
+}
+
+function shopifyProductIdValue(value = "") {
+  const text = String(value || "").trim();
+  return text.match(/Product\/(\d+)/i)?.[1] || text.match(/^\d+$/)?.[0] || "";
+}
+
+function shopifyLegacyId(value = "") {
+  return String(value || "").trim().match(/(\d+)$/)?.[1] || "";
+}
+
+function shopifyProductAdminUrl(value = "") {
+  const productId = shopifyProductIdValue(value);
+  if (!productId) return "";
+  return `https://admin.shopify.com/store/dealsclick-2/products/${encodeURIComponent(productId)}`;
+}
+
+function shopifyProductLink(value = "", label = "") {
+  const text = String(label || value || "").trim();
+  const url = shopifyProductAdminUrl(value);
+  if (!text) return "No Shopify GID";
+  if (!url) return html(text);
+  return `<a class="inline-id-link" href="${html(url)}" target="_blank" rel="noreferrer">${html(text)}</a>`;
+}
+
+function fillChannelStatusOptions(select, products = [], facets = {}) {
   if (!select) return;
   const current = select.value;
-  const shopifyStatuses = [...new Set(products.map((item) => item.shopifyStatus).filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b));
-  const ebayStatuses = [...new Set(products.map((item) => item.ebayListing?.ebayStatus || item.ebayListing?.status).filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b));
+  const shopifyStatuses = [...new Set([...(facets.shopifyStatuses || []), ...products.map((item) => item.shopifyStatus)].filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b));
+  const ebayStatuses = [...new Set([...(facets.ebayStatuses || []), ...products.map((item) => item.ebayListing?.ebayStatus || item.ebayListing?.status)].filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b));
   const options = [
     ["", "Any channel status"],
     ["shopify-live", "Shopify live"],
+    ["shopify-published", "Shopify published"],
+    ["shopify-unpublished", "Shopify unpublished"],
+    ["shopify-ready", "Shopify ready"],
+    ["shopify-linked", "Shopify linked"],
+    ["shopify-sync-graphql", "Shopify synced by API"],
+    ["shopify-sync-manual", "Shopify from upload"],
+    ["shopify-sync-failed", "Shopify sync failed"],
+    ["shopify-not-ready", "Shopify not ready"],
     ["shopify-missing", "Shopify missing ID"],
     ...shopifyStatuses.map((status) => [`shopify:${status}`, `Shopify ${status}`]),
     ["ebay-ready", "eBay ready"],
@@ -3955,17 +4209,22 @@ function hasText(value, min = 1) {
 
 function productReadiness(item = {}) {
   const available = Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0);
+  const hasVerifiedWeightDims = ["itemWeight", "itemLength", "itemWidth", "itemHeight"]
+    .every((field) => {
+      const detail = dimensionWeightFieldDetail(item, field);
+      return detail.value > 0 && !detail.defaulted;
+    });
   const checks = [
     { key: "title", label: "Title", ok: hasText(item.marketplaceTitle || item.title, 8) },
     { key: "description", label: "Description", ok: hasText(item.longDescription || item.shortDescription, 40) },
-    { key: "image", label: "Image", ok: Boolean(item.defaultImage || (item.images || [])[0]) },
+    { key: "image", label: "Image", ok: productImageCount(item) > 0 },
     { key: "category", label: "Main category", ok: hasText(item.category) && item.categoryVerified !== false },
     { key: "brand", label: "Brand", ok: hasText(item.brand) },
     { key: "price", label: "Price", ok: Number(item.price || 0) > 0 },
     { key: "vendor", label: "Vendor", ok: hasText(item.vendor || item.supplier) },
     { key: "stock", label: "Stock", ok: available > 0 },
     { key: "barcode", label: "UPC / barcode", ok: hasText(item.barcode) },
-    { key: "dimensions", label: "Weight / dimensions", ok: Number(item.weightOz || item.itemWeight || 0) > 0 }
+    { key: "dimensions", label: "Verified weight / dimensions", ok: hasVerifiedWeightDims }
   ];
   const passed = checks.filter((check) => check.ok).length;
   const score = Math.round((passed / checks.length) * 100);
@@ -4036,6 +4295,40 @@ function renderProductAlternatesCell(item = {}) {
   `;
 }
 
+function completedExportJobs() {
+  return importJobRows()
+    .filter((job) => String(job.direction || "").toLowerCase() === "export")
+    .filter((job) => String(job.status || "").toLowerCase() === "success")
+    .filter((job) => job.originalFilePath)
+    .slice(0, 5);
+}
+
+function renderExportNotifications() {
+  const jobs = completedExportJobs();
+  if (!jobs.length) return "";
+  return `
+    <div class="action-menu export-notification-menu">
+      <button class="button secondary export-notification-button" data-action-menu="export-notifications" title="Completed exports">
+        ${withIcon("download", "Exports")}
+        <strong>${jobs.length}</strong>
+      </button>
+      <div class="action-popover export-notification-popover" data-menu-for="export-notifications">
+        <div class="notification-popover-head">
+          <strong>Completed exports</strong>
+          <small>Download here or open Jobs</small>
+        </div>
+        ${jobs.map((job) => `
+          <a class="notification-export-row" href="/api/import-jobs/${encodeURIComponent(job.id)}/original">
+            <span>${html(job.fileName || job.originalFileName || "export.csv")}</span>
+            <small>${html(dateLabel(job.finishedAt || job.updatedAt))}</small>
+          </a>
+        `).join("")}
+        <button type="button" data-view-jump="jobs">Open Jobs</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderProductAvailabilityPanel(item = {}) {
   const key = String(item.sku || "").toLowerCase();
   const cache = productAlternatesCache[key];
@@ -4079,6 +4372,18 @@ function updateCatalogFilterOptions() {
     fillSelectOptions($("#catalog-filter-category"), facets.categories || [], "All categories");
     return;
   }
+  if (!inventoryFacetsState.loaded && !inventoryFacetsState.loading) loadInventoryFacets().catch(() => {});
+  if (inventoryFacetsState.facets) {
+    const facets = inventoryFacetsState.facets;
+    $("#supplier-multi-filter")?.remove();
+    $("#catalog-filter-supplier").style.display = "";
+    fillSelectOptions($("#catalog-filter-supplier"), facets.suppliers || [], "All suppliers");
+    fillSelectOptions($("#catalog-filter-stock-status"), facets.stockStatuses || [], "Any stock status");
+    fillChannelStatusOptions($("#catalog-filter-shopify-status"), state.inventory || [], facets);
+    fillSelectOptions($("#catalog-filter-brand"), facets.brands || [], "All brands");
+    fillSelectOptions($("#catalog-filter-category"), facets.categories || [], "All categories");
+    return;
+  }
   const products = state.inventory || [];
   if (productFilterOptionsCache.inventoryCount !== products.length) {
     productFilterOptionsCache = {
@@ -4098,6 +4403,24 @@ function updateCatalogFilterOptions() {
   fillChannelStatusOptions($("#catalog-filter-shopify-status"), products);
   fillSelectOptions($("#catalog-filter-brand"), productFilterOptionsCache.brands, "All brands");
   fillSelectOptions($("#catalog-filter-category"), productFilterOptionsCache.categories, "All categories");
+}
+
+async function loadInventoryFacets() {
+  inventoryFacetsState.loading = true;
+  try {
+    const result = await api("/api/inventory/facets");
+    inventoryFacetsState = { loading: false, loaded: true, facets: result.facets || {} };
+    updateCatalogFilterOptions();
+  } catch (error) {
+    inventoryFacetsState = { loading: false, loaded: false, facets: null };
+    throw error;
+  }
+}
+
+function invalidateProductCatalogPages() {
+  productCatalogState = { ...productCatalogState, loaded: false, loading: false };
+  inventoryCatalogState = { ...inventoryCatalogState, loaded: false, loading: false };
+  inventoryFacetsState = { ...inventoryFacetsState, loaded: false };
 }
 
 function renderSupplierMultiSelect(suppliers = []) {
@@ -4181,10 +4504,58 @@ function mergeSourceFacetsFromItems(items = []) {
 
 async function loadSourceCatalogFacets() {
   try {
-    sourceCatalogFacets = await api("/api/catalog/facets");
+    const [facets, searchIndex] = await Promise.all([
+      api("/api/catalog/facets"),
+      api("/api/catalog/source-search-index/status").catch(() => null)
+    ]);
+    sourceCatalogFacets = facets;
+    sourceSearchIndexStatus = searchIndex;
     if (catalogTab === "source") updateCatalogFilterOptions();
   } catch {
     sourceCatalogFacets = { suppliers: [], stockStatuses: [], brands: [], categories: [] };
+  }
+}
+
+async function refreshSourceSearchIndexStatus() {
+  try {
+    sourceSearchIndexStatus = await api("/api/catalog/source-search-index/status");
+    renderSourceCatalogTable();
+  } catch (error) {
+    toast(error.message || "Unable to load source search status");
+  }
+}
+
+async function buildSourceSearchIndex() {
+  try {
+    const result = await api("/api/catalog/source-search-index/build", { method: "POST" });
+    sourceSearchIndexStatus = result.status || sourceSearchIndexStatus;
+    toast(result.message || "Source catalog search index job queued.");
+    renderSourceCatalogTable();
+  } catch (error) {
+    toast(error.message || "Unable to start source search index job");
+  }
+}
+
+async function buildSourcePerformanceIndexes() {
+  try {
+    const result = await api("/api/catalog/performance-indexes/build", { method: "POST", feedbackLabel: "Queuing source catalog optimization..." });
+    toast(result.message || "Source catalog optimization job queued.");
+    await loadImportJobs?.();
+    renderSourceCatalogTable();
+  } catch (error) {
+    toast(error.message || "Unable to start source catalog optimization");
+  }
+}
+
+async function refreshSourceFacets() {
+  try {
+    const result = await api("/api/catalog/facets/refresh", { method: "POST", feedbackLabel: "Queuing source facet refresh..." });
+    sourceCatalogFacets = null;
+    toast(result.message || "Source catalog facet refresh queued.");
+    await loadImportJobs?.();
+    renderSourceCatalogTable();
+  } catch (error) {
+    toast(error.message || "Unable to refresh source catalog facets");
   }
 }
 
@@ -4236,6 +4607,53 @@ async function loadShopifyTaxonomyOptions(categoryId, query) {
     shopifyTaxonomyState = { categoryId: requestCategoryId, query: requestQuery, results: [], total: 0, version: "", loading: false, error: error.message };
     renderCategories();
   }
+}
+
+function productCatalogRequestParams(page = productCatalogPage) {
+  const query = $("#catalog-search")?.value.trim() || "";
+  const filters = catalogFilters();
+  const params = new URLSearchParams({
+    q: query,
+    page: String(Math.max(1, Number(page || 1))),
+    limit: String(PRODUCT_CATALOG_PAGE_SIZE)
+  });
+  for (const [key, value] of Object.entries(filters)) {
+    if (value) params.set(key, value);
+  }
+  return { query, filters, filtersKey: JSON.stringify(filters), params };
+}
+
+async function loadProductCatalogPage(page = productCatalogPage, targetTab = catalogTab) {
+  const { query, filtersKey, params } = productCatalogRequestParams(page);
+  const target = targetTab === "inventory" ? $("#inventory-list") : $("#products-list");
+  if (target) target.innerHTML = `<div class="empty-state">Loading ${targetTab === "inventory" ? "inventory" : "products"}...</div>`;
+  if (targetTab === "inventory") inventoryCatalogState = { ...inventoryCatalogState, loading: true, query, filtersKey };
+  else productCatalogState = { ...productCatalogState, loading: true, query, filtersKey };
+  const result = await api(`/api/inventory?${params.toString()}`, { feedbackLabel: "Loading products..." });
+  const items = result.inventory || [];
+  state.inventory = items;
+  state.inventoryLoaded = true;
+  inventoryById = new Map((state.inventory || []).flatMap((item) => [[item.id, item], [String(item.id || ""), item]]));
+  productFilterOptionsCache.inventoryCount = -1;
+  const pageState = {
+    items,
+    total: Number(result.total || items.length),
+    page: Number(result.page || page || 1),
+    limit: Number(result.limit || PRODUCT_CATALOG_PAGE_SIZE),
+    loading: false,
+    loaded: true,
+    query,
+    filtersKey,
+    storage: result.storage || ""
+  };
+  if (targetTab === "inventory") {
+    inventoryCatalogPage = pageState.page;
+    inventoryCatalogState = pageState;
+  } else {
+    productCatalogPage = pageState.page;
+    productCatalogState = pageState;
+  }
+  return items;
 }
 
 function openProductMasterCategory(productId) {
@@ -4480,7 +4898,10 @@ async function submitMasterCategoryMap() {
       })
     });
     if (result.state) setState(result.state);
-    if (result.item?.id) selectedProductId = result.item.id;
+    if (result.item?.id) {
+      mergeInventoryItem(result.item);
+      selectedProductId = result.item.id;
+    }
   }
   closeMasterCategoryMapModal();
   renderProductContentPage();
@@ -5012,9 +5433,9 @@ function renderCategoryCoverage() {
         <span class="${Number(matrixify.duplicateHandleCount || 0) ? "needs-work" : "ready"}">Duplicate handles: ${Number(matrixify.duplicateHandleCount || 0).toLocaleString()}</span>
         <span class="${Number(matrixify.missingImageCount || 0) ? "needs-work" : "ready"}">Missing images: ${Number(matrixify.missingImageCount || 0).toLocaleString()}</span>
         <span class="${Number(matrixify.weakSeoCount || 0) ? "needs-work" : "ready"}">SEO review: ${Number(matrixify.weakSeoCount || 0).toLocaleString()}</span>
-        <a class="button secondary" href="/api/categories/export/master-category-mapping.csv">${withIcon("download", "Master mapping")}</a>
-        <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon("clipboard-list", "Smart collections")}</a>
-        <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon("layout-panel-left", "Main menu")}</a>
+        <button class="button secondary" type="button" data-category-export="master-category-mapping">${withIcon("download", "Master mapping")}</button>
+        <button class="button secondary" type="button" data-category-export="matrixify-smart-collections">${withIcon("clipboard-list", "Smart collections")}</button>
+        <button class="button secondary" type="button" data-category-export="matrixify-menu">${withIcon("layout-panel-left", "Main menu")}</button>
       </div>
       <div class="category-coverage-attention">
         ${actionCards.map((row) => `
@@ -5084,9 +5505,9 @@ function renderCategoryTable(categories, scopeLabel) {
             <button type="button" class="${categoryScope === "main" ? "active" : ""}" data-category-scope="main">Main</button>
             <button type="button" class="${categoryScope === "source" ? "active" : ""}" data-category-scope="source">Source</button>
           </div>
-          <a class="button secondary" href="/api/categories/export/master-category-mapping.csv">${withIcon("download", "Master mapping")}</a>
-          <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon("clipboard-list", "Matrixify smart collections")}</a>
-          <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon("layout-panel-left", "Matrixify menu")}</a>
+          <button class="button secondary" type="button" data-category-export="master-category-mapping">${withIcon("download", "Master mapping")}</button>
+          <button class="button secondary" type="button" data-category-export="matrixify-smart-collections">${withIcon("clipboard-list", "Matrixify smart collections")}</button>
+          <button class="button secondary" type="button" data-category-export="matrixify-menu">${withIcon("layout-panel-left", "Matrixify menu")}</button>
           <button class="button secondary" type="button" data-learn-source-category-mappings="all">${withIcon("refresh-cw", "Learn source maps")}</button>
           <button class="button secondary" type="button" data-auto-map-ebay-categories>${withIcon("search", "Auto-map eBay")}</button>
         </div>
@@ -5142,9 +5563,9 @@ function renderCategoryDetail(selected) {
           <p class="muted">${categoryScope === "main" ? "Active product catalog category. Map this to sales channels before listing." : "Full source catalog category. Use this to compare supplier coverage and future product mapping."}</p>
         </div>
         <div class="category-detail-actions">
-          <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon("clipboard-list", "Matrixify smart collections")}</a>
-          <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon("layout-panel-left", "Matrixify menu")}</a>
-          <a class="button secondary" href="/api/categories/export/master-category-mapping.csv">${withIcon("download", "Master mapping")}</a>
+          <button class="button secondary" type="button" data-category-export="matrixify-smart-collections">${withIcon("clipboard-list", "Matrixify smart collections")}</button>
+          <button class="button secondary" type="button" data-category-export="matrixify-menu">${withIcon("layout-panel-left", "Matrixify menu")}</button>
+          <button class="button secondary" type="button" data-category-export="master-category-mapping">${withIcon("download", "Master mapping")}</button>
           <button class="button secondary" type="button" data-auto-map-ebay-categories>${withIcon("search", "Auto-map eBay")}</button>
           ${categoryScope === "main" ? `<button class="button secondary" type="button" data-learn-source-category-mappings="${html(selected.id)}">${withIcon("refresh-cw", "Map source catalog")}</button>` : ""}
           ${renderCategoryStatus(selected)}
@@ -5460,7 +5881,6 @@ function renderAttributesPage() {
   const target = $("#attribute-list");
   if (!target) return;
   const rows = filteredAttributeRows();
-  const exportQuery = attributeState.channel ? `?channel=${encodeURIComponent(attributeState.channel)}` : "";
   target.innerHTML = `
     <section class="attribute-review-page">
       <div class="category-coverage-head">
@@ -5474,7 +5894,7 @@ function renderAttributesPage() {
             ${["shopify", "ebay", "temu", "tiktok", "whatnot"].map((channel) => `<option value="${channel}" ${attributeState.channel === channel ? "selected" : ""}>${channelLabel(channel)}</option>`).join("")}
           </select>
           <input id="attribute-search" type="search" value="${html(attributeState.query || "")}" placeholder="Search category, attribute, field">
-          <a class="button secondary" href="/api/categories/export/marketplace-attributes.csv${exportQuery}">${withIcon("download", "Export attributes")}</a>
+          <button class="button secondary" type="button" data-category-export="marketplace-attributes" data-category-export-channel="${html(attributeState.channel || "")}">${withIcon("download", "Export attributes")}</button>
         </div>
       </div>
       <div class="category-coverage-grid">
@@ -5699,11 +6119,225 @@ async function saveAttributeGroup(id = "") {
   toast("Attribute group saved.");
 }
 
+async function loadCatalogChanges(force = false, page = catalogChangeState.page || 1) {
+  if (catalogChangeState.loading) return;
+  if (catalogChangeState.loaded && !force) return;
+  catalogChangeState = { ...catalogChangeState, loading: true, error: "", page };
+  renderCatalogChanges();
+  try {
+    const filters = catalogChangeState.filters || {};
+    const params = new URLSearchParams({ page: String(page), limit: String(catalogChangeState.limit || 100) });
+    for (const [key, value] of Object.entries(filters)) {
+      if (value) params.set(key, value);
+    }
+    const result = await api(`/api/catalog/changes?${params.toString()}`, { feedbackLabel: "Loading SKU changes..." });
+    catalogChangeState = {
+      ...catalogChangeState,
+      rows: result.rows || [],
+      summary: result.summary || null,
+      tracking: result.tracking || null,
+      facets: result.facets || catalogChangeState.facets || { fields: [], sources: [], vendors: [] },
+      total: Number(result.total || result.rows?.length || 0),
+      page: result.page || page,
+      limit: result.limit || catalogChangeState.limit || 100,
+      loading: false,
+      error: "",
+      loaded: true
+    };
+  } catch (error) {
+    catalogChangeState = { ...catalogChangeState, loading: false, error: error.message || "Unable to load SKU changes.", loaded: true };
+  }
+  renderCatalogChanges();
+}
+
+function readCatalogChangeFilters() {
+  return {
+    q: $("#sku-change-search")?.value.trim() || "",
+    field: $("#sku-change-field")?.value || "",
+    source: $("#sku-change-source")?.value || "",
+    vendor: $("#sku-change-vendor")?.value || "",
+    direction: $("#sku-change-direction")?.value || "",
+    from: $("#sku-change-from")?.value || "",
+    to: $("#sku-change-to")?.value || ""
+  };
+}
+
+function catalogChangeQueryString(extra = {}) {
+  const params = new URLSearchParams({ limit: String(catalogChangeState.limit || 100), ...extra });
+  for (const [key, value] of Object.entries(catalogChangeState.filters || {})) {
+    if (value) params.set(key, value);
+  }
+  return params.toString();
+}
+
+function changeDirectionLabel(row = {}) {
+  if (row.direction === "up") return "Up";
+  if (row.direction === "down") return "Down";
+  if (row.direction === "closeout" || (["toBeDiscontinued", "to_be_discontinued"].includes(row.field) && String(row.after).toLowerCase() === "true")) return "Closeout";
+  return "Changed";
+}
+
+function renderChangeValue(value) {
+  if (value === true) return "Yes";
+  if (value === false) return "No";
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "number") return Number.isInteger(value) ? value.toLocaleString() : value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  return html(value);
+}
+
+function renderCatalogChanges() {
+  const target = $("#catalog-changes-list");
+  if (!target) return;
+  const { rows = [], summary: rawSummary = {}, tracking: rawTracking = {}, loading, error, facets = {}, filters = {}, total = 0, page = 1, limit = 100 } = catalogChangeState;
+  const summary = rawSummary || {};
+  const tracking = rawTracking || {};
+  const changeTracking = tracking?.changeTracking || tracking?.manifest?.changeTracking || {};
+  const importedAt = tracking?.manifest?.importedAt || changeTracking.importedAt || "";
+  const snapshotReady = Boolean(tracking?.snapshotExists);
+  const closeoutReady = Boolean(tracking?.closeoutExists);
+  const cards = [
+    ["Tracked changes", summary.total || changeTracking.changes || 0, "Latest change rows"],
+    ["Cost changes", summary.costChanges || changeTracking.costChanges || 0, "Vendor price movement"],
+    ["Stock changes", summary.stockChanges || changeTracking.stockChanges || 0, "Qty or stock status"],
+    ["Closeout signals", summary.closeouts || changeTracking.closeouts || 0, "Discontinued / closeout"]
+  ];
+  const totalPages = Math.max(1, Math.ceil(Number(total || rows.length || 0) / Number(limit || 100)));
+  const fieldLabel = (value = "") => String(value || "").replace(/_/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  target.innerHTML = `
+    <section class="catalog-change-page">
+      <div class="category-coverage-head">
+        <div>
+          <strong>SKU Change Tracking</strong>
+          <p>Tracks vendor cost, stock, discontinued flags, and source catalog field changes from each data dump import.</p>
+        </div>
+        <div class="category-detail-actions">
+          ${closeoutReady ? `<a class="button secondary" href="/api/catalog/closeouts.csv">${withIcon("download", "Closeouts CSV")}</a>` : ""}
+          <a class="button secondary" href="/api/catalog/changes.csv?${html(catalogChangeQueryString({ limit: "25000" }))}">${withIcon("download", "Export changes")}</a>
+          <button class="button secondary" type="button" data-sync-shopify-closeouts>${withIcon("store", "Create Shopify collection")}</button>
+          <button class="button secondary" type="button" data-catalog-changes-refresh>${withIcon("refresh-cw", loading ? "Refreshing..." : "Refresh")}</button>
+        </div>
+      </div>
+      <div class="sku-change-filters">
+        <label>Search
+          <input id="sku-change-search" type="search" placeholder="SKU, vendor SKU, title, brand" value="${html(filters.q || "")}" />
+        </label>
+        <label>Field
+          <select id="sku-change-field">
+            <option value="">All fields</option>
+            ${(facets.fields || []).map((field) => `<option value="${html(field)}" ${filters.field === field ? "selected" : ""}>${html(fieldLabel(field))}</option>`).join("")}
+          </select>
+        </label>
+        <label>Source
+          <select id="sku-change-source">
+            <option value="">All sources</option>
+            ${(facets.sources || []).map((source) => `<option value="${html(source)}" ${filters.source === source ? "selected" : ""}>${html(source)}</option>`).join("")}
+          </select>
+        </label>
+        <label>Direction
+          <select id="sku-change-direction">
+            <option value="">Any direction</option>
+            <option value="up" ${filters.direction === "up" ? "selected" : ""}>Up</option>
+            <option value="down" ${filters.direction === "down" ? "selected" : ""}>Down</option>
+            <option value="closeout" ${filters.direction === "closeout" ? "selected" : ""}>Closeout</option>
+            <option value="changed" ${filters.direction === "changed" ? "selected" : ""}>Changed</option>
+          </select>
+        </label>
+        <label>Vendor
+          <select id="sku-change-vendor">
+            <option value="">All vendors</option>
+            ${(facets.vendors || []).slice(0, 1000).map((vendor) => `<option value="${html(vendor)}" ${filters.vendor === vendor ? "selected" : ""}>${html(vendor)}</option>`).join("")}
+          </select>
+        </label>
+        <label>From
+          <input id="sku-change-from" type="date" value="${html(filters.from || "")}" />
+        </label>
+        <label>To
+          <input id="sku-change-to" type="date" value="${html(filters.to || "")}" />
+        </label>
+        <button class="button secondary" type="button" data-sku-change-search>${withIcon("search", "Search")}</button>
+        <button class="button secondary" type="button" data-sku-change-clear>Clear</button>
+      </div>
+      <div class="category-coverage-grid">
+        ${cards.map(([label, value, note]) => `
+          <div class="metric-card">
+            <small>${html(label)}</small>
+            <strong>${Number(value || 0).toLocaleString()}</strong>
+            <span>${html(note)}</span>
+          </div>
+        `).join("")}
+      </div>
+      <div class="catalog-change-status">
+        <span class="pill ${snapshotReady ? "success" : "pending"}">${snapshotReady ? "Baseline ready" : "Baseline missing"}</span>
+        ${importedAt ? `<span>Latest catalog import ${html(simpleDate(importedAt))}</span>` : ""}
+        ${changeTracking.baselineAvailable === false ? `<span>Next import will compare against this baseline.</span>` : ""}
+        ${tracking?.database ? `<span>Source: ${html(tracking.database)}</span>` : ""}
+        ${loading ? `<span>Loading change log...</span>` : ""}
+        ${error ? `<span class="danger-text">${html(error)}</span>` : ""}
+      </div>
+      ${rows.length ? `
+        <div class="table-scroll">
+          <table class="data-table compact-table">
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th>Supplier</th>
+                <th>Field</th>
+                <th>Before</th>
+                <th>After</th>
+                <th>Delta</th>
+                <th>Direction</th>
+                <th>Imported</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((row) => `
+                <tr>
+                  <td><strong>${html(row.sku || "")}</strong><small>${html(row.title || "")}</small></td>
+                  <td>${html(row.supplier || "")}</td>
+                  <td>${html(String(row.field || "").replace(/([A-Z])/g, " $1").trim())}</td>
+                  <td>${renderChangeValue(row.before)}</td>
+                  <td>${renderChangeValue(row.after)}</td>
+                  <td>${row.deltaPercent !== null && row.deltaPercent !== undefined ? `${Number(row.deltaPercent).toFixed(1)}%` : renderChangeValue(row.delta)}</td>
+                  <td><span class="pill ${row.direction === "up" ? "success" : row.direction === "down" ? "warning" : row.direction === "closeout" ? "pending" : ""}">${html(changeDirectionLabel(row))}</span></td>
+                  <td>${html(simpleDate(row.importedAt || ""))}</td>
+                  <td>
+                    <button class="button secondary compact-button" type="button" data-source-change-open="${html(row.sku || "")}">Source</button>
+                    ${row.productId ? `<button class="button secondary compact-button" type="button" data-select-product="${html(row.productId)}" data-product-target="product-full">Product</button>` : ""}
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+        <div class="catalog-pager">
+          <button class="button secondary" type="button" data-sku-change-page="${Number(page) - 1}" ${Number(page) <= 1 ? "disabled" : ""}>Previous</button>
+          <span>Page ${Number(page).toLocaleString()} of ${Number(totalPages).toLocaleString()} · ${Number(total || 0).toLocaleString()} changes</span>
+          <button class="button secondary" type="button" data-sku-change-page="${Number(page) + 1}" ${Number(page) >= totalPages ? "disabled" : ""}>Next</button>
+        </div>
+      ` : `
+        <div class="empty-state">${loading ? "Loading SKU changes..." : snapshotReady ? "No tracked changes yet. The next data dump import will compare against the baseline." : "Create a baseline from the current data dump, then the next import will show changes here."}</div>
+      `}
+    </section>
+  `;
+}
+
+async function syncShopifyCloseoutsCollection() {
+  const result = await api("/api/shopify/collections/closeouts", {
+    method: "POST",
+    feedbackLabel: "Creating Shopify Closeouts collection...",
+    body: JSON.stringify({})
+  });
+  loadChannelApiLogs("Shopify", true).catch(() => {});
+  toast(result.message || "Shopify Closeouts collection synced.");
+}
+
 function renderCatalog() {
   if (!state) return;
+  if (!$("#catalog")?.classList.contains("active")) return;
   document.querySelectorAll("[data-catalog-tab]").forEach((button) => button.classList.toggle("active", button.dataset.catalogTab === catalogTab));
   updateCatalogFilterOptions();
-  if (selectedProductIds.size) {
+  if (selectedProductIds.size && !productCatalogState.loaded) {
     const inventoryIds = new Set((state.inventory || []).map((item) => item.id));
     selectedProductIds = new Set([...selectedProductIds].filter((id) => inventoryIds.has(id)));
   }
@@ -5724,6 +6358,8 @@ function renderCatalog() {
   $("#products-list").style.display = catalogTab === "products" ? "block" : "none";
   $("#source-catalog-list").style.display = catalogTab === "source" ? "block" : "none";
   $("#import-review-list").style.display = catalogTab === "reviews" ? "block" : "none";
+  const catalogChangesList = $("#catalog-changes-list");
+  if (catalogChangesList) catalogChangesList.style.display = catalogTab === "changes" ? "block" : "none";
   $("#category-list").style.display = catalogTab === "categories" ? "block" : "none";
   $("#attribute-list").style.display = catalogTab === "attributes" ? "block" : "none";
   $("#attribute-groups-list").style.display = catalogTab === "attribute-groups" ? "block" : "none";
@@ -5766,6 +6402,61 @@ function renderCatalog() {
     renderCatalogImportReviews();
     return;
   }
+  if (catalogTab === "changes") {
+    try {
+      renderCatalogChanges();
+      if (!catalogChangeState.loaded && !catalogChangeState.loading) loadCatalogChanges().catch((error) => toast(error.message));
+    } catch (error) {
+      const target = $("#catalog-changes-list");
+      if (target) target.innerHTML = `<div class="empty-state">Unable to render SKU changes: ${html(error.message || error)}</div>`;
+    }
+    return;
+  }
+  if (catalogTab === "readiness") {
+    renderReadinessQueue();
+    if (!dataQualityState.loaded && !dataQualityState.loading) {
+      loadDataQualitySummary()
+        .then(() => loadDataQualityProducts())
+        .catch((error) => {
+          dataQualityState.error = error.message || String(error);
+          renderReadinessQueue();
+          toast(error.message);
+        });
+    }
+    return;
+  }
+  if (["products", "inventory"].includes(catalogTab)) {
+    const page = catalogTab === "inventory" ? inventoryCatalogPage : productCatalogPage;
+    const stateForTab = catalogTab === "inventory" ? inventoryCatalogState : productCatalogState;
+    const { query, filtersKey } = productCatalogRequestParams(page);
+    const needsLoad = !stateForTab.loaded || stateForTab.page !== page || stateForTab.query !== query || stateForTab.filtersKey !== filtersKey;
+    if (needsLoad && !stateForTab.loading) {
+      loadProductCatalogPage(page, catalogTab)
+        .then(() => renderCatalog())
+        .catch((error) => {
+          const target = catalogTab === "inventory" ? $("#inventory-list") : $("#products-list");
+          if (target) target.innerHTML = `<div class="empty-state">Unable to load products: ${html(error.message)}</div>`;
+          toast(error.message);
+        });
+    }
+    if (needsLoad) {
+      const target = catalogTab === "inventory" ? $("#inventory-list") : $("#products-list");
+      if (target) target.innerHTML = `<div class="empty-state">Loading ${catalogTab === "inventory" ? "inventory" : "products"}...</div>`;
+      return;
+    }
+    state.inventory = stateForTab.items || [];
+    state.inventoryLoaded = true;
+  }
+  if (["products"].includes(catalogTab) && !state.categorySettingsLoaded) {
+    $("#products-list").innerHTML = `<div class="empty-state">Loading category mappings...</div>`;
+    ensureCategorySettingsLoaded()
+      .then(() => renderCatalog())
+      .catch((error) => {
+        $("#products-list").innerHTML = `<div class="empty-state">Unable to load category mappings: ${html(error.message)}</div>`;
+        toast(error.message);
+      });
+    return;
+  }
   if (catalogTab === "inventory") {
     const items = filteredCatalogItems();
     renderInventoryTable(items);
@@ -5777,10 +6468,6 @@ function renderCatalog() {
   }
   if (catalogTab === "templates") {
     renderMarketplaceTemplates();
-    return;
-  }
-  if (catalogTab === "readiness") {
-    renderReadinessQueue();
     return;
   }
   const items = filteredCatalogItems();
@@ -5803,6 +6490,9 @@ function renderSourceCatalogTable() {
     : selectedSourceSkus.size
       ? `${Number(selectedSourceSkus.size).toLocaleString()} selected`
       : `${Number(totalMatches || 0).toLocaleString()} filtered products`;
+  const searchReady = Boolean(sourceSearchIndexStatus?.ready);
+  const searchBuilding = Boolean(sourceSearchIndexStatus?.building || sourceSearchIndexStatus?.activeJobId);
+  const searchProgress = Number(sourceSearchIndexStatus?.progressPercent || 0);
 
   if (loading && !items.length) {
     target.innerHTML = `<div class="empty-state">Searching source catalog...</div>`;
@@ -5817,18 +6507,31 @@ function renderSourceCatalogTable() {
       <span><strong>${html(countLabel)}</strong>${importedLabel ? `<small>Last import ${html(importedLabel)}</small>` : ""}</span>
       <span><strong>${Number(totalMatches || 0).toLocaleString()}</strong><small>${partial ? `matches in ${Number(scanned || 0).toLocaleString()} scanned` : "matches"}</small></span>
       <span><strong>Page ${sourceCatalogPage}</strong><small>${loading ? "Refreshing" : hasMore ? "More available" : "End of results"}</small></span>
+      <span>
+        <strong>${searchReady ? "Keyword search ready" : searchBuilding ? `Indexing ${searchProgress}%` : "Fast SKU search"}</strong>
+        <small>${searchReady ? "Broad source search enabled" : searchBuilding ? "Track/cancel in Jobs" : "Build index for broad keyword search"}</small>
+      </span>
+      <button class="button secondary" type="button" data-build-source-search-index ${searchReady || searchBuilding ? "disabled" : ""}>${searchBuilding ? "Indexing..." : searchReady ? "Search ready" : "Build keyword index"}</button>
+      <button class="button secondary" type="button" data-build-source-performance-indexes>Optimize filters</button>
+      <button class="button secondary" type="button" data-refresh-source-facets>Refresh facets</button>
     </div>
     ${items.length ? `
       <div class="catalog-selection-toolbar">
         <div class="selection-summary">
           <strong>Source catalog selection</strong>
-          <small>${html(sourceSelectionLabel)}${selectedSourceAllFiltered ? " for export" : ""}</small>
+          <small>${html(sourceSelectionLabel)}${selectedSourceAllFiltered ? " for bulk actions and export" : ""}</small>
         </div>
         <div class="selection-actions">
           <button class="button secondary" type="button" data-select-source-page>Select current page</button>
           <button class="button secondary" type="button" data-select-source-filtered ${totalMatches ? "" : "disabled"}>Select all filtered</button>
           <button class="button secondary" type="button" data-clear-source-selection ${selectedCount ? "" : "disabled"}>Clear</button>
         </div>
+        <button class="button" type="button" data-add-filtered-source-products ${totalMatches ? "" : "disabled"}>Add filtered to Products</button>
+        <select id="source-import-mode" aria-label="Source import mode" data-system-setting="sourceCatalogDefaultImportMode">
+          <option value="new-and-update" ${(appSystemSettings().sourceCatalogDefaultImportMode || "new-and-update") === "new-and-update" ? "selected" : ""}>New + update</option>
+          <option value="new-only" ${appSystemSettings().sourceCatalogDefaultImportMode === "new-only" ? "selected" : ""}>New only</option>
+          <option value="update-existing" ${appSystemSettings().sourceCatalogDefaultImportMode === "update-existing" ? "selected" : ""}>Update existing only</option>
+        </select>
         <select id="source-export-template" aria-label="Source export template">
           ${exportMappings.map((template) => `<option value="${template.id}" ${template.id === selectedExportMappingId ? "selected" : ""}>${html(template.name)}</option>`).join("")}
         </select>
@@ -5890,7 +6593,7 @@ function renderSourceCatalogTable() {
 function updateCatalogBulkBar() {
   const count = catalogTab === "source"
     ? (selectedSourceAllFiltered ? Number(sourceCatalogState?.totalMatches || 0) : selectedSourceSkus.size)
-    : selectedProductAllFiltered ? filteredCatalogItems().length : selectedProductIds.size;
+    : selectedProductAllFiltered ? Number(productCatalogState?.total || filteredCatalogItems().length || 0) : selectedProductIds.size;
   const countEl = $("#catalog-selected-count");
   if (countEl) countEl.textContent = count;
   const action = $("#catalog-bulk-action");
@@ -6027,6 +6730,35 @@ function isBuiltInExportMapping(template = {}) {
   return ["export-shopify-basic", "export-ebay-basic", "export-amazon-basic"].includes(template.id);
 }
 
+function shopifyStatusRequiredColumnsMarkup() {
+  const columns = [
+    ["Variant SKU", "Primary match key. This links Shopify rows to DataPlus SKUs."],
+    ["ID", "Shopify Product GID. This determines whether the SKU is linked to Shopify."],
+    ["Variant ID", "Saved to the product when available."],
+    ["Handle", "Saved as channel reference, not used as the main link key."],
+    ["Status", "Active, Draft, or Archived."],
+    ["Published", "TRUE/FALSE published state."],
+    ["Published At", "Optional timestamp."],
+    ["Updated At", "Optional timestamp."]
+  ];
+  return `
+    <div class="template-column-guide">
+      <div>
+        <strong>Required columns</strong>
+        <small>Use Variant SKU to connect rows to DataPlus SKUs. Shopify Product ID/GID is saved as the linked reference.</small>
+      </div>
+      <div class="template-column-grid">
+        ${columns.map(([name, note], index) => `
+          <span class="${index < 3 ? "required" : ""}">
+            <strong>${html(name)}</strong>
+            <small>${html(note)}</small>
+          </span>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
 function importJobRows() {
   const rows = Array.isArray(state?.importJobs) && state.importJobs.length
     ? state.importJobs
@@ -6055,7 +6787,7 @@ function importJobStatusClass(status = '') {
   if (value === 'running' || value === 'queued') return 'hold';
   if (value === 'failed') return 'canceled';
   if (value === 'stopped') return 'inactive';
-  if (value === 'warning') return 'draft';
+  if (value === 'warning' || value === 'done_with_warnings' || value === 'done-with-warnings') return 'hold';
   return 'active';
 }
 
@@ -6064,17 +6796,124 @@ function importJobStatusLabel(status = '') {
   if (value === 'running') return 'Running';
   if (value === 'queued') return 'Queued';
   if (value === 'failed') return 'Failed';
-  if (value === 'warning') return 'Needs review';
+  if (value === 'warning' || value === 'done_with_warnings' || value === 'done-with-warnings') return 'Done with warnings';
   if (value === 'stopped') return 'Stopped';
   return 'Done';
 }
 
+function jobPhaseLabel(value = "") {
+  return ({
+    queued: "Queued",
+    starting: "Starting",
+    collecting_products: "Collecting products",
+    building_csv: "Building CSV",
+    saving_file: "Saving file",
+    complete: "Complete",
+    stopped: "Stopped"
+  })[String(value || "").toLowerCase()] || String(value || "").replace(/[_-]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function durationLabel(seconds = 0) {
+  const total = Math.max(0, Math.round(Number(seconds || 0)));
+  if (!total) return "";
+  const minutes = Math.floor(total / 60);
+  const secs = total % 60;
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    return `${hours}h ${mins}m`;
+  }
+  return minutes ? `${minutes}m ${secs}s` : `${secs}s`;
+}
+
+function fileSizeLabel(bytes = 0) {
+  const size = Number(bytes || 0);
+  if (!(size > 0)) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = size;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? Math.round(value).toLocaleString() : value.toFixed(1)} ${units[unit]}`;
+}
+
+function jobOriginalArtifact(job = {}) {
+  return (job.artifacts || []).find((artifact) => artifact.kind === "original") || null;
+}
+
+function jobStatusValue(job = {}) {
+  return String(job.status || "").toLowerCase();
+}
+
+function jobIsDone(job = {}) {
+  return ["success", "warning", "done_with_warnings", "done-with-warnings"].includes(jobStatusValue(job));
+}
+
+function jobIsActive(job = {}) {
+  return ["queued", "running"].includes(jobStatusValue(job));
+}
+
+function jobHasDownload(job = {}) {
+  return Boolean(job.originalFilePath || jobOriginalArtifact(job)?.filePath);
+}
+
+function jobFileReadyLabel(job = {}) {
+  if (jobHasDownload(job)) return String(job.direction || "").toLowerCase() === "export" ? "File ready" : "Original saved";
+  if (jobIsDone(job)) return "No file attached";
+  if (jobIsActive(job)) return "File pending";
+  return "No file";
+}
+
+function jobProgressPercent(job = {}) {
+  if (jobIsDone(job)) return 100;
+  if (Number(job.progressPercent || 0) > 0) return Math.max(0, Math.min(100, Number(job.progressPercent || 0)));
+  if (Number(job.totalRows || 0) > 0 && Number(job.processedRows || 0) > 0) {
+    return Math.max(0, Math.min(100, Math.round((Number(job.processedRows || 0) / Number(job.totalRows || 1)) * 100)));
+  }
+  return 0;
+}
+
+function renderJobProgress(job = {}) {
+  const status = jobStatusValue(job);
+  const pct = jobProgressPercent(job);
+  const total = Number(job.totalRows || 0);
+  const processed = Number(job.processedRows || 0);
+  const eta = jobIsDone(job) ? "" : durationLabel(job.estimatedSecondsRemaining);
+  const phase = jobIsDone(job) ? "Complete" : jobPhaseLabel(job.phase || status);
+  const showBar = jobIsActive(job) || pct > 0;
+  if (!showBar) return "";
+  const detail = total
+    ? `${(jobIsDone(job) && processed < total ? total : processed).toLocaleString()} / ${total.toLocaleString()} rows`
+    : "Rows pending";
+  return `
+    <div class="job-progress ${jobIsDone(job) ? "complete" : ""}">
+      <div class="job-progress-bar"><span style="width:${pct}%"></span></div>
+      <div class="job-progress-meta">
+        <span>${html(phase)}${pct ? ` · ${Math.round(pct)}%` : ""}</span>
+        <span>${html(detail)}${eta ? ` · ETA ${html(eta)}` : ""}</span>
+      </div>
+    </div>
+  `;
+}
+
 function renderImportJobMetrics(job = {}) {
   const metrics = [];
+  const originalSize = fileSizeLabel(jobOriginalArtifact(job)?.byteSize);
+  if (jobIsDone(job) || (Number(job.processedRows || 0) && Number(job.totalRows || 0))) metrics.push(`${Math.round(jobProgressPercent(job))}%`);
   if (Number(job.totalRows || 0)) metrics.push(`${Number(job.totalRows || 0).toLocaleString()} rows`);
   if (Number(job.changed || 0)) metrics.push(`${Number(job.changed || 0).toLocaleString()} changed`);
   if (Number(job.created || 0)) metrics.push(`${Number(job.created || 0).toLocaleString()} created`);
   if (Number(job.missingCount || 0)) metrics.push(`${Number(job.missingCount || 0).toLocaleString()} missing`);
+  if (jobLooksApiRelated(job)) {
+    const channel = jobApiChannel(job);
+    const reason = jobApiReason(job);
+    if (channel) metrics.push(channel);
+    if (reason) metrics.push(reason);
+  }
+  if (jobHasDownload(job)) metrics.push(jobFileReadyLabel(job));
+  if (originalSize) metrics.push(originalSize);
   return metrics.join(' / ') || html(job.direction || 'import');
 }
 
@@ -6085,7 +6924,20 @@ function filteredImportJobs({ useJobsFilters = false } = {}) {
   if (jobsFilter.section) jobs = jobs.filter((job) => String(job.section || "").toLowerCase() === jobsFilter.section);
   if (jobsFilter.status) jobs = jobs.filter((job) => String(job.status || "").toLowerCase() === jobsFilter.status);
   if (jobsFilter.direction) jobs = jobs.filter((job) => String(job.direction || "").toLowerCase() === jobsFilter.direction);
-  if (query) jobs = jobs.filter((job) => `${job.operation} ${job.section} ${job.fileName} ${job.status} ${job.message}`.toLowerCase().includes(query));
+  if (jobsFilter.channel) jobs = jobs.filter((job) => String(jobApiChannel(job) || "").toLowerCase() === jobsFilter.channel);
+  if (jobsFilter.endpoint) jobs = jobs.filter((job) => String(jobApiEndpoint(job) || "").toLowerCase() === jobsFilter.endpoint);
+  if (query) jobs = jobs.filter((job) => [
+    job.id,
+    job.operation,
+    job.section,
+    job.fileName,
+    job.status,
+    job.message,
+    job.details,
+    jobApiChannel(job),
+    jobApiEndpoint(job),
+    ...(Array.isArray(job.errors) ? job.errors : [])
+  ].join(" ").toLowerCase().includes(query));
   return jobs;
 }
 
@@ -6115,6 +6967,150 @@ function jobImportSection(job = {}) {
   return "products";
 }
 
+function channelNameForJob(job = {}) {
+  const text = [
+    job.section,
+    job.operation,
+    job.source,
+    job.fileName,
+    job.message,
+    ...(Array.isArray(job.errors) ? job.errors.slice(0, 3) : [])
+  ].join(" ").toLowerCase();
+  const channels = (state.connections || []).map((channel) => channel.name).filter(Boolean);
+  const matched = channels.find((name) => text.includes(String(name || "").toLowerCase()));
+  if (matched) return matched;
+  if (/\bebay\b/.test(text)) return "eBay";
+  if (/\bshopify\b/.test(text)) return "Shopify";
+  if (/\btemu\b/.test(text)) return "Temu";
+  if (/\btiktok\b/.test(text)) return "TikTok Shop";
+  if (/\bwhatnot\b/.test(text)) return "Whatnot";
+  return "";
+}
+
+function jobApiText(job = {}) {
+  return [
+    job.apiEndpoint,
+    job.apiChannel,
+    job.direction,
+    job.section,
+    job.operation,
+    job.source,
+    job.fileName,
+    job.message,
+    job.details,
+    ...(Array.isArray(job.errors) ? job.errors.slice(0, 8) : [])
+  ].join(" ");
+}
+
+function jobLooksApiRelated(job = {}) {
+  const text = jobApiText(job);
+  return String(job.direction || "").toLowerCase() === "api"
+    || /api notification|api failed|api error|api warning|graphql error|oauth|access denied|insufficient permission|permission denied|\bHTTP\s+[45]\d\d\b|\berror\s*\(?[45]\d\d\)?/i.test(text);
+}
+
+function jobApiChannel(job = {}) {
+  if (!jobLooksApiRelated(job)) return "";
+  const text = jobApiText(job);
+  if (/\b(GET|POST|PUT|PATCH|DELETE)\s+\/api\/(?!shopify(?:\/|$)|ebay(?:\/|$)|temu(?:\/|$)|tiktok(?:\/|$))[^\s|,]*/i.test(text)) return "System";
+  if (job.apiChannel && String(job.apiChannel) !== "System") return String(job.apiChannel || "");
+  return jobLooksApiRelated(job) ? channelNameForJob(job) || "System" : "";
+}
+
+function jobApiEndpoint(job = {}) {
+  if (!jobLooksApiRelated(job)) return "";
+  if (job.apiEndpoint && String(job.apiEndpoint) !== "Unknown endpoint") return String(job.apiEndpoint || "");
+  const text = jobApiText(job);
+  const cleanEndpoint = (value = "") => String(value || "").replace(/[):,.;]+$/g, "");
+  const methodPath = text.match(/\b(GET|POST|PUT|PATCH|DELETE)\s+(\/[^\s|,]+)/i);
+  if (methodPath) return `${methodPath[1].toUpperCase()} ${cleanEndpoint(methodPath[2])}`;
+  const urlPath = text.match(/https?:\/\/[^/]+(\/[^\s|,]+)/i);
+  if (urlPath) return cleanEndpoint(urlPath[1]);
+  return "";
+}
+
+function jobApiReason(job = {}) {
+  if (job.apiReason) return String(job.apiReason || "");
+  const text = jobApiText(job);
+  if (/access denied|insufficient permission|permission|scope/i.test(text)) return "Permission or OAuth scope";
+  if (/token|oauth|credential|authorization|refresh/i.test(text)) return "Authorization";
+  if (/missing|required|invalid value|invalid string|validation/i.test(text)) return "Validation";
+  if (/rate limit|too many/i.test(text)) return "Rate limit";
+  if (/timeout|network|ECONN|ENOTFOUND|socket/i.test(text)) return "Network";
+  if (/\b5\d\d\b/.test(text)) return "Remote service error";
+  if (/\b4\d\d\b/.test(text)) return "Request error";
+  return jobLooksApiRelated(job) ? "API error" : "";
+}
+
+function apiJobFilterOptions(kind = "channel") {
+  const values = importJobRows()
+    .filter(jobLooksApiRelated)
+    .map((job) => kind === "endpoint" ? jobApiEndpoint(job) : jobApiChannel(job))
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return [...new Set(values)].sort((a, b) => a.localeCompare(b));
+}
+
+function apiJobIssueGroups(limit = 5) {
+  const groups = new Map();
+  for (const job of importJobRows()) {
+    if (!jobLooksApiRelated(job)) continue;
+    const status = String(job.status || "").toLowerCase();
+    if (!["failed", "warning", "done_with_warnings", "done-with-warnings"].includes(status)) continue;
+    const channel = jobApiChannel(job) || "System";
+    const endpoint = jobApiEndpoint(job) || "Unknown endpoint";
+    const key = `${channel}|${endpoint}`;
+    const reason = jobApiReason(job) || "API error";
+    const group = groups.get(key) || { channel, endpoint, count: 0, latest: "", failed: 0, warning: 0, reasons: new Map() };
+    group.count += 1;
+    if (status === "failed") group.failed += 1;
+    else group.warning += 1;
+    group.reasons.set(reason, (group.reasons.get(reason) || 0) + 1);
+    const updated = job.finishedAt || job.updatedAt || job.startedAt || job.createdAt || "";
+    if (!group.latest || new Date(updated) > new Date(group.latest)) group.latest = updated;
+    groups.set(key, group);
+  }
+  return [...groups.values()].map((group) => ({
+      ...group,
+      topReason: [...group.reasons.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "API error"
+    }))
+    .sort((a, b) => b.failed - a.failed || b.count - a.count || new Date(b.latest || 0) - new Date(a.latest || 0))
+    .slice(0, limit);
+}
+
+function channelApiHistoryChannelForJob(job = {}) {
+  const channelName = channelNameForJob(job);
+  if (!channelName) return "";
+  const isExportOnly = String(job.direction || "").toLowerCase() === "export";
+  return jobLooksApiRelated(job) && !isExportOnly ? channelName : "";
+}
+
+function openJobChannelApiHistory(jobId = "") {
+  const job = importJobRows().find((row) => row.id === jobId);
+  const channelName = channelApiHistoryChannelForJob(job || {});
+  if (!job || !channelName) return toast("No channel API history is linked to this job.");
+  const channel = (state.connections || []).find((row) => String(row.name || "").toLowerCase() === channelName.toLowerCase());
+  if (!channel) return toast(`${channelName} channel settings were not found.`);
+  selectedChannelId = channel.id;
+  channelApiLogState = {
+    channel: channel.name,
+    logs: channelApiLogState.channel === channel.name ? channelApiLogState.logs : [],
+    loading: false,
+    loaded: channelApiLogState.channel === channel.name ? channelApiLogState.loaded : false,
+    error: "",
+    filters: { q: "", status: "failed", transport: "" }
+  };
+  showView("channel-full");
+  loadChannelApiLogs(channel.name, true).catch((error) => toast(error.message));
+}
+
+function openApiLogJob(jobId = "") {
+  const job = importJobRows().find((row) => row.id === jobId);
+  if (!job) return toast("Job was not found.");
+  selectedImportJobId = job.id;
+  showView("jobs");
+  refreshImportJobs().catch(() => {});
+}
+
 function renderJobProfile(job = null) {
   if (!job) {
     return `
@@ -6123,20 +7119,37 @@ function renderJobProfile(job = null) {
       </aside>
     `;
   }
-  const status = String(job.status || "success").toLowerCase();
-  const canStop = ["queued", "running"].includes(status);
-  const hasOriginal = Boolean(job.originalFilePath);
+  const status = jobStatusValue(job);
+  const canStop = jobIsActive(job);
+  const hasOriginal = jobHasDownload(job);
+  const originalSize = fileSizeLabel(jobOriginalArtifact(job)?.byteSize);
+  const downloadLabel = String(job.direction || "").toLowerCase() === "export" ? "Download file" : "Original file";
   const hasErrors = Boolean((job.errors || []).length || job.errorFilePath || job.errorFileName);
+  const channelName = channelApiHistoryChannelForJob(job);
+  const canRetry = Boolean(job.workerTask) && !canStop;
   const statRows = [
+    ["Job ID", job.id || "n/a"],
     ["Type", job.direction || "import"],
     ["Category", job.section || "System"],
     ["Started", dateLabel(job.startedAt || job.createdAt)],
     ["Ended", job.finishedAt ? dateLabel(job.finishedAt) : "Running"],
     ["Original", job.originalFileName || job.fileName || "None"],
     ["Rows", Number(job.totalRows || 0).toLocaleString()],
+    ["Processed", Number(jobIsDone(job) && Number(job.processedRows || 0) < Number(job.totalRows || 0) ? job.totalRows : job.processedRows || 0).toLocaleString()],
+    ["Progress", `${Math.round(jobProgressPercent(job))}%`],
+    ["ETA", jobIsDone(job) ? "Complete" : durationLabel(job.estimatedSecondsRemaining) || "n/a"],
     ["Changed", Number(job.changed || 0).toLocaleString()],
-    ["Missing", Number(job.missingCount || 0).toLocaleString()]
+    ["Missing", Number(job.missingCount || 0).toLocaleString()],
+    ["Worker", job.workerId || (job.workerTask ? "Queued worker" : "n/a")],
+    ["Worker seen", job.workerLastSeenAt ? dateLabel(job.workerLastSeenAt) : "n/a"],
+    ["File", jobFileReadyLabel(job)],
+    ["File size", originalSize || "n/a"]
   ];
+  if (jobLooksApiRelated(job)) {
+    statRows.splice(3, 0, ["API channel", jobApiChannel(job) || "n/a"]);
+    statRows.splice(4, 0, ["Endpoint", jobApiEndpoint(job) || "n/a"]);
+    statRows.splice(5, 0, ["Reason", jobApiReason(job) || "n/a"]);
+  }
   return `
     <aside class="job-profile-panel">
       <div class="job-profile-head">
@@ -6144,26 +7157,35 @@ function renderJobProfile(job = null) {
           <p class="eyebrow">Job Profile</p>
           <h3>${html(job.operation || "Import job")}</h3>
           <p class="muted">${html([job.section, job.fileName].filter(Boolean).join(" / ") || "System job")}</p>
+          <code class="job-id-code">${html(job.id || "no-job-id")}</code>
         </div>
         <span class="status ${importJobStatusClass(job.status)}">${html(importJobStatusLabel(job.status))}</span>
       </div>
       <div class="job-profile-actions">
         <button class="button" type="button" data-job-run="${html(job.id)}">${withIcon("upload", "Run")}</button>
+        ${canRetry ? `<button class="button secondary" type="button" data-job-retry="${html(job.id)}">${withIcon("refresh-cw", "Retry")}</button>` : ""}
         <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon("refresh-cw", "Refresh")}</button>
-        <button class="button danger" type="button" data-job-stop="${html(job.id)}" ${canStop ? "" : "disabled"}>Stop</button>
+        ${channelName ? `<button class="button secondary" type="button" data-job-channel-api-history="${html(job.id)}">${withIcon("activity", "Open API history")}</button>` : ""}
+        <button class="button danger" type="button" data-job-stop="${html(job.id)}" ${canStop ? "" : "disabled"}>Cancel job</button>
       </div>
       <div class="job-profile-note">
-        ${job.direction === "api" ? "This came from an API notification. Use the error preview and endpoint details to troubleshoot the connector." : canStop ? "This job is currently active and can be stopped." : "Run opens the matching import area. Background reruns will be connected when the runner is added."}
+        ${channelName ? `This job is linked to ${html(channelName)}. Open API history to review the connector calls around this failure.` : job.direction === "api" ? "This came from an API notification. Use the error preview and endpoint details to troubleshoot the connector." : canStop ? "This job is currently active and can be canceled." : canRetry ? "Retry starts a fresh background job with the same saved inputs." : "Run opens the matching import area."}
+      </div>
+      ${renderJobProgress(job)}
+      <div class="job-file-state ${hasOriginal ? "ready" : jobIsActive(job) ? "pending" : "missing"}">
+        <strong>${html(jobFileReadyLabel(job))}</strong>
+        <span>${hasOriginal ? html(job.originalFileName || job.fileName || "Download is available from this job.") : jobIsActive(job) ? "The download will appear here when the worker finishes." : "This job has no downloadable artifact attached."}</span>
       </div>
       <div class="job-profile-stats">
         ${statRows.map(([label, value]) => `<span><small>${html(label)}</small><strong>${html(value)}</strong></span>`).join("")}
       </div>
       <div class="job-profile-files">
-        ${hasOriginal ? `<a class="button secondary" href="/api/import-jobs/${encodeURIComponent(job.id)}/original">${withIcon("download", "Original file")}</a>` : `<button class="button secondary" type="button" disabled>Original file</button>`}
+        ${hasOriginal ? `<a class="button secondary" href="/api/import-jobs/${encodeURIComponent(job.id)}/original">${withIcon("download", downloadLabel)}</a>` : `<button class="button secondary" type="button" disabled>${html(downloadLabel)}</button>`}
         ${hasErrors ? `<a class="button secondary" href="/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv">${withIcon("download", "Errors CSV")}</a>` : `<button class="button secondary" type="button" disabled>Errors CSV</button>`}
       </div>
       ${job.message ? `<div class="job-profile-message"><strong>Status message</strong><p>${html(job.message)}</p></div>` : ""}
       ${job.details ? `<div class="job-profile-message"><strong>Details</strong><p>${html(job.details)}</p></div>` : ""}
+      ${job.workerHealth === "waiting_for_worker" ? `<div class="job-profile-message warning"><strong>Worker waiting</strong><p>Worker mode is enabled, but no active worker heartbeat is visible. Start <code>npm run worker</code> to process this job.</p></div>` : ""}
       ${(job.errors || []).length ? `
         <div class="job-profile-errors">
           <strong>Error preview</strong>
@@ -6176,7 +7198,11 @@ function renderJobProfile(job = null) {
 
 function renderImportJobActions(job = {}) {
   const actions = [];
-  if (job.originalFilePath) actions.push(`<a href="/api/import-jobs/${encodeURIComponent(job.id)}/original">Original file</a>`);
+  const canStop = ["queued", "running"].includes(String(job.status || "").toLowerCase());
+  if (canStop) actions.push(`<button type="button" data-job-stop="${html(job.id)}">Cancel job</button>`);
+  if (job.workerTask && !canStop) actions.push(`<button type="button" data-job-retry="${html(job.id)}">Retry job</button>`);
+  if (channelApiHistoryChannelForJob(job)) actions.push(`<button type="button" data-job-channel-api-history="${html(job.id)}">Open API history</button>`);
+  if (jobHasDownload(job)) actions.push(`<a href="/api/import-jobs/${encodeURIComponent(job.id)}/original">${String(job.direction || "").toLowerCase() === "export" ? "Download file" : "Original file"}</a>`);
   if ((job.errors || []).length || job.errorFilePath || job.errorFileName) actions.push(`<a href="/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv">Errors CSV</a>`);
   return actions.length ? `<div class="import-job-actions">${actions.join('')}</div>` : '';
 }
@@ -6205,6 +7231,7 @@ function renderImportQueuePanel({ full = false } = {}) {
               <div class="import-job-title">
                 <strong>${html(job.operation || 'Import')}</strong>
                 <small>${html([job.section, job.fileName].filter(Boolean).join(' / ') || 'System job')}</small>
+                <code class="job-id-code">${html(job.id || "no-job-id")}</code>
               </div>
             </div>
             <div class="import-job-meta">
@@ -6212,6 +7239,7 @@ function renderImportQueuePanel({ full = false } = {}) {
               <span>${html(dateLabel(job.startedAt || job.createdAt))}</span>
               <span>${job.finishedAt ? html(dateLabel(job.finishedAt)) : 'Running'}</span>
             </div>
+            ${renderJobProgress(job)}
             ${renderImportJobActions(job)}
             ${job.message ? `<p class="import-job-message">${html(job.message)}</p>` : ''}
             ${(job.errors || []).length ? `<details class="import-job-errors"><summary>View details</summary><div>${(job.errors || []).slice(0, 30).map((error) => `<span>${html(error)}</span>`).join('')}</div></details>` : ''}
@@ -6267,7 +7295,7 @@ function renderTemplateActionRows(templates = []) {
             <div class="import-template-actions">
               <button class="button secondary" type="button" data-open-export-mapping="${template.id}">${withIcon('file-pen-line', 'Manage')}</button>
               <button class="button secondary" type="button" data-open-product-import="${template.id}">${withIcon('upload', 'Import')}</button>
-              <a class="button secondary" href="/api/export-mappings/${template.id}/export">${withIcon('clipboard-list', 'Export')}</a>
+              <button class="button secondary" type="button" data-export-mapping-template="${template.id}">${withIcon('clipboard-list', 'Export')}</button>
               ${isBuiltInExportMapping(template)
                 ? `<button class="button secondary" type="button" data-duplicate-export-mapping="${template.id}">${withIcon('copy', 'Duplicate')}</button>`
                 : `<button class="button danger" type="button" data-delete-export-mapping="${template.id}">${withIcon('trash-2', 'Delete')}</button>`}
@@ -6352,11 +7380,11 @@ function renderImportSectionBody(sectionId, templates = []) {
           </article>
           <article class="import-action-row">
             <div><strong>Matrixify smart collections <span class="info-dot" title="Exports one Smart Collection row per mapped master category. Matrixify rules use Product Column = Type, Relation = Equals, Condition = product type.">i</span></strong><small>Exports Shopify smart collections from mapped product types, including SEO handles, rule conditions, and category images when available.</small></div>
-            <a class="button secondary" href="/api/categories/export/matrixify-smart-collections.csv">${withIcon('clipboard-list', 'Export CSV')}</a>
+            <button class="button secondary" type="button" data-category-export="matrixify-smart-collections">${withIcon('clipboard-list', 'Export CSV')}</button>
           </article>
           <article class="import-action-row">
             <div><strong>Matrixify main menu <span class="info-dot" title="Uses the Shopify menu collection mapping file as the menu structure, then adds any newly mapped master categories automatically with SEO collection handles.">i</span></strong><small>Exports the Matrixify Menus sheet for the Shopify main menu using department, group, and collection links.</small></div>
-            <a class="button secondary" href="/api/categories/export/matrixify-menu.csv">${withIcon('layout-panel-left', 'Export CSV')}</a>
+            <button class="button secondary" type="button" data-category-export="matrixify-menu">${withIcon('layout-panel-left', 'Export CSV')}</button>
           </article>
           <article class="import-action-row">
             <div><strong>Open category mappings</strong><small>Review Shopify, eBay, and other channel category mappings before exporting.</small></div>
@@ -6392,15 +7420,21 @@ function renderImportSectionBody(sectionId, templates = []) {
       </div>
       <div class="import-action-list">
         <article class="import-action-row">
-          <div><strong>Shopify / Matrixify status</strong><small>Updates Shopify ID, Variant ID, handle, published state, and live status after Shopify export.</small></div>
-          <label class="file-button">${withIcon('upload', 'Import Shopify status')}<input type="file" accept=".csv,text/csv" data-central-shopify-status-import /></label>
+          <div>
+            <strong>Shopify / Matrixify status <span class="info-dot" title="Variant SKU links Shopify rows to DataPlus SKUs. Shopify Product ID/GID determines whether the SKU is linked to Shopify.">i</span></strong>
+            <small>Links by Variant SKU, then saves Shopify Product GID, Variant ID, handle, published state, and live status.</small>
+          </div>
+          <div class="import-template-actions">
+            <a class="button secondary" href="/api/shopify/status-import/template.csv">${withIcon('download', 'Template')}</a>
+            <label class="file-button">${withIcon('upload', 'Import Shopify status')}<input type="file" accept=".csv,text/csv" data-central-shopify-status-import /></label>
+          </div>
         </article>
         ${shopifyTemplate ? `
           <article class="import-action-row">
             <div><strong>Shopify product CSV</strong><small>Import or export with the Shopify product template already mapped in DataPlus.</small></div>
             <div class="import-template-actions">
               <button class="button secondary" type="button" data-open-product-import="${shopifyTemplate.id}">${withIcon('upload', 'Import CSV')}</button>
-              <a class="button secondary" href="/api/export-mappings/${shopifyTemplate.id}/export">${withIcon('clipboard-list', 'Export CSV')}</a>
+              <button class="button secondary" type="button" data-export-mapping-template="${shopifyTemplate.id}">${withIcon('clipboard-list', 'Export CSV')}</button>
               <button class="button secondary" type="button" data-open-export-mapping="${shopifyTemplate.id}">${withIcon('file-pen-line', 'Manage')}</button>
             </div>
           </article>
@@ -6443,6 +7477,27 @@ function renderImportExportCenter(templates = []) {
         ${renderImportSectionMenu(sections)}
         <main class="import-section-workspace">${renderImportSectionBody(activeImportSection, templates)}</main>
         ${renderImportQueuePanel()}
+      </div>
+    </div>
+  `;
+}
+
+function renderJobsApiIssueGroups(groups = []) {
+  if (!groups.length) return "";
+  return `
+    <div class="jobs-api-groups">
+      <div>
+        <p class="eyebrow">API Issues</p>
+        <strong>Grouped by channel and endpoint</strong>
+      </div>
+      <div class="jobs-api-chip-row">
+        ${groups.map((group) => `
+          <button class="jobs-api-chip" type="button" data-job-api-channel="${html(group.channel.toLowerCase())}" data-job-api-endpoint="${html(group.endpoint.toLowerCase())}">
+            <span>${html(group.channel)}</span>
+            <strong>${html(group.endpoint)}</strong>
+            <em>${Number(group.count || 0).toLocaleString()} issue${Number(group.count || 0) === 1 ? "" : "s"} / ${html(group.topReason || "API error")}</em>
+          </button>
+        `).join("")}
       </div>
     </div>
   `;
@@ -6503,42 +7558,100 @@ function renderJobsPage() {
   const sections = importJobFilterOptions("section");
   const statuses = importJobFilterOptions("status");
   const directions = importJobFilterOptions("direction");
+  const apiChannels = apiJobFilterOptions("channel");
+  const apiEndpoints = apiJobFilterOptions("endpoint");
+  const apiGroups = apiJobIssueGroups();
   const jobs = filteredImportJobs({ useJobsFilters: true });
   const selectedJob = selectedImportJob(jobs);
   const totalJobs = importJobRows().length;
   const warnings = importJobRows().filter((job) => ["warning", "failed"].includes(String(job.status || "").toLowerCase())).length;
-  const savedFiles = importJobRows().filter((job) => job.originalFilePath).length;
+  const savedFiles = importJobRows().filter(jobHasDownload).length;
+  const workerStatus = state.workerStatus || {};
+  const workerMode = appSystemSettings().backgroundJobsMode === "worker";
+  const workerLabel = workerMode ? (workerStatus.online ? "Online" : "Offline") : "Inline";
+  const workerTone = workerMode ? (workerStatus.online ? "success" : "warning") : "muted";
+  const workerSeen = workerStatus.lastSeenAt ? `${dateLabel(workerStatus.lastSeenAt)} (${Number(workerStatus.ageSeconds || 0)}s ago)` : "No heartbeat yet";
   target.innerHTML = `
     <div class="jobs-page">
       <section class="jobs-command-bar">
-        <div class="jobs-command-head">
-          <div>
-            <p class="eyebrow">Operations</p>
-            <h2>Jobs</h2>
-            <p class="muted">${Number(jobs.length || 0).toLocaleString()} visible of ${Number(totalJobs || 0).toLocaleString()} jobs</p>
+        <div class="jobs-command-top">
+          <div class="jobs-command-head">
+            <div>
+              <p class="eyebrow">Operations</p>
+              <h2>Jobs</h2>
+              <p class="muted">${Number(jobs.length || 0).toLocaleString()} visible of ${Number(totalJobs || 0).toLocaleString()} jobs</p>
+            </div>
           </div>
-          <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon("refresh-cw", "Refresh jobs")}</button>
+          <div class="jobs-actions">
+            <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon("refresh-cw", "Refresh jobs")}</button>
+            <button class="button secondary" type="button" data-cleanup-import-jobs>${withIcon("sparkles", "Clean stale")}</button>
+            <button class="button secondary" type="button" data-system-backup>${withIcon("database-backup", "Backup Postgres")}</button>
+          </div>
+          <div class="jobs-quick-stats">
+            <span><small>Total</small><strong>${Number(totalJobs || 0).toLocaleString()}</strong></span>
+            <span><small>Review</small><strong>${Number(warnings || 0).toLocaleString()}</strong></span>
+            <span><small>Files</small><strong>${Number(savedFiles || 0).toLocaleString()}</strong></span>
+            <span><small>Worker</small><strong><span class="status ${workerTone}">${html(workerLabel)}</span></strong></span>
+          </div>
         </div>
-        <div class="jobs-quick-stats">
-          <span><small>Total</small><strong>${Number(totalJobs || 0).toLocaleString()}</strong></span>
-          <span><small>Review</small><strong>${Number(warnings || 0).toLocaleString()}</strong></span>
-          <span><small>Files</small><strong>${Number(savedFiles || 0).toLocaleString()}</strong></span>
+        <div class="jobs-filter-card">
+          <div class="jobs-filter-bar">
+            <input id="jobs-search" type="search" placeholder="Search jobs, files, endpoints, messages" value="${html(jobsFilter.query || "")}" />
+            <select id="jobs-filter-section">
+              <option value="">All categories</option>
+              ${sections.map((section) => `<option value="${html(section.toLowerCase())}" ${jobsFilter.section === section.toLowerCase() ? "selected" : ""}>${html(section)}</option>`).join("")}
+            </select>
+            <select id="jobs-filter-status">
+              <option value="">All statuses</option>
+              ${statuses.map((status) => `<option value="${html(status.toLowerCase())}" ${jobsFilter.status === status.toLowerCase() ? "selected" : ""}>${html(importJobStatusLabel(status))}</option>`).join("")}
+            </select>
+            <select id="jobs-filter-direction">
+              <option value="">All types</option>
+              ${directions.map((direction) => `<option value="${html(direction.toLowerCase())}" ${jobsFilter.direction === direction.toLowerCase() ? "selected" : ""}>${html(direction)}</option>`).join("")}
+            </select>
+            <select id="jobs-filter-channel">
+              <option value="">All API channels</option>
+              ${apiChannels.map((channel) => `<option value="${html(channel.toLowerCase())}" ${jobsFilter.channel === channel.toLowerCase() ? "selected" : ""}>${html(channel)}</option>`).join("")}
+            </select>
+            <select id="jobs-filter-endpoint">
+              <option value="">All API endpoints</option>
+              ${apiEndpoints.map((endpoint) => `<option value="${html(endpoint.toLowerCase())}" ${jobsFilter.endpoint === endpoint.toLowerCase() ? "selected" : ""}>${html(endpoint)}</option>`).join("")}
+            </select>
+            <button class="button secondary" type="button" data-clear-job-filters>Clear</button>
+          </div>
+          ${renderJobsApiIssueGroups(apiGroups)}
         </div>
-        <div class="jobs-filter-bar">
-          <input id="jobs-search" type="search" placeholder="Search jobs, files, messages" value="${html(jobsFilter.query || "")}" />
-          <select id="jobs-filter-section">
-            <option value="">All categories</option>
-            ${sections.map((section) => `<option value="${html(section.toLowerCase())}" ${jobsFilter.section === section.toLowerCase() ? "selected" : ""}>${html(section)}</option>`).join("")}
-          </select>
-          <select id="jobs-filter-status">
-            <option value="">All statuses</option>
-            ${statuses.map((status) => `<option value="${html(status.toLowerCase())}" ${jobsFilter.status === status.toLowerCase() ? "selected" : ""}>${html(importJobStatusLabel(status))}</option>`).join("")}
-          </select>
-          <select id="jobs-filter-direction">
-            <option value="">All types</option>
-            ${directions.map((direction) => `<option value="${html(direction.toLowerCase())}" ${jobsFilter.direction === direction.toLowerCase() ? "selected" : ""}>${html(direction)}</option>`).join("")}
-          </select>
-          <button class="button secondary" type="button" data-clear-job-filters>Clear</button>
+        <div class="jobs-settings-card">
+          <label class="jobs-setting-select">Job runner
+            <select data-system-setting="backgroundJobsMode">
+              <option value="inline" ${appSystemSettings().backgroundJobsMode !== "worker" ? "selected" : ""}>Inline server</option>
+              <option value="worker" ${appSystemSettings().backgroundJobsMode === "worker" ? "selected" : ""}>External worker</option>
+            </select>
+          </label>
+          <label class="jobs-setting-toggle"><input type="checkbox" ${appSystemSettings().autoDataQualityScanAfterImports !== false ? "checked" : ""} data-system-setting="autoDataQualityScanAfterImports" /> <span>Auto-scan after imports</span></label>
+          <label class="jobs-setting-toggle"><input type="checkbox" ${appSystemSettings().dataQualityWorkerEnabled !== false ? "checked" : ""} data-system-setting="dataQualityWorkerEnabled" /> <span>Quality scans on worker</span></label>
+          <label class="jobs-setting-toggle"><input type="checkbox" ${appSystemSettings().backupIncludeSourceCatalog === true ? "checked" : ""} data-system-setting="backupIncludeSourceCatalog" /> <span>Include source catalog in backups</span></label>
+          <label class="jobs-setting-toggle"><input type="checkbox" ${appSystemSettings().jobsRetentionAutoCleanupEnabled !== false ? "checked" : ""} data-system-setting="jobsRetentionAutoCleanupEnabled" /> <span>Auto-clean expired files</span></label>
+          <div class="jobs-retention-note"><strong>Files</strong><small>Export and error downloads are retained for 30 days.</small></div>
+        </div>
+        <div class="worker-health-card ${workerMode && !workerStatus.online ? "needs-attention" : ""}">
+          <div>
+            <strong>External worker</strong>
+            <small>${workerMode ? html(workerStatus.online ? "Ready to claim queued jobs." : "Worker mode is on, but no active heartbeat is visible.") : "Inline server mode is active."}</small>
+          </div>
+          <div>
+            <small>Worker ID</small>
+            <code>${html(workerStatus.workerId || "n/a")}</code>
+          </div>
+          <div>
+            <small>Last heartbeat</small>
+            <span>${html(workerSeen)}</span>
+          </div>
+          <div>
+            <small>Current task</small>
+            <span>${html(workerStatus.currentTask || workerStatus.status || "idle")}</span>
+          </div>
+          ${workerMode && !workerStatus.online ? `<code>npm run worker</code>` : ""}
         </div>
       </section>
       <div class="jobs-workspace">
@@ -6562,7 +7675,7 @@ function renderMappingDetailPage(selected) {
         <div class="mapping-actions">
           <button type="button" class="button" data-save-export-mapping="${selected.id}">Save changes</button>
           <span class="mapping-save-state" id="mapping-save-state">${mappingDraftDirty ? "Unsaved changes" : "No unsaved changes"}</span>
-          <a class="button" href="/api/export-mappings/${selected.id}/export">Download CSV</a>
+          <button type="button" class="button" data-export-mapping-template="${selected.id}">Export CSV</button>
           <button type="button" class="button secondary" data-open-product-import="${selected.id}">Import CSV</button>
           <label class="file-button secondary">Load headers<input type="file" accept=".csv,text/csv" data-load-mapping-headers="${selected.id}" /></label>
           <button type="button" class="button secondary" data-duplicate-export-mapping="${selected.id}">Duplicate</button>
@@ -6642,12 +7755,15 @@ function renderImportExportMappings() {
   target.innerHTML = selected ? renderMappingDetailPage(selected) : renderImportExportCenter(templates);
 }
 
-async function refreshImportJobs() {
-  const result = await api('/api/import-jobs');
+async function refreshImportJobs({ silent = false } = {}) {
+  if (currentViewId === "jobs" && !silent) renderJobsLoadingPage("Refreshing jobs and worker status...");
+  const result = await api('/api/import-jobs', { feedbackLabel: silent ? "Checking jobs..." : undefined });
   state.importJobs = result.importJobs || [];
+  state.workerStatus = result.workerStatus || state.workerStatus || {};
   if (currentViewId === 'jobs') renderJobsPage();
-  else renderImportExportMappings();
-  toast('Import queue refreshed.');
+  else if (!silent && currentViewId === "import-export") renderImportExportMappings();
+  renderTopbarActions();
+  if (!silent) toast('Import queue refreshed.');
 }
 
 async function stopImportJob(jobId) {
@@ -6655,7 +7771,35 @@ async function stopImportJob(jobId) {
   state.importJobs = result.importJobs || state.importJobs || [];
   selectedImportJobId = result.job?.id || jobId;
   renderJobsPage();
-  toast("Job stopped.");
+  toast("Job canceled.");
+}
+
+async function retryImportJob(jobId) {
+  const result = await api(`/api/import-jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST", feedbackLabel: "Queueing retry..." });
+  state.importJobs = result.importJobs || [result.job, ...(state.importJobs || [])].filter(Boolean);
+  selectedImportJobId = result.job?.id || jobId;
+  renderJobsPage();
+  renderTopbarActions();
+  toast(result.message || "Retry queued.");
+}
+
+async function cleanupImportJobs() {
+  const result = await api("/api/import-jobs/cleanup", { method: "POST", feedbackLabel: "Cleaning stale jobs..." });
+  state.importJobs = result.importJobs || state.importJobs || [];
+  if (currentViewId === "jobs") renderJobsPage();
+  renderTopbarActions();
+  toast(result.message || "Jobs cleaned.");
+}
+
+async function pollImportJobs() {
+  if (!state) return;
+  const response = await fetch("/api/import-jobs");
+  if (!response.ok) return;
+  const result = await response.json();
+  state.importJobs = result.importJobs || state.importJobs || [];
+  state.workerStatus = result.workerStatus || state.workerStatus || {};
+  if (currentViewId === "jobs") renderJobsPage();
+  renderTopbarActions();
 }
 
 function renderMarketplaceTemplates() {
@@ -6721,68 +7865,147 @@ function allocatedQtyFor(product, currentShadow = null) {
   }, 0);
 }
 
+function dataQualityQueryString(includeFilters = true) {
+  const params = new URLSearchParams();
+  if (!includeFilters) return "";
+  const filters = dataQualityState.filters || {};
+  if (filters.q) params.set("q", filters.q);
+  if (filters.issue) params.set("issue", filters.issue);
+  if (filters.type) params.set("type", filters.type);
+  if (filters.channel) params.set("channel", filters.channel);
+  if (filters.status) params.set("status", filters.status);
+  params.set("limit", "250");
+  const text = params.toString();
+  return text ? `?${text}` : "";
+}
+
+async function loadDataQualitySummary(force = false) {
+  dataQualityState.loading = true;
+  dataQualityState.error = "";
+  renderReadinessQueue();
+  const result = await api(`/api/data-quality/summary${force ? "?force=1" : ""}`, { feedbackLabel: force ? "Scanning data quality..." : "Loading data quality..." });
+  dataQualityState.summary = result.summary || null;
+  dataQualityState.issues = result.issues || [];
+  dataQualityState.loaded = true;
+  dataQualityState.loading = false;
+  renderReadinessQueue();
+  return result;
+}
+
+async function loadDataQualityProducts() {
+  dataQualityState.loading = true;
+  dataQualityState.error = "";
+  renderReadinessQueue();
+  const result = await api(`/api/data-quality/products${dataQualityQueryString(true)}`, { feedbackLabel: "Loading quality queue..." });
+  dataQualityState.rows = result.rows || [];
+  dataQualityState.total = Number(result.total || dataQualityState.rows.length || 0);
+  dataQualityState.loaded = true;
+  dataQualityState.loading = false;
+  renderReadinessQueue();
+  return result;
+}
+
+async function runDataQualityScan() {
+  dataQualityState.loading = true;
+  dataQualityState.error = "";
+  renderReadinessQueue();
+  const result = await api("/api/data-quality/scan", { method: "POST", feedbackLabel: "Scanning product data..." });
+  dataQualityState.summary = result.summary || dataQualityState.summary;
+  dataQualityState.issues = [];
+  dataQualityState.loaded = true;
+  dataQualityState.loading = false;
+  await loadDataQualityProducts();
+  toast(result.message || "Data quality scan complete.");
+}
+
+function dataQualityExportUrl() {
+  return `/api/data-quality/export.csv${dataQualityQueryString(true)}`;
+}
+
+function renderDataQualityIssueOptions() {
+  const selected = dataQualityState.filters.issue || "";
+  const issues = dataQualityState.issues || [];
+  return [`<option value="">All issues</option>`, ...issues.slice(0, 40).map((issue) => {
+    const label = `${issue.label} (${Number(issue.count || 0).toLocaleString()})`;
+    return `<option value="${html(issue.label)}" ${selected === issue.label ? "selected" : ""}>${html(label)}</option>`;
+  })].join("");
+}
+
 function renderReadinessQueue() {
-  const rows = allShadowRows();
-  const products = (state.inventory || []).map((product) => ({ product, readiness: productReadiness(product) }))
-    .sort((a, b) => a.readiness.score - b.readiness.score);
+  const summary = dataQualityState.summary || {};
+  const rows = dataQualityState.rows || [];
+  const filters = dataQualityState.filters || {};
+  const generated = summary.generatedAt ? `Last scanned ${simpleDate(summary.generatedAt)}` : "No scan yet";
+  const loadingText = dataQualityState.loading ? `<span class="status hold">Loading</span>` : "";
   $("#readiness-list").innerHTML = `
       <div class="catalog-readiness-overview">
         <div class="mapping-summary-grid">
-          <span><small>Products</small><strong>${products.length}</strong></span>
-          <span><small>Ready products</small><strong>${products.filter((row) => row.readiness.ready).length}</strong></span>
-          <span><small>Needs work</small><strong>${products.filter((row) => !row.readiness.ready).length}</strong></span>
-          <span><small>Shadow listings</small><strong>${rows.length}</strong></span>
+          <span><small>Products</small><strong>${Number(summary.total || 0).toLocaleString()}</strong></span>
+          <span><small>Product ready</small><strong>${Number(summary.productReady || 0).toLocaleString()}</strong></span>
+          <span><small>Needs work</small><strong>${Number(summary.needsWork || 0).toLocaleString()}</strong></span>
+          <span><small>Shopify ready</small><strong>${Number(summary.shopifyReady || 0).toLocaleString()}</strong></span>
+          <span><small>Shopify live</small><strong>${Number(summary.shopifyLive || 0).toLocaleString()}</strong></span>
+          <span><small>eBay ready</small><strong>${Number(summary.ebayReady || 0).toLocaleString()}</strong></span>
+          <span><small>Closeouts</small><strong>${Number(summary.closeouts || 0).toLocaleString()}</strong></span>
+          <span><small>Stale Shopify</small><strong>${Number(summary.staleShopify || 0).toLocaleString()}</strong></span>
         </div>
+        <div class="toolbar quality-toolbar">
+          <input id="data-quality-search" value="${html(filters.q || "")}" placeholder="Search SKU, title, vendor, category">
+          <select id="data-quality-issue">${renderDataQualityIssueOptions()}</select>
+          <select id="data-quality-type">
+            <option value="" ${!filters.type ? "selected" : ""}>All types</option>
+            <option value="product" ${filters.type === "product" ? "selected" : ""}>Product data</option>
+            <option value="shopify" ${filters.type === "shopify" ? "selected" : ""}>Shopify</option>
+            <option value="ebay" ${filters.type === "ebay" ? "selected" : ""}>eBay</option>
+            <option value="pricing" ${filters.type === "pricing" ? "selected" : ""}>Pricing</option>
+            <option value="category" ${filters.type === "category" ? "selected" : ""}>Categories</option>
+          </select>
+          <select id="data-quality-channel">
+            <option value="" ${!filters.channel ? "selected" : ""}>All channels</option>
+            <option value="shopify" ${filters.channel === "shopify" ? "selected" : ""}>Shopify</option>
+            <option value="ebay" ${filters.channel === "ebay" ? "selected" : ""}>eBay</option>
+          </select>
+          <select id="data-quality-status">
+            <option value="" ${!filters.status ? "selected" : ""}>All statuses</option>
+            <option value="needs-work" ${filters.status === "needs-work" ? "selected" : ""}>Needs work</option>
+            <option value="ready" ${filters.status === "ready" ? "selected" : ""}>Product ready</option>
+            <option value="shopify-ready" ${filters.status === "shopify-ready" ? "selected" : ""}>Shopify ready</option>
+            <option value="shopify-live" ${filters.status === "shopify-live" ? "selected" : ""}>Shopify live</option>
+            <option value="stale" ${filters.status === "stale" ? "selected" : ""}>Stale sync</option>
+            <option value="closeout" ${filters.status === "closeout" ? "selected" : ""}>Closeouts</option>
+          </select>
+          <button class="button primary" data-data-quality-search>${withIcon("search", "Search")}</button>
+          <button class="button secondary" data-data-quality-clear>Clear</button>
+          <button class="button secondary" data-data-quality-scan>${withIcon("refresh-cw", "Scan now")}</button>
+          <a class="button secondary" href="${html(dataQualityExportUrl())}" target="_blank" rel="noreferrer">${withIcon("download", "Export CSV")}</a>
+        </div>
+        <p class="muted">${html(generated)} ${loadingText}</p>
       </div>
-      ${products.length ? `
+      ${dataQualityState.error ? `<div class="empty-state danger">${html(dataQualityState.error)}</div>` : ""}
+      ${!dataQualityState.loaded && dataQualityState.loading ? `<div class="empty-state">Loading data-quality scan...</div>` : ""}
+      ${rows.length ? `
       <div class="catalog-table-wrap readiness-table">
         <table class="catalog-table">
-          <thead><tr><th>Product</th><th>Score</th><th>Missing</th><th>Stock</th><th>Price</th><th>Vendor</th><th>Action</th></tr></thead>
+          <thead><tr><th>Product</th><th>Product</th><th>Shopify</th><th>eBay</th><th>Issues</th><th>Channel state</th><th>Stock</th><th>Margin</th><th>Action</th></tr></thead>
           <tbody>
-            ${products.slice(0, 150).map(({ product, readiness }) => `
+            ${rows.map((row) => `
               <tr>
-                <td><button class="order-link product-name-link" data-select-product="${product.id}" data-product-target="product-full">${html(product.sku)}</button><small>${html(product.marketplaceTitle || product.title || "Untitled product")}</small></td>
-                <td><span class="status ${readinessTone(readiness.score)}">${readiness.score}% ready</span></td>
-                <td>${html(readiness.missing.slice(0, 5).join(", ") || "None")}</td>
-                <td>${Number(product.qty ?? product.stockQty ?? 0)}</td>
-                <td>${money(product.price || 0)}</td>
-                <td>${html(product.vendor || product.supplier || "No vendor")}</td>
-                <td><button class="button secondary" data-select-product="${product.id}" data-product-target="product-full">Review</button></td>
+                <td><button class="order-link product-name-link" data-select-product="${html(row.id)}" data-product-target="product-full">${html(row.sku)}</button><small>${html(row.title || "Untitled product")}</small></td>
+                <td><span class="status ${readinessTone(row.productScore || 0)}">${Number(row.productScore || 0)}%</span></td>
+                <td><span class="status ${row.shopifyLive ? "active" : readinessTone(row.shopifyScore || 0)}">${row.shopifyLive ? "Live" : `${Number(row.shopifyScore || 0)}%`}</span></td>
+                <td><span class="status ${row.ebayLive ? "active" : readinessTone(row.ebayScore || 0)}">${row.ebayLive ? "Live" : `${Number(row.ebayScore || 0)}%`}</span></td>
+                <td>${html((row.issues || []).slice(0, 5).join(", ") || "None")}</td>
+                <td><small>${html(row.syncSource || "No Shopify sync")}${row.staleDays !== null && row.staleDays !== undefined ? ` / ${Number(row.staleDays)}d` : ""}</small></td>
+                <td>${Number(row.available || 0).toLocaleString()}</td>
+                <td>${Number(row.margin || 0).toFixed(1)}%</td>
+                <td><button class="button secondary" data-select-product="${html(row.id)}" data-product-target="product-full">Review</button></td>
               </tr>
             `).join("")}
           </tbody>
         </table>
+        <p class="muted">Showing ${Number(rows.length).toLocaleString()} of ${Number(dataQualityState.total || rows.length).toLocaleString()} matches. Filters run on the server.</p>
       </div>
-      ` : `<div class="empty-state">No products yet.</div>`}
-      ${rows.length ? `
-      <div class="catalog-table-wrap">
-        <table class="catalog-table">
-          <thead><tr><th>Shadow SKU</th><th>Marketplace</th><th>Parent</th><th>Readiness</th><th>Missing</th><th>Allocation</th><th>Sync</th><th>Action</th></tr></thead>
-          <tbody>
-            ${rows.map(({ product, shadow, validation }) => {
-              const ready = validation.every((check) => check.ok);
-              const missing = validation.filter((check) => !check.ok).map((check) => check.label);
-              const parentAvailable = Math.max(0, Number(product.qty || 0) - Number(product.reserved || 0));
-              const allocated = allocatedQtyFor(product);
-              return `
-                <tr>
-                  <td><button class="order-link product-name-link" data-select-shadow="${shadow.id}" data-parent-product="${product.id}">${html(shadow.shadowSku)}</button></td>
-                  <td>${html(shadow.marketplace || "")}</td>
-                  <td>${html(product.sku)}</td>
-                  <td><span class="status ${ready ? "active" : "hold"}">${ready ? "Ready" : `${validation.length - missing.length}/${validation.length}`}</span></td>
-                  <td>${missing.length ? html(missing.slice(0, 4).join(", ")) : "None"}</td>
-                  <td>${allocated}/${parentAvailable}</td>
-                  <td>${html(shadow.syncStatus || "Not synced")}</td>
-                  <td>
-                    <button class="button secondary" data-shadow-sync="${shadow.id}" data-product-id="${product.id}" ${ready ? "" : "disabled"}>Sync</button>
-                  </td>
-                </tr>
-              `;
-            }).join("")}
-          </tbody>
-        </table>
-      </div>
-    ` : `<div class="empty-state">No shadow SKUs yet. Create marketplace shadows from a product page.</div>`}
+      ` : dataQualityState.loaded && !dataQualityState.loading ? `<div class="empty-state">No products match these quality filters.</div>` : ""}
     `;
 }
 
@@ -6885,17 +8108,22 @@ function openProductFromReviewSku(sku) {
 
 function renderProductsTable(items) {
   const exportMappings = state.exportMappings || [];
-  const filteredCount = items.length;
+  const serverPaged = productCatalogState.loaded;
+  const filteredCount = serverPaged ? productCatalogState.total : items.length;
   const pageCount = Math.max(1, Math.ceil(filteredCount / PRODUCT_CATALOG_PAGE_SIZE));
   productCatalogPage = Math.min(Math.max(1, productCatalogPage), pageCount);
   const pageStart = (productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
-  const pageItems = items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
+  const pageItems = serverPaged ? items : items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
   const selectedCount = selectedProductAllFiltered ? filteredCount : selectedProductIds.size;
   const selectionLabel = selectedProductAllFiltered
     ? `${Number(filteredCount).toLocaleString()} filtered results selected`
     : selectedProductIds.size
       ? `${Number(selectedProductIds.size).toLocaleString()} selected`
       : `${Number(filteredCount).toLocaleString()} filtered products`;
+  const pageRangeLabel = pageItems.length
+    ? `${Number(pageStart + 1).toLocaleString()}-${Number(pageStart + pageItems.length).toLocaleString()}`
+    : "0";
+  const allResultsLabel = `Select all ${Number(filteredCount).toLocaleString()} results`;
   const autoLoadAlternates = Boolean(appSystemSettings().autoLoadProductAlternates);
   if (autoLoadAlternates) loadProductTableAlternates(pageItems).catch((error) => toast(error.message));
   const alternatesLoaded = pageItems.filter((item) => productAlternatesCache[String(item.sku || "").toLowerCase()] && !productAlternatesCache[String(item.sku || "").toLowerCase()].loading).length;
@@ -6903,13 +8131,14 @@ function renderProductsTable(items) {
     ? `
       <div class="catalog-selection-toolbar product-export-bar">
         <div class="selection-summary">
-          <strong>Product selection</strong>
-          <small>${html(selectionLabel)} / showing ${Number(pageItems.length).toLocaleString()}</small>
+          <span class="selection-kicker">Selection</span>
+          <strong>${html(selectionLabel)}</strong>
+          <small>Showing ${Number(pageItems.length).toLocaleString()} on this page</small>
         </div>
         <div class="product-selection-actions">
           <div class="selection-actions">
-            <button class="button secondary" type="button" data-select-products-page>Select current page</button>
-            <button class="button secondary" type="button" data-select-products-filtered>Select all results</button>
+            <button class="button secondary" type="button" data-select-products-page>${withIcon("clipboard-check", "Current page")}</button>
+            <button class="button secondary" type="button" data-select-products-filtered>${withIcon("list-check", allResultsLabel)}</button>
             <button class="button secondary" type="button" data-clear-products-selection ${selectedCount ? "" : "disabled"}>Clear</button>
           </div>
           <div class="alternate-actions">
@@ -6918,16 +8147,17 @@ function renderProductsTable(items) {
           </div>
         </div>
         <div class="product-export-controls">
-          <span class="export-control-label">Export products</span>
+          <span class="export-control-label">Export</span>
           <select id="product-export-template">
+            <option value="custom-export">Custom export...</option>
             ${exportMappings.map((template) => `<option value="${template.id}" ${template.id === selectedExportMappingId ? "selected" : ""}>${html(template.name)}</option>`).join("")}
           </select>
-          <button class="button secondary" type="button" data-export-products ${exportMappings.length ? "" : "disabled"}>Export CSV</button>
+          <button class="button" type="button" data-export-products>${withIcon("download", "Export CSV")}</button>
         </div>
       </div>
       <div class="catalog-source-summary product-page-summary">
         <span><strong>${Number(filteredCount).toLocaleString()}</strong><small>filtered products</small></span>
-        <span><strong>Page ${productCatalogPage} of ${pageCount}</strong><small>${Number(pageStart + 1).toLocaleString()}-${Number(pageStart + pageItems.length).toLocaleString()}</small></span>
+        <span><strong>Page ${productCatalogPage} of ${pageCount}</strong><small>${pageRangeLabel}</small></span>
         <span><strong>${Number(PRODUCT_CATALOG_PAGE_SIZE).toLocaleString()}</strong><small>rows per page</small></span>
         <div class="source-pagination">
           <button class="button secondary" type="button" data-product-page="${productCatalogPage - 1}" ${productCatalogPage <= 1 ? "disabled" : ""}>Previous</button>
@@ -6954,11 +8184,11 @@ function renderProductsTable(items) {
                 <td>${html(item.brand || "No brand")}<small>${verifiedBrandForHandle(item) ? "Verified" : "Unverified"}</small></td>
                 <td>${html(item.category || "Uncategorized")}<small>Vendor: ${html(item.sourceCategory || item.vendorCategory || "n/a")}</small></td>
                 <td><span class="status ${String(item.status || "draft").toLowerCase()}">${html(item.status || "Draft")}</span></td>
-                <td><span class="status ${item.shopifyId && item.shopifyStatus === "Active" && item.shopifyPublished === true ? "active" : "draft"}">${html(item.shopifyStatus || (item.shopifyId ? "Synced" : "Not live"))}</span><small>${html(item.shopifyId || "No Shopify ID")}</small></td>
+                <td>${shopifyReadinessStatusCell(item)}</td>
                 <td>${ebayListingStatusCell(item)}</td>
-                <td>${(item.shadowSkus || []).length}</td>
+                <td>${Number(item.shadowSkuCount ?? (item.shadowSkus || []).length)}</td>
                 <td>${money(item.price || 0)}</td>
-                <td><span class="image-count-pill ${productImageUrls(item).length > 1 ? "has-gallery" : ""}">${productImageUrls(item).length}</span></td>
+                <td><span class="image-count-pill ${productImageCount(item) > 1 ? "has-gallery" : ""}">${productImageCount(item)}</span></td>
                 <td>${simpleDate(item.updatedAt)}</td>
                 <td>
                   <div class="action-menu">
@@ -6983,11 +8213,12 @@ function renderProductsTable(items) {
 }
 
 function renderInventoryTable(items) {
-  const filteredCount = items.length;
+  const serverPaged = inventoryCatalogState.loaded;
+  const filteredCount = serverPaged ? inventoryCatalogState.total : items.length;
   const pageCount = Math.max(1, Math.ceil(filteredCount / PRODUCT_CATALOG_PAGE_SIZE));
   inventoryCatalogPage = Math.min(Math.max(1, inventoryCatalogPage), pageCount);
   const pageStart = (inventoryCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
-  const pageItems = items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
+  const pageItems = serverPaged ? items : items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
   $("#inventory-list").innerHTML = items.length
     ? `
       <div class="catalog-source-summary product-page-summary">
@@ -7267,16 +8498,20 @@ function renderProductManagerFields(item) {
 function productFieldLabel(label, field, item, options = {}) {
   const value = item[field] ?? "";
   const className = options.className ? ` class="${html(options.className)}"` : "";
+  const disabled = options.readonly || !productEditModeActive();
   const attrs = options.readonly
     ? `readonly aria-readonly="true"`
-    : `data-product-field="${field}" data-product-id="${item.id}"`;
+    : `data-product-field="${field}" data-product-id="${item.id}"${editableAttr(!disabled)}`;
   if (options.textarea) {
     return `<label${className}>${label}<textarea rows="${options.rows || 3}" ${attrs}>${html(value)}</textarea></label>`;
   }
   const type = options.type || "text";
   const step = options.step ? ` step="${options.step}"` : "";
   const min = options.min !== undefined ? ` min="${options.min}"` : "";
-  return `<label${className}>${label}<input type="${type}"${step}${min} value="${html(value)}" ${attrs} /></label>`;
+  const trailing = field === "shopifyId" && value
+    ? `<a class="field-inline-link" href="${html(shopifyProductAdminUrl(value))}" target="_blank" rel="noreferrer">Open in Shopify</a>`
+    : "";
+  return `<label${className}>${label}<input type="${type}"${step}${min} value="${html(value)}" ${attrs} />${trailing}</label>`;
 }
 
 function productShadowForMarketplace(item, marketplace) {
@@ -7326,14 +8561,8 @@ function categoryMappingForProduct(item, channel = "shopify") {
 }
 
 function shopifyHandleForProduct(item) {
-  const verifiedBrand = verifiedBrandForHandle(item);
-  const title = item.marketplaceTitle || item.title || item.name;
-  const name = item.name || item.title || item.marketplaceTitle;
-  const parts = verifiedBrand ? [verifiedBrand, item.sku, title] : [item.sku, name];
-  return parts.map(slugPart)
-    .filter(Boolean)
-    .join("-")
-    .replace(/-+/g, "-");
+  const formattedTitle = shopifyTitleForProduct(item);
+  return slugPart(formattedTitle || item.sku || item.id || "product");
 }
 
 function shopifyTitleForProduct(item = {}) {
@@ -7352,13 +8581,34 @@ function cleanExportNumber(value, decimals = 3) {
 function shopifyDimensionValue(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return "";
-  return `${cleanExportNumber(number * 25.4, 3)} mm`;
+  return `${cleanExportNumber(number, 3)} in`;
 }
 
 function shopifyWeightValue(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return "";
-  return `${cleanExportNumber(number * 0.45359237, 3)} kg`;
+  return `${cleanExportNumber(number, 3)} lb`;
+}
+
+function shopifyJsonNumber(value, decimals = 3) {
+  const number = Number(sourceNumberValue(value));
+  if (!Number.isFinite(number) || number <= 0) return "";
+  const cleaned = Number(number.toFixed(decimals));
+  return Number.isInteger(cleaned) ? `${cleaned}.0` : String(cleaned);
+}
+
+function shopifyDimensionMetafieldValue(value) {
+  const number = shopifyJsonNumber(value, 3);
+  return number ? `{"value":${number},"unit":"INCHES"}` : "";
+}
+
+function shopifyWeightMetafieldUnit(column = "") {
+  return "POUNDS";
+}
+
+function shopifyWeightMetafieldValue(value, column = "") {
+  const number = shopifyJsonNumber(value, 3);
+  return number ? `{"value":${number},"unit":"${shopifyWeightMetafieldUnit(column)}"}` : "";
 }
 
 function shopifyBooleanValue(value, item = {}) {
@@ -7435,15 +8685,176 @@ function categoryTypeValue(value) {
   return parts.slice(-2).join(" > ") || parts[0] || "";
 }
 
+function productShopifyCategoryMapping(item = {}) {
+  return productMasterCategorySetting(item)?.mappings?.shopify || categoryMappingForProduct(item, "shopify") || {};
+}
+
+function productShopifyProductType(item = {}) {
+  const setting = productMasterCategorySetting(item) || {};
+  const mapping = setting.mappings?.shopify || {};
+  const smart = setting.smartCollection || {};
+  return smart.productType || mapping.productType || setting.shopifyProductType || setting.productType || categoryTypeValue(productMasterCategoryName(item));
+}
+
+function productShopifyAvailableQty(item = {}) {
+  return Math.max(0, Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
+}
+
+function productShopifyPrice(item = {}) {
+  return Number(item.shopifyPrice || item.websitePrice || item.price || 0);
+}
+
+function productShopifyMappedRows(item = {}) {
+  const mapping = productShopifyCategoryMapping(item);
+  const productType = productShopifyProductType(item);
+  const images = productImageUrls(item);
+  const imageCount = productImageCount(item);
+  const available = productShopifyAvailableQty(item);
+  const linked = isShopifyLinked(item);
+  const syncMeta = shopifySyncSourceMeta(item);
+  const syncSourceLabel = syncMeta.label ? `Shopify ${syncMeta.label}` : "Shopify status sync";
+  const rows = [
+    {
+      field: "Variant SKU",
+      source: "Product SKU",
+      value: item.sku,
+      ok: hasText(item.sku),
+      note: "Primary Shopify import match key"
+    },
+    {
+      field: "Product GID",
+      source: syncSourceLabel,
+      value: item.shopifyId,
+      ok: linked,
+      note: linked ? "Main linked Shopify reference" : "Needed after importing Shopify status"
+    },
+    {
+      field: "Variant GID",
+      source: syncSourceLabel,
+      value: item.shopifyVariantId,
+      ok: hasText(item.shopifyVariantId),
+      note: "Variant-level Shopify reference"
+    },
+    {
+      field: "Handle",
+      source: "Generated from SKU/title",
+      value: item.shopifyHandle || shopifyHandleForProduct(item),
+      ok: hasText(item.shopifyHandle || shopifyHandleForProduct(item), 6),
+      note: "Saved handle wins; generated handle is the fallback"
+    },
+    {
+      field: "Title",
+      source: "Brand + MPN + product title",
+      value: shopifyTitleForProduct(item),
+      ok: hasText(shopifyTitleForProduct(item), 8),
+      note: "Computed for Matrixify Shopify exports"
+    },
+    {
+      field: "Body HTML",
+      source: "Long description / source description",
+      value: item.longDescription || item.shortDescription,
+      ok: hasText(item.longDescription || item.shortDescription, 40),
+      note: "Used for product description"
+    },
+    {
+      field: "Product type",
+      source: "Master category smart collection",
+      value: productType,
+      ok: hasText(productType),
+      note: "Drives smart collection rules"
+    },
+    {
+      field: "Shopify taxonomy",
+      source: "Master category mapping",
+      value: mapping.categoryPath || mapping.categoryId,
+      ok: hasText(mapping.categoryId || mapping.categoryPath),
+      note: "Needed for Shopify category attributes"
+    },
+    {
+      field: "Vendor",
+      source: "Vendor / supplier / brand",
+      value: item.vendor || item.supplier || item.brand,
+      ok: hasText(item.vendor || item.supplier || item.brand),
+      note: "Shown as product vendor"
+    },
+    {
+      field: "Price",
+      source: "Website price",
+      value: productShopifyPrice(item) > 0 ? money(productShopifyPrice(item)) : "",
+      ok: productShopifyPrice(item) > 0,
+      note: "Uses channel price when present, otherwise product price"
+    },
+    {
+      field: "Inventory qty",
+      source: "Available inventory",
+      value: available,
+      ok: available > 0,
+      note: "Qty minus reserved"
+    },
+    {
+      field: "Images",
+      source: "Product media",
+      value: imageCount ? `${imageCount} image${imageCount === 1 ? "" : "s"}` : "",
+      ok: imageCount > 0,
+      note: "At least one image required before launch"
+    },
+    {
+      field: "Published state",
+      source: syncSourceLabel,
+      value: item.shopifyPublished === true ? "Published" : item.shopifyPublished === false ? "Unpublished" : "",
+      ok: item.shopifyPublished === true,
+      note: "Live products should be published"
+    }
+  ];
+  return rows.map((row) => ({ ...row, valueText: row.value === undefined || row.value === null ? "" : String(row.value) }));
+}
+
+function productShopifyReadiness(item = {}) {
+  const rows = productShopifyMappedRows(item);
+  const linked = isShopifyLinked(item);
+  const live = linked && String(item.shopifyStatus || "").toLowerCase() === "active" && item.shopifyPublished === true;
+  const requiredFields = ["Variant SKU", "Title", "Body HTML", "Product type", "Shopify taxonomy", "Vendor", "Price", "Inventory qty", "Images"];
+  const missing = rows
+    .filter((row) => requiredFields.includes(row.field) && !row.ok)
+    .map((row) => row.field);
+  if (live) return { status: "live", label: "Shopify live", tone: "active", ready: true, live: true, linked, missing, rows };
+  if (!missing.length) return { status: "ready", label: linked ? "Shopify linked" : "Shopify ready", tone: "ready", ready: true, live: false, linked, missing, rows };
+  return { status: "not-ready", label: "Not ready", tone: "draft", ready: false, live: false, linked, missing, rows };
+}
+
+function shopifyReadinessStatusCell(item = {}) {
+  const readiness = productShopifyReadiness(item);
+  const statusText = item.shopifyStatus ? `${item.shopifyStatus}${item.shopifyPublished === true ? " / Published" : item.shopifyPublished === false ? " / Not published" : ""}` : "";
+  const idText = item.shopifyId ? shopifyProductLink(item.shopifyId) : readiness.missing.slice(0, 2).join(", ") || "No Shopify GID";
+  const sync = shopifySyncSourceMeta(item);
+  return `
+    <span class="status ${readiness.tone}">${html(readiness.label.replace(/^Shopify\s+/i, ""))}</span>
+    ${sync.label ? `<span class="shopify-sync-badge ${sync.className}" title="${html(sync.title)}">${html(sync.label)}</span>` : ""}
+    ${statusText ? `<small>${html(statusText)}</small>` : ""}
+    <small>${idText}</small>
+  `;
+}
+
+function shopifySyncSourceMeta(item = {}) {
+  const source = String(item.shopifySyncSource || "").trim().toLowerCase();
+  if (source === "graphql") return { label: "GraphQL", className: "graphql", title: `Synced from Shopify API${item.shopifySyncedAt ? ` on ${dateLabel(item.shopifySyncedAt)}` : ""}` };
+  if (source === "manual_upload") return { label: "CSV", className: "manual", title: `Updated from manual Shopify status upload${item.shopifySyncedAt ? ` on ${dateLabel(item.shopifySyncedAt)}` : ""}` };
+  if (item.shopifyId) return { label: "Unsynced", className: "unknown", title: "Shopify ID exists, but sync source is not known yet." };
+  return { label: "", className: "", title: "" };
+}
+
 function formatMappedExportValue(value, mapping = {}, item = {}) {
   const column = String(mapping.externalColumn || "");
+  if (/^Variant Barcode$/i.test(column) && item.__shopifyVariant && productUomInfo(item).isMultiUnit) {
+    return item.__shopifyVariant.key === "each" ? barcodeTextValue(value) : "";
+  }
   if (/^(Variant Barcode|Barcode|UPC|GTIN|EAN)$/i.test(column)) return barcodeTextValue(value);
   if (/^Type$/i.test(column)) return categoryTypeValue(value);
   if (/^Status$/i.test(column)) return shopifyProductStatusValue(value, item, mapping);
   if (/^Published$/i.test(column)) return shopifyPublishedValue(item, mapping);
   if (/^Variant Inventory Tracker$/i.test(column)) return "shopify";
-  if (/^Metafield:\s*custom\..*\[dimension\]/i.test(column)) return shopifyDimensionValue(value);
-  if (/^Metafield:\s*custom\..*\[weight\]/i.test(column)) return shopifyWeightValue(value);
+  if (/^Metafield:\s*custom\..*\[dimension\]/i.test(column)) return shopifyDimensionMetafieldValue(value);
+  if (/^Metafield:\s*custom\..*\[weight\]/i.test(column)) return shopifyWeightMetafieldValue(value, column);
   if (/^Metafield:\s*custom\..*\[boolean\]/i.test(column)) return shopifyBooleanValue(value, item);
   if (/^Metafield:\s*custom\..*\[date_time\]/i.test(column)) return shopifyDateTimeValue(value);
   if (/^Metafield:\s*custom\..*\[json\]/i.test(column)) return shopifyJsonValue(value);
@@ -7457,7 +8868,25 @@ function productMappedValue(item, mapping = {}) {
   const source = String(mapping.templateSource || mapping.source || "").trim().toLowerCase();
   const column = String(mapping.externalColumn || "").trim();
   if (String(mapping.externalColumn || "").trim().toLowerCase() === "handle") return shopifyHandleForProduct(item);
+  if (source === "shopify" && /^ID$/i.test(column)) return shopifyLegacyId(item.shopifyId);
+  if (source === "shopify" && /^Variant ID$/i.test(column)) return shopifyLegacyId(item.shopifyVariantId);
   if (source === "shopify" && /^Title$/i.test(column)) return shopifyTitleForProduct(item);
+  if (source === "shopify" && /^Image Alt Text$/i.test(column)) return shopifyTitleForProduct(item);
+  if (source === "shopify" && /^Option1 Name$/i.test(column)) return productUomInfo(item).isMultiUnit ? "Purchase Unit" : "Title";
+  if (source === "shopify" && /^Option1 Value$/i.test(column)) return productUomInfo(item).isMultiUnit ? productUomInfo(item).display : "Default Title";
+  if (source === "shopify" && /^Variant Weight$/i.test(column)) return shopifyVariantWeightValue(item, item.__shopifyVariant || null);
+  if (source === "shopify" && /^Variant Metafield:\s*custom\.purchase_unit\s/i.test(column)) return productUomInfo(item).display;
+  if (source === "shopify" && /^Variant Metafield:\s*custom\.uom\s/i.test(column)) return productUomInfo(item).code;
+  if (source === "shopify" && /^Variant Metafield:\s*custom\.uom_qty\s/i.test(column)) return productUomInfo(item).qty;
+  if (source === "shopify" && /^Variant Metafield:\s*custom\.sell_unit_cost\s/i.test(column)) return productCostValue(item).toFixed(2);
+  if (source === "shopify" && /^Metafield:\s*custom\.item_height\s/i.test(column)) return formatMappedExportValue(shopifyDimensionSourceValue(item, "height", false), mapping, item);
+  if (source === "shopify" && /^Metafield:\s*custom\.item_length\s/i.test(column)) return formatMappedExportValue(shopifyDimensionSourceValue(item, "length", false), mapping, item);
+  if (source === "shopify" && /^Metafield:\s*custom\.item_width\s/i.test(column)) return formatMappedExportValue(shopifyDimensionSourceValue(item, "width", false), mapping, item);
+  if (source === "shopify" && /^Metafield:\s*custom\.item_weight\s/i.test(column)) return formatMappedExportValue(shopifyWeightSourceValue(item, false), mapping, item);
+  if (source === "shopify" && /^Metafield:\s*custom\.package_height\s/i.test(column)) return formatMappedExportValue(shopifyDimensionSourceValue(item, "height", true), mapping, item);
+  if (source === "shopify" && /^Metafield:\s*custom\.package_length\s/i.test(column)) return formatMappedExportValue(shopifyDimensionSourceValue(item, "length", true), mapping, item);
+  if (source === "shopify" && /^Metafield:\s*custom\.package_width\s/i.test(column)) return formatMappedExportValue(shopifyDimensionSourceValue(item, "width", true), mapping, item);
+  if (source === "shopify" && /^Metafield:\s*custom\.package_weight\s/i.test(column)) return formatMappedExportValue(shopifyWeightSourceValue(item, true), mapping, item);
   if (!field) return mapping.defaultValue || "";
   if (field === "available") return Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0);
   if (field === "vendor") return item.vendor ?? item.supplier ?? "";
@@ -7477,6 +8906,53 @@ function productMappedValue(item, mapping = {}) {
   const value = item[field];
   const formatted = formatMappedExportValue(value, mapping, item);
   return formatted === undefined || formatted === null || formatted === "" ? mapping.defaultValue || "" : formatted;
+}
+
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const number = Number(sourceNumberValue(value));
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return 0;
+}
+
+function productSourceNumber(item = {}, keys = []) {
+  return productSourceNumberDetail(item, keys).value || 0;
+}
+
+function shopifyVariantUsesPackageWeight(item = {}, variant = null) {
+  if (!variant) return false;
+  if (variant.key === "each") return false;
+  const qty = Number(variant.uomQty || 1);
+  return qty > 1 || (variant.key === "sell-unit" && productUomInfo(item).isMultiUnit);
+}
+
+function shopifyVariantWeightValue(item = {}, variant = null) {
+  const preferPackage = shopifyVariantUsesPackageWeight(item, variant);
+  const detail = shopifyWeightSourceDetail(item, preferPackage);
+  return detail.value > 0 ? cleanExportNumber(detail.value, 3) : "";
+}
+
+function shopifyWeightSourceDetail(item = {}, preferPackage = false) {
+  if (preferPackage) {
+    return productSourceNumberDetail(item, ["packageWeight", "package_weight"], { defaultValue: SYSTEM_DEFAULT_WEIGHT_LB });
+  }
+  const pounds = productSourceNumberDetail(item, ["itemWeight", "item_weight", "weightLb", "weight_lbs"]);
+  if (pounds.value > 0) return pounds;
+  const ounces = productSourceNumberDetail(item, ["weightOz", "weight_oz"]);
+  if (ounces.value > 0) return { ...ounces, value: ounces.value / 16 };
+  return productSourceNumberDetail(item, [], { defaultValue: SYSTEM_DEFAULT_WEIGHT_LB });
+}
+
+function shopifyWeightSourceValue(item = {}, preferPackage = false) {
+  return shopifyWeightSourceDetail(item, preferPackage).value || 0;
+}
+
+function shopifyDimensionSourceValue(item = {}, axis = "length", preferPackage = false) {
+  const title = axis.charAt(0).toUpperCase() + axis.slice(1);
+  const packageKeys = [`package${title}`, `package_${axis}`];
+  const itemKeys = [`item${title}`, `item_${axis}`, `${axis}In`, `${axis}_in`];
+  return productSourceNumberDetail(item, preferPackage ? packageKeys : itemKeys, { defaultValue: SYSTEM_DEFAULT_DIMENSION_IN }).value || 0;
 }
 
 function mappedFieldDefinition(field) {
@@ -7507,6 +8983,69 @@ function renderMappedProductField(item, mapping = {}) {
   `;
 }
 
+function renderShopifyReadinessPanel(item = {}) {
+  const readiness = productShopifyReadiness(item);
+  const rows = readiness.rows || [];
+  const passed = rows.filter((row) => row.ok).length;
+  const total = rows.length || 1;
+  const score = Math.round((passed / total) * 100);
+  const missing = readiness.missing || [];
+  return `
+    <section class="product-panel span-2 shopify-readiness-panel">
+      <div class="section-head product-section-head">
+        <div>
+          <h3>Shopify Readiness</h3>
+          <p class="muted">Checks the product data needed before bulk launch or Matrixify export.</p>
+        </div>
+        <span class="status ${readiness.tone}">${html(readiness.label)}</span>
+      </div>
+      <div class="readiness-meter"><span style="width:${score}%"></span></div>
+      <div class="shopify-readiness-summary">
+        <span><small>Checks passed</small><strong>${passed}/${total}</strong></span>
+        <span><small>Linked</small><strong>${readiness.linked ? "Yes" : "No"}</strong></span>
+        <span><small>Sync source</small><strong>${html(shopifySyncSourceMeta(item).label || "None")}</strong></span>
+        <span><small>Product type</small><strong>${html(productShopifyProductType(item) || "Missing")}</strong></span>
+        <span><small>Taxonomy</small><strong>${html(productShopifyCategoryMapping(item)?.categoryId || "Missing")}</strong></span>
+      </div>
+      ${missing.length ? `
+        <div class="readiness-missing-list">
+          ${missing.map((name) => `<span>${html(name)}</span>`).join("")}
+        </div>
+      ` : `<p class="muted">All launch readiness checks are passing.</p>`}
+    </section>
+  `;
+}
+
+function renderShopifyMappingAudit(item = {}) {
+  const rows = productShopifyMappedRows(item);
+  return `
+    <section class="product-panel span-2">
+      <div class="section-head product-section-head">
+        <div>
+          <h3>Shopify Data Map</h3>
+          <p class="muted">Shows which DataPlus fields feed Shopify and whether the current SKU has enough data.</p>
+        </div>
+        <span class="status ${productShopifyReadiness(item).tone}">${html(productShopifyReadiness(item).label)}</span>
+      </div>
+      <div class="shopify-mapping-table-wrap">
+        <table class="catalog-table shopify-mapping-table">
+          <thead><tr><th>Shopify field</th><th>DataPlus source</th><th>Current value</th><th>Status</th></tr></thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                <td><strong>${html(row.field)}</strong><small>${html(row.note || "")}</small></td>
+                <td>${html(row.source || "Product data")}</td>
+                <td>${row.field === "Product GID" && row.valueText ? shopifyProductLink(row.valueText) : html(row.valueText || "Missing")}</td>
+                <td><span class="status ${row.ok ? "active" : "hold"}">${row.ok ? "Ready" : "Missing"}</span></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
 function renderMarketplaceTab(item, marketplace) {
   const shadow = productShadowForMarketplace(item, marketplace);
   const isShopify = marketplace === "shopify";
@@ -7515,6 +9054,8 @@ function renderMarketplaceTab(item, marketplace) {
   const mappedFields = template?.mappings || [];
   return `
     <div class="product-tab-grid">
+      ${isShopify ? renderShopifyReadinessPanel(item) : ""}
+      ${isShopify ? renderShopifyMappingAudit(item) : ""}
       <section class="product-panel span-2">
         <div class="section-head product-section-head">
           <div>
@@ -7574,8 +9115,127 @@ function ebayListingValue(item, field, fallback = "") {
   return item.ebayListing?.[field] ?? fallback;
 }
 
+const UOM_DEFINITIONS = {
+  EA: "Each",
+  PL: "Pallet",
+  CS: "Case",
+  BD: "Bundle",
+  RL: "Roll",
+  SK: "Skid",
+  BX: "Box",
+  PK: "Pack",
+  KT: "Kit",
+  CT: "Carton",
+  BL: "Bale",
+  RM: "Ream",
+  FT: "Foot",
+  DR: "Drum",
+  PR: "Pair",
+  BG: "Bag",
+  ST: "Set",
+  CL: "Coil",
+  CX: "Carton",
+  GL: "Gallon",
+  LB: "Pound",
+  SO: "Spool",
+  CA: "Can",
+  DS: "Dispenser",
+  TU: "Tube",
+  YD: "Yard",
+  TB: "Tub"
+};
+
+function sourceNumberValue(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  const cleaned = String(value).replace(/[$,%\s]/g, "");
+  const number = Number(cleaned);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function productUomQty(item = {}) {
+  const qty = Number(sourceNumberValue(item.uomQty ?? item.uom_qty ?? item.minQuantity ?? item.min_quantity ?? item.quantityIncrements ?? item.quantity_increments ?? 1));
+  return Number.isFinite(qty) && qty > 1 ? qty : 1;
+}
+
+function productUomInfo(item = {}) {
+  const code = String(item.uom || item.unitOfMeasure || item.unit_of_measure || "EA").trim().toUpperCase() || "EA";
+  const name = UOM_DEFINITIONS[code] || code || "Each";
+  const qty = productUomQty(item);
+  return {
+    code,
+    name,
+    qty,
+    isMultiUnit: qty > 1,
+    display: qty > 1 ? (code === "EA" ? `Pack of ${qty}` : `${name} of ${qty}`) : name
+  };
+}
+
+function productSellUnitCost(item = {}) {
+  const unitCost = Number(sourceNumberValue(item.sourceCost ?? item.cost ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? item.price ?? 0));
+  return unitCost > 0 ? unitCost * productUomQty(item) : 0;
+}
+
+function shopifyVariantSku(baseSku = "", suffix = "EA") {
+  const sku = String(baseSku || "").trim();
+  return sku && !sku.toUpperCase().endsWith(`-${suffix}`) ? `${sku}-${suffix}` : sku;
+}
+
+function shopifyVariantBaseSku(item = {}) {
+  return String(item.sku || item.vendorSku || item.mfrPartNumber || "").trim();
+}
+
+function shopifyUomVariantSku(baseSku = "", uom = {}) {
+  const sku = String(baseSku || "").trim();
+  const qty = Number(uom.qty || 1);
+  if (!sku || !(qty > 1)) return sku;
+  return shopifyVariantSku(sku, `${Math.floor(qty)}PC`);
+}
+
+function shopifyPurchaseVariants(item = {}) {
+  if (Array.isArray(item.shopifyPurchaseVariants) && item.shopifyPurchaseVariants.length) return item.shopifyPurchaseVariants;
+  const uom = productUomInfo(item);
+  const settings = channelSettingsByName("Shopify");
+  const available = Math.max(0, Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
+  const packPrice = suggestedChannelPrice({ ...item, sellUnitCost: productSellUnitCost(item) }, "Shopify");
+  const variantBaseSku = shopifyVariantBaseSku(item);
+  const variants = [{
+    key: "sell-unit",
+    sku: uom.isMultiUnit ? shopifyUomVariantSku(variantBaseSku, uom) : variantBaseSku,
+    optionName: uom.isMultiUnit ? "Purchase Unit" : "Title",
+    optionValue: uom.isMultiUnit ? uom.display : "Default Title",
+    uom: uom.code,
+    uomName: uom.name,
+    uomQty: uom.qty,
+    inventoryMultiplier: 1,
+    quantity: available,
+    unitCost: productSellUnitCost(item),
+    price: packPrice,
+    compareAtPrice: roundMarketplacePrice(packPrice * 1.2, settings.roundingRule || "none"),
+    note: uom.isMultiUnit ? `Original sell unit from source data: ${uom.display}.` : "Default product variant."
+  }];
+  if (!uom.isMultiUnit) return variants;
+  const unitCost = Number(item.sourceCost ?? item.cost ?? 0);
+  const markup = Number(settings.priceMarkupPercent || 0) + 25;
+  const eachPrice = roundMarketplacePrice(unitCost * (1 + markup / 100), settings.roundingRule || "none");
+  variants.push({
+    key: "each",
+    sku: variantBaseSku,
+    optionName: "Purchase Unit",
+    optionValue: "Each",
+    uom: "EA",
+    uomName: "Each",
+    uomQty: 1,
+    inventoryMultiplier: 1,
+    quantity: available,
+    unitCost,
+    price: eachPrice,
+    note: `Virtual each variant from ${uom.display}; priced 25% above store markup.`
+  });
+  return variants;
+}
+
 function productCostValue(item = {}) {
-  return Number(item.sourceCost ?? item.cost ?? item.price ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? 0);
+  return Number(item.sellUnitCost || productSellUnitCost(item) || item.sourceCost || item.cost || item.price || 0);
 }
 
 function productBaseSellPrice(item = {}) {
@@ -7661,10 +9321,13 @@ function priceUpdateLabel(item = {}) {
 }
 
 function renderCostField(item = {}) {
+  const uom = productUomInfo(item);
+  const unitCost = Number(item.sourceCost ?? item.cost ?? 0);
+  const sellUnitCost = productCostValue(item);
   return `
     <label class="product-cost-field">Cost
       <input type="number" step="0.01" value="${html(item.cost ?? "")}" data-product-field="cost" data-product-id="${item.id}" />
-      <small>${priceUpdateLabel(item)}</small>
+      <small>${uom.isMultiUnit ? `${money(unitCost)} each x ${uom.qty} = ${money(sellUnitCost)} per ${html(uom.display)}` : `${priceUpdateLabel(item)}`}</small>
     </label>
   `;
 }
@@ -7676,7 +9339,7 @@ function renderPricingFeedback(item = {}) {
     <div class="pricing-feedback">
       <div>
         <strong>Website price calculation</strong>
-        <span>Cost ${money(website.cost)} x ${(1 + website.markupPercent / 100).toFixed(2)} = ${money(website.markupPrice)} using the Shopify/website markup rule.</span>
+        <span>${productUomInfo(item).isMultiUnit ? `${html(productUomInfo(item).display)} sell-unit cost` : "Cost"} ${money(website.cost)} x ${(1 + website.markupPercent / 100).toFixed(2)} = ${money(website.markupPrice)} using the Shopify/website markup rule.</span>
       </div>
       <div>
         <strong>Rule guardrails</strong>
@@ -7687,6 +9350,37 @@ function renderPricingFeedback(item = {}) {
         <span>${priceUpdateLabel(item)}</span>
       </div>
     </div>
+  `;
+}
+
+function renderShopifyPurchaseVariants(item = {}) {
+  const variants = shopifyPurchaseVariants(item);
+  if (!variants.length) return "";
+  return `
+    <section class="product-section-card product-section-orange">
+      <div class="product-section-title">${sectionIconTitle("git-branch", "Shopify Variations")}<span>${variants.length} purchase unit${variants.length === 1 ? "" : "s"}</span></div>
+      <div class="catalog-table-wrap compact-availability">
+        <table class="catalog-table">
+          <thead><tr><th>Variant</th><th>SKU</th><th>Unit cost</th><th>Price</th><th>Margin</th><th>Qty</th><th>Rule</th></tr></thead>
+          <tbody>
+            ${variants.map((variant) => {
+              const profit = Number(variant.price || 0) - Number(variant.unitCost || 0);
+              return `
+                <tr>
+                  <td><strong>${html(variant.optionValue || "Default Title")}</strong><small>${html(variant.uom || "")}${variant.uomQty ? ` / ${html(variant.uomQty)}` : ""}</small></td>
+                  <td>${html(variant.sku || "")}</td>
+                  <td>${money(variant.unitCost || 0)}</td>
+                  <td><strong>${money(variant.price || 0)}</strong></td>
+                  <td>${marginPercent(profit, Number(variant.price || 0)).toFixed(1)}%</td>
+                  <td>${countLabel(variant.quantity || 0)}</td>
+                  <td>${html(variant.note || "")}</td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
   `;
 }
 
@@ -7958,6 +9652,14 @@ function appSystemSettings() {
   return state.systemSettings || {};
 }
 
+function productEditModeActive() {
+  return selectedProductEditMode === true && currentViewId === "product-full";
+}
+
+function editableAttr(isEditable = productEditModeActive()) {
+  return isEditable ? "" : ` disabled aria-readonly="true"`;
+}
+
 function ebayListingStatusCell(item = {}) {
   const listing = item.ebayListing || {};
   const readiness = productEbayReadiness(item);
@@ -8155,7 +9857,7 @@ function renderEbayListingTab(item) {
 
 function renderProductInventoryTab(item) {
   const available = Number(item.qty || 0) - Number(item.reserved || 0);
-  const grossProfit = Number(item.price || 0) - Number(item.cost || 0);
+  const grossProfit = Number(item.price || 0) - productCostValue(item);
   const ledger = (state.inventoryLedger || []).filter((row) => row.productId === item.id || row.sku === item.sku).slice(0, 8);
   const warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
   return `
@@ -8413,7 +10115,7 @@ function renderBrandGuard(item = {}) {
       </div>
       ${productFieldLabel("Brand", "brand", item)}
       <label class="brand-lock-toggle">
-        <input type="checkbox" ${locked ? "checked" : ""} data-product-field="brandLocked" data-product-id="${item.id}" />
+        <input type="checkbox" ${locked ? "checked" : ""} data-product-field="brandLocked" data-product-id="${item.id}"${editableAttr()} />
         <span>Lock brand from dump updates</span>
       </label>
       <p class="brand-lock-message">${locked ? "Weekly data dumps cannot overwrite this brand." : "This brand can still be changed by approved imports."}</p>
@@ -8482,10 +10184,13 @@ function renderProductHomeTab(item, context) {
               ${productFieldLabel("Supplier", "supplier", item)}
               ${productFieldLabel("Supplier code", "supplierCode", item)}
               ${productFieldLabel("Vendor SKU", "vendorSku", item)}
+              ${productFieldLabel("UOM code", "uom", item)}
+              ${productFieldLabel("UOM qty", "uomQty", item)}
               ${productFieldLabel("Manufacturer", "manufacturer", item)}
               ${productFieldLabel("MFR part number", "mfrPartNumber", item)}
               ${productFieldLabel("Barcode / UPC", "barcode", item)}
             </div>
+            ${productUomInfo(item).isMultiUnit ? `<div class="callout subtle"><strong>Sell unit:</strong> ${html(productUomInfo(item).display)}. Pricing uses ${money(Number(item.sourceCost ?? item.cost ?? 0))} x ${productUomInfo(item).qty} before margin/markup.</div>` : ""}
           </section>
           <section class="product-section-card product-section-teal">
             <div class="product-section-title">${sectionIconTitle("dollar-sign", "Pricing")}<span>${money(grossProfit)} profit</span></div>
@@ -8503,6 +10208,7 @@ function renderProductHomeTab(item, context) {
               <span><small>Aliases</small><strong>${aliasCount}</strong></span>
             </div>
           </section>
+          ${renderShopifyPurchaseVariants(item)}
           <section class="product-section-card product-section-purple">
             <div class="product-section-title">${sectionIconTitle("fingerprint", "Identifiers")}</div>
             <div class="product-row-fields">
@@ -8510,6 +10216,7 @@ function renderProductHomeTab(item, context) {
               ${productFieldLabel("Shopify ID", "shopifyId", item)}
               ${productFieldLabel("Shopify variant ID", "shopifyVariantId", item)}
               ${productFieldLabel("Shopify status", "shopifyStatus", item)}
+              ${productFieldLabel("Shopify sync source", "shopifySyncSource", item)}
               ${productFieldLabel("Shopify published at", "shopifyPublishedAt", item)}
               ${productFieldLabel("Shopify synced at", "shopifySyncedAt", item)}
               ${productFieldLabel("UNSPSC", "unspsc", item)}
@@ -8704,7 +10411,7 @@ function renderProductContentPage() {
     return;
   }
 
-  const grossProfit = Number(item.price || 0) - Number(item.cost || 0);
+  const grossProfit = Number(item.price || 0) - productCostValue(item);
   const margin = Number(item.price || 0) ? (grossProfit / Number(item.price || 0)) * 100 : 0;
   const images = productImageUrls(item);
   const tagsText = (item.tags || []).join(", ");
@@ -8793,6 +10500,10 @@ function renderProductContentPage() {
           </div>
         </div>
         <div class="product-editor-actions">
+          <button class="button ${selectedProductEditMode ? "" : "secondary"}" data-toggle-product-edit="${item.id}">${withIcon(selectedProductEditMode ? "check" : "edit-3", selectedProductEditMode ? "Done editing" : "Edit product")}</button>
+          <button class="button secondary" data-export-product-shopify="${item.id}">${withIcon("download", "Export Shopify")}</button>
+          <button class="button secondary" data-export-product-template="${item.id}">${withIcon("clipboard-list", "Export Template")}</button>
+          ${item.shopifyId ? `<button class="button secondary" data-sync-product-shopify-status="${item.id}">${withIcon("refresh-cw", "Sync Shopify status")}</button>` : ""}
           <button class="button secondary" data-product-workspace-tab="inventory">${withIcon("warehouse", "Inventory")}</button>
           <button class="button" data-create-shadow="${item.id}">${withIcon("plus", "Create shadow")}</button>
         </div>
@@ -9189,7 +10900,7 @@ function renderInventoryProductPage() {
     return;
   }
   const available = Number(item.qty || 0) - Number(item.reserved || 0);
-  const grossProfit = Number(item.price || 0) - Number(item.cost || 0);
+  const grossProfit = Number(item.price || 0) - productCostValue(item);
   const ledger = (state.inventoryLedger || []).filter((row) => row.productId === item.id || row.sku === item.sku).slice(0, 12);
   const serialUnits = Array.isArray(item.serialUnits) ? item.serialUnits : [];
   const warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
@@ -10417,17 +12128,135 @@ function renderReports() {
 
 }
 
+function renderSystemSettingsPage() {
+  const target = $("#system-settings-page");
+  if (!target) return;
+  const settings = appSystemSettings();
+  const users = Array.isArray(settings.systemUsers) && settings.systemUsers.length
+    ? settings.systemUsers
+    : [{ id: "owner", name: "Luis", email: "", role: "Owner", status: "active" }];
+  const roles = Array.isArray(settings.permissionRoles) && settings.permissionRoles.length
+    ? settings.permissionRoles
+    : [
+      { id: "owner", name: "Owner", permissions: ["all"] },
+      { id: "admin", name: "Admin", permissions: ["catalog", "orders", "channels", "system"] },
+      { id: "operator", name: "Operator", permissions: ["catalog", "orders"] }
+    ];
+  const editable = systemSettingsEditMode;
+  const roleOptions = (current = "") => roles.map((role) => `<option value="${html(role.name)}" ${String(current || "") === String(role.name || "") ? "selected" : ""}>${html(role.name)}</option>`).join("");
+  target.innerHTML = `
+    <div class="system-settings-page">
+      <section class="system-settings-hero">
+        <div>
+          <p class="eyebrow">Admin</p>
+          <h2>System Settings</h2>
+          <p class="muted">App-wide defaults, access profiles, background jobs, backups, and safety controls live here. Marketplace settings stay under Channels.</p>
+        </div>
+        <div class="button-row compact-buttons">
+          <button class="button ${editable ? "" : "secondary"}" type="button" data-toggle-system-settings-edit>${withIcon(editable ? "check" : "edit-3", editable ? "Done editing" : "Edit settings")}</button>
+          <button class="button secondary" type="button" data-system-backup>${withIcon("database-backup", "Backup now")}</button>
+        </div>
+      </section>
+      <div class="system-settings-grid">
+        <section class="system-settings-card span-2">
+          <div class="section-head compact-head">
+            <div>
+              <h3>User Profiles</h3>
+              <p class="muted">Starter local profiles for permissions and accountability.</p>
+            </div>
+            <button class="button secondary compact-button" type="button" data-add-system-user ${editable ? "" : "disabled"}>${withIcon("plus", "Add user")}</button>
+          </div>
+          <div class="system-user-list">
+            ${users.map((user) => `
+              <article class="system-user-row" data-system-user-row="${html(user.id)}">
+                <input value="${html(user.name || "")}" placeholder="Name" data-system-user-field="name" ${editable ? "" : "disabled"} />
+                <input value="${html(user.email || "")}" placeholder="Email" data-system-user-field="email" ${editable ? "" : "disabled"} />
+                <select data-system-user-field="role" ${editable ? "" : "disabled"}>${roleOptions(user.role || "Operator")}</select>
+                <select data-system-user-field="status" ${editable ? "" : "disabled"}>
+                  <option value="active" ${String(user.status || "active") === "active" ? "selected" : ""}>Active</option>
+                  <option value="inactive" ${String(user.status || "") === "inactive" ? "selected" : ""}>Inactive</option>
+                </select>
+                <button class="icon-button" type="button" data-remove-system-user="${html(user.id)}" ${editable ? "" : "disabled"} aria-label="Remove user">x</button>
+              </article>
+            `).join("")}
+          </div>
+          <div class="system-settings-actions">
+            <button class="button" type="button" data-save-system-users ${editable ? "" : "disabled"}>${withIcon("save", "Save profiles")}</button>
+          </div>
+        </section>
+        <section class="system-settings-card">
+          <div class="section-head compact-head">
+            <div>
+              <h3>Roles</h3>
+              <p class="muted">Current permission groups.</p>
+            </div>
+          </div>
+          <div class="role-chip-list">
+            ${roles.map((role) => `<span><strong>${html(role.name)}</strong><small>${html((role.permissions || []).join(", ") || "No permissions")}</small></span>`).join("")}
+          </div>
+        </section>
+        <section class="system-settings-card">
+          <h3>Operations</h3>
+          <div class="settings-field-stack">
+            <label>Background jobs
+              <select data-system-setting="backgroundJobsMode" ${editable ? "" : "disabled"}>
+                <option value="inline" ${settings.backgroundJobsMode === "inline" ? "selected" : ""}>Inline</option>
+                <option value="worker" ${settings.backgroundJobsMode === "worker" ? "selected" : ""}>Worker</option>
+              </select>
+            </label>
+            <label>Default source import
+              <select data-system-setting="sourceCatalogDefaultImportMode" ${editable ? "" : "disabled"}>
+                <option value="new-and-update" ${settings.sourceCatalogDefaultImportMode === "new-and-update" ? "selected" : ""}>New and update</option>
+                <option value="new-only" ${settings.sourceCatalogDefaultImportMode === "new-only" ? "selected" : ""}>New only</option>
+                <option value="update-existing" ${settings.sourceCatalogDefaultImportMode === "update-existing" ? "selected" : ""}>Update existing</option>
+              </select>
+            </label>
+            <label>Backup retention days<input type="number" min="1" max="365" value="${Number(settings.backupRetentionDays || 30)}" data-system-setting="backupRetentionDays" ${editable ? "" : "disabled"} /></label>
+          </div>
+        </section>
+        <section class="system-settings-card span-2">
+          <h3>Safety Defaults</h3>
+          <div class="settings-toggle-grid">
+            ${[
+              ["autoLoadProductAlternates", "Auto-load product alternates"],
+              ["autoDataQualityScanAfterImports", "Run data-quality scans after imports"],
+              ["dataQualityWorkerEnabled", "Allow worker data-quality scans"],
+              ["backupIncludeSourceCatalog", "Include source catalog in backups"],
+              ["jobsRetentionAutoCleanupEnabled", "Auto-clean old jobs"],
+              ["requireAdminConfirmationForDeletes", "Require admin confirmation for deletes"]
+            ].map(([field, label]) => `
+              <label><input type="checkbox" ${settings[field] ? "checked" : ""} data-system-setting="${field}" ${editable ? "" : "disabled"} /> ${label}</label>
+            `).join("")}
+          </div>
+        </section>
+      </div>
+    </div>
+  `;
+}
+
 function renderConnections() {
-  $("#connection-grid").innerHTML = state.connections.map((connection) => {
+  const channelPriority = { Shopify: 0, eBay: 1, Temu: 2, Whatnot: 3, "TikTok Shop": 4 };
+  const connections = [...(state.connections || [])].sort((a, b) => {
+    const aPriority = channelPriority[a.name] ?? 99;
+    const bPriority = channelPriority[b.name] ?? 99;
+    return aPriority - bPriority || String(a.name || "").localeCompare(String(b.name || ""));
+  });
+  $("#connection-grid").innerHTML = connections.map((connection) => {
     const isTemu = connection.name === "Temu";
     const isEbay = connection.name === "eBay";
+    const isShopify = connection.name === "Shopify";
     const temuAuthorized = isTemu && state.connectorState?.temuAuthorized;
     const ebayAuthorized = isEbay && state.connectorState?.ebayAuthorized;
-    const connected = isEbay ? ebayAuthorized : connection.connected;
+    const shopifyConfigured = isShopify && connection.shopifyConfig?.configured;
+    const connected = isTemu ? temuAuthorized : isEbay ? ebayAuthorized : isShopify ? shopifyConfigured : connection.connected;
     const statusText = temuAuthorized
       ? `Authorized${state.connectorState.temuMallId ? ` / Mall ${state.connectorState.temuMallId}` : ""} / Last sync ${dateLabel(connection.lastSync)}`
       : ebayAuthorized
         ? `Authorized / ${state.connectorState?.ebayEnvironment || "production"} / Last sync ${dateLabel(connection.lastSync)}`
+        : shopifyConfigured
+          ? `Configured / ${html(connection.shopifyConfig?.shop || "Shopify store")} / API ${html(connection.shopifyConfig?.apiVersion || "")}`
+        : isTemu
+          ? "Not connected. Paste a Temu authorization code to save an access token."
         : connected
           ? `Connected / Last sync ${dateLabel(connection.lastSync)}`
           : "Ready for marketplace credentials and channel settings.";
@@ -10441,26 +12270,163 @@ function renderConnections() {
           <a class="button ${ebayAuthorized ? "secondary" : ""}" href="/auth/ebay/start">${ebayAuthorized ? "Reconnect eBay" : "Connect eBay"}</a>
           <p class="muted">Imports paid seller orders with eBay OAuth. Tokens stay on this PC.</p>
         </div>
+      ` : isShopify ? `
+        <div class="auth-box">
+          <p class="muted">${shopifyConfigured ? "Admin API is configured from .env. Credentials stay local." : "Add Shopify store domain and Admin API credentials in .env."}</p>
+        </div>
       ` : "";
-    const actionLabel = isTemu || isEbay ? "Sync orders" : connected ? "Sync now" : "Connect demo";
+    const actionLabel = isTemu && !temuAuthorized ? "Temu not connected" : isTemu || isEbay ? "Sync orders" : isShopify ? "Sync Shopify status" : connected ? "Sync now" : "Connect demo";
+    const statusClass = connected ? "connected" : "setup";
     return `
-      <article class="connection-card">
+      <article class="connection-card ${isShopify ? "primary-channel-card" : ""}">
         <div class="channel-card-head">
           <span class="channel-logo-frame">${channelLogoMarkup(connection, connection.name)}</span>
-          <h2><button class="order-link product-name-link" data-select-channel="${connection.id}">${connection.name}</button></h2>
+          <div>
+            <h2><button class="order-link product-name-link" data-select-channel="${connection.id}">${connection.name}</button></h2>
+            <span class="channel-state ${statusClass}">${connected ? "Connected" : "Needs setup"}</span>
+          </div>
         </div>
-        <p>${statusText}</p>
-        <div class="summary-grid channel-mini-grid">
-          <span><small>Default status</small><strong>${html(connection.settings?.defaultShadowStatus || "Draft")}</strong></span>
+        <p class="channel-status-line">${statusText}</p>
+        <div class="channel-mini-grid">
+          <span><small>Status</small><strong>${html(connection.settings?.defaultShadowStatus || "Draft")}</strong></span>
           <span><small>Inventory</small><strong>${connection.settings?.inventoryUpdateEnabled ? "On" : "Off"}</strong></span>
           <span><small>Orders</small><strong>${connection.settings?.orderDownloadEnabled ? "On" : "Off"}</strong></span>
         </div>
         ${authBox}
-        <button class="button ${connected ? "secondary" : ""}" data-sync-source="${connection.name}">${actionLabel}</button>
-        <button class="button secondary" data-select-channel="${connection.id}">Settings</button>
+        <div class="channel-card-actions">
+          <button class="button ${connected ? "secondary" : ""}" data-sync-source="${connection.name}" ${isTemu && !temuAuthorized ? "disabled" : ""}>${actionLabel}</button>
+          <button class="button secondary" data-select-channel="${connection.id}">Settings</button>
+        </div>
       </article>
     `;
   }).join("");
+}
+
+function channelApiLogStatusClass(log = {}) {
+  if (log.ok) return "ok";
+  const status = Number(log.statusCode || 0);
+  if (status >= 400 && status < 500) return "warn";
+  return "error";
+}
+
+function channelApiLogFilters() {
+  return {
+    q: String(channelApiLogState.filters?.q || "").trim().toLowerCase(),
+    status: String(channelApiLogState.filters?.status || ""),
+    transport: String(channelApiLogState.filters?.transport || "")
+  };
+}
+
+function filteredChannelApiLogs(logs = []) {
+  const filters = channelApiLogFilters();
+  return logs.filter((log) => {
+    const status = Number(log.statusCode || 0);
+    if (filters.status === "ok" && !log.ok) return false;
+    if (filters.status === "failed" && log.ok) return false;
+    if (filters.status === "4xx" && !(status >= 400 && status < 500)) return false;
+    if (filters.status === "5xx" && !(status >= 500)) return false;
+    if (filters.transport && String(log.transport || "") !== filters.transport) return false;
+    if (filters.q) {
+      const haystack = [
+        log.operation,
+        log.method,
+        log.path,
+        log.message,
+        log.statusCode,
+        log.requestId,
+        log.jobId
+      ].join(" ").toLowerCase();
+      if (!haystack.includes(filters.q)) return false;
+    }
+    return true;
+  });
+}
+
+function applyChannelApiLogFiltersFromDom() {
+  channelApiLogState.filters = {
+    q: $("#channel-api-log-search")?.value.trim() || "",
+    status: $("#channel-api-log-status")?.value || "",
+    transport: $("#channel-api-log-transport")?.value || ""
+  };
+}
+
+function renderChannelApiHistory(channel) {
+  const channelName = channel?.name || "";
+  const isCurrent = channelApiLogState.channel === channelName;
+  const logs = isCurrent ? channelApiLogState.logs || [] : [];
+  const filteredLogs = filteredChannelApiLogs(logs);
+  const loading = isCurrent && channelApiLogState.loading;
+  const error = isCurrent ? channelApiLogState.error : "";
+  const filters = channelApiLogFilters();
+  const transports = [...new Set(logs.map((log) => String(log.transport || "").trim()).filter(Boolean))].sort();
+  return `
+    <section class="full-card span-2 channel-api-history">
+      <div class="section-head channel-settings-head">
+        <div>
+          <h3>API History</h3>
+          <p class="muted">Safe log of ${html(channelName)} API calls from the past 30 days. Tokens and secrets are not stored.</p>
+        </div>
+        <button class="button secondary" type="button" data-refresh-channel-api-logs="${html(channelName)}">${withIcon("refresh-cw", loading ? "Refreshing..." : "Refresh logs")}</button>
+      </div>
+      <div class="api-log-filters">
+        <label>
+          <small>Search</small>
+          <input id="channel-api-log-search" value="${html(channelApiLogState.filters?.q || "")}" placeholder="Endpoint, status, request id, message" />
+        </label>
+        <label>
+          <small>Status</small>
+          <select id="channel-api-log-status" data-channel-api-log-filter="status">
+            <option value="" ${!filters.status ? "selected" : ""}>All statuses</option>
+            <option value="ok" ${filters.status === "ok" ? "selected" : ""}>OK only</option>
+            <option value="failed" ${filters.status === "failed" ? "selected" : ""}>Failed only</option>
+            <option value="4xx" ${filters.status === "4xx" ? "selected" : ""}>4xx warnings</option>
+            <option value="5xx" ${filters.status === "5xx" ? "selected" : ""}>5xx errors</option>
+          </select>
+        </label>
+        <label>
+          <small>Type</small>
+          <select id="channel-api-log-transport" data-channel-api-log-filter="transport">
+            <option value="" ${!filters.transport ? "selected" : ""}>All API types</option>
+            ${transports.map((transport) => `<option value="${html(transport)}" ${filters.transport === transport ? "selected" : ""}>${html(transport)}</option>`).join("")}
+          </select>
+        </label>
+        <button class="button" type="button" data-channel-api-log-search>${withIcon("search", "Search")}</button>
+        <button class="button secondary" type="button" data-channel-api-log-clear>Clear</button>
+      </div>
+      <p class="muted api-log-count">${filteredLogs.length.toLocaleString()} shown / ${logs.length.toLocaleString()} loaded</p>
+      ${error ? `<div class="notice warning">${html(error)}</div>` : ""}
+      <div class="api-log-list">
+        ${loading && !logs.length ? `<div class="empty-state compact">Loading API history...</div>` : filteredLogs.length ? filteredLogs.slice(0, 80).map((log) => `
+          <article class="api-log-row ${channelApiLogStatusClass(log)}">
+            <div>
+              <strong>${html(log.operation || log.path || "API call")}</strong>
+              <small>${html([log.transport, log.method, log.path].filter(Boolean).join(" / "))}</small>
+            </div>
+            <span class="api-log-status">${log.ok ? "OK" : `HTTP ${Number(log.statusCode || 0) || "error"}`}</span>
+            <span>${Number(log.durationMs || 0).toLocaleString()} ms</span>
+            <time>${dateLabel(log.createdAt)}</time>
+            ${log.jobId ? `<button class="api-log-job-link" type="button" data-open-api-log-job="${html(log.jobId)}">Job ${html(String(log.jobId).slice(0, 8))}</button>` : ""}
+            ${log.message && log.message !== "OK" ? `<p>${html(log.message)}</p>` : ""}
+          </article>
+        `).join("") : `<div class="empty-state compact">${logs.length ? "No API calls match these filters." : "No API calls logged in the last 30 days yet."}</div>`}
+      </div>
+    </section>
+  `;
+}
+
+async function loadChannelApiLogs(channelName, force = false) {
+  if (!channelName) return;
+  if (!force && channelApiLogState.channel === channelName && (channelApiLogState.loaded || channelApiLogState.loading)) return;
+  const filters = channelApiLogState.channel === channelName ? channelApiLogState.filters : { q: "", status: "", transport: "" };
+  channelApiLogState = { channel: channelName, logs: channelApiLogState.channel === channelName ? channelApiLogState.logs : [], loading: true, loaded: false, error: "", filters };
+  if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
+  try {
+    const result = await api(`/api/channel-api-logs?channel=${encodeURIComponent(channelName)}&days=30&limit=250`, { feedbackLabel: "Loading API history..." });
+    channelApiLogState = { channel: channelName, logs: result.logs || [], loading: false, loaded: true, error: "", filters };
+  } catch (error) {
+    channelApiLogState = { channel: channelName, logs: [], loading: false, loaded: true, error: error.message || "Unable to load API history.", filters };
+  }
+  if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
 }
 
 function renderChannelProfile() {
@@ -10472,6 +12438,7 @@ function renderChannelProfile() {
   }
   const settings = channel.settings || {};
   const isEbay = String(channel.name || "").toLowerCase() === "ebay";
+  const isShopify = String(channel.name || "").toLowerCase() === "shopify";
   const channelShadows = allShadowRows().filter((row) => String(row.shadow.marketplace || "").toLowerCase() === String(channel.name || "").toLowerCase());
   const optionRows = (rows = [], valueKey = "id", labelKey = "name", current = "") => rows.map((row) => {
     const value = row[valueKey] || "";
@@ -10592,6 +12559,73 @@ function renderChannelProfile() {
           </div>
         </section>
   ` : "";
+  const shopifySettingsPanel = isShopify ? `
+        <section class="full-card span-2 channel-settings-card">
+          <div class="section-head channel-settings-head">
+            <div>
+              <h3>Shopify Admin API</h3>
+              <p class="muted">Settings for status sync, Matrixify exports, smart collections, and Shopify API actions.</p>
+            </div>
+            <div class="button-row compact-buttons">
+              <button class="button secondary" type="button" data-sync-shopify-status-all>${withIcon("refresh-cw", "Sync Shopify status")}</button>
+              <button class="button secondary" type="button" data-sync-shopify-closeouts>${withIcon("store", "Sync Closeouts")}</button>
+              <button class="button secondary" type="button" data-open-shopify-status-import>${withIcon("upload", "Import status CSV")}</button>
+            </div>
+          </div>
+          <div class="channel-settings-layout">
+            <div class="channel-settings-main">
+              <div class="channel-settings-group">
+                <div class="channel-settings-group-head">
+                  <strong>Connection</strong>
+                  <span>Credentials are read from .env and are never displayed.</span>
+                </div>
+                <div class="channel-settings-grid listing-grid">
+                  <label>Store domain<input value="${html(settings.shopifyStoreDomain || channel.shopifyConfig?.shop || "")}" data-channel-field="shopifyStoreDomain" data-channel-id="${channel.id}" placeholder="dealsclick-2.myshopify.com" /></label>
+                  <label>Admin API version<input value="${html(settings.shopifyAdminApiVersion || channel.shopifyConfig?.apiVersion || "2026-04")}" data-channel-field="shopifyAdminApiVersion" data-channel-id="${channel.id}" /></label>
+                  <label>Status sync limit<input type="number" min="1" max="500" value="${Number(settings.shopifyStatusSyncLimit || 100)}" data-channel-field="shopifyStatusSyncLimit" data-channel-id="${channel.id}" /></label>
+                </div>
+              </div>
+              <div class="channel-settings-group">
+                <div class="channel-settings-group-head">
+                  <strong>Product Defaults</strong>
+                  <span>Used by exports and product launch workflows.</span>
+                </div>
+                <div class="channel-settings-grid listing-grid">
+                  <label>Default product status<select data-channel-field="shopifyDefaultStatus" data-channel-id="${channel.id}">
+                    ${["draft", "active", "archived"].map((status) => `<option value="${status}" ${String(settings.shopifyDefaultStatus || "draft").toLowerCase() === status ? "selected" : ""}>${status.toUpperCase()}</option>`).join("")}
+                  </select></label>
+                  <label>Inventory policy<select data-channel-field="shopifyInventoryPolicy" data-channel-id="${channel.id}">
+                    ${[["deny", "Deny oversell"], ["continue", "Continue selling"]].map(([value, label]) => `<option value="${value}" ${settings.shopifyInventoryPolicy === value ? "selected" : ""}>${label}</option>`).join("")}
+                  </select></label>
+                  <label>Fulfillment service<input value="${html(settings.shopifyFulfillmentService || "manual")}" data-channel-field="shopifyFulfillmentService" data-channel-id="${channel.id}" /></label>
+                  <label>Publish scope<select data-channel-field="shopifyPublishScope" data-channel-id="${channel.id}">
+                    ${["global", "web"].map((scope) => `<option value="${scope}" ${settings.shopifyPublishScope === scope ? "selected" : ""}>${scope}</option>`).join("")}
+                  </select></label>
+                </div>
+                <div class="channel-toggle-grid ebay-toggle-grid">
+                  ${[
+                    ["shopifySyncStatusEnabled", "Enable Shopify status sync"],
+                    ["shopifyAutoSyncStatus", "Auto-sync status after API actions"],
+                    ["shopifyCloseoutsEnabled", "Manage Closeouts collection"]
+                  ].map(([field, label]) => `<label><input type="checkbox" ${settings[field] ? "checked" : ""} data-channel-field="${field}" data-channel-id="${channel.id}" /> ${label}</label>`).join("")}
+                </div>
+              </div>
+            </div>
+            <aside class="channel-settings-aside">
+              <div class="channel-sync-panel">
+                <strong>Configuration Status</strong>
+                <p class="muted">${channel.shopifyConfig?.configured ? "Shopify Admin API is ready." : "Shopify Admin API is not fully configured."}</p>
+              </div>
+              <div class="channel-stat-strip">
+                <span><small>Store</small><strong>${html(channel.shopifyConfig?.shop || "Missing")}</strong></span>
+                <span><small>API version</small><strong>${html(channel.shopifyConfig?.apiVersion || "2026-04")}</strong></span>
+                <span><small>Access token</small><strong>${channel.shopifyConfig?.hasAccessToken ? "Set" : "Not set"}</strong></span>
+                <span><small>Client auth</small><strong>${channel.shopifyConfig?.hasClientCredentials ? "Set" : "Not set"}</strong></span>
+              </div>
+            </aside>
+          </div>
+        </section>
+  ` : "";
   target.innerHTML = `
     <div class="full-order">
       <div class="full-order-head">
@@ -10630,6 +12664,7 @@ function renderChannelProfile() {
           </div>
         </section>
         ${ebaySettingsPanel}
+        ${shopifySettingsPanel}
         <section class="full-card span-2">
           <h3>Automation Settings</h3>
           <div class="channel-toggle-grid">
@@ -10676,9 +12711,13 @@ function renderChannelProfile() {
             </table>
           </div>
         </section>
+        ${renderChannelApiHistory(channel)}
       </div>
     </div>
   `;
+  if (!channelApiLogState.loading && (channelApiLogState.channel !== channel.name || !channelApiLogState.loaded)) {
+    loadChannelApiLogs(channel.name).catch((error) => toast(error.message));
+  }
 }
 
 function render() {
@@ -10695,6 +12734,7 @@ function render() {
   renderReports();
   renderKnowledgeBase();
   renderConnections();
+  renderSystemSettingsPage();
   renderTopbarActions();
   if ($("#order-full").classList.contains("active")) renderFullOrderPage();
   if ($("#draft-full").classList.contains("active")) renderDraftOrderPage();
@@ -10715,7 +12755,75 @@ function render() {
 }
 
 async function load() {
-  setState(await api("/api/state"));
+  setState(await api("/api/state?lite=1"));
+}
+
+async function ensureInventoryLoaded() {
+  if (state?.inventoryLoaded) return state.inventory || [];
+  if (!inventoryLoadPromise) {
+    inventoryLoadPromise = api("/api/inventory", { feedbackLabel: "Loading products..." })
+      .then((result) => {
+        state.inventory = result.inventory || [];
+        state.inventoryLoaded = true;
+        inventoryById = new Map((state.inventory || []).flatMap((item) => [[item.id, item], [String(item.id || ""), item]]));
+        productFilterOptionsCache.inventoryCount = -1;
+        return state.inventory;
+      })
+      .finally(() => {
+        inventoryLoadPromise = null;
+      });
+  }
+  return inventoryLoadPromise;
+}
+
+async function ensureCategorySettingsLoaded() {
+  if (state?.categorySettingsLoaded) return state.categorySettings || [];
+  if (!categorySettingsLoadPromise) {
+    categorySettingsLoadPromise = api("/api/category-settings", { feedbackLabel: "Loading category mappings..." })
+      .then((result) => {
+        state.categorySettings = result.categorySettings || [];
+        state.vendorCategoryMappings = result.vendorCategoryMappings || {};
+        state.categorySettingsLoaded = true;
+        return state.categorySettings;
+      })
+      .finally(() => {
+        categorySettingsLoadPromise = null;
+      });
+  }
+  return categorySettingsLoadPromise;
+}
+
+async function ensureOrdersLoaded() {
+  if (state?.ordersLoaded) return state.orders || [];
+  if (!ordersLoadPromise) {
+    ordersLoadPromise = api("/api/orders", { feedbackLabel: "Loading orders..." })
+      .then((result) => {
+        state.orders = result.orders || [];
+        state.orderDrafts = result.orderDrafts || state.orderDrafts || [];
+        state.returns = result.returns || state.returns || [];
+        state.customers = result.customers || state.customers || [];
+        state.ordersLoaded = true;
+        return state.orders;
+      })
+      .finally(() => {
+        ordersLoadPromise = null;
+      });
+  }
+  return ordersLoadPromise;
+}
+
+async function loadProductDetail(productId) {
+  const key = String(productId || "");
+  if (!key) return null;
+  if (productDetailCache[key]) return productDetailCache[key];
+  const result = await api(`/api/inventory/${encodeURIComponent(key)}`, { feedbackLabel: "Loading product..." });
+  const item = result.item;
+  if (!item?.id) return null;
+  productDetailCache[String(item.id)] = item;
+  if (state?.inventory) {
+    mergeInventoryItem(item);
+  }
+  return item;
 }
 
 function lightweightState() {
@@ -10735,7 +12843,10 @@ function lightweightState() {
     connections: [],
     importJobs: [],
     syncRuns: [],
-    summary: {}
+    summary: {},
+    inventoryLoaded: false,
+    categorySettingsLoaded: false,
+    ordersLoaded: false
   };
 }
 
@@ -10749,10 +12860,10 @@ function mergeExportMappingsState(result = {}) {
   return exportMappings;
 }
 
-async function loadExportMappingsOnly() {
+async function loadExportMappingsOnly(silent = false) {
   const result = await api("/api/export-mappings");
   mergeExportMappingsState(result);
-  renderImportExportMappings();
+  if (!silent) renderImportExportMappings();
 }
 
 async function confirmOrder(id) {
@@ -10990,6 +13101,7 @@ async function renameProductSku(productId) {
   });
   selectedProductId = result.item.id;
   setState(result.state);
+  mergeInventoryItem(result.item);
   showView("product-full");
   toast(`Renamed SKU to ${result.item.sku}. Old SKU saved as an alias.`);
 }
@@ -11002,6 +13114,7 @@ async function backfillProductSourceData(productId) {
   });
   selectedProductId = productId;
   if (result.state) setState(result.state);
+  if (result.item) mergeInventoryItem(result.item);
   render();
   toast(result.changed ? "Source data backfilled." : "Source data is already loaded.");
 }
@@ -11099,6 +13212,7 @@ async function runEbayListingAction(productId, action) {
     });
     selectedProductId = result.item.id;
     setState(result.state);
+    mergeInventoryItem(result.item);
     toast(action === "publish" ? `eBay listing published${result.ebayListing.listingId ? `: ${result.ebayListing.listingId}` : "."}` : action === "draft" ? "SKU eBay mapping saved." : "eBay offer saved.");
   } finally {
     if (!activeApiRequests) setSavingIndicator(false);
@@ -11112,7 +13226,10 @@ async function syncProductEbayAttributes(productId) {
     body: JSON.stringify({})
   });
   if (result.state) setState(result.state);
-  if (result.item?.id) selectedProductId = result.item.id;
+  if (result.item?.id) {
+    mergeInventoryItem(result.item);
+    selectedProductId = result.item.id;
+  }
   renderProductContentPage();
   toast(`Loaded ${Number(result.attributes?.length || 0)} eBay attributes.`);
 }
@@ -11120,15 +13237,15 @@ async function syncProductEbayAttributes(productId) {
 async function runEbayCatalogImport() {
   if (!confirm("Import live eBay catalog/offers and map them to DataPlus products?")) return;
   const result = await api("/api/ebay/catalog-import", {
-    feedbackLabel: "Importing eBay catalog...",
+    feedbackLabel: "Queueing eBay catalog sync...",
     method: "POST",
     body: JSON.stringify({})
   });
-  setState(result.state);
+  if (result.state) setState(result.state);
   catalogTab = result.unmapped ? "reviews" : "products";
   showView("catalog");
   renderCatalog();
-  toast(`eBay catalog sync: ${result.matched || 0} mapped, ${result.unmapped || 0} need review.`);
+  toast(result.queued ? (result.message || "eBay catalog sync queued in Jobs.") : `eBay catalog sync: ${result.matched || 0} mapped, ${result.unmapped || 0} need review.`);
 }
 
 function toggleOtherCarrierFields() {
@@ -11297,6 +13414,7 @@ async function submitInventoryTransfer(form) {
   selectedProductId = productId;
   closeInventoryTransferModal();
   setState(result.state);
+  if (result.item) mergeInventoryItem(result.item);
   if (currentViewId === "product-full") {
     selectedProductWorkspaceTab = "inventory";
     renderProductContentPage();
@@ -11409,6 +13527,9 @@ async function createPurchaseOrder(orderIds, options = {}) {
 }
 
 async function syncSource(source) {
+  if (String(source || "").toLowerCase() === "shopify") {
+    return syncAllShopifyStatuses();
+  }
   const result = await api(`/api/sync/${encodeURIComponent(source)}`, { method: "POST" });
   setState(result.state);
   toast(`${source} sync complete.`);
@@ -11540,6 +13661,7 @@ async function submitShadowCreate(form) {
   selectedProductId = result.item.id;
   closeShadowModal();
   setState(result.state);
+  mergeInventoryItem(result.item);
   showView("product-full");
   toast(`${result.shadow.shadowSku} created.`);
 }
@@ -11556,6 +13678,7 @@ async function bulkCreateShadows(productId) {
   });
   selectedProductId = result.item.id;
   setState(result.state);
+  mergeInventoryItem(result.item);
   showView("product-full");
   toast(`Created ${result.created.length} shadow SKU${result.created.length === 1 ? "" : "s"}.`);
 }
@@ -12194,6 +14317,7 @@ async function updateSerialUnitAction(productId, serialId, action) {
   });
   selectedProductId = productId;
   setState(result.state);
+  if (result.item) mergeInventoryItem(result.item);
   showView("inventory-full");
   toast(`Serial updated to ${result.serial.status}.`);
 }
@@ -12302,6 +14426,12 @@ async function updateProductField(input) {
   if (numericFields.has(field)) value = Number(input.value);
   if (booleanFields.has(field)) value = input.type === "checkbox" ? input.checked : input.value === "true";
   const payload = { [field]: value };
+  if (DIMENSION_WEIGHT_FIELDS.has(field)) {
+    payload.dimensionWeightSources = {
+      ...(item.dimensionWeightSources || {}),
+      [field]: { source: "manual_entered", verified: true, updatedAt: new Date().toISOString() }
+    };
+  }
   if (["packageLength", "packageWidth", "packageHeight"].includes(field)) {
     const next = { ...item, [field]: value };
     payload.dimensionalWeight = calculateDimensionalWeight(next);
@@ -12329,6 +14459,7 @@ async function updateShadowField(input) {
   });
   selectedProductId = result.item.id;
   setState(result.state);
+  mergeInventoryItem(result.item);
   toast("Shadow SKU updated.");
 }
 
@@ -12344,6 +14475,7 @@ async function updateShadowAttribute(input) {
   selectedProductId = result.item.id;
   selectedShadowId = result.shadow.id;
   setState(result.state);
+  mergeInventoryItem(result.item);
   toast("Marketplace attribute updated.");
 }
 
@@ -12359,6 +14491,7 @@ async function updateShadowOverride(input) {
   selectedProductId = result.item.id;
   selectedShadowId = result.shadow.id;
   setState(result.state);
+  mergeInventoryItem(result.item);
   toast("Content override updated.");
 }
 
@@ -12376,6 +14509,7 @@ async function syncShadow(productId, shadowId) {
   selectedProductId = result.item.id;
   selectedShadowId = result.shadow.id;
   setState(result.state);
+  mergeInventoryItem(result.item);
   showView("shadow-full");
   toast("Marketplace sync queued.");
 }
@@ -12631,10 +14765,14 @@ function renderProductImportModal() {
     <div class="product-import-picker">
       <div>
         <strong>${html(isShopifyStatus ? "Matrixify Products export" : template.name)}</strong>
-        <small>${html(isShopifyStatus ? "Matches by Variant SKU, then Handle, then Shopify ID. Does not overwrite product content." : `${template.source} / ${(template.mappings || []).length} mapped columns`)}</small>
+        <small>${html(isShopifyStatus ? "Links by Variant SKU. Shopify Product ID/GID becomes the linked reference." : `${template.source} / ${(template.mappings || []).length} mapped columns`)}</small>
       </div>
-      <label class="file-button">Choose CSV<input type="file" accept=".csv,text/csv" ${isShopifyStatus ? "data-import-shopify-status-file" : `data-import-export-file="${template.id}"`} /></label>
+      <div class="import-picker-actions">
+        ${isShopifyStatus ? `<a class="button secondary" href="/api/shopify/status-import/template.csv">${withIcon("download", "Template")}</a>` : ""}
+        <label class="file-button">Choose CSV<input type="file" accept=".csv,text/csv" ${isShopifyStatus ? "data-import-shopify-status-file" : `data-import-export-file="${template.id}"`} /></label>
+      </div>
     </div>
+    ${isShopifyStatus ? shopifyStatusRequiredColumnsMarkup() : ""}
     ${preview ? `
       <div class="product-import-summary">
         <span><small>Updates</small><strong>${preview.changed}</strong></span>
@@ -12687,9 +14825,11 @@ async function previewProductImport(templateId, csv, fileName = "") {
 async function importShopifyStatusFile(input) {
   const [file] = input.files || [];
   if (!file) return;
+  setSavingIndicator(true, "Reading Shopify status file...");
   const csv = await file.text();
   const result = await api("/api/shopify/status-import", {
     method: "POST",
+    feedbackLabel: "Previewing Shopify status...",
     body: JSON.stringify({ csv, dryRun: true, fileName: file.name })
   });
   pendingProductImport = { templateId: null, fileName: file.name, csv, preview: result, mode: "shopify-status" };
@@ -12705,12 +14845,16 @@ async function runProductImport() {
   if (pendingProductImport.mode === "shopify-status") {
     const result = await api("/api/shopify/status-import", {
       method: "POST",
+      feedbackLabel: "Updating Shopify status...",
       body: JSON.stringify({ csv: pendingProductImport.csv, fileName: pendingProductImport.fileName })
     });
     closeProductImportModal();
     setState(result.state);
-    renderCatalog();
-    toast(`Updated Shopify status for ${result.changed} product${result.changed === 1 ? "" : "s"}.`);
+    selectedImportJobId = result.job?.id || selectedImportJobId;
+    showView("jobs");
+    renderJobsPage();
+    const missing = (result.missing || []).length;
+    toast(`Shopify status import complete: ${Number(result.changed || 0).toLocaleString()} updated${missing ? `, ${missing} need review` : ""}.`);
     return;
   }
   if (!pendingProductImport.templateId) return;
@@ -12766,7 +14910,7 @@ async function updateChannelField(input) {
   const field = input.dataset.channelField;
   let value = input.value;
   if (input.type === "checkbox") value = input.checked;
-  if (["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "minMarginPercent", "ebayMaxImages"].includes(field)) value = Number(input.value || 0);
+  if (["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit"].includes(field)) value = Number(input.value || 0);
   const result = await api(`/api/channels/${channel.id}`, {
     method: "PATCH",
     body: JSON.stringify({ [field]: value })
@@ -12778,13 +14922,17 @@ async function updateChannelField(input) {
 
 async function syncEbayAccountSettings(channelId) {
   const result = await api("/api/ebay/account-settings/sync", {
-    feedbackLabel: "Syncing eBay settings...",
+    feedbackLabel: "Queueing eBay settings sync...",
     method: "POST",
     body: JSON.stringify({})
   });
   selectedChannelId = result.channel?.id || channelId || selectedChannelId;
-  setState(result.state);
+  if (result.state) setState(result.state);
   showView("channel-full");
+  if (result.queued) {
+    toast(result.message || "eBay account settings sync queued in Jobs.");
+    return;
+  }
   const failureCount = (result.failures || []).length;
   if (failureCount) {
     toast(`eBay settings sync logged ${failureCount} API issue${failureCount === 1 ? "" : "s"} in Jobs.`);
@@ -12805,19 +14953,59 @@ async function updateSystemSetting(input) {
   if (result.state) setState(result.state);
   else if (result.systemSettings) state.systemSettings = result.systemSettings;
   renderCatalog();
+  renderSystemSettingsPage();
   toast("System setting updated.");
+}
+
+function systemUsersFromDom() {
+  return $$("[data-system-user-row]").map((row, index) => ({
+    id: row.dataset.systemUserRow || `user-${Date.now()}-${index}`,
+    name: row.querySelector('[data-system-user-field="name"]')?.value.trim() || "",
+    email: row.querySelector('[data-system-user-field="email"]')?.value.trim() || "",
+    role: row.querySelector('[data-system-user-field="role"]')?.value || "Operator",
+    status: row.querySelector('[data-system-user-field="status"]')?.value || "active"
+  })).filter((user) => user.name || user.email);
+}
+
+async function saveSystemUsers() {
+  const result = await api("/api/system-settings", {
+    method: "PATCH",
+    body: JSON.stringify({ systemUsers: systemUsersFromDom() })
+  });
+  if (result.systemSettings) state.systemSettings = result.systemSettings;
+  renderSystemSettingsPage();
+  toast("System profiles saved.");
+}
+
+function addSystemUserRow() {
+  const settings = appSystemSettings();
+  const users = Array.isArray(settings.systemUsers) ? [...settings.systemUsers] : [];
+  users.push({ id: `user-${Date.now()}`, name: "", email: "", role: "Operator", status: "active" });
+  state.systemSettings = { ...settings, systemUsers: users };
+  renderSystemSettingsPage();
+}
+
+function removeSystemUserRow(userId) {
+  const settings = appSystemSettings();
+  const users = (settings.systemUsers || []).filter((user) => String(user.id) !== String(userId));
+  state.systemSettings = { ...settings, systemUsers: users.length ? users : [{ id: `user-${Date.now()}`, name: "", email: "", role: "Operator", status: "active" }] };
+  renderSystemSettingsPage();
 }
 
 async function createEbayLocation(form) {
   const payload = Object.fromEntries(new FormData(form).entries());
   const result = await api("/api/ebay/locations", {
-    feedbackLabel: "Creating eBay location...",
+    feedbackLabel: "Queueing eBay location setup...",
     method: "POST",
     body: JSON.stringify(payload)
   });
   selectedChannelId = result.channel?.id || selectedChannelId;
-  setState(result.state);
+  if (result.state) setState(result.state);
   showView("channel-full");
+  if (result.queued) {
+    toast(result.message || `eBay location ${result.merchantLocationKey || ""} setup queued in Jobs.`);
+    return;
+  }
   const locationCount = result.syncResult?.merchantLocations?.length ?? result.channel?.settings?.ebayMerchantLocations?.length ?? 0;
   toast(`eBay location ${result.merchantLocationKey} created. Locations: ${locationCount}.`);
 }
@@ -12907,6 +15095,7 @@ async function promoteCatalogProduct(sku) {
   });
   selectedProductId = result.item?.id || selectedProductId;
   setState(result.state);
+  if (result.item) mergeInventoryItem(result.item);
   renderSourceCatalogTable();
   toast(`${sku} ${result.existing ? "updated in" : "added to"} active catalog.`);
 }
@@ -13058,19 +15247,51 @@ async function applyCatalogBulkAction() {
     return;
   }
   if (catalogTab === "source") {
-    if (selectedSourceAllFiltered) return toast("Select current page or individual source products before applying bulk actions.");
+    if (selectedSourceAllFiltered && action !== "add-active") return toast("Select current page or individual source products before applying this bulk action.");
     const skus = [...selectedSourceSkus];
-    if (!skus.length) return toast("Select source catalog products first.");
+    if (!skus.length && !selectedSourceAllFiltered) return toast("Select source catalog products first.");
     if (action === "delete" && !confirm(`Hide ${skus.length} source catalog product${skus.length === 1 ? "" : "s"} from this catalog view?`)) return;
+    if (action === "add-active") {
+      let impact = null;
+      const importMode = $("#source-import-mode")?.value || appSystemSettings().sourceCatalogDefaultImportMode || "new-and-update";
+      try {
+        impact = await api("/api/catalog/import-impact", {
+          method: "POST",
+          feedbackLabel: "Checking import impact...",
+          body: JSON.stringify({
+            skus,
+            allFiltered: selectedSourceAllFiltered,
+            query: $("#catalog-search")?.value.trim() || "",
+            filters: catalogFilters(),
+            importMode
+          })
+        });
+      } catch (error) {
+        toast(error.message || "Unable to preview import impact.");
+        return;
+      }
+      const scopeLabel = selectedSourceAllFiltered ? `${Number(impact.matched || sourceCatalogState?.totalMatches || 0).toLocaleString()} filtered matches` : `${skus.length.toLocaleString()} selected rows`;
+      const importLabel = `${Number(impact.importable || 0).toLocaleString()} importable (${Number(impact.newProducts || 0).toLocaleString()} new, ${Number(impact.existing || 0).toLocaleString()} updates${Number(impact.skippedExisting || 0) ? `, ${Number(impact.skippedExisting || 0).toLocaleString()} existing skipped` : ""}${Number(impact.skippedNew || 0) ? `, ${Number(impact.skippedNew || 0).toLocaleString()} new skipped` : ""}${Number(impact.closeouts || 0) ? `, ${Number(impact.closeouts || 0).toLocaleString()} closeouts` : ""})`;
+      const limitLabel = impact.limited ? " This will only import the first 25,000 matches." : "";
+      if (!confirm(`Add ${scopeLabel} to Products?\n\nMode: ${importMode}.\n${importLabel}.${limitLabel}`)) return;
+    }
     const result = await api("/api/catalog/bulk", {
       method: "POST",
-      body: JSON.stringify({ skus, action })
+      feedbackLabel: selectedSourceAllFiltered ? "Queuing source catalog import..." : "Adding source products...",
+      body: JSON.stringify({
+        skus,
+        action,
+        allFiltered: selectedSourceAllFiltered,
+        query: $("#catalog-search")?.value.trim() || "",
+        filters: catalogFilters(),
+        importMode: $("#source-import-mode")?.value || appSystemSettings().sourceCatalogDefaultImportMode || "new-and-update"
+      })
     });
     setState(result.state);
     selectedSourceSkus.clear();
     selectedSourceAllFiltered = false;
     renderCatalog();
-    toast(sourceCatalogActionMessage(action, result.changed));
+    toast(result.message || (result.queued ? "Source catalog import queued. Track it in Jobs." : sourceCatalogActionMessage(action, result.changed)));
     return;
   }
 
@@ -13093,6 +15314,7 @@ async function applyCatalogBulkAction() {
     setState(result.state);
     selectedProductIds.clear();
     selectedProductAllFiltered = false;
+    invalidateProductCatalogPages();
     renderCatalog();
     toast(`eBay launch complete: ${result.launched || 0} launched, ${result.skipped || 0} skipped, ${result.failed || 0} failed.`);
     return;
@@ -13105,6 +15327,7 @@ async function applyCatalogBulkAction() {
   setState(result.state);
   selectedProductIds.clear();
   selectedProductAllFiltered = false;
+  invalidateProductCatalogPages();
   renderCatalog();
   toast(productActionMessage(action, result.changed));
 }
@@ -13140,6 +15363,7 @@ async function runProductRowAction(id, action) {
   setState(result.state);
   selectedProductIds.delete(id);
   selectedProductAllFiltered = false;
+  invalidateProductCatalogPages();
   renderCatalog();
   toast(productActionMessage(action, result.changed));
 }
@@ -13150,6 +15374,15 @@ async function runSourceCatalogRowAction(sku, action) {
     method: "POST",
     body: JSON.stringify({ skus: [sku], action })
   });
+  if (result.queued) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+    selectedSourceSkus.delete(sku);
+    selectedSourceAllFiltered = false;
+    renderTopbarActions();
+    renderSourceCatalogTable();
+    toast(queuedJobToast(result, "Source catalog import queued. Track it in Jobs."));
+    return;
+  }
   setState(result.state);
   selectedSourceSkus.delete(sku);
   selectedSourceAllFiltered = false;
@@ -13159,19 +15392,408 @@ async function runSourceCatalogRowAction(sku, action) {
 
 async function exportProductsFromProductsTab() {
   const templateId = $("#product-export-template")?.value || selectedExportMappingId;
+  if (templateId === "custom-export") return openProductExportModal("custom");
   if (!templateId) return toast("Choose an export mapping.");
   selectedExportMappingId = templateId;
+  const { query, filters } = productCatalogRequestParams(productCatalogPage);
   const selectedSkus = [...selectedProductIds]
     .map((id) => (state.inventory || []).find((item) => item.id === id)?.sku)
     .filter(Boolean);
-  const filteredSkus = selectedSkus.length && !selectedProductAllFiltered
-    ? selectedSkus
-    : filteredCatalogItems().map((item) => item.sku).filter(Boolean);
-  if (!filteredSkus.length) return toast("No products match this export.");
+  const body = selectedSkus.length && !selectedProductAllFiltered
+    ? { skus: selectedSkus, forceJob: true, dataFileName: "selected-products.csv" }
+    : { query, filters, forceJob: true, dataFileName: "products.csv" };
+  const matchCount = selectedSkus.length && !selectedProductAllFiltered
+    ? selectedSkus.length
+    : (productCatalogState.loaded ? productCatalogState.total : filteredCatalogItems().length);
+  if (!matchCount) return toast("No products match this export.");
   const result = await api(`/api/export-mappings/${templateId}/export`, {
     method: "POST",
-    body: JSON.stringify({ skus: filteredSkus })
+    body: JSON.stringify(body)
   });
+  if (result.queued) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+    renderTopbarActions();
+    toast(queuedJobToast(result));
+    return;
+  }
+  downloadCsvResult(result, "product-export.csv");
+  toast(`Exported ${Number(result.count || 0).toLocaleString()} product${result.count === 1 ? "" : "s"}.`);
+}
+
+function productExportSelectionBody(fileName = "products.csv") {
+  const { query, filters } = productCatalogRequestParams(productCatalogPage);
+  const selectedSkus = [...selectedProductIds]
+    .map((id) => (state.inventory || []).find((item) => item.id === id)?.sku)
+    .filter(Boolean);
+  return selectedSkus.length && !selectedProductAllFiltered
+    ? { skus: selectedSkus, forceJob: true, dataFileName: fileName || "selected-products.csv" }
+    : { query, filters, forceJob: true, dataFileName: fileName || "products.csv" };
+}
+
+function productExportMatchCount() {
+  if (selectedProductIds.size && !selectedProductAllFiltered) return selectedProductIds.size;
+  return productCatalogState.loaded ? productCatalogState.total : filteredCatalogItems().length;
+}
+
+function productExportFieldGroups() {
+  const fields = productFieldOptions || [];
+  const search = String(productExportModalState.columnSearch || "").trim().toLowerCase();
+  const visibleFields = search
+    ? fields.filter((field) => `${field.label || ""} ${field.key || ""} ${field.type || ""}`.toLowerCase().includes(search))
+    : fields;
+  const groupFor = (field = {}) => {
+    const key = field.key || "";
+    if (["sku", "title", "marketplaceTitle", "brand", "manufacturer", "mfrPartNumber", "vendorSku", "barcode", "condition", "status", "active"].includes(key)) return "Identity";
+    if (["price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "qty", "reserved", "available", "stockQty", "stockStatus"].includes(key)) return "Inventory / Pricing";
+    if (/(weight|length|width|height|country|hazard|uom|sds)/i.test(key)) return "Shipping";
+    if (/shopify|google/i.test(key)) return "Shopify";
+    if (["shortDescription", "longDescription", "bulletPoints", "images", "defaultImage", "tags", "seoKeywords"].includes(key)) return "Content";
+    return "Other";
+  };
+  return visibleFields.reduce((groups, field) => {
+    const group = groupFor(field);
+    groups[group] = groups[group] || [];
+    groups[group].push(field);
+    return groups;
+  }, {});
+}
+
+const PRODUCT_EXPORT_FORMAT_OPTIONS = [
+  { id: "normal", label: "Normal CSV", description: "Use readable DataPlus column names with no marketplace-specific headers." },
+  { id: "shopify", label: "Shopify / Matrixify", description: "Use Shopify-style headers and metafield formats for variants, dims, and weights." },
+  { id: "ebay", label: "eBay", description: "Use eBay-friendly product CSV headers for listing work." },
+  { id: "amazon", label: "Amazon", description: "Use Amazon-style flat-file column names where available." }
+];
+
+const PRODUCT_EXPORT_FORMAT_LABELS = Object.fromEntries(PRODUCT_EXPORT_FORMAT_OPTIONS.map((option) => [option.id, option.label]));
+
+const SHOPIFY_CUSTOM_EXPORT_COLUMNS = {
+  sku: "Variant SKU",
+  title: "Title",
+  marketplaceTitle: "Title",
+  longDescription: "Body (HTML)",
+  shortDescription: "Metafield: custom.short_description [single_line_text_field]",
+  vendor: "Vendor",
+  supplier: "Vendor",
+  category: "Product Category",
+  shopifyCategoryPath: "Product Category",
+  googleCategoryId: "Google Shopping / Google Product Category",
+  tags: "Tags",
+  price: "Variant Price",
+  websitePrice: "Variant Price",
+  shopifyCompareAtPrice: "Variant Compare At Price",
+  available: "Variant Inventory Qty",
+  qty: "Variant Inventory Qty",
+  defaultImage: "Image Src",
+  images: "Image Src",
+  status: "Status",
+  shopifyHandle: "Handle",
+  weightOz: "Variant Weight",
+  itemHeight: "Metafield: custom.item_height [dimension]",
+  itemLength: "Metafield: custom.item_length [dimension]",
+  itemWidth: "Metafield: custom.item_width [dimension]",
+  itemWeight: "Metafield: custom.item_weight [weight]",
+  packageHeight: "Metafield: custom.package_height [dimension]",
+  packageLength: "Metafield: custom.package_length [dimension]",
+  packageWidth: "Metafield: custom.package_width [dimension]",
+  packageWeight: "Metafield: custom.package_weight [weight]",
+  uom: "Variant Metafield: custom.uom [single_line_text_field]",
+  uomQty: "Variant Metafield: custom.uom_qty [number_integer]",
+  countryOfOrigin: "Metafield: custom.country_of_origin [single_line_text_field]",
+  hazardous: "Metafield: custom.hazardous [boolean]"
+};
+
+const EBAY_CUSTOM_EXPORT_COLUMNS = {
+  sku: "SKU",
+  title: "Title",
+  marketplaceTitle: "Title",
+  longDescription: "Description",
+  shortDescription: "Subtitle",
+  brand: "Brand",
+  manufacturer: "Manufacturer",
+  mfrPartNumber: "MPN",
+  barcode: "UPC",
+  price: "Price",
+  websitePrice: "Price",
+  available: "Quantity",
+  qty: "Quantity",
+  condition: "Condition",
+  category: "Category",
+  countryOfOrigin: "Country of Origin",
+  itemLength: "Item Length",
+  itemWidth: "Item Width",
+  itemHeight: "Item Height",
+  itemWeight: "Item Weight",
+  packageLength: "Package Length",
+  packageWidth: "Package Width",
+  packageHeight: "Package Height",
+  packageWeight: "Package Weight"
+};
+
+const AMAZON_CUSTOM_EXPORT_COLUMNS = {
+  sku: "item_sku",
+  title: "item_name",
+  marketplaceTitle: "item_name",
+  brand: "brand_name",
+  manufacturer: "manufacturer",
+  mfrPartNumber: "manufacturer_part_number",
+  barcode: "external_product_id",
+  price: "standard_price",
+  websitePrice: "standard_price",
+  available: "quantity",
+  qty: "quantity",
+  longDescription: "product_description",
+  itemLength: "item_length",
+  itemWidth: "item_width",
+  itemHeight: "item_height",
+  itemWeight: "item_weight",
+  packageLength: "package_length",
+  packageWidth: "package_width",
+  packageHeight: "package_height",
+  packageWeight: "package_weight"
+};
+
+function productExportExternalColumn(field = {}, formatType = "normal") {
+  const key = field.key || "";
+  const fallback = field.label || key;
+  if (formatType === "shopify") return SHOPIFY_CUSTOM_EXPORT_COLUMNS[key] || fallback;
+  if (formatType === "ebay") return EBAY_CUSTOM_EXPORT_COLUMNS[key] || fallback;
+  if (formatType === "amazon") return AMAZON_CUSTOM_EXPORT_COLUMNS[key] || fallback;
+  return fallback;
+}
+
+function productExportDraftMappings() {
+  const fields = productFieldOptions || [];
+  const formatType = productExportModalState.formatType || "normal";
+  return [...productExportModalState.selectedFields]
+    .map((key) => fields.find((field) => field.key === key))
+    .filter(Boolean)
+    .map((field) => ({
+      externalColumn: productExportExternalColumn(field, formatType),
+      productField: field.key,
+      defaultValue: "",
+      required: field.key === "sku"
+    }));
+}
+
+async function openProductExportModal(mode = "custom") {
+  await loadProductFieldOptions();
+  const exportMappings = state.exportMappings || [];
+  productExportModalState = {
+    ...productExportModalState,
+    mode,
+    step: "columns",
+    templateId: selectedExportMappingId || exportMappings[0]?.id || "",
+    columnSearch: productExportModalState.columnSearch || "",
+    fileName: "products.csv"
+  };
+  renderProductExportModal();
+  $("#product-export-modal")?.classList.add("show");
+  $("#product-export-modal")?.setAttribute("aria-hidden", "false");
+}
+
+function closeProductExportModal() {
+  $("#product-export-modal")?.classList.remove("show");
+  $("#product-export-modal")?.setAttribute("aria-hidden", "true");
+}
+
+function renderProductExportModal() {
+  const target = $("#product-export-modal-content");
+  if (!target) return;
+  const exportMappings = state.exportMappings || [];
+  const matchCount = productExportMatchCount();
+  const selectedCount = productExportModalState.selectedFields.size;
+  const groups = productExportFieldGroups();
+  const profileMode = productExportModalState.mode === "profile";
+  const formatType = productExportModalState.formatType || "normal";
+  const selectedFields = [...productExportModalState.selectedFields]
+    .map((key) => (productFieldOptions || []).find((field) => field.key === key))
+    .filter(Boolean);
+  const runButton = $("#product-export-modal [data-run-product-export-modal]");
+  if (runButton) {
+    runButton.textContent = "Export CSV";
+    runButton.setAttribute("data-run-product-export-modal", "");
+    runButton.removeAttribute("data-product-export-step");
+    runButton.onclick = (event) => {
+      event.stopPropagation();
+      runProductExportModal().catch((error) => toast(error.message));
+    };
+  }
+  target.innerHTML = `
+    <div class="product-export-modal-layout">
+      <section class="export-choice-panel">
+        <div class="export-scope-strip">
+          <span><strong>${Number(matchCount || 0).toLocaleString()}</strong><small>${selectedProductIds.size && !selectedProductAllFiltered ? "selected products" : "matching products"}</small></span>
+          <span><strong>${profileMode ? "Saved profile" : `${selectedCount} columns`}</strong><small>${profileMode ? "export setup" : PRODUCT_EXPORT_FORMAT_LABELS[formatType] || "format"}</small></span>
+        </div>
+        <div class="segmented-control export-mode-toggle">
+          <button type="button" class="${profileMode ? "active" : ""}" data-product-export-mode="profile">Saved profile</button>
+          <button type="button" class="${!profileMode ? "active" : ""}" data-product-export-mode="custom">Choose columns</button>
+        </div>
+        <label>File name
+          <input value="${html(productExportModalState.fileName || "products.csv")}" data-product-export-filename placeholder="products.csv" />
+        </label>
+        ${profileMode ? `
+          <label>Export profile
+            <select data-product-export-template>
+              ${exportMappings.map((template) => `<option value="${template.id}" ${template.id === productExportModalState.templateId ? "selected" : ""}>${html(template.name)}</option>`).join("")}
+            </select>
+          </label>
+          <p class="muted">Use a saved mapping profile exactly as configured in Import / Export.</p>
+        ` : `
+          <label>Profile name
+            <input value="${html(productExportModalState.profileName || "")}" data-product-export-profile-name placeholder="My custom product export" />
+          </label>
+          <label>Source / channel
+            <input value="${html(productExportModalState.source || "Custom")}" data-product-export-source placeholder="Custom, Shopify, Vendor" />
+          </label>
+          <label class="checkbox-row"><input type="checkbox" ${productExportModalState.saveProfile ? "checked" : ""} data-product-export-save-profile /> Save as reusable profile</label>
+          <p class="muted">Leave save off for a one-time export. Turn it on to reuse the columns later.</p>
+        `}
+      </section>
+      <section class="export-columns-panel ${profileMode ? "is-muted" : ""}">
+        <div class="section-head compact-head">
+          <div>
+            <h3>Step 1: available columns</h3>
+            <p class="muted">${profileMode ? "Switch to Choose columns for a one-time custom export." : "Pick the DataPlus fields to export as CSV columns."}</p>
+          </div>
+          <div class="button-row compact-buttons">
+            <button class="button secondary compact-button" type="button" data-product-export-column-preset="core" ${profileMode ? "disabled" : ""}>Core</button>
+            <button class="button secondary compact-button" type="button" data-product-export-column-preset="all" ${profileMode ? "disabled" : ""}>All</button>
+            <button class="button secondary compact-button" type="button" data-product-export-column-preset="none" ${profileMode ? "disabled" : ""}>None</button>
+          </div>
+        </div>
+        <label class="export-column-search">
+          <span>Search columns</span>
+          <input value="${html(productExportModalState.columnSearch || "")}" data-product-export-column-search placeholder="Search by name, field key, or type" ${profileMode ? "disabled" : ""} />
+        </label>
+        <div class="export-column-groups">
+          ${Object.entries(groups).length ? Object.entries(groups).map(([group, fields]) => `
+            <details open>
+              <summary>${html(group)} <span>${fields.length}</span></summary>
+              <div class="export-column-grid">
+                ${fields.map((field) => `
+                  <label class="${productExportModalState.selectedFields.has(field.key) ? "selected" : ""}">
+                    <input type="checkbox" value="${html(field.key)}" ${productExportModalState.selectedFields.has(field.key) ? "checked" : ""} data-product-export-field ${profileMode ? "disabled" : ""} />
+                    <span><strong>${html(field.label || field.key)}</strong><small>${html(field.key)}${field.type ? ` / ${html(field.type)}` : ""}</small></span>
+                  </label>
+                `).join("")}
+              </div>
+            </details>
+          `).join("") : `<div class="empty-state compact-empty">No columns match your search.</div>`}
+        </div>
+        ${!profileMode ? `
+          <div class="export-format-preview">
+            <div class="section-head compact-head">
+              <div>
+                <h3>Step 2: format type</h3>
+                <p class="muted">Choose how these columns should be named and formatted in the CSV.</p>
+              </div>
+            </div>
+            <label class="export-format-select">Format
+              <select data-product-export-format-select>
+                ${PRODUCT_EXPORT_FORMAT_OPTIONS.map((option) => `<option value="${option.id}" ${formatType === option.id ? "selected" : ""}>${html(option.label)}</option>`).join("")}
+              </select>
+            </label>
+            <div class="export-format-options">
+              ${PRODUCT_EXPORT_FORMAT_OPTIONS.map((option) => `
+                <label class="${formatType === option.id ? "selected" : ""}">
+                  <input type="radio" name="product-export-format-type" value="${option.id}" ${formatType === option.id ? "checked" : ""} data-product-export-format-type />
+                  <span><strong>${html(option.label)}</strong><small>${html(option.description)}</small></span>
+                </label>
+              `).join("")}
+            </div>
+            <div class="export-preview-list">
+              ${selectedFields.slice(0, 18).map((field) => `
+                <span><small>${html(field.label || field.key)}</small><strong>${html(productExportExternalColumn(field, formatType))}</strong></span>
+              `).join("")}
+              ${selectedFields.length > 18 ? `<em>+${Number(selectedFields.length - 18).toLocaleString()} more columns</em>` : ""}
+            </div>
+          </div>
+        ` : ""}
+      </section>
+    </div>
+  `;
+}
+
+function syncProductExportModalState() {
+  productExportModalState.fileName = $("#product-export-modal [data-product-export-filename]")?.value.trim() || "products.csv";
+  productExportModalState.templateId = $("#product-export-modal [data-product-export-template]")?.value || productExportModalState.templateId;
+  productExportModalState.profileName = $("#product-export-modal [data-product-export-profile-name]")?.value.trim() || productExportModalState.profileName;
+  productExportModalState.source = $("#product-export-modal [data-product-export-source]")?.value.trim() || productExportModalState.source || "Custom";
+  productExportModalState.columnSearch = $("#product-export-modal [data-product-export-column-search]")?.value || productExportModalState.columnSearch || "";
+  productExportModalState.formatType = $("#product-export-modal [data-product-export-format-select]")?.value || $("#product-export-modal [data-product-export-format-type]:checked")?.value || productExportModalState.formatType || "normal";
+  productExportModalState.saveProfile = Boolean($("#product-export-modal [data-product-export-save-profile]")?.checked);
+}
+
+async function runProductExportModal() {
+  syncProductExportModalState();
+  const matchCount = productExportMatchCount();
+  if (!matchCount) return toast("No products match this export.");
+  let templateId = productExportModalState.templateId;
+  let endpoint = "";
+  let body = productExportSelectionBody(productExportModalState.fileName);
+  if (productExportModalState.mode === "profile") {
+    if (!templateId) return toast("Choose an export profile.");
+    selectedExportMappingId = templateId;
+    endpoint = `/api/export-mappings/${templateId}/export`;
+  } else {
+    const mappings = productExportDraftMappings();
+    if (!mappings.length) return toast("Choose at least one column.");
+    const profileName = productExportModalState.profileName || `Custom Product Export ${new Date().toLocaleDateString()}`;
+    const formatType = productExportModalState.formatType || "normal";
+    const source = formatType === "normal" ? (productExportModalState.source || "Custom") : (PRODUCT_EXPORT_FORMAT_LABELS[formatType] || productExportModalState.source || "Custom");
+    const draftTemplate = {
+      name: profileName,
+      source,
+      formatType,
+      mode: "export",
+      status: "active",
+      mappings,
+      notes: "Created from the product export modal."
+    };
+    if (productExportModalState.saveProfile) {
+      const created = await api("/api/export-mappings", {
+        method: "POST",
+        body: JSON.stringify(draftTemplate)
+      });
+      mergeExportMappingsState(created);
+      templateId = created.template.id;
+      selectedExportMappingId = templateId;
+      endpoint = `/api/export-mappings/${templateId}/export`;
+    } else {
+      endpoint = "/api/export-mappings/custom-export";
+      body = { ...body, template: draftTemplate };
+    }
+  }
+  const result = await api(endpoint, { method: "POST", body: JSON.stringify(body) });
+  if (result.queued) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+    renderTopbarActions();
+    closeProductExportModal();
+    toast(queuedJobToast(result));
+    return;
+  }
+  downloadCsvResult(result, "product-export.csv");
+  closeProductExportModal();
+  renderCatalog();
+  toast(`Exported ${Number(result.count || 0).toLocaleString()} product${result.count === 1 ? "" : "s"}.`);
+}
+
+async function exportMappingTemplate(templateId) {
+  if (!templateId) return toast("Choose an export mapping.");
+  const result = await api(`/api/export-mappings/${templateId}/export`, {
+    method: "POST",
+    body: JSON.stringify({ forceJob: true, dataFileName: "products.csv" })
+  });
+  if (result.queued) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+    selectedImportJobId = result.job.id;
+    renderTopbarActions();
+    renderImportExportMappings();
+    toast(queuedJobToast(result));
+    return;
+  }
   downloadCsvResult(result, "product-export.csv");
   toast(`Exported ${Number(result.count || 0).toLocaleString()} product${result.count === 1 ? "" : "s"}.`);
 }
@@ -13181,12 +15803,18 @@ async function exportSourceCatalogProducts() {
   if (!templateId) return toast("Choose an export mapping.");
   selectedExportMappingId = templateId;
   const body = selectedSourceAllFiltered || !selectedSourceSkus.size
-    ? { query: $("#catalog-search")?.value.trim() || "", filters: catalogFilters() }
-    : { skus: [...selectedSourceSkus] };
+    ? { query: $("#catalog-search")?.value.trim() || "", filters: catalogFilters(), dataFileName: "source-catalog.csv" }
+    : { skus: [...selectedSourceSkus], dataFileName: "selected-source-skus.csv" };
   const result = await api("/api/catalog/export", {
     method: "POST",
-    body: JSON.stringify({ ...body, mappingId: templateId })
+    body: JSON.stringify({ ...body, mappingId: templateId, forceJob: true })
   });
+  if (result.queued) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+    renderTopbarActions();
+    toast(queuedJobToast(result));
+    return;
+  }
   downloadCsvResult(result, "source-catalog-export.csv");
   const limited = result.limited && result.matched > result.count ? ` of ${Number(result.matched).toLocaleString()} matched` : "";
   toast(`Exported ${Number(result.count || 0).toLocaleString()}${limited} source product${result.count === 1 ? "" : "s"}.`);
@@ -13204,7 +15832,157 @@ function downloadCsvResult(result, fallbackName) {
   URL.revokeObjectURL(url);
 }
 
-document.addEventListener("click", (event) => {
+function queuedJobToast(result = {}, fallback = "Export queued. It will show in the top notifications when ready.") {
+  const job = result.job || {};
+  if (job.duplicateOfActiveJob) {
+    return result.message || `${job.operation || "Job"} is already ${String(job.status || "queued").toLowerCase()}. Job ID: ${job.id || "n/a"}`;
+  }
+  return result.message || (job.id ? `${fallback} Job ID: ${job.id}` : fallback);
+}
+
+function shopifyFullTemplate() {
+  const templates = state.exportMappings || [];
+  return templates.find((template) => /shopify full template/i.test(template.name || ""))
+    || templates.find((template) => String(template.source || "").toLowerCase() === "shopify" && /shopify_skus|full/i.test(template.name || ""))
+    || templates.find((template) => String(template.source || "").toLowerCase() === "shopify");
+}
+
+function ensureProductTemplateExportModal() {
+  let modal = $("#product-template-export-modal");
+  if (modal) return modal;
+  modal = document.createElement("div");
+  modal.id = "product-template-export-modal";
+  modal.className = "modal-backdrop";
+  modal.setAttribute("aria-hidden", "true");
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function closeProductTemplateExportModal() {
+  $("#product-template-export-modal")?.classList.remove("show");
+  $("#product-template-export-modal")?.setAttribute("aria-hidden", "true");
+}
+
+async function openProductTemplateExportModal(productId) {
+  const item = productById(productId);
+  if (!item) return toast("Product not found.");
+  if (!state.exportMappings?.length) await loadExportMappingsOnly(true);
+  const templates = state.exportMappings || [];
+  if (!templates.length) return toast("No export templates found.");
+  const modal = ensureProductTemplateExportModal();
+  const preferred = shopifyFullTemplate() || templates[0];
+  modal.dataset.productId = item.id;
+  modal.innerHTML = `
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Product export</p>
+          <h2>Export ${html(item.sku)}</h2>
+        </div>
+        <button type="button" class="icon-button" data-close-product-template-export-modal aria-label="Close export template">x</button>
+      </div>
+      <div class="modal-grid">
+        <label class="span-2">Export template
+          <select id="product-template-export-select">
+            ${templates.map((template) => `<option value="${template.id}" ${template.id === preferred?.id ? "selected" : ""}>${html(template.name)}${template.source ? ` / ${html(template.source)}` : ""}</option>`).join("")}
+          </select>
+        </label>
+        <div class="span-2 import-template-note">
+          <strong>One-product export</strong>
+          <span>The CSV will include only ${html(item.sku)}. Shopify full template exports include generated purchase-unit variants when UOM quantity is greater than 1.</span>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="button secondary" data-close-product-template-export-modal>Cancel</button>
+        <button type="button" class="button" data-run-product-template-export>${withIcon("download", "Export CSV")}</button>
+      </div>
+    </div>
+  `;
+  modal.classList.add("show");
+  modal.setAttribute("aria-hidden", "false");
+}
+
+async function exportSingleProductWithTemplate(productId, templateId, fallbackName = "product-export.csv") {
+  const item = productById(productId);
+  if (!item) return toast("Product not found.");
+  if (!state.exportMappings?.length) await loadExportMappingsOnly(true);
+  const template = (state.exportMappings || []).find((row) => row.id === templateId);
+  if (!template) return toast("Export template not found.");
+  selectedExportMappingId = template.id;
+  const result = await api(`/api/export-mappings/${template.id}/export`, {
+    method: "POST",
+    feedbackLabel: "Preparing product export...",
+    body: JSON.stringify({ skus: [item.sku], forceJob: true, dataFileName: `${item.sku || "product"}.csv` })
+  });
+  if (result.queued) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+    renderTopbarActions();
+    toast(queuedJobToast(result, "Product export queued. It will show in the top notifications when ready."));
+    return;
+  }
+  const handle = shopifyHandleForProduct(item) || String(item.sku || "product").toLowerCase();
+  downloadCsvResult(result, fallbackName.replace("{handle}", handle).replace("{sku}", item.sku || "product"));
+  return { item, template, result };
+}
+
+async function exportSingleProductToShopify(productId) {
+  if (!state.exportMappings?.length) await loadExportMappingsOnly(true);
+  const resolvedTemplate = shopifyFullTemplate();
+  if (!resolvedTemplate) return toast("No Shopify export template found.");
+  const exported = await exportSingleProductWithTemplate(productId, resolvedTemplate.id, "shopify-product-{handle}.csv");
+  if (!exported) return;
+  const { item } = exported;
+  const variantCount = Array.isArray(item.shopifyPurchaseVariants) ? item.shopifyPurchaseVariants.length : productUomInfo(item).isMultiUnit ? 2 : 1;
+  toast(`Exported ${html(item.sku)} to Shopify CSV with ${variantCount} variant${variantCount === 1 ? "" : "s"}.`);
+}
+
+async function syncProductShopifyStatus(productId) {
+  const item = productById(productId);
+  if (!item) return toast("Product not found.");
+  if (!item.shopifyId) return toast("This product does not have a Shopify Product GID yet.");
+  const result = await api("/api/shopify/status-sync", {
+    method: "POST",
+    feedbackLabel: "Pulling Shopify status...",
+    body: JSON.stringify({ productId })
+  });
+  if (result.state) setState(result.state);
+  if (result.item) mergeInventoryItem(result.item);
+  selectedProductId = productId;
+  render();
+  toast(result.message || `Shopify status synced for ${item.sku}.`);
+}
+
+async function syncAllShopifyStatuses() {
+  const shopifyChannel = (state.connections || []).find((channel) => String(channel.name || "").toLowerCase() === "shopify");
+  const limit = Number(shopifyChannel?.settings?.shopifyStatusSyncLimit || 100);
+  const result = await api("/api/shopify/status-sync-all", {
+    method: "POST",
+    feedbackLabel: "Queueing Shopify status sync...",
+    body: JSON.stringify({ limit })
+  });
+  if (result.state) setState(result.state);
+  render();
+  loadChannelApiLogs("Shopify", true).catch(() => {});
+  toast(result.queued ? (result.message || "Shopify status sync queued in Jobs.") : (result.message || `Shopify status sync complete: ${Number(result.synced || 0).toLocaleString()} checked.`));
+}
+
+async function runCategoryExport(type, channel = "") {
+  const result = await api("/api/categories/export-job", {
+    method: "POST",
+    feedbackLabel: "Preparing export...",
+    body: JSON.stringify({ type, channel })
+  });
+  if (result.queued) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+    renderTopbarActions();
+    toast(queuedJobToast(result));
+    return;
+  }
+  downloadCsvResult(result, `${type || "category-export"}.csv`);
+  toast(`Exported ${Number(result.count || 0).toLocaleString()} row${Number(result.count || 0) === 1 ? "" : "s"}.`);
+}
+
+document.addEventListener("click", async (event) => {
   const viewButton = event.target.closest("[data-view]");
   const jumpButton = event.target.closest("[data-view-jump]");
   const confirmButton = event.target.closest("[data-confirm-order]");
@@ -13237,6 +16015,7 @@ document.addEventListener("click", (event) => {
   const cancelAttributeGroupEditButton = event.target.closest("[data-cancel-attribute-group-edit]");
   const saveAttributeGroupButton = event.target.closest("[data-save-attribute-group]");
   const clearJobFiltersButton = event.target.closest("[data-clear-job-filters]");
+  const jobApiFilterButton = event.target.closest("[data-job-api-channel][data-job-api-endpoint]");
   const channelButton = event.target.closest("[data-select-channel]");
   const exchangeTemuButton = event.target.closest("[data-exchange-temu-code]");
   const actionMenuButton = event.target.closest("[data-action-menu]");
@@ -13276,7 +16055,11 @@ document.addEventListener("click", (event) => {
   const saveKnowledgeSettingsButton = event.target.closest("[data-save-knowledge-settings]");
   const addKnowledgeSettingButton = event.target.closest("[data-add-knowledge-setting]");
   const sourcePageButton = event.target.closest("[data-source-page]");
+  const buildSourceSearchIndexButton = event.target.closest("[data-build-source-search-index]");
+  const buildSourcePerformanceIndexesButton = event.target.closest("[data-build-source-performance-indexes]");
+  const refreshSourceFacetsButton = event.target.closest("[data-refresh-source-facets]");
   const promoteCatalogButton = event.target.closest("[data-promote-catalog-sku]");
+  const addFilteredSourceProductsButton = event.target.closest("[data-add-filtered-source-products]");
   const sourceRowActionButton = event.target.closest("[data-source-row-action]");
   const applyShopifyTaxonomyButton = event.target.closest("[data-apply-shopify-taxonomy]");
   const applyEbayTaxonomyButton = event.target.closest("[data-apply-ebay-taxonomy]");
@@ -13292,6 +16075,7 @@ document.addEventListener("click", (event) => {
   const saveExportMappingButton = event.target.closest("[data-save-export-mapping]");
   const duplicateExportMappingButton = event.target.closest("[data-duplicate-export-mapping]");
   const deleteExportMappingButton = event.target.closest("[data-delete-export-mapping]");
+  const exportMappingTemplateButton = event.target.closest("[data-export-mapping-template]");
   const addExportMappingRowButton = event.target.closest("[data-add-export-mapping-row]");
   const removeExportMappingRowButton = event.target.closest("[data-remove-export-mapping-row]");
   const openProductImportButton = event.target.closest("[data-open-product-import]");
@@ -13302,12 +16086,44 @@ document.addEventListener("click", (event) => {
   const runSourceSkuImportButton = event.target.closest("[data-run-source-sku-import]");
   const importSectionButton = event.target.closest("[data-import-section]");
   const refreshImportJobsButton = event.target.closest("[data-refresh-import-jobs]");
+  const cleanupImportJobsButton = event.target.closest("[data-cleanup-import-jobs]");
+  const systemBackupButton = event.target.closest("[data-system-backup]");
   const selectImportJobButton = event.target.closest("[data-select-import-job]");
   const stopJobButton = event.target.closest("[data-job-stop]");
+  const retryJobButton = event.target.closest("[data-job-retry]");
   const runJobButton = event.target.closest("[data-job-run]");
+  const jobChannelApiHistoryButton = event.target.closest("[data-job-channel-api-history]");
   const syncEbaySettingsButton = event.target.closest("[data-sync-ebay-account-settings]");
   const exportProductsButton = event.target.closest("[data-export-products]");
+  const exportProductShopifyButton = event.target.closest("[data-export-product-shopify]");
+  const exportProductTemplateButton = event.target.closest("[data-export-product-template]");
+  const closeProductExportButton = event.target.closest("[data-close-product-export-modal]");
+  const runProductExportModalButton = event.target.closest("[data-run-product-export-modal]");
+  const productExportModeButton = event.target.closest("[data-product-export-mode]");
+  const productExportPresetButton = event.target.closest("[data-product-export-column-preset]");
+  const productExportFieldInput = event.target.closest("[data-product-export-field]");
+  const productExportFormatInput = event.target.closest("[data-product-export-format-type]");
+  const productExportStepButton = event.target.closest("[data-product-export-step]");
+  const syncProductShopifyStatusButton = event.target.closest("[data-sync-product-shopify-status]");
+  const closeProductTemplateExportButton = event.target.closest("[data-close-product-template-export-modal]");
+  const runProductTemplateExportButton = event.target.closest("[data-run-product-template-export]");
   const exportSourceProductsButton = event.target.closest("[data-export-source-products]");
+  const categoryExportButton = event.target.closest("[data-category-export]");
+  const catalogChangesRefreshButton = event.target.closest("[data-catalog-changes-refresh]");
+  const skuChangeSearchButton = event.target.closest("[data-sku-change-search]");
+  const skuChangeClearButton = event.target.closest("[data-sku-change-clear]");
+  const skuChangePageButton = event.target.closest("[data-sku-change-page]");
+  const sourceChangeOpenButton = event.target.closest("[data-source-change-open]");
+  const dataQualitySearchButton = event.target.closest("[data-data-quality-search]");
+  const dataQualityClearButton = event.target.closest("[data-data-quality-clear]");
+  const dataQualityScanButton = event.target.closest("[data-data-quality-scan]");
+  const syncShopifyCloseoutsButton = event.target.closest("[data-sync-shopify-closeouts]");
+  const syncShopifyStatusAllButton = event.target.closest("[data-sync-shopify-status-all]");
+  const refreshChannelApiLogsButton = event.target.closest("[data-refresh-channel-api-logs]");
+  const channelApiLogSearchButton = event.target.closest("[data-channel-api-log-search]");
+  const channelApiLogClearButton = event.target.closest("[data-channel-api-log-clear]");
+  const openApiLogJobButton = event.target.closest("[data-open-api-log-job]");
+  const openShopifyStatusImportButton = event.target.closest("[data-open-shopify-status-import]");
   const copyFieldButton = event.target.closest("[data-copy-field]");
   const sourceCheck = event.target.closest("[data-source-check]");
   const sourceCheckAll = event.target.closest("[data-source-check-all]");
@@ -13424,6 +16240,35 @@ document.addEventListener("click", (event) => {
   const removeProductBulletButton = event.target.closest("[data-remove-product-bullet]");
   const saveProductBulletsButton = event.target.closest("[data-save-product-bullets]");
   const backfillSourceDataButton = event.target.closest("[data-backfill-source-data]");
+  const toggleProductEditButton = event.target.closest("[data-toggle-product-edit]");
+  const toggleSystemSettingsEditButton = event.target.closest("[data-toggle-system-settings-edit]");
+  const addSystemUserButton = event.target.closest("[data-add-system-user]");
+  const removeSystemUserButton = event.target.closest("[data-remove-system-user]");
+  const saveSystemUsersButton = event.target.closest("[data-save-system-users]");
+
+  if (toggleProductEditButton) {
+    selectedProductEditMode = !selectedProductEditMode;
+    renderProductContentPage();
+    return;
+  }
+  if (toggleSystemSettingsEditButton) {
+    systemSettingsEditMode = !systemSettingsEditMode;
+    renderSystemSettingsPage();
+    renderTopbarActions();
+    return;
+  }
+  if (addSystemUserButton) {
+    addSystemUserRow();
+    return;
+  }
+  if (removeSystemUserButton) {
+    removeSystemUserRow(removeSystemUserButton.dataset.removeSystemUser);
+    return;
+  }
+  if (saveSystemUsersButton) {
+    saveSystemUsers().catch((error) => toast(error.message));
+    return;
+  }
 
   if (categoryButton) {
     selectedCategoryId = categoryButton.dataset.selectCategory;
@@ -13496,7 +16341,18 @@ document.addEventListener("click", (event) => {
     return;
   }
   if (clearJobFiltersButton) {
-    jobsFilter = { query: "", section: "", status: "", direction: "" };
+    jobsFilter = { query: "", section: "", status: "", direction: "", channel: "", endpoint: "" };
+    renderJobsPage();
+    return;
+  }
+  if (jobApiFilterButton) {
+    jobsFilter = {
+      ...jobsFilter,
+      status: jobsFilter.status || "failed",
+      direction: "api",
+      channel: jobApiFilterButton.dataset.jobApiChannel || "",
+      endpoint: jobApiFilterButton.dataset.jobApiEndpoint || ""
+    };
     renderJobsPage();
     return;
   }
@@ -13679,6 +16535,25 @@ document.addEventListener("click", (event) => {
     refreshImportJobs().catch((error) => toast(error.message));
     return;
   }
+  if (systemBackupButton) {
+    const includeSource = appSystemSettings().backupIncludeSourceCatalog === true;
+    if (includeSource && !confirm("This backup includes the full source catalog and can take a long time. Continue?")) return;
+    const result = await api("/api/system/backup", {
+      method: "POST",
+      feedbackLabel: "Queueing Postgres backup...",
+      body: JSON.stringify({ includeSourceCatalog: includeSource })
+    });
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job?.id)].filter(Boolean);
+    selectedImportJobId = result.job?.id || selectedImportJobId;
+    renderJobsPage();
+    renderTopbarActions();
+    toast(result.message || "Postgres backup queued.");
+    return;
+  }
+  if (cleanupImportJobsButton) {
+    cleanupImportJobs().catch((error) => toast(error.message));
+    return;
+  }
   if (selectImportJobButton && currentViewId === "jobs" && !event.target.closest("a, button, input, select, summary")) {
     selectedImportJobId = selectImportJobButton.dataset.selectImportJob;
     renderJobsPage();
@@ -13686,6 +16561,14 @@ document.addEventListener("click", (event) => {
   }
   if (stopJobButton && !stopJobButton.disabled) {
     stopImportJob(stopJobButton.dataset.jobStop).catch((error) => toast(error.message));
+    return;
+  }
+  if (retryJobButton) {
+    retryImportJob(retryJobButton.dataset.jobRetry).catch((error) => toast(error.message));
+    return;
+  }
+  if (jobChannelApiHistoryButton) {
+    openJobChannelApiHistory(jobChannelApiHistoryButton.dataset.jobChannelApiHistory);
     return;
   }
   if (syncEbaySettingsButton) {
@@ -13770,8 +16653,118 @@ document.addEventListener("click", (event) => {
     exportProductsFromProductsTab().catch((error) => toast(error.message));
     return;
   }
+  if (closeProductExportButton) {
+    closeProductExportModal();
+    return;
+  }
+  if (runProductExportModalButton) {
+    runProductExportModal().catch((error) => toast(error.message));
+    return;
+  }
+  if (productExportModeButton) {
+    syncProductExportModalState();
+    productExportModalState.mode = productExportModeButton.dataset.productExportMode === "custom" ? "custom" : "profile";
+    productExportModalState.step = "columns";
+    renderProductExportModal();
+    return;
+  }
+  if (productExportStepButton) {
+    syncProductExportModalState();
+    productExportModalState.step = productExportStepButton.dataset.productExportStep === "format" ? "format" : "columns";
+    renderProductExportModal();
+    return;
+  }
+  if (productExportFormatInput) {
+    syncProductExportModalState();
+    productExportModalState.formatType = productExportFormatInput.value || "normal";
+    renderProductExportModal();
+    return;
+  }
+  if (productExportPresetButton) {
+    syncProductExportModalState();
+    const preset = productExportPresetButton.dataset.productExportColumnPreset;
+    const fields = productFieldOptions || [];
+    if (preset === "all") productExportModalState.selectedFields = new Set(fields.map((field) => field.key).filter(Boolean));
+    if (preset === "none") productExportModalState.selectedFields = new Set();
+    if (preset === "core") productExportModalState.selectedFields = new Set(["sku", "title", "brand", "vendor", "vendorSku", "mfrPartNumber", "barcode", "category", "price", "cost", "available", "stockQty"]);
+    renderProductExportModal();
+    return;
+  }
+  if (productExportFieldInput) {
+    syncProductExportModalState();
+    const field = productExportFieldInput.value;
+    if (productExportFieldInput.checked) productExportModalState.selectedFields.add(field);
+    else productExportModalState.selectedFields.delete(field);
+    renderProductExportModal();
+    return;
+  }
+  if (exportMappingTemplateButton) {
+    exportMappingTemplate(exportMappingTemplateButton.dataset.exportMappingTemplate).catch((error) => toast(error.message));
+    return;
+  }
+  if (exportProductShopifyButton) {
+    exportSingleProductToShopify(exportProductShopifyButton.dataset.exportProductShopify).catch((error) => toast(error.message));
+    return;
+  }
+  if (syncProductShopifyStatusButton) {
+    syncProductShopifyStatus(syncProductShopifyStatusButton.dataset.syncProductShopifyStatus).catch((error) => toast(error.message));
+    return;
+  }
+  if (syncShopifyStatusAllButton) {
+    closeActionMenus();
+    syncAllShopifyStatuses().catch((error) => toast(error.message));
+    return;
+  }
+  if (refreshChannelApiLogsButton) {
+    loadChannelApiLogs(refreshChannelApiLogsButton.dataset.refreshChannelApiLogs, true).catch((error) => toast(error.message));
+    return;
+  }
+  if (channelApiLogSearchButton) {
+    applyChannelApiLogFiltersFromDom();
+    renderChannelProfile();
+    return;
+  }
+  if (channelApiLogClearButton) {
+    channelApiLogState.filters = { q: "", status: "", transport: "" };
+    renderChannelProfile();
+    return;
+  }
+  if (openApiLogJobButton) {
+    openApiLogJob(openApiLogJobButton.dataset.openApiLogJob);
+    return;
+  }
+  if (openShopifyStatusImportButton) {
+    openShopifyStatusImportModal();
+    return;
+  }
+  if (exportProductTemplateButton) {
+    openProductTemplateExportModal(exportProductTemplateButton.dataset.exportProductTemplate).catch((error) => toast(error.message));
+    return;
+  }
+  if (closeProductTemplateExportButton) {
+    closeProductTemplateExportModal();
+    return;
+  }
+  if (runProductTemplateExportButton) {
+    const modal = $("#product-template-export-modal");
+    const productId = modal?.dataset.productId || selectedProductId;
+    const templateId = $("#product-template-export-select")?.value || selectedExportMappingId;
+    exportSingleProductWithTemplate(productId, templateId, "product-{sku}-template.csv")
+      .then((exported) => {
+        if (exported) {
+          closeProductTemplateExportModal();
+          toast(`Exported ${exported.item.sku} with ${exported.template.name}.`);
+        }
+      })
+      .catch((error) => toast(error.message));
+    return;
+  }
   if (exportSourceProductsButton) {
     exportSourceCatalogProducts().catch((error) => toast(error.message));
+    return;
+  }
+  if (categoryExportButton) {
+    runCategoryExport(categoryExportButton.dataset.categoryExport, categoryExportButton.dataset.categoryExportChannel || "").catch((error) => toast(error.message));
     return;
   }
   if (copyFieldButton) {
@@ -14243,9 +17236,69 @@ document.addEventListener("click", (event) => {
     renderPurchaseOrders();
     return;
   }
+  if (catalogChangesRefreshButton) {
+    await loadCatalogChanges(true);
+    return;
+  }
+  if (skuChangeSearchButton) {
+    catalogChangeState.filters = readCatalogChangeFilters();
+    catalogChangeState.loaded = false;
+    await loadCatalogChanges(true, 1);
+    return;
+  }
+  if (skuChangeClearButton) {
+    catalogChangeState.filters = { q: "", field: "", source: "", vendor: "", direction: "", from: "", to: "" };
+    catalogChangeState.loaded = false;
+    await loadCatalogChanges(true, 1);
+    return;
+  }
+  if (skuChangePageButton) {
+    const nextPage = Math.max(1, Number(skuChangePageButton.dataset.skuChangePage || 1));
+    await loadCatalogChanges(true, nextPage);
+    return;
+  }
+  if (sourceChangeOpenButton) {
+    catalogTab = "source";
+    const search = $("#catalog-search");
+    if (search) search.value = sourceChangeOpenButton.dataset.sourceChangeOpen || "";
+    sourceCatalogPage = 1;
+    renderCatalog();
+    return;
+  }
+  if (dataQualitySearchButton) {
+    dataQualityState.filters = {
+      q: $("#data-quality-search")?.value.trim() || "",
+      issue: $("#data-quality-issue")?.value || "",
+      type: $("#data-quality-type")?.value || "",
+      channel: $("#data-quality-channel")?.value || "",
+      status: $("#data-quality-status")?.value || ""
+    };
+    await loadDataQualityProducts().catch((error) => toast(error.message));
+    return;
+  }
+  if (dataQualityClearButton) {
+    dataQualityState.filters = { q: "", issue: "", type: "", channel: "", status: "" };
+    await loadDataQualityProducts().catch((error) => toast(error.message));
+    return;
+  }
+  if (dataQualityScanButton) {
+    await runDataQualityScan().catch((error) => {
+      dataQualityState.loading = false;
+      dataQualityState.error = error.message || String(error);
+      renderReadinessQueue();
+      toast(error.message);
+    });
+    return;
+  }
+  if (syncShopifyCloseoutsButton) {
+    await syncShopifyCloseoutsCollection().catch((error) => toast(error.message));
+    return;
+  }
   if (catalogTabButton) {
     catalogTab = catalogTabButton.dataset.catalogTab;
     if (catalogTab === "source") sourceCatalogPage = 1;
+    if (catalogTab === "products") productCatalogState.loaded = false;
+    if (catalogTab === "inventory") inventoryCatalogState.loaded = false;
     if (catalogTab === "categories") categoryRequestId += 1;
     renderCatalog();
     return;
@@ -14255,6 +17308,18 @@ document.addEventListener("click", (event) => {
     loadSourceCatalog(sourceCatalogPage);
     return;
   }
+  if (buildSourceSearchIndexButton) {
+    buildSourceSearchIndex();
+    return;
+  }
+  if (buildSourcePerformanceIndexesButton) {
+    buildSourcePerformanceIndexes();
+    return;
+  }
+  if (refreshSourceFacetsButton) {
+    refreshSourceFacets();
+    return;
+  }
   if (sourceRowActionButton) {
     closeActionMenus();
     runSourceCatalogRowAction(sourceRowActionButton.dataset.sourceSku, sourceRowActionButton.dataset.sourceRowAction).catch((error) => toast(error.message));
@@ -14262,6 +17327,13 @@ document.addEventListener("click", (event) => {
   }
   if (promoteCatalogButton) {
     promoteCatalogProduct(promoteCatalogButton.dataset.promoteCatalogSku);
+    return;
+  }
+  if (addFilteredSourceProductsButton) {
+    selectedSourceAllFiltered = true;
+    const bulkAction = $("#catalog-bulk-action");
+    if (bulkAction) bulkAction.value = "add-active";
+    applyCatalogBulkAction().catch((error) => toast(error.message));
     return;
   }
   if (sourceCheck) {
@@ -14354,8 +17426,7 @@ document.addEventListener("click", (event) => {
   if (productCheckAll) {
     selectedProductAllFiltered = false;
     const items = filteredCatalogItems();
-    const pageStart = (productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
-    const pageItems = items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
+    const pageItems = productCatalogState.loaded ? items : items.slice((productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE, productCatalogPage * PRODUCT_CATALOG_PAGE_SIZE);
     for (const item of pageItems) {
       if (productCheckAll.checked) selectedProductIds.add(item.id);
       else selectedProductIds.delete(item.id);
@@ -14366,23 +17437,24 @@ document.addEventListener("click", (event) => {
   }
   if (productPageButton) {
     productCatalogPage = Math.max(1, Number(productPageButton.dataset.productPage || 1));
-    renderProductsTable(filteredCatalogItems());
+    productCatalogState.loaded = false;
+    renderCatalog();
     return;
   }
   if (inventoryPageButton) {
     inventoryCatalogPage = Math.max(1, Number(inventoryPageButton.dataset.inventoryPage || 1));
-    renderInventoryTable(filteredCatalogItems());
+    inventoryCatalogState.loaded = false;
+    renderCatalog();
     return;
   }
   if (selectProductsPageButton || selectProductsFilteredButton) {
     const items = filteredCatalogItems();
-    const pageStart = (productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
     if (selectProductsFilteredButton) {
       selectedProductIds.clear();
       selectedProductAllFiltered = true;
     } else {
       selectedProductAllFiltered = false;
-      const nextItems = items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
+      const nextItems = productCatalogState.loaded ? items : items.slice((productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE, productCatalogPage * PRODUCT_CATALOG_PAGE_SIZE);
       for (const item of nextItems) selectedProductIds.add(item.id);
     }
     renderProductsTable(items);
@@ -14398,8 +17470,7 @@ document.addEventListener("click", (event) => {
   }
   if (loadProductAlternatesPageButton) {
     const items = filteredCatalogItems();
-    const pageStart = (productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
-    const pageItems = items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
+    const pageItems = productCatalogState.loaded ? items : items.slice((productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE, productCatalogPage * PRODUCT_CATALOG_PAGE_SIZE);
     loadProductTableAlternates(pageItems).catch((error) => toast(error.message));
     renderProductsTable(items);
     return;
@@ -14592,9 +17663,15 @@ document.addEventListener("click", (event) => {
   }
   if (productButton) {
     selectedProductId = productButton.dataset.selectProduct;
-    if (productButton.dataset.productTarget === "product-full") selectedProductWorkspaceTab = "home";
+    if (productButton.dataset.productTarget === "product-full") {
+      selectedProductWorkspaceTab = "home";
+      selectedProductEditMode = false;
+    }
     if (productButton.dataset.productTarget) {
       closeActionMenus();
+      if (["product-full", "inventory-full"].includes(productButton.dataset.productTarget)) {
+        await loadProductDetail(selectedProductId);
+      }
       showView(productButton.dataset.productTarget);
     } else {
       renderCatalog();
@@ -14687,13 +17764,35 @@ document.addEventListener("change", (event) => {
     loadCategoryAttributes().catch((error) => toast(error.message));
     return;
   }
+  const dataQualityFilter = event.target.closest("#data-quality-issue, #data-quality-type, #data-quality-channel, #data-quality-status");
+  if (dataQualityFilter) {
+    dataQualityState.filters = {
+      q: $("#data-quality-search")?.value.trim() || "",
+      issue: $("#data-quality-issue")?.value || "",
+      type: $("#data-quality-type")?.value || "",
+      channel: $("#data-quality-channel")?.value || "",
+      status: $("#data-quality-status")?.value || ""
+    };
+    loadDataQualityProducts().catch((error) => toast(error.message));
+    return;
+  }
   const section = event.target.closest("#jobs-filter-section");
   const status = event.target.closest("#jobs-filter-status");
   const direction = event.target.closest("#jobs-filter-direction");
-  if (!section && !status && !direction) return;
+  const channel = event.target.closest("#jobs-filter-channel");
+  const endpoint = event.target.closest("#jobs-filter-endpoint");
+  const channelApiLogFilter = event.target.closest("[data-channel-api-log-filter]");
+  if (channelApiLogFilter) {
+    applyChannelApiLogFiltersFromDom();
+    renderChannelProfile();
+    return;
+  }
+  if (!section && !status && !direction && !channel && !endpoint) return;
   if (section) jobsFilter.section = section.value;
   if (status) jobsFilter.status = status.value;
   if (direction) jobsFilter.direction = direction.value;
+  if (channel) jobsFilter.channel = channel.value;
+  if (endpoint) jobsFilter.endpoint = endpoint.value;
   runWithSearchFeedback(renderJobsPage, "Filtering jobs...");
 });
 
@@ -14716,6 +17815,8 @@ $("#catalog-search").addEventListener("input", () => {
     if (catalogTab === "source") sourceCatalogPage = 1;
     if (catalogTab === "products") productCatalogPage = 1;
     if (catalogTab === "inventory") inventoryCatalogPage = 1;
+    productCatalogState.loaded = false;
+    inventoryCatalogState.loaded = false;
     if (catalogTab === "categories") categoryRequestId += 1;
     selectedSourceSkus.clear();
     selectedSourceAllFiltered = false;
@@ -14732,6 +17833,7 @@ $("#catalog-search").addEventListener("input", () => {
   "#catalog-filter-shopify-status",
   "#catalog-filter-has-stock",
   "#catalog-filter-hazardous",
+  "#catalog-filter-discontinued",
   "#catalog-filter-verified-brand",
   "#catalog-filter-brand",
   "#catalog-filter-category"
@@ -14741,6 +17843,8 @@ $("#catalog-search").addEventListener("input", () => {
       sourceCatalogPage = 1;
       productCatalogPage = 1;
       inventoryCatalogPage = 1;
+      productCatalogState.loaded = false;
+      inventoryCatalogState.loaded = false;
       clearCatalogSelection();
     }, "Filtering catalog...");
   });
@@ -14748,13 +17852,15 @@ $("#catalog-search").addEventListener("input", () => {
 $("#catalog-clear-filters")?.addEventListener("click", () => {
   $("#catalog-search").value = "";
   selectedSourceSuppliers.clear();
-  for (const selector of ["#catalog-filter-supplier", "#catalog-filter-active", "#catalog-filter-product-membership", "#catalog-filter-stock-status", "#catalog-filter-shopify-status", "#catalog-filter-has-stock", "#catalog-filter-hazardous", "#catalog-filter-verified-brand", "#catalog-filter-brand", "#catalog-filter-category"]) {
+  for (const selector of ["#catalog-filter-supplier", "#catalog-filter-active", "#catalog-filter-product-membership", "#catalog-filter-stock-status", "#catalog-filter-shopify-status", "#catalog-filter-has-stock", "#catalog-filter-hazardous", "#catalog-filter-discontinued", "#catalog-filter-verified-brand", "#catalog-filter-brand", "#catalog-filter-category"]) {
     const element = $(selector);
     if (element) element.value = "";
   }
   sourceCatalogPage = 1;
   productCatalogPage = 1;
   inventoryCatalogPage = 1;
+  productCatalogState.loaded = false;
+  inventoryCatalogState.loaded = false;
   runWithSearchFeedback(clearCatalogSelection, "Clearing catalog filters...");
 });
 $("#catalog-apply-bulk")?.addEventListener("click", applyCatalogBulkAction);
@@ -15164,7 +18270,12 @@ document.addEventListener("change", (event) => {
     event.target.value = "";
   }
   if (event.target.id === "product-export-template") {
-    selectedExportMappingId = event.target.value;
+    if (event.target.value !== "custom-export") selectedExportMappingId = event.target.value;
+  }
+  if (event.target.matches("[data-product-export-format-select]")) {
+    productExportModalState.formatType = event.target.value || "normal";
+    renderProductExportModal();
+    return;
   }
   if (channelInput) updateChannelField(channelInput);
   if (systemSettingInput) updateSystemSetting(systemSettingInput).catch((error) => toast(error.message));
@@ -15182,6 +18293,19 @@ if (orderMoneyInput) updateOrderMoney(orderMoneyInput);
 });
 
 document.addEventListener("input", (event) => {
+  const productExportColumnSearch = event.target.closest("[data-product-export-column-search]");
+  if (productExportColumnSearch) {
+    productExportModalState.columnSearch = productExportColumnSearch.value;
+    renderProductExportModal();
+    setTimeout(() => {
+      const input = document.querySelector("[data-product-export-column-search]");
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    }, 0);
+    return;
+  }
   const mappingDraftInput = event.target.closest("[data-export-mapping-draft-field], [data-export-mapping-draft-row-field], [data-export-mapping-draft-raw]");
   if (!mappingDraftInput) return;
   if (mappingDraftInput.matches("[data-export-mapping-draft-raw]")) {
@@ -15194,3 +18318,6 @@ hydrateStaticIcons();
 applyMenuGroupState();
 applyTheme();
 load().catch((error) => toast(error.message));
+setInterval(() => {
+  pollImportJobs().catch(() => {});
+}, 10000);

@@ -2,16 +2,27 @@ const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
 const crypto = require("crypto");
+const readline = require("readline");
 const { once } = require("events");
 const { finished } = require("stream/promises");
 const { BSON } = require("bson");
 const ftp = require("basic-ftp");
-const { readState, writeState, closePool } = require("../db");
+const {
+  closePool,
+  createVendorFeedRun,
+  finishVendorFeedRun,
+  readState,
+  upsertVendorCatalogItemsFromProducts,
+  writeState
+} = require("../db");
 
 const ROOT = path.join(__dirname, "..");
 const DATA_DIR = path.join(ROOT, "data");
 const DEFAULT_LOCAL_DUMP = path.join(ROOT, "data", "imports", "products.bson.gz");
 const DEFAULT_CATALOG_PATH = path.join(ROOT, "data", "catalog", "products.ndjson");
+const CATALOG_CHANGE_SNAPSHOT_FILE = path.join(ROOT, "data", "catalog", "change-snapshot.tsv");
+const CATALOG_CHANGE_LOG_FILE = path.join(ROOT, "data", "catalog", "sku-changes.ndjson");
+const CATALOG_CLOSEOUT_FILE = path.join(ROOT, "data", "catalog", "closeout-skus.csv");
 const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
 const IMPORT_ERROR_COLUMNS = ["row", "record_key", "field", "issue", "raw_value", "sku", "category", "supplier", "details"];
 const DUMP_REVIEW_FIELDS = new Set([
@@ -87,6 +98,8 @@ function parseArgs(argv) {
     dryRun: false,
     inspect: false,
     inventory: false,
+    postgresOnly: false,
+    snapshotOnly: false,
     limit: 0
   };
 
@@ -100,6 +113,10 @@ function parseArgs(argv) {
       options.inspect = true;
     } else if (arg === "--inventory") {
       options.inventory = true;
+    } else if (arg === "--postgres-only") {
+      options.postgresOnly = true;
+    } else if (arg === "--snapshot-only") {
+      options.snapshotOnly = true;
     } else if (arg === "--limit") {
       options.limit = Number(argv[index + 1] || 0);
       index += 1;
@@ -206,6 +223,11 @@ function numberValue(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function yesValue(value) {
+  const text = textValue(value).toLowerCase();
+  return ["y", "yes", "true", "1", "discontinued", "to be discontinued"].includes(text);
+}
+
 function textValue(value) {
   const scalar = scalarValue(value);
   return scalar == null ? "" : String(scalar).trim();
@@ -216,6 +238,138 @@ function listValue(value) {
   const text = textValue(value);
   if (!text) return [];
   return text.split(/[|,]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function trackedNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Number(number.toFixed(4)).toString() : "0";
+}
+
+function trackedProductValues(product = {}) {
+  return {
+    sku: textValue(product.sku),
+    sourceCost: trackedNumber(product.sourceCost ?? product.cost),
+    fobPrice: trackedNumber(product.fobPrice),
+    websitePrice: trackedNumber(product.websitePrice ?? product.price),
+    listPrice: trackedNumber(product.listPrice ?? product.msrp),
+    stockQty: trackedNumber(product.stockQty ?? product.qty),
+    stockStatus: textValue(product.stockStatus),
+    toBeDiscontinued: product.toBeDiscontinued ? "Y" : "",
+    supplier: textValue(product.supplier || product.vendor),
+    supplierCode: textValue(product.supplierCode),
+    vendorSku: textValue(product.vendorSku),
+    productDumpUpdatedAt: textValue(product.productDumpUpdatedAt)
+  };
+}
+
+const SNAPSHOT_COLUMNS = ["sku", "sourceCost", "fobPrice", "websitePrice", "listPrice", "stockQty", "stockStatus", "toBeDiscontinued", "supplier", "supplierCode", "vendorSku", "productDumpUpdatedAt"];
+
+function snapshotLine(product = {}) {
+  const row = trackedProductValues(product);
+  return SNAPSHOT_COLUMNS.map((column) => String(row[column] ?? "").replace(/\t/g, " ").replace(/\r?\n/g, " ")).join("\t");
+}
+
+async function readChangeSnapshot(snapshotPath = CATALOG_CHANGE_SNAPSHOT_FILE) {
+  const rows = new Map();
+  if (!fs.existsSync(snapshotPath)) return rows;
+  const input = fs.createReadStream(snapshotPath, { encoding: "utf8" });
+  const rl = readline.createInterface({ input, crlfDelay: Infinity });
+  let headers = null;
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    if (!headers) {
+      headers = line.split("\t");
+      continue;
+    }
+    const values = line.split("\t");
+    const row = {};
+    headers.forEach((header, index) => { row[header] = values[index] ?? ""; });
+    const sku = textValue(row.sku).toLowerCase();
+    if (sku) rows.set(sku, row);
+  }
+  return rows;
+}
+
+function numericChange(before, after) {
+  const oldValue = Number(before || 0);
+  const newValue = Number(after || 0);
+  const delta = Number((newValue - oldValue).toFixed(4));
+  const percent = oldValue ? Number(((delta / oldValue) * 100).toFixed(2)) : (newValue ? 100 : 0);
+  return { oldValue, newValue, delta, percent };
+}
+
+function productChangeRows(previous = null, product = {}, importId = "", importedAt = "") {
+  if (!previous) return [];
+  const next = trackedProductValues(product);
+  const changes = [];
+  const numericFields = [
+    ["sourceCost", "Cost"],
+    ["fobPrice", "FOB price"],
+    ["websitePrice", "Website price"],
+    ["listPrice", "List price"],
+    ["stockQty", "Stock qty"]
+  ];
+  for (const [field, label] of numericFields) {
+    const change = numericChange(previous[field], next[field]);
+    if (Math.abs(change.delta) < 0.0001) continue;
+    changes.push({
+      id: crypto.randomUUID(),
+      importId,
+      importedAt,
+      sku: next.sku,
+      supplier: next.supplier,
+      supplierCode: next.supplierCode,
+      vendorSku: next.vendorSku,
+      field,
+      label,
+      oldValue: change.oldValue,
+      newValue: change.newValue,
+      delta: change.delta,
+      percent: change.percent,
+      direction: change.delta > 0 ? "up" : "down",
+      toBeDiscontinued: next.toBeDiscontinued === "Y"
+    });
+  }
+  for (const [field, label] of [["stockStatus", "Stock status"], ["supplier", "Supplier"], ["supplierCode", "Supplier code"], ["vendorSku", "Vendor SKU"]]) {
+    if (String(previous[field] || "") === String(next[field] || "")) continue;
+    changes.push({
+      id: crypto.randomUUID(),
+      importId,
+      importedAt,
+      sku: next.sku,
+      supplier: next.supplier,
+      supplierCode: next.supplierCode,
+      vendorSku: next.vendorSku,
+      field,
+      label,
+      oldValue: previous[field] || "",
+      newValue: next[field] || "",
+      delta: "",
+      percent: "",
+      direction: "changed",
+      toBeDiscontinued: next.toBeDiscontinued === "Y"
+    });
+  }
+  if (String(previous.toBeDiscontinued || "") !== String(next.toBeDiscontinued || "")) {
+    changes.push({
+      id: crypto.randomUUID(),
+      importId,
+      importedAt,
+      sku: next.sku,
+      supplier: next.supplier,
+      supplierCode: next.supplierCode,
+      vendorSku: next.vendorSku,
+      field: "toBeDiscontinued",
+      label: "To be discontinued",
+      oldValue: previous.toBeDiscontinued || "",
+      newValue: next.toBeDiscontinued || "",
+      delta: "",
+      percent: "",
+      direction: next.toBeDiscontinued === "Y" ? "closeout" : "changed",
+      toBeDiscontinued: next.toBeDiscontinued === "Y"
+    });
+  }
+  return changes;
 }
 
 function booleanValue(value, fallback = false) {
@@ -532,6 +686,11 @@ function buildProduct(record) {
   const checkedImage = normalizedRecord.checked_image && typeof normalizedRecord.checked_image === "object" ? normalizedRecord.checked_image : {};
   const sourceBrand = textValue(normalizedRecord.sourceBrand || normalizedRecord.brand);
   const sourceCategory = formatCategoryName(normalizedRecord.category || normalizedRecord.product_type);
+  const toBeDiscontinued = yesValue(normalizedRecord.to_be_discontinued ?? normalizedRecord.toBeDiscontinued ?? normalizedRecord.discontinued ?? normalizedRecord.is_discontinued);
+  const tags = [...new Set([
+    ...listValue(normalizedRecord.tags),
+    ...(toBeDiscontinued ? ["closeout", "to-be-discontinued"] : [])
+  ])];
 
   return {
     sku,
@@ -552,6 +711,8 @@ function buildProduct(record) {
     condition: textValue(normalizedRecord.condition) || "New",
     status: normalizedRecord.active === false ? "Draft" : textValue(normalizedRecord.status) || "Draft",
     active: booleanValue(normalizedRecord.active, true),
+    toBeDiscontinued,
+    closeoutEligible: toBeDiscontinued,
     barcode: textValue(normalizedRecord.upc || normalizedRecord.barcode || normalizedRecord.gtin),
     defaultImage,
     images,
@@ -592,7 +753,7 @@ function buildProduct(record) {
     listPrice,
     msrp: listPrice,
     wildcardSearch: textValue(normalizedRecord.wildcardSearch),
-    tags: listValue(normalizedRecord.tags),
+    tags,
     attributes: normalizedRecord.attributes && typeof normalizedRecord.attributes === "object" ? normalizedRecord.attributes : {},
     productDumpCreatedAt: textValue(normalizedRecord.created_at || normalizedRecord.createdAt),
     productDumpUpdatedAt: textValue(normalizedRecord.updated_at || normalizedRecord.updatedAt),
@@ -764,13 +925,27 @@ function mergeProduct(existing, product, state) {
 
 async function importCatalogStore(dumpPath, options) {
   const catalogPath = path.resolve(process.env.PRODUCT_CATALOG_LOCAL_PATH || DEFAULT_CATALOG_PATH);
-  const tempPath = `${catalogPath}.tmp`;
-  const manifestPath = `${catalogPath}.manifest.json`;
-  ensureParentDir(catalogPath);
+  const limitedCatalogWrite = Number(options.limit || 0) > 0;
+  const effectiveCatalogPath = limitedCatalogWrite
+    ? path.join(path.dirname(catalogPath), `products.sample-${options.limit}.ndjson`)
+    : catalogPath;
+  const tempPath = `${effectiveCatalogPath}.tmp`;
+  const manifestPath = `${effectiveCatalogPath}.manifest.json`;
+  const snapshotPath = limitedCatalogWrite
+    ? path.join(path.dirname(CATALOG_CHANGE_SNAPSHOT_FILE), `change-snapshot.sample-${options.limit}.tsv`)
+    : CATALOG_CHANGE_SNAPSHOT_FILE;
+  const closeoutPath = limitedCatalogWrite
+    ? path.join(path.dirname(CATALOG_CLOSEOUT_FILE), `closeout-skus.sample-${options.limit}.csv`)
+    : CATALOG_CLOSEOUT_FILE;
+  const snapshotTempPath = `${snapshotPath}.tmp`;
+  const closeoutTempPath = `${closeoutPath}.tmp`;
+  ensureParentDir(effectiveCatalogPath);
 
-  const stats = { read: 0, importable: 0, skipped: 0 };
+  const stats = { read: 0, importable: 0, skipped: 0, changes: 0, costChanges: 0, stockChanges: 0, closeouts: 0, discontinuedChanges: 0 };
   const startedAt = new Date().toISOString();
+  const importId = crypto.randomUUID();
   const errorRows = [];
+  const previousSnapshot = options.dryRun ? new Map() : await readChangeSnapshot();
   const job = await createDumpImportJob({
     dryRun: options.dryRun,
     section: "Source Catalog",
@@ -779,9 +954,48 @@ async function importCatalogStore(dumpPath, options) {
     filePath: dumpPath,
     message: `Importing source catalog from ${path.basename(dumpPath)}.`
   });
+  if (!options.dryRun) {
+    await createVendorFeedRun({
+      id: importId,
+      jobId: job?.id || "",
+      sourceFile: path.basename(dumpPath),
+      status: "running",
+      startedAt
+    });
+  }
   const seen = new Set();
-  const writer = options.dryRun ? null : fs.createWriteStream(tempPath, { encoding: "utf8" });
+  const vendorCatalogBatch = [];
+  const flushVendorCatalogBatch = async () => {
+    if (options.dryRun || !vendorCatalogBatch.length) return;
+    const result = await upsertVendorCatalogItemsFromProducts(importId, vendorCatalogBatch.splice(0), {
+      source: "product_dump"
+    });
+    stats.sqlChanges = (stats.sqlChanges || 0) + Number(result.changes || 0);
+  };
+  const writeCatalogArtifacts = !options.dryRun && !options.postgresOnly;
+  const writer = writeCatalogArtifacts ? fs.createWriteStream(tempPath, { encoding: "utf8" }) : null;
   const writerFinished = writer ? finished(writer) : null;
+  const snapshotWriter = writeCatalogArtifacts ? fs.createWriteStream(snapshotTempPath, { encoding: "utf8" }) : null;
+  const snapshotFinished = snapshotWriter ? finished(snapshotWriter) : null;
+  const closeoutWriter = writeCatalogArtifacts ? fs.createWriteStream(closeoutTempPath, { encoding: "utf8" }) : null;
+  const closeoutFinished = closeoutWriter ? finished(closeoutWriter) : null;
+  const changeWriter = options.dryRun ? null : fs.createWriteStream(CATALOG_CHANGE_LOG_FILE, { flags: "a", encoding: "utf8" });
+  const changeFinished = changeWriter ? finished(changeWriter) : null;
+
+  if (snapshotWriter) await writeLine(snapshotWriter, `${SNAPSHOT_COLUMNS.join("\t")}\n`);
+  if (closeoutWriter) await writeLine(closeoutWriter, rowsToCsv([{
+    sku: "",
+    supplier: "",
+    supplierCode: "",
+    vendorSku: "",
+    title: "",
+    sourceCost: "",
+    fobPrice: "",
+    stockQty: "",
+    stockStatus: "",
+    category: "",
+    productDumpUpdatedAt: ""
+  }]).split(/\r?\n/)[0] + "\n");
 
   try {
     await forEachDumpRecord(dumpPath, { limit: options.limit }, async (record) => {
@@ -799,14 +1013,58 @@ async function importCatalogStore(dumpPath, options) {
       }
       stats.importable += 1;
       seen.add(product.sku.toLowerCase());
+      vendorCatalogBatch.push(product);
+      if (vendorCatalogBatch.length >= 1000) await flushVendorCatalogBatch();
       if (writer) {
         await writeLine(writer, `${JSON.stringify({ id: product.sku, ...product })}\n`);
       }
+      if (snapshotWriter) await writeLine(snapshotWriter, `${snapshotLine(product)}\n`);
+      if (product.toBeDiscontinued) {
+        stats.closeouts += 1;
+        if (closeoutWriter) {
+          await writeLine(closeoutWriter, rowsToCsv([{
+            sku: product.sku,
+            supplier: product.supplier,
+            supplierCode: product.supplierCode,
+            vendorSku: product.vendorSku,
+            title: product.marketplaceTitle || product.title,
+            sourceCost: product.sourceCost,
+            fobPrice: product.fobPrice,
+            stockQty: product.stockQty,
+            stockStatus: product.stockStatus,
+            category: product.category,
+            productDumpUpdatedAt: product.productDumpUpdatedAt
+          }]).split(/\r?\n/)[1] + "\n");
+        }
+      }
+      if (changeWriter && previousSnapshot.size) {
+        const previous = previousSnapshot.get(product.sku.toLowerCase());
+        const changes = productChangeRows(previous, product, importId, startedAt);
+        for (const change of changes) {
+          stats.changes += 1;
+          if (["sourceCost", "fobPrice", "websitePrice", "listPrice"].includes(change.field)) stats.costChanges += 1;
+          if (["stockQty", "stockStatus"].includes(change.field)) stats.stockChanges += 1;
+          if (change.field === "toBeDiscontinued") stats.discontinuedChanges += 1;
+          await writeLine(changeWriter, `${JSON.stringify(change)}\n`);
+        }
+      }
       if (stats.read % 10000 === 0) {
+        await flushVendorCatalogBatch();
         process.stderr.write(`Processed ${stats.read} records (${stats.importable} catalog products, ${stats.skipped} skipped)\\r`);
       }
     });
+    await flushVendorCatalogBatch();
   } catch (error) {
+    if (!options.dryRun) {
+      await finishVendorFeedRun(importId, {
+        status: "failed",
+        totalRows: stats.read,
+        processedRows: stats.importable,
+        changedRows: stats.sqlChanges || stats.changes,
+        missingRows: stats.skipped,
+        error: error.message
+      });
+    }
     await finishDumpImportJob(job, {
       status: "failed",
       message: `Product dump import failed after ${stats.read} record${stats.read === 1 ? "" : "s"}.`,
@@ -822,36 +1080,75 @@ async function importCatalogStore(dumpPath, options) {
       writer.end();
       await writerFinished;
     }
+    if (snapshotWriter) {
+      snapshotWriter.end();
+      await snapshotFinished;
+    }
+    if (closeoutWriter) {
+      closeoutWriter.end();
+      await closeoutFinished;
+    }
+    if (changeWriter) {
+      changeWriter.end();
+      await changeFinished;
+    }
   }
 
   if (stats.read >= 10000) process.stderr.write("\n");
 
-  if (!options.dryRun) {
-    fs.renameSync(tempPath, catalogPath);
+  if (writeCatalogArtifacts) {
+    fs.renameSync(tempPath, effectiveCatalogPath);
+    fs.renameSync(snapshotTempPath, snapshotPath);
+    fs.renameSync(closeoutTempPath, closeoutPath);
     fs.writeFileSync(manifestPath, JSON.stringify({
       source: path.basename(dumpPath),
-      catalogPath: path.relative(ROOT, catalogPath),
+      catalogPath: path.relative(ROOT, effectiveCatalogPath),
+      sampleOnly: limitedCatalogWrite,
       importedAt: new Date().toISOString(),
       startedAt,
+      importId,
       recordsRead: stats.read,
       productCount: stats.importable,
       skipped: stats.skipped,
-      uniqueSkuCount: seen.size
+      uniqueSkuCount: seen.size,
+      changeTracking: {
+        baselineAvailable: previousSnapshot.size > 0,
+        previousSnapshotCount: previousSnapshot.size,
+        changes: stats.changes,
+        costChanges: stats.costChanges,
+        stockChanges: stats.stockChanges,
+        discontinuedChanges: stats.discontinuedChanges,
+        closeouts: stats.closeouts,
+        snapshotPath: path.relative(ROOT, snapshotPath),
+        changeLogPath: path.relative(ROOT, CATALOG_CHANGE_LOG_FILE),
+        closeoutPath: path.relative(ROOT, closeoutPath)
+      }
     }, null, 2));
   }
 
   await finishDumpImportJob(job, {
     status: stats.skipped ? "warning" : "success",
-    message: `${options.dryRun ? "Dry run checked" : "Imported"} ${stats.importable} source catalog products from ${path.basename(dumpPath)}.`,
+    message: `${options.dryRun ? "Dry run checked" : options.postgresOnly ? "Normalized" : "Imported"} ${stats.importable} source catalog products from ${path.basename(dumpPath)}.`,
     totalRows: stats.read,
     changed: stats.importable,
     created: stats.importable,
     missingCount: stats.skipped,
     errors: importErrorMessages(errorRows),
     errorRows,
-    details: `${seen.size} unique SKUs written to ${path.relative(ROOT, catalogPath)}.`
+    details: `${seen.size} unique SKUs written to ${path.relative(ROOT, effectiveCatalogPath)}. ${previousSnapshot.size ? `${stats.changes.toLocaleString()} tracked field changes detected.` : "Change tracking baseline snapshot created."} ${Number(stats.sqlChanges || 0).toLocaleString()} SQL change events recorded. ${stats.closeouts.toLocaleString()} closeout SKUs found.`
   });
-  console.log(`${options.dryRun ? "Dry run:" : "Imported"} ${stats.importable} catalog products (${stats.skipped} skipped) from ${path.basename(dumpPath)}${options.dryRun ? "" : ` into ${path.relative(ROOT, catalogPath)}`}.`);
+  if (!options.dryRun) {
+    await finishVendorFeedRun(importId, {
+      status: stats.skipped ? "warning" : "success",
+      totalRows: stats.read,
+      processedRows: stats.importable,
+      changedRows: stats.sqlChanges || stats.changes,
+      missingRows: stats.skipped,
+      closeouts: stats.closeouts,
+      previousSnapshotCount: previousSnapshot.size
+    });
+  }
+  console.log(`${options.dryRun ? "Dry run:" : options.postgresOnly ? "Normalized" : "Imported"} ${stats.importable} catalog products (${stats.skipped} skipped) from ${path.basename(dumpPath)}${options.dryRun ? "" : options.postgresOnly ? " into PostgreSQL" : ` into ${path.relative(ROOT, effectiveCatalogPath)}`}.`);
 }
 
 async function importInventoryState(dumpPath, options) {
@@ -932,6 +1229,63 @@ async function importInventoryState(dumpPath, options) {
   console.log(`${options.dryRun ? "Dry run:" : "Imported"} ${stats.importable} inventory products (${stats.created} created, ${stats.updated} updated, ${stats.skipped} skipped) from ${path.basename(dumpPath)}.`);
 }
 
+async function buildCatalogChangeSnapshotFromCurrentCatalog() {
+  const catalogPath = path.resolve(process.env.PRODUCT_CATALOG_LOCAL_PATH || DEFAULT_CATALOG_PATH);
+  if (!fs.existsSync(catalogPath)) throw new Error(`Catalog file not found: ${catalogPath}`);
+  ensureParentDir(CATALOG_CHANGE_SNAPSHOT_FILE);
+  const snapshotTempPath = `${CATALOG_CHANGE_SNAPSHOT_FILE}.tmp`;
+  const closeoutTempPath = `${CATALOG_CLOSEOUT_FILE}.tmp`;
+  const snapshotWriter = fs.createWriteStream(snapshotTempPath, { encoding: "utf8" });
+  const closeoutWriter = fs.createWriteStream(closeoutTempPath, { encoding: "utf8" });
+  const snapshotFinished = finished(snapshotWriter);
+  const closeoutFinished = finished(closeoutWriter);
+  const closeoutHeader = rowsToCsv([{ sku: "", supplier: "", supplierCode: "", vendorSku: "", title: "", sourceCost: "", fobPrice: "", stockQty: "", stockStatus: "", category: "", productDumpUpdatedAt: "" }]).split(/\r?\n/)[0];
+  let count = 0;
+  let closeouts = 0;
+  await writeLine(snapshotWriter, `${SNAPSHOT_COLUMNS.join("\t")}\n`);
+  await writeLine(closeoutWriter, `${closeoutHeader}\n`);
+  const input = fs.createReadStream(catalogPath, { encoding: "utf8" });
+  const rl = readline.createInterface({ input, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    let product;
+    try {
+      product = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    count += 1;
+    await writeLine(snapshotWriter, `${snapshotLine(product)}\n`);
+    if (product.toBeDiscontinued) {
+      closeouts += 1;
+      await writeLine(closeoutWriter, rowsToCsv([{
+        sku: product.sku,
+        supplier: product.supplier,
+        supplierCode: product.supplierCode,
+        vendorSku: product.vendorSku,
+        title: product.marketplaceTitle || product.title,
+        sourceCost: product.sourceCost,
+        fobPrice: product.fobPrice,
+        stockQty: product.stockQty,
+        stockStatus: product.stockStatus,
+        category: product.category,
+        productDumpUpdatedAt: product.productDumpUpdatedAt
+      }]).split(/\r?\n/)[1] + "\n");
+    }
+    if (count % 100000 === 0) process.stderr.write(`Snapshot ${count.toLocaleString()} products (${closeouts.toLocaleString()} closeouts)\\r`);
+  }
+  snapshotWriter.end();
+  closeoutWriter.end();
+  await snapshotFinished;
+  await closeoutFinished;
+  fs.renameSync(snapshotTempPath, CATALOG_CHANGE_SNAPSHOT_FILE);
+  fs.renameSync(closeoutTempPath, CATALOG_CLOSEOUT_FILE);
+  if (count >= 100000) process.stderr.write("\n");
+  console.log(`Snapshot created for ${count.toLocaleString()} products with ${closeouts.toLocaleString()} closeout SKUs.`);
+  console.log(`Snapshot: ${path.relative(ROOT, CATALOG_CHANGE_SNAPSHOT_FILE)}`);
+  console.log(`Closeouts: ${path.relative(ROOT, CATALOG_CLOSEOUT_FILE)}`);
+}
+
 async function main() {
   loadEnv();
   const options = parseArgs(process.argv.slice(2));
@@ -996,6 +1350,11 @@ async function main() {
       };
     });
     console.log(JSON.stringify({ file: path.basename(dumpPath), inspected: sample.length, sample }, null, 2));
+    return;
+  }
+
+  if (options.snapshotOnly) {
+    await buildCatalogChangeSnapshotFromCurrentCatalog();
     return;
   }
 

@@ -90,19 +90,59 @@ Public access is risky until authentication is added.
 
 ## PostgreSQL
 
-The app can use PostgreSQL when `DATABASE_URL` is present in `.env`.
+The app can use PostgreSQL when `DATABASE_URL` is present in `.env`. PostgreSQL is the intended storage path for a large catalog because it avoids rewriting the full `data/db.json` file for one product/job update.
 
 ```env
 DATABASE_URL=postgres://postgres:data_plus_123@localhost:5432/dataplus
 ```
 
-Migrate the current JSON state into PostgreSQL:
+Check the current database connection from the running app:
+
+```text
+http://localhost:4173/api/system/database
+```
+
+Create/update the relational catalog operations schema and migrate current products into PostgreSQL:
 
 ```powershell
 npm run db:migrate
 ```
 
-For safety, the app still writes a JSON backup to `data/db.json` after each save.
+By default this migrates products, vendors, identifiers, vendor offer snapshots, jobs, and the remaining app state documents into PostgreSQL. It intentionally does not write the old whole-app `app_state` JSON snapshot because that can hit Node string-size limits on large catalogs. If you need the old legacy snapshot for a one-time test, run:
+
+```powershell
+npm run db:migrate -- --legacy-app-state
+```
+
+During the transition, `data/db.json` remains a fallback/backup. Runtime reads and writes prefer PostgreSQL when `DATABASE_URL` is configured.
+
+Large app modules are split into `entity_documents` rows by collection, so categories, orders, POs, vendors, brands, warehouses, templates, and channel connections can change without rewriting one large JSON document.
+
+Marketplace-critical lookup data is also normalized:
+- `product_aliases` powers SKU alias lookup for future imports and mapped marketplace SKUs.
+- `category_channel_mappings` tracks each master category's channel mapping status and attributes by marketplace.
+- `order_records` / `order_line_items` and `purchase_order_records` / `purchase_order_line_items` make queues, reporting, committed/reserved/incoming inventory, and PO status queryable without scanning app JSON.
+- `shopify_product_statuses`, `product_quality_rows`, and `product_change_events` power channel filters, readiness queues, and SKU/cost/stock change tracking directly from PostgreSQL.
+
+Operational jobs are stored in `operations_jobs` with artifacts in `operation_artifacts`. Exports, large source catalog imports, data-quality scans, source catalog index/facet rebuilds, and PostgreSQL backups are cancelable from Jobs and report progress/ETA.
+
+Use `GET /api/system/readiness` to confirm Postgres source-of-truth health, row counts, job mode, quality snapshot size, Shopify status rows, and API log retention. Use Jobs > Backup Postgres to create a background backup of operational tables. By default the huge source catalog tables are skipped; turn on `DATAPLUS_BACKUP_INCLUDE_SOURCE_CATALOG=true` or the matching system setting only when you want a full source-catalog backup too.
+
+For long-running production work, switch Jobs > Job runner to `External worker`, then run:
+
+```powershell
+npm run worker
+```
+
+External worker tasks include `postgres-backup`, `data-quality-scan`, mapped product exports such as Shopify/Matrixify templates, category exports, source catalog imports, source catalog search-index builds, source catalog performance-index builds, source catalog facet refreshes, mapped CSV product imports, Shopify status CSV imports, Shopify status API syncs, eBay catalog/account/location syncs, and product dump imports. The worker claims queued tasks from PostgreSQL, updates progress in `operations_jobs`, and writes artifacts/results back to Jobs so the web server request does not have to stay alive. Data quality worker scans can be toggled from Jobs with `Run quality scans on worker`; automatic post-import scans can be toggled separately.
+
+For local verification or scheduled maintenance runs, use one pass of the worker:
+
+```powershell
+npm run worker:once
+```
+
+External-worker jobs are intentionally not cleaned up as abandoned server jobs. If the web server restarts, queued worker jobs stay queued until a worker claims them, and running worker jobs keep their last persisted progress in Jobs. Failed, stopped, and completed worker jobs can be retried from the job profile; the retry creates a fresh queued job with the same saved worker payload and original file reference when one exists.
 
 ## Temu order import
 
@@ -254,6 +294,8 @@ Import the full product dump into the offline source catalog:
 ```powershell
 npm run import:product-dump -- data/imports/products.bson.gz
 ```
+
+When PostgreSQL is configured, this import also normalizes vendor feed data into `vendor_feed_runs`, `vendor_catalog_items`, `vendor_catalog_snapshots`, and `product_change_events`. The NDJSON catalog remains as a backup/search artifact. Limited test imports write `data/catalog/products.sample-<limit>.ndjson` so they do not replace the full source catalog.
 
 Rebuild the fast source catalog index after importing or replacing `data/catalog/products.ndjson`:
 

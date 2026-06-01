@@ -6,6 +6,7 @@ const crypto = require("crypto");
 const readline = require("readline");
 const zlib = require("zlib");
 const postgres = require("./db");
+const { createDataQualityEngine } = require("./lib/data-quality");
 
 const PORT = process.env.PORT || 4173;
 const ROOT = __dirname;
@@ -14,6 +15,11 @@ const DATA_DIR = path.join(ROOT, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
 const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
+const STATE_SUMMARY_FILE = path.join(DATA_DIR, "state-summary.json");
+const LITE_STATE_FILE = path.join(DATA_DIR, "lite-state.json");
+const SHOPIFY_STATUS_FILE = path.join(DATA_DIR, "shopify-status-map.json");
+const PRODUCT_SOURCE_ENRICHMENT_FILE = path.join(DATA_DIR, "product-source-enrichment.json");
+const DATA_QUALITY_SNAPSHOT_FILE = path.join(DATA_DIR, "data-quality-snapshot.json");
 const ATTRIBUTE_MAPPINGS_FILE = path.join(DATA_DIR, "attribute-mappings.json");
 const ATTRIBUTE_GROUPS_FILE = path.join(DATA_DIR, "attribute-groups.json");
 const CATEGORY_CACHE_FILE = path.join(DATA_DIR, "category-cache.json");
@@ -30,14 +36,29 @@ const CATALOG_INDEX_MANIFEST_FILE = path.join(CATALOG_INDEX_DIR, "manifest.json"
 const CATALOG_INDEX_SUPPLIERS_FILE = path.join(CATALOG_INDEX_DIR, "suppliers.json");
 const CATALOG_INDEX_SUPPLIER_DIR = path.join(CATALOG_INDEX_DIR, "suppliers");
 const CATALOG_INDEX_SKU_DIR = path.join(CATALOG_INDEX_DIR, "sku-shards");
+const CATALOG_CHANGE_LOG_FILE = path.join(DATA_DIR, "catalog", "sku-changes.ndjson");
+const CATALOG_CHANGE_SNAPSHOT_FILE = path.join(DATA_DIR, "catalog", "change-snapshot.tsv");
+const CATALOG_CLOSEOUT_FILE = path.join(DATA_DIR, "catalog", "closeout-skus.csv");
 const SHOPIFY_TAXONOMY_INDEX_FILE = path.join(DATA_DIR, "channel-taxonomies", "shopify", "taxonomy-index.json");
+const CHANNEL_API_LOG_FILE = path.join(DATA_DIR, "channel-api-log.ndjson");
+const CHANNEL_API_LOG_RETENTION_DAYS = Math.max(1, Number(process.env.CHANNEL_API_LOG_RETENTION_DAYS || 30) || 30);
 const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
+const IMPORT_JOB_STORE_FILE = path.join(DATA_DIR, "import-jobs.json");
 const CONNECTOR_STATE_FILE = path.join(DATA_DIR, "connectors.json");
 const ENV_FILE = path.join(ROOT, ".env");
+const BACKGROUND_EXPORT_PAGE_SIZE = 100;
+const IMPORT_JOB_FILE_RETENTION_DAYS = 30;
+const SERVER_STARTED_AT = new Date();
+const activeJobProgress = new Map();
+const activeJobRecords = new Map();
 let dbCache = { mtimeMs: 0, data: null };
 let publicStateJsonCache = null;
+let shopifyAccessTokenCache = { token: "", expiresAt: 0, scope: "" };
+let shopifyStatusMapCache = { mtimeMs: 0, data: null };
+let productSourceEnrichmentCache = { mtimeMs: 0, data: null };
+let channelApiLogPruneLastRun = 0;
 
-const SOURCES = ["Temu", "eBay", "Whatnot", "TikTok Shop"];
+const SOURCES = ["Shopify", "Temu", "eBay", "Whatnot", "TikTok Shop"];
 const ORDER_PREFIX = "DP";
 
 const PRODUCT_MAPPING_FIELDS = [
@@ -75,6 +96,8 @@ const PRODUCT_MAPPING_FIELDS = [
   { key: "reorderPoint", label: "Reorder point", type: "number" },
   { key: "stockQty", label: "Source stock quantity", type: "number" },
   { key: "stockStatus", label: "Stock status", type: "text" },
+  { key: "toBeDiscontinued", label: "To be discontinued", type: "boolean" },
+  { key: "closeoutEligible", label: "Closeout eligible", type: "computed" },
   { key: "weightOz", label: "Weight oz", type: "number" },
   { key: "lengthIn", label: "Length in", type: "number" },
   { key: "widthIn", label: "Width in", type: "number" },
@@ -256,12 +279,97 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayMaxImages: 12,
   ebayAutoPublish: false,
   ebayRequireImage: true,
-  ebayBestOfferEnabled: false
+  ebayBestOfferEnabled: false,
+  shopifyStoreDomain: "",
+  shopifyAdminApiVersion: "2026-04",
+  shopifyDefaultStatus: "draft",
+  shopifyInventoryPolicy: "deny",
+  shopifyFulfillmentService: "manual",
+  shopifySyncStatusEnabled: true,
+  shopifyAutoSyncStatus: false,
+  shopifyStatusSyncLimit: 100,
+  shopifyPublishScope: "global",
+  shopifyCloseoutsEnabled: true
 };
 
 const DEFAULT_SYSTEM_SETTINGS = {
-  autoLoadProductAlternates: false
+  autoLoadProductAlternates: false,
+  backgroundJobsMode: "inline",
+  autoDataQualityScanAfterImports: true,
+  dataQualityWorkerEnabled: true,
+  sourceCatalogDefaultImportMode: "new-and-update",
+  backupIncludeSourceCatalog: false,
+  backupRetentionDays: 30,
+  jobsRetentionDays: IMPORT_JOB_FILE_RETENTION_DAYS,
+  jobsRetentionAutoCleanupEnabled: true,
+  requireAdminConfirmationForDeletes: true,
+  systemUsers: [
+    { id: "owner", name: "Luis", email: "", role: "Owner", status: "active" }
+  ],
+  permissionRoles: [
+    { id: "owner", name: "Owner", permissions: ["all"] },
+    { id: "admin", name: "Admin", permissions: ["catalog", "orders", "channels", "system"] },
+    { id: "operator", name: "Operator", permissions: ["catalog", "orders"] }
+  ]
 };
+
+const UOM_DEFINITIONS = {
+  EA: "Each",
+  PL: "Pallet",
+  CS: "Case",
+  BD: "Bundle",
+  RL: "Roll",
+  SK: "Skid",
+  BX: "Box",
+  PK: "Pack",
+  KT: "Kit",
+  CT: "Carton",
+  BL: "Bale",
+  RM: "Ream",
+  FT: "Foot",
+  DR: "Drum",
+  PR: "Pair",
+  BG: "Bag",
+  ST: "Set",
+  CL: "Coil",
+  CX: "Carton",
+  GL: "Gallon",
+  LB: "Pound",
+  SO: "Spool",
+  CA: "Can",
+  DS: "Dispenser",
+  TU: "Tube",
+  YD: "Yard",
+  TB: "Tub"
+};
+
+function normalizedUomCode(value = "") {
+  return String(value || "").trim().toUpperCase();
+}
+
+function productUomQty(item = {}) {
+  const qty = Number(sourceNumberValue(item.uomQty ?? item.uom_qty ?? item.minQuantity ?? item.min_quantity ?? item.quantityIncrements ?? item.quantity_increments ?? 1));
+  return Number.isFinite(qty) && qty > 1 ? qty : 1;
+}
+
+function productUomInfo(item = {}) {
+  const code = normalizedUomCode(item.uom ?? item.unitOfMeasure ?? item.unit_of_measure ?? "");
+  const name = UOM_DEFINITIONS[code] || code || "Each";
+  const qty = productUomQty(item);
+  return {
+    code: code || "EA",
+    name,
+    qty,
+    isMultiUnit: qty > 1,
+    display: qty > 1 ? (code === "EA" ? `Pack of ${qty}` : `${name} of ${qty}`) : name
+  };
+}
+
+function productSellUnitCost(item = {}) {
+  const unitCost = Number(sourceNumberValue(item.sourceCost ?? item.cost ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? item.price ?? 0));
+  if (!(unitCost > 0)) return 0;
+  return Math.round(unitCost * productUomQty(item) * 10000) / 10000;
+}
 
 function pricedFromCost(cost, markupPercent = DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent) {
   const numericCost = Number(sourceNumberValue(cost));
@@ -605,9 +713,9 @@ function ensureDb() {
   }
 }
 
-async function readDb() {
+async function readDb(options = {}) {
   ensureDb();
-  const stored = postgres.isPostgresEnabled() ? await postgres.readState() : null;
+  const stored = postgres.isPostgresEnabled() ? await postgres.readState(options) : null;
   if (!stored && dbCache.data) {
     const stats = fs.statSync(DB_FILE);
     if (stats.mtimeMs === dbCache.mtimeMs) return dbCache.data;
@@ -615,17 +723,14 @@ async function readDb() {
   const db = stored || JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
   db.exportMappings = readExportMappingsStore(db.exportMappings);
   const normalized = normalizeDb(db);
-  if (normalized.__normalizedChanged) {
-    delete normalized.__normalizedChanged;
-    await writeDb(normalized);
-  }
+  if (normalized.__normalizedChanged) delete normalized.__normalizedChanged;
   if (!stored) dbCache = { mtimeMs: fs.statSync(DB_FILE).mtimeMs, data: normalized };
   return normalized;
 }
 
-async function readDbFast() {
+async function readDbFast(options = {}) {
   ensureDb();
-  const stored = postgres.isPostgresEnabled() ? await postgres.readState() : null;
+  const stored = postgres.isPostgresEnabled() ? await postgres.readState(options) : null;
   if (!stored && dbCache.data) {
     const stats = fs.statSync(DB_FILE);
     if (stats.mtimeMs === dbCache.mtimeMs) return dbCache.data;
@@ -636,6 +741,161 @@ async function readDbFast() {
   return db;
 }
 
+function stripTopLevelJsonField(text, fieldName, replacement) {
+  const key = `"${fieldName}"`;
+  const keyIndex = text.indexOf(key);
+  if (keyIndex < 0) return text;
+  const colonIndex = text.indexOf(":", keyIndex + key.length);
+  if (colonIndex < 0) return text;
+  let valueStart = colonIndex + 1;
+  while (/\s/.test(text[valueStart] || "")) valueStart += 1;
+  let index = valueStart;
+  let inString = false;
+  let escape = false;
+  let depth = 0;
+  const first = text[index];
+  if (first === "{" || first === "[") {
+    depth = 1;
+    index += 1;
+    for (; index < text.length; index += 1) {
+      const char = text[index];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (char === "\\") {
+        escape = inString;
+        continue;
+      }
+      if (char === "\"") {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (char === "{" || char === "[") depth += 1;
+      else if (char === "}" || char === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          index += 1;
+          break;
+        }
+      }
+    }
+  } else {
+    while (index < text.length && text[index] !== "," && text[index] !== "\n" && text[index] !== "\r") index += 1;
+  }
+  return `${text.slice(0, valueStart)}${replacement}${text.slice(index)}`;
+}
+
+function readStateSummarySync() {
+  try {
+    if (!fs.existsSync(STATE_SUMMARY_FILE)) return null;
+    return JSON.parse(fs.readFileSync(STATE_SUMMARY_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeStateSummarySync(db = {}) {
+  try {
+    fs.mkdirSync(path.dirname(STATE_SUMMARY_FILE), { recursive: true });
+    fs.writeFileSync(STATE_SUMMARY_FILE, JSON.stringify(summarize(db), null, 2));
+    const liteDb = {
+      sequence: db.sequence || {},
+      syncRuns: Array.isArray(db.syncRuns) ? db.syncRuns.slice(0, 100) : [],
+      importJobs: Array.isArray(db.importJobs) ? db.importJobs.slice(0, 100) : [],
+      connections: Array.isArray(db.connections) ? db.connections : [],
+      connectorState: db.connectorState || {},
+      exportMappings: db.exportMappings || [],
+      marketplaceTemplates: db.marketplaceTemplates || [],
+      orders: Array.isArray(db.orders) ? db.orders.slice(0, 25) : [],
+      orderDrafts: [],
+      returns: [],
+      cancellations: [],
+      customers: Array.isArray(db.customers) ? db.customers.slice(0, 25) : [],
+      purchaseOrders: Array.isArray(db.purchaseOrders) ? db.purchaseOrders.slice(0, 25) : [],
+      vendors: Array.isArray(db.vendors) ? db.vendors.slice(0, 100) : [],
+      brands: Array.isArray(db.brands) ? db.brands.slice(0, 100) : [],
+      warehouses: Array.isArray(db.warehouses) ? db.warehouses : [],
+      inventoryLedger: [],
+      inventory: [],
+      categorySettings: [],
+      vendorCategoryMappings: {},
+      sourceCatalogOverrides: {},
+      catalogImportReviews: [],
+      knowledgeSettings: db.knowledgeSettings || {},
+      knowledgeArticles: Array.isArray(db.knowledgeArticles) ? db.knowledgeArticles.slice(0, 100) : [],
+      systemSettings: db.systemSettings || {},
+      __summaryOverride: summarize(db)
+    };
+    fs.writeFileSync(LITE_STATE_FILE, JSON.stringify(liteDb, null, 2));
+  } catch {
+    // Summary cache is an optimization; never block a write on it.
+  }
+}
+
+function readDbLiteFast() {
+  ensureDb();
+  if (postgres.isPostgresEnabled()) return null;
+  if (fs.existsSync(LITE_STATE_FILE)) {
+    const db = JSON.parse(fs.readFileSync(LITE_STATE_FILE, "utf8"));
+    db.exportMappings = readExportMappingsStore(db.exportMappings);
+    db.systemSettings = readSystemSettingsStore(db.systemSettings);
+    const rows = Array.isArray(db.connections) ? db.connections : [];
+    const known = new Set(rows.map((connection) => String(connection.name || "").trim().toLowerCase()).filter(Boolean));
+    for (const name of SOURCES) {
+      if (known.has(name.toLowerCase())) continue;
+      rows.push({ id: crypto.randomUUID(), name, connected: name === "Shopify" ? Boolean(shopifyAdminConfig().shop) : false, virtual: true });
+      known.add(name.toLowerCase());
+    }
+    db.connections = rows.map(normalizeChannel);
+    db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
+    db.__summaryOverride = db.__summaryOverride || readStateSummarySync();
+    return db;
+  }
+  const summary = readStateSummarySync();
+  return {
+    sequence: {},
+    syncRuns: [],
+    importJobs: [],
+    connections: SOURCES.map((name) => normalizeChannel({ id: crypto.randomUUID(), name, connected: name === "Shopify" ? Boolean(shopifyAdminConfig().shop) : false, virtual: true })),
+    connectorState: {},
+    exportMappings: readExportMappingsStore([]),
+    marketplaceTemplates: [],
+    orders: [],
+    orderDrafts: [],
+    returns: [],
+    cancellations: [],
+    customers: [],
+    purchaseOrders: [],
+    vendors: [],
+    brands: [],
+    warehouses: [],
+    inventoryLedger: [],
+    inventory: [],
+    categorySettings: [],
+    vendorCategoryMappings: {},
+    sourceCatalogOverrides: {},
+    catalogImportReviews: [],
+    knowledgeSettings: {},
+    knowledgeArticles: [],
+    systemSettings: readSystemSettingsStore({}),
+    __summaryOverride: summary || {
+      inventoryCount: 0,
+      openOrders: 0,
+      lowStock: 0,
+      reserved: 0,
+      sales: 0,
+      profit: 0,
+      customerCount: 0,
+      repeatCustomers: 0,
+      purchaseOrderCount: 0,
+      openPurchaseOrders: 0,
+      sources: []
+    }
+  };
+}
+
 async function writeDb(db) {
   publicStateJsonCache = null;
   if (postgres.isPostgresEnabled()) {
@@ -643,6 +903,7 @@ async function writeDb(db) {
     return;
   }
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+  writeStateSummarySync(db);
   dbCache = { mtimeMs: fs.statSync(DB_FILE).mtimeMs, data: db };
 }
 
@@ -650,11 +911,16 @@ function writeDbSync(db) {
   publicStateJsonCache = null;
   if (postgres.isPostgresEnabled()) return;
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+  writeStateSummarySync(db);
   dbCache = { mtimeMs: fs.statSync(DB_FILE).mtimeMs, data: db };
 }
 
 function isReportableOrder(order = {}) {
   return !["void", "canceled", "cancelled", "deleted"].includes(String(order.status || "").toLowerCase());
+}
+
+function isOpenPurchaseOrder(po = {}) {
+  return ["draft", "submitted", "partially_received"].includes(String(po.status || "").trim().toLowerCase());
 }
 
 function readConnectorStateSync() {
@@ -671,10 +937,617 @@ function writeConnectorStateSync(state) {
   ensureDb();
   const next = state && typeof state === "object" && !Array.isArray(state) ? state : {};
   fs.writeFileSync(CONNECTOR_STATE_FILE, JSON.stringify(next, null, 2));
+  if (postgres.isPostgresEnabled()) {
+    postgres.writeStateDocuments({ connectorState: next }).catch((error) => {
+      console.error("Unable to persist connector state to Postgres", error.message || error);
+    });
+  }
 }
 
 function mergedConnectorState(db = {}) {
+  if (postgres.isPostgresEnabled() && db.connectorState && Object.keys(db.connectorState || {}).length) {
+    return { ...readConnectorStateSync(), ...(db.connectorState || {}) };
+  }
   return { ...(db.connectorState || {}), ...readConnectorStateSync() };
+}
+
+function readShopifyStatusMapSync() {
+  try {
+    if (!fs.existsSync(SHOPIFY_STATUS_FILE)) return {};
+    const stats = fs.statSync(SHOPIFY_STATUS_FILE);
+    if (shopifyStatusMapCache.data && shopifyStatusMapCache.mtimeMs === stats.mtimeMs) {
+      return shopifyStatusMapCache.data;
+    }
+    const parsed = JSON.parse(fs.readFileSync(SHOPIFY_STATUS_FILE, "utf8"));
+    const data = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    shopifyStatusMapCache = { mtimeMs: stats.mtimeMs, data };
+    return data;
+  } catch {
+    return {};
+  }
+}
+
+function writeShopifyStatusMapSync(statusMap = {}) {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(SHOPIFY_STATUS_FILE, JSON.stringify(statusMap, null, 2));
+  shopifyStatusMapCache = { mtimeMs: fs.statSync(SHOPIFY_STATUS_FILE).mtimeMs, data: statusMap };
+  if (postgres.isPostgresEnabled()) {
+    postgres.upsertShopifyStatusMap(statusMap).catch((error) => {
+      console.error("Unable to persist Shopify status map to Postgres", error.message || error);
+    });
+  }
+}
+
+function mergeShopifyStatusMapSync(statusPatch = {}) {
+  const patch = statusPatch && typeof statusPatch === "object" && !Array.isArray(statusPatch) ? statusPatch : {};
+  if (!Object.keys(patch).length) return readShopifyStatusMapSync();
+  const statusMap = { ...readShopifyStatusMapSync(), ...patch };
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(SHOPIFY_STATUS_FILE, JSON.stringify(statusMap, null, 2));
+  shopifyStatusMapCache = { mtimeMs: fs.statSync(SHOPIFY_STATUS_FILE).mtimeMs, data: statusMap };
+  if (postgres.isPostgresEnabled()) {
+    postgres.upsertShopifyStatusMap(patch).catch((error) => {
+      console.error("Unable to persist Shopify status map patch to Postgres", error.message || error);
+    });
+  }
+  return statusMap;
+}
+
+function shopifyStatusForSku(statusMap = {}, sku = "") {
+  return statusMap[String(sku || "").trim().toLowerCase()] || null;
+}
+
+function withShopifyStatus(item = {}, statusMap = {}) {
+  const status = shopifyStatusForSku(statusMap, item.sku);
+  if (!status) return item;
+  const itemSyncedAt = Date.parse(item.shopifySyncedAt || "");
+  const statusSyncedAt = Date.parse(status.shopifySyncedAt || status.syncedAt || "");
+  if (Number.isFinite(itemSyncedAt) && (!Number.isFinite(statusSyncedAt) || statusSyncedAt < itemSyncedAt)) {
+    return { ...status, ...item };
+  }
+  return { ...item, ...status };
+}
+
+function readProductSourceEnrichmentSync() {
+  try {
+    if (!fs.existsSync(PRODUCT_SOURCE_ENRICHMENT_FILE)) return {};
+    const stats = fs.statSync(PRODUCT_SOURCE_ENRICHMENT_FILE);
+    if (productSourceEnrichmentCache.data && productSourceEnrichmentCache.mtimeMs === stats.mtimeMs) {
+      return productSourceEnrichmentCache.data;
+    }
+    const parsed = JSON.parse(fs.readFileSync(PRODUCT_SOURCE_ENRICHMENT_FILE, "utf8"));
+    const data = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    for (const [key, payload] of Object.entries({ ...data })) {
+      if (!payload || typeof payload !== "object") continue;
+      for (const alias of [key, payload.sku, payload.id, payload.externalId, payload.vendorSku, payload.shopifyVariantSku]) {
+        const aliasKey = String(alias || "").trim().toLowerCase();
+        if (aliasKey && !data[aliasKey]) data[aliasKey] = payload;
+      }
+    }
+    productSourceEnrichmentCache = { mtimeMs: stats.mtimeMs, data };
+    return data;
+  } catch {
+    return {};
+  }
+}
+
+function writeProductSourceEnrichmentSync(enrichmentMap = {}) {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(PRODUCT_SOURCE_ENRICHMENT_FILE, JSON.stringify(enrichmentMap, null, 2));
+  productSourceEnrichmentCache = { mtimeMs: fs.statSync(PRODUCT_SOURCE_ENRICHMENT_FILE).mtimeMs, data: enrichmentMap };
+  if (postgres.isPostgresEnabled()) {
+    postgres.upsertProductSourceEnrichmentMap(enrichmentMap).catch((error) => {
+      console.error("Unable to persist source enrichment map to Postgres", error.message || error);
+    });
+  }
+  return enrichmentMap;
+}
+
+function productSourceEnrichmentForSku(enrichmentMap = {}, skuOrItem = "") {
+  const item = skuOrItem && typeof skuOrItem === "object" ? skuOrItem : null;
+  const candidates = item
+    ? [
+        item.sku,
+        item.id,
+        item.externalId,
+        item.sourceSku,
+        item.vendorSku,
+        item.shopifyVariantSku,
+        item.sources?.productDump,
+        item.sources?.sourceCatalog,
+        item.sources?.sourceEnrichment,
+        String(item.shopifyHandle || "").match(/(bus[a-z0-9]+)$/i)?.[1]
+      ]
+    : [skuOrItem];
+  for (const candidate of candidates) {
+    const key = String(candidate || "").trim().toLowerCase();
+    if (key && enrichmentMap[key]) return enrichmentMap[key];
+  }
+  return null;
+}
+
+function sourceEnrichmentPreserveFields(item = {}) {
+  const fields = {
+    id: item.id,
+    reserved: item.reserved,
+    aliases: item.aliases,
+    shadowSkus: item.shadowSkus,
+    serialUnits: item.serialUnits,
+    warehouseStock: item.warehouseStock,
+    ebayListing: item.ebayListing,
+    shopifyId: item.shopifyId,
+    shopifyVariantId: item.shopifyVariantId,
+    shopifyHandle: item.shopifyHandle,
+    shopifyStatus: item.shopifyStatus,
+    shopifyPublished: item.shopifyPublished,
+    shopifyPublishedAt: item.shopifyPublishedAt,
+    shopifyUpdatedAt: item.shopifyUpdatedAt,
+    shopifySyncedAt: item.shopifySyncedAt,
+    shopifySyncSource: item.shopifySyncSource,
+    shopifyOnlineStoreUrl: item.shopifyOnlineStoreUrl,
+    shopifyVariantSku: item.shopifyVariantSku,
+    shopifyVariantCount: item.shopifyVariantCount
+  };
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined && value !== null && value !== ""));
+}
+
+function sourceEnrichedItem(item = {}, enrichmentMap = {}) {
+  const enrichment = productSourceEnrichmentForSku(enrichmentMap, item);
+  if (!enrichment) return item;
+  const preserve = sourceEnrichmentPreserveFields(item);
+  const existingCategory = sourceTextValue(item.category || item.mainCategory);
+  const shell = isInventoryShellProduct(item);
+  const merged = shell ? { ...enrichment, ...preserve } : { ...enrichment, ...item };
+  if (!shell) {
+    for (const field of [
+      "title", "marketplaceTitle", "shortDescription", "longDescription", "brand", "sourceBrand",
+      "barcode", "defaultImage", "originalImage", "manufacturer", "mfrPartNumber", "vendorSku",
+      "supplier", "supplierCode", "vendor", "unspsc", "uom", "uomQty", "minQuantity",
+      "quantityIncrements", "countryOfOrigin", "sourceCategory", "vendorCategory"
+    ]) {
+      if (!sourceTextValue(item[field]) && sourceTextValue(enrichment[field])) merged[field] = enrichment[field];
+    }
+    const hasWarehouseStockRows = Array.isArray(item.warehouseStock) && item.warehouseStock.length > 0;
+    for (const field of [
+      "qty", "stockQty", "price", "websitePrice", "cost", "sourceCost", "msrp", "listPrice",
+      "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength",
+      "packageWeight", "packageWidth"
+    ]) {
+      if (hasWarehouseStockRows && ["qty", "stockQty"].includes(field)) continue;
+      if (!(Number(item[field] || 0) > 0) && Number(enrichment[field] || 0) > 0) merged[field] = enrichment[field];
+    }
+    if ((!Array.isArray(item.images) || !item.images.length) && Array.isArray(enrichment.images)) merged.images = enrichment.images;
+  }
+  if (existingCategory) {
+    merged.category = existingCategory;
+    merged.mainCategory = item.mainCategory || existingCategory;
+    merged.categoryVerified = item.categoryVerified;
+  }
+  merged.sources = { ...(enrichment.sources || {}), ...(item.sources || {}), sourceEnrichment: enrichment.sku || item.sku };
+  merged.productManagerFields = Object.keys(item.productManagerFields || {}).length ? item.productManagerFields : enrichment.productManagerFields;
+  merged.original = item.original || enrichment.original;
+  merged.updatedAt = item.updatedAt || enrichment.updatedAt;
+  return merged;
+}
+
+function parseDateMs(value = "") {
+  const ms = new Date(value || 0).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function daysSince(value = "") {
+  const ms = parseDateMs(value);
+  if (!ms) return null;
+  return Math.max(0, Math.floor((Date.now() - ms) / 86400000));
+}
+
+function dataQualityIssueKey(label = "") {
+  return String(label || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "unknown";
+}
+
+function hasText(value, min = 1) {
+  return String(value || "").replace(/<[^>]+>/g, " ").trim().length >= min;
+}
+
+let sharedDataQualityEngine = null;
+
+function dataQualityEngine() {
+  if (!sharedDataQualityEngine) {
+    sharedDataQualityEngine = createDataQualityEngine({
+      productImageUrls,
+      productIsCloseout,
+      productUomInfo,
+      shopifyPurchaseVariants,
+      sourceCatalogCost,
+      marketplaceSuggestedPrice,
+      marketplaceListingQuantity,
+      categoryMappingForProduct,
+      categorySettingForProduct,
+      ebayListingCategoryId,
+      ebayChannelSettings,
+      withShopifyStatus
+    });
+  }
+  return sharedDataQualityEngine;
+}
+
+function productQualityChecks(item = {}) {
+  return dataQualityEngine().productQualityChecks(item);
+}
+
+function productQualitySummary(item = {}) {
+  return dataQualityEngine().productQualitySummary(item);
+}
+
+function categoryQualityLookupKey(value = "") {
+  return formatCategoryName(value || "").toLowerCase();
+}
+
+function buildCategoryQualityContext(db = {}) {
+  const settings = normalizeCategorySettings(db.categorySettings).map((row) => applyStoredAttributeMappingsToCategory(row));
+  const byName = new Map();
+  const byId = new Map();
+  for (const setting of settings) {
+    const nameKey = categoryQualityLookupKey(setting.name || setting.category || "");
+    if (nameKey && !byName.has(nameKey)) byName.set(nameKey, setting);
+    const idKey = String(setting.categoryId || "").trim().toLowerCase();
+    if (idKey && !byId.has(idKey)) byId.set(idKey, setting);
+  }
+  return { byName, byId, ebaySettings: ebayChannelSettings(db), shopifySettings: findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS };
+}
+
+function categorySettingFromQualityContext(context = {}, item = {}) {
+  const categoryKey = categoryQualityLookupKey(item.category || item.mainCategory || "");
+  if (!categoryKey) return null;
+  return context.byName?.get(categoryKey) || context.byId?.get(categoryKey) || null;
+}
+
+function categoryChannelMappingFromQualityContext(context = {}, item = {}, channel = "shopify") {
+  return categorySettingFromQualityContext(context, item)?.mappings?.[channel] || null;
+}
+
+function shopifyQualitySummary(db, item = {}, context = null) {
+  const sharedContext = context ? {
+    ...context,
+    categoryChannelMapping: (product, channel) => categoryChannelMappingFromQualityContext(context, product, channel)
+  } : null;
+  return dataQualityEngine().shopifyQualitySummary(db, item, sharedContext);
+}
+
+function ebayQualitySummary(db, item = {}, context = null) {
+  const sharedContext = context ? {
+    ...context,
+    categoryChannelMapping: (product, channel) => categoryChannelMappingFromQualityContext(context, product, channel)
+  } : null;
+  return dataQualityEngine().ebayQualitySummary(db, item, sharedContext);
+}
+
+function pricingQualitySummary(item = {}) {
+  return dataQualityEngine().pricingQualitySummary(item);
+}
+
+function categoryQualitySummary(db, item = {}, context = null) {
+  const sharedContext = context ? {
+    ...context,
+    categoryChannelMapping: (product, channel) => categoryChannelMappingFromQualityContext(context, product, channel),
+    categorySetting: (product) => categorySettingFromQualityContext(context, product)
+  } : null;
+  return dataQualityEngine().categoryQualitySummary(db, item, sharedContext);
+}
+
+function dataQualityRow(db, rawItem = {}, shopifyStatusMap = {}, context = null) {
+  const sharedContext = context ? {
+    ...context,
+    categoryChannelMapping: (product, channel) => categoryChannelMappingFromQualityContext(context, product, channel),
+    categorySetting: (product) => categorySettingFromQualityContext(context, product)
+  } : null;
+  return dataQualityEngine().dataQualityRow(db, rawItem, shopifyStatusMap, sharedContext);
+}
+
+function dataQualitySnapshot(db, options = {}) {
+  const shopifyStatusMap = options.shopifyStatusMap || readShopifyStatusMapSync();
+  const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
+  const context = options.context || buildCategoryQualityContext(db);
+  const rows = (db.inventory || []).map((item) => dataQualityRow(db, sourceEnrichedItem(item, sourceEnrichmentMap), shopifyStatusMap, context));
+  const issueCounts = {};
+  const typeCounts = {};
+  for (const row of rows) {
+    for (const issue of row.issues) issueCounts[issue] = (issueCounts[issue] || 0) + 1;
+    for (const type of row.issueTypes) typeCounts[type] = (typeCounts[type] || 0) + 1;
+  }
+  const summary = {
+    generatedAt: new Date().toISOString(),
+    total: rows.length,
+    productReady: rows.filter((row) => row.ready).length,
+    needsWork: rows.filter((row) => !row.ready).length,
+    shopifyReady: rows.filter((row) => row.shopifyReady).length,
+    shopifyLive: rows.filter((row) => row.shopifyLive).length,
+    ebayReady: rows.filter((row) => row.ebayReady).length,
+    ebayLive: rows.filter((row) => row.ebayLive).length,
+    staleShopify: rows.filter((row) => row.staleDays !== null && row.staleDays > 7).length,
+    closeouts: rows.filter((row) => row.toBeDiscontinued).length,
+    issueCounts: Object.fromEntries(Object.entries(issueCounts).sort((a, b) => b[1] - a[1])),
+    typeCounts
+  };
+  return { summary, rows };
+}
+
+function writeDataQualitySnapshot(snapshot = {}) {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(DATA_QUALITY_SNAPSHOT_FILE, JSON.stringify(snapshot, null, 2));
+  if (postgres.isPostgresEnabled()) {
+    postgres.replaceProductQualityRows(snapshot.rows || []).catch((error) => {
+      console.error("Unable to persist data-quality snapshot to Postgres", error.message || error);
+    });
+    postgres.writeStateDocuments({ dataQualitySummary: snapshot.summary || {} }).catch((error) => {
+      console.error("Unable to persist data-quality summary to Postgres", error.message || error);
+    });
+  }
+}
+
+function readDataQualitySnapshot() {
+  try {
+    if (!fs.existsSync(DATA_QUALITY_SNAPSHOT_FILE)) return null;
+    return JSON.parse(fs.readFileSync(DATA_QUALITY_SNAPSHOT_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function filterDataQualityRows(snapshot = {}, query = {}) {
+  const q = String(query.q || "").trim().toLowerCase();
+  const issue = String(query.issue || "").trim().toLowerCase();
+  const type = String(query.type || "").trim().toLowerCase();
+  const channel = String(query.channel || "").trim().toLowerCase();
+  const status = String(query.status || "").trim().toLowerCase();
+  let rows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
+  if (q) rows = rows.filter((row) => [row.sku, row.title, row.brand, row.vendor, row.category].some((value) => String(value || "").toLowerCase().includes(q)));
+  if (issue) rows = rows.filter((row) => (row.issueKeys || []).includes(issue) || (row.issues || []).some((label) => dataQualityIssueKey(label) === issue));
+  if (type) rows = rows.filter((row) => (row.issueTypes || []).includes(type));
+  if (channel === "shopify") rows = rows.filter((row) => !row.shopifyReady || !row.shopifyLive);
+  if (channel === "ebay") rows = rows.filter((row) => !row.ebayReady || !row.ebayLive);
+  if (status === "ready") rows = rows.filter((row) => row.ready);
+  if (status === "needs-work") rows = rows.filter((row) => !row.ready);
+  if (status === "shopify-ready") rows = rows.filter((row) => row.shopifyReady);
+  if (status === "shopify-live") rows = rows.filter((row) => row.shopifyLive);
+  if (status === "stale") rows = rows.filter((row) => row.staleDays !== null && row.staleDays > 7);
+  if (status === "closeout") rows = rows.filter((row) => row.toBeDiscontinued);
+  return rows.sort((a, b) => a.productScore - b.productScore || String(a.sku).localeCompare(String(b.sku)));
+}
+
+async function dataQualitySnapshotFromPostgres(options = {}) {
+  const baseDb = normalizeDb(await readDbFast({ skipInventory: true }));
+  const shopifyStatusMap = options.shopifyStatusMap || readShopifyStatusMapSync();
+  const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
+  const context = buildCategoryQualityContext(baseDb);
+  const total = await postgres.countProducts();
+  const pageSize = Math.max(100, Math.min(5000, Number(options.pageSize || 1000)));
+  const rows = [];
+  const issueCounts = {};
+  const typeCounts = {};
+  const progress = typeof options.progress === "function" ? options.progress : null;
+  const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
+  for (let page = 1; rows.length < total || page === 1; page += 1) {
+    if (isCanceled()) throw new Error("Job was canceled.");
+    const result = await postgres.listProducts({ page, limit: pageSize });
+    const items = result?.inventory || result?.items || [];
+    if (!items.length) break;
+    for (const item of items) {
+      const row = dataQualityRow(baseDb, sourceEnrichedItem(item, sourceEnrichmentMap), shopifyStatusMap, context);
+      rows.push(row);
+      for (const issue of row.issues) issueCounts[issue] = (issueCounts[issue] || 0) + 1;
+      for (const type of row.issueTypes) typeCounts[type] = (typeCounts[type] || 0) + 1;
+    }
+    progress?.({ phase: "scanning_products", processedRows: rows.length, totalRows: total });
+    if (items.length < pageSize) break;
+  }
+  const summary = {
+    generatedAt: new Date().toISOString(),
+    total: rows.length,
+    productReady: rows.filter((row) => row.ready).length,
+    needsWork: rows.filter((row) => !row.ready).length,
+    shopifyReady: rows.filter((row) => row.shopifyReady).length,
+    shopifyLive: rows.filter((row) => row.shopifyLive).length,
+    ebayReady: rows.filter((row) => row.ebayReady).length,
+    ebayLive: rows.filter((row) => row.ebayLive).length,
+    staleShopify: rows.filter((row) => row.staleDays !== null && row.staleDays > 7).length,
+    closeouts: rows.filter((row) => row.toBeDiscontinued).length,
+    issueCounts: Object.fromEntries(Object.entries(issueCounts).sort((a, b) => b[1] - a[1])),
+    typeCounts,
+    storage: "postgres"
+  };
+  return { summary, rows };
+}
+
+async function startDataQualityScanJob(jobId) {
+  setTimeout(async () => {
+    const job = activeJobRecords.get(jobId) || normalizeImportJob({ id: jobId });
+    try {
+      if (!["queued", "running"].includes(String(job.status || "").toLowerCase())) return;
+      setActiveJobProgress(jobId, {
+        status: "running",
+        phase: "starting",
+        processedRows: 0,
+        totalRows: Number(job.totalRows || 0) || 0,
+        startedAt: job.startedAt || new Date().toISOString()
+      });
+      job.status = "running";
+      job.startedAt = job.startedAt || new Date().toISOString();
+      job.updatedAt = new Date().toISOString();
+      job.message = "Scanning product data quality...";
+      upsertImportJobStore(job);
+      let lastProgressPersistedAt = 0;
+      const progress = (patch = {}) => {
+        const next = setActiveJobProgress(jobId, {
+          ...patch,
+          status: "running",
+          startedAt: job.startedAt || new Date().toISOString()
+        });
+        job.totalRows = next.totalRows;
+        job.processedRows = next.processedRows;
+        job.progressPercent = next.progressPercent;
+        job.estimatedSecondsRemaining = next.estimatedSecondsRemaining;
+        job.phase = next.phase;
+        job.lastProgressAt = next.lastProgressAt;
+        activeJobRecords.set(jobId, normalizeImportJob(job));
+        if (Date.now() - lastProgressPersistedAt > 1000 || Number(next.progressPercent || 0) >= 100) {
+          lastProgressPersistedAt = Date.now();
+          upsertImportJobStore(job);
+        }
+      };
+      const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(jobId)?.status || job.status || "").toLowerCase());
+      const snapshot = postgres.isPostgresEnabled()
+        ? await dataQualitySnapshotFromPostgres({ progress, isCanceled })
+        : dataQualitySnapshot(normalizeDb(await readDbFast()), { progress, isCanceled });
+      progress({ phase: "saving_snapshot", processedRows: snapshot.summary.total, totalRows: snapshot.summary.total });
+      writeDataQualitySnapshot(snapshot);
+      activeJobProgress.delete(jobId);
+      finishImportJob(job, {
+        status: "success",
+        message: `Data quality scan finished for ${Number(snapshot.summary.total || 0).toLocaleString()} products.`,
+        totalRows: snapshot.summary.total,
+        processedRows: snapshot.summary.total,
+        changed: snapshot.summary.needsWork,
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0,
+        phase: "complete",
+        details: `${Number(snapshot.summary.needsWork || 0).toLocaleString()} products need work.`
+      });
+      upsertImportJobStore(job);
+    } catch (error) {
+      activeJobProgress.delete(jobId);
+      const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+      finishImportJob(job, {
+        status: wasCanceled ? "stopped" : "failed",
+        message: wasCanceled ? "Data quality scan was canceled." : error.message || "Data quality scan failed.",
+        errors: [error.message || "Data quality scan failed."],
+        missingCount: wasCanceled ? 0 : 1
+      });
+      upsertImportJobStore(job);
+    }
+  }, 1000);
+}
+
+function startPostgresBackupJob(jobId, attrs = {}) {
+  setTimeout(async () => {
+    const job = activeJobRecords.get(jobId) || normalizeImportJob({ id: jobId, operation: "Postgres backup" });
+    try {
+      if (!postgres.isPostgresEnabled()) throw new Error("Postgres is not configured.");
+      if (!["queued", "running"].includes(String(job.status || "").toLowerCase())) return;
+      const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+      const includeSourceCatalog = attrs.includeSourceCatalog === undefined
+        ? settings.backupIncludeSourceCatalog === true
+        : attrs.includeSourceCatalog === true || String(attrs.includeSourceCatalog || "").toLowerCase() === "true";
+      job.status = "running";
+      job.phase = "starting";
+      job.startedAt = job.startedAt || new Date().toISOString();
+      job.updatedAt = new Date().toISOString();
+      job.message = "Creating Postgres backup...";
+      upsertImportJobStore(job);
+      let lastProgressPersistedAt = 0;
+      const progress = (patch = {}) => {
+        const next = setActiveJobProgress(jobId, {
+          ...patch,
+          status: "running",
+          startedAt: job.startedAt
+        });
+        Object.assign(job, {
+          processedRows: next.processedRows,
+          totalRows: next.totalRows,
+          progressPercent: next.progressPercent,
+          estimatedSecondsRemaining: next.estimatedSecondsRemaining,
+          phase: next.phase,
+          lastProgressAt: next.lastProgressAt,
+          message: next.message || job.message
+        });
+        activeJobRecords.set(jobId, normalizeImportJob(job));
+        if (Date.now() - lastProgressPersistedAt > 1000 || Number(next.progressPercent || 0) >= 100) {
+          lastProgressPersistedAt = Date.now();
+          upsertImportJobStore(job);
+        }
+      };
+      const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(jobId)?.status || job.status || "").toLowerCase());
+      const backup = await postgres.createPostgresBackup({
+        outputDir: path.join(DATA_DIR, "backups"),
+        includeSourceCatalog,
+        onProgress: progress,
+        isCanceled
+      });
+      attachImportJobOriginalFilePath(job, backup.manifestPath, "manifest.json");
+      activeJobProgress.delete(jobId);
+      finishImportJob(job, {
+        status: "success",
+        message: `Postgres backup complete: ${Number(backup.rows || 0).toLocaleString()} rows across ${Number(backup.tables?.length || 0).toLocaleString()} tables.`,
+        details: `Backup folder: ${backup.backupDir}${backup.skippedTables?.length ? `. Skipped large tables by setting: ${backup.skippedTables.join(", ")}.` : ""}`,
+        totalRows: backup.totalRows || backup.rows || 0,
+        processedRows: backup.rows || backup.totalRows || 0,
+        changed: backup.tables?.length || 0,
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0,
+        phase: "complete"
+      });
+      upsertImportJobStore(job);
+    } catch (error) {
+      activeJobProgress.delete(jobId);
+      const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+      finishImportJob(job, {
+        status: wasCanceled ? "stopped" : "failed",
+        message: wasCanceled ? "Postgres backup was canceled." : error.message || "Postgres backup failed.",
+        errors: wasCanceled ? [] : [error.message || "Postgres backup failed."],
+        missingCount: wasCanceled ? 0 : 1,
+        phase: wasCanceled ? "stopped" : "failed",
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+    } finally {
+      activeJobRecords.delete(jobId);
+    }
+  }, 1000);
+}
+
+function shouldRunJobsInline() {
+  const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+  return String(settings.backgroundJobsMode || "inline").toLowerCase() !== "worker";
+}
+
+function shouldRunDataQualityInline() {
+  const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+  return String(settings.backgroundJobsMode || "inline").toLowerCase() !== "worker" || settings.dataQualityWorkerEnabled !== true;
+}
+
+async function queueDataQualityScanIfEnabled(reason = "Catalog data changed") {
+  try {
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (settings.autoDataQualityScanAfterImports !== true) return null;
+    const existing = [...activeJobRecords.values()].find((job) => /data quality/i.test(String(job.operation || job.message || "")) && ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+    if (existing) return existing;
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    const totalRows = postgres.isPostgresEnabled() ? await postgres.countProducts() : (db.inventory || []).length;
+    const job = createImportJob(db, {
+      section: "Products",
+      operation: "Data quality scan",
+      direction: "scan",
+      status: "queued",
+      fileName: "data-quality-snapshot.json",
+      totalRows,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: shouldRunDataQualityInline() ? "" : "data-quality-scan",
+      workerPayload: shouldRunDataQualityInline() ? {} : { reason },
+      message: `Data quality scan queued after ${reason}.`
+    });
+    upsertImportJobStore(job);
+    if (shouldRunDataQualityInline()) {
+      activeJobRecords.set(job.id, normalizeImportJob(job));
+      setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows, processedRows: 0, progressPercent: 0 });
+      startDataQualityScanJob(job.id);
+    }
+    return job;
+  } catch (error) {
+    console.error("Unable to queue data quality scan", error.message || error);
+    return null;
+  }
 }
 
 function loadLocalEnv() {
@@ -1131,7 +2004,14 @@ function normalizeDb(db) {
   db.knowledgeSettings = normalizeKnowledgeSettings(db.knowledgeSettings);
   db.knowledgeArticles = normalizeKnowledgeArticles(db.knowledgeArticles);
   db.systemSettings = readSystemSettingsStore(db.systemSettings);
-  db.connections = (db.connections || SOURCES.map((name) => ({ id: crypto.randomUUID(), name }))).map(normalizeChannel);
+  const connectionRows = Array.isArray(db.connections) ? db.connections : SOURCES.map((name) => ({ id: crypto.randomUUID(), name }));
+  const knownConnections = new Set(connectionRows.map((connection) => String(connection.name || "").trim().toLowerCase()).filter(Boolean));
+  for (const name of SOURCES) {
+    if (knownConnections.has(name.toLowerCase())) continue;
+    connectionRows.push({ id: crypto.randomUUID(), name, connected: name === "Shopify" ? Boolean(shopifyAdminConfig().shop) : false, virtual: true });
+    knownConnections.add(name.toLowerCase());
+  }
+  db.connections = connectionRows.map(normalizeChannel);
   const websitePriceSettings = findChannelByName(db, "Shopify")?.settings || db.connections[0]?.settings || DEFAULT_CHANNEL_SETTINGS;
   const websiteMarkupPercent = Number(websitePriceSettings.priceMarkupPercent || DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent);
 
@@ -1141,14 +2021,20 @@ function normalizeDb(db) {
     const currentCategory = formatCategoryName(item.category ?? defaults.category ?? "");
     const sourceCategory = formatCategoryName(item.sourceCategory ?? item.vendorCategory ?? item.productManagerFields?.category ?? item.original?.category ?? (categoryVerified ? "" : currentCategory));
     const sourceCost = sourceCatalogCost({ ...defaults, ...item });
+    const sellUnitCost = productSellUnitCost({ ...defaults, ...item, sourceCost });
     const listPrice = Number(sourceNumberValue(item.listPrice ?? item.list_price ?? item.msrp ?? defaults.msrp ?? 0));
-    const websitePrice = Number(sourceNumberValue(item.websitePrice ?? item.shopifyPrice ?? item.channelPrice ?? pricedFromCost(sourceCost, websiteMarkupPercent)));
+    const websitePrice = Math.max(
+      Number(sourceNumberValue(item.websitePrice ?? item.shopifyPrice ?? item.channelPrice ?? 0)),
+      pricedFromCost(sellUnitCost || sourceCost, websiteMarkupPercent)
+    );
+    const uomInfo = productUomInfo(item);
     const product = {
       title: item.title ?? item.name ?? defaults.title ?? item.sku ?? "",
       price: websitePrice,
       websitePrice,
       cost: sourceCost,
       sourceCost,
+      sellUnitCost,
       listPrice,
       msrp: listPrice,
       brand: formatBrandName(item.brand ?? defaults.brand ?? ""),
@@ -1184,6 +2070,10 @@ function normalizeDb(db) {
       shopifyPublishedAt: item.shopifyPublishedAt ?? item.shopify_published_at ?? "",
       shopifyUpdatedAt: item.shopifyUpdatedAt ?? item.shopify_updated_at ?? "",
       shopifySyncedAt: item.shopifySyncedAt ?? item.shopify_synced_at ?? "",
+      shopifySyncSource: item.shopifySyncSource ?? item.shopify_sync_source ?? "",
+      shopifyOnlineStoreUrl: item.shopifyOnlineStoreUrl ?? item.shopify_online_store_url ?? "",
+      shopifyVariantSku: item.shopifyVariantSku ?? item.shopify_variant_sku ?? "",
+      shopifyVariantCount: Number(item.shopifyVariantCount ?? item.shopify_variant_count ?? 0),
       defaultImage: item.defaultImage ?? item.default_image ?? "",
       manufacturer: item.manufacturer ?? "",
       mfrPartNumber: item.mfrPartNumber ?? item.mfr_part_number ?? "",
@@ -1191,8 +2081,11 @@ function normalizeDb(db) {
       supplier: item.supplier ?? "",
       supplierCode: item.supplierCode ?? item.supplier_code ?? "",
       unspsc: item.unspsc ?? "",
-      uom: item.uom ?? "",
-      uomQty: item.uomQty ?? item.uom_qty ?? "",
+      uom: uomInfo.code,
+      uomName: uomInfo.name,
+      uomQty: String(uomInfo.qty),
+      uomDisplay: uomInfo.display,
+      isMultiUnit: uomInfo.isMultiUnit,
       minQuantity: item.minQuantity ?? item.min_quantity ?? "",
       quantityIncrements: item.quantityIncrements ?? item.quantity_increments ?? "",
       hazardous: Boolean(item.hazardous ?? false),
@@ -1555,7 +2448,6 @@ function normalizeDb(db) {
     vendor.lastPOAt = pos[0]?.createdAt || vendor.lastPOAt || "";
   }
 
-  if (changed) writeDbSync(db);
   if (changed) db.__normalizedChanged = true;
   else delete db.__normalizedChanged;
   return db;
@@ -1727,10 +2619,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   return {
@@ -1873,11 +2765,13 @@ function normalizeExportMappingRow(row = {}) {
 
 function normalizeExportMapping(template = {}) {
   const mappings = parseMappingRows(template.mappings).map(normalizeExportMappingRow).filter((row) => row.externalColumn);
+  const formatType = String(template.formatType || template.exportFormat || template.marketplaceFormat || "normal").trim().toLowerCase() || "normal";
   return {
     id: template.id || crypto.randomUUID(),
     name: String(template.name || template.source || "Product Export Mapping").trim(),
     source: String(template.source || template.channel || "Custom").trim(),
     format: "csv",
+    formatType,
     mode: template.mode || "both",
     status: template.status || "active",
     mappings,
@@ -1965,10 +2859,42 @@ async function writeExportMappingsStore(exportMappings = []) {
 }
 
 function normalizeSystemSettings(settings = {}) {
-  return { ...DEFAULT_SYSTEM_SETTINGS, ...(settings && typeof settings === "object" ? settings : {}) };
+  const normalized = { ...DEFAULT_SYSTEM_SETTINGS, ...(settings && typeof settings === "object" ? settings : {}) };
+  if (settings.backgroundJobsMode === undefined && process.env.DATAPLUS_BACKGROUND_JOBS_MODE) normalized.backgroundJobsMode = process.env.DATAPLUS_BACKGROUND_JOBS_MODE;
+  if (settings.backupIncludeSourceCatalog === undefined && process.env.DATAPLUS_BACKUP_INCLUDE_SOURCE_CATALOG) normalized.backupIncludeSourceCatalog = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_BACKUP_INCLUDE_SOURCE_CATALOG).toLowerCase());
+  if (settings.backupRetentionDays === undefined && process.env.DATAPLUS_BACKUP_RETENTION_DAYS) normalized.backupRetentionDays = Number(process.env.DATAPLUS_BACKUP_RETENTION_DAYS || 30);
+  if (settings.autoDataQualityScanAfterImports === undefined && process.env.DATAPLUS_AUTO_DATA_QUALITY_SCAN_AFTER_IMPORTS) normalized.autoDataQualityScanAfterImports = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_AUTO_DATA_QUALITY_SCAN_AFTER_IMPORTS).toLowerCase());
+  if (settings.dataQualityWorkerEnabled === undefined && process.env.DATAPLUS_DATA_QUALITY_WORKER_ENABLED) normalized.dataQualityWorkerEnabled = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_DATA_QUALITY_WORKER_ENABLED).toLowerCase());
+  if (!["inline", "worker"].includes(String(normalized.backgroundJobsMode || "").toLowerCase())) normalized.backgroundJobsMode = "inline";
+  if (!["new-and-update", "new-only", "update-existing"].includes(String(normalized.sourceCatalogDefaultImportMode || "").toLowerCase())) normalized.sourceCatalogDefaultImportMode = "new-and-update";
+  normalized.backgroundJobsMode = String(normalized.backgroundJobsMode || "inline").toLowerCase();
+  normalized.sourceCatalogDefaultImportMode = String(normalized.sourceCatalogDefaultImportMode || "new-and-update").toLowerCase();
+  normalized.backupRetentionDays = Math.max(1, Math.min(365, Number(normalized.backupRetentionDays || 30) || 30));
+  normalized.jobsRetentionDays = IMPORT_JOB_FILE_RETENTION_DAYS;
+  normalized.jobsRetentionAutoCleanupEnabled = normalized.jobsRetentionAutoCleanupEnabled !== false;
+  normalized.systemUsers = (Array.isArray(normalized.systemUsers) ? normalized.systemUsers : DEFAULT_SYSTEM_SETTINGS.systemUsers)
+    .map((user, index) => ({
+      id: String(user.id || crypto.randomUUID?.() || `user-${index + 1}`),
+      name: sourceTextValue(user.name || user.displayName || ""),
+      email: sourceTextValue(user.email || ""),
+      role: sourceTextValue(user.role || "Operator"),
+      status: ["active", "inactive"].includes(String(user.status || "").toLowerCase()) ? String(user.status).toLowerCase() : "active"
+    }))
+    .filter((user) => user.name || user.email);
+  normalized.permissionRoles = (Array.isArray(normalized.permissionRoles) ? normalized.permissionRoles : DEFAULT_SYSTEM_SETTINGS.permissionRoles)
+    .map((role, index) => ({
+      id: String(role.id || `role-${index + 1}`),
+      name: sourceTextValue(role.name || ""),
+      permissions: Array.isArray(role.permissions) ? role.permissions.map(sourceTextValue).filter(Boolean) : parseList(role.permissions)
+    }))
+    .filter((role) => role.name);
+  return normalized;
 }
 
 function readSystemSettingsStore(fallback = {}) {
+  if (postgres.isPostgresEnabled() && fallback && typeof fallback === "object" && Object.keys(fallback).length) {
+    return normalizeSystemSettings(fallback);
+  }
   if (fs.existsSync(SYSTEM_SETTINGS_FILE)) {
     try {
       return normalizeSystemSettings(JSON.parse(fs.readFileSync(SYSTEM_SETTINGS_FILE, "utf8")));
@@ -1983,7 +2909,155 @@ function writeSystemSettingsStore(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(SYSTEM_SETTINGS_FILE, JSON.stringify(normalized, null, 2));
+  if (postgres.isPostgresEnabled()) {
+    postgres.writeStateDocuments({ systemSettings: normalized }).catch((error) => {
+      console.error("Unable to persist system settings to Postgres", error.message || error);
+    });
+  }
   return normalized;
+}
+
+async function readWorkerStatus(settings = readSystemSettingsStore({})) {
+  const docs = postgres.isPostgresEnabled() ? await postgres.readStateDocuments().catch(() => ({})) : {};
+  const heartbeat = docs?.workerHeartbeat && typeof docs.workerHeartbeat === "object" ? docs.workerHeartbeat : {};
+  const lastSeenAt = heartbeat.lastSeenAt || "";
+  const lastSeenMs = lastSeenAt ? new Date(lastSeenAt).getTime() : 0;
+  const ageSeconds = lastSeenMs ? Math.max(0, Math.round((Date.now() - lastSeenMs) / 1000)) : null;
+  const staleAfterSeconds = Math.max(30, Math.ceil((Number(heartbeat.heartbeatMs || heartbeat.pollMs || 5000) * 3) / 1000));
+  const configured = String(settings.backgroundJobsMode || "inline").toLowerCase() === "worker";
+  const heartbeatStatus = String(heartbeat.status || "unknown").toLowerCase();
+  const online = configured && ageSeconds !== null && ageSeconds <= staleAfterSeconds && !["stopped", "failed", "exited"].includes(heartbeatStatus);
+  return {
+    configured,
+    online,
+    stale: configured && !online,
+    status: heartbeat.status || "unknown",
+    workerId: heartbeat.workerId || "",
+    currentJobId: heartbeat.currentJobId || "",
+    currentTask: heartbeat.currentTask || "",
+    lastSeenAt,
+    ageSeconds,
+    staleAfterSeconds,
+    supportedTasks: Array.isArray(heartbeat.supportedTasks) ? heartbeat.supportedTasks : [],
+    pollMs: Number(heartbeat.pollMs || 0) || 0,
+    heartbeatMs: Number(heartbeat.heartbeatMs || 0) || 0,
+    runOnce: heartbeat.runOnce === true
+  };
+}
+
+function workerJobLooksAbandoned(job = {}, workerStatus = {}) {
+  if (!isExternalWorkerJob(job)) return false;
+  const status = String(job.status || "").toLowerCase();
+  if (status !== "running") return false;
+  if (workerStatus.online) return false;
+  const updatedMs = new Date(job.workerLastSeenAt || job.updatedAt || job.startedAt || 0).getTime();
+  if (!updatedMs) return true;
+  const graceSeconds = Math.max(60, Number(workerStatus.staleAfterSeconds || 30) * 2);
+  return Date.now() - updatedMs > graceSeconds * 1000;
+}
+
+function jobFileRetentionCutoff() {
+  return Date.now() - (IMPORT_JOB_FILE_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+}
+
+function jobCompletedBeforeRetentionCutoff(job = {}) {
+  const status = String(job.status || "").toLowerCase();
+  if (!["success", "warning", "failed", "stopped"].includes(status)) return false;
+  const completedAt = new Date(job.finishedAt || job.updatedAt || job.startedAt || job.createdAt || 0).getTime();
+  return Number.isFinite(completedAt) && completedAt > 0 && completedAt < jobFileRetentionCutoff();
+}
+
+function importJobArtifactPaths(job = {}) {
+  const paths = [
+    job.originalFilePath,
+    job.filePath,
+    job.errorFilePath,
+    job.manifestFilePath,
+    ...(Array.isArray(job.artifacts) ? job.artifacts.map((artifact) => artifact.filePath) : [])
+  ].map((filePath) => String(filePath || "").trim()).filter(Boolean);
+  return [...new Set(paths)];
+}
+
+function removeImportJobArtifactFiles(job = {}) {
+  let removedFiles = 0;
+  const root = path.resolve(IMPORT_JOB_FILE_DIR);
+  const touchedDirs = new Set();
+  for (const filePath of importJobArtifactPaths(job)) {
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(root + path.sep)) continue;
+    if (!fs.existsSync(resolved)) continue;
+    const stat = fs.statSync(resolved);
+    if (!stat.isFile()) continue;
+    fs.rmSync(resolved, { force: true });
+    removedFiles += 1;
+    touchedDirs.add(path.dirname(resolved));
+  }
+  for (const dir of touchedDirs) {
+    try {
+      if (dir !== root && fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+    } catch {
+      // Retention cleanup must not block Jobs maintenance.
+    }
+  }
+  return removedFiles;
+}
+
+async function pruneExpiredImportJobArtifacts(jobs = []) {
+  let expiredJobs = 0;
+  let removedFiles = 0;
+  for (const job of jobs || []) {
+    if (!jobCompletedBeforeRetentionCutoff(job)) continue;
+    if (!importJobArtifactPaths(job).length) continue;
+    removedFiles += removeImportJobArtifactFiles(job);
+    job.artifacts = [];
+    job.originalFilePath = "";
+    job.filePath = "";
+    job.errorFilePath = "";
+    job.manifestFilePath = "";
+    job.originalFileName = job.originalFileName || job.fileName || "";
+    job.errorFileName = "";
+    job.manifestFileName = "";
+    job.details = [
+      job.details,
+      `Download files expired after ${IMPORT_JOB_FILE_RETENTION_DAYS} days and were removed by Jobs cleanup.`
+    ].filter(Boolean).join(" ");
+    job.updatedAt = new Date().toISOString();
+    upsertImportJobStore(job);
+    if (postgres.isPostgresEnabled()) {
+      await postgres.deleteOperationArtifactsForJob(job.id).catch((error) => {
+        console.error("Unable to delete expired job artifacts", error.message || error);
+      });
+      await postgres.upsertOperationJob(job).catch((error) => {
+        console.error("Unable to persist expired job artifact cleanup", error.message || error);
+      });
+    }
+    expiredJobs += 1;
+  }
+  return { expiredJobs, removedFiles };
+}
+
+function pruneOrphanImportJobDirectories(jobs = []) {
+  if (!fs.existsSync(IMPORT_JOB_FILE_DIR)) return { orphanDirs: 0, orphanFiles: 0 };
+  const knownJobIds = new Set((jobs || []).map((job) => String(job.id || "")).filter(Boolean));
+  const cutoff = jobFileRetentionCutoff();
+  let orphanDirs = 0;
+  let orphanFiles = 0;
+  for (const entry of fs.readdirSync(IMPORT_JOB_FILE_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    if (knownJobIds.has(entry.name)) continue;
+    const dir = path.join(IMPORT_JOB_FILE_DIR, entry.name);
+    const stat = fs.statSync(dir);
+    if (!(stat.mtimeMs < cutoff)) continue;
+    try {
+      const files = fs.readdirSync(dir, { recursive: true });
+      fs.rmSync(dir, { recursive: true, force: true });
+      orphanDirs += 1;
+      orphanFiles += files.length;
+    } catch {
+      // Retention cleanup must not block Jobs maintenance.
+    }
+  }
+  return { orphanDirs, orphanFiles };
 }
 
 function categoryMappingForProduct(db, item, channel = "shopify") {
@@ -2010,14 +3084,27 @@ function verifiedBrandForHandle(item = {}) {
 }
 
 function shopifyHandleForProduct(item) {
-  const verifiedBrand = verifiedBrandForHandle(item);
-  const title = item.marketplaceTitle || item.title || item.name;
-  const name = item.name || item.title || item.marketplaceTitle;
-  const parts = verifiedBrand ? [verifiedBrand, item.sku, title] : [item.sku, name];
-  return parts.map(slugPart)
-    .filter(Boolean)
-    .join("-")
-    .replace(/-+/g, "-");
+  const formattedTitle = shopifyExportTitle(item);
+  return slugPart(formattedTitle || item.sku || item.id || "product");
+}
+
+function productExportCache(db, item = {}) {
+  if (item.__exportCache && typeof item.__exportCache === "object") return item.__exportCache;
+  const cache = {
+    shopifyTitle: shopifyExportTitle(item),
+    shopifyHandle: "",
+    shopifyMapping: categoryMappingForProduct(db, item, "shopify") || null,
+    uomInfo: productUomInfo(item),
+    sellUnitCost: productSellUnitCost(item),
+    imageUrls: productImageUrls(item)
+  };
+  cache.shopifyHandle = slugPart(cache.shopifyTitle || item.sku || item.id || "product");
+  Object.defineProperty(item, "__exportCache", {
+    value: cache,
+    enumerable: true,
+    configurable: true
+  });
+  return cache;
 }
 
 function decodeHtmlEntities(value) {
@@ -2103,8 +3190,11 @@ function shopifyMoneyValue(value) {
   return number.toFixed(2);
 }
 
-function shopifyVariantPrice(item = {}) {
-  return shopifyMoneyValue(item.websitePrice ?? item.price);
+function shopifyVariantPrice(item = {}, db = null) {
+  const settings = db ? findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS : DEFAULT_CHANNEL_SETTINGS;
+  const calculated = pricedFromCost(productSellUnitCost(item), settings.priceMarkupPercent);
+  const current = Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
+  return shopifyMoneyValue(Math.max(current, calculated));
 }
 
 function deterministicMarkupPercent(seed = "") {
@@ -2127,30 +3217,395 @@ function shopifyExportTitle(item = {}) {
     .join(" ");
 }
 
+const SHOPIFY_SINGLE_MUSIC_INVENTORY_COLUMNS_TO_REMOVE = new Set([
+  "inventory committed: single music",
+  "inventory reserved: single music",
+  "inventory damaged: single music",
+  "inventory damaged adjust: single music",
+  "inventory safety stock: single music",
+  "inventory safety stock adjust: single music",
+  "inventory quality control: single music",
+  "inventory quality control adjust: single music"
+]);
+
+function isShopifyTemplate(template = {}) {
+  const formatType = String(template.formatType || template.exportFormat || "").trim().toLowerCase();
+  if (formatType === "shopify" || formatType === "matrixify") return true;
+  const source = String(template.source || "").trim().toLowerCase();
+  const name = String(template.name || template.id || "").trim().toLowerCase();
+  if (source === "shopify" || name.includes("shopify")) return true;
+  const columns = new Set((template.mappings || []).map((mapping) => String(mapping.externalColumn || "").trim().toLowerCase()));
+  const matrixifySignals = [
+    "handle",
+    "variant sku",
+    "option1 name",
+    "option1 value",
+    "variant command"
+  ].filter((column) => columns.has(column)).length;
+  return matrixifySignals >= 3;
+}
+
+function shouldOmitShopifyExportColumn(mapping = {}, template = {}) {
+  if (!isShopifyTemplate(template)) return false;
+  return SHOPIFY_SINGLE_MUSIC_INVENTORY_COLUMNS_TO_REMOVE.has(String(mapping.externalColumn || "").trim().toLowerCase());
+}
+
+function exportMappingsForTemplate(template = {}) {
+  const mappings = (template.mappings || []).filter((mapping) => !shouldOmitShopifyExportColumn(mapping, template));
+  if (!isShopifyTemplate(template)) return mappings;
+  const columns = new Set(mappings.map((mapping) => String(mapping.externalColumn || "").trim().toLowerCase()));
+  const synthetic = [
+    { externalColumn: "Variant Metafield: custom.purchase_unit [single_line_text_field]", productField: "" },
+    { externalColumn: "Variant Metafield: custom.uom [single_line_text_field]", productField: "" },
+    { externalColumn: "Variant Metafield: custom.uom_qty [number_integer]", productField: "" },
+    { externalColumn: "Variant Metafield: custom.sell_unit_cost [number_decimal]", productField: "" }
+  ].filter((mapping) => !columns.has(mapping.externalColumn.toLowerCase()));
+  return [...mappings, ...synthetic];
+}
+
+function exportValueTemplateSource(template = {}) {
+  if (isShopifyTemplate(template)) return "Shopify";
+  const formatType = String(template.formatType || "").trim().toLowerCase();
+  if (formatType === "ebay") return "eBay";
+  if (formatType === "amazon") return "Amazon";
+  return template.source || "Custom";
+}
+
+function normalizedWarehouseToken(value = "") {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function warehouseAliasesForColumn(warehouseName = "") {
+  const token = normalizedWarehouseToken(warehouseName);
+  const aliases = new Set([token]);
+  if (token === "siwarehouse" || token === "si") {
+    aliases.add("statenisland");
+    aliases.add("whsi");
+  }
+  if (token === "bkwarehouse" || token === "bk") {
+    aliases.add("brooklyn");
+    aliases.add("whbk");
+  }
+  return aliases;
+}
+
+function warehouseMatchesColumn(warehouse = {}, columnWarehouseName = "") {
+  const aliases = warehouseAliasesForColumn(columnWarehouseName);
+  return [warehouse.id, warehouse.code, warehouse.name, warehouse.warehouseName]
+    .map((value) => normalizedWarehouseToken(value))
+    .some((token) => token && aliases.has(token));
+}
+
+function warehouseNameFromInventoryColumn(column = "") {
+  const match = String(column || "").match(/^Inventory\s+[^:]+:\s*(.+)$/i);
+  return match ? match[1].trim() : "";
+}
+
+function productSkuKeys(item = {}) {
+  return new Set([
+    item.sku,
+    item.internalSku,
+    item.mfrPartNumber,
+    ...(Array.isArray(item.aliases) ? item.aliases.map((alias) => alias.sku || alias.alias || alias.value || alias) : []),
+    ...(Array.isArray(item.shadowSkus) ? item.shadowSkus.map((shadow) => shadow.sku || shadow.shadowSku || shadow.value || shadow) : [])
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
+}
+
+function lineMatchesProduct(line = {}, item = {}) {
+  const keys = productSkuKeys(item);
+  if (!keys.size) return false;
+  return [line.sku, line.internalSku, line.mappedSku, line.productSku, line.vendorSku, line.shadowSku]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .some((value) => value && keys.has(value));
+}
+
+function purchaseOrderIncomingQtyForWarehouse(db, item = {}, warehouseName = "") {
+  const aliases = warehouseAliasesForColumn(warehouseName);
+  let total = 0;
+  for (const po of db.purchaseOrders || []) {
+    const status = String(po.status || "").trim().toLowerCase();
+    if (["closed", "canceled", "cancelled", "received"].includes(status)) continue;
+    const poWarehouse = (db.warehouses || []).find((warehouse) => warehouse.id === po.warehouseId);
+    const poWarehouseTokens = [po.warehouseId, po.warehouseName, poWarehouse?.code, poWarehouse?.name]
+      .map((value) => normalizedWarehouseToken(value))
+      .filter(Boolean);
+    if (!poWarehouseTokens.some((token) => aliases.has(token))) continue;
+    for (const line of po.items || []) {
+      if (!lineMatchesProduct(line, item)) continue;
+      const ordered = Number(line.qty ?? line.quantity ?? line.orderedQty ?? 0);
+      const received = Number(line.receivedQty ?? line.receivedQuantity ?? line.received ?? 0);
+      if (Number.isFinite(ordered) && ordered > received) total += ordered - Math.max(0, received);
+    }
+  }
+  return total > 0 ? total : "";
+}
+
+function inventoryReservedQtyForWarehouse(item = {}, warehouseName = "") {
+  const rows = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
+  const row = rows.find((entry) => warehouseMatchesColumn(entry, warehouseName));
+  const value = Number(row?.reserved || 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function inventoryOnHandQtyForWarehouse(item = {}, warehouseName = "") {
+  const rows = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
+  const row = rows.find((entry) => warehouseMatchesColumn(entry, warehouseName));
+  const value = Number(row?.qty || 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function inventoryAvailableQtyForWarehouse(item = {}, warehouseName = "") {
+  return Math.max(0, inventoryOnHandQtyForWarehouse(item, warehouseName) - inventoryReservedQtyForWarehouse(item, warehouseName));
+}
+
+function shopifyInventoryColumnValue(db, item = {}, column = "") {
+  const warehouseName = warehouseNameFromInventoryColumn(column);
+  if (!warehouseName) return undefined;
+  if (/single\s+music/i.test(warehouseName)) return 0;
+  if (/^Inventory\s+Available:/i.test(column)) return inventoryAvailableQtyForWarehouse(item, warehouseName);
+  if (/^Inventory\s+On Hand:/i.test(column)) return inventoryOnHandQtyForWarehouse(item, warehouseName);
+  if (/^Inventory\s+Incoming:/i.test(column)) return "";
+  if (/^Inventory\s+(Committed|Reserved):/i.test(column)) return inventoryReservedQtyForWarehouse(item, warehouseName);
+  return undefined;
+}
+
+function shopifyVariantSku(baseSku = "", suffix = "EA") {
+  const sku = String(baseSku || "").trim();
+  return sku && !sku.toUpperCase().endsWith(`-${suffix}`) ? `${sku}-${suffix}` : sku;
+}
+
+function shopifyVariantBaseSku(item = {}) {
+  return String(item.sku || item.vendorSku || item.mfrPartNumber || "").trim();
+}
+
+function shopifyUomVariantSku(baseSku = "", uom = {}) {
+  const sku = String(baseSku || "").trim();
+  const qty = Number(uom.qty || 1);
+  if (!sku || !(qty > 1)) return sku;
+  return shopifyVariantSku(sku, `${Math.floor(qty)}PC`);
+}
+
+function shopifyPurchaseVariants(item = {}, db = null) {
+  const uom = productUomInfo(item);
+  const settings = db ? findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS : DEFAULT_CHANNEL_SETTINGS;
+  const packPrice = Number(shopifyVariantPrice(item, db)) || pricedFromCost(productSellUnitCost(item), settings.priceMarkupPercent);
+  const available = Math.max(0, Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
+  const variantBaseSku = shopifyVariantBaseSku(item);
+  const variants = [{
+    key: "sell-unit",
+    sku: uom.isMultiUnit ? shopifyUomVariantSku(variantBaseSku, uom) : variantBaseSku,
+    optionName: uom.isMultiUnit ? "Purchase Unit" : "Title",
+    optionValue: uom.isMultiUnit ? uom.display : "Default Title",
+    uom: uom.code,
+    uomName: uom.name,
+    uomQty: uom.qty,
+    inventoryMultiplier: 1,
+    quantity: available,
+    unitCost: productSellUnitCost(item),
+    price: packPrice,
+    compareAtPrice: shopifyMoneyValue(packPrice * 1.2),
+    note: uom.isMultiUnit ? `Original sell unit from source data: ${uom.display}.` : "Default product variant."
+  }];
+  if (!uom.isMultiUnit) return variants;
+  const eachPremiumPercent = 25;
+  const unitCost = Number(sourceCatalogCost(item) || item.cost || 0);
+  const eachPrice = pricedFromCost(unitCost, Number(settings.priceMarkupPercent || 0) + eachPremiumPercent);
+  variants.push({
+    key: "each",
+    sku: variantBaseSku,
+    optionName: "Purchase Unit",
+    optionValue: "Each",
+    uom: "EA",
+    uomName: "Each",
+    uomQty: 1,
+    inventoryMultiplier: 1,
+    quantity: available,
+    unitCost,
+    price: eachPrice,
+    compareAtPrice: shopifyMoneyValue(eachPrice * 1.2),
+    note: `Virtual each variant from ${uom.display}; priced ${eachPremiumPercent}% above the store markup.`
+  });
+  return variants;
+}
+
+function productIsCloseout(item = {}) {
+  if (item.toBeDiscontinued === true || item.closeoutEligible === true) return true;
+  const tags = sourceListValue(item.tags || []);
+  return tags.some((tag) => ["closeout", "to-be-discontinued"].includes(String(tag || "").trim().toLowerCase()));
+}
+
+function productExportTags(item = {}) {
+  const tags = sourceListValue(item.tags || []).map((tag) => String(tag || "").trim()).filter(Boolean);
+  if (productIsCloseout(item)) {
+    tags.push("closeout", "to-be-discontinued");
+  }
+  const seen = new Set();
+  return tags.filter((tag) => {
+    const key = tag.toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function productFieldValue(db, item, field, mapping = {}) {
   const column = String(mapping.externalColumn || "").trim();
   const source = String(mapping.templateSource || mapping.source || "").trim().toLowerCase();
-  if (String(mapping.externalColumn || "").trim().toLowerCase() === "handle") return shopifyHandleForProduct(item);
-  if (source === "shopify" && /^Title$/i.test(column)) return shopifyExportTitle(item);
-  if (/^Variant Price$/i.test(column)) return shopifyVariantPrice(item);
+  const variant = item.__shopifyVariant || null;
+  const variantRow = Number(item.__shopifyVariantRow || 1);
+  const cache = source === "shopify" ? productExportCache(db, item) : null;
+  if (source === "shopify" && /^Row #$/i.test(column)) return Number(item.__shopifyVariantRow || 1);
+  if (source === "shopify" && /^Top Row$/i.test(column)) return variantRow === 1 ? "TRUE" : "FALSE";
+  if (source === "shopify" && /^ID$/i.test(column)) return shopifyLegacyId(item.shopifyId);
+  if (source === "shopify" && /^Variant ID$/i.test(column)) return shopifyLegacyId(variant?.shopifyVariantId || item.shopifyVariantId);
+  if (source === "shopify" && /^Inventory\s+/.test(column)) {
+    const inventoryValue = shopifyInventoryColumnValue(db, item, column);
+    if (inventoryValue !== undefined) return inventoryValue;
+  }
+  if (source === "shopify" && /^Metafield:/i.test(column) && variantRow > 1) return "";
+  if (source === "shopify" && /^Variant Metafield:\s*custom\.purchase_unit\s/i.test(column)) return variant?.optionValue || cache.uomInfo.display;
+  if (source === "shopify" && /^Variant Metafield:\s*custom\.uom\s/i.test(column)) return variant?.uom || cache.uomInfo.code;
+  if (source === "shopify" && /^Variant Metafield:\s*custom\.uom_qty\s/i.test(column)) return variant?.uomQty || cache.uomInfo.qty;
+  if (source === "shopify" && /^Variant Metafield:\s*custom\.sell_unit_cost\s/i.test(column)) return variant?.unitCost !== undefined ? Number(variant.unitCost).toFixed(2) : productSellUnitCost(item).toFixed(2);
+  if (source === "shopify" && /^Option1 Name$/i.test(column)) return variant?.optionName || (cache.uomInfo.isMultiUnit ? "Purchase Unit" : "Title");
+  if (source === "shopify" && /^Option1 Value$/i.test(column)) return variant?.optionValue || (cache.uomInfo.isMultiUnit ? cache.uomInfo.display : "Default Title");
+  if (source === "shopify" && /^Variant SKU$/i.test(column)) return variant?.sku || item.sku || "";
+  if (source === "shopify" && /^Variant Price$/i.test(column)) return variant?.price !== undefined ? shopifyMoneyValue(variant.price) : shopifyVariantPrice(item, db);
+  if (source === "shopify" && /^Variant Compare At Price$/i.test(column)) return variant?.compareAtPrice !== undefined ? shopifyMoneyValue(variant.compareAtPrice) : shopifyCompareAtPrice(item);
+  if (source === "shopify" && /^Variant Weight$/i.test(column)) return shopifyVariantWeightValue(item, variant);
+  if (source === "shopify" && /^Variant Inventory Qty$/i.test(column)) return variant?.quantity ?? (Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
+  if (source === "shopify" && /^Metafield:\s*custom\.uom\s/i.test(column)) return variant?.uom || cache.uomInfo.code;
+  if (source === "shopify" && /^Metafield:\s*custom\.uom_qty\s/i.test(column)) return variant?.uomQty || cache.uomInfo.qty;
+  if (source === "shopify" && /^Metafield:\s*custom\.item_height\s/i.test(column)) return shopifyDimensionSourceValue(item, "height", false);
+  if (source === "shopify" && /^Metafield:\s*custom\.item_length\s/i.test(column)) return shopifyDimensionSourceValue(item, "length", false);
+  if (source === "shopify" && /^Metafield:\s*custom\.item_width\s/i.test(column)) return shopifyDimensionSourceValue(item, "width", false);
+  if (source === "shopify" && /^Metafield:\s*custom\.item_weight\s/i.test(column)) return shopifyWeightSourceValue(item, false);
+  if (source === "shopify" && /^Metafield:\s*custom\.package_height\s/i.test(column)) return shopifyDimensionSourceValue(item, "height", true);
+  if (source === "shopify" && /^Metafield:\s*custom\.package_length\s/i.test(column)) return shopifyDimensionSourceValue(item, "length", true);
+  if (source === "shopify" && /^Metafield:\s*custom\.package_width\s/i.test(column)) return shopifyDimensionSourceValue(item, "width", true);
+  if (source === "shopify" && /^Metafield:\s*custom\.package_weight\s/i.test(column)) return shopifyWeightSourceValue(item, true);
+  if (String(mapping.externalColumn || "").trim().toLowerCase() === "handle") return cache?.shopifyHandle || shopifyHandleForProduct(item);
+  if (source === "shopify" && /^Title$/i.test(column)) return cache.shopifyTitle;
+  if (source === "shopify" && /^Image Alt Text$/i.test(column)) return cache.shopifyTitle;
+  if (/^Variant Price$/i.test(column)) return shopifyVariantPrice(item, db);
   if (/^Variant Compare At Price$/i.test(column) || field === "shopifyCompareAtPrice") return shopifyCompareAtPrice(item);
   if (field === "available") return Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0);
   if (field === "vendor") return item.vendor ?? item.supplier ?? "";
   if (field === "qty") return item.qty ?? item.stockQty ?? "";
-  if (field === "shopifyHandle") return shopifyHandleForProduct(item);
+  if (field === "shopifyHandle") return cache?.shopifyHandle || shopifyHandleForProduct(item);
   if (field === "images") return (item.images || []).join("|");
-  if (field === "tags") return (item.tags || []).join("|");
+  if (field === "tags") return productExportTags(item).join("|");
+  if (field === "toBeDiscontinued") return productIsCloseout(item) ? "TRUE" : "FALSE";
+  if (field === "closeoutEligible") return productIsCloseout(item) ? "TRUE" : "FALSE";
   if (field === "bulletPoints") return (item.bulletPoints || []).join("|");
   if (field === "sources") return Object.entries(item.sources || {}).map(([source, id]) => `${source}:${id}`).join(";");
-  if (field === "shopifyCategoryId") return categoryMappingForProduct(db, item, "shopify")?.categoryId || "";
-  if (field === "shopifyCategoryPath") return categoryMappingForProduct(db, item, "shopify")?.categoryPath || "";
-  if (field === "googleCategoryId") return categoryMappingForProduct(db, item, "shopify")?.googleCategory?.id || "";
-  if (field === "googleCategoryBreadcrumb") return categoryMappingForProduct(db, item, "shopify")?.googleCategory?.breadcrumb || categoryMappingForProduct(db, item, "shopify")?.googleCategory?.fullName || "";
+  if (field === "shopifyCategoryId") return (cache?.shopifyMapping || categoryMappingForProduct(db, item, "shopify"))?.categoryId || "";
+  if (field === "shopifyCategoryPath") return (cache?.shopifyMapping || categoryMappingForProduct(db, item, "shopify"))?.categoryPath || "";
+  if (field === "googleCategoryId") return (cache?.shopifyMapping || categoryMappingForProduct(db, item, "shopify"))?.googleCategory?.id || "";
+  if (field === "googleCategoryBreadcrumb") {
+    const shopifyMapping = cache?.shopifyMapping || categoryMappingForProduct(db, item, "shopify");
+    return shopifyMapping?.googleCategory?.breadcrumb || shopifyMapping?.googleCategory?.fullName || "";
+  }
   if (field === "title" || field === "marketplaceTitle") return sanitizeProductTitle(item[field]);
   if (["shortDescription", "longDescription", "vendorDescription"].includes(field)) {
     return /html/i.test(String(mapping.externalColumn || "")) ? sanitizeProductHtml(item[field]) : sanitizeProductText(item[field]);
   }
   return item[field] ?? "";
+}
+
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const number = Number(sourceNumberValue(value));
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return 0;
+}
+
+const SYSTEM_DEFAULT_DIMENSION_IN = 5;
+const SYSTEM_DEFAULT_WEIGHT_LB = 5;
+const DIMENSION_WEIGHT_FIELDS = new Set(["itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth"]);
+
+function productSourceContainers(item = {}) {
+  return [
+    { container: item, source: "manual_entered", label: "Manual entered" },
+    { container: item.productManagerFields || {}, source: "data_dump", label: "Data dump" },
+    { container: item.productManagerFields?.original || {}, source: "data_dump", label: "Data dump" },
+    { container: item.original || {}, source: "data_dump", label: "Data dump" },
+    ...(Array.isArray(item.sourceCatalogMatches)
+      ? item.sourceCatalogMatches.flatMap((match) => [
+        { container: match, source: "data_dump", label: "Data dump" },
+        { container: match?.raw || {}, source: "data_dump", label: "Data dump" }
+      ])
+      : [])
+  ];
+}
+
+function productSourceNumberDetail(item = {}, keys = [], options = {}) {
+  const defaultValue = Number(options.defaultValue || 0);
+  for (const entry of productSourceContainers(item)) {
+    const container = entry.container;
+    if (!container || typeof container !== "object") continue;
+    for (const key of keys) {
+      const number = Number(sourceNumberValue(container[key]));
+      if (Number.isFinite(number) && number > 0) {
+        const sourceOverride = item.dimensionWeightSources?.[key]?.source || item.dimensionWeightSource?.[key];
+        if (entry.source === "manual_entered" && sourceOverride) {
+          return { value: number, source: sourceOverride, label: sourceOverride === "manual_import" ? "Manual import" : "Manual entered", verified: true, defaulted: false };
+        }
+        if (entry.source === "manual_entered") {
+          const dataDumpMatch = productSourceContainers(item).some((candidate) => {
+            if (candidate.source !== "data_dump" || !candidate.container || typeof candidate.container !== "object") return false;
+            const candidateValue = Number(sourceNumberValue(candidate.container[key]));
+            return Number.isFinite(candidateValue) && Math.abs(candidateValue - number) < 0.0001;
+          });
+          if (dataDumpMatch) return { value: number, source: "data_dump", label: "Data dump", verified: true, defaulted: false };
+        }
+        return { value: number, source: entry.source, label: entry.label, verified: true, defaulted: false };
+      }
+    }
+  }
+  return defaultValue > 0
+    ? { value: defaultValue, source: "system_default", label: "System default", verified: false, defaulted: true }
+    : { value: 0, source: "missing", label: "Missing", verified: false, defaulted: false };
+}
+
+function productSourceNumber(item = {}, keys = []) {
+  return productSourceNumberDetail(item, keys).value || 0;
+}
+
+function shopifyVariantUsesPackageWeight(item = {}, variant = null) {
+  if (!variant) return false;
+  if (variant.key === "each") return false;
+  const qty = Number(variant.uomQty || 1);
+  return qty > 1 || (variant.key === "sell-unit" && productUomInfo(item).isMultiUnit);
+}
+
+function shopifyVariantWeightValue(item = {}, variant = null) {
+  const preferPackage = shopifyVariantUsesPackageWeight(item, variant);
+  const detail = shopifyWeightSourceDetail(item, preferPackage);
+  return detail.value > 0 ? cleanExportNumber(detail.value, 3) : "";
+}
+
+function shopifyWeightSourceDetail(item = {}, preferPackage = false) {
+  if (preferPackage) {
+    return productSourceNumberDetail(item, ["packageWeight", "package_weight"], { defaultValue: SYSTEM_DEFAULT_WEIGHT_LB });
+  }
+  const pounds = productSourceNumberDetail(item, ["itemWeight", "item_weight", "weightLb", "weight_lbs"]);
+  if (pounds.value > 0) return pounds;
+  const ounces = productSourceNumberDetail(item, ["weightOz", "weight_oz"]);
+  if (ounces.value > 0) return { ...ounces, value: ounces.value / 16 };
+  return productSourceNumberDetail(item, [], { defaultValue: SYSTEM_DEFAULT_WEIGHT_LB });
+}
+
+function shopifyWeightSourceValue(item = {}, preferPackage = false) {
+  return shopifyWeightSourceDetail(item, preferPackage).value || 0;
+}
+
+function shopifyDimensionSourceValue(item = {}, axis = "length", preferPackage = false) {
+  const title = axis.charAt(0).toUpperCase() + axis.slice(1);
+  const packageKeys = [`package${title}`, `package_${axis}`];
+  const itemKeys = [`item${title}`, `item_${axis}`, `${axis}In`, `${axis}_in`];
+  return productSourceNumberDetail(item, preferPackage ? packageKeys : itemKeys, { defaultValue: SYSTEM_DEFAULT_DIMENSION_IN }).value || 0;
 }
 
 function cleanExportNumber(value, decimals = 3) {
@@ -2162,13 +3617,34 @@ function cleanExportNumber(value, decimals = 3) {
 function shopifyDimensionValue(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return "";
-  return `${cleanExportNumber(number * 25.4, 3)} mm`;
+  return `${cleanExportNumber(number, 3)} in`;
 }
 
 function shopifyWeightValue(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return "";
-  return `${cleanExportNumber(number * 0.45359237, 3)} kg`;
+  return `${cleanExportNumber(number, 3)} lb`;
+}
+
+function shopifyJsonNumber(value, decimals = 3) {
+  const number = Number(sourceNumberValue(value));
+  if (!Number.isFinite(number) || number <= 0) return "";
+  const cleaned = Number(number.toFixed(decimals));
+  return Number.isInteger(cleaned) ? `${cleaned}.0` : String(cleaned);
+}
+
+function shopifyDimensionMetafieldValue(value) {
+  const number = shopifyJsonNumber(value, 3);
+  return number ? `{"value":${number},"unit":"INCHES"}` : "";
+}
+
+function shopifyWeightMetafieldUnit(column = "") {
+  return "POUNDS";
+}
+
+function shopifyWeightMetafieldValue(value, column = "") {
+  const number = shopifyJsonNumber(value, 3);
+  return number ? `{"value":${number},"unit":"${shopifyWeightMetafieldUnit(column)}"}` : "";
 }
 
 function shopifyBooleanValue(value, item = {}) {
@@ -2227,13 +3703,15 @@ function barcodeTextValue(value) {
 }
 
 function shopifyProductStatusValue(value, item = {}, mapping = {}) {
-  const raw = String(value || mapping.defaultValue || item.status || "").trim().toLowerCase();
+  const raw = String(item.shopifyStatus || value || mapping.defaultValue || item.status || "").trim().toLowerCase();
   if (["active", "published", "publish"].includes(raw)) return "Active";
   if (["archived", "archive", "deleted", "discontinued"].includes(raw)) return "Archived";
   return "Draft";
 }
 
 function shopifyPublishedValue(item = {}, mapping = {}) {
+  if (item.shopifyPublished === true) return "TRUE";
+  if (item.shopifyPublished === false && item.shopifyStatus) return "FALSE";
   return shopifyProductStatusValue(item.status, item, mapping) === "Active" ? "TRUE" : "FALSE";
 }
 
@@ -2345,6 +3823,23 @@ function productImageUrl(item = {}) {
   return images.map((image) => String(image || "").trim()).find((image) => /^https?:\/\//i.test(image)) || "";
 }
 
+function productImageUrls(item = {}) {
+  const images = [
+    item.defaultImage,
+    item.default_image,
+    item.checkedImageUrl,
+    item.originalImage,
+    item.original_image,
+    item.checkedImage?.url,
+    item.productManagerFields?.default_image,
+    item.productManagerFields?.checked_image?.url,
+    ...(Array.isArray(item.images) ? item.images : parseList(item.images)),
+    ...(Array.isArray(item.imageUrls) ? item.imageUrls : parseList(item.imageUrls)),
+    ...(Array.isArray(item.productManagerFields?.images) ? item.productManagerFields.images : [])
+  ];
+  return [...new Set(images.map((image) => String(image || "").trim()).filter((image) => /^https?:\/\//i.test(image)))];
+}
+
 function productTimestamp(item = {}) {
   for (const value of [
     item.updatedAt,
@@ -2403,7 +3898,7 @@ async function matrixifySmartCollectionRows() {
   const categoryData = await publicCategoriesFast("", "main");
   const cachedRowsByType = matrixifySmartCollectionCacheByType();
   const seenHandles = new Set();
-  return (categoryData.categories || [])
+  const rows = (categoryData.categories || [])
     .filter((category) => Number(category.productCount || 0) > 0)
     .filter((category) => category.mappings?.shopify?.categoryId || category.mappings?.shopify?.categoryPath)
     .map((category) => {
@@ -2441,8 +3936,40 @@ async function matrixifySmartCollectionRows() {
       if (seenHandles.has(row.Handle)) return false;
       seenHandles.add(row.Handle);
       return true;
+    });
+  rows.push(closeoutSmartCollectionRow());
+  return rows
+    .filter((row) => {
+      if (seenHandles.has(row.Handle)) return false;
+      seenHandles.add(row.Handle);
+      return true;
     })
     .sort((a, b) => a.Handle.localeCompare(b.Handle));
+}
+
+function closeoutSmartCollectionRow() {
+  return {
+    "Handle": "closeouts",
+    "Command": "MERGE",
+    "Title": "Closeouts",
+    "Body HTML": "",
+    "Sort Order": "Best Selling",
+    "Template Suffix": "",
+    "Published": "TRUE",
+    "Published Scope": "global",
+    "Image Src": "",
+    "Image Alt Text": "Closeouts",
+    "Must Match": "all conditions",
+    "Rule: Product Column": "Tag",
+    "Rule: Relation": "Equals",
+    "Rule: Condition": "closeout",
+    "Product: ID": "",
+    "Product: Handle": "",
+    "Product: Position": "",
+    "Metafield: title_tag [string]": "Closeouts on Sale",
+    "Metafield: description_tag [string]": "Closeout deals on discontinued products while supplies last.",
+    "Metafield: custom.fda_approved [boolean]": ""
+  };
 }
 
 const MATRIXIFY_MENU_COLUMNS = [
@@ -2950,13 +4477,32 @@ function matrixifyMenuReviewRows(rows = []) {
 
 function formatMappedExportValue(value, mapping = {}, item = {}) {
   const column = String(mapping.externalColumn || "");
+  if (/^Variant Barcode$/i.test(column) && item.__shopifyVariant && productUomInfo(item).isMultiUnit) {
+    return item.__shopifyVariant.key === "each" ? barcodeTextValue(value) : "";
+  }
   if (/^(Variant Barcode|Barcode|UPC|GTIN|EAN)$/i.test(column)) return barcodeTextValue(value);
   if (/^Type$/i.test(column)) return categoryTypeValue(value);
   if (/^Status$/i.test(column)) return shopifyProductStatusValue(value, item, mapping);
   if (/^Published$/i.test(column)) return shopifyPublishedValue(item, mapping);
   if (/^Variant Inventory Tracker$/i.test(column)) return "shopify";
-  if (/^Metafield:\s*custom\..*\[dimension\]/i.test(column)) return shopifyDimensionValue(value);
-  if (/^Metafield:\s*custom\..*\[weight\]/i.test(column)) return shopifyWeightValue(value);
+  if (/^Metafield:\s*custom\..*\[dimension\]/i.test(column)) {
+    if (Number(item.__shopifyVariantRow || 1) > 1) return "";
+    const derived = /^Metafield:\s*custom\.item_height\s/i.test(column) ? shopifyDimensionSourceValue(item, "height", false)
+      : /^Metafield:\s*custom\.item_length\s/i.test(column) ? shopifyDimensionSourceValue(item, "length", false)
+        : /^Metafield:\s*custom\.item_width\s/i.test(column) ? shopifyDimensionSourceValue(item, "width", false)
+          : /^Metafield:\s*custom\.package_height\s/i.test(column) ? shopifyDimensionSourceValue(item, "height", true)
+            : /^Metafield:\s*custom\.package_length\s/i.test(column) ? shopifyDimensionSourceValue(item, "length", true)
+              : /^Metafield:\s*custom\.package_width\s/i.test(column) ? shopifyDimensionSourceValue(item, "width", true)
+                : value;
+    return shopifyDimensionMetafieldValue(derived || value);
+  }
+  if (/^Metafield:\s*custom\..*\[weight\]/i.test(column)) {
+    if (Number(item.__shopifyVariantRow || 1) > 1) return "";
+    const derived = /^Metafield:\s*custom\.item_weight\s/i.test(column) ? shopifyWeightSourceValue(item, false)
+      : /^Metafield:\s*custom\.package_weight\s/i.test(column) ? shopifyWeightSourceValue(item, true)
+        : value;
+    return shopifyWeightMetafieldValue(derived || value, column);
+  }
   if (/^Metafield:\s*custom\..*\[boolean\]/i.test(column)) return shopifyBooleanValue(value, item);
   if (/^Metafield:\s*custom\..*\[date_time\]/i.test(column)) return shopifyDateTimeValue(value);
   if (/^Metafield:\s*custom\..*\[json\]/i.test(column)) return shopifyJsonValue(value);
@@ -2981,23 +4527,355 @@ function mappedRecordToProductPayload(record, template) {
     const field = mapping.productField;
     if (!PRODUCT_MAPPING_FIELDS.some((definition) => definition.key === field) || field === "available" || field === "shopifyHandle" || field.startsWith("google")) continue;
     const value = castMappedProductValue(field, record[mapping.externalColumn]);
-    if (value !== undefined) payload[field] = value;
+    if (value !== undefined) {
+      payload[field] = value;
+      if (DIMENSION_WEIGHT_FIELDS.has(field)) {
+        payload.dimensionWeightSources = {
+          ...(payload.dimensionWeightSources || {}),
+          [field]: { source: "manual_import", verified: true, updatedAt: new Date().toISOString() }
+        };
+      }
+    }
   }
   return payload;
 }
 
-function mappedProductsCsv(db, template, items) {
-  const headers = (template.mappings || []).map((mapping) => mapping.externalColumn);
-  const rows = items.map((item) => (template.mappings || []).map((mapping) => {
-    const value = productFieldValue(db, item, mapping.productField, { ...mapping, templateSource: template.source, templateId: template.id });
+function mappedProductsCsv(db, template, items, options = {}) {
+  const mappings = exportMappingsForTemplate(template);
+  const headers = mappings.map((mapping) => mapping.externalColumn);
+  const templateSource = exportValueTemplateSource(template);
+  const shopifyStatusMap = isShopifyTemplate(template) ? (options.shopifyStatusMap || readShopifyStatusMapSync()) : {};
+  const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
+  const exportItems = items.flatMap((item) => isShopifyTemplate(template)
+    ? (() => {
+      const shopifyItem = withShopifyStatus(sourceEnrichedItem(item, sourceEnrichmentMap), shopifyStatusMap);
+      productExportCache(db, shopifyItem);
+      return shopifyPurchaseVariants(shopifyItem, db).map((variant, index) => ({ ...shopifyItem, __shopifyVariant: variant, __shopifyVariantRow: index + 1 }));
+    })()
+    : [item]);
+  const rows = exportItems.map((item) => mappings.map((mapping) => {
+    const value = productFieldValue(db, item, mapping.productField, { ...mapping, templateSource, templateId: template.id });
     const formatted = formatMappedExportValue(value, mapping, item);
     return formatted === "" || formatted === undefined || formatted === null ? mapping.defaultValue || "" : formatted;
   }));
   return [headers, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\n");
 }
 
-function mappedExportFilename(template) {
-  return `${String(template.name || "product-export").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "product-export"}.csv`;
+function mappedProductsCsvRowCount(db, template, items = []) {
+  if (!isShopifyTemplate(template)) return items.length;
+  return items.reduce((sum, item) => sum + shopifyPurchaseVariants(item, db).length, 0);
+}
+
+async function mappedProductsCsvAsync(db, template, items, options = {}) {
+  const mappings = exportMappingsForTemplate(template);
+  const headers = mappings.map((mapping) => mapping.externalColumn);
+  const templateSource = exportValueTemplateSource(template);
+  const lines = [headers.map(escapeCsv).join(",")];
+  const total = items.length;
+  const batchSize = Number(options.batchSize || 500) || 500;
+  const progress = typeof options.progress === "function" ? options.progress : () => {};
+  const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
+  const shopifyStatusMap = isShopifyTemplate(template) ? (options.shopifyStatusMap || readShopifyStatusMapSync()) : {};
+  const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
+  for (let index = 0; index < total; index += 1) {
+    if (isCanceled()) throw new Error("Job was canceled.");
+    const item = isShopifyTemplate(template) ? withShopifyStatus(sourceEnrichedItem(items[index], sourceEnrichmentMap), shopifyStatusMap) : sourceEnrichedItem(items[index], sourceEnrichmentMap);
+    if (isShopifyTemplate(template)) productExportCache(db, item);
+    const exportItems = isShopifyTemplate(template)
+      ? shopifyPurchaseVariants(item, db).map((variant, variantIndex) => ({ ...item, __shopifyVariant: variant, __shopifyVariantRow: variantIndex + 1 }))
+      : [item];
+    for (const exportItem of exportItems) {
+      const row = mappings.map((mapping) => {
+        const value = productFieldValue(db, exportItem, mapping.productField, { ...mapping, templateSource, templateId: template.id });
+        const formatted = formatMappedExportValue(value, mapping, exportItem);
+        return formatted === "" || formatted === undefined || formatted === null ? mapping.defaultValue || "" : formatted;
+      });
+      lines.push(row.map(escapeCsv).join(","));
+    }
+    const processed = index + 1;
+    if (processed === total || processed % batchSize === 0) {
+      progress({ processedRows: processed, totalRows: total, phase: "building_csv" });
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+  return lines.join("\n");
+}
+
+function writeStreamText(stream, text) {
+  return new Promise((resolve, reject) => {
+    stream.write(text, "utf8", (error) => error ? reject(error) : resolve());
+  });
+}
+
+function endWriteStream(stream) {
+  return new Promise((resolve, reject) => {
+    stream.end((error) => error ? reject(error) : resolve());
+  });
+}
+
+async function mappedProductsCsvFileAsync(db, template, items, filePath, options = {}) {
+  const mappings = exportMappingsForTemplate(template);
+  const headers = mappings.map((mapping) => mapping.externalColumn);
+  const templateSource = exportValueTemplateSource(template);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const stream = fs.createWriteStream(filePath, { encoding: "utf8" });
+  const total = items.length;
+  const batchSize = Number(options.batchSize || 250) || 250;
+  const progress = typeof options.progress === "function" ? options.progress : () => {};
+  const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
+  const shopifyStatusMap = isShopifyTemplate(template) ? (options.shopifyStatusMap || readShopifyStatusMapSync()) : {};
+  const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
+  let outputRows = 0;
+  const lineBuffer = [];
+  const flushLineBuffer = async () => {
+    if (!lineBuffer.length) return;
+    await writeStreamText(stream, lineBuffer.join(""));
+    lineBuffer.length = 0;
+  };
+  try {
+    await writeStreamText(stream, `${headers.map(escapeCsv).join(",")}\n`);
+    for (let index = 0; index < total; index += 1) {
+      if (isCanceled()) throw new Error("Job was canceled.");
+      const item = isShopifyTemplate(template) ? withShopifyStatus(sourceEnrichedItem(items[index], sourceEnrichmentMap), shopifyStatusMap) : sourceEnrichedItem(items[index], sourceEnrichmentMap);
+      if (isShopifyTemplate(template)) productExportCache(db, item);
+      const exportItems = isShopifyTemplate(template)
+        ? shopifyPurchaseVariants(item, db).map((variant, variantIndex) => ({ ...item, __shopifyVariant: variant, __shopifyVariantRow: variantIndex + 1 }))
+        : [item];
+      for (const exportItem of exportItems) {
+        const row = mappings.map((mapping) => {
+          const value = productFieldValue(db, exportItem, mapping.productField, { ...mapping, templateSource, templateId: template.id });
+          const formatted = formatMappedExportValue(value, mapping, exportItem);
+          return formatted === "" || formatted === undefined || formatted === null ? mapping.defaultValue || "" : formatted;
+        });
+        lineBuffer.push(`${row.map(escapeCsv).join(",")}\n`);
+        outputRows += 1;
+        if (lineBuffer.length >= 1000) await flushLineBuffer();
+      }
+      const processed = index + 1;
+      if (processed === total || processed % batchSize === 0) {
+        await flushLineBuffer();
+        progress({ processedRows: processed, totalRows: total, phase: "building_csv" });
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+    await flushLineBuffer();
+    await endWriteStream(stream);
+    return { filePath, outputRows };
+  } catch (error) {
+    stream.destroy();
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch {
+      // Best-effort cleanup only.
+    }
+    throw error;
+  }
+}
+
+async function mappedProductsCsvPostgresFileAsync(db, template, filePath, options = {}) {
+  const mappings = exportMappingsForTemplate(template);
+  const headers = mappings.map((mapping) => mapping.externalColumn);
+  const templateSource = exportValueTemplateSource(template);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const stream = fs.createWriteStream(filePath, { encoding: "utf8" });
+  const shopifyTemplate = isShopifyTemplate(template);
+  const batchSize = Math.max(50, Math.min(2000, Number(options.batchSize || (shopifyTemplate ? 250 : 500))));
+  const yieldEvery = Math.max(1, Math.min(batchSize, Number(options.yieldEvery || (shopifyTemplate ? 1 : 100))));
+  const progress = typeof options.progress === "function" ? options.progress : () => {};
+  const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
+  const shopifyStatusMap = shopifyTemplate ? (options.shopifyStatusMap || readShopifyStatusMapSync()) : {};
+  const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
+  const filters = options.filters || {};
+  const query = options.query || "";
+  const selectedSkus = Array.isArray(options.skus) ? [...new Set(options.skus.map((sku) => String(sku || "").trim()).filter(Boolean))] : [];
+  const totalProducts = selectedSkus.length || await postgres.countProducts({ q: query, filters });
+  let processedProducts = 0;
+  let outputRows = 0;
+  const lineBuffer = [];
+  const flushLineBuffer = async () => {
+    if (!lineBuffer.length) return;
+    await writeStreamText(stream, lineBuffer.join(""));
+    lineBuffer.length = 0;
+  };
+  const checkpoint = async (phaseTotal = totalProducts) => {
+    await flushLineBuffer();
+    progress({ processedRows: processedProducts, totalRows: phaseTotal || totalProducts, phase: "building_csv" });
+    await new Promise((resolve) => setImmediate(resolve));
+    if (isCanceled()) throw new Error("Job was canceled.");
+  };
+  const writeProduct = async (sourceItem) => {
+    const item = shopifyTemplate
+      ? withShopifyStatus(sourceEnrichedItem(sourceItem, sourceEnrichmentMap), shopifyStatusMap)
+      : sourceEnrichedItem(sourceItem, sourceEnrichmentMap);
+    if (shopifyTemplate) productExportCache(db, item);
+    const exportItems = shopifyTemplate
+      ? shopifyPurchaseVariants(item, db).map((variant, variantIndex) => ({ ...item, __shopifyVariant: variant, __shopifyVariantRow: variantIndex + 1 }))
+      : [item];
+    for (const exportItem of exportItems) {
+      const row = mappings.map((mapping) => {
+        const value = productFieldValue(db, exportItem, mapping.productField, { ...mapping, templateSource, templateId: template.id });
+        const formatted = formatMappedExportValue(value, mapping, exportItem);
+        return formatted === "" || formatted === undefined || formatted === null ? mapping.defaultValue || "" : formatted;
+      });
+      lineBuffer.push(`${row.map(escapeCsv).join(",")}\n`);
+      outputRows += 1;
+      if (lineBuffer.length >= 1000) await flushLineBuffer();
+      if (shopifyTemplate && exportItems.length > 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+        if (isCanceled()) throw new Error("Job was canceled.");
+      }
+    }
+  };
+  try {
+    await writeStreamText(stream, `${headers.map(escapeCsv).join(",")}\n`);
+    if (selectedSkus.length) {
+      for (const sku of selectedSkus) {
+        if (isCanceled()) throw new Error("Job was canceled.");
+        const item = await postgres.readProductByKey(sku);
+        if (item) await writeProduct(item);
+        processedProducts += 1;
+        if (processedProducts % yieldEvery === 0) await checkpoint(totalProducts);
+        if (processedProducts === totalProducts || processedProducts % batchSize === 0) {
+          await checkpoint(totalProducts);
+        }
+      }
+    } else {
+      for (let page = 1; processedProducts < totalProducts || page === 1; page += 1) {
+        if (isCanceled()) throw new Error("Job was canceled.");
+        const result = await postgres.listProducts({ q: query, filters, page, limit: batchSize });
+        const items = result?.items || result?.inventory || [];
+        if (!items.length) break;
+        for (const item of items) {
+          if (isCanceled()) throw new Error("Job was canceled.");
+          await writeProduct(item);
+          processedProducts += 1;
+          if (processedProducts % yieldEvery === 0) await checkpoint(result.total || totalProducts);
+        }
+        await checkpoint(result.total || totalProducts);
+        if (processedProducts >= Number(result.total || totalProducts || 0)) break;
+      }
+    }
+    await flushLineBuffer();
+    await endWriteStream(stream);
+    return { filePath, outputRows, productCount: processedProducts, totalProducts };
+  } catch (error) {
+    stream.destroy();
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch {
+      // Best-effort cleanup only.
+    }
+    throw error;
+  }
+}
+
+async function mappedSourceCatalogCsvPostgresFileAsync(db, template, filePath, options = {}) {
+  const mappings = exportMappingsForTemplate(template);
+  const headers = mappings.map((mapping) => mapping.externalColumn);
+  const templateSource = exportValueTemplateSource(template);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const stream = fs.createWriteStream(filePath, { encoding: "utf8" });
+  const batchSize = Math.max(100, Math.min(500, Number(options.batchSize || 500)));
+  const maxItems = Math.max(1, Math.min(25000, Number(options.limit || 10000)));
+  const progress = typeof options.progress === "function" ? options.progress : () => {};
+  const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
+  const filters = options.filters || {};
+  const query = options.query || "";
+  const shopifyStatusMap = isShopifyTemplate(template) ? (options.shopifyStatusMap || readShopifyStatusMapSync()) : {};
+  const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
+  const overrides = sourceCatalogOverrideMap(db);
+  const vendorMappings = vendorCategoryMappingMap(db);
+  const productsBySku = inventoryBySkuMap(db);
+  let processedProducts = 0;
+  let outputRows = 0;
+  let matched = 0;
+  let totalTarget = maxItems;
+  let limited = false;
+  const lineBuffer = [];
+  const flushLineBuffer = async () => {
+    if (!lineBuffer.length) return;
+    await writeStreamText(stream, lineBuffer.join(""));
+    lineBuffer.length = 0;
+  };
+  const writeProduct = async (sourceItem) => {
+    const decorated = decorateSourceCatalogProduct(normalizeCatalogProductForInventory(sourceItem), overrides, productsBySku, vendorMappings);
+    if (!decorated || decorated.sourceCatalogDeleted) return;
+    const sourceProduct = catalogSummary(decorated);
+    const item = isShopifyTemplate(template)
+      ? withShopifyStatus(sourceEnrichedItem(sourceProduct, sourceEnrichmentMap), shopifyStatusMap)
+      : sourceEnrichedItem(sourceProduct, sourceEnrichmentMap);
+    if (isShopifyTemplate(template)) productExportCache(db, item);
+    const exportItems = isShopifyTemplate(template)
+      ? shopifyPurchaseVariants(item, db).map((variant, variantIndex) => ({ ...item, __shopifyVariant: variant, __shopifyVariantRow: variantIndex + 1 }))
+      : [item];
+    for (const exportItem of exportItems) {
+      const row = mappings.map((mapping) => {
+        const value = productFieldValue(db, exportItem, mapping.productField, { ...mapping, templateSource, templateId: template.id });
+        const formatted = formatMappedExportValue(value, mapping, exportItem);
+        return formatted === "" || formatted === undefined || formatted === null ? mapping.defaultValue || "" : formatted;
+      });
+      lineBuffer.push(`${row.map(escapeCsv).join(",")}\n`);
+      outputRows += 1;
+      if (lineBuffer.length >= 1000) await flushLineBuffer();
+    }
+  };
+  try {
+    await writeStreamText(stream, `${headers.map(escapeCsv).join(",")}\n`);
+    for (let page = 1; processedProducts < maxItems; page += 1) {
+      if (isCanceled()) throw new Error("Job was canceled.");
+      const result = await postgres.listVendorCatalogItems({ query, filters, page, limit: Math.min(batchSize, maxItems - processedProducts) });
+      const items = result?.items || [];
+      if (page === 1) {
+        matched = Number(result?.total || 0);
+        totalTarget = Math.min(maxItems, matched || maxItems);
+        limited = matched > maxItems;
+      }
+      if (!items.length) break;
+      for (const item of items) {
+        if (isCanceled()) throw new Error("Job was canceled.");
+        await writeProduct(item);
+        processedProducts += 1;
+        if (processedProducts >= maxItems) break;
+      }
+      await flushLineBuffer();
+      progress({ processedRows: processedProducts, totalRows: totalTarget, phase: "building_csv" });
+      await new Promise((resolve) => setImmediate(resolve));
+      if (items.length < batchSize || processedProducts >= totalTarget) break;
+    }
+    await flushLineBuffer();
+    await endWriteStream(stream);
+    return { filePath, outputRows, productCount: processedProducts, matched, limited };
+  } catch (error) {
+    stream.destroy();
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch {
+      // Best-effort cleanup only.
+    }
+    throw error;
+  }
+}
+
+function exportFilenameDateStamp(date = new Date()) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const year = String(date.getFullYear()).slice(-2);
+  return `${month}-${day}-${year}`;
+}
+
+function exportFilenameStem(value, fallback = "product-export") {
+  const base = path.basename(String(value || fallback));
+  const withoutExtension = base.replace(/\.[^.\\/]+$/g, "");
+  return String(withoutExtension || fallback).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || fallback;
+}
+
+function mappedExportFilename(template, dataFileName = "") {
+  const templateStem = exportFilenameStem(template?.name || "product-export", "product-export");
+  const dataStem = exportFilenameStem(dataFileName || template?.source || "products", "products");
+  const nameStem = templateStem.endsWith(`-${dataStem}`) || templateStem === dataStem
+    ? templateStem
+    : `${templateStem}-${dataStem}`;
+  return `${nameStem}-${exportFilenameDateStamp()}.csv`;
 }
 
 function csvValue(record, names = []) {
@@ -3033,16 +4911,17 @@ function normalizeShopifyPublished(value, status = "") {
 
 function buildShopifyLookupMaps(db) {
   const bySku = new Map();
-  const byHandle = new Map();
   const byProductId = new Map();
   for (const item of db.inventory || []) {
     if (item.sku) bySku.set(String(item.sku).trim().toLowerCase(), item);
-    if (item.shopifyId) byProductId.set(String(item.shopifyId).trim(), item);
-    if (item.shopifyHandle) byHandle.set(normalizedHandle(item.shopifyHandle), item);
-    const computed = shopifyHandleForProduct(item);
-    if (computed) byHandle.set(normalizedHandle(computed), item);
+    if (item.shopifyId) {
+      byProductId.set(String(item.shopifyId).trim(), item);
+      byProductId.set(normalizeShopifyProductGid(item.shopifyId), item);
+      const legacyId = shopifyLegacyId(item.shopifyId);
+      if (legacyId) byProductId.set(legacyId, item);
+    }
   }
-  return { bySku, byHandle, byProductId };
+  return { bySku, byProductId };
 }
 
 function shopifyStatusPayloadFromRecord(record) {
@@ -3051,24 +4930,39 @@ function shopifyStatusPayloadFromRecord(record) {
   return {
     sku: csvValue(record, ["Variant SKU", "Variant: SKU", "SKU"]),
     handle: csvValue(record, ["Handle"]),
-    shopifyId: productId,
-    shopifyVariantId: csvValue(record, ["Variant ID", "Variant: ID"]),
+    shopifyId: normalizeShopifyProductGid(productId),
+    shopifyVariantId: normalizeShopifyVariantGid(csvValue(record, ["Variant ID", "Variant: ID"])),
     shopifyHandle: csvValue(record, ["Handle"]),
     shopifyStatus: status,
     shopifyPublished: normalizeShopifyPublished(csvValue(record, ["Published"]), status),
     shopifyPublishedAt: csvValue(record, ["Published At", "Published: At"]),
     shopifyUpdatedAt: csvValue(record, ["Updated At", "Updated: At"]),
-    shopifySyncedAt: new Date().toISOString()
+    shopifySyncedAt: new Date().toISOString(),
+    shopifySyncSource: "manual_upload"
   };
+}
+
+function shopifyStatusTemplateRows() {
+  return [{
+    "Variant SKU": "BUS192408TRV",
+    "Handle": "lam-woven-pp-shop-bag",
+    "ID": "gid://shopify/Product/1234567890",
+    "Variant ID": "gid://shopify/ProductVariant/9876543210",
+    "Status": "ACTIVE",
+    "Published": "TRUE",
+    "Published At": "2026-05-15T12:00:00-04:00",
+    "Updated At": "2026-05-15T12:15:00-04:00"
+  }];
 }
 
 function findProductForShopifyRecord(record, maps) {
   const payload = shopifyStatusPayloadFromRecord(record);
   const skuKey = String(payload.sku || "").trim().toLowerCase();
   if (skuKey && maps.bySku.has(skuKey)) return { item: maps.bySku.get(skuKey), payload, matchBy: "Variant SKU" };
-  const handleKey = normalizedHandle(payload.handle);
-  if (handleKey && maps.byHandle.has(handleKey)) return { item: maps.byHandle.get(handleKey), payload, matchBy: "Handle" };
+  if (skuKey) return { item: null, payload, matchBy: "Variant SKU" };
   if (payload.shopifyId && maps.byProductId.has(payload.shopifyId)) return { item: maps.byProductId.get(payload.shopifyId), payload, matchBy: "Shopify ID" };
+  const legacyId = shopifyLegacyId(payload.shopifyId);
+  if (legacyId && maps.byProductId.has(legacyId)) return { item: maps.byProductId.get(legacyId), payload, matchBy: "Shopify ID" };
   return { item: null, payload, matchBy: "" };
 }
 function normalizeCategorySettings(settings = []) {
@@ -3290,7 +5184,7 @@ function scheduleAttributeMappingPropagationJob(seed = {}) {
     let db;
     let job;
     try {
-      db = normalizeDb(await readDbFast());
+      db = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
       job = createImportJob(db, {
         id: seed.jobId,
         section: "Categories",
@@ -3301,14 +5195,22 @@ function scheduleAttributeMappingPropagationJob(seed = {}) {
         message: `Applying ${seed.channel || "marketplace"} attribute mapping rules in the background.`,
         details: `${seed.mainCategory || ""} | ${seed.attributeName || ""}`.trim()
       });
-      await writeDb(db);
+      if (postgres.isPostgresEnabled()) upsertImportJobStore(job);
+      else await writeDb(db);
       const mainCategory = formatCategoryName(seed.mainCategory || "").toLowerCase();
       const categories = Array.isArray(seed.categories) ? seed.categories.map((name) => formatCategoryName(name).toLowerCase()).filter(Boolean) : [];
       const categorySet = new Set([mainCategory, ...categories].filter(Boolean));
-      const affectedProducts = (db.inventory || []).filter((item) => {
-        const itemCategory = formatCategoryName(item.category || item.mainCategory || "").toLowerCase();
-        return categorySet.has(itemCategory);
-      }).length;
+      let affectedProducts = 0;
+      if (postgres.isPostgresEnabled()) {
+        for (const category of categorySet) {
+          affectedProducts += await postgres.countProducts({ filters: { category } });
+        }
+      } else {
+        affectedProducts = (db.inventory || []).filter((item) => {
+          const itemCategory = formatCategoryName(item.category || item.mainCategory || "").toLowerCase();
+          return categorySet.has(itemCategory);
+        }).length;
+      }
       finishImportJob(job, {
         status: "success",
         totalRows: Number(seed.mappingCount || 1),
@@ -3316,10 +5218,11 @@ function scheduleAttributeMappingPropagationJob(seed = {}) {
         message: `Saved ${Number(seed.mappingCount || 1).toLocaleString()} attribute mapping rule${Number(seed.mappingCount || 1) === 1 ? "" : "s"}. ${affectedProducts.toLocaleString()} SKU${affectedProducts === 1 ? "" : "s"} will use them when marketplace output is generated.`,
         details: `${seed.channel || ""} | ${seed.mainCategory || ""} | ${categorySet.size} categor${categorySet.size === 1 ? "y" : "ies"} | ${affectedProducts} affected SKUs`
       });
-      await writeDb(db);
+      if (postgres.isPostgresEnabled()) upsertImportJobStore(job);
+      else await writeDb(db);
     } catch (error) {
       try {
-        db = db || normalizeDb(await readDbFast());
+        db = db || normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
         job = job || createImportJob(db, {
           id: seed.jobId,
           section: "Categories",
@@ -3329,7 +5232,8 @@ function scheduleAttributeMappingPropagationJob(seed = {}) {
           fileName: seed.mainCategory || seed.channel || "attribute-mapping"
         });
         finishImportJob(job, { status: "failed", message: error.message, errors: [error.message], missingCount: 1 });
-        await writeDb(db);
+        if (postgres.isPostgresEnabled()) upsertImportJobStore(job);
+        else await writeDb(db);
       } catch (writeError) {
         console.error("Unable to finish attribute mapping job", writeError);
       }
@@ -3688,6 +5592,41 @@ function publicCategoryRow(category, settings, scope) {
 }
 
 function aggregateMainCatalogCategories(db) {
+  if (Array.isArray(db.__mainCategoryRows)) {
+    const byCategory = new Map();
+    for (const rawRow of db.__mainCategoryRows) {
+      const name = formatCategoryName(rawRow.name || "Uncategorized") || "Uncategorized";
+      const identity = categoryIdentity(name, "main");
+      byCategory.set(name.toLowerCase(), {
+        id: identity.id,
+        categoryId: identity.id,
+        name,
+        productCount: Number(rawRow.productCount || 0),
+        activeProductCount: Number(rawRow.activeProductCount || 0),
+        stockProductCount: Number(rawRow.stockProductCount || 0),
+        hazardousProductCount: Number(rawRow.hazardousProductCount || 0),
+        topVendors: Array.isArray(rawRow.topVendors) ? rawRow.topVendors : [],
+        topBrands: Array.isArray(rawRow.topBrands) ? rawRow.topBrands : []
+      });
+    }
+    for (const setting of normalizeCategorySettings(db.categorySettings)) {
+      const name = formatCategoryName(setting.name || "");
+      if (!name || byCategory.has(name.toLowerCase())) continue;
+      const identity = categoryIdentity(name, "main");
+      byCategory.set(name.toLowerCase(), {
+        id: identity.id,
+        categoryId: identity.id,
+        name,
+        productCount: 0,
+        activeProductCount: 0,
+        stockProductCount: 0,
+        hazardousProductCount: 0,
+        topVendors: [],
+        topBrands: []
+      });
+    }
+    return [...byCategory.values()].sort((a, b) => b.productCount - a.productCount || a.name.localeCompare(b.name));
+  }
   const byCategory = new Map();
   for (const item of db.inventory || []) {
     const name = item.categoryVerified ? (formatCategoryName(item.category || item.mainCategory || "Uncategorized") || "Uncategorized") : "Uncategorized";
@@ -4042,6 +5981,144 @@ function rowsToCsv(rows = []) {
   return [headers, ...rows.map((row) => headers.map((header) => row[header] ?? ""))]
     .map((row) => row.map(escapeCsv).join(","))
     .join("\n");
+}
+
+const DATA_QUALITY_EXPORT_COLUMNS = [
+  "SKU",
+  "Title",
+  "Product score",
+  "Shopify score",
+  "eBay score",
+  "Missing fields",
+  "Issue types",
+  "Shopify status",
+  "Sync source",
+  "Stale days",
+  "Closeout",
+  "Suggested fix"
+];
+
+function dataQualityExportRow(row = {}) {
+  return {
+    SKU: row.sku,
+    Title: row.title,
+    "Product score": row.productScore,
+    "Shopify score": row.shopifyScore,
+    "eBay score": row.ebayScore,
+    "Missing fields": (row.issues || []).join("; "),
+    "Issue types": (row.issueTypes || []).join("; "),
+    "Shopify status": row.shopifyLive ? "Live" : row.shopifyReady ? "Ready" : "Needs work",
+    "Sync source": row.syncSource,
+    "Stale days": row.staleDays ?? "",
+    Closeout: row.toBeDiscontinued ? "TRUE" : "FALSE",
+    "Suggested fix": (row.issues || []).slice(0, 3).map((issue) => `Add ${issue}`).join("; ")
+  };
+}
+
+async function streamDataQualityCsvFromPostgres(res, query = {}) {
+  res.writeHead(200, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": "attachment; filename=dataplus-data-quality.csv"
+  });
+  await writeStreamText(res, `${DATA_QUALITY_EXPORT_COLUMNS.map(escapeCsv).join(",")}\n`);
+  const pageSize = 1000;
+  let offset = 0;
+  while (true) {
+    const page = await postgres.readProductQualityRows({ ...query, limit: pageSize, offset, skipCount: true });
+    const rows = page?.rows || [];
+    if (!rows.length) break;
+    const chunk = rows.map((row) => {
+      const exportRow = dataQualityExportRow(row);
+      return DATA_QUALITY_EXPORT_COLUMNS.map((column) => escapeCsv(exportRow[column] ?? "")).join(",");
+    }).join("\n");
+    await writeStreamText(res, `${chunk}\n`);
+    offset += rows.length;
+    if (rows.length < pageSize) break;
+  }
+  res.end();
+}
+
+const PRODUCT_CHANGE_EXPORT_COLUMNS = [
+  "sku",
+  "supplier",
+  "vendorSku",
+  "title",
+  "field",
+  "before",
+  "after",
+  "delta",
+  "deltaPercent",
+  "direction",
+  "source",
+  "jobId",
+  "importedAt"
+];
+
+function productChangeExportRow(row = {}) {
+  return {
+    sku: row.sku,
+    supplier: row.supplier,
+    vendorSku: row.vendorSku,
+    title: row.title,
+    field: row.field,
+    before: row.before,
+    after: row.after,
+    delta: row.delta,
+    deltaPercent: row.deltaPercent,
+    direction: row.direction,
+    source: row.source,
+    jobId: row.jobId,
+    importedAt: row.importedAt
+  };
+}
+
+async function streamProductChangesCsvFromPostgres(res, query = {}) {
+  res.writeHead(200, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": "attachment; filename=source-catalog-sku-changes.csv"
+  });
+  await writeStreamText(res, `${PRODUCT_CHANGE_EXPORT_COLUMNS.map(escapeCsv).join(",")}\n`);
+  const pageSize = 1000;
+  const maxRows = Math.max(1, Math.min(250000, Number(query.limit || 25000)));
+  let written = 0;
+  for (let page = 1; written < maxRows; page += 1) {
+    const result = await postgres.listProductChangeEvents({ ...query, page, limit: Math.min(pageSize, maxRows - written), skipMeta: true });
+    const rows = result?.rows || [];
+    if (!rows.length) break;
+    const chunk = rows.map((row) => {
+      const exportRow = productChangeExportRow(row);
+      return PRODUCT_CHANGE_EXPORT_COLUMNS.map((column) => escapeCsv(exportRow[column] ?? "")).join(",");
+    }).join("\n");
+    await writeStreamText(res, `${chunk}\n`);
+    written += rows.length;
+    if (rows.length < pageSize) break;
+  }
+  res.end();
+}
+
+async function streamCloseoutSkusCsv(res) {
+  if (fs.existsSync(CATALOG_CLOSEOUT_FILE)) {
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=source-catalog-closeouts.csv"
+    });
+    return fs.createReadStream(CATALOG_CLOSEOUT_FILE).pipe(res);
+  }
+  if (!postgres.isPostgresEnabled()) return sendJson(res, 404, { error: "Closeout export is not ready yet." });
+  res.writeHead(200, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": "attachment; filename=source-catalog-closeouts.csv"
+  });
+  await writeStreamText(res, "sku\n");
+  const pageSize = 1000;
+  for (let page = 1; ; page += 1) {
+    const result = await postgres.listProducts({ page, limit: pageSize, filters: { toBeDiscontinued: "true" } });
+    const rows = result?.inventory || [];
+    if (!rows.length) break;
+    await writeStreamText(res, rows.map((item) => escapeCsv(item.sku || "")).join("\n") + "\n");
+    if (rows.length < pageSize) break;
+  }
+  res.end();
 }
 
 const IMPORT_ERROR_COLUMNS = ["row", "record_key", "field", "issue", "raw_value", "sku", "category", "supplier", "details"];
@@ -5221,6 +7298,14 @@ function sendHtml(res, status, html) {
   res.end(html);
 }
 
+function sendCsv(res, csv, filename = "export.csv") {
+  res.writeHead(200, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": `attachment; filename=${safeImportFileName(filename, "export.csv")}`
+  });
+  res.end(csv);
+}
+
 function notFound(res) {
   sendJson(res, 404, { error: "Not found" });
 }
@@ -5317,10 +7402,71 @@ function serveStatic(req, res) {
 function normalizeImportJobStatus(status) {
   const value = String(status || 'success').trim().toLowerCase();
   if (['queued', 'running', 'success', 'warning', 'failed', 'stopped'].includes(value)) return value;
+  if (['done_with_warnings', 'done-with-warnings', 'completed_with_warnings', 'completed-with-warnings'].includes(value)) return 'warning';
   if (['done', 'complete', 'completed', 'ok'].includes(value)) return 'success';
   if (['stop', 'stopped', 'cancel', 'canceled', 'cancelled'].includes(value)) return 'stopped';
   if (['error', 'errored', 'failure'].includes(value)) return 'failed';
   return 'success';
+}
+
+function importJobApiText(job = {}) {
+  return [
+    job.apiEndpoint,
+    job.apiChannel,
+    job.operation,
+    job.section,
+    job.source,
+    job.fileName,
+    job.message,
+    job.details,
+    ...(Array.isArray(job.errors) ? job.errors : [])
+  ].filter(Boolean).join(" ");
+}
+
+function importJobLooksApiRelated(job = {}) {
+  const direction = String(job.direction || "").toLowerCase();
+  const text = importJobApiText(job);
+  return direction === "api"
+    || /api notification|api failed|api error|api warning|graphql error|oauth|access denied|insufficient permission|permission denied|\bHTTP\s+[45]\d\d\b|\berror\s*\(?[45]\d\d\)?/i.test(text);
+}
+
+function inferImportJobApiChannel(job = {}) {
+  if (!importJobLooksApiRelated(job)) return "";
+  const text = importJobApiText(job);
+  if (/\b(GET|POST|PUT|PATCH|DELETE)\s+\/api\/(?!shopify(?:\/|$)|ebay(?:\/|$)|temu(?:\/|$)|tiktok(?:\/|$))[^\s|,]*/i.test(text)) return "System";
+  if (job.apiChannel && String(job.apiChannel) !== "System") return String(job.apiChannel || "");
+  if (/ebay|\/sell\/inventory|\/sell\/account/i.test(text)) return "eBay";
+  if (/shopify|graphql|myshopify/i.test(text)) return "Shopify";
+  if (/temu/i.test(text)) return "Temu";
+  if (/tiktok/i.test(text)) return "TikTok Shop";
+  return "System";
+}
+
+function inferImportJobApiEndpoint(job = {}) {
+  if (!importJobLooksApiRelated(job)) return "";
+  if (job.apiEndpoint && String(job.apiEndpoint) !== "Unknown endpoint") return String(job.apiEndpoint || "");
+  const text = importJobApiText(job);
+  const cleanEndpoint = (value = "") => String(value || "").replace(/[):,.;]+$/g, "");
+  const methodPath = text.match(/\b(GET|POST|PUT|PATCH|DELETE)\s+(\/[^\s|,]+)/i);
+  if (methodPath) return `${methodPath[1].toUpperCase()} ${cleanEndpoint(methodPath[2])}`;
+  const urlPath = text.match(/https?:\/\/[^/]+(\/[^\s|,]+)/i);
+  if (urlPath) return cleanEndpoint(urlPath[1]);
+  return "Unknown endpoint";
+}
+
+function inferImportJobApiStatus(job = {}) {
+  if (!importJobLooksApiRelated(job)) return 0;
+  if (job.apiStatus) return Number(job.apiStatus || 0) || 0;
+  const text = importJobApiText(job);
+  const status = text.match(/\b(?:HTTP|error)\s*\(?(\d{3})\)?/i)?.[1]
+    || text.match(/\b([45]\d\d)\b/)?.[1];
+  return Number(status || 0) || 0;
+}
+
+function inferImportJobApiReason(job = {}) {
+  if (job.apiReason) return String(job.apiReason || "");
+  if (!importJobLooksApiRelated(job)) return "";
+  return apiFailureReason(importJobApiText(job), inferImportJobApiStatus(job));
 }
 
 function importJobSectionFromSyncRun(run = {}) {
@@ -5338,10 +7484,19 @@ function normalizeImportJob(job = {}) {
   const now = new Date().toISOString();
   const status = normalizeImportJobStatus(job.status);
   const createdAt = job.createdAt || job.startedAt || job.finishedAt || job.updatedAt || now;
-  const finishedAt = job.finishedAt || (['success', 'warning', 'failed'].includes(status) ? job.updatedAt || createdAt : '');
+  const finishedAt = job.finishedAt || (['success', 'warning', 'failed', 'stopped'].includes(status) ? job.updatedAt || createdAt : '');
+  let phase = job.phase || '';
+  const activePhases = new Set(['', 'queued', 'starting', 'collecting_products', 'building_csv', 'saving_file']);
+  if (status === 'stopped' && activePhases.has(phase)) phase = 'stopped';
+  if (status === 'failed' && activePhases.has(phase)) phase = 'failed';
+  if (['success', 'warning'].includes(status) && activePhases.has(phase)) phase = 'complete';
   const errors = Array.isArray(job.errors)
     ? job.errors.map((error) => typeof error === 'string' ? error : error?.message || JSON.stringify(error)).filter(Boolean).slice(0, 50)
     : (job.error ? [String(job.error)] : []);
+  const apiChannel = inferImportJobApiChannel({ ...job, errors });
+  const apiEndpoint = inferImportJobApiEndpoint({ ...job, errors, apiChannel });
+  const apiStatus = inferImportJobApiStatus({ ...job, errors, apiChannel, apiEndpoint });
+  const apiReason = inferImportJobApiReason({ ...job, errors, apiChannel, apiEndpoint, apiStatus });
   return {
     id: job.id || crypto.randomUUID(),
     syncRunId: job.syncRunId || '',
@@ -5352,15 +7507,45 @@ function normalizeImportJob(job = {}) {
     fileName: job.fileName || '',
     originalFileName: job.originalFileName || job.fileName || '',
     originalFilePath: job.originalFilePath || '',
+    filePath: job.filePath || job.originalFilePath || '',
+    artifacts: Array.isArray(job.artifacts)
+      ? job.artifacts.map((artifact) => ({
+        kind: artifact.kind || artifact.artifactKind || '',
+        fileName: artifact.fileName || '',
+        filePath: artifact.filePath || '',
+        contentType: artifact.contentType || '',
+        rowCount: Number(artifact.rowCount ?? artifact.rows ?? 0) || 0,
+        byteSize: Number(artifact.byteSize ?? artifact.bytes ?? 0) || 0
+      })).filter((artifact) => artifact.kind || artifact.fileName || artifact.filePath)
+      : [],
     errorFileName: job.errorFileName || '',
     errorFilePath: job.errorFilePath || '',
     message: job.message || '',
     details: job.details || '',
     totalRows: Number(job.totalRows ?? job.requested ?? job.rows ?? 0) || 0,
+    processedRows: Number(job.processedRows ?? 0) || 0,
+    progressPercent: Number(job.progressPercent ?? 0) || 0,
+    estimatedSecondsRemaining: Number(job.estimatedSecondsRemaining ?? 0) || 0,
+    phase,
+    lastProgressAt: job.lastProgressAt || '',
     changed: Number(job.changed ?? job.updated ?? 0) || 0,
     created: Number(job.created ?? 0) || 0,
     missingCount: Number(job.missingCount ?? job.missing ?? 0) || 0,
     errors,
+    workerTask: job.workerTask || '',
+    workerPayload: job.workerPayload && typeof job.workerPayload === "object" ? job.workerPayload : {},
+    workerId: job.workerId || '',
+    workerLastSeenAt: job.workerLastSeenAt || '',
+    workerClaimedAt: job.workerClaimedAt || '',
+    workerHealth: job.workerHealth || '',
+    duplicateOfActiveJob: Boolean(job.duplicateOfActiveJob),
+    apiChannel,
+    apiEndpoint,
+    apiStatus,
+    apiReason,
+    exportManifest: job.exportManifest && typeof job.exportManifest === "object" ? job.exportManifest : {},
+    manifestFileName: job.manifestFileName || '',
+    manifestFilePath: job.manifestFilePath || '',
     createdAt,
     startedAt: job.startedAt || createdAt,
     finishedAt,
@@ -5403,6 +7588,194 @@ function normalizeImportJobs(jobs = [], syncRuns = []) {
     .slice(0, 250);
 }
 
+function progressPercent(processedRows = 0, totalRows = 0) {
+  const total = Number(totalRows || 0);
+  if (!(total > 0)) return 0;
+  return Math.max(0, Math.min(100, Math.round((Number(processedRows || 0) / total) * 100)));
+}
+
+function estimateRemainingSeconds(startedAt, processedRows = 0, totalRows = 0) {
+  const processed = Number(processedRows || 0);
+  const total = Number(totalRows || 0);
+  if (!(processed > 0) || !(total > processed)) return 0;
+  const start = new Date(startedAt || Date.now()).getTime();
+  const elapsedSeconds = Math.max(1, (Date.now() - start) / 1000);
+  const rowsPerSecond = processed / elapsedSeconds;
+  if (!(rowsPerSecond > 0)) return 0;
+  return Math.max(0, Math.round((total - processed) / rowsPerSecond));
+}
+
+function setActiveJobProgress(jobId, patch = {}) {
+  const existing = activeJobProgress.get(jobId) || {};
+  const totalRows = Number(patch.totalRows ?? existing.totalRows ?? 0) || 0;
+  const processedRows = Number(patch.processedRows ?? existing.processedRows ?? 0) || 0;
+  const startedAt = patch.startedAt || existing.startedAt || new Date().toISOString();
+  const progress = {
+    ...existing,
+    ...patch,
+    totalRows,
+    processedRows,
+    startedAt,
+    progressPercent: patch.progressPercent ?? progressPercent(processedRows, totalRows),
+    estimatedSecondsRemaining: patch.estimatedSecondsRemaining ?? estimateRemainingSeconds(startedAt, processedRows, totalRows),
+    lastProgressAt: new Date().toISOString()
+  };
+  activeJobProgress.set(jobId, progress);
+  return progress;
+}
+
+function applyActiveJobProgress(jobs = []) {
+  return jobs.map((job) => {
+    const progress = activeJobProgress.get(job.id);
+    return progress ? normalizeImportJob({ ...job, ...progress }) : job;
+  });
+}
+
+function readImportJobStore() {
+  try {
+    if (!fs.existsSync(IMPORT_JOB_STORE_FILE)) return [];
+    const parsed = JSON.parse(fs.readFileSync(IMPORT_JOB_STORE_FILE, "utf8"));
+    return normalizeImportJobs(Array.isArray(parsed) ? parsed : parsed.importJobs || [], []);
+  } catch {
+    return [];
+  }
+}
+
+function writeImportJobStore(jobs = []) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(IMPORT_JOB_STORE_FILE, JSON.stringify(normalizeImportJobs(jobs, []).slice(0, 250), null, 2));
+  } catch (error) {
+    console.error("Unable to write import job store", error.message || error);
+  }
+}
+
+function upsertImportJobStore(job = {}) {
+  if (!job?.id) return job;
+  const externalWorkerJob = Boolean(job.workerTask) && !shouldRunJobsInline();
+  if (!externalWorkerJob) activeJobRecords.set(job.id, normalizeImportJob(job));
+  if (postgres.isPostgresEnabled()) {
+    postgres.upsertOperationJob(normalizeImportJob(job)).catch((error) => {
+      console.error("Unable to write Postgres job store", error.message || error);
+    });
+    return job;
+  }
+  const jobs = readImportJobStore();
+  const index = jobs.findIndex((row) => row.id === job.id);
+  if (index >= 0) jobs[index] = normalizeImportJob({ ...jobs[index], ...job });
+  else jobs.unshift(normalizeImportJob(job));
+  writeImportJobStore(jobs);
+  return job;
+}
+
+function mergedImportJobs(db = {}) {
+  const dbJobs = normalizeImportJobs(db.importJobs || [], db.syncRuns || []);
+  const byId = new Map();
+  for (const job of dbJobs) byId.set(job.id, job);
+  for (const job of readImportJobStore()) byId.set(job.id, { ...(byId.get(job.id) || {}), ...job });
+  for (const job of activeJobRecords.values()) byId.set(job.id, { ...(byId.get(job.id) || {}), ...job });
+  return applyActiveJobProgress([...byId.values()]
+    .map(normalizeImportJob)
+    .sort((a, b) => new Date(b.createdAt || b.startedAt || 0) - new Date(a.createdAt || a.startedAt || 0))
+    .slice(0, 250));
+}
+
+async function mergedImportJobsAsync(db = {}) {
+  if (postgres.isPostgresEnabled()) {
+    const byId = new Map();
+    const workerStatus = await readWorkerStatus(readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {})).catch(() => ({}));
+    try {
+      const pgJobs = await postgres.readOperationJobs(250);
+      for (const job of pgJobs) {
+        const status = String(job.status || "").toLowerCase();
+        const updatedAt = new Date(job.updatedAt || job.startedAt || job.createdAt || 0);
+        const hasActiveWorker = activeJobProgress.has(job.id) || activeJobRecords.has(job.id);
+        if (["queued", "running"].includes(status) && isExternalWorkerJob(job) && activeJobLooksComplete(job)) {
+          finishImportJob(job, {
+            status: job.missingCount || (job.errors || []).length ? "warning" : "success",
+            message: job.message && !/queued|building|running/i.test(String(job.message))
+              ? job.message
+              : `${job.operation || "Worker job"} completed.`,
+            phase: "complete",
+            progressPercent: 100,
+            processedRows: job.processedRows || job.totalRows || 0,
+            estimatedSecondsRemaining: 0
+          });
+        } else if (workerJobLooksAbandoned(job, workerStatus)) {
+          finishImportJob(job, {
+            status: "stopped",
+            message: `${job.operation || "Worker job"} stopped because the external worker heartbeat was lost.`,
+            details: [job.details, `Last worker seen: ${job.workerLastSeenAt || job.updatedAt || "unknown"}. Start npm run worker, then use Retry if this job is still needed.`].filter(Boolean).join(" "),
+            phase: "stopped",
+            estimatedSecondsRemaining: 0
+          });
+        } else if (isExternalWorkerJob(job) && ["queued", "running"].includes(status)) {
+          job.workerHealth = workerStatus.online ? "online" : "waiting_for_worker";
+        }
+        if (status === "stopped" && activeJobLooksComplete(job) && /interrupted by a server restart/i.test(String(job.message || ""))) {
+          finishImportJob(job, {
+            status: job.missingCount || (job.errors || []).length ? "done_with_warnings" : "success",
+            message: job.operation ? `${job.operation} completed.` : "Job completed.",
+            phase: "complete",
+            estimatedSecondsRemaining: 0
+          });
+        }
+        if (["queued", "running"].includes(status) && !hasActiveWorker && updatedAt < SERVER_STARTED_AT && !isExternalWorkerJob(job)) {
+          if (activeJobLooksComplete(job)) {
+            finishImportJob(job, {
+              status: job.missingCount || (job.errors || []).length ? "done_with_warnings" : "success",
+              message: job.message || `${job.operation || "Job"} completed before the server restarted.`,
+              phase: "complete",
+              estimatedSecondsRemaining: 0
+            });
+          } else {
+            finishImportJob(job, {
+              status: "stopped",
+              message: `${job.operation || "Job"} was interrupted by a server restart. Run it again if you still need this file.`,
+              details: [job.details, "Automatically marked stopped because the active worker no longer exists after restart."].filter(Boolean).join(" ")
+            });
+          }
+        }
+        byId.set(job.id, job);
+      }
+    } catch (error) {
+      console.error("Unable to read Postgres job store", error.message || error);
+    }
+    for (const job of activeJobRecords.values()) {
+      const existing = byId.get(job.id) || {};
+      const merged = { ...existing, ...job };
+      if ((!Array.isArray(job.artifacts) || !job.artifacts.length) && Array.isArray(existing.artifacts)) merged.artifacts = existing.artifacts;
+      byId.set(job.id, merged);
+    }
+    return applyActiveJobProgress([...byId.values()]
+      .map(normalizeImportJob)
+      .sort((a, b) => new Date(b.createdAt || b.startedAt || 0) - new Date(a.createdAt || a.startedAt || 0))
+      .slice(0, 250));
+  }
+  const dbJobs = normalizeImportJobs(db.importJobs || [], db.syncRuns || []);
+  const byId = new Map();
+  for (const job of dbJobs) byId.set(job.id, job);
+  for (const job of readImportJobStore()) byId.set(job.id, { ...(byId.get(job.id) || {}), ...job });
+  if (postgres.isPostgresEnabled()) {
+    try {
+      const pgJobs = await postgres.readOperationJobs(250);
+      for (const job of pgJobs) byId.set(job.id, { ...(byId.get(job.id) || {}), ...job });
+    } catch (error) {
+      console.error("Unable to read Postgres job store", error.message || error);
+    }
+  }
+  for (const job of activeJobRecords.values()) {
+    const existing = byId.get(job.id) || {};
+    const merged = { ...existing, ...job };
+    if ((!Array.isArray(job.artifacts) || !job.artifacts.length) && Array.isArray(existing.artifacts)) merged.artifacts = existing.artifacts;
+    byId.set(job.id, merged);
+  }
+  return applyActiveJobProgress([...byId.values()]
+    .map(normalizeImportJob)
+    .sort((a, b) => new Date(b.createdAt || b.startedAt || 0) - new Date(a.createdAt || a.startedAt || 0))
+    .slice(0, 250));
+}
+
 function createImportJob(db, attrs = {}) {
   db.importJobs = normalizeImportJobs(db.importJobs, []);
   const now = new Date().toISOString();
@@ -5416,19 +7789,51 @@ function createImportJob(db, attrs = {}) {
   });
   db.importJobs.unshift(job);
   db.importJobs = db.importJobs.slice(0, 250);
+  upsertImportJobStore(job);
   return job;
+}
+
+async function findActiveDuplicateImportJob(db = {}, attrs = {}) {
+  if (!attrs.workerTask) return null;
+  const probe = normalizeImportJob({
+    id: "duplicate-probe",
+    section: attrs.section || "System",
+    operation: attrs.operation || "Import",
+    direction: attrs.direction || "import",
+    fileName: safeImportFileName(attrs.fileName || "job.csv", "job.csv"),
+    workerTask: attrs.workerTask,
+    workerPayload: attrs.workerPayload || {}
+  });
+  const key = importJobDedupeKey(probe);
+  if (!key) return null;
+  const jobs = postgres.isPostgresEnabled()
+    ? await mergedImportJobsAsync(db)
+    : mergedImportJobs(db);
+  return (jobs || []).find((job) => {
+    const status = String(job.status || "").toLowerCase();
+    return ["queued", "running"].includes(status) && importJobDedupeKey(job) === key;
+  }) || null;
 }
 
 function finishImportJob(job, attrs = {}) {
   if (!job) return null;
   const now = new Date().toISOString();
+  const nextAttrs = { ...attrs };
+  const nextStatus = String(nextAttrs.status || "success").toLowerCase();
+  if (!nextAttrs.phase) {
+    if (["stopped", "stop", "canceled", "cancelled"].includes(nextStatus)) nextAttrs.phase = "stopped";
+    else if (nextStatus === "failed") nextAttrs.phase = "failed";
+    else nextAttrs.phase = "complete";
+  }
   Object.assign(job, normalizeImportJob({
     ...job,
-    ...attrs,
-    status: attrs.status || 'success',
-    finishedAt: attrs.finishedAt || now,
+    ...nextAttrs,
+    status: nextAttrs.status || 'success',
+    progressPercent: nextAttrs.progressPercent ?? (nextAttrs.phase === "complete" || ["success", "warning", "done_with_warnings"].includes(nextStatus) ? 100 : job.progressPercent),
+    finishedAt: nextAttrs.finishedAt || now,
     updatedAt: now
   }));
+  upsertImportJobStore(job);
   return job;
 }
 
@@ -5447,6 +7852,25 @@ function attachImportJobOriginalFile(job, content = "", fileName = "") {
   job.originalFileName = safeName;
   job.originalFilePath = filePath;
   if (!job.fileName) job.fileName = safeName;
+  if (postgres.isPostgresEnabled()) {
+    postgres.upsertOperationArtifact(job, "original").catch((error) => {
+      console.error("Unable to persist operation artifact", error.message || error);
+    });
+  }
+  return job;
+}
+
+function attachImportJobOriginalFilePath(job, filePath = "", fileName = "") {
+  if (!job || !filePath || !fs.existsSync(filePath)) return job;
+  const safeName = safeImportFileName(fileName || path.basename(filePath) || job.fileName || "original.csv");
+  job.originalFileName = safeName;
+  job.originalFilePath = filePath;
+  if (!job.fileName) job.fileName = safeName;
+  if (postgres.isPostgresEnabled()) {
+    postgres.upsertOperationArtifact(job, "original").catch((error) => {
+      console.error("Unable to persist operation artifact", error.message || error);
+    });
+  }
   return job;
 }
 
@@ -5469,6 +7893,58 @@ function attachImportJobErrorsFile(job, rows = []) {
   fs.writeFileSync(filePath, rowsToCsv(normalizedRows), "utf8");
   job.errorFileName = "errors.csv";
   job.errorFilePath = filePath;
+  if (postgres.isPostgresEnabled()) {
+    postgres.upsertOperationArtifact(job, "errors").catch((error) => {
+      console.error("Unable to persist error artifact", error.message || error);
+    });
+  }
+  return job;
+}
+
+function exportManifestPayload(job = {}, result = {}, attrs = {}) {
+  return {
+    jobId: job.id || "",
+    operation: job.operation || "",
+    section: job.section || "",
+    fileName: result.filename || job.fileName || job.originalFileName || "",
+    templateId: attrs.templateId || job.workerPayload?.templateId || "",
+    templateName: attrs.templateName || job.exportManifest?.templateName || "",
+    source: attrs.source || job.exportManifest?.source || "",
+    filters: attrs.filters || job.workerPayload?.filters || {},
+    query: attrs.query || job.workerPayload?.query || "",
+    selectedSkus: Array.isArray(attrs.skus) ? attrs.skus.length : Array.isArray(job.workerPayload?.skus) ? job.workerPayload.skus.length : 0,
+    productCount: Number(result.productCount ?? attrs.productCount ?? job.totalRows ?? 0) || 0,
+    rowCount: Number(result.count ?? result.outputRows ?? job.changed ?? 0) || 0,
+    createdAt: new Date().toISOString(),
+    retentionDays: IMPORT_JOB_FILE_RETENTION_DAYS
+  };
+}
+
+function attachExportManifestFile(job, manifest = {}) {
+  if (!job) return job;
+  const dir = path.join(IMPORT_JOB_FILE_DIR, job.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, "manifest.json");
+  fs.writeFileSync(filePath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  job.exportManifest = manifest;
+  job.manifestFileName = "manifest.json";
+  job.manifestFilePath = filePath;
+  job.artifacts = Array.isArray(job.artifacts) ? job.artifacts : [];
+  if (!job.artifacts.some((artifact) => artifact.kind === "manifest" && artifact.filePath === filePath)) {
+    job.artifacts.push({
+      kind: "manifest",
+      fileName: "manifest.json",
+      filePath,
+      contentType: "application/json; charset=utf-8",
+      rowCount: 1,
+      byteSize: fs.statSync(filePath).size
+    });
+  }
+  if (postgres.isPostgresEnabled()) {
+    postgres.upsertOperationArtifact(job, "manifest").catch((error) => {
+      console.error("Unable to persist export manifest artifact", error.message || error);
+    });
+  }
   return job;
 }
 
@@ -5487,14 +7963,23 @@ function apiErrorJobContext(req, error = {}, status = 500) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const pathName = url.pathname;
   const message = String(error.message || "API request failed");
-  const isEbay = pathName.includes("/ebay") || /eBay/i.test(message);
+  const isEbay = /\/ebay(?:\/|$)/i.test(pathName) || /eBay/i.test(message);
+  const isShopify = /\/shopify(?:\/|$)/i.test(pathName) || /Shopify|GraphQL/i.test(message);
+  const isTemu = /\/temu(?:\/|$)/i.test(pathName) || /Temu/i.test(message);
+  const isTiktok = /\/tiktok(?:\/|$)/i.test(pathName) || /TikTok/i.test(message);
+  const channel = isEbay ? "eBay" : isShopify ? "Shopify" : isTemu ? "Temu" : isTiktok ? "TikTok Shop" : "System";
   let operation = "API notification";
   let section = "System";
-  let source = "API";
+  let source = channel === "System" ? "API" : channel;
   if (isEbay) {
-    source = "eBay";
     section = "Channels";
     operation = "eBay API notification";
+  } else if (isShopify) {
+    section = "Channels";
+    operation = "Shopify API notification";
+  } else if (isTemu || isTiktok) {
+    section = "Channels";
+    operation = `${channel} API notification`;
   }
   if (pathName === "/api/ebay/catalog-import") {
     section = "Products";
@@ -5505,16 +7990,31 @@ function apiErrorJobContext(req, error = {}, status = 500) {
   } else if (pathName.includes("/connections/sync")) {
     operation = "Channel sync API failed";
   }
-  return { pathName, method: req.method || "GET", operation, section, source, status, message };
+  const endpoint = `${req.method || "GET"} ${pathName}`;
+  const reason = apiFailureReason(message, status);
+  return { pathName, method: req.method || "GET", endpoint, channel, operation, section, source, status, reason, message };
+}
+
+function apiFailureReason(message = "", status = 0) {
+  const text = String(message || "");
+  if (/access denied|insufficient permission|permission|scope/i.test(text)) return "Permission or OAuth scope";
+  if (/token|oauth|credential|authorization|refresh/i.test(text)) return "Authorization";
+  if (/missing|required|invalid value|invalid string|validation/i.test(text)) return "Validation";
+  if (/rate limit|too many/i.test(text)) return "Rate limit";
+  if (/timeout|network|ECONN|ENOTFOUND|socket/i.test(text)) return "Network";
+  if (Number(status) >= 500) return "Remote service error";
+  if (Number(status) >= 400) return "Request error";
+  return "API error";
 }
 
 async function recordApiErrorJob(req, error = {}, status = 500) {
   try {
     const context = apiErrorJobContext(req, error, status);
-    const db = normalizeDb(await readDbFast());
+    const db = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
     const details = [
       `${context.method} ${context.pathName}`,
       `HTTP ${context.status}`,
+      context.reason,
       context.message
     ].join(" | ");
     const job = createImportJob(db, {
@@ -5527,7 +8027,11 @@ async function recordApiErrorJob(req, error = {}, status = 500) {
       details,
       totalRows: 1,
       missingCount: 1,
-      errors: [context.message]
+      errors: [context.message],
+      apiChannel: context.channel,
+      apiEndpoint: context.endpoint,
+      apiStatus: context.status,
+      apiReason: context.reason
     });
     finishImportJob(job, {
       status: "failed",
@@ -5535,7 +8039,11 @@ async function recordApiErrorJob(req, error = {}, status = 500) {
       details,
       totalRows: 1,
       missingCount: 1,
-      errors: [context.message]
+      errors: [context.message],
+      apiChannel: context.channel,
+      apiEndpoint: context.endpoint,
+      apiStatus: context.status,
+      apiReason: context.reason
     });
     db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
     db.syncRuns.unshift({
@@ -5548,7 +8056,7 @@ async function recordApiErrorJob(req, error = {}, status = 500) {
       createdAt: new Date().toISOString(),
       errors: [context.message]
     });
-    await writeDb(db);
+    upsertImportJobStore(job);
     return normalizeImportJob(job);
   } catch (logError) {
     console.error("Unable to record API error job", logError);
@@ -5558,25 +8066,1532 @@ async function recordApiErrorJob(req, error = {}, status = 500) {
 
 function findImportJob(db, id) {
   db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
-  return db.importJobs.find((job) => job.id === id);
+  const found = db.importJobs.find((job) => job.id === id)
+    || activeJobRecords.get(id)
+    || readImportJobStore().find((job) => job.id === id);
+  return found || null;
+}
+
+function activeJobLooksComplete(job = {}) {
+  const processedRows = Number(job.processedRows || 0);
+  const totalRows = Number(job.totalRows || 0);
+  return totalRows > 0 && processedRows >= totalRows;
+}
+
+function isExternalWorkerJob(job = {}) {
+  return Boolean(String(job.workerTask || "").trim());
+}
+
+function stableJsonKey(value) {
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) return `[${value.map(stableJsonKey).join(",")}]`;
+  if (typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJsonKey(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function importJobDedupeKey(job = {}) {
+  const task = String(job.workerTask || "").trim();
+  if (!task) return "";
+  const operation = String(job.operation || job.name || "").trim().toLowerCase();
+  const fileName = String(job.fileName || job.originalFileName || "").trim().toLowerCase();
+  const payload = stableJsonKey(job.workerPayload || {});
+  return [task, operation, fileName, payload].join("|");
+}
+
+function importJobTime(job = {}, field = "createdAt") {
+  const value = job[field] || job.updatedAt || job.startedAt || job.createdAt || 0;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function markInterruptedActiveJobs(db) {
+  db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
+  let changed = false;
+  for (const job of db.importJobs || []) {
+    const status = String(job.status || "").toLowerCase();
+    if (!["queued", "running"].includes(status)) continue;
+    if (isExternalWorkerJob(job)) continue;
+    const updatedAt = new Date(job.updatedAt || job.startedAt || job.createdAt || 0);
+    if (!(updatedAt < SERVER_STARTED_AT)) continue;
+    if (activeJobLooksComplete(job)) {
+      finishImportJob(job, {
+        status: job.missingCount || (job.errors || []).length ? "done_with_warnings" : "success",
+        message: job.message || `${job.operation || "Job"} completed before the server restarted.`,
+        phase: "complete",
+        estimatedSecondsRemaining: 0
+      });
+    } else {
+      finishImportJob(job, {
+        status: "stopped",
+        message: `${job.operation || "Job"} was interrupted by a server restart. Run it again if you still need this file.`,
+        details: [job.details, "Automatically marked stopped because the active worker no longer exists after restart."].filter(Boolean).join(" "),
+        phase: "stopped",
+        estimatedSecondsRemaining: 0
+      });
+    }
+    changed = true;
+  }
+  return changed;
+}
+
+async function cleanupImportJobs(db = {}) {
+  db.importJobs = await mergedImportJobsAsync(db);
+  let cleaned = 0;
+  let duplicates = 0;
+  let abandoned = 0;
+  let normalizedApiJobs = 0;
+  let expiredArtifacts = 0;
+  let removedArtifactFiles = 0;
+  let orphanArtifactDirs = 0;
+  for (const job of db.importJobs || []) {
+    const hasApiMetadata = Boolean(job.apiChannel || job.apiEndpoint || job.apiReason || job.apiStatus);
+    if (!hasApiMetadata && !importJobLooksApiRelated(job)) continue;
+    const normalized = normalizeImportJob(job);
+    const changedApiMetadata = normalized.apiChannel !== job.apiChannel
+      || normalized.apiEndpoint !== job.apiEndpoint
+      || normalized.apiStatus !== job.apiStatus
+      || normalized.apiReason !== job.apiReason;
+    if (!changedApiMetadata) continue;
+    Object.assign(job, normalized);
+    upsertImportJobStore(job);
+    if (postgres.isPostgresEnabled()) {
+      await postgres.upsertOperationJob(job).catch((error) => {
+        console.error("Unable to persist normalized API job metadata", error.message || error);
+      });
+    }
+    cleaned += 1;
+    normalizedApiJobs += 1;
+  }
+  const workerStatus = await readWorkerStatus(readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {})).catch(() => ({}));
+  const newestActiveByKey = new Map();
+  const activeWorkerJobs = (db.importJobs || [])
+    .filter((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && isExternalWorkerJob(job))
+    .sort((a, b) => importJobTime(b) - importJobTime(a));
+  for (const job of activeWorkerJobs) {
+    if (activeJobLooksComplete(job)) {
+      finishImportJob(job, {
+        status: job.missingCount || (job.errors || []).length ? "warning" : "success",
+        message: job.message && !/queued|building|running/i.test(String(job.message))
+          ? job.message
+          : `${job.operation || "Worker job"} completed.`,
+        phase: "complete",
+        progressPercent: 100,
+        processedRows: job.processedRows || job.totalRows || 0,
+        estimatedSecondsRemaining: 0
+      });
+      activeJobProgress.delete(job.id);
+      activeJobRecords.delete(job.id);
+      cleaned += 1;
+      continue;
+    }
+    if (workerJobLooksAbandoned(job, workerStatus)) {
+      finishImportJob(job, {
+        status: "stopped",
+        message: `${job.operation || "Worker job"} was cleaned up because the worker heartbeat was lost.`,
+        details: [job.details, `Last worker seen: ${job.workerLastSeenAt || job.updatedAt || "unknown"}.`].filter(Boolean).join(" "),
+        phase: "stopped",
+        estimatedSecondsRemaining: 0
+      });
+      activeJobProgress.delete(job.id);
+      activeJobRecords.delete(job.id);
+      cleaned += 1;
+      abandoned += 1;
+      continue;
+    }
+    const key = importJobDedupeKey(job);
+    if (!key) continue;
+    const keeper = newestActiveByKey.get(key);
+    if (!keeper) {
+      newestActiveByKey.set(key, job);
+      continue;
+    }
+    const status = String(job.status || "").toLowerCase();
+    if (status !== "queued") continue;
+    finishImportJob(job, {
+      status: "stopped",
+      message: `${job.operation || "Worker job"} was stopped because a newer duplicate job is already active.`,
+      details: [job.details, `Superseded by job ${keeper.id}.`].filter(Boolean).join(" "),
+      phase: "stopped",
+      estimatedSecondsRemaining: 0
+    });
+    activeJobProgress.delete(job.id);
+    activeJobRecords.delete(job.id);
+    cleaned += 1;
+    duplicates += 1;
+  }
+  for (const job of db.importJobs || []) {
+    const status = String(job.status || "").toLowerCase();
+    if (!["queued", "running"].includes(status)) continue;
+    if (isExternalWorkerJob(job)) continue;
+    const hasActiveWorker = activeJobProgress.has(job.id) || activeJobRecords.has(job.id);
+    if (hasActiveWorker) continue;
+    finishImportJob(job, {
+      status: activeJobLooksComplete(job) ? (job.missingCount || (job.errors || []).length ? "warning" : "success") : "stopped",
+      message: activeJobLooksComplete(job)
+        ? (job.message || `${job.operation || "Job"} completed.`)
+        : `${job.operation || "Job"} was cleaned up because no active worker is running for it.`,
+      details: [job.details, "Cleaned from Jobs maintenance."].filter(Boolean).join(" "),
+      phase: activeJobLooksComplete(job) ? "complete" : "stopped",
+      estimatedSecondsRemaining: 0
+    });
+    activeJobProgress.delete(job.id);
+    activeJobRecords.delete(job.id);
+    cleaned += 1;
+  }
+  const retention = await pruneExpiredImportJobArtifacts(db.importJobs || []);
+  if (retention.expiredJobs) {
+    cleaned += retention.expiredJobs;
+    expiredArtifacts = retention.expiredJobs;
+    removedArtifactFiles = retention.removedFiles;
+  }
+  const orphans = pruneOrphanImportJobDirectories(db.importJobs || []);
+  if (orphans.orphanDirs) {
+    cleaned += orphans.orphanDirs;
+    orphanArtifactDirs = orphans.orphanDirs;
+    removedArtifactFiles += orphans.orphanFiles;
+  }
+  return { cleaned, duplicates, abandoned, normalizedApiJobs, expiredArtifacts, removedArtifactFiles, orphanArtifactDirs, importJobs: await mergedImportJobsAsync(db) };
+}
+
+async function runJobsRetentionCleanupWorkerJob(job = {}) {
+  const current = normalizeImportJob({
+    ...job,
+    status: "running",
+    phase: "cleaning_jobs",
+    startedAt: job.startedAt || new Date().toISOString(),
+    message: "Worker is cleaning expired job files..."
+  });
+  upsertImportJobStore(current);
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const result = await cleanupImportJobs(db);
+  finishImportJob(current, {
+    status: "success",
+    phase: "complete",
+    message: result.expiredArtifacts || result.orphanArtifactDirs
+      ? `Jobs retention cleanup removed ${Number(result.removedArtifactFiles || 0).toLocaleString()} file${Number(result.removedArtifactFiles || 0) === 1 ? "" : "s"}.`
+      : "Jobs retention cleanup complete. No expired files found.",
+    details: `Retention: ${IMPORT_JOB_FILE_RETENTION_DAYS} days. Expired job files: ${result.expiredArtifacts || 0}. Orphan folders: ${result.orphanArtifactDirs || 0}.`,
+    totalRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0),
+    processedRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0),
+    changed: Number(result.removedArtifactFiles || 0),
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString()
+  });
+  upsertImportJobStore(current);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(current);
+  return current;
+}
+
+async function queueJobsRetentionCleanupJob(db = {}, options = {}) {
+  const attrs = {
+    section: "Jobs",
+    operation: "Jobs retention cleanup",
+    direction: "maintenance",
+    fileName: "jobs-retention-cleanup",
+    totalRows: 0,
+    workerTask: shouldRunJobsInline() ? "" : "jobs-retention-cleanup",
+    workerPayload: shouldRunJobsInline() ? {} : { retentionDays: IMPORT_JOB_FILE_RETENTION_DAYS, scheduled: Boolean(options.scheduled) }
+  };
+  const duplicate = await findActiveDuplicateImportJob(db, attrs);
+  if (duplicate) return normalizeImportJob({ ...duplicate, duplicateOfActiveJob: true });
+  const job = createImportJob(db, {
+    ...attrs,
+    status: "queued",
+    phase: "queued",
+    message: `Jobs retention cleanup queued. Files older than ${IMPORT_JOB_FILE_RETENTION_DAYS} days will be removed.`
+  });
+  upsertImportJobStore(job);
+  if (shouldRunJobsInline()) setTimeout(() => {
+    runJobsRetentionCleanupWorkerJob(job).catch((error) => {
+      finishImportJob(job, {
+        status: "failed",
+        phase: "failed",
+        message: error.message || "Jobs retention cleanup failed.",
+        errors: [error.message || "Jobs retention cleanup failed."],
+        missingCount: 1
+      });
+      upsertImportJobStore(job);
+    });
+  }, 100);
+  return job;
+}
+
+async function maybeQueueScheduledJobsRetentionCleanup(db = {}) {
+  const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+  if (settings.jobsRetentionAutoCleanupEnabled === false) return null;
+  const jobs = await mergedImportJobsAsync(db);
+  const cutoff = Date.now() - (24 * 60 * 60 * 1000);
+  const recent = (jobs || []).find((job) => {
+    if (String(job.operation || "") !== "Jobs retention cleanup") return false;
+    const status = String(job.status || "").toLowerCase();
+    if (["queued", "running"].includes(status)) return true;
+    const time = new Date(job.finishedAt || job.updatedAt || job.createdAt || 0).getTime();
+    return Number.isFinite(time) && time >= cutoff;
+  });
+  if (recent) return null;
+  return queueJobsRetentionCleanupJob(db, { scheduled: true });
+}
+
+async function backfillMissingExportManifests(jobs = []) {
+  let changed = 0;
+  for (const job of jobs || []) {
+    const status = String(job.status || "").toLowerCase();
+    if (!["success", "warning"].includes(status)) continue;
+    if (String(job.direction || "").toLowerCase() !== "export") continue;
+    if (job.manifestFilePath && fs.existsSync(job.manifestFilePath)) continue;
+    if (!job.originalFilePath || !fs.existsSync(job.originalFilePath)) continue;
+    attachExportManifestFile(job, exportManifestPayload(job, {
+      filename: job.originalFileName || job.fileName,
+      count: job.changed || job.totalRows || job.processedRows,
+      productCount: job.totalRows || job.processedRows || 0
+    }, job.exportManifest || {}));
+    upsertImportJobStore(job);
+    if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+    changed += 1;
+  }
+  return changed;
 }
 
 function sendImportJobFile(res, job, kind) {
   const isOriginal = kind === "original";
-  const filePath = isOriginal ? job?.originalFilePath : job?.errorFilePath;
-  const fileName = isOriginal ? job?.originalFileName : job?.errorFileName;
+  const isManifest = kind === "manifest";
+  const filePath = isManifest ? job?.manifestFilePath : isOriginal ? job?.originalFilePath : job?.errorFilePath;
+  const fileName = isManifest ? job?.manifestFileName : isOriginal ? job?.originalFileName : job?.errorFileName;
   if (!filePath || !fs.existsSync(filePath)) return false;
   const contentType = fileName?.endsWith(".gz")
     ? "application/gzip"
     : fileName?.endsWith(".json")
       ? "application/json; charset=utf-8"
-      : "text/csv; charset=utf-8";
+      : isManifest
+        ? "application/json; charset=utf-8"
+        : "text/csv; charset=utf-8";
   res.writeHead(200, {
     "Content-Type": contentType,
-    "Content-Disposition": `attachment; filename=${safeImportFileName(fileName || (isOriginal ? "original.csv" : "errors.csv"))}`
+    "Content-Disposition": `attachment; filename=${safeImportFileName(fileName || (isManifest ? "manifest.json" : isOriginal ? "original.csv" : "errors.csv"))}`
   });
-  res.end(fs.readFileSync(filePath));
+  fs.createReadStream(filePath).pipe(res);
   return true;
+}
+
+function exportJobMessage(filename = "export.csv", count = 0) {
+  return `${safeImportFileName(filename, "export.csv")} is ready with ${Number(count || 0).toLocaleString()} row${Number(count || 0) === 1 ? "" : "s"}.`;
+}
+
+async function queueBackgroundExport(db, attrs = {}, buildExport) {
+  const duplicate = await findActiveDuplicateImportJob(db, attrs);
+  if (duplicate) {
+    return normalizeImportJob({
+      ...duplicate,
+      duplicateOfActiveJob: true,
+      message: `${duplicate.operation || attrs.operation || "Job"} is already ${String(duplicate.status || "queued").toLowerCase()}. Job ID: ${duplicate.id}`
+    });
+  }
+  const job = createImportJob(db, {
+    section: attrs.section || "Products",
+    operation: attrs.operation || "CSV export",
+    direction: "export",
+    status: "queued",
+    fileName: safeImportFileName(attrs.fileName || "export.csv", "export.csv"),
+    totalRows: Number(attrs.totalRows || 0) || 0,
+    processedRows: 0,
+    progressPercent: 0,
+    estimatedSecondsRemaining: 0,
+    phase: "queued",
+    workerTask: attrs.workerTask || "",
+    workerPayload: attrs.workerPayload || {},
+    exportManifest: attrs.exportManifest || {},
+    message: attrs.message || "Export queued. The file will be available in Jobs when it is ready.",
+    details: attrs.details || ""
+  });
+  return job;
+}
+
+function startBackgroundExportJob(jobId, buildExport, attrs = {}) {
+  setTimeout(async () => {
+    try {
+      const runningDb = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
+      const runningJob = findImportJob(runningDb, jobId);
+      if (!runningJob) {
+        activeJobProgress.delete(jobId);
+        activeJobRecords.delete(jobId);
+        return;
+      }
+      if (!["queued", "running"].includes(String(runningJob.status || "").toLowerCase())) {
+        activeJobProgress.delete(jobId);
+        activeJobRecords.delete(jobId);
+        return;
+      }
+      setActiveJobProgress(jobId, {
+        status: "running",
+        phase: "starting",
+        totalRows: Number(runningJob.totalRows || attrs.totalRows || 0) || 0,
+        processedRows: 0,
+        startedAt: runningJob.startedAt || new Date().toISOString()
+      });
+      runningJob.status = "running";
+      runningJob.startedAt = runningJob.startedAt || new Date().toISOString();
+      runningJob.updatedAt = new Date().toISOString();
+      runningJob.message = "Building export file...";
+      upsertImportJobStore(runningJob);
+
+      const workDb = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
+      const workJob = findImportJob(workDb, jobId);
+      if (!workJob) {
+        activeJobProgress.delete(jobId);
+        activeJobRecords.delete(jobId);
+        return;
+      }
+      if (!["queued", "running"].includes(String(workJob.status || "").toLowerCase())) {
+        activeJobProgress.delete(jobId);
+        activeJobRecords.delete(jobId);
+        return;
+      }
+      let lastProgressPersistedAt = 0;
+      const progress = (patch = {}) => {
+        const next = setActiveJobProgress(jobId, {
+          ...patch,
+          status: "running",
+          startedAt: workJob.startedAt || runningJob.startedAt || new Date().toISOString()
+        });
+        workJob.processedRows = next.processedRows;
+        workJob.progressPercent = next.progressPercent;
+        workJob.estimatedSecondsRemaining = next.estimatedSecondsRemaining;
+        workJob.phase = next.phase;
+        workJob.lastProgressAt = next.lastProgressAt;
+        activeJobRecords.set(jobId, normalizeImportJob(workJob));
+        if (Date.now() - lastProgressPersistedAt > 1000 || Number(next.progressPercent || 0) >= 100) {
+          lastProgressPersistedAt = Date.now();
+          upsertImportJobStore(workJob);
+        }
+      };
+      const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(jobId)?.status || workJob.status || "").toLowerCase());
+      const result = await buildExport(workDb, { jobId, progress, isCanceled });
+      const latestDb = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
+      const latestJob = findImportJob(latestDb, jobId);
+      if (!latestJob || !["queued", "running"].includes(String(latestJob.status || "").toLowerCase())) {
+        activeJobProgress.delete(jobId);
+        activeJobRecords.delete(jobId);
+        return;
+      }
+      const filename = safeImportFileName(result.filename || attrs.fileName || "export.csv", "export.csv");
+      setActiveJobProgress(jobId, {
+        phase: "saving_file",
+        processedRows: Number(result.count ?? result.totalRows ?? latestJob.processedRows ?? 0) || 0,
+        totalRows: Number(result.count ?? result.totalRows ?? latestJob.totalRows ?? attrs.totalRows ?? 0) || 0
+      });
+      if (result.filePath) {
+        attachImportJobOriginalFilePath(latestJob, result.filePath, filename);
+      } else {
+        attachImportJobOriginalFile(latestJob, result.csv || "", filename);
+      }
+      finishImportJob(latestJob, {
+        status: result.status || "success",
+        fileName: filename,
+        originalFileName: filename,
+        message: result.message || exportJobMessage(filename, result.count),
+        details: result.details || attrs.details || "",
+        totalRows: Number(result.count ?? result.totalRows ?? attrs.totalRows ?? 0) || 0,
+        changed: Number(result.count ?? result.changed ?? 0) || 0,
+        processedRows: Number(result.count ?? result.processedRows ?? result.totalRows ?? 0) || 0,
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0,
+        phase: "complete",
+        lastProgressAt: new Date().toISOString(),
+        missingCount: Number(result.missingCount || 0) || 0
+      });
+      if (postgres.isPostgresEnabled() && latestJob.originalFilePath) {
+        await postgres.upsertOperationArtifact(latestJob, "original").catch((error) => {
+          console.error("Unable to persist completed export artifact", error.message || error);
+        });
+      }
+      attachExportManifestFile(latestJob, exportManifestPayload(latestJob, result, attrs.exportManifest || {}));
+      activeJobProgress.delete(jobId);
+      activeJobRecords.delete(jobId);
+      latestDb.syncRuns = Array.isArray(latestDb.syncRuns) ? latestDb.syncRuns : [];
+      latestDb.syncRuns.unshift({
+        id: crypto.randomUUID(),
+        importJobId: latestJob.id,
+        source: latestJob.section || "Export",
+        type: "export",
+        status: "success",
+        message: latestJob.message,
+        fileName: filename,
+        createdAt: new Date().toISOString()
+      });
+      upsertImportJobStore(latestJob);
+    } catch (error) {
+      try {
+        const failedDb = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
+        const failedJob = findImportJob(failedDb, jobId);
+        if (failedJob) {
+          activeJobProgress.delete(jobId);
+          const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+          finishImportJob(failedJob, {
+            status: wasCanceled ? "stopped" : "failed",
+            message: wasCanceled ? "Job was canceled." : error.message || "Export failed.",
+            errors: wasCanceled ? [] : [error.message || "Export failed."],
+            missingCount: wasCanceled ? 0 : 1,
+            phase: wasCanceled ? "stopped" : "failed",
+            estimatedSecondsRemaining: 0
+          });
+          upsertImportJobStore(failedJob);
+        }
+      } catch (writeError) {
+        console.error("Unable to finish export job", writeError);
+      } finally {
+        activeJobProgress.delete(jobId);
+        activeJobRecords.delete(jobId);
+      }
+    }
+  }, 1000);
+}
+
+function sourceSearchIndexJobActive() {
+  for (const job of activeJobRecords.values()) {
+    const isSearchIndexJob = job.source === "source-catalog-search-index"
+      || /source catalog keyword search index/i.test(String(job.operation || job.message || ""));
+    if (isSearchIndexJob && ["queued", "running"].includes(String(job.status || "").toLowerCase())) return job;
+  }
+  return null;
+}
+
+function startSourceCatalogSearchIndexJob(jobId) {
+  setTimeout(async () => {
+    const job = activeJobRecords.get(jobId);
+    if (!job) return;
+    try {
+      job.status = "running";
+      job.phase = "starting";
+      job.startedAt = job.startedAt || new Date().toISOString();
+      job.updatedAt = new Date().toISOString();
+      job.message = "Building source catalog keyword search index...";
+      setActiveJobProgress(jobId, { status: "running", phase: "starting", startedAt: job.startedAt, processedRows: 0, totalRows: 0, progressPercent: 0 });
+      upsertImportJobStore(job);
+      const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(jobId)?.status || job.status || "").toLowerCase());
+      const status = await postgres.buildSourceCatalogSearchIndex({
+        isCanceled,
+        onProgress: (progress = {}) => {
+          const patch = {
+            status: "running",
+            phase: progress.phase || "building_index",
+            totalRows: Number(progress.totalRows || 0) || Number(job.totalRows || 0) || 0,
+            processedRows: Number(progress.processedRows || 0) || Number(job.processedRows || 0) || 0,
+            progressPercent: progress.progressPercent,
+            estimatedSecondsRemaining: progress.estimatedSecondsRemaining
+          };
+          const next = setActiveJobProgress(jobId, patch);
+          job.totalRows = next.totalRows;
+          job.processedRows = next.processedRows;
+          job.progressPercent = next.progressPercent;
+          job.estimatedSecondsRemaining = next.estimatedSecondsRemaining;
+          job.phase = next.phase;
+          job.updatedAt = new Date().toISOString();
+          activeJobRecords.set(jobId, normalizeImportJob(job));
+          upsertImportJobStore(job);
+        }
+      });
+      activeJobProgress.delete(jobId);
+      finishImportJob(job, {
+        status: status.ready ? "success" : "done_with_warnings",
+        phase: "complete",
+        message: status.ready
+          ? "Source catalog keyword search index is ready."
+          : "Source catalog search index finished, but Postgres did not mark it ready.",
+        totalRows: status.totalRows || job.totalRows || 0,
+        processedRows: status.processedRows || job.processedRows || 0,
+        changed: 1,
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0,
+        details: "Built vendor_catalog_items_search_trgm_idx for broad source catalog keyword search."
+      });
+    } catch (error) {
+      activeJobProgress.delete(jobId);
+      const canceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+      finishImportJob(job, {
+        status: canceled ? "stopped" : "failed",
+        phase: canceled ? "stopped" : "failed",
+        message: canceled ? "Source catalog search index job was canceled." : error.message || "Source catalog search index build failed.",
+        errors: canceled ? [] : [error.message || "Source catalog search index build failed."],
+        missingCount: canceled ? 0 : 1
+      });
+    }
+  }, 1000);
+}
+
+async function categoryExportPayload(db, type = "", options = {}) {
+  const channel = String(options.channel || "").trim().toLowerCase();
+  if (type === "matrixify-smart-collections") {
+    const rows = await matrixifySmartCollectionRows();
+    return {
+      filename: "matrixify-smart_collections-product-types.csv",
+      csv: rowsToCsv(rows),
+      count: rows.length,
+      section: "Categories",
+      operation: "Matrixify smart collections export"
+    };
+  }
+  if (type === "matrixify-menu") {
+    const rows = await matrixifyMenuRows();
+    const csv = [MATRIXIFY_MENU_COLUMNS, ...rows.map((row) => MATRIXIFY_MENU_COLUMNS.map((column) => row[column] ?? ""))]
+      .map((row) => row.map(escapeCsv).join(","))
+      .join("\n");
+    return {
+      filename: "matrixify-shopify-menus.csv",
+      csv,
+      count: rows.length,
+      section: "Categories",
+      operation: "Matrixify menu export"
+    };
+  }
+  if (type === "master-category-mapping") {
+    const rows = masterCategoryMappingRows(db);
+    return {
+      filename: "dataplus-master-category-mapping.csv",
+      csv: rowsToCsv(rows),
+      count: rows.length,
+      section: "Categories",
+      operation: "Master category mapping export"
+    };
+  }
+  if (type === "marketplace-attributes") {
+    const rows = marketplaceCategoryAttributeRows(db, { channel });
+    const suffix = channel ? `-${channel}` : "";
+    return {
+      filename: `dataplus-marketplace-category-attributes${suffix}.csv`,
+      csv: rowsToCsv(rows),
+      count: rows.length,
+      section: "Categories",
+      operation: "Marketplace attributes export"
+    };
+  }
+  return null;
+}
+
+function categoryExportMeta(type = "", channel = "") {
+  const normalizedType = String(type || "").trim();
+  const normalizedChannel = String(channel || "").trim();
+  return {
+    "matrixify-smart-collections": {
+      filename: "matrixify-smart_collections-product-types.csv",
+      section: "Categories",
+      operation: "Matrixify smart collections export"
+    },
+    "matrixify-menu": {
+      filename: "matrixify-shopify-menus.csv",
+      section: "Categories",
+      operation: "Matrixify menu export"
+    },
+    "master-category-mapping": {
+      filename: "dataplus-master-category-mapping.csv",
+      section: "Categories",
+      operation: "Master category mapping export"
+    },
+    "marketplace-attributes": {
+      filename: `dataplus-marketplace-category-attributes${normalizedChannel ? `-${normalizedChannel}` : ""}.csv`,
+      section: "Categories",
+      operation: "Marketplace attributes export"
+    }
+  }[normalizedType] || null;
+}
+
+async function buildCategoryExportFile(workDb, type = "", options = {}, jobContext = {}) {
+  const meta = categoryExportMeta(type, options.channel || "");
+  if (!meta) throw new Error("Unsupported category export.");
+  jobContext.progress?.({ phase: "building_csv", processedRows: 0, totalRows: 0 });
+  const payload = await categoryExportPayload(workDb, type, options);
+  if (!payload) throw new Error("Unsupported category export.");
+  const filename = safeImportFileName(payload.filename || meta.filename, meta.filename);
+  const exportFilePath = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(jobContext.jobId || crypto.randomUUID(), "export-job"), filename);
+  fs.mkdirSync(path.dirname(exportFilePath), { recursive: true });
+  fs.writeFileSync(exportFilePath, payload.csv || "", "utf8");
+  jobContext.progress?.({ phase: "saving_file", processedRows: Number(payload.count || 0) || 0, totalRows: Number(payload.count || 0) || 0 });
+  return { ...payload, csv: "", filename, filePath: exportFilePath };
+}
+
+async function queueCategoryExportJob(db, type = "", options = {}) {
+  const meta = categoryExportMeta(type, options.channel || "");
+  if (!meta) return null;
+  const buildExport = async (workDb, jobContext = {}) => buildCategoryExportFile(workDb, type, options, jobContext);
+  const job = await queueBackgroundExport(db, {
+    section: meta.section,
+    operation: meta.operation,
+    fileName: meta.filename,
+    totalRows: Number(options.totalRows || 0) || 0,
+    workerTask: shouldRunJobsInline() ? "" : "category-export",
+    workerPayload: shouldRunJobsInline() ? {} : { type, options },
+    exportManifest: { exportType: "category", categoryExportType: type, options },
+    message: `${meta.operation} queued. You can download it from Jobs when it finishes.`
+  }, buildExport);
+  if (!job.duplicateOfActiveJob) {
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) startBackgroundExportJob(job.id, buildExport, {
+      fileName: meta.filename,
+      totalRows: options.totalRows,
+      exportManifest: { exportType: "category", categoryExportType: type, options }
+    });
+  }
+  return job;
+}
+
+function isDirectCategoryExportRequest(url) {
+  return process.env.DATAPLUS_ALLOW_DIRECT_CATEGORY_EXPORTS === "true"
+    && ["1", "true", "yes"].includes(String(url.searchParams.get("direct") || "").toLowerCase());
+}
+
+async function queueMappedProductsExportJob(db, templateId, template, options = {}) {
+  const requestedSkus = Array.isArray(options.skus)
+    ? [...new Set(options.skus.map((sku) => String(sku || "").trim()).filter(Boolean))]
+    : [];
+  const query = options.query || "";
+  const filters = options.filters || {};
+  const productTotal = Number(options.productTotal || requestedSkus.length || 0) || 0;
+  const dataFileName = options.dataFileName || options.fileName || "";
+  const filename = mappedExportFilename(template, dataFileName);
+  const buildExport = async (workDb, jobContext = {}) => {
+    workDb.exportMappings = await readExportMappingsApiStore();
+    const workTemplate = workDb.exportMappings.find((row) => row.id === templateId) || template;
+    const exportFileName = mappedExportFilename(workTemplate, dataFileName);
+    const exportFilePath = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(jobContext.jobId || crypto.randomUUID(), "export-job"), safeImportFileName(exportFileName, "export.csv"));
+    const written = await mappedProductsCsvPostgresFileAsync(workDb, workTemplate, exportFilePath, {
+      skus: requestedSkus,
+      query,
+      filters,
+      progress: jobContext.progress,
+      isCanceled: jobContext.isCanceled
+    });
+    const exportedProductCount = written.productCount ?? productTotal;
+    return {
+      filename: exportFileName,
+      filePath: written.filePath,
+      count: written.outputRows,
+      changed: written.outputRows,
+      productCount: exportedProductCount,
+      details: `${written.outputRows.toLocaleString()} CSV rows exported from ${Number(exportedProductCount || 0).toLocaleString()} product${Number(exportedProductCount || 0) === 1 ? "" : "s"}.`
+    };
+  };
+  const job = await queueBackgroundExport(db, {
+    section: "Products",
+    operation: `${template.name} product export`,
+    fileName: filename,
+    totalRows: productTotal,
+    workerTask: shouldRunJobsInline() ? "" : "mapped-product-export",
+    workerPayload: shouldRunJobsInline() ? {} : { templateId, template: options.includeTemplateInPayload ? template : undefined, skus: requestedSkus, query, filters, productTotal, dataFileName },
+    exportManifest: { exportType: "mapped-products", templateId, templateName: template.name, source: template.source, dataFileName, skus: requestedSkus, query, filters },
+    message: "Product export queued. You can download it from Jobs when it finishes."
+  }, buildExport);
+  if (!job.duplicateOfActiveJob) {
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) startBackgroundExportJob(job.id, buildExport, {
+      fileName: filename,
+      totalRows: productTotal,
+      exportManifest: { exportType: "mapped-products", templateId, templateName: template.name, source: template.source, dataFileName, skus: requestedSkus, query, filters }
+    });
+  }
+  return job;
+}
+
+function startShopifyStatusSyncJob(jobId, attrs = {}) {
+  setTimeout(async () => {
+    const job = activeJobRecords.get(jobId) || normalizeImportJob({ id: jobId });
+    try {
+      if (!["queued", "running"].includes(String(job.status || "").toLowerCase())) return;
+      const limit = Math.max(1, Math.min(5000, Number(attrs.limit || job.totalRows || 100)));
+      setActiveJobProgress(jobId, {
+        status: "running",
+        phase: "syncing_shopify",
+        totalRows: limit,
+        processedRows: 0,
+        startedAt: job.startedAt || new Date().toISOString()
+      });
+      job.status = "running";
+      job.phase = "syncing_shopify";
+      job.startedAt = job.startedAt || new Date().toISOString();
+      job.updatedAt = new Date().toISOString();
+      job.message = "Syncing Shopify product status...";
+      upsertImportJobStore(job);
+      const errors = [];
+      let synced = 0;
+      let changed = 0;
+      let processed = 0;
+      const touched = [];
+      const existingShopifyStatusMap = await postgres.readShopifyStatusMap().catch(() => ({})) || {};
+      const syncedStatusMap = {};
+      let lastProgressPersistedAt = 0;
+      const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(jobId)?.status || job.status || "").toLowerCase());
+      const persistProgress = () => {
+        const next = setActiveJobProgress(jobId, {
+          status: "running",
+          phase: "syncing_shopify",
+          totalRows: limit,
+          processedRows: processed,
+          startedAt: job.startedAt
+        });
+        job.totalRows = next.totalRows;
+        job.processedRows = next.processedRows;
+        job.progressPercent = next.progressPercent;
+        job.estimatedSecondsRemaining = next.estimatedSecondsRemaining;
+        job.phase = next.phase;
+        job.lastProgressAt = next.lastProgressAt;
+        activeJobRecords.set(jobId, normalizeImportJob(job));
+        if (Date.now() - lastProgressPersistedAt > 1000 || processed >= limit) {
+          lastProgressPersistedAt = Date.now();
+          upsertImportJobStore(job);
+        }
+      };
+      const pageSize = Math.min(100, limit);
+      for (let page = 1; processed < limit; page += 1) {
+        if (isCanceled()) throw new Error("Shopify status sync canceled.");
+        const remaining = limit - processed;
+        const result = await postgres.listProducts({ page, limit: Math.min(pageSize, remaining), filters: { channelStatus: "shopify-linked" } });
+        const candidates = result?.inventory || result?.items || [];
+        if (!candidates.length) break;
+        for (const item of candidates) {
+          if (isCanceled()) throw new Error("Shopify status sync canceled.");
+          try {
+            const hydratedItem = withShopifyStatus(item, existingShopifyStatusMap);
+            const syncResult = await syncInventoryItemShopifyStatus(hydratedItem, "", { jobId });
+            synced += 1;
+            syncedStatusMap[String(item.sku || "").toLowerCase()] = syncResult.payload;
+            if (syncResult.changed.length) {
+              changed += 1;
+              touched.push(hydratedItem);
+            }
+          } catch (error) {
+            errors.push(`${item.sku || item.id}: ${error.message}`);
+          }
+          processed += 1;
+          persistProgress();
+          await new Promise((resolve) => setImmediate(resolve));
+          if (processed >= limit) break;
+        }
+        if (candidates.length < Math.min(pageSize, remaining)) break;
+      }
+      if (touched.length) await postgres.upsertProductsFromState(touched);
+      if (Object.keys(syncedStatusMap).length) mergeShopifyStatusMapSync(syncedStatusMap);
+      activeJobProgress.delete(jobId);
+      finishImportJob(job, {
+        status: errors.length ? "warning" : "success",
+        message: `Shopify GraphQL sync checked ${synced.toLocaleString()} product${synced === 1 ? "" : "s"}${changed ? ` and updated ${changed.toLocaleString()}` : ""}${errors.length ? `; ${errors.length.toLocaleString()} failed` : ""}.`,
+        totalRows: limit,
+        processedRows: processed,
+        changed,
+        missingCount: errors.length,
+        errors: errors.slice(0, 50),
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0,
+        phase: "complete",
+        lastProgressAt: new Date().toISOString()
+      });
+      upsertImportJobStore(job);
+      activeJobRecords.delete(jobId);
+      publicStateJsonCache = null;
+    } catch (error) {
+      activeJobProgress.delete(jobId);
+      const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+      finishImportJob(job, {
+        status: wasCanceled ? "stopped" : "failed",
+        message: wasCanceled ? "Shopify status sync was canceled." : error.message || "Shopify status sync failed.",
+        errors: wasCanceled ? [] : [error.message || "Shopify status sync failed."],
+        missingCount: wasCanceled ? 0 : 1,
+        phase: wasCanceled ? "stopped" : "failed",
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+      activeJobRecords.delete(jobId);
+    }
+  }, 1000);
+}
+
+function startEbayCatalogImportJob(jobId) {
+  setTimeout(async () => {
+    const job = activeJobRecords.get(jobId) || normalizeImportJob({ id: jobId });
+    try {
+      if (!["queued", "running"].includes(String(job.status || "").toLowerCase())) return;
+      setActiveJobProgress(jobId, {
+        status: "running",
+        phase: "fetching_ebay_catalog",
+        totalRows: Number(job.totalRows || 0) || 0,
+        processedRows: 0,
+        startedAt: job.startedAt || new Date().toISOString()
+      });
+      job.status = "running";
+      job.phase = "fetching_ebay_catalog";
+      job.startedAt = job.startedAt || new Date().toISOString();
+      job.updatedAt = new Date().toISOString();
+      job.message = "Fetching live eBay catalog...";
+      upsertImportJobStore(job);
+      const workDb = normalizeDb(await readDbFast({ skipInventory: false }));
+      const workJob = findImportJob(workDb, jobId) || job;
+      let lastProgressPersistedAt = 0;
+      const progress = (patch = {}) => {
+        const next = setActiveJobProgress(jobId, {
+          ...patch,
+          status: "running",
+          startedAt: workJob.startedAt || job.startedAt || new Date().toISOString()
+        });
+        workJob.totalRows = next.totalRows;
+        workJob.processedRows = next.processedRows;
+        workJob.progressPercent = next.progressPercent;
+        workJob.estimatedSecondsRemaining = next.estimatedSecondsRemaining;
+        workJob.phase = next.phase;
+        workJob.lastProgressAt = next.lastProgressAt;
+        activeJobRecords.set(jobId, normalizeImportJob(workJob));
+        if (Date.now() - lastProgressPersistedAt > 1000 || Number(next.progressPercent || 0) >= 100) {
+          lastProgressPersistedAt = Date.now();
+          upsertImportJobStore(workJob);
+        }
+      };
+      const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(jobId)?.status || workJob.status || job.status || "").toLowerCase());
+      const result = await importEbayCatalog(workDb, { job: workJob, progress, isCanceled });
+      const normalized = normalizeDb(workDb);
+      await writeDb(normalized);
+      activeJobProgress.delete(jobId);
+      activeJobRecords.delete(jobId);
+      upsertImportJobStore(result.job || workJob);
+      publicStateJsonCache = null;
+    } catch (error) {
+      activeJobProgress.delete(jobId);
+      const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+      finishImportJob(job, {
+        status: wasCanceled ? "stopped" : "failed",
+        message: wasCanceled ? "eBay catalog sync was canceled." : error.message || "eBay catalog sync failed.",
+        errors: wasCanceled ? [] : [error.message || "eBay catalog sync failed."],
+        missingCount: wasCanceled ? 0 : 1,
+        phase: wasCanceled ? "stopped" : "failed",
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+      activeJobRecords.delete(jobId);
+    }
+  }, 1000);
+}
+
+function startEbayAccountSettingsSyncJob(jobId) {
+  setTimeout(async () => {
+    const job = activeJobRecords.get(jobId) || normalizeImportJob({ id: jobId });
+    try {
+      if (!["queued", "running"].includes(String(job.status || "").toLowerCase())) return;
+      const startedAt = job.startedAt || new Date().toISOString();
+      setActiveJobProgress(jobId, {
+        status: "running",
+        phase: "fetching_ebay_settings",
+        totalRows: 4,
+        processedRows: 0,
+        startedAt
+      });
+      job.status = "running";
+      job.phase = "fetching_ebay_settings";
+      job.startedAt = startedAt;
+      job.updatedAt = new Date().toISOString();
+      job.message = "Fetching eBay account settings...";
+      upsertImportJobStore(job);
+      const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(jobId)?.status || job.status || "").toLowerCase());
+      if (isCanceled()) throw new Error("eBay account settings sync canceled.");
+      const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+      const workJob = findImportJob(workDb, jobId) || job;
+      const progress = (processedRows, phase = "fetching_ebay_settings") => {
+        const next = setActiveJobProgress(jobId, {
+          status: "running",
+          phase,
+          totalRows: 4,
+          processedRows,
+          startedAt
+        });
+        workJob.totalRows = next.totalRows;
+        workJob.processedRows = next.processedRows;
+        workJob.progressPercent = next.progressPercent;
+        workJob.estimatedSecondsRemaining = next.estimatedSecondsRemaining;
+        workJob.phase = next.phase;
+        workJob.lastProgressAt = next.lastProgressAt;
+        activeJobRecords.set(jobId, normalizeImportJob(workJob));
+        upsertImportJobStore(workJob);
+      };
+      progress(1);
+      const result = await syncEbayAccountSettings(workDb, { logWarnings: false, jobId });
+      if (isCanceled()) throw new Error("eBay account settings sync canceled.");
+      progress(3, "saving_ebay_settings");
+      const normalized = normalizeDb({ ...workDb, inventory: [] });
+      await writeDb(normalized);
+      const failures = Array.isArray(result.failures) ? result.failures.filter(Boolean) : [];
+      const fetchedCount = (result.merchantLocations || []).length
+        + (result.paymentPolicies || []).length
+        + (result.returnPolicies || []).length
+        + (result.fulfillmentPolicies || []).length;
+      activeJobProgress.delete(jobId);
+      finishImportJob(workJob, {
+        status: failures.length ? "done_with_warnings" : "success",
+        message: failures.length
+          ? `Synced ${fetchedCount} eBay account setting${fetchedCount === 1 ? "" : "s"} with ${failures.length} API warning${failures.length === 1 ? "" : "s"}.`
+          : `Synced ${fetchedCount} eBay account setting${fetchedCount === 1 ? "" : "s"}.`,
+        totalRows: 4,
+        processedRows: 4,
+        changed: fetchedCount,
+        missingCount: failures.length,
+        errors: failures,
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0,
+        phase: "complete",
+        lastProgressAt: new Date().toISOString()
+      });
+      upsertImportJobStore(workJob);
+      activeJobRecords.delete(jobId);
+      publicStateJsonCache = null;
+    } catch (error) {
+      activeJobProgress.delete(jobId);
+      const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+      finishImportJob(job, {
+        status: wasCanceled ? "stopped" : "failed",
+        message: wasCanceled ? "eBay account settings sync was canceled." : error.message || "eBay account settings sync failed.",
+        errors: wasCanceled ? [] : [error.message || "eBay account settings sync failed."],
+        missingCount: wasCanceled ? 0 : 1,
+        phase: wasCanceled ? "stopped" : "failed",
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+      activeJobRecords.delete(jobId);
+    }
+  }, 1000);
+}
+
+function queueEbayAccountSettingsSyncJob(db) {
+  const job = createImportJob(db, {
+    section: "Channels",
+    operation: "eBay account settings sync",
+    direction: "sync",
+    status: "queued",
+    fileName: "eBay Account API",
+    totalRows: 4,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "ebay-account-settings-sync",
+    workerPayload: shouldRunJobsInline() ? {} : {},
+    message: "eBay account settings sync queued. Locations and business policies will update when it finishes."
+  });
+  upsertImportJobStore(job);
+  if (shouldRunJobsInline()) {
+    activeJobRecords.set(job.id, normalizeImportJob(job));
+    setActiveJobProgress(job.id, {
+      status: "queued",
+      phase: "queued",
+      totalRows: 4,
+      processedRows: 0,
+      startedAt: job.startedAt || new Date().toISOString()
+    });
+    startEbayAccountSettingsSyncJob(job.id);
+  }
+  return job;
+}
+
+function startEbayLocationJob(jobId, body = {}) {
+  setTimeout(async () => {
+    const job = activeJobRecords.get(jobId) || normalizeImportJob({ id: jobId });
+    try {
+      if (!["queued", "running"].includes(String(job.status || "").toLowerCase())) return;
+      const startedAt = job.startedAt || new Date().toISOString();
+      setActiveJobProgress(jobId, {
+        status: "running",
+        phase: "creating_ebay_location",
+        totalRows: 3,
+        processedRows: 0,
+        startedAt
+      });
+      job.status = "running";
+      job.phase = "creating_ebay_location";
+      job.startedAt = startedAt;
+      job.updatedAt = new Date().toISOString();
+      job.message = "Creating eBay inventory location...";
+      upsertImportJobStore(job);
+      const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(jobId)?.status || job.status || "").toLowerCase());
+      if (isCanceled()) throw new Error("eBay location creation canceled.");
+      const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+      const workJob = findImportJob(workDb, jobId) || job;
+      const progress = (processedRows, phase = "creating_ebay_location") => {
+        const next = setActiveJobProgress(jobId, {
+          status: "running",
+          phase,
+          totalRows: 3,
+          processedRows,
+          startedAt
+        });
+        workJob.totalRows = next.totalRows;
+        workJob.processedRows = next.processedRows;
+        workJob.progressPercent = next.progressPercent;
+        workJob.estimatedSecondsRemaining = next.estimatedSecondsRemaining;
+        workJob.phase = next.phase;
+        workJob.lastProgressAt = next.lastProgressAt;
+        activeJobRecords.set(jobId, normalizeImportJob(workJob));
+        upsertImportJobStore(workJob);
+      };
+      progress(1);
+      const result = await createOrEnableEbayLocation(workDb, body, { logWarnings: false, jobId });
+      if (isCanceled()) throw new Error("eBay location creation canceled.");
+      progress(2, "saving_ebay_location");
+      const normalized = normalizeDb({ ...workDb, inventory: [] });
+      await writeDb(normalized);
+      const failures = Array.isArray(result.syncResult?.failures) ? result.syncResult.failures.filter(Boolean) : [];
+      activeJobProgress.delete(jobId);
+      finishImportJob(workJob, {
+        status: failures.length ? "done_with_warnings" : "success",
+        message: failures.length
+          ? `eBay location ${result.merchantLocationKey} was saved with ${failures.length} settings warning${failures.length === 1 ? "" : "s"}.`
+          : `eBay location ${result.merchantLocationKey} was created and account settings were refreshed.`,
+        totalRows: 3,
+        processedRows: 3,
+        changed: 1,
+        missingCount: failures.length,
+        errors: failures,
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0,
+        phase: "complete",
+        lastProgressAt: new Date().toISOString()
+      });
+      upsertImportJobStore(workJob);
+      activeJobRecords.delete(jobId);
+      publicStateJsonCache = null;
+    } catch (error) {
+      activeJobProgress.delete(jobId);
+      const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+      finishImportJob(job, {
+        status: wasCanceled ? "stopped" : "failed",
+        message: wasCanceled ? "eBay location creation was canceled." : error.message || "eBay location creation failed.",
+        errors: wasCanceled ? [] : [error.message || "eBay location creation failed."],
+        missingCount: wasCanceled ? 0 : 1,
+        phase: wasCanceled ? "stopped" : "failed",
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+      activeJobRecords.delete(jobId);
+    }
+  }, 1000);
+}
+
+function queueEbayLocationJob(db, body = {}) {
+  const merchantLocationKey = ebayMerchantLocationKeyFromBody(body);
+  ebayLocationPayload(body);
+  const job = createImportJob(db, {
+    section: "Channels",
+    operation: "eBay inventory location setup",
+    direction: "sync",
+    status: "queued",
+    fileName: "eBay Inventory Location API",
+    totalRows: 3,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "ebay-location-sync",
+    workerPayload: shouldRunJobsInline() ? {} : body,
+    message: `eBay location ${merchantLocationKey} setup queued. The location and account settings will update when it finishes.`,
+    details: `Merchant location key: ${merchantLocationKey}`
+  });
+  upsertImportJobStore(job);
+  if (shouldRunJobsInline()) {
+    activeJobRecords.set(job.id, normalizeImportJob(job));
+    setActiveJobProgress(job.id, {
+      status: "queued",
+      phase: "queued",
+      totalRows: 3,
+      processedRows: 0,
+      startedAt: job.startedAt || new Date().toISOString()
+    });
+    startEbayLocationJob(job.id, body);
+  }
+  return { job, merchantLocationKey };
+}
+
+async function persistWorkerImportJob(job = {}, attrs = {}) {
+  Object.assign(job, normalizeImportJob({ ...job, ...attrs, updatedAt: new Date().toISOString() }));
+  await postgres.upsertOperationJob(job);
+  return job;
+}
+
+async function runShopifyStatusSyncWorkerJob(job = {}, attrs = {}) {
+  const limit = Math.max(1, Math.min(5000, Number(attrs.limit || job.workerPayload?.limit || job.totalRows || 100)));
+  const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "syncing_shopify",
+    totalRows: limit,
+    processedRows: 0,
+    startedAt,
+    message: "Syncing Shopify product status..."
+  });
+  const errors = [];
+  let synced = 0;
+  let changed = 0;
+  let processed = 0;
+  const touched = [];
+  const existingShopifyStatusMap = await postgres.readShopifyStatusMap().catch(() => ({})) || {};
+  const syncedStatusMap = {};
+  let lastPersistedAt = 0;
+  const persistProgress = async () => {
+    const now = Date.now();
+    if (now - lastPersistedAt < 1000 && processed < limit) return;
+    lastPersistedAt = now;
+    await persistWorkerImportJob(job, {
+      status: "running",
+      phase: "syncing_shopify",
+      totalRows: limit,
+      processedRows: processed,
+      progressPercent: progressPercent(processed, limit),
+      estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, limit),
+      lastProgressAt: new Date().toISOString()
+    });
+  };
+  const pageSize = Math.min(100, limit);
+  for (let page = 1; processed < limit; page += 1) {
+    const remaining = limit - processed;
+    const result = await postgres.listProducts({ page, limit: Math.min(pageSize, remaining), filters: { channelStatus: "shopify-linked" } });
+    const candidates = result?.inventory || result?.items || [];
+    if (!candidates.length) break;
+    for (const item of candidates) {
+      try {
+        const hydratedItem = withShopifyStatus(item, existingShopifyStatusMap);
+        const syncResult = await syncInventoryItemShopifyStatus(hydratedItem, "", { jobId: job.id });
+        synced += 1;
+        syncedStatusMap[String(item.sku || "").toLowerCase()] = syncResult.payload;
+        if (syncResult.changed.length) {
+          changed += 1;
+          touched.push(hydratedItem);
+        }
+      } catch (error) {
+        errors.push(`${item.sku || item.id}: ${error.message}`);
+      }
+      processed += 1;
+      await persistProgress();
+      await new Promise((resolve) => setImmediate(resolve));
+      if (processed >= limit) break;
+    }
+    if (candidates.length < Math.min(pageSize, remaining)) break;
+  }
+  if (touched.length) await postgres.upsertProductsFromState(touched);
+  if (Object.keys(syncedStatusMap).length) mergeShopifyStatusMapSync(syncedStatusMap);
+  finishImportJob(job, {
+    status: errors.length ? "warning" : "success",
+    message: `Shopify GraphQL sync checked ${synced.toLocaleString()} product${synced === 1 ? "" : "s"}${changed ? ` and updated ${changed.toLocaleString()}` : ""}${errors.length ? `; ${errors.length.toLocaleString()} failed` : ""}.`,
+    totalRows: limit,
+    processedRows: processed,
+    changed,
+    missingCount: errors.length,
+    errors: errors.slice(0, 50),
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    phase: "complete",
+    lastProgressAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job);
+  publicStateJsonCache = null;
+  return job;
+}
+
+async function runEbayCatalogImportWorkerJob(job = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "fetching_ebay_catalog",
+    startedAt,
+    processedRows: 0,
+    message: "Fetching live eBay catalog..."
+  });
+  const workDb = normalizeDb(await readDbFast({ skipInventory: false }));
+  const result = await importEbayCatalog(workDb, {
+    job,
+    progress: (patch = {}) => {
+      persistWorkerImportJob(job, {
+        ...patch,
+        status: "running",
+        startedAt,
+        progressPercent: patch.progressPercent ?? progressPercent(patch.processedRows ?? job.processedRows, patch.totalRows ?? job.totalRows),
+        estimatedSecondsRemaining: patch.estimatedSecondsRemaining ?? estimateRemainingSeconds(startedAt, patch.processedRows ?? job.processedRows, patch.totalRows ?? job.totalRows)
+      }).catch((error) => console.error("Unable to persist eBay catalog progress", error.message || error));
+    },
+    isCanceled: () => false
+  });
+  const normalized = normalizeDb(workDb);
+  await writeDb(normalized);
+  publicStateJsonCache = null;
+  const finalJob = normalizeImportJob(result.job || job);
+  await postgres.upsertOperationJob(finalJob);
+  return finalJob;
+}
+
+async function runEbayAccountSettingsSyncWorkerJob(job = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "fetching_ebay_settings",
+    totalRows: 4,
+    processedRows: 0,
+    startedAt,
+    message: "Fetching eBay account settings..."
+  });
+  const progress = async (processedRows, phase = "fetching_ebay_settings") => {
+    await persistWorkerImportJob(job, {
+      status: "running",
+      phase,
+      totalRows: 4,
+      processedRows,
+      progressPercent: progressPercent(processedRows, 4),
+      estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processedRows, 4),
+      lastProgressAt: new Date().toISOString()
+    });
+  };
+  const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+  await progress(1);
+  const result = await syncEbayAccountSettings(workDb, { logWarnings: false, jobId: job.id });
+  await progress(3, "saving_ebay_settings");
+  await writeDb(normalizeDb({ ...workDb, inventory: [] }));
+  const failures = Array.isArray(result.failures) ? result.failures.filter(Boolean) : [];
+  const fetchedCount = (result.merchantLocations || []).length
+    + (result.paymentPolicies || []).length
+    + (result.returnPolicies || []).length
+    + (result.fulfillmentPolicies || []).length;
+  finishImportJob(job, {
+    status: failures.length ? "done_with_warnings" : "success",
+    message: failures.length
+      ? `Synced ${fetchedCount} eBay account setting${fetchedCount === 1 ? "" : "s"} with ${failures.length} API warning${failures.length === 1 ? "" : "s"}.`
+      : `Synced ${fetchedCount} eBay account setting${fetchedCount === 1 ? "" : "s"}.`,
+    totalRows: 4,
+    processedRows: 4,
+    changed: fetchedCount,
+    missingCount: failures.length,
+    errors: failures,
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    phase: "complete",
+    lastProgressAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job);
+  publicStateJsonCache = null;
+  return job;
+}
+
+async function runEbayLocationWorkerJob(job = {}, body = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "creating_ebay_location",
+    totalRows: 3,
+    processedRows: 0,
+    startedAt,
+    message: "Creating eBay inventory location..."
+  });
+  const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+  await persistWorkerImportJob(job, { processedRows: 1, progressPercent: progressPercent(1, 3), estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, 1, 3) });
+  const result = await createOrEnableEbayLocation(workDb, body, { logWarnings: false, jobId: job.id });
+  await persistWorkerImportJob(job, { phase: "saving_ebay_location", processedRows: 2, progressPercent: progressPercent(2, 3), estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, 2, 3) });
+  await writeDb(normalizeDb({ ...workDb, inventory: [] }));
+  const failures = Array.isArray(result.syncResult?.failures) ? result.syncResult.failures.filter(Boolean) : [];
+  finishImportJob(job, {
+    status: failures.length ? "done_with_warnings" : "success",
+    message: failures.length
+      ? `eBay location ${result.merchantLocationKey} was saved with ${failures.length} settings warning${failures.length === 1 ? "" : "s"}.`
+      : `eBay location ${result.merchantLocationKey} was created and account settings were refreshed.`,
+    totalRows: 3,
+    processedRows: 3,
+    changed: 1,
+    missingCount: failures.length,
+    errors: failures,
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    phase: "complete",
+    lastProgressAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job);
+  publicStateJsonCache = null;
+  return job;
+}
+
+async function runMappedProductImportWorkerJob(job = {}) {
+  const payload = job.workerPayload || {};
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  db.exportMappings = await readExportMappingsApiStore();
+  const template = db.exportMappings.find((row) => row.id === payload.templateId);
+  if (!template) throw new Error(`Import template not found: ${payload.templateId || "missing template id"}`);
+  const csvPath = payload.originalFilePath || job.originalFilePath || "";
+  const csv = csvPath && fs.existsSync(csvPath) ? fs.readFileSync(csvPath, "utf8") : String(payload.csv || "");
+  const records = parseCsv(csv);
+  const skuMapping = (template.mappings || []).find((mapping) => mapping.productField === "sku");
+  if (!skuMapping) throw new Error("Template needs a mapped SKU column before importing.");
+  const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "importing_products",
+    totalRows: records.length,
+    processedRows: 0,
+    startedAt,
+    message: `Importing ${records.length.toLocaleString()} row${records.length === 1 ? "" : "s"} with ${template.name}.`
+  });
+  let changed = 0;
+  let created = 0;
+  let processed = 0;
+  const errorRows = [];
+  const changedItems = [];
+  let lastPersistedAt = 0;
+  for (const record of records) {
+    const sku = String(record[skuMapping.externalColumn] || "").trim();
+    if (!sku) {
+      errorRows.push(standardImportError({ record, field: skuMapping.externalColumn || "sku", issue: "Missing SKU", rawValue: JSON.stringify(record) }));
+      processed += 1;
+      continue;
+    }
+    const payloadRecord = mappedRecordToProductPayload(record, template);
+    payloadRecord.sku = sku;
+    const existing = await postgres.readProductByKey(sku);
+    if (existing) {
+      applyInventoryPatch(existing, payloadRecord);
+      if (payloadRecord.brand !== undefined && payloadRecord.brandLocked === undefined) existing.brandLocked = true;
+      existing.updatedAt = new Date().toISOString();
+      changedItems.push(existing);
+    } else {
+      changedItems.push({
+        id: crypto.randomUUID(),
+        title: payloadRecord.title || sku,
+        qty: Number(payloadRecord.qty || 0),
+        reserved: Number(payloadRecord.reserved || 0),
+        reorderPoint: Number(payloadRecord.reorderPoint || 0),
+        sources: {},
+        updatedAt: new Date().toISOString(),
+        brandLocked: payloadRecord.brand !== undefined ? true : Boolean(payloadRecord.brandLocked),
+        ...payloadRecord
+      });
+      created += 1;
+    }
+    changed += 1;
+    processed += 1;
+    if (changedItems.length >= 500) {
+      await postgres.upsertProductsFromState(changedItems.splice(0));
+    }
+    if (Date.now() - lastPersistedAt > 1000 || processed >= records.length) {
+      lastPersistedAt = Date.now();
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "importing_products",
+        totalRows: records.length,
+        processedRows: processed,
+        changed,
+        created,
+        progressPercent: progressPercent(processed, records.length),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, records.length),
+        lastProgressAt: new Date().toISOString()
+      });
+    }
+  }
+  if (changedItems.length) await postgres.upsertProductsFromState(changedItems);
+  const status = errorRows.length ? "warning" : "success";
+  const message = `Updated ${changed} product row${changed === 1 ? "" : "s"} from ${template.name}${errorRows.length ? `; ${errorRows.length} row${errorRows.length === 1 ? "" : "s"} need review.` : "."}`;
+  attachImportJobErrorsFile(job, errorRows);
+  const stateDocs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const syncRuns = Array.isArray(stateDocs.syncRuns) ? stateDocs.syncRuns : [];
+  syncRuns.unshift({
+    id: crypto.randomUUID(),
+    importJobId: job.id,
+    source: template.source || "CSV",
+    type: "mapped-product-import",
+    status,
+    fileName: payload.fileName || job.fileName || "",
+    message,
+    createdAt: new Date().toISOString()
+  });
+  await postgres.writeStateDocuments({ syncRuns });
+  finishImportJob(job, { status, message, changed, created, totalRows: records.length, processedRows: records.length, missingCount: errorRows.length, errors: importErrorMessages(errorRows), progressPercent: 100, estimatedSecondsRemaining: 0 });
+  await postgres.upsertOperationJob(job);
+  publicStateJsonCache = null;
+  return job;
+}
+
+async function runShopifyStatusImportWorkerJob(job = {}) {
+  const payload = job.workerPayload || {};
+  const csvPath = payload.originalFilePath || job.originalFilePath || "";
+  const csv = csvPath && fs.existsSync(csvPath) ? fs.readFileSync(csvPath, "utf8") : String(payload.csv || "");
+  const records = parseCsv(csv);
+  const lookupKeys = [];
+  for (const record of records) {
+    const payloadRecord = shopifyStatusPayloadFromRecord(record);
+    if (payloadRecord.sku) lookupKeys.push(payloadRecord.sku);
+    if (payloadRecord.shopifyId) {
+      lookupKeys.push(payloadRecord.shopifyId);
+      const legacy = shopifyLegacyId(payloadRecord.shopifyId);
+      if (legacy) lookupKeys.push(legacy);
+    }
+  }
+  const lookupProducts = await postgres.readProductsByKeys(lookupKeys);
+  const db = normalizeDb({ ...(await readDbFast({ skipInventory: true })), inventory: lookupProducts || [] });
+  const maps = buildShopifyLookupMaps(db);
+  const statusMap = await postgres.readShopifyStatusMap().catch(() => ({})) || {};
+  const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "importing_shopify_status",
+    totalRows: records.length,
+    processedRows: 0,
+    startedAt,
+    message: `Updating Shopify IDs and live status from ${records.length.toLocaleString()} row${records.length === 1 ? "" : "s"}.`
+  });
+  const missing = [];
+  const errorRows = [];
+  const changedItems = new Map();
+  let changed = 0;
+  let processed = 0;
+  for (const record of records) {
+    const { item, payload: statusPayload, matchBy } = findProductForShopifyRecord(record, maps);
+    const key = statusPayload.sku || statusPayload.handle || statusPayload.shopifyId;
+    if (!key) {
+      errorRows.push(standardImportError({ record, field: "sku", issue: "Missing Shopify match key", rawValue: JSON.stringify(record), details: "Expected Variant SKU for first-time linking, or Shopify product ID for an already-linked product." }));
+      processed += 1;
+      continue;
+    }
+    if (!item) {
+      missing.push(key);
+      errorRows.push(standardImportError({ record, recordKey: key, sku: statusPayload.sku || "", field: statusPayload.sku ? "sku" : statusPayload.handle ? "handle" : "shopifyId", issue: "No matching product found", rawValue: key, details: matchBy ? `Tried ${matchBy}.` : "No matching Variant SKU or linked Shopify product ID found." }));
+      processed += 1;
+      continue;
+    }
+    const skuKey = String(item.sku || "").trim().toLowerCase();
+    const existing = { ...item, ...(shopifyStatusForSku(statusMap, item.sku) || {}) };
+    const fields = ["shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublished", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource"]
+      .filter((field) => statusPayload[field] !== undefined && statusPayload[field] !== "" && existing[field] !== statusPayload[field]);
+    if (!statusMap[skuKey]) statusMap[skuKey] = {};
+    for (const field of fields) {
+      statusMap[skuKey][field] = statusPayload[field];
+      item[field] = statusPayload[field];
+    }
+    if (fields.length) {
+      item.updatedAt = new Date().toISOString();
+      changedItems.set(item.id || item.sku, item);
+      changed += 1;
+    }
+    processed += 1;
+    if (processed % 500 === 0 || processed >= records.length) {
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "importing_shopify_status",
+        totalRows: records.length,
+        processedRows: processed,
+        changed,
+        progressPercent: progressPercent(processed, records.length),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, records.length),
+        lastProgressAt: new Date().toISOString()
+      });
+    }
+  }
+  if (changedItems.size) await postgres.upsertProductsFromState([...changedItems.values()]);
+  writeShopifyStatusMapSync(statusMap);
+  const issueCount = errorRows.length;
+  const status = issueCount ? "warning" : "success";
+  const message = `Updated Shopify status for ${changed} product row${changed === 1 ? "" : "s"}${issueCount ? `; ${issueCount} row${issueCount === 1 ? "" : "s"} need review.` : "."}`;
+  attachImportJobErrorsFile(job, errorRows);
+  const stateDocs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const syncRuns = Array.isArray(stateDocs.syncRuns) ? stateDocs.syncRuns : [];
+  syncRuns.unshift({ id: crypto.randomUUID(), importJobId: job.id, source: "Shopify", type: "shopify-status-import", status, fileName: payload.fileName || job.fileName || "", message, createdAt: new Date().toISOString() });
+  await postgres.writeStateDocuments({ syncRuns });
+  finishImportJob(job, { status, message, changed, totalRows: records.length, processedRows: records.length, missingCount: issueCount, errors: importErrorMessages(errorRows), progressPercent: 100, estimatedSecondsRemaining: 0 });
+  await postgres.upsertOperationJob(job);
+  publicStateJsonCache = null;
+  return job;
 }
 
 const PUBLIC_SOURCE_FIELD_KEYS = [
@@ -5686,8 +9701,14 @@ function publicSourceManagerFields(item = {}) {
 function publicConnection(connection = {}) {
   const logoDataUrl = String(connection.logoDataUrl || "");
   const normalized = normalizeChannel(connection);
+  const isShopify = String(normalized.name || "").toLowerCase() === "shopify";
+  const shopifyConfig = isShopify ? publicShopifyConfigStatus() : null;
   return {
     ...normalized,
+    connected: isShopify ? shopifyConfig.configured : normalized.connected,
+    status: isShopify && shopifyConfig.configured ? "active" : normalized.status,
+    externalAccount: isShopify ? shopifyConfig.shop : normalized.externalAccount,
+    shopifyConfig,
     logoDataUrl: logoDataUrl.length <= 120000 ? logoDataUrl : "",
     settings: normalized.settings
   };
@@ -5718,11 +9739,15 @@ function publicEbayListing(listing = null) {
   };
 }
 
-function publicInventoryItem(item = {}) {
+function publicInventoryItem(item = {}, context = {}) {
+  item = sourceEnrichedItem(item, context.sourceEnrichmentMap || {});
+  item = withShopifyStatus(item, context.shopifyStatusMap || {});
   const cost = sourceCatalogCost(item);
+  const sellUnitCost = productSellUnitCost(item);
+  const uomInfo = productUomInfo(item);
   const listPrice = Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0));
   const rawPrice = Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
-  const websitePrice = rawPrice > cost ? rawPrice : pricedFromCost(cost);
+  const websitePrice = rawPrice > sellUnitCost ? rawPrice : pricedFromCost(sellUnitCost || cost);
   return {
     id: item.id,
     sku: item.sku,
@@ -5746,8 +9771,15 @@ function publicInventoryItem(item = {}) {
     vendor: item.vendor,
     unspsc: item.unspsc,
     uom: item.uom,
+    uomName: uomInfo.name,
     uomQty: item.uomQty,
+    uomDisplay: uomInfo.display,
+    isMultiUnit: uomInfo.isMultiUnit,
+    shopifyPurchaseVariants: shopifyPurchaseVariants(item),
     hazardous: Boolean(item.hazardous),
+    toBeDiscontinued: productIsCloseout(item),
+    closeoutEligible: productIsCloseout(item),
+    tags: productExportTags(item),
     sdsUrl: item.sdsUrl,
     originalSdsUrl: item.originalSdsUrl,
     validatedAt: item.validatedAt,
@@ -5758,6 +9790,18 @@ function publicInventoryItem(item = {}) {
     condition: item.condition,
     status: item.status,
     active: item.active,
+    shopifyId: item.shopifyId || "",
+    shopifyVariantId: item.shopifyVariantId || "",
+    shopifyHandle: item.shopifyHandle || "",
+    shopifyStatus: item.shopifyStatus || "",
+    shopifyPublished: Boolean(item.shopifyPublished),
+    shopifyPublishedAt: item.shopifyPublishedAt || "",
+    shopifyUpdatedAt: item.shopifyUpdatedAt || "",
+    shopifySyncedAt: item.shopifySyncedAt || "",
+    shopifySyncSource: item.shopifySyncSource || "",
+    shopifyOnlineStoreUrl: item.shopifyOnlineStoreUrl || "",
+    shopifyVariantSku: item.shopifyVariantSku || "",
+    shopifyVariantCount: Number(item.shopifyVariantCount || 0),
     qty: Number(item.qty || 0),
     stockQty: Number(item.stockQty || 0),
     reserved: Number(item.reserved || 0),
@@ -5765,6 +9809,7 @@ function publicInventoryItem(item = {}) {
     websitePrice,
     cost,
     sourceCost: cost,
+    sellUnitCost,
     listPrice,
     msrp: listPrice,
     fobPrice: Number(item.fobPrice || 0),
@@ -5780,22 +9825,116 @@ function publicInventoryItem(item = {}) {
     defaultImage: item.defaultImage,
     images: Array.isArray(item.images) ? item.images.slice(0, 4) : [],
     ebayListing: publicEbayListing(item.ebayListing),
-    productManagerFields: {},
-    original: null,
-    attributes: {},
+    productManagerFields: item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {},
+    original: item.original || null,
+    attributes: item.attributes && typeof item.attributes === "object" ? item.attributes : {},
     aliases: Array.isArray(item.aliases) ? item.aliases : [],
-    shadowSkus: Array.isArray(item.shadowSkus) ? item.shadowSkus : []
+    shadowSkus: Array.isArray(item.shadowSkus) ? item.shadowSkus : [],
+    identifiers: Array.isArray(item.identifiers) ? item.identifiers : [],
+    vendorOffers: Array.isArray(item.vendorOffers) ? item.vendorOffers : [],
+    warehouseStock: Array.isArray(item.warehouseStock) ? item.warehouseStock : [],
+    recentChanges: Array.isArray(item.recentChanges) ? item.recentChanges : [],
+    sourceCatalogMatches: Array.isArray(item.sourceCatalogMatches) ? item.sourceCatalogMatches : []
   };
 }
 
-function publicState(db) {
+function publicInventoryContext() {
+  return {
+    shopifyStatusMap: readShopifyStatusMapSync(),
+    sourceEnrichmentMap: readProductSourceEnrichmentSync()
+  };
+}
+
+function publicProductItem(item = {}) {
+  return publicInventoryItem(item, publicInventoryContext());
+}
+
+function publicInventoryListItem(item = {}, context = {}) {
+  item = sourceEnrichedItem(item, context.sourceEnrichmentMap || {});
+  item = withShopifyStatus(item, context.shopifyStatusMap || {});
+  const cost = sourceCatalogCost(item);
+  const sellUnitCost = productSellUnitCost(item);
+  const uomInfo = productUomInfo(item);
+  const listPrice = Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0));
+  const rawPrice = Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
+  const websitePrice = rawPrice > sellUnitCost ? rawPrice : pricedFromCost(sellUnitCost || cost);
+  const images = Array.isArray(item.images) ? item.images : [];
+  return {
+    id: item.id,
+    sku: item.sku,
+    title: item.title,
+    marketplaceTitle: item.marketplaceTitle,
+    shortDescription: item.shortDescription,
+    longDescription: item.longDescription,
+    brand: item.brand,
+    brandLocked: Boolean(item.brandLocked),
+    manufacturer: item.manufacturer,
+    mfrPartNumber: item.mfrPartNumber,
+    vendorSku: item.vendorSku,
+    barcode: item.barcode,
+    category: item.category,
+    categoryVerified: item.categoryVerified,
+    sourceCategory: item.sourceCategory,
+    supplier: item.supplier,
+    vendor: item.vendor,
+    hazardous: Boolean(item.hazardous),
+    toBeDiscontinued: productIsCloseout(item),
+    closeoutEligible: productIsCloseout(item),
+    tags: productExportTags(item),
+    condition: item.condition,
+    status: item.status,
+    active: item.active,
+    shopifyId: item.shopifyId || "",
+    shopifyVariantId: item.shopifyVariantId || "",
+    shopifyHandle: item.shopifyHandle || "",
+    shopifyStatus: item.shopifyStatus || "",
+    shopifyPublished: Boolean(item.shopifyPublished),
+    shopifySyncSource: item.shopifySyncSource || "",
+    uom: item.uom,
+    uomName: uomInfo.name,
+    uomQty: item.uomQty,
+    uomDisplay: uomInfo.display,
+    isMultiUnit: uomInfo.isMultiUnit,
+    qty: Number(item.qty || 0),
+    stockQty: Number(item.stockQty || 0),
+    reserved: Number(item.reserved || 0),
+    price: websitePrice,
+    websitePrice,
+    cost,
+    sellUnitCost,
+    listPrice,
+    weightOz: Number(item.weightOz || item.weight_oz || 0),
+    itemWeight: Number(item.itemWeight || item.item_weight || 0),
+    packageWeight: Number(item.packageWeight || item.package_weight || 0),
+    itemHeight: Number(item.itemHeight || item.item_height || 0),
+    itemLength: Number(item.itemLength || item.item_length || 0),
+    itemWidth: Number(item.itemWidth || item.item_width || 0),
+    packageHeight: Number(item.packageHeight || item.package_height || 0),
+    packageLength: Number(item.packageLength || item.package_length || 0),
+    packageWidth: Number(item.packageWidth || item.package_width || 0),
+    defaultImage: item.defaultImage || "",
+    originalImage: item.originalImage || "",
+    imageCount: images.length || (item.defaultImage ? 1 : 0),
+    ebayListing: publicEbayListing(item.ebayListing),
+    aliasCount: Array.isArray(item.aliases) ? item.aliases.filter((alias) => alias.active !== false).length : 0,
+    shadowSkuCount: Array.isArray(item.shadowSkus) ? item.shadowSkus.length : 0
+  };
+}
+
+function publicState(db, options = {}) {
   const connectorState = mergedConnectorState(db);
   const ebaySettings = ebayChannelSettings(db);
+  const lite = Boolean(options.lite);
+  const shopifyStatusMap = lite ? {} : readShopifyStatusMapSync();
+  const sourceEnrichmentMap = lite ? {} : readProductSourceEnrichmentSync();
   const safeDb = {
     ...db,
     systemSettings: { ...DEFAULT_SYSTEM_SETTINGS, ...(db.systemSettings || {}) },
     connections: (db.connections || []).map(publicConnection),
-    inventory: (db.inventory || []).map(publicInventoryItem),
+    inventory: lite ? [] : (db.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap })),
+    orders: lite ? (db.orders || []).slice(0, 25) : (db.orders || []),
+    categorySettings: lite ? [] : (db.categorySettings || []),
+    vendorCategoryMappings: lite ? {} : (db.vendorCategoryMappings || {}),
     sourceCatalogOverrides: {},
     connectorState: {
       temuAuthorized: Boolean(connectorState.temuAccessToken),
@@ -5814,27 +9953,59 @@ function publicState(db) {
       }
     }
   };
-  return { ...safeDb, summary: summarize(safeDb) };
+  return { ...safeDb, summary: db.__summaryOverride || summarize({ ...safeDb, inventory: db.inventory || [], orders: db.orders || [] }), inventoryLoaded: !lite, categorySettingsLoaded: !lite, ordersLoaded: !lite };
 }
 
-function publicStateJson(db) {
+async function withOperationalSummary(db) {
+  if (!postgres.isPostgresEnabled()) return db;
+  try {
+    const summary = await postgres.readOperationalSummary();
+    if (!summary) return db;
+    return {
+      ...db,
+      __summaryOverride: {
+        ...summary,
+        sources: (db.connections || []).map((connection) => ({
+          id: connection.id,
+          name: connection.name,
+          connected: Boolean(connection.connected),
+          status: connection.status || "",
+          lastSync: connection.lastSync || null
+        }))
+      }
+    };
+  } catch (error) {
+    console.warn("Unable to load Postgres operational summary:", error.message || error);
+    return db;
+  }
+}
+
+function publicStateJson(db, options = {}) {
+  const lite = Boolean(options.lite);
   const dbMtime = postgres.isPostgresEnabled() ? 0 : (fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).mtimeMs : 0);
   const settingsMtime = fs.existsSync(SYSTEM_SETTINGS_FILE) ? fs.statSync(SYSTEM_SETTINGS_FILE).mtimeMs : 0;
+  const enrichmentMtime = fs.existsSync(PRODUCT_SOURCE_ENRICHMENT_FILE) ? fs.statSync(PRODUCT_SOURCE_ENRICHMENT_FILE).mtimeMs : 0;
   if (
     publicStateJsonCache &&
     publicStateJsonCache.dbMtime === dbMtime &&
-    publicStateJsonCache.settingsMtime === settingsMtime
+    publicStateJsonCache.settingsMtime === settingsMtime &&
+    publicStateJsonCache.enrichmentMtime === enrichmentMtime &&
+    publicStateJsonCache.lite === lite
   ) {
     return publicStateJsonCache.text;
   }
-  const text = JSON.stringify(publicState(db));
-  publicStateJsonCache = { dbMtime, settingsMtime, text };
+  const text = JSON.stringify(publicState(db, { lite }));
+  publicStateJsonCache = { dbMtime, settingsMtime, enrichmentMtime, lite, text };
   return text;
 }
 
-function publicStateGzip(db) {
-  const text = publicStateJson(db);
-  if (!publicStateJsonCache.gzip) publicStateJsonCache.gzip = zlib.gzipSync(text);
+function publicStateGzip(db, options = {}) {
+  const text = publicStateJson(db, options);
+  const lite = Boolean(options.lite);
+  if (!publicStateJsonCache.gzip || publicStateJsonCache.gzipLite !== lite) {
+    publicStateJsonCache.gzip = zlib.gzipSync(text);
+    publicStateJsonCache.gzipLite = lite;
+  }
   return publicStateJsonCache.gzip;
 }
 
@@ -5859,8 +10030,14 @@ function summarize(db) {
     customerCount: customers.length,
     repeatCustomers: customers.filter((customer) => customer.repeatCustomer).length,
     purchaseOrderCount: purchaseOrders.length,
-    openPurchaseOrders: purchaseOrders.filter((po) => !["closed", "canceled"].includes(po.status)).length,
-    sources: db.connections
+    openPurchaseOrders: purchaseOrders.filter(isOpenPurchaseOrder).length,
+    sources: (db.connections || []).map((connection) => ({
+      id: connection.id,
+      name: connection.name,
+      connected: Boolean(connection.connected),
+      status: connection.status || "",
+      lastSync: connection.lastSync || null
+    }))
   };
 }
 
@@ -6899,10 +11076,12 @@ async function ebayRequest(db, resourcePath, options = {}) {
   const marketplaceId = options.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
   const optionHeaders = options.headers || {};
   const acceptLanguage = ebayLocaleForMarketplace(marketplaceId);
+  const method = options.method || "GET";
   const request = async (token) => {
+    const startedAt = Date.now();
     try {
-      return await ebayRawRequest(`${config.apiBase}${resourcePath}`, {
-        method: options.method || "GET",
+      const result = await ebayRawRequest(`${config.apiBase}${resourcePath}`, {
+        method,
         timeoutMs: options.timeoutMs || 25000,
         headers: {
           Accept: "application/json",
@@ -6915,7 +11094,33 @@ async function ebayRequest(db, resourcePath, options = {}) {
         },
         body: options.body
       });
+      appendChannelApiLog({
+        channel: "eBay",
+        transport: options.tokenType === "app" ? "OAuth App" : "OAuth Seller",
+        method,
+        path: resourcePath,
+        operation: options.operation || resourcePath,
+        statusCode: result.response?.status || 0,
+        ok: Boolean(result.response?.ok),
+        durationMs: Date.now() - startedAt,
+        message: result.response?.ok ? "OK" : JSON.stringify(result.data || {}).slice(0, 1200),
+        requestId: result.response?.headers?.get?.("x-ebay-c-request-id") || result.response?.headers?.get?.("rlogid") || "",
+        jobId: options.jobId || ""
+      });
+      return result;
     } catch (error) {
+      appendChannelApiLog({
+        channel: "eBay",
+        transport: options.tokenType === "app" ? "OAuth App" : "OAuth Seller",
+        method,
+        path: resourcePath,
+        operation: options.operation || resourcePath,
+        statusCode: error.status || (/request timed out/i.test(String(error.message || "")) ? 504 : 0),
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        message: error.message,
+        jobId: options.jobId || ""
+      });
       if (/request timed out/i.test(String(error.message || ""))) throw new Error(`eBay API error (504): request timed out for ${resourcePath}`);
       throw error;
     }
@@ -6937,7 +11142,7 @@ async function ebayRequest(db, resourcePath, options = {}) {
         ? " Confirm the application has the general eBay OAuth scope enabled: https://api.ebay.com/oauth/api_scope."
         : " Reconnect eBay from Channels so the seller token is reissued with https://api.ebay.com/oauth/api_scope/sell.inventory.")
       : "";
-    const error = new Error(`eBay API error (${response.status}) on ${options.method || "GET"} ${resourcePath}: ${detail}${permissionHint}`);
+    const error = new Error(`eBay API error (${response.status}) on ${method} ${resourcePath}: ${detail}${permissionHint}`);
     error.status = response.status;
     error.ebayData = data;
     error.resourcePath = resourcePath;
@@ -7099,7 +11304,7 @@ function ebayChannelSettings(db = {}) {
 }
 
 function marketplaceItemCost(item = {}) {
-  return Number(sourceNumberValue(item.sourceCost ?? item.cost ?? item.price ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? 0));
+  return productSellUnitCost(item);
 }
 
 function marketplaceBaseSellPrice(item = {}) {
@@ -7439,17 +11644,80 @@ function applyChannelCategoryMappingToProducts(db, source, channel = "ebay") {
 function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", channel = "ebay") {
   setTimeout(async () => {
     try {
-      const db = normalizeDb(await readDbFast());
+      const db = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
       const job = findImportJob(db, jobId);
       if (!job) return;
       job.status = "running";
       job.startedAt = job.startedAt || new Date().toISOString();
       job.updatedAt = new Date().toISOString();
       job.message = job.message || "Refreshing SKU category mappings.";
-      await writeDb(db);
+      if (postgres.isPostgresEnabled()) upsertImportJobStore(job);
+      else await writeDb(db);
 
-      const workingDb = normalizeDb(await readDbFast());
+      const workingDb = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
       const workingJob = findImportJob(workingDb, jobId);
+      if (postgres.isPostgresEnabled()) {
+        const categories = await publicCategoriesFast("", scope);
+        workingDb.__mainCategoryRows = scope === "main" ? await postgres.listCategoryProductStats() : undefined;
+        const source = (categories.categories || []).find((category) => category.id === sourceId || category.categoryId === sourceId);
+        if (!source) throw new Error("Master category was not found for SKU refresh.");
+        const category = findOrCreateCategorySetting(workingDb, source.name);
+        const mapping = normalizeChannelCategoryMapping(category.mappings?.[channel] || {});
+        if (channel !== "ebay") throw new Error("Only eBay category refresh is supported right now.");
+        if (!mapping.categoryId) throw new Error("Map and save the eBay category before refreshing SKUs.");
+        let changed = 0;
+        let page = 1;
+        const pageSize = 1000;
+        while (true) {
+          const result = await postgres.listProducts({ page, limit: pageSize, filters: { category: formatCategoryName(source.name || "") } });
+          const products = result?.inventory || [];
+          if (!products.length) break;
+          const touched = [];
+          for (const item of products) {
+            const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+            if (listing.categoryId) continue;
+            item.ebayListing = {
+              ...listing,
+              marketplaceId: listing.marketplaceId || ebayChannelSettings(workingDb).ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US",
+              categoryId: mapping.categoryId,
+              categoryPath: mapping.categoryPath,
+              categoryHandle: mapping.categoryHandle,
+              taxonomyVersion: mapping.taxonomyVersion,
+              categoryAttributes: Array.isArray(mapping.attributes) ? mapping.attributes : listing.categoryAttributes || [],
+              status: listing.status || "draft",
+              draftSavedAt: listing.draftSavedAt || new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            };
+            item.updatedAt = new Date().toISOString();
+            touched.push(item);
+            changed += 1;
+          }
+          if (touched.length) await postgres.upsertProductsFromState(touched);
+          if (products.length < pageSize) break;
+          page += 1;
+        }
+        const message = `Applied ${channel} category mapping to ${changed} SKU${changed === 1 ? "" : "s"} in ${source.name}.`;
+        finishImportJob(workingJob, {
+          status: "success",
+          message,
+          details: `${source.name} | ${mapping.categoryId} | ${mapping.categoryPath || ""}`,
+          totalRows: changed,
+          changed
+        });
+        workingDb.syncRuns = Array.isArray(workingDb.syncRuns) ? workingDb.syncRuns : [];
+        workingDb.syncRuns.unshift({
+          id: crypto.randomUUID(),
+          importJobId: workingJob.id,
+          source: "Categories",
+          type: "category-mapping-refresh",
+          status: "success",
+          message,
+          createdAt: new Date().toISOString()
+        });
+        await postgres.writeStateDocuments({ syncRuns: workingDb.syncRuns || [] });
+        upsertImportJobStore(workingJob);
+        return;
+      }
       const source = findPublicCategory(workingDb, sourceId, scope);
       if (!source) throw new Error("Master category was not found for SKU refresh.");
       const result = applyChannelCategoryMappingToProducts(workingDb, source, channel);
@@ -7474,7 +11742,7 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
       await writeDb(normalizeDb(workingDb));
     } catch (error) {
       try {
-        const db = normalizeDb(await readDbFast());
+        const db = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
         const job = findImportJob(db, jobId);
         if (job) {
           finishImportJob(job, {
@@ -7494,7 +11762,12 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
             createdAt: new Date().toISOString(),
             errors: [error.message]
           });
-          await writeDb(normalizeDb(db));
+          if (postgres.isPostgresEnabled()) {
+            await postgres.writeStateDocuments({ syncRuns: db.syncRuns || [] });
+            upsertImportJobStore(job);
+          } else {
+            await writeDb(normalizeDb(db));
+          }
         }
       } catch (writeError) {
         console.error("Unable to finish category mapping job", writeError);
@@ -7579,11 +11852,11 @@ function ebayCatalogRowFromOffer(offer = {}, inventoryItem = {}) {
   };
 }
 
-async function fetchEbayOffers(db) {
+async function fetchEbayOffers(db, options = {}) {
   const offers = [];
   const limit = 200;
   for (let offset = 0; offset <= 5000; offset += limit) {
-    const data = await ebayRequest(db, `/sell/inventory/v1/offer?limit=${limit}&offset=${offset}`);
+    const data = await ebayRequest(db, `/sell/inventory/v1/offer?limit=${limit}&offset=${offset}`, { jobId: options.jobId, operation: "Fetch eBay offers" });
     const page = Array.isArray(data.offers) ? data.offers : Array.isArray(data.offerSummaries) ? data.offerSummaries : [];
     offers.push(...page);
     if (!page.length || page.length < limit || offers.length >= Number(data.total || Infinity)) break;
@@ -7591,11 +11864,11 @@ async function fetchEbayOffers(db) {
   return offers;
 }
 
-async function fetchEbayInventoryItems(db) {
+async function fetchEbayInventoryItems(db, options = {}) {
   const items = [];
   const limit = 200;
   for (let offset = 0; offset <= 5000; offset += limit) {
-    const data = await ebayRequest(db, `/sell/inventory/v1/inventory_item?limit=${limit}&offset=${offset}`);
+    const data = await ebayRequest(db, `/sell/inventory/v1/inventory_item?limit=${limit}&offset=${offset}`, { jobId: options.jobId, operation: "Fetch eBay inventory items" });
     const page = Array.isArray(data.inventoryItems) ? data.inventoryItems : [];
     items.push(...page);
     if (!page.length || page.length < limit || items.length >= Number(data.total || Infinity)) break;
@@ -7603,14 +11876,15 @@ async function fetchEbayInventoryItems(db) {
   return items;
 }
 
-async function fetchEbayAccountSettings(db) {
+async function fetchEbayAccountSettings(db, options = {}) {
   const settings = ebayChannelSettings(db);
   const marketplaceId = settings.ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
+  const requestOptions = { jobId: options.jobId };
   const [locationsResult, paymentResult, returnResult, fulfillmentResult] = await Promise.allSettled([
-    ebayRequest(db, "/sell/inventory/v1/location?limit=200&offset=0"),
-    ebayRequest(db, `/sell/account/v1/payment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`),
-    ebayRequest(db, `/sell/account/v1/return_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`),
-    ebayRequest(db, `/sell/account/v1/fulfillment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`)
+    ebayRequest(db, "/sell/inventory/v1/location?limit=200&offset=0", { ...requestOptions, operation: "Fetch eBay locations" }),
+    ebayRequest(db, `/sell/account/v1/payment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`, { ...requestOptions, operation: "Fetch eBay payment policies" }),
+    ebayRequest(db, `/sell/account/v1/return_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`, { ...requestOptions, operation: "Fetch eBay return policies" }),
+    ebayRequest(db, `/sell/account/v1/fulfillment_policy?marketplace_id=${encodeURIComponent(marketplaceId)}`, { ...requestOptions, operation: "Fetch eBay fulfillment policies" })
   ]);
   const unwrap = (result, keys) => {
     if (result.status !== "fulfilled") return [];
@@ -7649,10 +11923,10 @@ async function fetchEbayAccountSettings(db) {
   };
 }
 
-async function syncEbayAccountSettings(db) {
+async function syncEbayAccountSettings(db, options = {}) {
   const channel = findChannelByName(db, "eBay");
   if (!channel) throw new Error("eBay channel settings were not found.");
-  const result = await fetchEbayAccountSettings(db);
+  const result = await fetchEbayAccountSettings(db, { jobId: options.jobId });
   const fetchedCount = result.merchantLocations.length
     + result.paymentPolicies.length
     + result.returnPolicies.length
@@ -7670,7 +11944,7 @@ async function syncEbayAccountSettings(db) {
   if (!channel.settings.ebayReturnPolicyId && result.returnPolicies.length) channel.settings.ebayReturnPolicyId = result.returnPolicies[0].id;
   if (!channel.settings.ebayFulfillmentPolicyId && result.fulfillmentPolicies.length) channel.settings.ebayFulfillmentPolicyId = result.fulfillmentPolicies[0].id;
   Object.assign(channel, normalizeChannel(channel));
-  if (failures.length) {
+  if (failures.length && options.logWarnings !== false) {
     const status = fetchedCount ? "warning" : "failed";
     const message = fetchedCount
       ? `Synced ${fetchedCount} eBay account setting${fetchedCount === 1 ? "" : "s"} with ${failures.length} API warning${failures.length === 1 ? "" : "s"}.`
@@ -7736,28 +12010,37 @@ function ebayLocationPayload(body = {}) {
   };
 }
 
-async function createOrEnableEbayLocation(db, body = {}) {
-  const channel = findChannelByName(db, "eBay");
-  if (!channel) throw new Error("eBay channel settings were not found.");
+function ebayMerchantLocationKeyFromBody(body = {}) {
   const merchantLocationKey = String(body.merchantLocationKey || body.locationKey || "SI-WAREHOUSE")
     .trim()
     .replace(/[^A-Za-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .toUpperCase();
   if (!merchantLocationKey) throw new Error("Merchant location key is required.");
+  return merchantLocationKey;
+}
+
+async function createOrEnableEbayLocation(db, body = {}, options = {}) {
+  const channel = findChannelByName(db, "eBay");
+  if (!channel) throw new Error("eBay channel settings were not found.");
+  const merchantLocationKey = ebayMerchantLocationKeyFromBody(body);
   const payload = ebayLocationPayload(body);
   await ebayRequest(db, `/sell/inventory/v1/location/${encodeURIComponent(merchantLocationKey)}`, {
     method: "POST",
-    body: payload
+    body: payload,
+    jobId: options.jobId,
+    operation: "Create eBay inventory location"
   });
   await ebayRequest(db, `/sell/inventory/v1/location/${encodeURIComponent(merchantLocationKey)}/enable`, {
-    method: "POST"
+    method: "POST",
+    jobId: options.jobId,
+    operation: "Enable eBay inventory location"
   });
   channel.settings = { ...DEFAULT_CHANNEL_SETTINGS, ...(channel.settings || {}) };
   channel.settings.ebayMerchantLocationKey = merchantLocationKey;
   channel.settings.ebayLocationCreatedAt = new Date().toISOString();
   Object.assign(channel, normalizeChannel(channel));
-  const syncResult = await syncEbayAccountSettings(db);
+  const syncResult = await syncEbayAccountSettings(db, { logWarnings: options.logWarnings !== false, jobId: options.jobId });
   return { merchantLocationKey, location: payload, syncResult };
 }
 
@@ -7819,11 +12102,16 @@ function applyEbayCatalogRowToProduct(db, item, row, matchBy = "sku") {
   return previous !== JSON.stringify(item.ebayListing || {});
 }
 
-async function importEbayCatalog(db) {
-  const offers = await fetchEbayOffers(db);
+async function importEbayCatalog(db, options = {}) {
+  const progress = typeof options.progress === "function" ? options.progress : () => {};
+  const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
+  if (isCanceled()) throw new Error("eBay catalog sync canceled.");
+  const jobId = options.job?.id || options.jobId || "";
+  const offers = await fetchEbayOffers(db, { jobId });
+  if (isCanceled()) throw new Error("eBay catalog sync canceled.");
   let inventoryItems = [];
   try {
-    inventoryItems = await fetchEbayInventoryItems(db);
+    inventoryItems = await fetchEbayInventoryItems(db, { jobId });
   } catch {
     inventoryItems = [];
   }
@@ -7831,7 +12119,7 @@ async function importEbayCatalog(db) {
   const rows = offers
     .map((offer) => ebayCatalogRowFromOffer(offer, inventoryBySku.get(String(offer.sku || "").toLowerCase()) || {}))
     .filter((row) => row.sku);
-  const job = createImportJob(db, {
+  const job = options.job || createImportJob(db, {
     section: "Products",
     operation: "eBay catalog sync",
     direction: "import",
@@ -7843,7 +12131,11 @@ async function importEbayCatalog(db) {
   let updated = 0;
   let live = 0;
   const errorRows = [];
+  let processed = 0;
+  progress({ phase: "mapping_catalog", processedRows: 0, totalRows: rows.length });
   for (const row of rows) {
+    if (isCanceled()) throw new Error("eBay catalog sync canceled.");
+    processed += 1;
     if (row.live) live += 1;
     const { item, matchBy } = findInventoryByEbayCatalogRow(db, row);
     if (!item) {
@@ -7856,10 +12148,18 @@ async function importEbayCatalog(db) {
         rawValue: JSON.stringify({ sku: row.sku, offerId: row.offerId, listingId: row.listingId, title: row.title }),
         details: row.listingUrl || ""
       }));
+      if (processed % 25 === 0 || processed === rows.length) {
+        progress({ phase: "mapping_catalog", processedRows: processed, totalRows: rows.length });
+        await new Promise((resolve) => setImmediate(resolve));
+      }
       continue;
     }
     matched += 1;
     if (applyEbayCatalogRowToProduct(db, item, row, matchBy)) updated += 1;
+    if (processed % 25 === 0 || processed === rows.length) {
+      progress({ phase: "mapping_catalog", processedRows: processed, totalRows: rows.length });
+      await new Promise((resolve) => setImmediate(resolve));
+    }
   }
   attachImportJobErrorsFile(job, errorRows);
   const status = errorRows.length ? "warning" : "success";
@@ -8290,7 +12590,7 @@ function inventoryPayloadFromRecord(record) {
     brand: record.brand ?? record.Brand ?? record.brandName ?? record.brand_name ?? record["Brand Name"] ?? record["brand name"] ?? record["brand_name"]
   };
   const payload = {};
-  const textFields = ["marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
+  const textFields = ["marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
   const numberFields = ["price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "reorderPoint", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
 
   for (const field of textFields) {
@@ -8319,6 +12619,7 @@ function inventoryPayloadFromRecord(record) {
   if (record.images !== undefined) payload.images = parseList(record.images);
   if (record.tags !== undefined) payload.tags = parseList(record.tags);
   if (record.productManagerFields && typeof record.productManagerFields === "object") payload.productManagerFields = record.productManagerFields;
+  if (record.dimensionWeightSources && typeof record.dimensionWeightSources === "object") payload.dimensionWeightSources = record.dimensionWeightSources;
   if (record.checkedImage && typeof record.checkedImage === "object") payload.checkedImage = record.checkedImage;
   if (record.suppliers !== undefined) payload.suppliers = record.suppliers;
   if (record.original !== undefined) payload.original = record.original;
@@ -8326,7 +12627,7 @@ function inventoryPayloadFromRecord(record) {
 }
 
 function applyInventoryPatch(item, body) {
-  const textFields = ["title", "marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
+  const textFields = ["title", "marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
   const numberFields = ["qty", "reserved", "reorderPoint", "price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
 
   for (const field of textFields) {
@@ -8360,6 +12661,7 @@ function applyInventoryPatch(item, body) {
   if (body.tags !== undefined) item.tags = parseList(body.tags);
   if (body.bulletPoints !== undefined) item.bulletPoints = parseList(body.bulletPoints);
   if (body.productManagerFields && typeof body.productManagerFields === "object") item.productManagerFields = body.productManagerFields;
+  if (body.dimensionWeightSources && typeof body.dimensionWeightSources === "object") item.dimensionWeightSources = body.dimensionWeightSources;
   if (body.checkedImage && typeof body.checkedImage === "object") item.checkedImage = body.checkedImage;
   if (body.suppliers !== undefined) item.suppliers = body.suppliers;
   if (body.original !== undefined) item.original = body.original;
@@ -8372,11 +12674,12 @@ function ensureInventoryWarehouseStock(item, warehouse) {
   item.warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
   let row = item.warehouseStock.find((entry) => entry.warehouseId === warehouse.id);
   if (!row) {
+    const isFirstWarehouseRow = item.warehouseStock.length === 0;
     row = normalizeWarehouseStockRow({
       warehouseId: warehouse.id,
       warehouseName: warehouse.name,
-      qty: 0,
-      reserved: 0,
+      qty: isFirstWarehouseRow ? Number(item.qty ?? item.stockQty ?? 0) : 0,
+      reserved: isFirstWarehouseRow ? Number(item.reserved || 0) : 0,
       reorderPoint: 0
     }, warehouse, item);
     item.warehouseStock.push(row);
@@ -8494,8 +12797,10 @@ function catalogFilterParams(searchParams) {
     active: searchParams.get("active") || "",
     productMembership: searchParams.get("productMembership") || "",
     stockStatus: searchParams.get("stockStatus") || "",
+    channelStatus: searchParams.get("channelStatus") || searchParams.get("shopifyStatus") || "",
     hasStock: searchParams.get("hasStock") || "",
     hazardous: searchParams.get("hazardous") || "",
+    toBeDiscontinued: searchParams.get("toBeDiscontinued") || searchParams.get("discontinued") || "",
     brand: searchParams.get("brand") || "",
     category: searchParams.get("category") || ""
   };
@@ -8510,6 +12815,7 @@ function productMatchesCatalogFilters(product = {}, filters = {}) {
   if (filters.stockStatus && String(product.stockStatus || "") !== filters.stockStatus) return false;
   if (filters.hasStock && String(Number(product.stockQty ?? product.qty ?? 0) > 0) !== filters.hasStock) return false;
   if (filters.hazardous && String(Boolean(product.hazardous)) !== filters.hazardous) return false;
+  if (filters.toBeDiscontinued && String(Boolean(product.toBeDiscontinued || product.closeoutEligible)) !== filters.toBeDiscontinued) return false;
   if (filters.brand && formatBrandName(product.brand || "") !== filters.brand) return false;
   if (filters.category && formatCategoryName(product.category || "") !== formatCategoryName(filters.category)) return false;
   return true;
@@ -8657,6 +12963,19 @@ function vendorCategoryMappingMap(db = {}) {
   return db.vendorCategoryMappings;
 }
 
+async function readSourceCatalogRuntimeDb() {
+  if (!postgres.isPostgresEnabled()) return readDbFast();
+  const [sourceCatalogOverrides, vendorCategoryMappings] = await Promise.all([
+    postgres.readStateField("sourceCatalogOverrides").catch(() => ({})),
+    postgres.readStateField("vendorCategoryMappings").catch(() => ({}))
+  ]);
+  return {
+    inventory: [],
+    sourceCatalogOverrides: sourceCatalogOverrides || {},
+    vendorCategoryMappings: vendorCategoryMappings || {}
+  };
+}
+
 function applySourceCatalogOverride(product = {}, overrides = {}, vendorMappings = {}) {
   const override = overrides[String(product.sku || "").toLowerCase()];
   const supplier = sourceTextValue(product.supplier || product.vendor);
@@ -8747,6 +13066,9 @@ function catalogSummary(product = {}) {
     supplierCode: product.supplierCode || "",
     stockStatus: product.stockStatus || "",
     hazardous: Boolean(product.hazardous),
+    toBeDiscontinued: Boolean(product.toBeDiscontinued || product.closeoutEligible),
+    closeoutEligible: Boolean(product.toBeDiscontinued || product.closeoutEligible),
+    tags: productExportTags(product),
     price: websitePrice,
     websitePrice,
     cost,
@@ -8854,6 +13176,7 @@ async function readCatalogProductAtOffset(offset) {
 }
 
 function normalizeCatalogProductForInventory(record) {
+  if (!record || typeof record !== "object") return null;
   const sku = sourceTextValue(record._id || record.sku || record.SKU || record.id);
   if (!sku) return null;
   const originalSourceRecord = record && typeof record === "object" ? { ...record } : {};
@@ -9001,14 +13324,241 @@ function upsertInventoryProductFromCatalog(db, product) {
   return { item, existing: false };
 }
 
+function needsSourceCatalogEnrichment(item = {}) {
+  if (isInventoryShellProduct(item)) return true;
+  return !sourceTextValue(item.vendorSku)
+    || !sourceTextValue(item.supplier || item.vendor)
+    || !sourceTextValue(item.mfrPartNumber)
+    || !sourceTextValue(item.defaultImage || item.originalImage)
+    || !sourceTextValue(item.shortDescription)
+    || !sourceTextValue(item.longDescription)
+    || !sourceTextValue(item.barcode)
+    || !(Number(item.cost || item.price || item.stockQty || item.qty || 0) > 0);
+}
+
+async function buildSourceEnrichmentForSkus(db = {}, skus = []) {
+  const sourceProducts = await findCatalogProductsBySkus(skus, db);
+  const current = readProductSourceEnrichmentSync();
+  let changed = 0;
+  for (const product of sourceProducts) {
+    const normalized = normalizeCatalogProductForInventory(product);
+    if (!normalized?.sku) continue;
+    current[String(normalized.sku).trim().toLowerCase()] = normalized;
+    changed += 1;
+  }
+  writeProductSourceEnrichmentSync(current);
+  return { changed, total: Object.keys(current).length, skus: sourceProducts.map((product) => product.sku).filter(Boolean) };
+}
+
+async function sourceEnrichmentCandidateSkusFromPostgres(options = {}) {
+  const limit = Math.max(1, Math.min(50000, Number(options.limit || 1000)));
+  const pageSize = Math.max(100, Math.min(5000, Number(options.pageSize || 1000)));
+  const progress = typeof options.progress === "function" ? options.progress : null;
+  const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
+  const totalRows = await postgres.countProducts();
+  const enrichmentMap = readProductSourceEnrichmentSync();
+  const candidates = [];
+  let processedRows = 0;
+  for (let page = 1; processedRows < totalRows && candidates.length < limit; page += 1) {
+    if (isCanceled()) throw new Error("Source enrichment backfill canceled.");
+    const result = await postgres.listProducts({ page, limit: pageSize });
+    const products = result?.inventory || [];
+    if (!products.length) break;
+    for (const item of products) {
+      const sku = String(item?.sku || "").trim();
+      if (!sku) continue;
+      const key = sku.toLowerCase();
+      if (!enrichmentMap[key] && needsSourceCatalogEnrichment(item)) {
+        candidates.push(sku);
+        if (candidates.length >= limit) break;
+      }
+    }
+    processedRows += products.length;
+    if (progress) {
+      progress({
+        phase: "finding_candidates",
+        processedRows,
+        totalRows,
+        candidateRows: candidates.length,
+        message: `Found ${candidates.length.toLocaleString()} source enrichment candidate${candidates.length === 1 ? "" : "s"}.`
+      });
+    }
+    if (products.length < pageSize) break;
+  }
+  return { candidates, scannedRows: processedRows, totalRows };
+}
+
+async function buildSourceEnrichmentForSkusPaged(skus = [], options = {}) {
+  const uniqueSkus = [...new Set((skus || []).map((sku) => String(sku || "").trim()).filter(Boolean))];
+  const chunkSize = Math.max(10, Math.min(500, Number(options.chunkSize || 100)));
+  const progress = typeof options.progress === "function" ? options.progress : null;
+  const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
+  const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+  let changed = 0;
+  let persisted = 0;
+  let processedRows = 0;
+  let total = Object.keys(readProductSourceEnrichmentSync()).length;
+  const enrichedSkus = [];
+  for (let index = 0; index < uniqueSkus.length; index += chunkSize) {
+    if (isCanceled()) throw new Error("Source enrichment backfill canceled.");
+    const chunk = uniqueSkus.slice(index, index + chunkSize);
+    let currentProducts = [];
+    if (postgres.isPostgresEnabled()) {
+      currentProducts = await postgres.readProductsByKeys(chunk);
+      workDb.inventory = currentProducts;
+    }
+    const result = await buildSourceEnrichmentForSkus(workDb, chunk);
+    changed += Number(result.changed || 0);
+    total = Number(result.total || total || 0);
+    enrichedSkus.push(...(result.skus || []));
+    if (postgres.isPostgresEnabled() && currentProducts.length && (result.skus || []).length) {
+      const enrichmentMap = readProductSourceEnrichmentSync();
+      const mergedProducts = currentProducts
+        .map((item) => sourceEnrichedItem(item, enrichmentMap))
+        .filter((item) => item?.id || item?.sku);
+      if (mergedProducts.length) {
+        await postgres.upsertProductsFromState(mergedProducts);
+        persisted += mergedProducts.length;
+      }
+    }
+    processedRows += chunk.length;
+    if (progress) {
+      progress({
+        phase: "enriching",
+        processedRows,
+        totalRows: uniqueSkus.length,
+        changed,
+        message: `Updated source enrichment for ${changed.toLocaleString()} product${changed === 1 ? "" : "s"}; persisted ${persisted.toLocaleString()} Postgres row${persisted === 1 ? "" : "s"}.`
+      });
+    }
+  }
+  return { changed, persisted, total, skus: enrichedSkus };
+}
+
+function startSourceEnrichmentBackfillJob(jobId, attrs = {}) {
+  setTimeout(async () => {
+    const job = activeJobRecords.get(jobId);
+    if (!job) return;
+    try {
+      job.status = "running";
+      job.phase = "starting";
+      job.startedAt = job.startedAt || new Date().toISOString();
+      job.updatedAt = new Date().toISOString();
+      job.message = "Source catalog enrichment backfill is running...";
+      upsertImportJobStore(job);
+      setActiveJobProgress(jobId, {
+        status: "running",
+        phase: "starting",
+        startedAt: job.startedAt,
+        processedRows: 0,
+        totalRows: job.totalRows || Number(attrs.limit || 0) || 0,
+        progressPercent: 0
+      });
+      const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(jobId)?.status || job.status || "").toLowerCase());
+      const updateProgress = (patch = {}) => {
+        const next = setActiveJobProgress(jobId, { status: "running", ...patch });
+        Object.assign(job, {
+          phase: next.phase,
+          totalRows: next.totalRows,
+          processedRows: next.processedRows,
+          progressPercent: next.progressPercent,
+          estimatedSecondsRemaining: next.estimatedSecondsRemaining,
+          changed: patch.changed ?? job.changed,
+          message: patch.message || job.message,
+          updatedAt: new Date().toISOString()
+        });
+        activeJobRecords.set(jobId, normalizeImportJob(job));
+        upsertImportJobStore(job);
+      };
+      let candidates = Array.isArray(attrs.skus)
+        ? attrs.skus.map((sku) => String(sku || "").trim()).filter(Boolean)
+        : [];
+      let scannedRows = 0;
+      if (!candidates.length && postgres.isPostgresEnabled()) {
+        const result = await sourceEnrichmentCandidateSkusFromPostgres({
+          limit: attrs.limit,
+          isCanceled,
+          progress: updateProgress
+        });
+        candidates = result.candidates;
+        scannedRows = result.scannedRows;
+      }
+      if (!candidates.length) {
+        activeJobProgress.delete(jobId);
+        finishImportJob(job, {
+          status: "success",
+          phase: "complete",
+          message: "No products need source catalog enrichment.",
+          totalRows: scannedRows || 0,
+          processedRows: scannedRows || 0,
+          progressPercent: 100,
+          estimatedSecondsRemaining: 0,
+          changed: 0
+        });
+        return;
+      }
+      updateProgress({
+        phase: "enriching",
+        processedRows: 0,
+        totalRows: candidates.length,
+        message: `Updating source enrichment for ${candidates.length.toLocaleString()} product${candidates.length === 1 ? "" : "s"}...`
+      });
+      const result = await buildSourceEnrichmentForSkusPaged(candidates, { isCanceled, progress: updateProgress });
+      publicStateJsonCache = null;
+      activeJobProgress.delete(jobId);
+      finishImportJob(job, {
+        status: "success",
+        phase: "complete",
+        message: `Source catalog enrichment updated for ${Number(result.changed || 0).toLocaleString()} product${Number(result.changed || 0) === 1 ? "" : "s"}.`,
+        totalRows: candidates.length,
+        processedRows: candidates.length,
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0,
+        changed: result.changed || 0,
+        details: [
+          scannedRows ? `Scanned ${scannedRows.toLocaleString()} Postgres products to find candidates.` : "",
+          Number(result.persisted || 0) ? `Persisted ${Number(result.persisted || 0).toLocaleString()} enriched product row${Number(result.persisted || 0) === 1 ? "" : "s"} back to Postgres.` : ""
+        ].filter(Boolean).join(" ")
+      });
+    } catch (error) {
+      activeJobProgress.delete(jobId);
+      const canceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+      finishImportJob(job, {
+        status: canceled ? "stopped" : "failed",
+        phase: canceled ? "stopped" : "failed",
+        message: canceled ? "Source catalog enrichment backfill was canceled." : error.message || "Source catalog enrichment backfill failed.",
+        errors: canceled ? [] : [error.message || "Source catalog enrichment backfill failed."],
+        missingCount: canceled ? 0 : 1
+      });
+    }
+  }, 1000);
+}
+
 async function findCatalogProductsBySkus(skus = [], db = {}) {
   const wanted = new Set(skus.map((sku) => String(sku || "").toLowerCase()).filter(Boolean));
   const found = [];
-  if (!wanted.size || !fs.existsSync(CATALOG_FILE)) return found;
+  if (!wanted.size) return found;
   const overrides = sourceCatalogOverrideMap(db);
   const vendorMappings = vendorCategoryMappingMap(db);
   const productsBySku = inventoryBySkuMap(db);
   const decorate = (product) => decorateSourceCatalogProduct(product, overrides, productsBySku, vendorMappings);
+  if (postgres.isPostgresEnabled()) {
+    try {
+      const rows = await postgres.readVendorCatalogItemsBySkus([...wanted]);
+      if (Array.isArray(rows) && rows.length) {
+        for (const row of rows) {
+          const normalized = normalizeCatalogProductForInventory(row);
+          if (!normalized?.sku) continue;
+          found.push(decorate(normalized));
+          wanted.delete(String(normalized.sku || "").toLowerCase());
+        }
+      }
+      return found;
+    } catch (error) {
+      console.warn("Postgres source SKU lookup failed, falling back to catalog file:", error.message);
+    }
+  }
+  if (!fs.existsSync(CATALOG_FILE)) return found;
   const index = readSourceCatalogIndexManifest();
   if (index) {
     const byShard = new Map();
@@ -9067,10 +13617,29 @@ async function findCatalogProductsBySkus(skus = [], db = {}) {
 async function findSourceCatalogAlternatesBySkus(skus = [], db = {}) {
   const wanted = [...new Set(skus.map((sku) => String(sku || "").trim().toLowerCase()).filter(Boolean))];
   const result = Object.fromEntries(wanted.map((sku) => [sku, []]));
-  if (!wanted.length || !fs.existsSync(CATALOG_FILE)) return result;
+  if (!wanted.length) return result;
   const overrides = sourceCatalogOverrideMap(db);
   const vendorMappings = vendorCategoryMappingMap(db);
   const productsBySku = inventoryBySkuMap(db);
+  if (postgres.isPostgresEnabled()) {
+    try {
+      const rows = await postgres.readVendorCatalogItemsBySkus(wanted);
+      if (Array.isArray(rows)) {
+        for (const row of rows) {
+          const normalized = normalizeCatalogProductForInventory(row);
+          if (!normalized?.sku) continue;
+          const sku = String(normalized.sku || "").toLowerCase();
+          if (!result[sku]) continue;
+          const decorated = decorateSourceCatalogProduct(normalized, overrides, productsBySku, vendorMappings);
+          if (!decorated.sourceCatalogDeleted) result[sku].push(catalogSummary(decorated));
+        }
+        return result;
+      }
+    } catch (error) {
+      console.warn("Postgres source alternate lookup failed, falling back to catalog file:", error.message);
+    }
+  }
+  if (!fs.existsSync(CATALOG_FILE)) return result;
   const index = readSourceCatalogIndexManifest();
   if (index) {
     const byShard = new Map();
@@ -9134,7 +13703,7 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, db 
   const filtered = hasCatalogFilters(filters);
   const selectedSuppliers = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim()).filter(Boolean);
   const supplierIndexedFilter = selectedSuppliers.length >= 1 && !q;
-  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hazardous, filters.brand, filters.category].every((value) => !value);
+  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.category].every((value) => !value);
   const vendorIndex = supplierIndexedFilter ? readCatalogVendorIndex() : null;
   const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
   const supplierTotal = supplierOnlyFilter
@@ -9152,7 +13721,46 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, db 
     manifest: readCatalogManifest(),
     vendorIndex: supplierIndexedFilter ? vendorIndex : undefined
   };
+  if (postgres.isPostgresEnabled()) {
+    try {
+      const pgResult = await postgres.listVendorCatalogItems({ query, page: pageNumber, limit: pageSize, filters });
+      if (pgResult) {
+        const overrides = sourceCatalogOverrideMap(db);
+        const vendorMappings = vendorCategoryMappingMap(db);
+        const productsBySku = inventoryBySkuMap(db);
+        result.items = pgResult.items
+          .map((item) => normalizeCatalogProductForInventory(item))
+          .filter(Boolean)
+          .map((item) => decorateSourceCatalogProduct(item, overrides, productsBySku, vendorMappings))
+          .filter((item) => !item.sourceCatalogDeleted)
+          .map(catalogSummary);
+        result.totalMatches = Number(pgResult.total || 0);
+        result.hasMore = result.totalMatches > offset + result.items.length;
+        result.scanned = result.items.length;
+        result.manifest = { ...(result.manifest || {}), productCount: result.totalMatches, source: "postgres:vendor_catalog_items" };
+        result.indexed = true;
+        result.database = "postgres";
+        return result;
+      }
+    } catch (error) {
+      console.warn("Postgres source catalog scan failed, falling back to catalog file:", error.message);
+    }
+  }
   if (!fs.existsSync(CATALOG_FILE)) return result;
+  if (filters.toBeDiscontinued === "true" && !q) {
+    const closeoutSkus = readCloseoutSkus();
+    result.totalMatches = closeoutSkus.length;
+    result.hasMore = result.totalMatches > offset + pageSize;
+    if (!closeoutSkus.length) return result;
+    const pageSkus = closeoutSkus.slice(offset, offset + pageSize);
+    const items = await findCatalogProductsBySkus(pageSkus, db);
+    result.items = items
+      .filter((item) => productMatchesCatalogFilters(item, filters))
+      .map(catalogSummary);
+    result.hasMore = result.totalMatches > offset + result.items.length;
+    result.indexed = true;
+    return result;
+  }
   const overrides = sourceCatalogOverrideMap(db);
   const vendorMappings = vendorCategoryMappingMap(db);
   const productsBySku = inventoryBySkuMap(db);
@@ -9252,16 +13860,36 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, db 
 async function collectCatalogProductsForExport({ query = "", filters = {}, limit = 10000, db = {} } = {}) {
   const maxItems = Math.min(25000, Math.max(1, Number(limit || 10000)));
   const q = String(query || "").trim().toLowerCase();
+  const overrides = sourceCatalogOverrideMap(db);
+  const vendorMappings = vendorCategoryMappingMap(db);
+  const productsBySku = inventoryBySkuMap(db);
+  if (postgres.isPostgresEnabled()) {
+    try {
+      const pgResult = await postgres.collectVendorCatalogItems({ query, filters, limit: maxItems });
+      if (pgResult) {
+        return {
+          items: pgResult.items
+            .map((item) => normalizeCatalogProductForInventory(item))
+            .filter(Boolean)
+            .map((item) => decorateSourceCatalogProduct(item, overrides, productsBySku, vendorMappings))
+            .filter((item) => !item.sourceCatalogDeleted)
+            .map(catalogSummary),
+          matched: Number(pgResult.matched || 0),
+          limited: Boolean(pgResult.limited),
+          database: "postgres"
+        };
+      }
+    } catch (error) {
+      console.warn("Postgres source catalog export collection failed, falling back to catalog file:", error.message);
+    }
+  }
   const selectedSuppliers = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim()).filter(Boolean);
   const supplierIndexedFilter = selectedSuppliers.length >= 1 && !q;
-  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hazardous, filters.brand, filters.category].every((value) => !value);
+  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.category].every((value) => !value);
   const sourceIndex = supplierIndexedFilter ? readSourceCatalogIndexManifest() : null;
   const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
   const items = [];
   let matched = 0;
-  const overrides = sourceCatalogOverrideMap(db);
-  const vendorMappings = vendorCategoryMappingMap(db);
-  const productsBySku = inventoryBySkuMap(db);
 
   if (sourceIndex) {
     const supplierRows = (sourceIndex.suppliers || []).filter((row) => supplierNames.has(String(row.name || "").toLowerCase()));
@@ -9315,7 +13943,312 @@ async function collectCatalogProductsForExport({ query = "", filters = {}, limit
   return { items, matched, limited: items.length >= maxItems };
 }
 
+function normalizeSourceImportMode(value = "") {
+  const mode = String(value || "").trim().toLowerCase();
+  if (["new-only", "new"].includes(mode)) return "new-only";
+  if (["update-existing", "updates-only", "existing-only", "update"].includes(mode)) return "update-existing";
+  return "new-and-update";
+}
+
+async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query = "", filters = {}, limit = 25000, db = null, importMode = "" } = {}) {
+  if (!postgres.isPostgresEnabled()) return { matched: 0, requested: 0, importable: 0, existing: 0, newProducts: 0, closeouts: 0, limited: false, skus: [] };
+  const mode = normalizeSourceImportMode(importMode || readSystemSettingsStore(db?.systemSettings || {}).sourceCatalogDefaultImportMode);
+  let sourceRows = [];
+  let matched = skus.length;
+  let limited = false;
+  if (allFiltered) {
+    const collected = await postgres.collectVendorCatalogItems({
+      query,
+      filters,
+      limit: Math.max(1, Math.min(25000, Number(limit || 25000))),
+      includeCount: false
+    });
+    sourceRows = collected?.items || [];
+    matched = Number(collected?.matched || sourceRows.length || 0);
+    limited = Boolean(collected?.limited);
+  } else {
+    sourceRows = await postgres.readVendorCatalogItemsBySkus(skus);
+  }
+  const runtimeDb = db || normalizeDb(await readDbFast({ skipInventory: true }));
+  const overrides = sourceCatalogOverrideMap(runtimeDb);
+  sourceRows = sourceRows.filter((row) => !overrides[String(row.sku || "").toLowerCase()]?.deleted);
+  const importSkus = [...new Set(sourceRows.map((row) => row.sku).filter(Boolean))];
+  const existingProducts = importSkus.length ? await postgres.readProductsByKeys(importSkus) : [];
+  const existingKeys = new Set((existingProducts || []).map((item) => String(item.sku || "").toLowerCase()));
+  if (mode === "new-only") {
+    sourceRows = sourceRows.filter((row) => !existingKeys.has(String(row.sku || "").toLowerCase()));
+  } else if (mode === "update-existing") {
+    sourceRows = sourceRows.filter((row) => existingKeys.has(String(row.sku || "").toLowerCase()));
+  }
+  const filteredImportSkus = [...new Set(sourceRows.map((row) => row.sku).filter(Boolean))];
+  const closeouts = sourceRows.filter((row) => row.toBeDiscontinued || row.closeoutEligible).length;
+  return {
+    matched,
+    requested: allFiltered ? matched : skus.length,
+    importable: filteredImportSkus.length,
+    existing: filteredImportSkus.filter((sku) => existingKeys.has(String(sku || "").toLowerCase())).length,
+    newProducts: filteredImportSkus.filter((sku) => !existingKeys.has(String(sku || "").toLowerCase())).length,
+    skippedExisting: mode === "new-only" ? importSkus.filter((sku) => existingKeys.has(String(sku || "").toLowerCase())).length : 0,
+    skippedNew: mode === "update-existing" ? importSkus.filter((sku) => !existingKeys.has(String(sku || "").toLowerCase())).length : 0,
+    closeouts,
+    limited,
+    importMode: mode,
+    skus: filteredImportSkus,
+    sourceRows
+  };
+}
+
+async function promoteSourceCatalogRows({ sourceRows = [], skus = [], progress, isCanceled } = {}) {
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  let rows = sourceRows;
+  if (!rows.length && skus.length) rows = await postgres.readVendorCatalogItemsBySkus(skus);
+  const importSkus = [...new Set(rows.map((row) => row.sku).filter(Boolean))];
+  const existingProducts = importSkus.length ? await postgres.readProductsByKeys(importSkus) : [];
+  db.inventory = existingProducts || [];
+  const products = rows.map(normalizeCatalogProductForInventory).filter(Boolean);
+  const changedItems = [];
+  let created = 0;
+  let updated = 0;
+  const existingKeys = new Set((existingProducts || []).map((item) => String(item.sku || "").toLowerCase()));
+  for (let index = 0; index < products.length; index += 1) {
+    if (isCanceled?.()) throw new Error("Source catalog import canceled.");
+    const product = products[index];
+    const existed = existingKeys.has(String(product.sku || "").toLowerCase());
+    const upserted = upsertInventoryProductFromCatalog(db, product);
+    if (upserted.item) changedItems.push(upserted.item);
+    if (existed || upserted.existing) updated += 1;
+    else created += 1;
+    if (progress && (index % 250 === 0 || index === products.length - 1)) {
+      progress({
+        phase: "promoting_products",
+        processedRows: index + 1,
+        totalRows: products.length,
+        message: `Promoted ${(index + 1).toLocaleString()} of ${products.length.toLocaleString()} source products.`
+      });
+    }
+  }
+  const batchSize = 1000;
+  for (let index = 0; index < changedItems.length; index += batchSize) {
+    if (isCanceled?.()) throw new Error("Source catalog import canceled.");
+    await postgres.upsertProductsFromState(changedItems.slice(index, index + batchSize));
+    if (progress) {
+      progress({
+        phase: "saving_products",
+        processedRows: Math.min(index + batchSize, changedItems.length),
+        totalRows: changedItems.length,
+        message: `Saved ${Math.min(index + batchSize, changedItems.length).toLocaleString()} of ${changedItems.length.toLocaleString()} products.`
+      });
+    }
+  }
+  const summary = await postgres.readOperationalSummary();
+  return { changed: changedItems.length, created, updated, requested: importSkus.length, summary };
+}
+
+async function queueSourceCatalogImportJob(db, body = {}, impact = {}) {
+  const totalRows = Number(impact.importable || impact.requested || 0);
+  const attrs = {
+    section: "Source Catalog",
+    category: "Source Catalog",
+    operation: body.allFiltered ? "Filtered source catalog import" : "Source catalog import",
+    direction: "import",
+    status: "queued",
+    fileName: "source-catalog-filtered-import",
+    totalRows,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "source-catalog-import",
+    workerPayload: shouldRunJobsInline() ? {} : body,
+    message: `Source catalog import queued for ${totalRows.toLocaleString()} product${totalRows === 1 ? "" : "s"}.`,
+    details: [
+      body.allFiltered ? "Scope: all filtered source catalog results." : "Scope: selected source catalog rows.",
+      impact.importMode ? `Import mode: ${impact.importMode}.` : "",
+      impact.limited ? "Limited to first 25,000 matches." : ""
+    ].filter(Boolean).join(" ")
+  };
+  const duplicate = await findActiveDuplicateImportJob(db, attrs);
+  if (duplicate) {
+    duplicate.duplicateOfActiveJob = true;
+    duplicate.message = `${duplicate.operation || "Source catalog import"} is already ${String(duplicate.status || "queued").toLowerCase()}.`;
+    return normalizeImportJob(duplicate);
+  }
+  const job = createImportJob(db, attrs);
+  if (shouldRunJobsInline()) {
+    activeJobRecords.set(job.id, normalizeImportJob(job));
+    setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows, processedRows: 0, progressPercent: 0 });
+    startSourceCatalogImportJob(job.id, body);
+  }
+  return job;
+}
+
+async function runSourceCatalogImportWorkerJob(job = {}, body = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "collecting_source_rows",
+    startedAt,
+    processedRows: 0,
+    message: "Collecting source catalog rows..."
+  });
+  let lastPersistedAt = 0;
+  const progress = (patch = {}) => {
+    const processedRows = Number(patch.processedRows ?? job.processedRows ?? 0) || 0;
+    const totalRows = Number(patch.totalRows ?? job.totalRows ?? 0) || 0;
+    Object.assign(job, normalizeImportJob({
+      ...job,
+      ...patch,
+      status: "running",
+      totalRows,
+      processedRows,
+      progressPercent: patch.progressPercent ?? progressPercent(processedRows, totalRows),
+      estimatedSecondsRemaining: patch.estimatedSecondsRemaining ?? estimateRemainingSeconds(startedAt, processedRows, totalRows),
+      lastProgressAt: new Date().toISOString()
+    }));
+    if (Date.now() - lastPersistedAt > 1000 || Number(job.progressPercent || 0) >= 100) {
+      lastPersistedAt = Date.now();
+      postgres.upsertOperationJob(job).catch((error) => console.error("Unable to persist source import progress:", error.message || error));
+    }
+  };
+  const runningDb = normalizeDb(await readDbFast({ skipInventory: true }));
+  const impact = await sourceCatalogImportImpact({
+    skus: Array.isArray(body.skus) ? body.skus : [],
+    allFiltered: body.allFiltered === true || String(body.allFiltered || "").toLowerCase() === "true",
+    query: body.query || "",
+    filters: body.filters || {},
+    limit: body.limit || 25000,
+    importMode: body.importMode || body.sourceImportMode || "",
+    db: runningDb
+  });
+  progress({ phase: "source_rows_ready", processedRows: 0, totalRows: impact.importable, message: `${impact.importable.toLocaleString()} source rows ready to import.` });
+  const result = await promoteSourceCatalogRows({ sourceRows: impact.sourceRows || [], skus: impact.skus || [], progress, isCanceled: () => false });
+  const status = impact.limited ? "warning" : "success";
+  const message = `Imported ${result.changed.toLocaleString()} source product${result.changed === 1 ? "" : "s"} into Products (${result.created.toLocaleString()} new, ${result.updated.toLocaleString()} updated).`;
+  finishImportJob(job, {
+    status,
+    message,
+    details: [job.details, impact.limited ? "Only the first 25,000 filtered matches were imported." : ""].filter(Boolean).join(" "),
+    totalRows: result.requested,
+    processedRows: result.changed,
+    changed: result.changed,
+    missingCount: 0,
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    phase: "complete"
+  });
+  await postgres.upsertOperationJob(job);
+  queueDataQualityScanIfEnabled("source catalog import").catch(() => {});
+  publicStateJsonCache = null;
+  return job;
+}
+
+function startSourceCatalogImportJob(jobId, body = {}) {
+  setTimeout(async () => {
+    try {
+      const runningDb = normalizeDb(await readDbFast({ skipInventory: true }));
+      const job = findImportJob(runningDb, jobId);
+      if (!job) return;
+      job.status = "running";
+      job.startedAt = job.startedAt || new Date().toISOString();
+      job.updatedAt = new Date().toISOString();
+      job.message = "Importing source catalog products...";
+      upsertImportJobStore(job);
+      let lastProgressPersistedAt = 0;
+      const progress = (patch = {}) => {
+        const next = setActiveJobProgress(jobId, {
+          ...patch,
+          status: "running",
+          startedAt: job.startedAt
+        });
+        Object.assign(job, {
+          processedRows: next.processedRows,
+          totalRows: next.totalRows,
+          progressPercent: next.progressPercent,
+          estimatedSecondsRemaining: next.estimatedSecondsRemaining,
+          phase: next.phase,
+          lastProgressAt: next.lastProgressAt,
+          message: next.message || job.message
+        });
+        activeJobRecords.set(jobId, normalizeImportJob(job));
+        if (Date.now() - lastProgressPersistedAt > 1000 || Number(next.progressPercent || 0) >= 100) {
+          lastProgressPersistedAt = Date.now();
+          upsertImportJobStore(job);
+        }
+      };
+      const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(jobId)?.status || job.status || "").toLowerCase());
+      progress({ phase: "collecting_source_rows", processedRows: 0, totalRows: Number(job.totalRows || 0), message: "Collecting source catalog rows..." });
+      const impact = await sourceCatalogImportImpact({
+        skus: Array.isArray(body.skus) ? body.skus : [],
+        allFiltered: body.allFiltered === true || String(body.allFiltered || "").toLowerCase() === "true",
+        query: body.query || "",
+        filters: body.filters || {},
+        limit: body.limit || 25000,
+        importMode: body.importMode || body.sourceImportMode || "",
+        db: runningDb
+      });
+      progress({ phase: "source_rows_ready", processedRows: 0, totalRows: impact.importable, message: `${impact.importable.toLocaleString()} source rows ready to import.` });
+      const result = await promoteSourceCatalogRows({ sourceRows: impact.sourceRows || [], skus: impact.skus || [], progress, isCanceled });
+      const status = impact.limited ? "warning" : "success";
+      const message = `Imported ${result.changed.toLocaleString()} source product${result.changed === 1 ? "" : "s"} into Products (${result.created.toLocaleString()} new, ${result.updated.toLocaleString()} updated).`;
+      finishImportJob(job, {
+        status,
+        message,
+        details: [job.details, impact.limited ? "Only the first 25,000 filtered matches were imported." : ""].filter(Boolean).join(" "),
+        totalRows: result.requested,
+        processedRows: result.changed,
+        changed: result.changed,
+        missingCount: 0,
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0,
+        phase: "complete"
+      });
+      queueDataQualityScanIfEnabled("source catalog import").catch(() => {});
+      activeJobProgress.delete(jobId);
+      activeJobRecords.delete(jobId);
+      upsertImportJobStore(job);
+    } catch (error) {
+      const failedDb = normalizeDb(await readDbFast({ skipInventory: true }));
+      const job = findImportJob(failedDb, jobId) || normalizeImportJob({ id: jobId, operation: "Source catalog import" });
+      const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+      finishImportJob(job, {
+        status: wasCanceled ? "stopped" : "failed",
+        message: wasCanceled ? "Source catalog import was canceled." : error.message || "Source catalog import failed.",
+        errors: wasCanceled ? [] : [error.message || "Source catalog import failed."],
+        missingCount: wasCanceled ? 0 : 1,
+        phase: wasCanceled ? "stopped" : "failed",
+        estimatedSecondsRemaining: 0
+      });
+      activeJobProgress.delete(jobId);
+      activeJobRecords.delete(jobId);
+      upsertImportJobStore(job);
+    }
+  }, 10);
+}
+
 async function scanCatalogFacets() {
+  if (postgres.isPostgresEnabled()) {
+    try {
+      const facets = await postgres.vendorCatalogFacets();
+      if (facets) {
+        const sortValues = (values = [], limit = 500) => [...new Set(values.filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b))).slice(0, limit);
+        const suppliers = sortValues(facets.suppliers, 10000);
+        const stockStatuses = sortValues(facets.stockStatuses);
+        const brands = sortValues((facets.brands || []).map(formatBrandName));
+        const categories = sortValues((facets.categories || []).map(formatCategoryName));
+        return {
+          suppliers,
+          stockStatuses,
+          brands,
+          categories,
+          scanned: Number(facets.total || 0),
+          manifest: { ...(readCatalogManifest() || {}), productCount: Number(facets.total || 0), source: "postgres:vendor_catalog_items" },
+          vendorIndex: { generatedAt: new Date().toISOString(), vendors: suppliers.map((name) => ({ name })) },
+          database: "postgres"
+        };
+      }
+    } catch (error) {
+      console.warn("Postgres source catalog facets failed, falling back to catalog file:", error.message);
+    }
+  }
   const mtime = fs.existsSync(CATALOG_FILE) ? fs.statSync(CATALOG_FILE).mtimeMs : 0;
   const vendorIndex = readCatalogVendorIndex();
   if (catalogFacetCache && catalogFacetCache.mtime === mtime && catalogFacetCache.vendorIndexGeneratedAt === vendorIndex?.generatedAt) return catalogFacetCache.data;
@@ -9395,12 +14328,551 @@ async function scanCatalogFacets() {
   return data;
 }
 
+function readCatalogChangeRows(limit = 500) {
+  if (!fs.existsSync(CATALOG_CHANGE_LOG_FILE)) return [];
+  const stat = fs.statSync(CATALOG_CHANGE_LOG_FILE);
+  const readSize = Math.min(stat.size, 8 * 1024 * 1024);
+  const fd = fs.openSync(CATALOG_CHANGE_LOG_FILE, "r");
+  const buffer = Buffer.alloc(readSize);
+  try {
+    fs.readSync(fd, buffer, 0, readSize, stat.size - readSize);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return buffer.toString("utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .slice(-Math.max(1, Number(limit || 500)))
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .reverse();
+}
+
+function catalogChangeSummary(rows = []) {
+  const summary = {
+    total: rows.length,
+    costChanges: 0,
+    stockChanges: 0,
+    closeouts: 0,
+    up: 0,
+    down: 0
+  };
+  for (const row of rows) {
+    if (["sourceCost", "fobPrice", "websitePrice", "listPrice"].includes(row.field)) summary.costChanges += 1;
+    if (["stockQty", "stockStatus"].includes(row.field)) summary.stockChanges += 1;
+    if (row.toBeDiscontinued || row.field === "toBeDiscontinued") summary.closeouts += 1;
+    if (row.direction === "up") summary.up += 1;
+    if (row.direction === "down") summary.down += 1;
+  }
+  return summary;
+}
+
+function catalogChangeTrackingStatus() {
+  const manifest = readCatalogManifest() || {};
+  return {
+    manifest,
+    snapshotExists: fs.existsSync(CATALOG_CHANGE_SNAPSHOT_FILE),
+    snapshotPath: CATALOG_CHANGE_SNAPSHOT_FILE,
+    changeLogExists: fs.existsSync(CATALOG_CHANGE_LOG_FILE),
+    changeLogPath: CATALOG_CHANGE_LOG_FILE,
+    closeoutExists: fs.existsSync(CATALOG_CLOSEOUT_FILE),
+    closeoutPath: CATALOG_CLOSEOUT_FILE,
+    changeTracking: manifest.changeTracking || null
+  };
+}
+
+function shopifyAdminConfig() {
+  const shop = String(process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOPIFY_SHOP_DOMAIN || process.env.SHOPIFY_STORE || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/g, "");
+  const accessToken = String(process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || process.env.SHOPIFY_ACCESS_TOKEN || "").trim();
+  const clientId = String(process.env.SHOPIFY_CLIENT_ID || process.env.SHOPIFY_APP_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.SHOPIFY_CLIENT_SECRET || process.env.SHOPIFY_APP_CLIENT_SECRET || "").trim();
+  const apiVersion = String(process.env.SHOPIFY_ADMIN_API_VERSION || "2026-04").trim();
+  return { shop, accessToken, clientId, clientSecret, apiVersion };
+}
+
+function publicShopifyConfigStatus() {
+  const config = shopifyAdminConfig();
+  return {
+    shop: config.shop,
+    apiVersion: config.apiVersion,
+    hasAccessToken: Boolean(config.accessToken),
+    hasClientCredentials: Boolean(config.clientId && config.clientSecret),
+    configured: Boolean(config.shop && (config.accessToken || (config.clientId && config.clientSecret)))
+  };
+}
+
+function sanitizeApiLogMessage(value = "") {
+  return String(value || "")
+    .replace(/shpat_[A-Za-z0-9_\-]+/g, "[token]")
+    .replace(/shp[a-z]{2,}_[A-Za-z0-9_\-]+/g, "[secret]")
+    .replace(/access_token["']?\s*:\s*["'][^"']+["']/gi, 'access_token:"[token]"')
+    .slice(0, 1200);
+}
+
+function pruneFileChannelApiLogs(days = CHANNEL_API_LOG_RETENTION_DAYS) {
+  if (!fs.existsSync(CHANNEL_API_LOG_FILE)) return 0;
+  const cutoff = Date.now() - Math.max(1, Number(days || CHANNEL_API_LOG_RETENTION_DAYS)) * 24 * 60 * 60 * 1000;
+  let removed = 0;
+  const kept = [];
+  for (const line of fs.readFileSync(CHANNEL_API_LOG_FILE, "utf8").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const row = JSON.parse(line);
+      const time = Date.parse(row.createdAt || "");
+      if (Number.isFinite(time) && time < cutoff) {
+        removed += 1;
+        continue;
+      }
+    } catch {
+      removed += 1;
+      continue;
+    }
+    kept.push(line);
+  }
+  if (removed) fs.writeFileSync(CHANNEL_API_LOG_FILE, `${kept.join("\n")}${kept.length ? "\n" : ""}`, "utf8");
+  return removed;
+}
+
+function pruneChannelApiLogsSoon(force = false) {
+  const now = Date.now();
+  if (!force && now - channelApiLogPruneLastRun < 60 * 60 * 1000) return;
+  channelApiLogPruneLastRun = now;
+  setTimeout(() => {
+    try {
+      pruneFileChannelApiLogs(CHANNEL_API_LOG_RETENTION_DAYS + 1);
+    } catch {
+      // API log retention must never block the app.
+    }
+    if (postgres.isPostgresEnabled()) {
+      postgres.pruneChannelApiLogs(CHANNEL_API_LOG_RETENTION_DAYS + 1).catch(() => {
+        // API log retention must never block the app.
+      });
+    }
+  }, 250);
+}
+
+function appendChannelApiLog(entry = {}) {
+  try {
+    pruneChannelApiLogsSoon();
+    fs.mkdirSync(path.dirname(CHANNEL_API_LOG_FILE), { recursive: true });
+    const row = {
+      id: entry.id || crypto.randomUUID(),
+      createdAt: entry.createdAt || new Date().toISOString(),
+      channel: entry.channel || "Shopify",
+      transport: entry.transport || "",
+      method: entry.method || "",
+      path: entry.path || "",
+      operation: entry.operation || "",
+      statusCode: entry.statusCode || 0,
+      ok: Boolean(entry.ok),
+      durationMs: Math.max(0, Number(entry.durationMs || 0)),
+      requestId: entry.requestId || "",
+      jobId: entry.jobId || "",
+      message: sanitizeApiLogMessage(entry.message || entry.error || "")
+    };
+    fs.appendFileSync(CHANNEL_API_LOG_FILE, `${JSON.stringify(row)}\n`);
+    if (postgres.isPostgresEnabled()) {
+      postgres.insertChannelApiLog(row).catch(() => {
+        // API logging must never block the marketplace action.
+      });
+    }
+  } catch {
+    // API logging must never block the marketplace action.
+  }
+}
+
+function readFileChannelApiLogs({ channel = "", days = 30, limit = 250 } = {}) {
+  if (!fs.existsSync(CHANNEL_API_LOG_FILE)) return [];
+  const channelKey = String(channel || "").trim().toLowerCase();
+  const minTime = Date.now() - Math.max(1, Number(days || 30)) * 24 * 60 * 60 * 1000;
+  const maxRows = Math.max(1, Math.min(1000, Number(limit || 250)));
+  const rows = [];
+  const lines = fs.readFileSync(CHANNEL_API_LOG_FILE, "utf8").split(/\r?\n/).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0 && rows.length < maxRows; index -= 1) {
+    try {
+      const row = JSON.parse(lines[index]);
+      const time = Date.parse(row.createdAt || "");
+      if (!Number.isFinite(time) || time < minTime) continue;
+      if (channelKey && String(row.channel || "").trim().toLowerCase() !== channelKey) continue;
+      rows.push(row);
+    } catch {
+      // Ignore malformed log lines.
+    }
+  }
+  return rows;
+}
+
+async function readChannelApiLogs({ channel = "", days = 30, limit = 250 } = {}) {
+  const fileRows = readFileChannelApiLogs({ channel, days, limit });
+  if (!postgres.isPostgresEnabled()) return fileRows;
+  try {
+    const pgRows = await postgres.readChannelApiLogs({ channel, days, limit });
+    const byKey = new Map();
+    for (const row of [...pgRows, ...fileRows]) {
+      const key = `${row.createdAt}|${row.channel}|${row.transport || ""}|${row.method}|${row.path}|${row.statusCode}|${row.ok}|${row.requestId || ""}|${row.jobId || ""}|${row.message}`;
+      byKey.set(key, row);
+    }
+    return [...byKey.values()]
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+      .slice(0, Math.max(1, Math.min(1000, Number(limit || 250))));
+  } catch {
+    return fileRows;
+  }
+}
+
+function shopifyGraphqlOperationName(query = "") {
+  return String(query || "").match(/\b(query|mutation)\s+([A-Za-z0-9_]+)/)?.[2] || "GraphQL request";
+}
+
+function shopifyGraphqlRequest(query, variables = {}, options = {}) {
+  const config = shopifyAdminConfig();
+  if (!config.shop || !config.accessToken) {
+    throw new Error("Shopify Admin API is not configured. Add SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_ACCESS_TOKEN to .env.");
+  }
+  return shopifyGraphqlRequestWithToken(query, variables, config.accessToken, options);
+}
+
+function shopifyGraphqlRequestWithToken(query, variables = {}, accessToken = "", options = {}) {
+  const config = shopifyAdminConfig();
+  if (!config.shop || !accessToken) {
+    throw new Error("Shopify Admin API is not configured. Add SHOPIFY_STORE_DOMAIN and Shopify credentials to .env.");
+  }
+  const startedAt = Date.now();
+  const requestPath = `/admin/api/${encodeURIComponent(config.apiVersion)}/graphql.json`;
+  const operation = shopifyGraphqlOperationName(query);
+  const payload = JSON.stringify({ query, variables });
+  const requestOptions = {
+    hostname: config.shop,
+    path: requestPath,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(payload),
+      "X-Shopify-Access-Token": accessToken
+    }
+  };
+  return new Promise((resolve, reject) => {
+    const req = https.request(requestOptions, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        let data;
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch {
+          appendChannelApiLog({ channel: "Shopify", transport: "GraphQL", method: "POST", path: requestPath, operation: options.operation || operation, statusCode: response.statusCode, ok: false, durationMs: Date.now() - startedAt, message: `Non-JSON response (${response.statusCode})`, requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
+          return reject(new Error(`Shopify returned a non-JSON response (${response.statusCode}).`));
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          appendChannelApiLog({ channel: "Shopify", transport: "GraphQL", method: "POST", path: requestPath, operation: options.operation || operation, statusCode: response.statusCode, ok: false, durationMs: Date.now() - startedAt, message: text, requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
+          return reject(new Error(`Shopify API error (${response.statusCode}): ${text}`));
+        }
+        if (Array.isArray(data.errors) && data.errors.length) {
+          appendChannelApiLog({ channel: "Shopify", transport: "GraphQL", method: "POST", path: requestPath, operation: options.operation || operation, statusCode: response.statusCode, ok: false, durationMs: Date.now() - startedAt, message: data.errors.map((error) => error.message || JSON.stringify(error)).join("; "), requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
+          return reject(new Error(`Shopify GraphQL error: ${data.errors.map((error) => error.message || JSON.stringify(error)).join("; ")}`));
+        }
+        appendChannelApiLog({ channel: "Shopify", transport: "GraphQL", method: "POST", path: requestPath, operation: options.operation || operation, statusCode: response.statusCode, ok: true, durationMs: Date.now() - startedAt, message: "OK", requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
+        resolve(data.data || {});
+      });
+    });
+    req.on("error", (error) => {
+      appendChannelApiLog({ channel: "Shopify", transport: "GraphQL", method: "POST", path: requestPath, operation: options.operation || operation, ok: false, durationMs: Date.now() - startedAt, message: error.message, jobId: options.jobId || "" });
+      reject(error);
+    });
+    req.write(payload);
+    req.end();
+  });
+}
+
+function shopifyRestRequest(method, resourcePath, body = null, options = {}) {
+  return shopifyRestRequestWithToken(method, resourcePath, body, shopifyAdminConfig().accessToken, options);
+}
+
+function shopifyTokenRequest(options = {}) {
+  const config = shopifyAdminConfig();
+  if (!config.shop || !config.clientId || !config.clientSecret) {
+    throw new Error("Shopify client credentials are not configured. Add SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID, and SHOPIFY_CLIENT_SECRET to .env.");
+  }
+  if (shopifyAccessTokenCache.token && shopifyAccessTokenCache.expiresAt > Date.now() + 60_000) {
+    return Promise.resolve(shopifyAccessTokenCache);
+  }
+  const payload = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: config.clientId,
+    client_secret: config.clientSecret
+  }).toString();
+  const startedAt = Date.now();
+  const requestPath = "/admin/oauth/access_token";
+  const requestOptions = {
+    hostname: config.shop,
+    path: requestPath,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Length": Buffer.byteLength(payload)
+    }
+  };
+  return new Promise((resolve, reject) => {
+    const req = https.request(requestOptions, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        let data = {};
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch {
+          appendChannelApiLog({ channel: "Shopify", transport: "OAuth", method: "POST", path: requestPath, operation: options.operation || "Token request", statusCode: response.statusCode, ok: false, durationMs: Date.now() - startedAt, message: `Non-JSON response (${response.statusCode})`, requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
+          return reject(new Error(`Shopify returned a non-JSON response (${response.statusCode}).`));
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          appendChannelApiLog({ channel: "Shopify", transport: "OAuth", method: "POST", path: requestPath, operation: options.operation || "Token request", statusCode: response.statusCode, ok: false, durationMs: Date.now() - startedAt, message: text, requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
+          return reject(new Error(`Shopify token error (${response.statusCode}): ${text}`));
+        }
+        const token = String(data.access_token || "").trim();
+        if (!token) return reject(new Error("Shopify token response did not include access_token."));
+        const expiresIn = Math.max(60, Number(data.expires_in || 86399));
+        shopifyAccessTokenCache = {
+          token,
+          scope: String(data.scope || ""),
+          expiresAt: Date.now() + Math.max(60, expiresIn - 60) * 1000
+        };
+        appendChannelApiLog({ channel: "Shopify", transport: "OAuth", method: "POST", path: requestPath, operation: options.operation || "Token request", statusCode: response.statusCode, ok: true, durationMs: Date.now() - startedAt, message: "OK", requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
+        resolve(shopifyAccessTokenCache);
+      });
+    });
+    req.on("error", (error) => {
+      appendChannelApiLog({ channel: "Shopify", transport: "OAuth", method: "POST", path: requestPath, operation: options.operation || "Token request", ok: false, durationMs: Date.now() - startedAt, message: error.message, jobId: options.jobId || "" });
+      reject(error);
+    });
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function shopifyAdminAccessToken(options = {}) {
+  const config = shopifyAdminConfig();
+  if (config.clientId && config.clientSecret) {
+    return (await shopifyTokenRequest(options)).token;
+  }
+  if (config.accessToken) return config.accessToken;
+  throw new Error("Shopify Admin API is not configured. Add SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET, or SHOPIFY_ADMIN_ACCESS_TOKEN, to .env.");
+}
+
+async function shopifyRestRequestAuto(method, resourcePath, body = null, options = {}) {
+  const token = await shopifyAdminAccessToken(options);
+  return shopifyRestRequestWithToken(method, resourcePath, body, token, options);
+}
+
+async function shopifyGraphqlRequestAuto(query, variables = {}, options = {}) {
+  const token = await shopifyAdminAccessToken(options);
+  return shopifyGraphqlRequestWithToken(query, variables, token, options);
+}
+
+function shopifyRestRequestWithToken(method, resourcePath, body = null, accessToken = "", options = {}) {
+  const config = shopifyAdminConfig();
+  if (!config.shop || !accessToken) {
+    throw new Error("Shopify Admin API is not configured. Add SHOPIFY_STORE_DOMAIN and Shopify credentials to .env.");
+  }
+  const startedAt = Date.now();
+  const requestPath = `/admin/api/${encodeURIComponent(config.apiVersion)}${resourcePath}`;
+  const payload = body ? JSON.stringify(body) : "";
+  const requestOptions = {
+    hostname: config.shop,
+    path: requestPath,
+    method,
+    headers: {
+      "Accept": "application/json",
+      "X-Shopify-Access-Token": accessToken,
+      ...(payload ? {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload)
+      } : {})
+    }
+  };
+  return new Promise((resolve, reject) => {
+    const req = https.request(requestOptions, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        let data = {};
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch {
+          appendChannelApiLog({ channel: "Shopify", transport: "REST", method, path: requestPath, operation: options.operation || resourcePath, statusCode: response.statusCode, ok: false, durationMs: Date.now() - startedAt, message: `Non-JSON response (${response.statusCode})`, requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
+          return reject(new Error(`Shopify returned a non-JSON response (${response.statusCode}).`));
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          appendChannelApiLog({ channel: "Shopify", transport: "REST", method, path: requestPath, operation: options.operation || resourcePath, statusCode: response.statusCode, ok: false, durationMs: Date.now() - startedAt, message: text, requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
+          return reject(new Error(`Shopify API error (${response.statusCode}): ${text}`));
+        }
+        appendChannelApiLog({ channel: "Shopify", transport: "REST", method, path: requestPath, operation: options.operation || resourcePath, statusCode: response.statusCode, ok: true, durationMs: Date.now() - startedAt, message: "OK", requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
+        resolve(data);
+      });
+    });
+    req.on("error", (error) => {
+      appendChannelApiLog({ channel: "Shopify", transport: "REST", method, path: requestPath, operation: options.operation || resourcePath, ok: false, durationMs: Date.now() - startedAt, message: error.message, jobId: options.jobId || "" });
+      reject(error);
+    });
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function syncShopifyCloseoutCollection() {
+  const existing = await shopifyRestRequestAuto("GET", "/smart_collections.json?handle=closeouts&limit=1");
+  const current = Array.isArray(existing.smart_collections) ? existing.smart_collections[0] : null;
+  const smartCollection = {
+    title: "Closeouts",
+    handle: "closeouts",
+    body_html: "",
+    published: true,
+    published_scope: "global",
+    sort_order: "best-selling",
+    rules: [{ column: "tag", relation: "equals", condition: "closeout" }],
+    disjunctive: false,
+    metafields_global_title_tag: "Closeouts on Sale",
+    metafields_global_description_tag: "Closeout deals on discontinued products while supplies last."
+  };
+  if (current?.id) {
+    const updated = await shopifyRestRequestAuto("PUT", `/smart_collections/${encodeURIComponent(current.id)}.json`, { smart_collection: { id: current.id, ...smartCollection } });
+    return { action: "updated", collection: updated.smart_collection || current };
+  }
+  const created = await shopifyRestRequestAuto("POST", "/smart_collections.json", { smart_collection: smartCollection });
+  return { action: "created", collection: created.smart_collection };
+}
+
+function normalizeShopifyProductGid(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (/^gid:\/\/shopify\/Product\/\d+$/i.test(text)) return text;
+  const id = text.match(/Product\/(\d+)/i)?.[1] || text.match(/^\d+$/)?.[0] || "";
+  return id ? `gid://shopify/Product/${id}` : text;
+}
+
+function normalizeShopifyVariantGid(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (/^gid:\/\/shopify\/ProductVariant\/\d+$/i.test(text)) return text;
+  const id = text.match(/ProductVariant\/(\d+)/i)?.[1] || text.match(/^\d+$/)?.[0] || "";
+  return id ? `gid://shopify/ProductVariant/${id}` : text;
+}
+
+function shopifyLegacyId(value = "") {
+  return String(value || "").trim().match(/(\d+)$/)?.[1] || "";
+}
+
+async function fetchShopifyProductStatusByGid(productGid = "", options = {}) {
+  const gid = normalizeShopifyProductGid(productGid);
+  if (!gid) throw new Error("Missing Shopify Product GID.");
+  const query = `
+    query DataPlusProductStatus($id: ID!) {
+      node(id: $id) {
+        ... on Product {
+          id
+          legacyResourceId
+          title
+          handle
+          status
+          publishedAt
+          updatedAt
+          onlineStoreUrl
+          variants(first: 100) {
+            nodes {
+              id
+              legacyResourceId
+              sku
+              inventoryQuantity
+            }
+          }
+        }
+      }
+    }
+  `;
+  const data = await shopifyGraphqlRequestAuto(query, { id: gid }, { jobId: options.jobId, operation: options.operation || "Fetch Shopify product status" });
+  const product = data?.node;
+  if (!product?.id) throw new Error(`Shopify product was not found for ${gid}.`);
+  return product;
+}
+
+function shopifyStatusPayloadFromProduct(product = {}, item = {}) {
+  const variants = Array.isArray(product.variants?.nodes) ? product.variants.nodes : [];
+  const expectedSkus = new Set(shopifyPurchaseVariants(item).map((variant) => String(variant.sku || "").trim().toLowerCase()).filter(Boolean));
+  const currentVariantId = normalizeShopifyVariantGid(item.shopifyVariantId);
+  const matchedVariant = variants.find((variant) => currentVariantId && normalizeShopifyVariantGid(variant.id) === currentVariantId)
+    || variants.find((variant) => expectedSkus.has(String(variant.sku || "").trim().toLowerCase()))
+    || variants[0]
+    || null;
+  const status = normalizeShopifyStatus(product.status);
+  return {
+    shopifyId: normalizeShopifyProductGid(product.id),
+    shopifyVariantId: matchedVariant?.id ? normalizeShopifyVariantGid(matchedVariant.id) : "",
+    shopifyHandle: product.handle || "",
+    shopifyStatus: status,
+    shopifyPublished: Boolean(product.publishedAt),
+    shopifyPublishedAt: product.publishedAt || "",
+    shopifyUpdatedAt: product.updatedAt || "",
+    shopifySyncedAt: new Date().toISOString(),
+    shopifySyncSource: "graphql",
+    shopifyOnlineStoreUrl: product.onlineStoreUrl || "",
+    shopifyVariantSku: matchedVariant?.sku || "",
+    shopifyVariantCount: variants.length
+  };
+}
+
+async function syncInventoryItemShopifyStatus(item = {}, gidOverride = "", options = {}) {
+  const gid = normalizeShopifyProductGid(gidOverride || item.shopifyId);
+  if (!gid) throw new Error(`Product ${item.sku || item.id || ""} does not have a Shopify Product GID yet.`);
+  const product = await fetchShopifyProductStatusByGid(gid, { jobId: options.jobId, operation: "Sync Shopify product status" });
+  const payload = shopifyStatusPayloadFromProduct(product, item);
+  const fields = ["shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublished", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource", "shopifyOnlineStoreUrl", "shopifyVariantSku", "shopifyVariantCount"];
+  const changed = [];
+  for (const field of fields) {
+    if (payload[field] !== undefined && payload[field] !== "" && item[field] !== payload[field]) {
+      item[field] = payload[field];
+      changed.push(field);
+    }
+  }
+  if (changed.length) item.updatedAt = new Date().toISOString();
+  return { item, product, payload, changed };
+}
+
+function readCloseoutSkus() {
+  if (!fs.existsSync(CATALOG_CLOSEOUT_FILE)) return [];
+  try {
+    return parseCsv(fs.readFileSync(CATALOG_CLOSEOUT_FILE, "utf8"))
+      .map((row) => String(row.sku || row.SKU || "").trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 async function findCatalogProductBySku(sku, db = {}) {
   const key = String(sku || "").trim().toLowerCase();
-  if (!key || !fs.existsSync(CATALOG_FILE)) return null;
+  if (!key) return null;
   const overrides = sourceCatalogOverrideMap(db);
   const vendorMappings = vendorCategoryMappingMap(db);
   const productsBySku = inventoryBySkuMap(db);
+  if (postgres.isPostgresEnabled()) {
+    try {
+      const rows = await postgres.readVendorCatalogItemsBySkus([key]);
+      const normalized = normalizeCatalogProductForInventory(rows?.[0] || null);
+      if (normalized) return decorateSourceCatalogProduct(normalized, overrides, productsBySku, vendorMappings);
+      return null;
+    } catch (error) {
+      console.warn("Postgres source catalog SKU lookup failed, falling back to catalog file:", error.message);
+    }
+  }
+  if (!fs.existsSync(CATALOG_FILE)) return null;
   const indexedProduct = await readCatalogProductFromSkuIndex(key);
   if (indexedProduct) return decorateSourceCatalogProduct(indexedProduct, overrides, productsBySku, vendorMappings);
   const rl = readline.createInterface({
@@ -9427,6 +14899,10 @@ async function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split("/").filter(Boolean);
 
+  if (req.method === "GET" && url.pathname === "/api/system/database") {
+    return sendJson(res, 200, await postgres.databaseHealth());
+  }
+
   if (parts[0] === "api" && parts[1] === "export-mappings" && !parts[3]) {
     let exportMappings = await readExportMappingsApiStore();
     if (req.method === "GET" && parts.length === 2) {
@@ -9437,6 +14913,7 @@ async function handleApi(req, res) {
       const template = normalizeExportMapping({
         name: body.name || `${body.source || "Custom"} Product Mapping`,
         source: body.source || "Custom",
+        formatType: body.formatType || body.exportFormat || "normal",
         mode: body.mode || "both",
         mappings: body.mappings || [
           { externalColumn: "SKU", productField: "sku" },
@@ -9453,7 +14930,7 @@ async function handleApi(req, res) {
       const body = await parseBody(req);
       const template = exportMappings.find((row) => row.id === parts[2]);
       if (!template) return notFound(res);
-      for (const field of ["name", "source", "mode", "status", "notes"]) {
+      for (const field of ["name", "source", "mode", "status", "notes", "formatType"]) {
         if (body[field] !== undefined) template[field] = String(body[field] || "").trim();
       }
       if (body.mappings !== undefined) template.mappings = parseMappingRows(body.mappings).map(normalizeExportMappingRow).filter((row) => row.externalColumn);
@@ -9477,18 +14954,2404 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { fields: PRODUCT_MAPPING_FIELDS });
   }
 
-  if (req.method === "GET" && url.pathname === "/api/state") {
+  if (req.method === "GET" && url.pathname === "/api/channel-api-logs") {
+    return sendJson(res, 200, {
+      logs: await readChannelApiLogs({
+        channel: url.searchParams.get("channel") || "",
+        days: url.searchParams.get("days") || 30,
+        limit: url.searchParams.get("limit") || 250
+      })
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/inventory/facets") {
+    if (postgres.isPostgresEnabled()) {
+      const facets = await postgres.productFacets();
+      if (facets) return sendJson(res, 200, { facets });
+      return sendJson(res, 200, {
+        facets: { suppliers: [], stockStatuses: [], shopifyStatuses: [], ebayStatuses: [], brands: [], categories: [] },
+        storage: "postgres"
+      });
+    }
     const db = await readDbFast();
+    const products = db.inventory || [];
+    return sendJson(res, 202, {
+      facets: {
+        suppliers: products.map((item) => item.supplier || item.vendor).filter(Boolean),
+        stockStatuses: products.map((item) => item.stockStatus).filter(Boolean),
+        shopifyStatuses: products.map((item) => item.shopifyStatus).filter(Boolean),
+        ebayStatuses: products.map((item) => item.ebayListing?.ebayStatus || item.ebayListing?.status).filter(Boolean),
+        brands: products.map((item) => item.brand).filter(Boolean),
+        categories: products.map((item) => item.category).filter(Boolean)
+      }
+    });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts.length === 3) {
+    if (postgres.isPostgresEnabled()) {
+      const pgItem = await postgres.readProductByKey(parts[2]);
+      if (pgItem) {
+        return sendJson(res, 200, { item: publicInventoryItem(pgItem, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) });
+      }
+      return notFound(res);
+    }
+    const db = await readDbFast();
+    const item = (db.inventory || []).find((row) => row.id === parts[2] || String(row.sku || "").toLowerCase() === String(parts[2] || "").toLowerCase());
+    if (!item) return notFound(res);
+    return sendJson(res, 200, { item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const qtyBefore = Number(item.qty || 0);
+    const reservedBefore = Number(item.reserved || 0);
+    applyInventoryPatch(item, body);
+    if (body.brand !== undefined && body.brandLocked === undefined) item.brandLocked = true;
+    item.updatedAt = new Date().toISOString();
+    const qtyAfter = Number(item.qty || 0);
+    const reservedAfter = Number(item.reserved || 0);
+    let db = null;
+    if (qtyBefore !== qtyAfter || reservedBefore !== reservedAfter) {
+      db = await readDbFast({ skipInventory: true });
+      const warehouse = (db.warehouses || []).find((row) => row.isDefaultReceiving) || (db.warehouses || [])[0] || { id: "default", name: "Default" };
+      const stockRow = ensureInventoryWarehouseStock(item, warehouse);
+      stockRow.qty = qtyAfter;
+      stockRow.reserved = reservedAfter;
+      stockRow.updatedAt = new Date().toISOString();
+      syncInventoryTotalsFromWarehouses(item);
+      addInventoryLedger(db, item, {
+        type: "manual_adjustment",
+        source: "inventory",
+        warehouseId: warehouse.id,
+        warehouseName: warehouse.name,
+        quantityChange: qtyAfter - qtyBefore,
+        reservedChange: reservedAfter - reservedBefore,
+        qtyBefore,
+        qtyAfter,
+        reservedBefore,
+        reservedAfter,
+        reason: body.reason || "Manual inventory edit",
+        user: body.user || "Luis"
+      });
+    }
+    await postgres.upsertProductsFromState([item]);
+    if (qtyBefore !== qtyAfter || reservedBefore !== reservedAfter) {
+      await postgres.upsertInventoryLevelsFromProducts([item]);
+      await postgres.writeStateDocuments({ inventoryLedger: db?.inventoryLedger || [] });
+    }
+    const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
+    const summary = await postgres.readOperationalSummary();
+    return sendJson(res, 200, {
+      item: publicInventoryItem(updated || item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
+      summary
+    });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "warehouse-stock" && parts[4] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const warehouse = (db.warehouses || []).find((row) => row.id === parts[4]) || { id: parts[4], name: parts[4] };
+    const stockRow = ensureInventoryWarehouseStock(item, warehouse);
+    const qtyBefore = Number(stockRow.qty || 0);
+    const reservedBefore = Number(stockRow.reserved || 0);
+    for (const field of ["qty", "reserved", "reorderPoint", "incoming", "committed", "available"]) {
+      if (body[field] !== undefined) stockRow[field] = Number(body[field] || 0);
+    }
+    for (const field of ["locationBin", "notes"]) {
+      if (body[field] !== undefined) stockRow[field] = String(body[field] || "").trim();
+    }
+    stockRow.updatedAt = new Date().toISOString();
+    syncInventoryTotalsFromWarehouses(item);
+    item.updatedAt = new Date().toISOString();
+    const qtyAfter = Number(stockRow.qty || 0);
+    const reservedAfter = Number(stockRow.reserved || 0);
+    if (qtyBefore !== qtyAfter || reservedBefore !== reservedAfter) {
+      addInventoryLedger(db, item, {
+        type: "warehouse_adjustment",
+        source: "inventory",
+        warehouseId: warehouse.id,
+        warehouseName: warehouse.name,
+        quantityChange: qtyAfter - qtyBefore,
+        reservedChange: reservedAfter - reservedBefore,
+        qtyBefore,
+        qtyAfter,
+        reservedBefore,
+        reservedAfter,
+        reason: body.reason || "Manual warehouse stock edit",
+        user: body.user || "Luis"
+      });
+    }
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
+    const summary = await postgres.readOperationalSummary();
+    return sendJson(res, 200, {
+      item: publicInventoryItem(updated || item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
+      warehouseStock: stockRow,
+      summary,
+      state: publicState({ ...db, inventory: [], __summaryOverride: summary }, { lite: true })
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/inventory") {
+    if (postgres.isPostgresEnabled()) {
+      const result = await postgres.listProducts({
+        q: url.searchParams.get("q") || "",
+        page: url.searchParams.get("page") || 1,
+        limit: url.searchParams.get("limit") || 100000,
+        filters: catalogFilterParams(url.searchParams)
+      });
+      if (result) {
+        const shopifyStatusMap = readShopifyStatusMapSync();
+        const sourceEnrichmentMap = readProductSourceEnrichmentSync();
+        return sendJson(res, 200, {
+          inventory: (result.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap })),
+          inventoryLoaded: true,
+          total: result.total,
+          page: result.page,
+          limit: result.limit,
+          storage: "postgres"
+        });
+      }
+      return sendJson(res, 500, { error: "Postgres catalog query did not return a result." });
+    }
+    const db = await readDbFast();
+    const shopifyStatusMap = readShopifyStatusMapSync();
+    const sourceEnrichmentMap = readProductSourceEnrichmentSync();
+    return sendJson(res, 200, { inventory: (db.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap })), inventoryLoaded: true });
+  }
+
+
+  if (req.method === "GET" && url.pathname === "/api/data-quality/summary") {
+    const force = ["1", "true", "yes"].includes(String(url.searchParams.get("force") || "").toLowerCase());
+    const active = [...activeJobRecords.values()].find((job) => /data quality/i.test(String(job.operation || job.message || "")) && ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+    if (postgres.isPostgresEnabled() && !force) {
+      const pgSummary = await postgres.readProductQualitySummary();
+      if (pgSummary) {
+        return sendJson(res, 200, {
+          summary: pgSummary.summary || {},
+          issues: Object.entries(pgSummary.summary?.issueCounts || {}).map(([label, count]) => ({ label, key: dataQualityIssueKey(label), count })),
+          sample: pgSummary.sample || [],
+          stale: false,
+          activeJobId: active?.id || "",
+          activeJob: active ? normalizeImportJob(active) : null,
+          storage: "postgres"
+        });
+      }
+    }
+    let snapshot = !force ? readDataQualitySnapshot() : null;
+    if (!snapshot) return sendJson(res, 200, {
+      summary: { generatedAt: "", total: 0, needsWork: 0, productReady: 0 },
+      issues: [],
+      sample: [],
+      stale: true,
+      activeJobId: active?.id || "",
+      activeJob: active ? normalizeImportJob(active) : null,
+      message: "No data quality snapshot exists yet. Run a scan from Jobs."
+    });
+    const rows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
+    return sendJson(res, 200, {
+      summary: snapshot.summary || {},
+      issues: Object.entries(snapshot.summary?.issueCounts || {}).map(([label, count]) => ({ label, key: dataQualityIssueKey(label), count })),
+      sample: rows.slice(0, 25),
+      stale: false,
+      activeJobId: active?.id || "",
+      activeJob: active ? normalizeImportJob(active) : null
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/data-quality/products") {
+    const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get("limit") || 150)));
+    const query = {
+      q: url.searchParams.get("q") || "",
+      issue: url.searchParams.get("issue") || "",
+      type: url.searchParams.get("type") || "",
+      channel: url.searchParams.get("channel") || "",
+      status: url.searchParams.get("status") || ""
+    };
+    let snapshot = readDataQualitySnapshot();
+    if (postgres.isPostgresEnabled()) {
+      const page = await postgres.readProductQualityRows({ ...query, limit });
+      if (page) {
+        return sendJson(res, 200, { rows: page.rows || [], total: page.total || 0, summary: snapshot?.summary || {}, stale: false, storage: "postgres" });
+      }
+    }
+    if (!snapshot) return sendJson(res, 200, { rows: [], total: 0, summary: {}, stale: true, message: "No data quality snapshot exists yet. Run a scan from Jobs." });
+    const rows = filterDataQualityRows(snapshot, query);
+    return sendJson(res, 200, { rows: rows.slice(0, limit), total: rows.length, summary: snapshot.summary || {}, stale: false, storage: "json" });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/data-quality/export.csv") {
+    const query = {
+      q: url.searchParams.get("q") || "",
+      issue: url.searchParams.get("issue") || "",
+      type: url.searchParams.get("type") || "",
+      channel: url.searchParams.get("channel") || "",
+      status: url.searchParams.get("status") || ""
+    };
+    if (postgres.isPostgresEnabled()) {
+      return streamDataQualityCsvFromPostgres(res, query);
+    }
+    let snapshot = readDataQualitySnapshot();
+    if (!snapshot) return sendJson(res, 409, { error: "No data quality snapshot exists yet. Run a scan first." });
+    const rows = filterDataQualityRows(snapshot, query).map(dataQualityExportRow);
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=dataplus-data-quality.csv"
+    });
+    return res.end(rowsToCsv(rows));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/data-quality/scan") {
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    const totalRows = postgres.isPostgresEnabled() ? await postgres.countProducts() : (db.inventory || []).length;
+    const job = createImportJob(db, {
+      section: "Products",
+      operation: "Data quality scan",
+      direction: "scan",
+      status: "queued",
+      fileName: "data-quality-snapshot.json",
+      totalRows,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: shouldRunDataQualityInline() ? "" : "data-quality-scan",
+      workerPayload: shouldRunDataQualityInline() ? {} : { reason: "manual scan" },
+      message: "Data quality scan queued. Progress is available in Jobs."
+    });
+    upsertImportJobStore(job);
+    if (shouldRunDataQualityInline()) {
+      activeJobRecords.set(job.id, normalizeImportJob(job));
+      setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows, processedRows: 0, progressPercent: 0 });
+      startDataQualityScanJob(job.id);
+    }
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/source-enrichment/backfill") {
+    const body = await parseBody(req);
+    const requestedSkus = Array.isArray(body.skus)
+      ? body.skus.map((sku) => String(sku || "").trim()).filter(Boolean)
+      : [];
+    const limit = Math.max(1, Math.min(5000, Number(body.limit || 1000)));
+    if (postgres.isPostgresEnabled()) {
+      if (requestedSkus.length > 0 && requestedSkus.length <= BACKGROUND_EXPORT_PAGE_SIZE) {
+        const result = await buildSourceEnrichmentForSkusPaged(requestedSkus, { chunkSize: requestedSkus.length || 1 });
+        publicStateJsonCache = null;
+        return sendJson(res, 200, {
+          ...result,
+          requested: requestedSkus.length,
+          storage: "postgres",
+          message: `Source catalog enrichment updated for ${Number(result.changed || 0).toLocaleString()} product${Number(result.changed || 0) === 1 ? "" : "s"} and persisted ${Number(result.persisted || 0).toLocaleString()} Postgres row${Number(result.persisted || 0) === 1 ? "" : "s"}.`
+        });
+      }
+      const db = await readDbFast({ skipInventory: true });
+      const totalRows = requestedSkus.length || limit;
+      const job = createImportJob(db, {
+        section: "Products",
+        operation: "Source catalog enrichment backfill",
+        direction: "backfill",
+        status: "queued",
+        fileName: "product-source-enrichment.json",
+        totalRows,
+        processedRows: 0,
+        progressPercent: 0,
+        phase: "queued",
+        message: "Source catalog enrichment backfill queued. Progress is available in Jobs."
+      });
+      upsertImportJobStore(job);
+      startSourceEnrichmentBackfillJob(job.id, { skus: requestedSkus, limit });
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
+    }
+    const workDb = normalizeDb(await readDbFast());
+    const candidates = requestedSkus.length
+      ? requestedSkus
+      : (workDb.inventory || []).filter(needsSourceCatalogEnrichment).map((item) => item.sku).filter(Boolean).slice(0, limit);
+    if (!candidates.length) {
+      return sendJson(res, 200, {
+        changed: 0,
+        total: Object.keys(readProductSourceEnrichmentSync()).length,
+        message: "No products need source catalog enrichment."
+      });
+    }
+    const result = await buildSourceEnrichmentForSkus(workDb, candidates);
+    publicStateJsonCache = null;
+    return sendJson(res, 200, {
+      ...result,
+      requested: candidates.length,
+      message: `Source catalog enrichment updated for ${Number(result.changed || 0).toLocaleString()} product${Number(result.changed || 0) === 1 ? "" : "s"}.`
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/orders") {
+    if (postgres.isPostgresEnabled()) {
+      const [orders, db] = await Promise.all([
+        postgres.listOrders({ limit: url.searchParams.get("limit") || 5000 }),
+        readDbFast({ skipInventory: true })
+      ]);
+      return sendJson(res, 200, {
+        orders: orders || [],
+        orderDrafts: db.orderDrafts || [],
+        returns: db.returns || [],
+        customers: db.customers || [],
+        ordersLoaded: true,
+        storage: "postgres"
+      });
+    }
+    const db = await readDbFast();
+    return sendJson(res, 200, {
+      orders: db.orders || [],
+      orderDrafts: db.orderDrafts || [],
+      returns: db.returns || [],
+      customers: db.customers || [],
+      ordersLoaded: true
+    });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const changes = [];
+    for (const field of ["total", "productCost", "marketplaceFees", "shippingCost", "refundAmount"]) {
+      if (body[field] !== undefined && Number.isFinite(Number(body[field]))) {
+        const oldValue = Number(order[field] || 0);
+        const newValue = Number(body[field]);
+        if (oldValue !== newValue) changes.push(`${field} changed from ${oldValue} to ${newValue}`);
+        order[field] = newValue;
+      }
+    }
+    for (const field of ["buyer", "source", "buyerEmail", "phone", "marketplaceOrderNumber", "shipBy", "notes"]) {
+      if (body[field] !== undefined) {
+        const oldValue = String(order[field] || "");
+        const newValue = String(body[field] || "").trim();
+        if (oldValue !== newValue) changes.push(`${field} changed from "${oldValue || "blank"}" to "${newValue || "blank"}"`);
+        order[field] = newValue;
+      }
+    }
+    order.updatedAt = new Date().toISOString();
+    if (changes.length) {
+      addOrderTimeline(order, {
+        type: "edited",
+        title: "Order edited",
+        message: changes.join(", "),
+        user: body.user || "Luis"
+      });
+    }
+    await postgres.saveOrder(order);
+    const db = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { order, state: publicState(db, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "action" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const action = String(body.action || "").toLowerCase();
+    const nextStatus = {
+      approve: "approved",
+      hold: "hold",
+      cancel: "canceled",
+      void: "void",
+      done: "done",
+      delete: "deleted"
+    }[action];
+    if (!nextStatus) return sendJson(res, 400, { error: "Unsupported order action." });
+    if (action === "delete") {
+      const confirmation = String(body.confirmation || "").trim();
+      const expected = order.internalOrderNumber || order.orderNumber;
+      if (confirmation !== expected) return sendJson(res, 400, { error: `Type ${expected} to delete this order.` });
+      order.deletedAt = new Date().toISOString();
+      order.deletedBy = body.user || "Luis";
+      order.deleteReason = String(body.reason || body.note || "Admin deleted order").trim();
+    }
+    order.status = nextStatus;
+    order.actionedAt = new Date().toISOString();
+    order.actionNote = body.note || "";
+    if (action === "approve") order.approvedAt = order.actionedAt;
+    if (action === "hold") order.holdAt = order.actionedAt;
+    if (action === "cancel") order.canceledAt = order.actionedAt;
+    if (action === "done") order.doneAt = order.actionedAt;
+    if (["void", "delete", "cancel"].includes(action)) {
+      order.financialExcludedAt = order.financialExcludedAt || order.actionedAt;
+      order.financialExcludedReason = order.financialExcludedReason || action;
+      if (action === "void") {
+        order.voidedAt = order.actionedAt;
+        order.voidedBy = body.user || "Luis";
+      }
+    }
+    addOrderTimeline(order, {
+      type: "status",
+      title: action === "delete" ? "Order deleted" : `Order ${nextStatus}`,
+      message: body.note || `Status changed to ${nextStatus}.`,
+      user: body.user || "Luis"
+    });
+    await postgres.saveOrder(order);
+    const db = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, action === "delete"
+      ? { deleted: true, deletedOrderId: order.id, order, state: publicState(db, { lite: true }) }
+      : { order, state: publicState(db, { lite: true }) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    if (body.vendorId !== undefined) {
+      const vendor = findVendorById(db, body.vendorId);
+      if (!vendor) return sendJson(res, 400, { error: "Vendor not found." });
+      const previous = po.supplier || "Unassigned supplier";
+      po.vendorId = vendor.id;
+      po.supplier = vendor.name;
+      addPoTimeline(po, {
+        type: "edited",
+        title: "PO vendor changed",
+        message: `Vendor changed from ${previous} to ${vendor.name}.`,
+        user: body.user || "Luis"
+      });
+    }
+    if (body.warehouseId !== undefined) {
+      const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId);
+      if (!warehouse) return sendJson(res, 400, { error: "Warehouse not found." });
+      const previous = po.warehouseName || "Unassigned warehouse";
+      po.warehouseId = warehouse.id;
+      po.warehouseName = warehouse.name;
+      addPoTimeline(po, {
+        type: "edited",
+        title: "PO warehouse changed",
+        message: `Warehouse changed from ${previous} to ${warehouse.name}.`,
+        user: body.user || "Luis"
+      });
+    }
+    po.updatedAt = new Date().toISOString();
+    await postgres.savePurchaseOrder(po);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "action" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const action = String(body.action || "").toLowerCase();
+    const nextStatus = {
+      approve: "approved",
+      hold: "hold",
+      cancel: "canceled",
+      received: "received",
+      close: "closed",
+      reopen: "draft"
+    }[action];
+    if (!nextStatus) return sendJson(res, 400, { error: "Unsupported PO action." });
+    const previousStatus = po.status || "draft";
+    po.status = nextStatus;
+    po.updatedAt = new Date().toISOString();
+    addPoTimeline(po, {
+      type: "status",
+      title: `PO ${nextStatus}`,
+      message: `Status changed from ${previousStatus} to ${nextStatus}.`,
+      user: body.user || "Luis"
+    });
+    await postgres.savePurchaseOrder(po);
+    const db = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { purchaseOrder: po, state: publicState(db, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts.length === 2 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const po = createPurchaseOrderFromOrders(db, body.orderIds || [], {
+        vendorId: body.vendorId,
+        supplier: body.supplier,
+        notes: body.notes,
+        user: body.user || "Luis",
+        forceDuplicate: body.forceDuplicate === true || String(body.forceDuplicate).toLowerCase() === "true"
+      });
+      const touchedOrders = (db.orders || []).filter((order) => (po.orderIds || []).includes(order.id));
+      await postgres.savePurchaseOrder(po);
+      for (const order of touchedOrders) await postgres.saveOrder(order);
+      await postgres.writeStateDocuments({ sequence: db.sequence || {} });
+      const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+      return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+    } catch (error) {
+      if (error.code === "DUPLICATE_OPEN_PO") {
+        return sendJson(res, 409, { error: error.message, duplicates: error.duplicates });
+      }
+      return sendJson(res, 400, { error: error.message });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "submit" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    const settings = vendor?.submissionSettings || {};
+    const method = String(body.method || settings.preferredMethod || "email").toLowerCase();
+    const allowedMethods = new Set(["preferred", "api", "ftp", "email", "manual"]);
+    if (!allowedMethods.has(method)) return sendJson(res, 400, { error: "Unsupported PO submission method." });
+    const resolvedMethod = method === "preferred" ? String(settings.preferredMethod || "email").toLowerCase() : method;
+    const requirements = {
+      api: settings.apiEnabled && settings.apiBaseUrl,
+      ftp: settings.ftpEnabled && settings.ftpHost,
+      email: settings.emailEnabled !== false && settings.emailTo
+    };
+    if (["api", "ftp", "email"].includes(resolvedMethod) && !requirements[resolvedMethod]) {
+      return sendJson(res, 400, { error: `Vendor ${resolvedMethod.toUpperCase()} submission settings are incomplete.` });
+    }
+    addPoSubmission(po, {
+      method: resolvedMethod,
+      status: "queued",
+      poStatus: "submitted",
+      message: `PO queued for ${resolvedMethod.toUpperCase()} submission with CSV${settings.attachPdf !== false ? " and PDF" : ""}.`,
+      user: body.user || "Luis"
+    });
+    await postgres.savePurchaseOrder(po);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "receive" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    const receivedLines = Array.isArray(body.items) ? body.items : [];
+    const receivedAt = String(body.receivedAt || new Date().toISOString().slice(0, 10));
+    const note = String(body.note || "").trim();
+    const mode = String(body.mode || "final").toLowerCase() === "draft" ? "draft" : "final";
+    const defaultLocationBin = String(body.defaultLocationBin || "").trim();
+    const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId || row.id === po.warehouseId) || null;
+    const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReceiptAttachment(file, body.user || "Luis"));
+    const touchedProducts = [];
+    let totalReceived = 0;
+    const receipt = {
+      id: crypto.randomUUID(),
+      receiptNumber: `${mode === "draft" ? "DRF" : "RCV"}-${String(((mode === "draft" ? po.receiptDrafts : po.receipts) || []).length + 1).padStart(4, "0")}`,
+      status: mode,
+      receivedAt,
+      receivedBy: body.user || "Luis",
+      note,
+      defaultLocationBin,
+      warehouseId: warehouse?.id || po.warehouseId || "",
+      warehouseName: warehouse?.name || po.warehouseName || "",
+      attachments,
+      items: []
+    };
+
+    for (const line of receivedLines) {
+      const sku = String(line.sku || "").trim();
+      const qtyReceived = Number(line.qtyReceived || 0);
+      if (!sku || !Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
+      const [product, poLine] = await Promise.all([
+        postgres.readProductByKey(sku),
+        Promise.resolve((po.items || []).find((item) => String(item.sku || "").toLowerCase() === sku.toLowerCase()))
+      ]);
+      const varianceStatus = String(line.varianceStatus || "none").toLowerCase();
+      const varianceNote = String(line.varianceNote || "").trim();
+      const locationBin = String(line.locationBin || defaultLocationBin || "").trim();
+      const providedSerials = Array.isArray(line.serials) ? line.serials : [];
+      const serials = [];
+      for (let index = 0; index < qtyReceived; index += 1) {
+        const serialInput = providedSerials[index] || {};
+        const noSerial = serialInput.noSerial === true || String(serialInput.noSerial).toLowerCase() === "true";
+        const manualSerial = String(serialInput.serialNumber || "").trim();
+        const serialNumber = noSerial || !manualSerial ? generatedReceiptSerial(po, vendor, receivedAt, sku, index + 1) : manualSerial;
+        serials.push({
+          id: crypto.randomUUID(),
+          serialNumber,
+          noSerial,
+          status: "available",
+          sku,
+          productId: product?.id || "",
+          poId: po.id,
+          poNumber: po.poNumber,
+          vendorId: vendor?.id || "",
+          vendorCode: vendor?.vendorNumber || "",
+          warehouseId: warehouse?.id || po.warehouseId || "",
+          warehouseName: warehouse?.name || po.warehouseName || "",
+          locationBin,
+          receivedAt,
+          createdAt: new Date().toISOString()
+        });
+      }
+      receipt.items.push({
+        sku,
+        title: product?.title || poLine?.title || sku,
+        qtyReceived,
+        orderedQty: Number(poLine?.qty || 0),
+        receivedBefore: Number(poLine?.receivedQty || 0),
+        varianceStatus,
+        varianceNote,
+        locationBin,
+        serials
+      });
+
+      if (!product || mode === "draft") {
+        totalReceived += qtyReceived;
+        continue;
+      }
+
+      product.serialUnits = Array.isArray(product.serialUnits) ? product.serialUnits : [];
+      serials.forEach((serialRecord) => product.serialUnits.push(serialRecord));
+      const warehouseStockRow = warehouse ? ensureInventoryWarehouseStock(product, warehouse) : null;
+      const qtyBefore = Number(warehouseStockRow?.qty ?? product.qty ?? 0);
+      const reservedBefore = Number(warehouseStockRow?.reserved ?? product.reserved ?? 0);
+      if (warehouseStockRow) {
+        warehouseStockRow.qty = Number(warehouseStockRow.qty || 0) + qtyReceived;
+        warehouseStockRow.locationBin = locationBin || warehouseStockRow.locationBin || "";
+        warehouseStockRow.updatedAt = new Date().toISOString();
+        syncInventoryTotalsFromWarehouses(product);
+      } else {
+        product.qty = Number(product.qty || 0) + qtyReceived;
+      }
+      product.stockQty = Number(product.qty || 0);
+      product.stockStatus = varianceStatus === "damaged" ? "Received with damage" : "Received";
+      product.stockUpdatedAt = receivedAt;
+      product.updatedAt = new Date().toISOString();
+      if (poLine) {
+        poLine.receivedQty = Number(poLine.receivedQty || 0) + qtyReceived;
+        poLine.remainingQty = Math.max(0, Number(poLine.qty || 0) - Number(poLine.receivedQty || 0));
+        poLine.lastReceivedAt = receivedAt;
+        poLine.lastLocationBin = locationBin;
+        poLine.lastVarianceStatus = varianceStatus;
+        poLine.lastVarianceNote = varianceNote;
+      }
+      Object.assign(receipt.items[receipt.items.length - 1], {
+        qtyBefore,
+        qtyAfter: Number(warehouseStockRow?.qty ?? product.qty)
+      });
+      addInventoryLedger(db, product, {
+        type: varianceStatus === "damaged" ? "po_receipt_damaged" : "po_receipt",
+        source: "purchase_order",
+        referenceId: po.id,
+        referenceNumber: po.poNumber,
+        warehouseId: warehouse?.id || po.warehouseId || "",
+        warehouseName: warehouse?.name || po.warehouseName || "",
+        locationBin,
+        quantityChange: qtyReceived,
+        qtyBefore,
+        qtyAfter: Number(warehouseStockRow?.qty ?? product.qty),
+        reservedBefore,
+        reservedAfter: Number(warehouseStockRow?.reserved ?? product.reserved ?? 0),
+        serials,
+        reason: `${note || `Received on ${po.poNumber}`}${varianceStatus !== "none" ? ` / variance: ${varianceStatus}${varianceNote ? ` (${varianceNote})` : ""}` : ""}${locationBin ? ` / bin: ${locationBin}` : ""}`,
+        user: body.user || "Luis"
+      });
+      touchedProducts.push(product);
+      totalReceived += qtyReceived;
+    }
+
+    if (!totalReceived) return sendJson(res, 400, { error: mode === "draft" ? "Enter at least one line to save a draft receipt." : "Enter at least one received quantity for a matching SKU." });
+    if (mode === "draft") {
+      po.receiptDrafts = Array.isArray(po.receiptDrafts) ? po.receiptDrafts : [];
+      po.receiptDrafts.unshift(receipt);
+      po.updatedAt = new Date().toISOString();
+      addPoTimeline(po, {
+        type: "draft",
+        title: "Receipt draft saved",
+        message: `${receipt.receiptNumber} saved with ${totalReceived} unit${totalReceived === 1 ? "" : "s"} planned${note ? `: ${note}` : "."}`,
+        user: body.user || "Luis"
+      });
+      await postgres.savePurchaseOrder(po);
+      const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+      return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+    }
+
+    po.receipts = Array.isArray(po.receipts) ? po.receipts : [];
+    po.receipts.unshift(receipt);
+    po.receivedUnits = Number(po.receivedUnits || 0) + totalReceived;
+    po.status = (po.items || []).every((item) => Number(item.receivedQty || 0) >= Number(item.qty || 0)) ? "received" : "partially_received";
+    po.receivedAt = receivedAt;
+    po.updatedAt = new Date().toISOString();
+    addPoTimeline(po, {
+      type: "received",
+      title: po.status === "received" ? "PO received" : "PO partially received",
+      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
+      user: body.user || "Luis"
+    });
+    if (touchedProducts.length) {
+      await postgres.upsertProductsFromState(touchedProducts);
+      await postgres.upsertInventoryLevelsFromProducts(touchedProducts);
+      await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    }
+    await postgres.savePurchaseOrder(po);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "returns" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    po.returns = Array.isArray(po.returns) ? po.returns : [];
+    const warehouse = (db.warehouses || []).find((item) => item.id === body.warehouseId || item.id === po.warehouseId) || null;
+    const vendorReturn = {
+      id: crypto.randomUUID(),
+      returnNumber: `RTV-${String(po.returns.length + 1).padStart(4, "0")}`,
+      status: "draft",
+      warehouseId: warehouse?.id || po.warehouseId || "",
+      warehouseName: warehouse?.name || po.warehouseName || "",
+      reason: body.reason || "Vendor return created from PO.",
+      items: Array.isArray(body.items) ? body.items : po.items || [],
+      createdBy: body.user || "Luis",
+      createdAt: new Date().toISOString()
+    };
+    po.returns.push(vendorReturn);
+    po.updatedAt = new Date().toISOString();
+    addPoTimeline(po, {
+      type: "return",
+      title: "Vendor return created",
+      message: `${vendorReturn.returnNumber} created for ${po.poNumber}.`,
+      user: body.user || "Luis"
+    });
+    await postgres.savePurchaseOrder(po);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { return: vendorReturn, purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "transfers" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const fromWarehouse = (db.warehouses || []).find((row) => row.id === body.fromWarehouseId);
+    const toWarehouse = (db.warehouses || []).find((row) => row.id === body.toWarehouseId);
+    const qty = Number(body.qty || 0);
+    if (!fromWarehouse || !toWarehouse) return sendJson(res, 400, { error: "Both warehouses are required." });
+    if (fromWarehouse.id === toWarehouse.id) return sendJson(res, 400, { error: "Choose different source and destination warehouses." });
+    if (!(qty > 0)) return sendJson(res, 400, { error: "Transfer quantity must be greater than zero." });
+    const fromRow = ensureInventoryWarehouseStock(item, fromWarehouse);
+    const toRow = ensureInventoryWarehouseStock(item, toWarehouse);
+    const available = Number(fromRow.qty || 0) - Number(fromRow.reserved || 0);
+    if (available < qty) return sendJson(res, 400, { error: `Only ${available} available in ${fromWarehouse.name}.` });
+    const fromBefore = Number(fromRow.qty || 0);
+    const toBefore = Number(toRow.qty || 0);
+    fromRow.qty = Math.max(0, fromBefore - qty);
+    toRow.qty = toBefore + qty;
+    if (body.toLocationBin !== undefined) toRow.locationBin = String(body.toLocationBin || "").trim();
+    fromRow.updatedAt = new Date().toISOString();
+    toRow.updatedAt = new Date().toISOString();
+    syncInventoryTotalsFromWarehouses(item);
+    item.stockQty = Number(item.qty || 0);
+    item.updatedAt = new Date().toISOString();
+    const referenceNumber = `${fromWarehouse.code || fromWarehouse.name} -> ${toWarehouse.code || toWarehouse.name}`;
+    addInventoryLedger(db, item, {
+      type: "transfer_out",
+      source: "inventory",
+      warehouseId: fromWarehouse.id,
+      warehouseName: fromWarehouse.name,
+      locationBin: fromRow.locationBin || "",
+      referenceNumber,
+      quantityChange: -qty,
+      qtyBefore: fromBefore,
+      qtyAfter: fromRow.qty,
+      reservedBefore: Number(fromRow.reserved || 0),
+      reservedAfter: Number(fromRow.reserved || 0),
+      reason: body.note || `Transferred to ${toWarehouse.name}`,
+      user: body.user || "Luis"
+    });
+    addInventoryLedger(db, item, {
+      type: "transfer_in",
+      source: "inventory",
+      warehouseId: toWarehouse.id,
+      warehouseName: toWarehouse.name,
+      locationBin: toRow.locationBin || "",
+      referenceNumber,
+      quantityChange: qty,
+      qtyBefore: toBefore,
+      qtyAfter: toRow.qty,
+      reservedBefore: Number(toRow.reserved || 0),
+      reservedAfter: Number(toRow.reserved || 0),
+      reason: body.note || `Transferred from ${fromWarehouse.name}`,
+      user: body.user || "Luis"
+    });
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { item, summary: summarize(stateDb), state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "serials" && parts[4] && parts[5] === "action" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    item.serialUnits = Array.isArray(item.serialUnits) ? item.serialUnits : [];
+    const serial = item.serialUnits.find((row) => row.id === parts[4]);
+    if (!serial) return notFound(res);
+    const action = String(body.action || "").toLowerCase();
+    const nextStatus = {
+      available: "available",
+      reserve: "reserved",
+      reserved: "reserved",
+      sold: "sold",
+      quarantine: "quarantine",
+      return: "returned",
+      returned: "returned"
+    }[action];
+    if (!nextStatus) return sendJson(res, 400, { error: "Unsupported serial action." });
+    const db = await readDbFast({ skipInventory: true });
+    const previousStatus = serial.status || "available";
+    serial.status = nextStatus;
+    serial.updatedAt = new Date().toISOString();
+    serial.statusNote = String(body.note || "").trim();
+    if (body.locationBin !== undefined) serial.locationBin = String(body.locationBin || "").trim();
+    item.updatedAt = new Date().toISOString();
+    addInventoryLedger(db, item, {
+      type: "serial_status",
+      source: "inventory",
+      referenceId: serial.id,
+      referenceNumber: serial.serialNumber,
+      quantityChange: 0,
+      reservedChange: 0,
+      qtyBefore: Number(item.qty || 0),
+      qtyAfter: Number(item.qty || 0),
+      reservedBefore: Number(item.reserved || 0),
+      reservedAfter: Number(item.reserved || 0),
+      reason: `${serial.serialNumber} changed from ${previousStatus} to ${nextStatus}${serial.statusNote ? `: ${serial.statusNote}` : ""}`,
+      serials: [serial],
+      user: body.user || "Luis"
+    });
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { item, serial, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "shadows" && parts.length === 4 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const shadowSku = String(body.shadowSku || "").trim();
+    const marketplace = String(body.marketplace || body.company || "").trim();
+    if (!shadowSku) return sendJson(res, 400, { error: "Shadow SKU is required." });
+    if (!marketplace) return sendJson(res, 400, { error: "Marketplace is required." });
+    if ((item.shadowSkus || []).some((shadow) => String(shadow.shadowSku || "").toLowerCase() === shadowSku.toLowerCase())) {
+      return sendJson(res, 400, { error: "Shadow SKU already exists on this product." });
+    }
+    item.shadowSkus = Array.isArray(item.shadowSkus) ? item.shadowSkus : [];
+    const shadow = normalizeShadowSku(applyChannelDefaultsToShadow(db, {
+      shadowSku,
+      marketplace,
+      price: body.price,
+      handlingTimeDays: body.handlingTimeDays,
+      safetyQty: body.safetyQty,
+      maxSellableQty: body.maxSellableQty,
+      inventoryPolicy: body.inventoryPolicy,
+      shippingProfile: body.shippingProfile,
+      shippingService: body.shippingService,
+      shippingTemplateId: body.shippingTemplateId,
+      freeShipping: body.freeShipping,
+      marketplaceAttributes: body.marketplaceAttributes,
+      contentOverrides: body.contentOverrides,
+      status: body.status || "Draft",
+      notes: body.notes || ""
+    }, marketplace), item);
+    item.shadowSkus.push(shadow);
+    item.updatedAt = new Date().toISOString();
+    await postgres.upsertProductsFromState([item]);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { item, shadow, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "shadows" && parts[4] && parts[5] === "sync" && postgres.isPostgresEnabled()) {
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const shadow = (item.shadowSkus || []).find((row) => row.id === parts[4]);
+    if (!shadow) return notFound(res);
+    const now = new Date().toISOString();
+    const record = {
+      id: crypto.randomUUID(),
+      status: "queued",
+      message: "Sync queued for marketplace connector.",
+      createdAt: now,
+      user: "Luis"
+    };
+    shadow.syncStatus = "Queued";
+    shadow.lastSyncAt = now;
+    shadow.syncHistory = Array.isArray(shadow.syncHistory) ? shadow.syncHistory : [];
+    shadow.syncHistory.unshift(record);
+    addShadowTimeline(shadow, {
+      type: "sync",
+      title: "Sync queued",
+      message: `${shadow.shadowSku} queued for ${shadow.marketplace}.`,
+      createdAt: now
+    });
+    item.updatedAt = now;
+    await postgres.upsertProductsFromState([item]);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { item, shadow, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "shadows-bulk" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const marketplaces = Array.isArray(body.marketplaces) ? body.marketplaces : parseTemplateList(body.marketplaces || "");
+    item.shadowSkus = Array.isArray(item.shadowSkus) ? item.shadowSkus : [];
+    const created = [];
+    for (const marketplace of marketplaces) {
+      const shadowSku = `${item.sku}-${marketplace}`;
+      if (item.shadowSkus.some((shadow) => shadow.marketplace === marketplace || shadow.shadowSku === shadowSku)) continue;
+      const shadow = normalizeShadowSku(applyChannelDefaultsToShadow(db, {
+        shadowSku,
+        marketplace,
+        price: body.price ?? item.price,
+        handlingTimeDays: body.handlingTimeDays ?? 2,
+        status: "Draft"
+      }, marketplace), item);
+      item.shadowSkus.push(shadow);
+      created.push(shadow);
+    }
+    item.updatedAt = new Date().toISOString();
+    await postgres.upsertProductsFromState([item]);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { item, created, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "shadows" && parts[4] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const shadow = (item.shadowSkus || []).find((row) => row.id === parts[4]);
+    if (!shadow) return notFound(res);
+    applyShadowSkuPatch(shadow, body);
+    item.updatedAt = new Date().toISOString();
+    await postgres.upsertProductsFromState([item]);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { item, shadow, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "reserve" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId) || findPreferredOrderWarehouse(db, order);
+    if (!warehouse) return sendJson(res, 400, { error: "Warehouse is required." });
+    const primarySku = String(order.sku || orderLineItems(order)[0]?.sku || "").trim();
+    const item = primarySku ? await postgres.readProductByKey(primarySku) : null;
+    if (!item) return sendJson(res, 400, { error: "Inventory item not found for this order." });
+    const qty = Number(body.qty || order.qty || orderLineItems(order)[0]?.qty || 0);
+    if (!(qty > 0)) return sendJson(res, 400, { error: "Reservation quantity must be greater than zero." });
+    const stockRow = ensureInventoryWarehouseStock(item, warehouse);
+    const available = Number(stockRow.qty || 0) - Number(stockRow.reserved || 0);
+    if (available < qty) return sendJson(res, 400, { error: `Only ${available} available in ${warehouse.name}.` });
+    const reservedBefore = Number(stockRow.reserved || 0);
+    stockRow.reserved = reservedBefore + qty;
+    stockRow.updatedAt = new Date().toISOString();
+    syncInventoryTotalsFromWarehouses(item);
+    item.stockQty = Number(item.qty || 0);
+    item.updatedAt = new Date().toISOString();
+    order.reservationWarehouseId = warehouse.id;
+    order.reservationWarehouseName = warehouse.name;
+    order.reservedQty = qty;
+    order.reservedAt = new Date().toISOString();
+    order.updatedAt = new Date().toISOString();
+    addInventoryLedger(db, item, {
+      type: "order_reservation",
+      source: "order",
+      referenceId: order.id,
+      referenceNumber: order.orderNumber,
+      warehouseId: warehouse.id,
+      warehouseName: warehouse.name,
+      locationBin: stockRow.locationBin || "",
+      quantityChange: 0,
+      reservedChange: qty,
+      qtyBefore: Number(stockRow.qty || 0),
+      qtyAfter: Number(stockRow.qty || 0),
+      reservedBefore,
+      reservedAfter: stockRow.reserved,
+      reason: body.note || `Reserved for ${order.orderNumber}`,
+      user: body.user || "Luis"
+    });
+    addOrderTimeline(order, {
+      type: "allocation",
+      title: "Inventory reserved",
+      message: `${qty} unit(s) reserved from ${warehouse.name}.${body.note ? ` ${body.note}` : ""}`,
+      user: body.user || "Luis"
+    });
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    await postgres.saveOrder(order);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { order, item: publicProductItem(item), state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "returns" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const warehouseValue = String(
+      body.warehouseId ||
+      body.warehouse?.id ||
+      body.warehouse ||
+      order.returnWarehouseId ||
+      ""
+    ).trim();
+    const warehouse = (db.warehouses || []).find((item) =>
+      item.id === warehouseValue ||
+      String(item.code || "").trim().toLowerCase() === warehouseValue.toLowerCase() ||
+      String(item.name || "").trim().toLowerCase() === warehouseValue.toLowerCase()
+    );
+    if (!warehouse) return sendJson(res, 400, { error: "Warehouse is required." });
+    const orderItems = orderLineItems(order);
+    const items = (Array.isArray(body.items) ? body.items : orderItems)
+      .map((item, index) => {
+        const fallback = orderItems[index] || orderItems.find((line) => String(line.sku || "").toLowerCase() === String(item.sku || "").toLowerCase()) || {};
+        return {
+          sku: String(item.sku || fallback.sku || "").trim(),
+          title: String(item.title || fallback.title || fallback.sku || "").trim(),
+          qty: Number(item.qty || item.qtySelected || 0),
+          price: Number(item.price ?? fallback.price ?? 0),
+          cost: Number(item.cost ?? fallback.cost ?? 0),
+          lineIndex: Number(item.lineIndex || index)
+        };
+      })
+      .filter((item) => item.sku && item.qty > 0);
+    if (!items.length) return sendJson(res, 400, { error: "Select at least one returned line item." });
+    const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
+    const record = {
+      id: crypto.randomUUID(),
+      returnNumber: nextReturnNumber(db),
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      source: order.source,
+      sku: order.sku || items[0]?.sku || "",
+      qty: items.reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1,
+      items,
+      warehouseId: warehouse.id,
+      warehouseName: warehouse.name,
+      reason: String(body.reason || "Return created from order.").trim(),
+      amount: Number(body.amount || order.total || 0),
+      status: String(body.status || "requested"),
+      condition: String(body.condition || "Unknown"),
+      note: String(body.note || "").trim(),
+      returnFee: Number(body.returnFee || 0),
+      attachments,
+      createdAt: String(body.createdAt || new Date().toISOString().slice(0, 10)),
+      createdBy: body.user || "Luis",
+      receivedAt: "",
+      receivedBy: "",
+      binLocation: "",
+      inspectionStatus: "",
+      inspectionCondition: "",
+      inspectionNotes: "",
+      disposition: "",
+      resolutionNotes: "",
+      resolvedAt: "",
+      resolvedBy: "",
+      restockedAt: ""
+    };
+    db.returns = Array.isArray(db.returns) ? db.returns : [];
+    db.returns.unshift(record);
+    order.returnWarehouseId = warehouse.id;
+    order.returnWarehouseName = warehouse.name;
+    order.updatedAt = new Date().toISOString();
+    addOrderTimeline(order, {
+      type: "return",
+      title: "Return created",
+      message: `${record.returnNumber} created for ${warehouse.name}.${record.reason ? ` ${record.reason}` : ""}${attachments.length ? ` ${attachments.length} image${attachments.length === 1 ? "" : "s"} attached.` : ""}`,
+      user: body.user || "Luis"
+    });
+    await postgres.writeStateDocuments({ returns: db.returns });
+    await postgres.saveOrder(order);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { return: record, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "refunds" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const orderItems = orderLineItems(order);
+    const items = (Array.isArray(body.items) ? body.items : [])
+      .map((item, index) => {
+        const fallback = orderItems[index] || orderItems.find((line) => String(line.sku || "").toLowerCase() === String(item.sku || "").toLowerCase()) || {};
+        return {
+          sku: String(item.sku || fallback.sku || "").trim(),
+          title: String(item.title || fallback.title || fallback.sku || "").trim(),
+          qty: Number(item.qty || 0),
+          price: Number(item.price ?? fallback.price ?? 0),
+          lineIndex: Number(item.lineIndex || index)
+        };
+      })
+      .filter((item) => item.sku && item.qty > 0);
+    if (!items.length) return sendJson(res, 400, { error: "Select at least one line item to refund." });
+    const calculatedAmount = items.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.qty || 0)), 0);
+    const amount = Number(body.amount || calculatedAmount || 0);
+    if (!(amount > 0)) return sendJson(res, 400, { error: "Refund amount must be greater than zero." });
+    const refundedAt = String(body.refundedAt || new Date().toISOString().slice(0, 10)).trim();
+    order.refunds = Array.isArray(order.refunds) ? order.refunds : [];
+    const refund = {
+      id: crypto.randomUUID(),
+      amount,
+      items: items.map((item) => ({
+        sku: item.sku,
+        title: item.title,
+        qty: Number(item.qty || 0),
+        price: Number(item.price || 0),
+        lineIndex: Number(item.lineIndex || 0)
+      })),
+      refundedAt,
+      method: String(body.method || "manual").trim(),
+      reference: String(body.reference || "").trim(),
+      reason: String(body.reason || "Order refund").trim(),
+      note: String(body.note || "").trim(),
+      createdAt: new Date().toISOString(),
+      createdBy: body.user || "Luis"
+    };
+    order.refunds.unshift(refund);
+    order.refundAmount = Number(order.refundAmount || 0) + amount;
+    order.refundPendingAmount = Math.max(0, Number(order.refundPendingAmount || 0) - amount);
+    order.refundRequired = order.refundPendingAmount > 0;
+    order.updatedAt = new Date().toISOString();
+    addOrderTimeline(order, {
+      type: "refund",
+      title: "Refund recorded",
+      message: `$${amount.toFixed(2)} refunded on ${refundedAt} via ${refund.method}.${refund.reference ? ` Ref ${refund.reference}.` : ""}${refund.reason ? ` ${refund.reason}.` : ""}`,
+      user: refund.createdBy
+    });
+    await postgres.saveOrder(order);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { refund, order, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "items" && parts[5] === "map-sku" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const targetSku = String(body.targetSku || body.sku || "").trim();
+    if (!targetSku) return sendJson(res, 400, { error: "Target SKU is required." });
+    const product = await postgres.readProductByKey(targetSku);
+    if (!product) return sendJson(res, 400, { error: `Inventory SKU ${targetSku} was not found.` });
+    const lineIndex = Number(parts[4]);
+    if (!Number.isInteger(lineIndex) || lineIndex < 0) return sendJson(res, 400, { error: "Valid line index is required." });
+    const items = orderLineItems(order);
+    const currentLine = items[lineIndex];
+    if (!currentLine) return sendJson(res, 404, { error: "Order line not found." });
+    const mappingType = String(body.mappingType || body.mode || "direct").toLowerCase();
+    const mode = mappingType === "shadow" ? "shadow" : "direct";
+    const sourceSku = String(body.sourceSku || currentLine.originalSku || currentLine.mappedFromSku || currentLine.sku || "").trim();
+    if (sourceSku) {
+      const existingOwner = await postgres.readProductByKey(sourceSku);
+      if (existingOwner && existingOwner.id !== product.id && String(existingOwner.sku || "").toLowerCase() !== String(product.sku || "").toLowerCase()) {
+        return sendJson(res, 400, { error: `Alias SKU ${sourceSku} already belongs to ${existingOwner.sku}.` });
+      }
+    }
+    const db = await readDbFast({ skipInventory: true });
+    db.inventory = [product];
+    let shadow = null;
+    if (mode === "shadow") {
+      try {
+        shadow = createShadowSkuFromOrderLine(db, product, order, currentLine, { ...body, lineIndex });
+      } catch (error) {
+        return sendJson(res, 400, { error: error.message });
+      }
+    }
+    let alias = null;
+    try {
+      alias = addProductAlias(db, product, sourceSku, {
+        source: order.source,
+        type: mode,
+        createdFromOrderId: order.id,
+        createdFromOrderNumber: order.orderNumber,
+        createdFromLineIndex: lineIndex,
+        notes: `${mode} mapping from order ${order.orderNumber || order.id}`
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    const line = updateOrderLineSku(order, lineIndex, product.sku, {
+      ...body,
+      mode,
+      parentSku: product.sku,
+      shadowSku: shadow?.shadowSku || "",
+      shadowId: shadow?.id || ""
+    });
+    line.title = line.title || product.title || product.sku;
+    await postgres.upsertProductsFromState([product]);
+    await postgres.upsertInventoryLevelsFromProducts([product]);
+    await postgres.saveOrder(order);
+
+    let ordersRemapped = { ordersChanged: 0, linesChanged: 0 };
+    if (alias?.aliasSku || shadow?.shadowSku) {
+      const allOrders = await postgres.listOrders({ limit: 5000 });
+      const aliasSku = String(alias?.aliasSku || shadow?.shadowSku || "").toLowerCase();
+      for (const candidate of allOrders || []) {
+        if (candidate.id === order.id) continue;
+        let changed = false;
+        const candidateItems = orderLineItems(candidate);
+        candidateItems.forEach((candidateLine, index) => {
+          const lineSku = String(candidateLine.sku || "").trim().toLowerCase();
+          if (lineSku !== aliasSku) return;
+          updateOrderLineSku(candidate, index, product.sku, {
+            user: body.user || "Luis",
+            mode: shadow ? "shadow-alias" : alias?.type ? `${alias.type}-alias` : "alias",
+            parentSku: product.sku,
+            shadowSku: shadow?.shadowSku || "",
+            shadowId: shadow?.id || ""
+          });
+          changed = true;
+          ordersRemapped.linesChanged += 1;
+        });
+        if (changed) {
+          ordersRemapped.ordersChanged += 1;
+          await postgres.saveOrder(candidate);
+        }
+      }
+    }
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { order, product: publicProductItem(product), shadow, alias, ordersRemapped, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "items" && parts[5] === "unmap-sku" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const lineIndex = Number(parts[4]);
+    if (!Number.isInteger(lineIndex) || lineIndex < 0) return sendJson(res, 400, { error: "Valid line index is required." });
+    const items = orderLineItems(order);
+    const line = items[lineIndex];
+    if (!line) return sendJson(res, 404, { error: "Order line not found." });
+    const mappedSku = String(line.sku || "").trim();
+    const product = mappedSku ? await postgres.readProductByKey(mappedSku) : null;
+    const db = await readDbFast({ skipInventory: true });
+    db.inventory = product ? [product] : [];
+    let result;
+    try {
+      result = unmapOrderLineSku(db, order, lineIndex, body);
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    if (result.product) {
+      await postgres.upsertProductsFromState([result.product]);
+      await postgres.upsertInventoryLevelsFromProducts([result.product]);
+    }
+    await postgres.saveOrder(order);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { order, product: result.product ? publicProductItem(result.product) : result.product, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "items" && parts[5] === "create-sku" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const lineIndex = Number(parts[4]);
+    if (!Number.isInteger(lineIndex) || lineIndex < 0) return sendJson(res, 400, { error: "Valid line index is required." });
+    const items = orderLineItems(order);
+    const line = items[lineIndex];
+    if (!line) return sendJson(res, 404, { error: "Order line not found." });
+    const sku = String(body.sku || line.sku || "").trim();
+    if (!sku) return sendJson(res, 400, { error: "SKU is required." });
+    const existing = await postgres.readProductByKey(sku);
+    const db = await readDbFast({ skipInventory: true });
+    db.inventory = existing ? [existing] : [];
+    const product = createInventoryFromOrderLine(db, order, line, sku, body);
+    updateOrderLineSku(order, lineIndex, product.sku, { ...body, mode: "created" });
+    await postgres.upsertProductsFromState([product]);
+    await postgres.upsertInventoryLevelsFromProducts([product]);
+    await postgres.saveOrder(order);
+    const updated = await postgres.readProductByKey(product.id || product.sku);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { order, product: publicProductItem(updated || product), state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "ebay" && parts[4] === "listing" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    db.inventory = [item];
+    const action = String(body.action || "offer").toLowerCase();
+    if (!["draft", "offer", "publish"].includes(action)) return sendJson(res, 400, { error: "Unsupported eBay listing action." });
+    if (action === "draft") {
+      const config = await saveEbayListingDraft(db, item, body);
+      await postgres.upsertProductsFromState([item]);
+      await postgres.upsertInventoryLevelsFromProducts([item]);
+      const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
+      const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+      return sendJson(res, 200, {
+        item: publicProductItem(updated || item),
+        ebayListing: config,
+        draft: true,
+        state: publicState(stateDb, { lite: true })
+      });
+    }
+    const result = await createOrUpdateEbayListing(db, item, body, { publish: action === "publish" });
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, {
+      item: publicProductItem(updated || item),
+      ebayListing: result.config,
+      offer: result.offer,
+      published: result.published,
+      state: publicState(stateDb, { lite: true })
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "ebay" && parts[4] === "attributes" && parts[5] === "sync" && postgres.isPostgresEnabled()) {
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    db.inventory = [item];
+    const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+    const categoryId = String(listing.categoryId || ebayListingCategoryId(db, item, listing) || "").trim();
+    if (!categoryId) return sendJson(res, 400, { error: "Add an eBay category before loading attributes." });
+    const attributes = await ebayCategoryAspects(db, categoryId, { categoryTreeId: listing.taxonomyVersion || "" });
+    const now = new Date().toISOString();
+    item.ebayListing = {
+      ...listing,
+      categoryId,
+      categoryAttributes: attributes,
+      attributesSyncedAt: now,
+      updatedAt: now
+    };
+    item.updatedAt = now;
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, {
+      item: publicProductItem(updated || item),
+      attributes,
+      state: publicState(stateDb, { lite: true })
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/status-sync" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const productId = String(body.productId || body.id || "").trim();
+    const sku = String(body.sku || "").trim();
+    const gid = normalizeShopifyProductGid(body.gid || body.shopifyId || "");
+    const item = productId
+      ? await postgres.readProductByKey(productId)
+      : sku
+        ? await postgres.readProductByKey(sku)
+        : gid
+          ? await postgres.readProductByShopifyGid(gid)
+          : null;
+    if (!item) return sendJson(res, 404, { error: "No local product found for that Shopify GID or SKU." });
+    try {
+      const result = await syncInventoryItemShopifyStatus(item, gid);
+      await postgres.upsertProductsFromState([item]);
+      await postgres.upsertInventoryLevelsFromProducts([item]);
+      if (item.sku) mergeShopifyStatusMapSync({ [String(item.sku || "").toLowerCase()]: result.payload });
+      const updated = await postgres.readProductByKey(item.id || item.sku);
+      const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+      return sendJson(res, 200, {
+        ok: true,
+        item: publicProductItem(updated || item),
+        status: result.payload,
+        changed: result.changed,
+        state: publicState(stateDb, { lite: true }),
+        message: result.changed.length
+          ? `Updated Shopify status for ${item.sku || item.title || item.id}.`
+          : `Shopify status already current for ${item.sku || item.title || item.id}.`
+      });
+    } catch (error) {
+      return sendJson(res, 500, { error: error.message || "Unable to sync Shopify status." });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "source-data" && parts[4] === "backfill" && postgres.isPostgresEnabled()) {
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const before = hasSourceManagerData(item);
+    const db = await readDbFast({ skipInventory: true });
+    db.inventory = [item];
+    await enrichItemWithCatalogSource(db, item);
+    if (!hasSourceManagerData(item)) return sendJson(res, 404, { error: "No source catalog row was found for this SKU." });
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { item: publicProductItem(updated || item), state: publicState(stateDb, { lite: true }), changed: !before });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "rename-sku" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const nextSku = String(body.newSku || body.sku || "").trim();
+    if (!nextSku) return sendJson(res, 400, { error: "New SKU is required." });
+    const conflict = await postgres.readProductByKey(nextSku);
+    if (conflict && conflict.id !== item.id && String(conflict.sku || "").toLowerCase() !== String(item.sku || "").toLowerCase()) {
+      return sendJson(res, 400, { error: `SKU ${nextSku} already belongs to ${conflict.sku}.` });
+    }
+    const db = await readDbFast({ skipInventory: true });
+    db.inventory = [item];
+    db.orders = await postgres.listOrders({ limit: 5000 });
+    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
+    db.returns = await postgres.readStateField("returns") || [];
+    db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
+    let result;
+    try {
+      result = renameProductSku(db, item, nextSku, body);
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    for (const order of db.orders || []) await postgres.saveOrder(order);
+    for (const po of db.purchaseOrders || []) await postgres.savePurchaseOrder(po);
+    await postgres.writeStateDocuments({ returns: db.returns || [], inventoryLedger: db.inventoryLedger || [] });
+    const updated = await postgres.readProductByKey(item.id || item.sku || nextSku);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, {
+      item: publicProductItem(updated || item),
+      rename: result,
+      state: publicState(stateDb, { lite: true })
+    });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "returns" && parts[2] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    db.returns = await postgres.readStateField("returns") || [];
+    db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
+    const record = (db.returns || []).find((row) => row.id === parts[2]);
+    if (!record) return notFound(res);
+    const order = record.orderId ? await postgres.readOrderByKey(record.orderId) : null;
+    const normalizedStatus = body.status !== undefined
+      ? (["resolved", "done"].includes(String(body.status || "").trim().toLowerCase()) ? "done" : String(body.status || record.status).trim())
+      : record.status;
+    record.items = Array.isArray(record.items) ? record.items : [{ sku: record.sku, title: record.title || record.sku || "", qty: Number(record.qty || 1), lineIndex: 0 }];
+    record.attachments = Array.isArray(record.attachments) ? record.attachments : [];
+    if (body.status !== undefined) record.status = normalizedStatus;
+    if (body.condition !== undefined) record.condition = String(body.condition || record.condition).trim();
+    if (body.reason !== undefined) record.reason = String(body.reason || record.reason).trim();
+    if (body.note !== undefined) record.note = String(body.note || record.note).trim();
+    if (body.returnFee !== undefined) record.returnFee = Number(body.returnFee || 0);
+    if (body.binLocation !== undefined) record.binLocation = String(body.binLocation || "").trim();
+    if (body.receivedAt !== undefined) record.receivedAt = String(body.receivedAt || "").trim();
+    if (body.receivedBy !== undefined) record.receivedBy = String(body.receivedBy || "").trim();
+    if (body.inspectionStatus !== undefined) record.inspectionStatus = String(body.inspectionStatus || "").trim();
+    if (body.inspectionCondition !== undefined) record.inspectionCondition = String(body.inspectionCondition || "").trim();
+    if (body.inspectionNotes !== undefined) record.inspectionNotes = String(body.inspectionNotes || "").trim();
+    if (body.disposition !== undefined) record.disposition = String(body.disposition || "").trim();
+    if (body.resolutionNotes !== undefined) record.resolutionNotes = String(body.resolutionNotes || "").trim();
+    if (Array.isArray(body.items)) {
+      record.items = body.items.map((item, index) => ({
+        sku: String(item.sku || "").trim(),
+        title: String(item.title || item.sku || "").trim(),
+        qty: Number(item.qty || item.qtySelected || 0),
+        price: Number(item.price || 0),
+        cost: Number(item.cost || 0),
+        lineIndex: Number(item.lineIndex || index)
+      })).filter((item) => item.sku && item.qty > 0);
+      if (record.items.length) {
+        record.sku = record.items[0].sku;
+        record.qty = record.items.reduce((sum, item) => sum + Number(item.qty || 0), 0);
+      }
+    }
+    if (Array.isArray(body.attachments) && body.attachments.length) {
+      const nextAttachments = body.attachments.map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
+      const existing = new Map(record.attachments.map((file) => [file.id, file]));
+      nextAttachments.forEach((file) => existing.set(file.id, file));
+      record.attachments = Array.from(existing.values());
+    }
+    if (body.warehouseId) {
+      const warehouse = (db.warehouses || []).find((item) => item.id === body.warehouseId);
+      if (warehouse) {
+        record.warehouseId = warehouse.id;
+        record.warehouseName = warehouse.name;
+      }
+    }
+    const actingUser = body.user || "Luis";
+    if (record.status === "received" && !record.receivedAt) record.receivedAt = new Date().toISOString().slice(0, 10);
+    if (record.status === "received" && !record.receivedBy) record.receivedBy = actingUser;
+    if (record.status === "done" && !record.receivedAt) record.receivedAt = new Date().toISOString().slice(0, 10);
+    if (record.status === "done" && !record.receivedBy) record.receivedBy = actingUser;
+    let restocked = false;
+    const touchedProducts = [];
+    if (["resolved", "done"].includes(String(record.status || "").toLowerCase()) && record.disposition === "restock" && !record.restockedAt) {
+      const warehouse = (db.warehouses || []).find((row) => row.id === record.warehouseId);
+      for (const line of record.items) {
+        const item = await postgres.readProductByKey(line.sku);
+        if (!item) continue;
+        const qtyBefore = Number(item.qty || 0);
+        const reservedBefore = Number(item.reserved || 0);
+        if (warehouse) {
+          const stockRow = ensureInventoryWarehouseStock(item, warehouse);
+          stockRow.qty = Number(stockRow.qty || 0) + Number(line.qty || 0);
+          stockRow.locationBin = record.binLocation || stockRow.locationBin || defaultWarehouseBinCode(warehouse);
+          stockRow.updatedAt = new Date().toISOString();
+        }
+        syncInventoryTotalsFromWarehouses(item);
+        item.stockQty = Number(item.qty || 0);
+        item.updatedAt = new Date().toISOString();
+        addInventoryLedger(db, item, {
+          type: "return_restock",
+          source: "returns",
+          referenceId: record.id,
+          referenceNumber: record.returnNumber,
+          quantityChange: Number(item.qty || 0) - qtyBefore,
+          reservedChange: Number(item.reserved || 0) - reservedBefore,
+          qtyBefore,
+          qtyAfter: Number(item.qty || 0),
+          reservedBefore,
+          reservedAfter: Number(item.reserved || 0),
+          reason: `Restocked ${line.qty} of ${line.sku} from ${record.returnNumber}`,
+          warehouseId: record.warehouseId || "",
+          warehouseName: record.warehouseName || "",
+          locationBin: record.binLocation || "",
+          user: actingUser
+        });
+        touchedProducts.push(item);
+        restocked = true;
+      }
+      record.restockedAt = new Date().toISOString();
+    }
+    const isFinalReturnStatus = ["resolved", "done"].includes(String(record.status || "").toLowerCase());
+    record.resolvedAt = isFinalReturnStatus ? (record.resolvedAt || new Date().toISOString()) : record.resolvedAt || "";
+    record.resolvedBy = isFinalReturnStatus ? (record.resolvedBy || actingUser) : record.resolvedBy || "";
+    if (order) {
+      const resolvedReturns = (db.returns || []).filter((item) => (item.orderId === order.id || item.orderNumber === order.orderNumber) && ["resolved", "done"].includes(String(item.status || "").toLowerCase()));
+      const refundRequiredAmount = resolvedReturns.reduce((sum, item) => sum + Math.max(0, Number(item.amount || 0) - Number(item.returnFee || 0)), 0);
+      order.refundRequired = refundRequiredAmount > Number(order.refundAmount || 0);
+      order.refundPendingAmount = Math.max(0, refundRequiredAmount - Number(order.refundAmount || 0));
+      order.updatedAt = new Date().toISOString();
+      addOrderTimeline(order, {
+        type: "return",
+        title: "Return updated",
+        message: `${record.returnNumber} moved to ${record.status}.${record.disposition ? ` Disposition: ${record.disposition}.` : ""}${restocked ? " Inventory restocked." : ""}${order.refundPendingAmount > 0 ? ` Refund due: $${order.refundPendingAmount.toFixed(2)}.` : ""}`,
+        user: actingUser
+      });
+      await postgres.saveOrder(order);
+    }
+    if (touchedProducts.length) {
+      await postgres.upsertProductsFromState(touchedProducts);
+      await postgres.upsertInventoryLevelsFromProducts(touchedProducts);
+    }
+    await postgres.writeStateDocuments({ returns: db.returns || [], inventoryLedger: db.inventoryLedger || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { return: record, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouses" && parts.length === 2 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const name = String(body.name || "").trim();
+    if (!name) return sendJson(res, 400, { error: "Warehouse name is required." });
+    const db = await readDbFast({ skipInventory: true });
+    db.warehouses = db.warehouses || [];
+    const warehouse = normalizeWarehouse({
+      id: crypto.randomUUID(),
+      code: String(body.code || nextWarehouseCode(db)).trim(),
+      name,
+      status: String(body.status || "active"),
+      warehouseType: String(body.warehouseType || "Warehouse").trim(),
+      contactName: String(body.contactName || "").trim(),
+      managerName: String(body.managerName || "").trim(),
+      phone: String(body.phone || "").trim(),
+      email: String(body.email || "").trim(),
+      timezone: String(body.timezone || "America/New_York").trim(),
+      operatingHours: String(body.operatingHours || "").trim(),
+      carrierCutoffTime: String(body.carrierCutoffTime || "").trim(),
+      receivingInstructions: String(body.receivingInstructions || "").trim(),
+      addressLine1: String(body.addressLine1 || "").trim(),
+      addressLine2: String(body.addressLine2 || "").trim(),
+      city: String(body.city || "").trim(),
+      state: String(body.state || "").trim(),
+      postalCode: String(body.postalCode || "").trim(),
+      country: String(body.country || "US").trim(),
+      isDefaultReceiving: Boolean(body.isDefaultReceiving),
+      isDefaultReturns: Boolean(body.isDefaultReturns),
+      requireAppointment: Boolean(body.requireAppointment),
+      allowBlindReceipts: body.allowBlindReceipts === undefined ? true : Boolean(body.allowBlindReceipts),
+      requireSerialScan: Boolean(body.requireSerialScan),
+      requirePhotoForDamage: Boolean(body.requirePhotoForDamage),
+      autoRouteReturns: Boolean(body.autoRouteReturns),
+      bins: [],
+      notes: String(body.notes || "").trim(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    if (warehouse.isDefaultReceiving) db.warehouses.forEach((item) => { item.isDefaultReceiving = false; });
+    if (warehouse.isDefaultReturns) db.warehouses.forEach((item) => { item.isDefaultReturns = false; });
+    db.warehouses.unshift(warehouse);
+    await postgres.writeStateDocuments({ warehouses: db.warehouses, sequence: db.sequence || {} });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { warehouse, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "warehouses" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const warehouse = (db.warehouses || []).find((row) => row.id === parts[2]);
+    if (!warehouse) return notFound(res);
+    const fields = [
+      "code", "name", "status", "warehouseType", "contactName", "managerName", "phone", "email", "timezone",
+      "operatingHours", "carrierCutoffTime", "receivingInstructions", "addressLine1", "addressLine2", "city",
+      "state", "postalCode", "country", "isDefaultReceiving", "isDefaultReturns", "requireAppointment",
+      "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "notes"
+    ];
+    for (const field of fields) {
+      if (body[field] === undefined) continue;
+      if (["isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns"].includes(field)) {
+        warehouse[field] = Boolean(body[field]);
+      } else {
+        warehouse[field] = String(body[field] ?? "").trim();
+      }
+    }
+    if (body.isDefaultReceiving) (db.warehouses || []).forEach((item) => { if (item.id !== warehouse.id) item.isDefaultReceiving = false; });
+    if (body.isDefaultReturns) (db.warehouses || []).forEach((item) => { if (item.id !== warehouse.id) item.isDefaultReturns = false; });
+    warehouse.addressLine = formatWarehouseAddress(warehouse);
+    warehouse.updatedAt = new Date().toISOString();
+    await postgres.writeStateDocuments({ warehouses: db.warehouses || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { warehouse, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouses" && parts[2] && parts[3] === "bins" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const warehouse = (db.warehouses || []).find((row) => row.id === parts[2]);
+    if (!warehouse) return notFound(res);
+    warehouse.bins = Array.isArray(warehouse.bins) ? warehouse.bins : [];
+    const bin = normalizeWarehouseBin({
+      id: crypto.randomUUID(),
+      code: body.code,
+      name: body.name,
+      type: body.type,
+      isDefault: body.isDefault,
+      active: body.active === undefined ? true : body.active,
+      notes: body.notes
+    }, warehouse.bins.length);
+    if (bin.isDefault) warehouse.bins.forEach((item) => { item.isDefault = false; });
+    warehouse.bins.push(bin);
+    warehouse.updatedAt = new Date().toISOString();
+    await postgres.writeStateDocuments({ warehouses: db.warehouses || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { warehouse, bin, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "warehouses" && parts[2] && parts[3] === "bins" && parts[4] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const warehouse = (db.warehouses || []).find((row) => row.id === parts[2]);
+    if (!warehouse) return notFound(res);
+    warehouse.bins = Array.isArray(warehouse.bins) ? warehouse.bins : [];
+    const bin = warehouse.bins.find((item) => item.id === parts[4]);
+    if (!bin) return notFound(res);
+    for (const field of ["code", "name", "type", "notes"]) {
+      if (body[field] !== undefined) bin[field] = String(body[field] ?? "").trim();
+    }
+    if (body.active !== undefined) bin.active = Boolean(body.active);
+    if (body.isDefault !== undefined) {
+      const nextDefault = Boolean(body.isDefault);
+      if (nextDefault) warehouse.bins.forEach((item) => { item.isDefault = false; });
+      bin.isDefault = nextDefault;
+    }
+    if (!warehouse.bins.some((item) => item.isDefault) && warehouse.bins.length) warehouse.bins[0].isDefault = true;
+    warehouse.updatedAt = new Date().toISOString();
+    await postgres.writeStateDocuments({ warehouses: db.warehouses || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { warehouse, bin, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "customers" && parts.length === 2 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const name = String(body.name || "").trim();
+    if (!name) return sendJson(res, 400, { error: "Customer name is required." });
+    const db = await readDbFast({ skipInventory: true });
+    db.customers = db.customers || [];
+    const customer = {
+      id: crypto.randomUUID(),
+      customerNumber: nextCustomerNumber(db),
+      name,
+      email: String(body.email || ""),
+      phone: String(body.phone || ""),
+      company: "",
+      customerType: "Retail",
+      status: "active",
+      preferredChannel: "Email",
+      taxExempt: false,
+      marketingOptIn: false,
+      tags: [],
+      identities: [],
+      marketplaceAccounts: [],
+      shippingAddresses: [],
+      billingAddresses: [],
+      defaultAddress: {},
+      billingAddress: {},
+      totalOrders: 0,
+      lifetimeValue: 0,
+      repeatCustomer: false,
+      notes: "",
+      matchKey: `manual:${crypto.randomUUID()}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    normalizeCustomerLists(customer);
+    db.customers.unshift(customer);
+    await postgres.writeStateDocuments({ customers: db.customers, sequence: db.sequence || {} });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { customer, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "customers" && parts[2] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const customer = (db.customers || []).find((row) => row.id === parts[2]);
+    if (!customer) return notFound(res);
+    updateCustomerProfile(customer, body);
+    await postgres.writeStateDocuments({ customers: db.customers || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { customer, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "customers" && parts[2] && parts[3] === "addresses" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const customer = (db.customers || []).find((row) => row.id === parts[2]);
+    if (!customer) return notFound(res);
+    normalizeCustomerLists(customer);
+    const type = String(body.type || "shipping").toLowerCase() === "billing" ? "billing" : "shipping";
+    const key = type === "billing" ? "billingAddresses" : "shippingAddresses";
+    const address = normalizeAddress({
+      label: body.label || (type === "billing" ? `Billing ${customer[key].length + 1}` : `Shipping ${customer[key].length + 1}`),
+      isDefault: customer[key].length === 0
+    }, type);
+    customer[key].push(address);
+    if (key === "shippingAddresses") customer.defaultAddress = customer.shippingAddresses[0] || {};
+    if (key === "billingAddresses") customer.billingAddress = customer.billingAddresses[0] || {};
+    addCustomerTimeline(customer, {
+      type: "address",
+      title: `${type === "billing" ? "Billing" : "Shipping"} address added`,
+      message: `${address.label} added.`
+    });
+    await postgres.writeStateDocuments({ customers: db.customers || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { customer, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "brands" && parts.length === 2 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const name = String(body.name || "").trim();
+    if (!name) return sendJson(res, 400, { error: "Brand name is required." });
+    const db = await readDbFast({ skipInventory: true });
+    db.brands = db.brands || [];
+    const existing = db.brands.find((brand) => brand.name.toLowerCase() === name.toLowerCase());
+    if (existing) return sendJson(res, 400, { error: "Brand already exists." });
+    const brand = {
+      id: crypto.randomUUID(),
+      name,
+      status: "active",
+      vendorIds: [],
+      preferredVendorId: "",
+      logoUrl: "",
+      logoDataUrl: "",
+      category: "",
+      website: "",
+      mapPolicy: "",
+      warranty: "",
+      leadTimeNotes: "",
+      notes: "",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    db.brands.unshift(brand);
+    await postgres.writeStateDocuments({ brands: db.brands || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "brands" && parts[2] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const brand = (db.brands || []).find((row) => row.id === parts[2]);
+    if (!brand) return notFound(res);
+    const textFields = new Set(["name", "status", "category", "website", "logoUrl", "logoDataUrl", "mapPolicy", "warranty", "leadTimeNotes", "notes"]);
+    for (const [field, value] of Object.entries(body)) {
+      if (textFields.has(field)) brand[field] = String(value || "");
+    }
+    if (body.preferredVendorId !== undefined) {
+      const preferred = body.preferredVendorId ? findVendorById(db, body.preferredVendorId) : null;
+      if (body.preferredVendorId && !preferred) return sendJson(res, 400, { error: "Preferred vendor not found." });
+      brand.preferredVendorId = preferred?.id || "";
+      brand.vendorIds = Array.isArray(brand.vendorIds) ? brand.vendorIds : [];
+      if (preferred && !brand.vendorIds.includes(preferred.id)) brand.vendorIds.push(preferred.id);
+    }
+    if (Array.isArray(body.vendorIds)) {
+      brand.vendorIds = body.vendorIds.filter((id) => findVendorById(db, id));
+      if (brand.preferredVendorId && !brand.vendorIds.includes(brand.preferredVendorId)) brand.preferredVendorId = brand.vendorIds[0] || "";
+    }
+    brand.updatedAt = new Date().toISOString();
+    await postgres.writeStateDocuments({ brands: db.brands || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "brands" && parts[2] && parts[3] === "action" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const brand = (db.brands || []).find((row) => row.id === parts[2]);
+    if (!brand) return notFound(res);
+    const action = String(body.action || "").toLowerCase();
+    const nextStatus = { enable: "active", disable: "inactive", void: "void" }[action];
+    if (!nextStatus) return sendJson(res, 400, { error: "Unsupported brand action." });
+    brand.status = nextStatus;
+    brand.updatedAt = new Date().toISOString();
+    await postgres.writeStateDocuments({ brands: db.brands || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts.length === 2 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const name = String(body.name || "").trim();
+    if (!name) return sendJson(res, 400, { error: "Vendor name is required." });
+    const db = await readDbFast({ skipInventory: true });
+    db.vendors = db.vendors || [];
+    const vendor = normalizeVendor(db, {
+      id: crypto.randomUUID(),
+      vendorNumber: nextVendorNumber(db),
+      name,
+      status: "active",
+      type: String(body.type || "Supplier"),
+      contactName: String(body.contactName || ""),
+      email: String(body.email || ""),
+      phone: String(body.phone || ""),
+      website: String(body.website || ""),
+      notes: String(body.notes || ""),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    db.vendors.unshift(vendor);
+    await postgres.writeStateDocuments({ vendors: db.vendors || [], sequence: db.sequence || {} });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { vendor, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const vendor = findVendorById(db, parts[2]);
+    if (!vendor) return notFound(res);
+    const allowedFields = new Set(["name", "status", "type", "contactName", "email", "phone", "website", "paymentTerms", "leadTimeDays", "moq", "notes", "rating"]);
+    const numericFields = new Set(["leadTimeDays", "moq", "rating"]);
+    const submissionFields = new Set(["preferredMethod", "apiEnabled", "apiBaseUrl", "apiAuthType", "apiKeyReference", "ftpEnabled", "ftpHost", "ftpPort", "ftpUsername", "ftpPath", "emailEnabled", "emailTo", "emailCc", "emailSubjectTemplate", "attachCsv", "attachPdf"]);
+    const booleanSubmissionFields = new Set(["apiEnabled", "ftpEnabled", "emailEnabled", "attachCsv", "attachPdf"]);
+    const changes = [];
+    for (const [field, rawValue] of Object.entries(body)) {
+      if (field.startsWith("submissionSettings.")) {
+        const key = field.split(".")[1];
+        if (!submissionFields.has(key)) continue;
+        vendor.submissionSettings = vendor.submissionSettings || {};
+        const value = booleanSubmissionFields.has(key) ? Boolean(rawValue) : String(rawValue ?? "");
+        if (vendor.submissionSettings[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.submissionSettings[key] = value;
+        }
+        continue;
+      }
+      if (!allowedFields.has(field)) continue;
+      const value = numericFields.has(field) ? Number(rawValue || 0) : String(rawValue ?? "");
+      if (vendor[field] !== value) {
+        changes.push(`${field} changed from "${vendor[field] ?? ""}" to "${value}"`);
+        vendor[field] = value;
+      }
+    }
+    if (changes.length) {
+      addVendorChange(vendor, {
+        type: "edited",
+        title: "Vendor profile edited",
+        message: changes.join(", "),
+        user: body.user || "Luis"
+      });
+    }
+    await postgres.writeStateDocuments({ vendors: db.vendors || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { vendor, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "files" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const vendor = findVendorById(db, parts[2]);
+    if (!vendor) return notFound(res);
+    const type = String(body.type || "attachments");
+    const allowed = new Set(["priceUpdates", "inventory", "productCatalog", "attachments"]);
+    if (!allowed.has(type)) return sendJson(res, 400, { error: "Unsupported vendor file type." });
+    vendor.fileFeeds = vendor.fileFeeds || { priceUpdates: [], inventory: [], productCatalog: [], attachments: [] };
+    vendor.fileFeeds[type] = Array.isArray(vendor.fileFeeds[type]) ? vendor.fileFeeds[type] : [];
+    const record = {
+      id: crypto.randomUUID(),
+      name: String(body.name || "Unnamed file"),
+      source: String(body.source || "Manual upload"),
+      size: Number(body.size || 0),
+      mimeType: String(body.mimeType || ""),
+      uploadedBy: body.user || "Luis",
+      uploadedAt: new Date().toISOString()
+    };
+    vendor.fileFeeds[type].unshift(record);
+    addVendorChange(vendor, {
+      type: "file",
+      title: "Vendor file uploaded",
+      message: `${record.name} added to ${type}.`,
+      user: body.user || "Luis"
+    });
+    await postgres.writeStateDocuments({ vendors: db.vendors || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { file: record, vendor, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "action" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const vendor = findVendorById(db, parts[2]);
+    if (!vendor) return notFound(res);
+    const action = String(body.action || "").toLowerCase();
+    const nextStatus = { inactive: "inactive", active: "active" }[action];
+    if (!nextStatus) return sendJson(res, 400, { error: "Unsupported vendor action." });
+    if (vendor.status !== nextStatus) {
+      const previousStatus = vendor.status;
+      vendor.status = nextStatus;
+      addVendorChange(vendor, {
+        type: "status",
+        title: `Vendor set as ${nextStatus}`,
+        message: `Status changed from ${previousStatus} to ${nextStatus}.`,
+        user: body.user || "Luis"
+      });
+    }
+    await postgres.writeStateDocuments({ vendors: db.vendors || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { vendor, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/import-jobs" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    db.importJobs = await mergedImportJobsAsync(db);
+    if (markInterruptedActiveJobs(db)) {
+      for (const job of db.importJobs) upsertImportJobStore(job);
+    }
+    await maybeQueueScheduledJobsRetentionCleanup(db).catch((error) => {
+      console.error("Unable to queue scheduled Jobs retention cleanup", error.message || error);
+    });
+    db.importJobs = await mergedImportJobsAsync(db);
+    await backfillMissingExportManifests(db.importJobs).catch((error) => {
+      console.error("Unable to backfill export manifests", error.message || error);
+    });
+    db.importJobs = await mergedImportJobsAsync(db);
+    return sendJson(res, 200, {
+      importJobs: applyActiveJobProgress(db.importJobs),
+      workerStatus: await readWorkerStatus(readSystemSettingsStore(db.systemSettings || {}))
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/import-jobs/cleanup" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    const result = await cleanupImportJobs(db);
+    return sendJson(res, 200, {
+      cleaned: result.cleaned,
+      duplicates: result.duplicates || 0,
+      abandoned: result.abandoned || 0,
+      normalizedApiJobs: result.normalizedApiJobs || 0,
+      expiredArtifacts: result.expiredArtifacts || 0,
+      removedArtifactFiles: result.removedArtifactFiles || 0,
+      orphanArtifactDirs: result.orphanArtifactDirs || 0,
+      importJobs: applyActiveJobProgress(result.importJobs),
+      message: result.cleaned
+        ? `Cleaned ${result.cleaned.toLocaleString()} job${result.cleaned === 1 ? "" : "s"}${result.normalizedApiJobs ? `, including ${result.normalizedApiJobs.toLocaleString()} API metadata normalization${result.normalizedApiJobs === 1 ? "" : "s"}` : ""}${result.expiredArtifacts ? `, ${result.expiredArtifacts.toLocaleString()} expired file set${result.expiredArtifacts === 1 ? "" : "s"} older than ${IMPORT_JOB_FILE_RETENTION_DAYS} days` : ""}${result.orphanArtifactDirs ? `, ${result.orphanArtifactDirs.toLocaleString()} orphan export folder${result.orphanArtifactDirs === 1 ? "" : "s"}` : ""}${result.duplicates ? `, ${result.duplicates.toLocaleString()} duplicate queue entr${result.duplicates === 1 ? "y" : "ies"}` : ""}${result.abandoned ? `, and ${result.abandoned.toLocaleString()} abandoned worker job${result.abandoned === 1 ? "" : "s"}` : ""}.`
+        : "No stale queued/running jobs needed cleanup."
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/import-jobs/retention-cleanup" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    const job = await queueJobsRetentionCleanupJob(db, { scheduled: false });
+    const jobs = await mergedImportJobsAsync(db);
+    return sendJson(res, 202, {
+      queued: true,
+      job: normalizeImportJob(job),
+      importJobs: jobs,
+      message: job.message || `Jobs retention cleanup queued. Files older than ${IMPORT_JOB_FILE_RETENTION_DAYS} days will be removed.`
+    });
+  }
+
+  const retryImportJobMatch = req.method === "POST" && postgres.isPostgresEnabled()
+    ? url.pathname.match(/^\/api\/import-jobs\/([^/]+)\/retry$/)
+    : null;
+  if (retryImportJobMatch) {
+    const retryJobId = decodeURIComponent(retryImportJobMatch[1] || "");
+    const db = await readDbFast({ skipInventory: true });
+    db.importJobs = await mergedImportJobsAsync(db);
+    const previous = (db.importJobs || []).find((row) => row.id === retryJobId) || findImportJob(db, retryJobId);
+    if (!previous) return notFound(res);
+    if (!previous.workerTask) return sendJson(res, 400, { error: "This job does not have a background worker task to retry yet." });
+    if (["queued", "running"].includes(String(previous.status || "").toLowerCase())) {
+      return sendJson(res, 400, { error: "This job is already active." });
+    }
+    const now = new Date().toISOString();
+    const nextPayload = { ...(previous.workerPayload || {}) };
+    if (previous.originalFilePath && !nextPayload.originalFilePath) nextPayload.originalFilePath = previous.originalFilePath;
+    const job = normalizeImportJob({
+      ...previous,
+      id: crypto.randomUUID(),
+      status: "queued",
+      phase: "queued",
+      message: `Retry queued for ${previous.operation || "job"}.`,
+      details: [previous.details, `Retry of job ${previous.id}.`].filter(Boolean).join(" "),
+      processedRows: 0,
+      progressPercent: 0,
+      estimatedSecondsRemaining: 0,
+      changed: 0,
+      created: 0,
+      missingCount: 0,
+      errors: [],
+      errorFileName: "",
+      errorFilePath: "",
+      workerPayload: nextPayload,
+      createdAt: now,
+      startedAt: now,
+      updatedAt: now,
+      finishedAt: ""
+    });
+    upsertImportJobStore(job);
+    await postgres.upsertOperationJob(job);
+    if (job.originalFilePath) await postgres.upsertOperationArtifact(job, "original");
+    const jobs = await mergedImportJobsAsync(db);
+    return sendJson(res, 202, { queued: true, job, importJobs: jobs, message: job.message });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "stop" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    db.importJobs = await mergedImportJobsAsync(db);
+    const job = findImportJob(db, parts[2]);
+    if (!job) return notFound(res);
+    if (!["queued", "running"].includes(String(job.status || "").toLowerCase())) {
+      return sendJson(res, 400, { error: "Only queued or running jobs can be stopped." });
+    }
+    finishImportJob(job, {
+      status: "stopped",
+      message: "Job was stopped.",
+      details: [job.details, "Stopped by user from Jobs profile."].filter(Boolean).join(" ")
+    });
+    setActiveJobProgress(job.id, { status: "stopped", phase: "stopped", estimatedSecondsRemaining: 0 });
+    upsertImportJobStore(job);
+    const jobs = await mergedImportJobsAsync(db);
+    return sendJson(res, 200, { job: jobs.find((row) => row.id === job.id) || job, importJobs: jobs });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "retry" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    db.importJobs = await mergedImportJobsAsync(db);
+    const previous = (db.importJobs || []).find((row) => row.id === parts[2]) || findImportJob(db, parts[2]);
+    if (!previous) return notFound(res);
+    if (!previous.workerTask) return sendJson(res, 400, { error: "This job does not have a background worker task to retry yet." });
+    if (["queued", "running"].includes(String(previous.status || "").toLowerCase())) {
+      return sendJson(res, 400, { error: "This job is already active." });
+    }
+    const now = new Date().toISOString();
+    const nextPayload = { ...(previous.workerPayload || {}) };
+    if (previous.originalFilePath && !nextPayload.originalFilePath) nextPayload.originalFilePath = previous.originalFilePath;
+    const job = normalizeImportJob({
+      ...previous,
+      id: crypto.randomUUID(),
+      status: "queued",
+      phase: "queued",
+      message: `Retry queued for ${previous.operation || "job"}.`,
+      details: [previous.details, `Retry of job ${previous.id}.`].filter(Boolean).join(" "),
+      processedRows: 0,
+      progressPercent: 0,
+      estimatedSecondsRemaining: 0,
+      changed: 0,
+      created: 0,
+      missingCount: 0,
+      errors: [],
+      errorFileName: "",
+      errorFilePath: "",
+      workerPayload: nextPayload,
+      createdAt: now,
+      startedAt: now,
+      updatedAt: now,
+      finishedAt: ""
+    });
+    upsertImportJobStore(job);
+    await postgres.upsertOperationJob(job);
+    if (job.originalFilePath) await postgres.upsertOperationArtifact(job, "original");
+    const jobs = await mergedImportJobsAsync(db);
+    return sendJson(res, 202, {
+      queued: true,
+      job,
+      importJobs: jobs,
+      message: job.message
+    });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    db.importJobs = await mergedImportJobsAsync(db);
+    const job = findImportJob(db, parts[2]);
+    if (!job) return notFound(res);
+    if (parts[3] === "original") {
+      if (sendImportJobFile(res, job, "original")) return;
+      return sendJson(res, 404, { error: "Original file was not saved for this job." });
+    }
+    if (parts[3] === "errors.csv") {
+      if (sendImportJobFile(res, job, "errors")) return;
+      const rows = (job.errors || []).map((error) => ({ error }));
+      if (!rows.length) return sendJson(res, 404, { error: "This job has no errors." });
+      res.writeHead(200, {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename=${safeImportFileName(job.errorFileName || "errors.csv")}`
+      });
+      return res.end(rowsToCsv(rows));
+    }
+    if (parts[3] === "manifest.json") {
+      if (sendImportJobFile(res, job, "manifest")) return;
+      return sendJson(res, 404, { error: "This job has no manifest file." });
+    }
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "channels" && parts[2] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const channel = (db.connections || []).find((row) => row.id === parts[2]);
+    if (!channel) return notFound(res);
+    for (const field of ["name", "status", "notes", "logoUrl", "logoDataUrl"]) {
+      if (body[field] !== undefined) channel[field] = String(body[field]).trim();
+    }
+    if (body.connected !== undefined) channel.connected = body.connected === true || String(body.connected).toLowerCase() === "true";
+    channel.settings = { ...(channel.settings || DEFAULT_CHANNEL_SETTINGS) };
+    for (const field of Object.keys(DEFAULT_CHANNEL_SETTINGS)) {
+      if (body[field] === undefined) continue;
+      if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "boolean") channel.settings[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
+      else if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "number") channel.settings[field] = Number(body[field] || 0);
+      else channel.settings[field] = String(body[field] || "");
+    }
+    Object.assign(channel, normalizeChannel(channel));
+    await postgres.writeStateDocuments({ connections: db.connections || [] });
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { channel, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "confirm" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const touched = [];
+    if (order.status !== "confirmed") {
+      const previousStatus = order.status;
+      order.status = "confirmed";
+      order.confirmedAt = new Date().toISOString();
+      const warehouse = findPreferredOrderWarehouse(db, order);
+      const lines = orderLineItems(order);
+      for (const line of lines) {
+        const sku = String(line.sku || "").trim();
+        const qty = Number(line.qty || 0);
+        if (!sku || qty <= 0) continue;
+        const inventory = await postgres.readProductByKey(sku);
+        if (!inventory) continue;
+        const stockRow = warehouse ? ensureInventoryWarehouseStock(inventory, warehouse) : null;
+        const qtyBefore = Number(stockRow?.qty ?? inventory.qty ?? 0);
+        const reservedBefore = Number(stockRow?.reserved ?? inventory.reserved ?? 0);
+        if (stockRow) {
+          stockRow.reserved = Math.max(0, Number(stockRow.reserved || 0) - qty);
+          stockRow.qty = Math.max(0, Number(stockRow.qty || 0) - qty);
+          stockRow.updatedAt = new Date().toISOString();
+        } else {
+          inventory.reserved = Math.max(0, Number(inventory.reserved || 0) - qty);
+          inventory.qty = Math.max(0, Number(inventory.qty || 0) - qty);
+        }
+        syncInventoryTotalsFromWarehouses(inventory);
+        inventory.updatedAt = new Date().toISOString();
+        addInventoryLedger(db, inventory, {
+          type: "order_confirm",
+          source: "order",
+          referenceId: order.id,
+          referenceNumber: order.orderNumber,
+          warehouseId: warehouse?.id || "",
+          warehouseName: warehouse?.name || "",
+          quantityChange: Number(stockRow?.qty ?? inventory.qty ?? 0) - qtyBefore,
+          reservedChange: Number(stockRow?.reserved ?? inventory.reserved ?? 0) - reservedBefore,
+          qtyBefore,
+          qtyAfter: Number(stockRow?.qty ?? inventory.qty ?? 0),
+          reservedBefore,
+          reservedAfter: Number(stockRow?.reserved ?? inventory.reserved ?? 0),
+          reason: `Confirmed ${order.orderNumber}`,
+          user: "Luis"
+        });
+        touched.push(inventory);
+      }
+      addOrderTimeline(order, {
+        type: "status",
+        title: "Order confirmed",
+        message: `Status changed from ${previousStatus} to confirmed and inventory was updated.`,
+        user: "Luis"
+      });
+    }
+    if (touched.length) {
+      await postgres.upsertProductsFromState(touched);
+      await postgres.upsertInventoryLevelsFromProducts(touched);
+      await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    }
+    await postgres.saveOrder(order);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { order, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "fulfill" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const carrier = String(body.carrier || "").trim();
+    const carrierName = String(body.carrierName || carrier).trim();
+    const trackingNumber = String(body.trackingNumber || "").trim();
+    const trackingUrl = String(body.trackingUrl || "").trim();
+    const shipDate = String(body.shipDate || "").trim();
+    const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId) || findPreferredOrderWarehouse(db, order);
+    if (!carrier) return sendJson(res, 400, { error: "Carrier is required." });
+    if (!trackingNumber) return sendJson(res, 400, { error: "Tracking number is required." });
+    if (carrier.toLowerCase() === "other" && !carrierName) return sendJson(res, 400, { error: "Carrier name is required for unsupported carriers." });
+    if (carrier.toLowerCase() === "other" && !trackingUrl) return sendJson(res, 400, { error: "Tracking URL is required for unsupported carriers." });
+    if (!shipDate) return sendJson(res, 400, { error: "Ship date is required." });
+    if (!warehouse) return sendJson(res, 400, { error: "Warehouse is required." });
+
+    const orderLines = orderLineItems(order);
+    const requestedLines = (Array.isArray(body.lines) ? body.lines : [])
+      .map((line) => ({ sku: String(line.sku || "").trim(), qty: Number(line.qty || 0), lineIndex: Number(line.lineIndex || 0) }))
+      .filter((line) => line.sku && line.qty > 0);
+    if (!requestedLines.length) return sendJson(res, 400, { error: "Select at least one line to fulfill." });
+    order.fulfillmentLines = Array.isArray(order.fulfillmentLines) ? order.fulfillmentLines : [];
+    const previousStatus = order.status || "new";
+    const touched = [];
+    let totalFulfilledNow = 0;
+
+    for (const requestLine of requestedLines) {
+      const orderLine = orderLines[requestLine.lineIndex] && String(orderLines[requestLine.lineIndex].sku || "").toLowerCase() === requestLine.sku.toLowerCase()
+        ? orderLines[requestLine.lineIndex]
+        : orderLines.find((line) => String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase());
+      if (!orderLine) return sendJson(res, 400, { error: `Order line ${requestLine.sku} not found.` });
+      const fulfillmentRow = order.fulfillmentLines.find((line) => Number(line.lineIndex || 0) === Number(requestLine.lineIndex || 0) && String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase())
+        || order.fulfillmentLines.find((line) => String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase());
+      const alreadyFulfilled = Number(fulfillmentRow?.qtyFulfilled || 0);
+      const remaining = Math.max(0, Number(orderLine.qty || 0) - alreadyFulfilled);
+      if (remaining <= 0) continue;
+      if (requestLine.qty > remaining) return sendJson(res, 400, { error: `Cannot fulfill more than remaining qty for ${requestLine.sku}.` });
+
+      const inventory = await postgres.readProductByKey(requestLine.sku);
+      if (inventory) {
+        const stockRow = ensureInventoryWarehouseStock(inventory, warehouse);
+        const qtyBefore = Number(stockRow.qty || 0);
+        const reservedBefore = Number(stockRow.reserved || 0);
+        if (qtyBefore < requestLine.qty) return sendJson(res, 400, { error: `Not enough stock in ${warehouse.name} to fulfill ${requestLine.sku}.` });
+        stockRow.reserved = Math.max(0, Number(stockRow.reserved || 0) - requestLine.qty);
+        stockRow.qty = Math.max(0, Number(stockRow.qty || 0) - requestLine.qty);
+        stockRow.updatedAt = new Date().toISOString();
+        syncInventoryTotalsFromWarehouses(inventory);
+        inventory.updatedAt = new Date().toISOString();
+        addInventoryLedger(db, inventory, {
+          type: "order_fulfillment",
+          source: "order",
+          referenceId: order.id,
+          referenceNumber: order.orderNumber,
+          warehouseId: warehouse.id,
+          warehouseName: warehouse.name,
+          locationBin: stockRow.locationBin || "",
+          quantityChange: Number(stockRow.qty || 0) - qtyBefore,
+          reservedChange: Number(stockRow.reserved || 0) - reservedBefore,
+          qtyBefore,
+          qtyAfter: Number(stockRow.qty || 0),
+          reservedBefore,
+          reservedAfter: Number(stockRow.reserved || 0),
+          reason: `Fulfilled ${requestLine.qty} of ${requestLine.sku} on ${order.orderNumber}`,
+          user: body.user || "Luis"
+        });
+        touched.push(inventory);
+      }
+
+      if (fulfillmentRow) fulfillmentRow.qtyFulfilled = alreadyFulfilled + requestLine.qty;
+      else order.fulfillmentLines.push({ sku: requestLine.sku, lineIndex: requestLine.lineIndex, qtyFulfilled: requestLine.qty });
+      totalFulfilledNow += requestLine.qty;
+    }
+
+    const totalOrderedQty = orderLines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
+    const totalFulfilledQty = order.fulfillmentLines.reduce((sum, line) => sum + Number(line.qtyFulfilled || 0), 0);
+    order.status = totalFulfilledQty >= totalOrderedQty ? "fulfilled" : "partial_fulfilled";
+    order.fulfilledAt = order.status === "fulfilled" ? new Date().toISOString() : order.fulfilledAt || "";
+    order.confirmedAt = order.confirmedAt || new Date().toISOString();
+    order.shippingCarrier = carrier;
+    order.carrierName = carrierName;
+    order.shippingService = carrierName;
+    order.trackingNumber = trackingNumber;
+    order.trackingUrl = trackingUrl;
+    order.shipDate = shipDate;
+    order.fulfillmentWarehouseId = warehouse.id;
+    order.fulfillmentWarehouseName = warehouse.name;
+    order.updatedAt = new Date().toISOString();
+    addOrderTimeline(order, {
+      type: "status",
+      title: order.status === "fulfilled" ? "Order fulfilled" : "Order partially fulfilled",
+      message: `${carrierName} tracking ${trackingNumber} added for ship date ${shipDate} from ${warehouse.name}. ${totalFulfilledNow} unit${totalFulfilledNow === 1 ? "" : "s"} fulfilled.${previousStatus !== order.status ? ` Status moved from ${previousStatus} to ${order.status}.` : ""}`,
+      user: body.user || "Luis"
+    });
+    if (touched.length) {
+      await postgres.upsertProductsFromState(touched);
+      await postgres.upsertInventoryLevelsFromProducts(touched);
+      await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    }
+    await postgres.saveOrder(order);
+    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return sendJson(res, 200, { order, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/state") {
+    const lite = ["1", "true", "yes"].includes(String(url.searchParams.get("lite") || "").toLowerCase());
+    const includeInventory = ["1", "true", "yes"].includes(String(url.searchParams.get("inventory") || "").toLowerCase());
+    const db = await withOperationalSummary(lite && !postgres.isPostgresEnabled()
+      ? readDbLiteFast()
+      : await readDbFast({ skipInventory: postgres.isPostgresEnabled() && !includeInventory }));
+    if (postgres.isPostgresEnabled()) {
+      const text = JSON.stringify(publicState(db, { lite }));
+      if (/\bgzip\b/i.test(String(req.headers["accept-encoding"] || ""))) {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Content-Encoding": "gzip", "Vary": "Accept-Encoding" });
+        res.end(zlib.gzipSync(text));
+        return;
+      }
+      return sendJsonText(res, 200, text, req);
+    }
     if (/\bgzip\b/i.test(String(req.headers["accept-encoding"] || ""))) {
+      const text = publicStateGzip(db, { lite });
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Content-Encoding": "gzip", "Vary": "Accept-Encoding" });
-      res.end(publicStateGzip(db));
+      res.end(text);
       return;
     }
-    return sendJsonText(res, 200, publicStateJson(db), req);
+    const text = publicStateJson(db, { lite });
+    return sendJsonText(res, 200, text, req);
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories") {
     return sendJson(res, 200, await publicCategoriesFast(url.searchParams.get("q") || "", url.searchParams.get("scope") || "source"));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/category-settings") {
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    return sendJson(res, 200, {
+      categorySettings: db.categorySettings || [],
+      vendorCategoryMappings: db.vendorCategoryMappings || {},
+      categorySettingsLoaded: true
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories/attribute-groups") {
@@ -9512,7 +17375,8 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories/attributes") {
-    const db = await readDbFast();
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    if (postgres.isPostgresEnabled()) db.__mainCategoryRows = await postgres.listCategoryProductStats();
     const rows = marketplaceCategoryAttributeRows(db, { channel: url.searchParams.get("channel") || "" });
     return sendJson(res, 200, {
       rows,
@@ -9524,45 +17388,71 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories/export/matrixify-smart-collections.csv") {
-    const rows = await matrixifySmartCollectionRows();
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    if (!isDirectCategoryExportRequest(url)) {
+      const job = await queueCategoryExportJob(normalizeDb(db), "matrixify-smart-collections");
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), count: 0, message: job.message });
+    }
+    const payload = await categoryExportPayload(db, "matrixify-smart-collections");
     res.writeHead(200, {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": "attachment; filename=matrixify-smart_collections-product-types.csv"
+      "Content-Disposition": `attachment; filename=${payload.filename}`
     });
-    return res.end(rowsToCsv(rows));
+    return res.end(payload.csv);
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories/export/matrixify-menu.csv") {
-    const rows = await matrixifyMenuRows();
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    if (!isDirectCategoryExportRequest(url)) {
+      const job = await queueCategoryExportJob(normalizeDb(db), "matrixify-menu");
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), count: 0, message: job.message });
+    }
+    const payload = await categoryExportPayload(db, "matrixify-menu");
     res.writeHead(200, {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": "attachment; filename=matrixify-shopify-menus.csv"
+      "Content-Disposition": `attachment; filename=${payload.filename}`
     });
-    return res.end([MATRIXIFY_MENU_COLUMNS, ...rows.map((row) => MATRIXIFY_MENU_COLUMNS.map((column) => row[column] ?? ""))]
-      .map((row) => row.map(escapeCsv).join(","))
-      .join("\n"));
+    return res.end(payload.csv);
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories/export/master-category-mapping.csv") {
-    const db = await readDbFast();
-    const rows = masterCategoryMappingRows(db);
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    if (!isDirectCategoryExportRequest(url)) {
+      const job = await queueCategoryExportJob(normalizeDb(db), "master-category-mapping");
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), count: 0, message: job.message });
+    }
+    const payload = await categoryExportPayload(db, "master-category-mapping");
     res.writeHead(200, {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": "attachment; filename=dataplus-master-category-mapping.csv"
+      "Content-Disposition": `attachment; filename=${payload.filename}`
     });
-    return res.end(rowsToCsv(rows));
+    return res.end(payload.csv);
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories/export/marketplace-attributes.csv") {
-    const db = await readDbFast();
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
     const channel = url.searchParams.get("channel") || "";
-    const rows = marketplaceCategoryAttributeRows(db, { channel });
-    const suffix = channel ? `-${channel}` : "";
+    if (!isDirectCategoryExportRequest(url)) {
+      const job = await queueCategoryExportJob(normalizeDb(db), "marketplace-attributes", { channel });
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), count: 0, message: job.message });
+    }
+    const payload = await categoryExportPayload(db, "marketplace-attributes", { channel });
     res.writeHead(200, {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename=dataplus-marketplace-category-attributes${suffix}.csv`
+      "Content-Disposition": `attachment; filename=${payload.filename}`
     });
-    return res.end(rowsToCsv(rows));
+    return res.end(payload.csv);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/categories/export-job") {
+    const body = await parseBody(req);
+    const db = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
+    const type = String(body.type || "").trim();
+    const channel = String(body.channel || "").trim();
+    const exportMeta = categoryExportMeta(type, channel);
+    if (!exportMeta) return sendJson(res, 400, { error: "Unsupported category export." });
+    const job = await queueCategoryExportJob(db, type, { channel });
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), count: 0, message: job.message });
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories/templates/sku-categories.csv") {
@@ -9595,6 +17485,14 @@ async function handleApi(req, res) {
       "Content-Disposition": "attachment; filename=category-mapping-template.csv"
     });
     return res.end(rowsToCsv(rows));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/shopify/status-import/template.csv") {
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=shopify-status-import-template.csv"
+    });
+    return res.end(rowsToCsv(shopifyStatusTemplateRows()));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "attribute-mapping") {
@@ -9667,6 +17565,8 @@ async function handleApi(req, res) {
       if (body[field] === undefined) continue;
       if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "boolean") current[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
       else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") current[field] = Number(body[field] || 0);
+      else if (Array.isArray(DEFAULT_SYSTEM_SETTINGS[field])) current[field] = Array.isArray(body[field]) ? body[field] : current[field];
+      else if (DEFAULT_SYSTEM_SETTINGS[field] && typeof DEFAULT_SYSTEM_SETTINGS[field] === "object") current[field] = body[field] && typeof body[field] === "object" ? body[field] : current[field];
       else current[field] = String(body[field] || "");
     }
     const systemSettings = writeSystemSettingsStore(current);
@@ -9675,7 +17575,2049 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { systemSettings });
   }
 
-  const db = await readDb();
+  if (req.method === "GET" && url.pathname === "/api/system/readiness") {
+    const health = await postgres.databaseHealth().catch((error) => ({ connected: false, error: error.message }));
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const jobs = await mergedImportJobsAsync({});
+    const activeJobs = jobs.filter((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+    const dataQuality = postgres.isPostgresEnabled() ? await postgres.readProductQualitySummary().catch(() => null) : null;
+    const workerStatus = await readWorkerStatus(settings);
+    return sendJson(res, 200, {
+      database: health,
+      settings,
+      workerStatus,
+      activeJobs: activeJobs.slice(0, 10).map(normalizeImportJob),
+      readiness: {
+        postgresSourceOfTruth: Boolean(health.connected && postgres.isPostgresEnabled()),
+        backgroundJobs: settings.backgroundJobsMode,
+        workerOnline: workerStatus.online,
+        dataQualityWorkerEnabled: settings.dataQualityWorkerEnabled === true,
+        dataQualityRows: Number(health.productQualityRows || dataQuality?.summary?.total || 0),
+        shopifyStatusRows: Number(health.shopifyProductStatuses || 0),
+        sourceCatalogRows: Number(health.vendorCatalogItems || 0),
+        backupsConfigured: true,
+        apiLogRetentionDays: CHANNEL_API_LOG_RETENTION_DAYS
+      }
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/system/backup" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const settings = readSystemSettingsStore(db.systemSettings || {});
+    const includeSourceCatalog = body.includeSourceCatalog === undefined
+      ? settings.backupIncludeSourceCatalog === true
+      : body.includeSourceCatalog === true || String(body.includeSourceCatalog || "").toLowerCase() === "true";
+    const job = createImportJob(db, {
+      section: "System",
+      category: "System",
+      operation: "Postgres backup",
+      direction: "backup",
+      status: "queued",
+      fileName: "manifest.json",
+      totalRows: 0,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: "postgres-backup",
+      workerPayload: { includeSourceCatalog },
+      message: includeSourceCatalog
+        ? "Full Postgres backup queued, including the source catalog. This can take a while."
+        : "Postgres backup queued for operational tables."
+    });
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) {
+      activeJobRecords.set(job.id, normalizeImportJob(job));
+      setActiveJobProgress(job.id, { status: "queued", phase: "queued", processedRows: 0, totalRows: 0, progressPercent: 0 });
+      startPostgresBackupJob(job.id, { includeSourceCatalog });
+    }
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/import-jobs') {
+    const jobs = await mergedImportJobsAsync({});
+    return sendJson(res, 200, { importJobs: applyActiveJobProgress(jobs) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "stop") {
+    const jobs = await mergedImportJobsAsync({});
+    const job = jobs.find((row) => row.id === parts[2]);
+    if (!job) return notFound(res);
+    const status = String(job.status || "").toLowerCase();
+    if (!["queued", "running"].includes(status)) {
+      return sendJson(res, 400, { error: "Only queued or running jobs can be stopped." });
+    }
+    finishImportJob(job, {
+      status: "stopped",
+      message: "Job was stopped.",
+      details: [job.details, "Stopped by user from Jobs profile."].filter(Boolean).join(" ")
+    });
+    setActiveJobProgress(job.id, { status: "stopped", phase: "stopped", estimatedSecondsRemaining: 0 });
+    upsertImportJobStore(job);
+    const updatedJobs = await mergedImportJobsAsync({});
+    return sendJson(res, 200, { job: updatedJobs.find((row) => row.id === job.id) || job, importJobs: updatedJobs });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/products") {
+    const catalogDb = await readSourceCatalogRuntimeDb();
+    const result = await scanCatalog({
+      query: url.searchParams.get("q") || "",
+      page: url.searchParams.get("page") || 1,
+      limit: url.searchParams.get("limit") || 50,
+      filters: catalogFilterParams(url.searchParams),
+      db: catalogDb
+    });
+    return sendJson(res, 200, result);
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/facets") {
+    return sendJson(res, 200, await scanCatalogFacets());
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/source-search-index/status") {
+    const active = sourceSearchIndexJobActive();
+    const status = await postgres.sourceCatalogSearchIndexStatus();
+    return sendJson(res, 200, {
+      ...status,
+      activeJobId: active?.id || "",
+      activeJob: active ? normalizeImportJob(active) : null
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/source-search-index/build") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 400, { error: "Postgres is required for the source catalog search index." });
+    const active = sourceSearchIndexJobActive();
+    if (active) return sendJson(res, 200, { job: normalizeImportJob(active), status: await postgres.sourceCatalogSearchIndexStatus() });
+    const status = await postgres.sourceCatalogSearchIndexStatus();
+    if (status.ready) return sendJson(res, 200, { status, message: "Source catalog keyword search index is already ready." });
+    const job = normalizeImportJob({
+      id: crypto.randomUUID(),
+      section: "Source Catalog",
+      category: "Source Catalog",
+      operation: "Build source catalog keyword search index",
+      direction: "maintenance",
+      type: "maintenance",
+      source: "source-catalog-search-index",
+      status: "queued",
+      phase: "queued",
+      message: "Source catalog keyword search index queued.",
+      details: "Builds vendor_catalog_items_search_trgm_idx in the background so broad Source Catalog keyword search can use Postgres.",
+      totalRows: Number(status.totalRows || 0) || 0,
+      processedRows: Number(status.processedRows || 0) || 0,
+      progressPercent: Number(status.progressPercent || 0) || 0,
+      workerTask: shouldRunJobsInline() ? "" : "source-search-index",
+      workerPayload: shouldRunJobsInline() ? {} : {},
+      createdAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) {
+      activeJobRecords.set(job.id, job);
+      setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: job.totalRows, processedRows: job.processedRows, progressPercent: job.progressPercent });
+      startSourceCatalogSearchIndexJob(job.id);
+    }
+    return sendJson(res, 202, { job, status });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/performance-indexes/build") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 400, { error: "Postgres is required for source catalog performance indexes." });
+    const active = [...activeJobRecords.values()].find((job) => /source catalog performance indexes/i.test(String(job.operation || "")) && ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+    if (active) return sendJson(res, 200, { job: normalizeImportJob(active), message: "Source catalog performance index job is already running." });
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const job = createImportJob(db, {
+      section: "Source Catalog",
+      category: "Source Catalog",
+      operation: "Build source catalog performance indexes",
+      direction: "maintenance",
+      status: "queued",
+      fileName: "Postgres vendor catalog indexes",
+      totalRows: 7,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: shouldRunJobsInline() ? "" : "source-performance-indexes",
+      workerPayload: shouldRunJobsInline() ? {} : {},
+      message: "Source catalog performance index job queued."
+    });
+    if (!shouldRunJobsInline()) {
+      return sendJson(res, 202, { job: normalizeImportJob(job), message: job.message });
+    }
+    activeJobRecords.set(job.id, normalizeImportJob(job));
+    setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: 7, processedRows: 0, progressPercent: 0 });
+    setTimeout(async () => {
+      const workJob = activeJobRecords.get(job.id) || job;
+      try {
+        workJob.status = "running";
+        workJob.startedAt = workJob.startedAt || new Date().toISOString();
+        workJob.message = "Building source catalog performance indexes...";
+        upsertImportJobStore(workJob);
+        const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(workJob.id)?.status || workJob.status || "").toLowerCase());
+        const result = await postgres.buildSourceCatalogPerformanceIndexes({
+          isCanceled,
+          onProgress: (patch) => {
+            const next = setActiveJobProgress(workJob.id, { ...patch, status: "running", startedAt: workJob.startedAt });
+            Object.assign(workJob, {
+              processedRows: next.processedRows,
+              totalRows: next.totalRows,
+              progressPercent: next.progressPercent,
+              estimatedSecondsRemaining: next.estimatedSecondsRemaining,
+              phase: next.phase,
+              message: next.message || workJob.message
+            });
+            activeJobRecords.set(workJob.id, normalizeImportJob(workJob));
+            upsertImportJobStore(workJob);
+          }
+        });
+        finishImportJob(workJob, { status: "success", message: `Built ${result.indexes?.length || 0} source catalog performance indexes.`, totalRows: 7, processedRows: 7, changed: result.indexes?.length || 0, progressPercent: 100, phase: "complete", estimatedSecondsRemaining: 0 });
+      } catch (error) {
+        const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+        finishImportJob(workJob, { status: wasCanceled ? "stopped" : "failed", message: wasCanceled ? "Source catalog performance index job was canceled." : error.message, errors: wasCanceled ? [] : [error.message], missingCount: wasCanceled ? 0 : 1, phase: wasCanceled ? "stopped" : "failed" });
+      } finally {
+        activeJobProgress.delete(workJob.id);
+        activeJobRecords.delete(workJob.id);
+      }
+    }, 10);
+    return sendJson(res, 202, { job: normalizeImportJob(job), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/facets/refresh") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 400, { error: "Postgres is required for source catalog facets." });
+    const active = [...activeJobRecords.values()].find((job) => /source catalog facet/i.test(String(job.operation || "")) && ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+    if (active) return sendJson(res, 200, { job: normalizeImportJob(active), message: "Source catalog facet refresh is already running." });
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const job = createImportJob(db, {
+      section: "Source Catalog",
+      category: "Source Catalog",
+      operation: "Refresh source catalog facets",
+      direction: "maintenance",
+      status: "queued",
+      fileName: "vendor_catalog_facets",
+      totalRows: 4,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: shouldRunJobsInline() ? "" : "source-facets-refresh",
+      workerPayload: shouldRunJobsInline() ? {} : {},
+      message: "Source catalog facet refresh queued."
+    });
+    if (!shouldRunJobsInline()) {
+      return sendJson(res, 202, { job: normalizeImportJob(job), message: job.message });
+    }
+    activeJobRecords.set(job.id, normalizeImportJob(job));
+    setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: 4, processedRows: 0, progressPercent: 0 });
+    setTimeout(async () => {
+      const workJob = activeJobRecords.get(job.id) || job;
+      try {
+        workJob.status = "running";
+        workJob.startedAt = workJob.startedAt || new Date().toISOString();
+        workJob.message = "Refreshing source catalog facets...";
+        upsertImportJobStore(workJob);
+        const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(workJob.id)?.status || workJob.status || "").toLowerCase());
+        const result = await postgres.refreshVendorCatalogFacets({
+          isCanceled,
+          onProgress: (patch) => {
+            const next = setActiveJobProgress(workJob.id, { ...patch, status: "running", startedAt: workJob.startedAt });
+            Object.assign(workJob, {
+              processedRows: next.processedRows,
+              totalRows: next.totalRows,
+              progressPercent: next.progressPercent,
+              estimatedSecondsRemaining: next.estimatedSecondsRemaining,
+              phase: next.phase,
+              message: next.message || workJob.message
+            });
+            activeJobRecords.set(workJob.id, normalizeImportJob(workJob));
+            upsertImportJobStore(workJob);
+          }
+        });
+        finishImportJob(workJob, { status: "success", message: `Refreshed source catalog facets for ${Number(result.total || 0).toLocaleString()} source rows.`, totalRows: 4, processedRows: 4, changed: 4, progressPercent: 100, phase: "complete", estimatedSecondsRemaining: 0 });
+      } catch (error) {
+        const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+        finishImportJob(workJob, { status: wasCanceled ? "stopped" : "failed", message: wasCanceled ? "Source catalog facet refresh was canceled." : error.message, errors: wasCanceled ? [] : [error.message], missingCount: wasCanceled ? 0 : 1, phase: wasCanceled ? "stopped" : "failed" });
+      } finally {
+        activeJobProgress.delete(workJob.id);
+        activeJobRecords.delete(workJob.id);
+      }
+    }, 10);
+    return sendJson(res, 202, { job: normalizeImportJob(job), message: job.message });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/changes") {
+    const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get("limit") || 500)));
+    if (postgres.isPostgresEnabled()) {
+      const result = await postgres.listProductChangeEvents({
+        query: url.searchParams.get("q") || "",
+        field: url.searchParams.get("field") || "",
+        source: url.searchParams.get("source") || "",
+        vendor: url.searchParams.get("vendor") || "",
+        direction: url.searchParams.get("direction") || "",
+        from: url.searchParams.get("from") || "",
+        to: url.searchParams.get("to") || "",
+        page: url.searchParams.get("page") || 1,
+        limit
+      });
+      return sendJson(res, 200, {
+        ...result,
+        tracking: {
+          ...catalogChangeTrackingStatus(),
+          database: "postgres",
+          productChangeEvents: result.total
+        }
+      });
+    }
+    const rows = readCatalogChangeRows(limit);
+    return sendJson(res, 200, {
+      rows,
+      summary: catalogChangeSummary(rows),
+      tracking: catalogChangeTrackingStatus()
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/changes.csv") {
+    if (postgres.isPostgresEnabled()) {
+      return streamProductChangesCsvFromPostgres(res, {
+        query: url.searchParams.get("q") || "",
+        field: url.searchParams.get("field") || "",
+        source: url.searchParams.get("source") || "",
+        vendor: url.searchParams.get("vendor") || "",
+        direction: url.searchParams.get("direction") || "",
+        from: url.searchParams.get("from") || "",
+        to: url.searchParams.get("to") || "",
+        limit: url.searchParams.get("limit") || 25000
+      });
+    }
+    const rows = readCatalogChangeRows(Math.max(1, Math.min(25000, Number(url.searchParams.get("limit") || 25000))));
+    return sendCsv(res, rowsToCsv(rows), "source-catalog-sku-changes.csv");
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/closeouts.csv") {
+    return streamCloseoutSkusCsv(res);
+  }
+
+  async function readCategoryWorkflowDb() {
+    const [baseDb, categoryDb] = await Promise.all([
+      readDbFast({ skipInventory: postgres.isPostgresEnabled() }),
+      postgres.isPostgresEnabled() ? postgres.readCategoryState() : Promise.resolve(null)
+    ]);
+    return normalizeDb({
+      ...baseDb,
+      ...(categoryDb || {}),
+      connections: baseDb.connections || [],
+      channels: baseDb.channels || [],
+      systemSettings: baseDb.systemSettings || {},
+      sequence: baseDb.sequence || {}
+    });
+  }
+
+  async function persistCategoryWorkflowDb(db) {
+    if (postgres.isPostgresEnabled()) {
+      await postgres.writeStateDocuments({
+        categorySettings: db.categorySettings || [],
+        vendorCategoryMappings: db.vendorCategoryMappings || {},
+        sourceCatalogOverrides: db.sourceCatalogOverrides || {}
+      });
+      publicStateJsonCache = null;
+      return;
+    }
+    await writeDb(normalizeDb(db));
+  }
+
+  async function readKnowledgeWorkflowDb() {
+    return normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
+  }
+
+  async function persistKnowledgeWorkflowDb(db) {
+    if (postgres.isPostgresEnabled()) {
+      await postgres.writeStateDocuments({
+        knowledgeArticles: normalizeKnowledgeArticles(db.knowledgeArticles || []),
+        knowledgeSettings: normalizeKnowledgeSettings(db.knowledgeSettings || {})
+      });
+      publicStateJsonCache = null;
+      return;
+    }
+    await writeDb(normalizeDb(db));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/knowledge/articles") {
+    const db = await readKnowledgeWorkflowDb();
+    const body = await parseBody(req);
+    const settingsError = validateKnowledgeArticleSettings(db, body);
+    if (settingsError) return sendJson(res, 400, { error: settingsError });
+    const now = new Date().toISOString();
+    const article = normalizeKnowledgeArticle({
+      ...body,
+      id: undefined,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: body.createdBy || "Luis",
+      updatedBy: body.updatedBy || body.createdBy || "Luis"
+    });
+    db.knowledgeArticles = normalizeKnowledgeArticles([article, ...(db.knowledgeArticles || [])]);
+    await persistKnowledgeWorkflowDb(db);
+    return sendJson(res, 200, { article, state: publicState(db, { lite: true }) });
+  }
+
+  if (req.method === "PATCH" && url.pathname === "/api/knowledge/settings") {
+    const db = await readKnowledgeWorkflowDb();
+    const body = await parseBody(req);
+    const nextSettings = normalizeKnowledgeSettings({
+      ...db.knowledgeSettings,
+      categories: body.categories === undefined ? db.knowledgeSettings?.categories : body.categories,
+      areas: body.areas === undefined ? db.knowledgeSettings?.areas : body.areas
+    });
+    const activeCategoryIds = knowledgeSettingIds(nextSettings, "categories");
+    const activeAreaIds = knowledgeSettingIds(nextSettings, "areas");
+    const liveArticles = normalizeKnowledgeArticles(db.knowledgeArticles).filter((article) => !article.archived);
+    const categoryInUse = liveArticles.find((article) => !activeCategoryIds.has(article.category));
+    if (categoryInUse) return sendJson(res, 400, { error: `Category "${categoryInUse.category}" is still used by "${categoryInUse.title}".` });
+    const areaInUse = liveArticles.find((article) => !activeAreaIds.has(article.area));
+    if (areaInUse) return sendJson(res, 400, { error: `Area "${areaInUse.area}" is still used by "${areaInUse.title}".` });
+    db.knowledgeSettings = nextSettings;
+    await persistKnowledgeWorkflowDb(db);
+    return sendJson(res, 200, { knowledgeSettings: db.knowledgeSettings, state: publicState(db, { lite: true }) });
+  }
+
+  if (parts[0] === "api" && parts[1] === "knowledge" && parts[2] === "articles" && parts[3] && ["PATCH", "DELETE"].includes(req.method)) {
+    const db = await readKnowledgeWorkflowDb();
+    db.knowledgeArticles = normalizeKnowledgeArticles(db.knowledgeArticles);
+    const article = db.knowledgeArticles.find((row) => row.id === parts[3]);
+    if (!article) return notFound(res);
+    if (req.method === "PATCH") {
+      const body = await parseBody(req);
+      const settingsError = validateKnowledgeArticleSettings(db, { ...article, ...body });
+      if (settingsError) return sendJson(res, 400, { error: settingsError });
+      for (const field of ["title", "area", "summary", "status", "category"]) {
+        if (body[field] !== undefined) article[field] = body[field];
+      }
+      if (body.tags !== undefined) article.tags = body.tags;
+      if (body.blocks !== undefined) article.blocks = body.blocks;
+      article.slug = body.slug || slugifyKnowledgeTitle(article.title);
+      article.updatedAt = new Date().toISOString();
+      article.updatedBy = String(body.updatedBy || "Luis").trim() || "Luis";
+      const normalizedArticle = normalizeKnowledgeArticle(article);
+      db.knowledgeArticles = db.knowledgeArticles.map((row) => row.id === normalizedArticle.id ? normalizedArticle : row);
+      await persistKnowledgeWorkflowDb(db);
+      return sendJson(res, 200, { article: normalizedArticle, state: publicState(db, { lite: true }) });
+    }
+    article.archived = true;
+    article.updatedAt = new Date().toISOString();
+    article.updatedBy = "Luis";
+    await persistKnowledgeWorkflowDb(db);
+    return sendJson(res, 200, { article: normalizeKnowledgeArticle(article), state: publicState(db, { lite: true }) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/shopify/categories") {
+    return sendJson(res, 200, searchShopifyTaxonomy(url.searchParams.get("q") || "", url.searchParams.get("limit") || 20));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/categories") {
+    const db = await readCategoryWorkflowDb();
+    const settings = ebayChannelSettings(db);
+    const result = await searchEbayTaxonomy(
+      db,
+      url.searchParams.get("q") || "",
+      url.searchParams.get("limit") || 12,
+      url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US"
+    );
+    return sendJson(res, 200, result);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/ebay/map-current") {
+    const db = await readCategoryWorkflowDb();
+    const body = await parseBody(req);
+    const result = await autoMapEbayCategories(db, body);
+    await persistCategoryWorkflowDb(db);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, {
+      ...result,
+      categories: publicCategories(db, "", body.scope || "main"),
+      state: publicState(db, { lite: true })
+    });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "categories" && parts[2]) {
+    const db = await readCategoryWorkflowDb();
+    const body = await parseBody(req);
+    const scope = body.scope || url.searchParams.get("scope") || "source";
+    const source = findPublicCategory(db, parts[2], scope);
+    if (!source) return notFound(res);
+    db.categorySettings = normalizeCategorySettings(db.categorySettings);
+    let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
+    if (!category) {
+      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name }])[0];
+      db.categorySettings.push(category);
+    }
+    for (const field of ["status", "owner", "notes"]) {
+      if (body[field] !== undefined) category[field] = String(body[field] || "").trim();
+    }
+    if (body.channel && body.mapping && category.mappings[body.channel]) {
+      let mapping = { ...body.mapping };
+      if (body.channel === "shopify" && mapping.categoryId) mapping = enrichShopifyCategoryMapping(mapping);
+      if (body.channel === "ebay" && mapping.categoryId) mapping = await enrichEbayCategoryMapping(db, { ...category.mappings.ebay, ...mapping });
+      category.mappings[body.channel] = normalizeChannelCategoryMapping({ ...category.mappings[body.channel], ...mapping });
+      if (body.channel === "shopify") {
+        category.smartCollection = normalizeSmartCollectionProfile({
+          ...category.smartCollection,
+          productType: body.smartCollection?.productType || category.smartCollection?.productType || source.name,
+          title: body.smartCollection?.title || category.smartCollection?.title || "",
+          handle: mapping.collectionHandle || body.smartCollection?.handle || category.smartCollection?.handle || ""
+        }, source.name);
+      }
+    }
+    if (body.smartCollection && typeof body.smartCollection === "object") {
+      category.smartCollection = normalizeSmartCollectionProfile({ ...category.smartCollection, ...body.smartCollection }, source.name);
+    }
+    if (body.defaults && typeof body.defaults === "object") {
+      category.defaults = normalizeCategorySettings([{ ...category, defaults: { ...category.defaults, ...body.defaults } }])[0].defaults;
+    }
+    if (body.requiredAttributes !== undefined) {
+      category.requiredAttributes = Array.isArray(body.requiredAttributes) ? body.requiredAttributes : String(body.requiredAttributes || "").split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+    }
+    category.updatedAt = new Date().toISOString();
+    await persistCategoryWorkflowDb(db);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", scope));
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "attributes" && parts[4] === "sync") {
+    const db = await readCategoryWorkflowDb();
+    const body = await parseBody(req);
+    const scope = body.scope || url.searchParams.get("scope") || "main";
+    const source = findPublicCategory(db, parts[2], scope);
+    if (!source) return notFound(res);
+    db.categorySettings = normalizeCategorySettings(db.categorySettings);
+    let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
+    if (!category) {
+      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name }])[0];
+      db.categorySettings.push(category);
+    }
+    if (category.mappings?.shopify?.categoryId) {
+      category.mappings.shopify = normalizeChannelCategoryMapping(enrichShopifyCategoryMapping(category.mappings.shopify));
+    }
+    if (category.mappings?.ebay?.categoryId) {
+      category.mappings.ebay = normalizeChannelCategoryMapping(await enrichEbayCategoryMapping(db, category.mappings.ebay));
+    }
+    category.updatedAt = new Date().toISOString();
+    await persistCategoryWorkflowDb(db);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", scope));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/status-import" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const records = parseCsv(body.csv || "");
+    const lookupKeys = [];
+    for (const record of records) {
+      const payload = shopifyStatusPayloadFromRecord(record);
+      if (payload.sku) lookupKeys.push(payload.sku);
+      if (payload.shopifyId) {
+        lookupKeys.push(payload.shopifyId);
+        const legacy = shopifyLegacyId(payload.shopifyId);
+        if (legacy) lookupKeys.push(legacy);
+      }
+    }
+    const lookupProducts = await postgres.readProductsByKeys(lookupKeys);
+    const db = normalizeDb({
+      ...(await readDbFast({ skipInventory: true })),
+      inventory: lookupProducts || []
+    });
+    const maps = buildShopifyLookupMaps(db);
+    const statusMap = readShopifyStatusMapSync();
+    const preview = [];
+    const missing = [];
+    const errorRows = [];
+    const changedItems = new Map();
+    const job = body.dryRun ? null : createImportJob(db, {
+      section: "Products",
+      operation: "Shopify status import",
+      direction: "import",
+      fileName: body.fileName || "shopify-status.csv",
+      totalRows: records.length,
+      workerTask: shouldRunJobsInline() ? "" : "shopify-status-import",
+      workerPayload: shouldRunJobsInline() ? {} : { fileName: body.fileName || "shopify-status.csv" },
+      message: `Updating Shopify IDs and live status from ${records.length} row${records.length === 1 ? "" : "s"}.`
+    });
+    if (job) attachImportJobOriginalFile(job, body.csv || "", body.fileName || "shopify-status.csv");
+    if (job && !shouldRunJobsInline()) {
+      job.workerPayload = { ...(job.workerPayload || {}), originalFilePath: job.originalFilePath || "" };
+      upsertImportJobStore(job);
+      await postgres.upsertOperationJob(normalizeImportJob(job));
+      return sendJson(res, 202, {
+        queued: true,
+        changed: 0,
+        missing: [],
+        job: normalizeImportJob(job),
+        state: publicState({ ...db, inventory: [] }, { lite: true }),
+        message: job.message
+      });
+    }
+    let changed = 0;
+    for (const record of records) {
+      const { item, payload, matchBy } = findProductForShopifyRecord(record, maps);
+      const key = payload.sku || payload.handle || payload.shopifyId;
+      if (!key) {
+        errorRows.push(standardImportError({
+          record,
+          field: "sku",
+          issue: "Missing Shopify match key",
+          rawValue: JSON.stringify(record),
+          details: "Expected Variant SKU for first-time linking, or Shopify product ID for an already-linked product."
+        }));
+        continue;
+      }
+      if (!item) {
+        missing.push(key);
+        errorRows.push(standardImportError({
+          record,
+          recordKey: key,
+          sku: payload.sku || "",
+          field: payload.sku ? "sku" : payload.handle ? "handle" : "shopifyId",
+          issue: "No matching product found",
+          rawValue: key,
+          details: matchBy ? `Tried ${matchBy}.` : "No matching Variant SKU or linked Shopify product ID found."
+        }));
+        if (preview.length < 50) preview.push({ sku: payload.sku || "", handle: payload.handle || "", action: "missing", fields: [] });
+        continue;
+      }
+      const skuKey = String(item.sku || "").trim().toLowerCase();
+      const existing = { ...item, ...(shopifyStatusForSku(statusMap, item.sku) || {}) };
+      const fields = ["shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublished", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource"]
+        .filter((field) => payload[field] !== undefined && payload[field] !== "" && existing[field] !== payload[field]);
+      if (body.dryRun) {
+        if (preview.length < 50) preview.push({ sku: item.sku, handle: payload.handle, action: fields.length ? "update" : "unchanged", matchBy, fields });
+        if (fields.length) changed += 1;
+        continue;
+      }
+      if (!statusMap[skuKey]) statusMap[skuKey] = {};
+      for (const field of fields) {
+        statusMap[skuKey][field] = payload[field];
+        item[field] = payload[field];
+      }
+      if (fields.length) {
+        item.updatedAt = new Date().toISOString();
+        changedItems.set(item.id || item.sku, item);
+        changed += 1;
+      }
+    }
+    if (body.dryRun) {
+      return sendJson(res, 200, {
+        changed,
+        matched: records.length - missing.length,
+        missing: missing.slice(0, 100),
+        preview
+      });
+    }
+    if (changedItems.size) await postgres.upsertProductsFromState([...changedItems.values()]);
+    const issueCount = errorRows.length;
+    const status = issueCount ? "warning" : "success";
+    const message = `Updated Shopify status for ${changed} product row${changed === 1 ? "" : "s"}${issueCount ? `; ${issueCount} row${issueCount === 1 ? "" : "s"} need review.` : "."}`;
+    attachImportJobErrorsFile(job, errorRows);
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+    db.syncRuns.unshift({
+      id: crypto.randomUUID(),
+      importJobId: job.id,
+      source: "Shopify",
+      type: "shopify-status-import",
+      status,
+      fileName: body.fileName || "",
+      message,
+      createdAt: new Date().toISOString()
+    });
+    finishImportJob(job, { status, message, changed, totalRows: records.length, missingCount: issueCount, errors: importErrorMessages(errorRows) });
+    upsertImportJobStore(job);
+    await postgres.writeStateDocuments({ syncRuns: db.syncRuns || [] });
+    writeShopifyStatusMapSync(statusMap);
+    publicStateJsonCache = null;
+    return sendJson(res, 200, { changed, missing: missing.slice(0, 100), job: normalizeImportJob(job), state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  if (parts[0] === "api" && parts[1] === "export-mappings" && parts[2] && parts[3] === "export" && postgres.isPostgresEnabled()) {
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    db.exportMappings = await readExportMappingsApiStore();
+    const template = db.exportMappings.find((row) => row.id === parts[2]);
+    if (!template) return notFound(res);
+    if (!(template.mappings || []).length) return sendJson(res, 400, { error: "Template has no mapped columns." });
+
+    if (req.method === "GET") {
+      const requestedSkus = String(url.searchParams.get("skus") || "").split(",").map((sku) => sku.trim()).filter(Boolean);
+      const dataFileName = url.searchParams.get("dataFileName") || url.searchParams.get("fileName") || "";
+      const productTotal = requestedSkus.length || await postgres.countProducts({});
+      if (productTotal > BACKGROUND_EXPORT_PAGE_SIZE) {
+        const job = await queueMappedProductsExportJob(db, parts[2], template, { skus: requestedSkus, productTotal, dataFileName });
+        return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), count: productTotal, productCount: productTotal, message: job.message });
+      }
+      const exportFileName = mappedExportFilename(template, dataFileName);
+      const exportFilePath = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(crypto.randomUUID(), "export-job"), safeImportFileName(exportFileName, "export.csv"));
+      const written = await mappedProductsCsvPostgresFileAsync(db, template, exportFilePath, { skus: requestedSkus });
+      res.writeHead(200, {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename=${exportFileName}`
+      });
+      return fs.createReadStream(written.filePath).pipe(res);
+    }
+
+    if (req.method === "POST") {
+      const body = await parseBody(req);
+      const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))];
+      const filters = body.filters || {};
+      const query = body.query || "";
+      const dataFileName = body.dataFileName || body.fileName || "";
+      const forceJob = body.forceJob === true || ["1", "true", "yes"].includes(String(body.forceJob || "").toLowerCase());
+      const productTotal = requestedSkus.length || await postgres.countProducts({ q: query, filters });
+      if (forceJob || productTotal > BACKGROUND_EXPORT_PAGE_SIZE) {
+        const job = await queueMappedProductsExportJob(db, parts[2], template, { skus: requestedSkus, query, filters, productTotal, dataFileName });
+        return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), count: productTotal, productCount: productTotal, message: job.message });
+      }
+      const exportFileName = mappedExportFilename(template, dataFileName);
+      const exportFilePath = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(crypto.randomUUID(), "export-job"), safeImportFileName(exportFileName, "export.csv"));
+      const written = await mappedProductsCsvPostgresFileAsync(db, template, exportFilePath, { skus: requestedSkus, query, filters });
+      const csv = fs.readFileSync(written.filePath, "utf8");
+      return sendJson(res, 200, { filename: exportFileName, csv, count: written.outputRows, productCount: written.productCount });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "export-mappings" && parts[2] && parts[3] === "import" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    db.exportMappings = await readExportMappingsApiStore();
+    const template = db.exportMappings.find((row) => row.id === parts[2]);
+    if (!template) return notFound(res);
+    const records = parseCsv(body.csv || "");
+    const skuMapping = (template.mappings || []).find((mapping) => mapping.productField === "sku");
+    if (!skuMapping) return sendJson(res, 400, { error: "Template needs a mapped SKU column before importing." });
+    const job = body.dryRun ? null : createImportJob(db, {
+      section: "Products",
+      operation: `${template.name} import`,
+      direction: "import",
+      fileName: body.fileName || `${template.source || "products"}.csv`,
+      totalRows: records.length,
+      workerTask: shouldRunJobsInline() ? "" : "mapped-product-import",
+      workerPayload: shouldRunJobsInline() ? {} : { templateId: parts[2], fileName: body.fileName || `${template.source || "products"}.csv` },
+      message: `Importing ${records.length} row${records.length === 1 ? "" : "s"} with ${template.name}.`
+    });
+    if (job) attachImportJobOriginalFile(job, body.csv || "", body.fileName || `${template.source || "products"}.csv`);
+    if (job && !shouldRunJobsInline()) {
+      job.workerPayload = { ...(job.workerPayload || {}), originalFilePath: job.originalFilePath || "" };
+      upsertImportJobStore(job);
+      await postgres.upsertOperationJob(normalizeImportJob(job));
+      return sendJson(res, 202, { queued: true, changed: 0, created: 0, job: normalizeImportJob(job), state: publicState({ ...db, inventory: [] }, { lite: true }), message: job.message });
+    }
+    let changed = 0;
+    let created = 0;
+    const preview = [];
+    const errorRows = [];
+    const changedItems = [];
+    for (const record of records) {
+      const sku = String(record[skuMapping.externalColumn] || "").trim();
+      if (!sku) {
+        errorRows.push(standardImportError({ record, field: skuMapping.externalColumn || "sku", issue: "Missing SKU", rawValue: JSON.stringify(record) }));
+        continue;
+      }
+      const payload = mappedRecordToProductPayload(record, template);
+      payload.sku = sku;
+      const existing = await postgres.readProductByKey(sku);
+      if (body.dryRun) {
+        preview.push({ sku, action: existing ? "update" : "create", fields: Object.keys(payload).filter((field) => field !== "sku") });
+        continue;
+      }
+      if (existing) {
+        applyInventoryPatch(existing, payload);
+        if (payload.brand !== undefined && payload.brandLocked === undefined) existing.brandLocked = true;
+        existing.updatedAt = new Date().toISOString();
+        changedItems.push(existing);
+      } else {
+        changedItems.push({
+          id: crypto.randomUUID(),
+          title: payload.title || sku,
+          qty: Number(payload.qty || 0),
+          reserved: Number(payload.reserved || 0),
+          reorderPoint: Number(payload.reorderPoint || 0),
+          sources: {},
+          updatedAt: new Date().toISOString(),
+          brandLocked: payload.brand !== undefined ? true : Boolean(payload.brandLocked),
+          ...payload
+        });
+        created += 1;
+      }
+      changed += 1;
+    }
+    if (body.dryRun) return sendJson(res, 200, { changed: preview.length, preview: preview.slice(0, 50) });
+    if (changedItems.length) await postgres.upsertProductsFromState(changedItems);
+    const status = errorRows.length ? "warning" : "success";
+    const message = `Updated ${changed} product row${changed === 1 ? "" : "s"} from ${template.name}${errorRows.length ? `; ${errorRows.length} row${errorRows.length === 1 ? "" : "s"} need review.` : "."}`;
+    attachImportJobErrorsFile(job, errorRows);
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+    db.syncRuns.unshift({
+      id: crypto.randomUUID(),
+      importJobId: job.id,
+      source: template.source || "CSV",
+      type: "mapped-product-import",
+      status,
+      fileName: body.fileName || "",
+      message,
+      createdAt: new Date().toISOString()
+    });
+    finishImportJob(job, { status, message, changed, created, totalRows: records.length, missingCount: errorRows.length, errors: importErrorMessages(errorRows) });
+    upsertImportJobStore(job);
+    await postgres.writeStateDocuments({ syncRuns: db.syncRuns || [] });
+    publicStateJsonCache = null;
+    return sendJson(res, 200, { changed, created, job: normalizeImportJob(job), state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/promote" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const sourceRows = await postgres.readVendorCatalogItemsBySkus([body.sku]);
+    const product = normalizeCatalogProductForInventory(sourceRows?.[0] || null);
+    if (!product) return notFound(res);
+    const existing = await postgres.readProductByKey(product.sku || body.sku);
+    const db = normalizeDb({ ...(await readDbFast({ skipInventory: true })), inventory: existing ? [existing] : [] });
+    const upserted = upsertInventoryProductFromCatalog(db, product);
+    if (upserted.item) await postgres.upsertProductsFromState([upserted.item]);
+    const summary = await postgres.readOperationalSummary();
+    return sendJson(res, 200, { item: upserted.item, summary, existing: upserted.existing, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/promote-bulk" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const skus = Array.isArray(body.skus) ? [...new Set(body.skus.map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, 5000) : [];
+    if (!skus.length) return sendJson(res, 400, { error: "Select source catalog products first." });
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const existingProducts = await postgres.readProductsByKeys(skus);
+    db.inventory = existingProducts || [];
+    const products = (await postgres.readVendorCatalogItemsBySkus(skus)).map(normalizeCatalogProductForInventory).filter(Boolean);
+    const changedItems = [];
+    for (const product of products) {
+      const upserted = upsertInventoryProductFromCatalog(db, product);
+      if (upserted.item) changedItems.push(upserted.item);
+    }
+    if (changedItems.length) await postgres.upsertProductsFromState(changedItems);
+    const summary = await postgres.readOperationalSummary();
+    return sendJson(res, 200, { changed: changedItems.length, summary, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/source-catalog/product-dump/import" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const dumpPath = String(body.path || body.filePath || process.env.DATAPLUS_PRODUCT_DUMP_PATH || "").trim();
+    const job = createImportJob(db, {
+      section: "Source Catalog",
+      operation: "Product dump import",
+      direction: "import",
+      status: "queued",
+      fileName: dumpPath ? path.basename(dumpPath) : "vendor product dump",
+      totalRows: 0,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: "product-dump-import",
+      workerPayload: { path: dumpPath },
+      message: "Product dump import queued. The source catalog will refresh in the background."
+    });
+    upsertImportJobStore(job);
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: publicState({ ...db, inventory: [] }, { lite: true }), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/import-impact" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const skus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, 25000);
+    const allFiltered = body.allFiltered === true || String(body.allFiltered || "").toLowerCase() === "true";
+    if (!skus.length && !allFiltered) return sendJson(res, 400, { error: "Select source catalog products first." });
+    const impact = await sourceCatalogImportImpact({
+      skus,
+      allFiltered,
+      query: body.query || "",
+      filters: body.filters || {},
+      limit: Math.max(1, Math.min(25000, Number(body.limit || 25000))),
+      importMode: body.importMode || body.sourceImportMode || ""
+    });
+    const { sourceRows, ...publicImpact } = impact;
+    return sendJson(res, 200, publicImpact);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/bulk" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const action = String(body.action || "");
+    const allFiltered = body.allFiltered === true || String(body.allFiltered || "").toLowerCase() === "true";
+    let skus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, 25000);
+    if (!skus.length && !allFiltered) return sendJson(res, 400, { error: "Select source catalog products first." });
+    if (action === "add-active") {
+      const db = normalizeDb(await readDbFast({ skipInventory: true }));
+      const impact = await sourceCatalogImportImpact({
+        skus,
+        allFiltered,
+        query: body.query || "",
+        filters: body.filters || {},
+        limit: Math.max(1, Math.min(25000, Number(body.limit || 25000))),
+        importMode: body.importMode || body.sourceImportMode || "",
+        db
+      });
+      if (!impact.importable) {
+        return sendJson(res, 200, {
+          changed: 0,
+          requested: 0,
+          matched: impact.matched,
+          limited: impact.limited,
+          state: publicState({ ...db, inventory: [] }, { lite: true }),
+          message: "No source catalog products matched this import."
+        });
+      }
+      const job = await queueSourceCatalogImportJob(db, { ...body, skus, limit: Math.max(1, Math.min(25000, Number(body.limit || 25000))) }, impact);
+      return sendJson(res, 202, {
+        queued: true,
+        job: normalizeImportJob(job),
+        impact: (({ sourceRows, ...rest }) => rest)(impact),
+        message: job.message,
+        state: publicState({ ...db, inventory: [] }, { lite: true })
+      });
+    }
+    const statusByAction = {
+      "set-active": { status: "Active", active: true, deleted: false },
+      "set-inactive": { status: "Inactive", active: false, deleted: false },
+      "set-discontinued": { status: "Discontinued", active: false, deleted: false },
+      delete: { status: "Deleted", active: false, deleted: true }
+    };
+    const patch = statusByAction[action];
+    if (!patch) return sendJson(res, 400, { error: "Unsupported source catalog action." });
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const overrides = sourceCatalogOverrideMap(db);
+    const now = new Date().toISOString();
+    for (const sku of skus) {
+      const key = sku.toLowerCase();
+      overrides[key] = { ...(overrides[key] || { sku }), sku, ...patch, updatedAt: now };
+    }
+    db.sourceCatalogOverrides = overrides;
+    await postgres.writeStateDocuments({ sourceCatalogOverrides: db.sourceCatalogOverrides || [] });
+    publicStateJsonCache = null;
+    return sendJson(res, 200, { changed: skus.length, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/categories/import-sku-csv" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const records = parseCsv(body.csv || "");
+    const now = new Date().toISOString();
+    const dryRun = body.dryRun === true || String(body.dryRun).toLowerCase() === "true";
+    const rowInfos = [];
+    const errorRows = [];
+    const seen = new Set();
+    let skipped = 0;
+    for (const record of records) {
+      const sku = sourceTextValue(record.sku || record.SKU || record.Sku || record["Variant SKU"] || record["variant sku"]);
+      const category = formatCategoryName(record.category || record.Category || record.internalCategory || record["Internal Category"] || record["product category"] || record["Product Category"]);
+      if (!sku || !category) {
+        skipped += 1;
+        errorRows.push(standardImportError({
+          record,
+          sku,
+          category,
+          field: !sku ? "sku" : "category",
+          issue: "Missing SKU or category",
+          rawValue: JSON.stringify(record)
+        }));
+        continue;
+      }
+      const key = sku.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rowInfos.push({ sku, key, category, record });
+    }
+    const [baseDb, existingProducts, sourceRows] = await Promise.all([
+      readDbFast({ skipInventory: true }),
+      postgres.readProductsByKeys(rowInfos.map((row) => row.sku)),
+      postgres.readVendorCatalogItemsBySkus(rowInfos.map((row) => row.sku))
+    ]);
+    const db = normalizeDb({ ...baseDb, inventory: existingProducts || [] });
+    const inventoryBySku = inventoryBySkuMap(db);
+    const overrides = sourceCatalogOverrideMap(db);
+    const vendorMappings = vendorCategoryMappingMap(db);
+    const sourceProducts = (sourceRows || []).map(normalizeCatalogProductForInventory).filter(Boolean);
+    const sourceBySku = new Map(sourceProducts.map((product) => [String(product.sku || "").toLowerCase(), product]));
+    const changedProducts = [];
+    let updatedProducts = 0;
+    let updatedSourceOverrides = 0;
+    let updatedVendorCategoryMappings = 0;
+    let vendorCategoryConflicts = 0;
+    const samples = [];
+    for (const { sku, key, category, record } of rowInfos) {
+      const existing = inventoryBySku.get(key);
+      if (existing) {
+        if (!existing.sourceCategory && existing.category && !existing.categoryVerified) existing.sourceCategory = existing.category;
+        if (existing.category !== category) {
+          if (!dryRun) {
+            existing.category = category;
+            existing.mainCategory = category;
+            existing.categoryVerified = true;
+            existing.updatedAt = now;
+            changedProducts.push(existing);
+          }
+          updatedProducts += 1;
+        }
+        existing.vendorCategory = existing.sourceCategory || existing.vendorCategory || "";
+      }
+      if (!dryRun) overrides[key] = { ...(overrides[key] || { sku }), sku, category, categoryVerified: true, updatedAt: now };
+      updatedSourceOverrides += 1;
+      const sourceProduct = sourceBySku.get(key);
+      const supplier = sourceTextValue(existing?.supplier || existing?.vendor || sourceProduct?.supplier || sourceProduct?.vendor);
+      const vendorCategory = formatCategoryName(existing?.sourceCategory || existing?.vendorCategory || sourceProduct?.sourceCategory || sourceProduct?.vendorCategory || "");
+      const mappingKey = vendorCategoryMappingKey(supplier, vendorCategory);
+      if (mappingKey) {
+        const currentMapping = vendorMappings[mappingKey];
+        if (currentMapping && formatCategoryName(currentMapping.mainCategory).toLowerCase() !== category.toLowerCase()) {
+          vendorCategoryConflicts += 1;
+          errorRows.push(standardImportError({
+            record,
+            recordKey: sku,
+            sku,
+            supplier,
+            category,
+            field: "category",
+            issue: "Vendor category mapping conflict",
+            rawValue: vendorCategory,
+            details: `Vendor category "${vendorCategory}" is already learned as "${currentMapping.mainCategory}".`,
+            vendor_category: vendorCategory,
+            existing_main_category: currentMapping.mainCategory,
+            incoming_main_category: category
+          }));
+          if (!dryRun) {
+            currentMapping.conflictCount = Number(currentMapping.conflictCount || 0) + 1;
+            currentMapping.updatedAt = now;
+          }
+        } else {
+          if (!dryRun) {
+            vendorMappings[mappingKey] = {
+              ...(currentMapping || {}),
+              supplier,
+              vendorCategory,
+              mainCategory: category,
+              categoryVerified: true,
+              source: "sku-category-import",
+              sampleSku: currentMapping?.sampleSku || sku,
+              matchCount: Number(currentMapping?.matchCount || 0) + 1,
+              updatedAt: now,
+              createdAt: currentMapping?.createdAt || now
+            };
+          }
+          updatedVendorCategoryMappings += currentMapping ? 0 : 1;
+        }
+      }
+      if (samples.length < 10) samples.push({ sku, category, vendorCategory, supplier, inProducts: Boolean(existing) });
+    }
+    if (dryRun) {
+      return sendJson(res, 200, {
+        requested: records.length,
+        changed: seen.size,
+        updatedProducts,
+        updatedSourceOverrides,
+        updatedVendorCategoryMappings,
+        vendorCategoryConflicts,
+        skipped,
+        samples,
+        dryRun: true
+      });
+    }
+    const job = createImportJob(db, {
+      section: "Categories",
+      operation: "SKU category import",
+      direction: "import",
+      fileName: body.fileName || "sku-categories.csv",
+      totalRows: records.length,
+      message: `Importing ${records.length} SKU category row${records.length === 1 ? "" : "s"}.`
+    });
+    attachImportJobOriginalFile(job, body.csv || "", body.fileName || "sku-categories.csv");
+    attachImportJobErrorsFile(job, errorRows);
+    finishImportJob(job, {
+      status: errorRows.length ? "warning" : "success",
+      message: `Imported ${seen.size} SKU category mapping${seen.size === 1 ? "" : "s"}.`,
+      totalRows: records.length,
+      changed: seen.size,
+      missingCount: skipped,
+      errors: importErrorMessages(errorRows)
+    });
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+    db.syncRuns.unshift({
+      id: crypto.randomUUID(),
+      importJobId: job.id,
+      source: "CSV",
+      type: "sku-category-import",
+      status: errorRows.length ? "warning" : "success",
+      fileName: body.fileName || "sku-categories.csv",
+      message: `Imported ${seen.size} SKU category mapping${seen.size === 1 ? "" : "s"}.`,
+      createdAt: now
+    });
+    if (changedProducts.length) await postgres.upsertProductsFromState(changedProducts);
+    upsertImportJobStore(job);
+    await postgres.writeStateDocuments({
+      sourceCatalogOverrides: overrides,
+      vendorCategoryMappings: vendorMappings,
+      syncRuns: db.syncRuns || []
+    });
+    catalogFacetCache = null;
+    clearCategoryResponseCache();
+    const categoryDb = await readCategoryWorkflowDb();
+    return sendJson(res, 200, {
+      requested: records.length,
+      changed: seen.size,
+      updatedProducts,
+      updatedSourceOverrides,
+      updatedVendorCategoryMappings,
+      vendorCategoryConflicts,
+      skipped,
+      samples,
+      job: normalizeImportJob(job),
+      state: publicState({ ...categoryDb, inventory: [] }, { lite: true }),
+      categories: publicCategories(categoryDb, "", "main")
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/categories/import-mapping-csv" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const records = parseCsv(body.csv || "");
+    const now = new Date().toISOString();
+    const dryRun = body.dryRun === true || String(body.dryRun).toLowerCase() === "true";
+    const db = await readCategoryWorkflowDb();
+    let changed = 0;
+    let skipped = 0;
+    const errorRows = [];
+    const samples = [];
+    for (const record of records) {
+      const categoryName = formatCategoryName(csvValue(record, ["category", "Category", "mainCategory", "Main Category", "internalCategory", "Internal Category", "product category", "Product Category"]));
+      if (!categoryName) {
+        skipped += 1;
+        errorRows.push(standardImportError({ record, field: "category", issue: "Missing category", rawValue: JSON.stringify(record) }));
+        continue;
+      }
+      const shopifyCategoryId = csvValue(record, ["shopify_category_id", "shopifyCategoryId", "Shopify Category ID", "Shopify ID", "shopify id", "shopify_id"]);
+      const shopifyCategoryPath = csvValue(record, ["shopify_category", "shopify_category_path", "shopifyCategory", "shopifyCategoryPath", "Shopify Category", "Shopify Category Path", "Shopify Path", "shopify path", "shopify", "Shopify", "SHOPIFY"]);
+      const shopifyCategoryHandle = csvValue(record, ["shopify_category_handle", "shopifyCategoryHandle", "Shopify Category Handle", "shopify handle"]);
+      const shopifyCollectionHandle = csvValue(record, ["collection_handle", "collectionHandle", "Collection Handle", "shopify_collection_handle"]);
+      const smartProductType = csvValue(record, ["product_type", "productType", "Product Type", "shopify_product_type"]);
+      const smartCollectionTitle = csvValue(record, ["collection_title", "collectionTitle", "Collection Title", "title", "Title"]);
+      const googleCategoryId = csvValue(record, ["google_category_id", "googleCategoryId", "Google Category ID", "Google ID", "google id"]);
+      const googleCategoryPath = csvValue(record, ["google_category_path", "googleCategoryPath", "Google Category Path", "Google Path", "google_product_category", "google product category"]);
+      const notes = csvValue(record, ["notes", "Notes"]);
+      const owner = csvValue(record, ["owner", "Owner"]);
+      const status = csvValue(record, ["status", "Status"]);
+      if (!shopifyCategoryId && !shopifyCategoryPath && !shopifyCollectionHandle && !googleCategoryId && !googleCategoryPath) {
+        skipped += 1;
+        errorRows.push(standardImportError({ record, category: categoryName, field: "shopify_category", issue: "Missing Shopify/Google mapping", rawValue: JSON.stringify(record) }));
+        continue;
+      }
+      let mapping = {
+        categoryId: shopifyCategoryId,
+        categoryPath: shopifyCategoryPath,
+        categoryHandle: shopifyCategoryHandle,
+        collectionHandle: shopifyCollectionHandle,
+        googleCategory: (googleCategoryId || googleCategoryPath) ? {
+          id: googleCategoryId,
+          fullName: googleCategoryPath,
+          breadcrumb: googleCategoryPath,
+          taxonomy: "Google Product Taxonomy"
+        } : null,
+        notes
+      };
+      if (shopifyCategoryId || shopifyCategoryPath) mapping = enrichShopifyCategoryMapping(mapping);
+      if (!dryRun) {
+        const category = findOrCreateCategorySetting(db, categoryName);
+        category.mappings.shopify = normalizeChannelCategoryMapping({ ...category.mappings.shopify, ...mapping });
+        category.smartCollection = normalizeSmartCollectionProfile({
+          ...category.smartCollection,
+          productType: smartProductType || category.smartCollection?.productType || categoryName,
+          title: smartCollectionTitle || category.smartCollection?.title || "",
+          handle: shopifyCollectionHandle || category.smartCollection?.handle || ""
+        }, categoryName);
+        category.status = status || "mapped";
+        if (owner) category.owner = owner;
+        if (notes) category.notes = notes;
+        category.updatedAt = now;
+      }
+      changed += 1;
+      if (samples.length < 10) samples.push({ category: categoryName, shopifyCategoryId: mapping.categoryId || "", shopifyCategoryPath: mapping.categoryPath || "", googleCategory: mapping.googleCategory?.breadcrumb || "" });
+    }
+    if (dryRun) return sendJson(res, 200, { requested: records.length, changed, skipped, samples, dryRun: true });
+    const job = createImportJob(db, {
+      section: "Categories",
+      operation: "Shopify category mapping import",
+      direction: "import",
+      fileName: body.fileName || "category-mapping.csv",
+      totalRows: records.length,
+      message: `Importing ${records.length} category mapping row${records.length === 1 ? "" : "s"}.`
+    });
+    attachImportJobOriginalFile(job, body.csv || "", body.fileName || "category-mapping.csv");
+    attachImportJobErrorsFile(job, errorRows);
+    finishImportJob(job, {
+      status: errorRows.length ? "warning" : "success",
+      message: `Imported ${changed} category mapping${changed === 1 ? "" : "s"}.`,
+      totalRows: records.length,
+      changed,
+      missingCount: skipped,
+      errors: importErrorMessages(errorRows)
+    });
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+    db.syncRuns.unshift({
+      id: crypto.randomUUID(),
+      importJobId: job.id,
+      source: "CSV",
+      type: "category-mapping-import",
+      status: errorRows.length ? "warning" : "success",
+      fileName: body.fileName || "category-mapping.csv",
+      message: `Imported ${changed} category mapping${changed === 1 ? "" : "s"}.`,
+      createdAt: now
+    });
+    upsertImportJobStore(job);
+    await postgres.writeStateDocuments({
+      categorySettings: db.categorySettings || [],
+      vendorCategoryMappings: db.vendorCategoryMappings || {},
+      syncRuns: db.syncRuns || []
+    });
+    clearCategoryResponseCache();
+    return sendJson(res, 200, {
+      requested: records.length,
+      changed,
+      skipped,
+      samples,
+      job: normalizeImportJob(job),
+      state: publicState({ ...db, inventory: [] }, { lite: true }),
+      categories: publicCategories(db, "", "main")
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/promote-csv" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const records = parseCsv(body.csv || "");
+    const skusFromRecords = records.flatMap((record) => [
+      record.sku,
+      record.SKU,
+      record.Sku,
+      record["Variant SKU"],
+      record["variant sku"],
+      record["Vendor SKU"],
+      record.vendorSku
+    ]).filter(Boolean);
+    const skus = skusFromRecords.length
+      ? skusFromRecords
+      : String(body.csv || "").split(/[\r\n,;\t]+/)
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .filter((value) => !["sku", "variant sku", "vendor sku"].includes(value.toLowerCase()));
+    const uniqueSkus = [...new Set(skus.map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, 10000);
+    const skuMeta = new Map();
+    for (const record of records) {
+      const sku = String(record.sku || record.SKU || record.Sku || record["Variant SKU"] || record["variant sku"] || record["Vendor SKU"] || record.vendorSku || "").trim();
+      if (sku && !skuMeta.has(sku.toLowerCase())) skuMeta.set(sku.toLowerCase(), { record, row: csvRecordRow(record) });
+    }
+    if (!skuMeta.size) {
+      String(body.csv || "").split(/\r?\n/).forEach((line, index) => {
+        const sku = line.trim();
+        if (sku && !["sku", "variant sku", "vendor sku"].includes(sku.toLowerCase()) && !skuMeta.has(sku.toLowerCase())) {
+          skuMeta.set(sku.toLowerCase(), { row: index + 1, rawValue: line });
+        }
+      });
+    }
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const job = createImportJob(db, {
+      section: "Source Catalog",
+      operation: "Add SKUs CSV to products",
+      direction: "import",
+      fileName: body.fileName || "source-skus.csv",
+      totalRows: uniqueSkus.length,
+      message: `Moving ${uniqueSkus.length} source SKU${uniqueSkus.length === 1 ? "" : "s"} into Products.`
+    });
+    attachImportJobOriginalFile(job, body.csv || "", body.fileName || "source-skus.csv");
+    const [existingProducts, sourceRows] = await Promise.all([
+      postgres.readProductsByKeys(uniqueSkus),
+      postgres.readVendorCatalogItemsBySkus(uniqueSkus)
+    ]);
+    db.inventory = existingProducts || [];
+    const products = (sourceRows || []).map(normalizeCatalogProductForInventory).filter(Boolean);
+    const found = new Set(products.map((product) => String(product.sku || "").toLowerCase()));
+    const changedItems = [];
+    for (const product of products) {
+      const upserted = upsertInventoryProductFromCatalog(db, product);
+      if (upserted.item) changedItems.push(upserted.item);
+    }
+    const missing = uniqueSkus.filter((sku) => !found.has(String(sku || "").toLowerCase()));
+    const errorRows = missing.map((sku) => {
+      const meta = skuMeta.get(String(sku || "").toLowerCase()) || {};
+      return standardImportError({
+        record: meta.record,
+        row: meta.row,
+        sku,
+        field: "sku",
+        issue: "SKU not found in source catalog",
+        rawValue: meta.rawValue || sku
+      });
+    });
+    attachImportJobErrorsFile(job, errorRows);
+    finishImportJob(job, {
+      status: missing.length ? "warning" : "success",
+      message: `Added ${changedItems.length} of ${uniqueSkus.length} source SKU${uniqueSkus.length === 1 ? "" : "s"} to Products.`,
+      changed: changedItems.length,
+      totalRows: uniqueSkus.length,
+      missingCount: missing.length,
+      errors: importErrorMessages(errorRows)
+    });
+    db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
+    db.syncRuns.unshift({
+      id: crypto.randomUUID(),
+      importJobId: job.id,
+      source: "Source Catalog",
+      type: "source-catalog-promote-csv",
+      status: missing.length ? "warning" : "success",
+      fileName: body.fileName || "source-skus.csv",
+      message: job.message,
+      createdAt: new Date().toISOString()
+    });
+    if (changedItems.length) await postgres.upsertProductsFromState(changedItems);
+    upsertImportJobStore(job);
+    await postgres.writeStateDocuments({ syncRuns: db.syncRuns || [] });
+    publicStateJsonCache = null;
+    return sendJson(res, 200, {
+      requested: uniqueSkus.length,
+      changed: changedItems.length,
+      missing: missing.slice(0, 100),
+      job: normalizeImportJob(job),
+      state: publicState({ ...db, inventory: [] }, { lite: true })
+    });
+  }
+
+  async function readReviewWorkflowDb() {
+    const [baseDb, reviews] = await Promise.all([
+      readDbFast({ skipInventory: true }),
+      postgres.readStateField("catalogImportReviews").catch(() => [])
+    ]);
+    return normalizeDb({ ...baseDb, catalogImportReviews: reviews || [] });
+  }
+
+  async function persistReviewWorkflowDb(db) {
+    await postgres.writeStateDocuments({ catalogImportReviews: normalizeCatalogImportReviews(db.catalogImportReviews || []) });
+    publicStateJsonCache = null;
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "catalog-import-reviews" && parts[2] && ["accept", "reject"].includes(parts[3]) && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readReviewWorkflowDb();
+    db.catalogImportReviews = normalizeCatalogImportReviews(db.catalogImportReviews);
+    const review = db.catalogImportReviews.find((row) => row.id === parts[2]);
+    if (!review) return notFound(res);
+    if (review.status !== "pending") return sendJson(res, 400, { error: "This review has already been decided." });
+    let item = null;
+    if (parts[3] === "accept") {
+      item = await postgres.readProductByKey(review.productId || review.sku);
+      if (!item) return sendJson(res, 404, { error: "Product not found for this review." });
+      item[review.field] = review.incomingValue;
+      if (review.field === "brand") item.brandLocked = true;
+      if (["packageLength", "packageWidth", "packageHeight"].includes(review.field)) item.dimensionalWeight = calculateDimensionalWeight(item);
+      item.updatedAt = new Date().toISOString();
+      review.status = "accepted";
+      await postgres.upsertProductsFromState([item]);
+    } else {
+      review.status = "rejected";
+    }
+    review.decisionNote = body.note || "";
+    review.decidedAt = new Date().toISOString();
+    review.updatedAt = review.decidedAt;
+    await persistReviewWorkflowDb(db);
+    return sendJson(res, 200, { review, item: item ? publicInventoryItem(item) : null, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "catalog-import-reviews" && parts[2] === "bulk" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const action = String(body.action || "");
+    const ids = new Set(Array.isArray(body.ids) ? body.ids : []);
+    if (!["accept", "reject"].includes(action)) return sendJson(res, 400, { error: "Unsupported review action." });
+    const db = await readReviewWorkflowDb();
+    db.catalogImportReviews = normalizeCatalogImportReviews(db.catalogImportReviews);
+    const pending = db.catalogImportReviews.filter((review) => ids.has(review.id) && review.status === "pending");
+    const productKeys = action === "accept" ? pending.map((review) => review.productId || review.sku).filter(Boolean) : [];
+    const products = action === "accept" ? await postgres.readProductsByKeys(productKeys) : [];
+    const productsByKey = new Map();
+    for (const item of products) {
+      if (item.id) productsByKey.set(String(item.id).toLowerCase(), item);
+      if (item.sku) productsByKey.set(String(item.sku).toLowerCase(), item);
+    }
+    const changedItems = [];
+    let changed = 0;
+    for (const review of pending) {
+      let item = null;
+      if (action === "accept") {
+        item = productsByKey.get(String(review.productId || "").toLowerCase()) || productsByKey.get(String(review.sku || "").toLowerCase());
+        if (!item) continue;
+        item[review.field] = review.incomingValue;
+        if (review.field === "brand") item.brandLocked = true;
+        if (["packageLength", "packageWidth", "packageHeight"].includes(review.field)) item.dimensionalWeight = calculateDimensionalWeight(item);
+        item.updatedAt = new Date().toISOString();
+        review.status = "accepted";
+        changedItems.push(item);
+      } else {
+        review.status = "rejected";
+      }
+      review.decidedAt = new Date().toISOString();
+      review.updatedAt = review.decidedAt;
+      changed += 1;
+    }
+    if (changedItems.length) await postgres.upsertProductsFromState(changedItems);
+    await persistReviewWorkflowDb(db);
+    return sendJson(res, 200, { changed, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  async function readMarketplaceTemplateDb() {
+    const [baseDb, templates] = await Promise.all([
+      readDbFast({ skipInventory: true }),
+      postgres.readStateField("marketplaceTemplates").catch(() => [])
+    ]);
+    return normalizeDb({ ...baseDb, marketplaceTemplates: templates || [] });
+  }
+
+  async function persistMarketplaceTemplates(db) {
+    await postgres.writeStateDocuments({ marketplaceTemplates: normalizeMarketplaceTemplates(db.marketplaceTemplates || []) });
+    publicStateJsonCache = null;
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "marketplace-templates" && parts[2] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readMarketplaceTemplateDb();
+    db.marketplaceTemplates = normalizeMarketplaceTemplates(db.marketplaceTemplates);
+    db.categorySettings = normalizeCategorySettings(db.categorySettings);
+    const template = db.marketplaceTemplates.find((row) => row.id === parts[2]);
+    if (!template) return notFound(res);
+    for (const field of ["marketplace", "notes"]) {
+      if (body[field] !== undefined) template[field] = String(body[field]).trim();
+    }
+    if (body.requiredAttributes !== undefined) template.requiredAttributes = parseTemplateList(body.requiredAttributes);
+    if (body.fieldDefinitions !== undefined) {
+      template.fieldDefinitions = parseTemplateFields(body.fieldDefinitions);
+      template.requiredAttributes = template.fieldDefinitions.filter((field) => field.required !== false).map((field) => field.key);
+      template.optionLists = Object.fromEntries(template.fieldDefinitions.filter((field) => field.options.length).map((field) => [field.key, field.options]));
+    }
+    if (body.categoryMappings !== undefined) {
+      template.categoryMappings = String(body.categoryMappings || "")
+        .split(/\r?\n/)
+        .map((line) => {
+          const [internalCategory = "", marketplaceCategory = "", marketplaceCategoryId = ""] = line.split("|").map((part) => part.trim());
+          return internalCategory ? { id: crypto.randomUUID(), internalCategory, marketplaceCategory, marketplaceCategoryId } : null;
+        })
+        .filter(Boolean);
+    }
+    if (body.titleMaxLength !== undefined && Number.isFinite(Number(body.titleMaxLength))) template.titleMaxLength = Number(body.titleMaxLength);
+    if (body.minImages !== undefined && Number.isFinite(Number(body.minImages))) template.minImages = Number(body.minImages);
+    for (const field of ["requireShippingProfile", "requireHandlingTime", "requirePrice"]) {
+      if (body[field] !== undefined) template[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
+    }
+    template.updatedAt = new Date().toISOString();
+    await persistMarketplaceTemplates(db);
+    return sendJson(res, 200, { template, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "marketplace-templates" && parts[3] === "action" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readMarketplaceTemplateDb();
+    db.marketplaceTemplates = normalizeMarketplaceTemplates(db.marketplaceTemplates);
+    db.categorySettings = normalizeCategorySettings(db.categorySettings);
+    const template = db.marketplaceTemplates.find((row) => row.id === parts[2]);
+    if (!template) return notFound(res);
+    const action = String(body.action || "").toLowerCase();
+    if (action === "duplicate") {
+      const copy = normalizeMarketplaceTemplate({
+        ...template,
+        id: crypto.randomUUID(),
+        marketplace: `${template.marketplace} Copy`,
+        updatedAt: new Date().toISOString()
+      });
+      db.marketplaceTemplates.unshift(copy);
+      await persistMarketplaceTemplates(db);
+      return sendJson(res, 200, { template: copy, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+    }
+    if (action === "reset") {
+      const defaults = DEFAULT_MARKETPLACE_TEMPLATES.find((row) => row.marketplace === template.marketplace);
+      if (!defaults) return sendJson(res, 400, { error: "No default exists for this template." });
+      Object.assign(template, normalizeMarketplaceTemplate(defaults));
+      await persistMarketplaceTemplates(db);
+      return sendJson(res, 200, { template, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+    }
+    if (["active", "inactive"].includes(action)) {
+      template.status = action;
+      template.updatedAt = new Date().toISOString();
+      await persistMarketplaceTemplates(db);
+      return sendJson(res, 200, { template, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+    }
+    return sendJson(res, 400, { error: "Unsupported template action." });
+  }
+
+  async function readOrderDraftWorkflowDb() {
+    const [baseDb, drafts] = await Promise.all([
+      readDbFast({ skipInventory: true }),
+      postgres.readStateField("orderDrafts").catch(() => [])
+    ]);
+    return normalizeDb({ ...baseDb, orderDrafts: drafts || [] });
+  }
+
+  async function persistOrderDraftWorkflowDb(db) {
+    await postgres.writeStateDocuments({
+      orderDrafts: (db.orderDrafts || []).map((draft) => normalizeOrderDraft(db, draft)),
+      sequence: db.sequence || {}
+    });
+    publicStateJsonCache = null;
+  }
+
+  async function hydrateDraftLineCosts(db, draftLike = {}) {
+    const items = Array.isArray(draftLike.items) ? draftLike.items : [];
+    const skus = items.map((item) => item.sku).filter(Boolean);
+    if (!skus.length) return draftLike;
+    const products = await postgres.readProductsByKeys(skus);
+    db.inventory = products || [];
+    return draftLike;
+  }
+
+  async function postgresLiteState(extra = {}) {
+    const base = await withOperationalSummary(await readDbFast({ skipInventory: true }));
+    return publicState({ ...base, ...extra, inventory: [] }, { lite: true });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readOrderDraftWorkflowDb();
+    await hydrateDraftLineCosts(db, body);
+    const draft = normalizeOrderDraft(db, {
+      source: body.source,
+      buyer: body.buyer,
+      buyerEmail: body.buyerEmail,
+      phone: body.phone,
+      marketplaceOrderNumber: body.marketplaceOrderNumber,
+      note: body.note,
+      shippingAddress: body.shippingAddress,
+      billingAddress: body.billingAddress,
+      items: body.items,
+      status: "draft"
+    });
+    if (!draft.buyer) return sendJson(res, 400, { error: "Customer name is required." });
+    if (!draft.items.length) return sendJson(res, 400, { error: "Add at least one line item." });
+    db.orderDrafts = Array.isArray(db.orderDrafts) ? db.orderDrafts : [];
+    db.orderDrafts.unshift(draft);
+    await persistOrderDraftWorkflowDb(db);
+    return sendJson(res, 200, { draft, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts[3] === "duplicate" && postgres.isPostgresEnabled()) {
+    const db = await readOrderDraftWorkflowDb();
+    const current = (db.orderDrafts || []).find((row) => row.id === parts[2]);
+    if (!current) return notFound(res);
+    await hydrateDraftLineCosts(db, current);
+    const duplicate = normalizeOrderDraft(db, {
+      ...current,
+      id: crypto.randomUUID(),
+      draftNumber: "",
+      quoteGroupId: current.quoteGroupId || current.id,
+      revisionNumber: nextDraftRevisionNumber(db, current.quoteGroupId || current.id),
+      parentDraftId: current.id,
+      marketplaceOrderNumber: "",
+      note: current.note ? `${current.note} / Duplicated from ${current.draftNumber}` : `Duplicated from ${current.draftNumber}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    db.orderDrafts.unshift(duplicate);
+    await persistOrderDraftWorkflowDb(db);
+    return sendJson(res, 200, { draft: duplicate, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readOrderDraftWorkflowDb();
+    const current = (db.orderDrafts || []).find((row) => row.id === parts[2]);
+    if (!current) return notFound(res);
+    await hydrateDraftLineCosts(db, body.items ? body : current);
+    const updated = normalizeOrderDraft(db, {
+      ...current,
+      source: body.source ?? current.source,
+      buyer: body.buyer ?? current.buyer,
+      buyerEmail: body.buyerEmail ?? current.buyerEmail,
+      phone: body.phone ?? current.phone,
+      marketplaceOrderNumber: body.marketplaceOrderNumber ?? current.marketplaceOrderNumber,
+      note: body.note ?? current.note,
+      shippingAddress: body.shippingAddress ?? current.shippingAddress,
+      billingAddress: body.billingAddress ?? current.billingAddress,
+      items: body.items ?? current.items,
+      updatedAt: new Date().toISOString()
+    });
+    if (!updated.buyer) return sendJson(res, 400, { error: "Customer name is required." });
+    if (!updated.items.length) return sendJson(res, 400, { error: "Add at least one line item." });
+    Object.assign(current, updated);
+    await persistOrderDraftWorkflowDb(db);
+    return sendJson(res, 200, { draft: current, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts[3] === "convert" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readOrderDraftWorkflowDb();
+    const index = (db.orderDrafts || []).findIndex((row) => row.id === parts[2]);
+    if (index < 0) return notFound(res);
+    const draft = db.orderDrafts[index];
+    if (!draft.items?.length) return sendJson(res, 400, { error: "Draft has no line items." });
+    await hydrateDraftLineCosts(db, draft);
+    const order = buildOrderFromDraft(db, draft, body.user || "Luis");
+    db.orderDrafts.splice(index, 1);
+    await Promise.all([
+      postgres.saveOrder(order),
+      persistOrderDraftWorkflowDb(db)
+    ]);
+    const saved = await postgres.readOrderByKey(order.id);
+    return sendJson(res, 200, { order: saved || order, state: publicState({ ...db, orders: saved ? [saved] : [order], inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "duplicate-draft" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const orderItems = Array.isArray(order.items) && order.items.length
+      ? order.items
+      : [{ sku: order.sku, title: order.title, qty: Number(order.qty || 1), price: Number(order.total || 0) / Math.max(1, Number(order.qty || 1)) }];
+    const products = await postgres.readProductsByKeys(orderItems.map((item) => item.sku).filter(Boolean));
+    const productsBySku = new Map((products || []).map((item) => [String(item.sku || "").toLowerCase(), item]));
+    const items = orderItems.map((item) => {
+      const product = productsBySku.get(String(item.sku || "").toLowerCase());
+      return {
+        sku: item.sku,
+        title: item.title,
+        qty: Number(item.qty || 1),
+        price: Number(item.price || 0),
+        cost: Number(product?.cost || 0)
+      };
+    });
+    const db = await readOrderDraftWorkflowDb();
+    db.inventory = products || [];
+    const duplicate = normalizeOrderDraft(db, {
+      buyer: order.buyer,
+      source: order.source || "Manual",
+      buyerEmail: order.buyerEmail || "",
+      phone: order.phone || "",
+      marketplaceOrderNumber: "",
+      note: `Duplicated from ${order.orderNumber}`,
+      shippingAddress: order.address || {},
+      billingAddress: order.address || {},
+      items,
+      sourceOrderId: order.id,
+      sourceOrderNumber: order.orderNumber,
+      revisionNumber: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    db.orderDrafts = Array.isArray(db.orderDrafts) ? db.orderDrafts : [];
+    db.orderDrafts.unshift(duplicate);
+    await persistOrderDraftWorkflowDb(db);
+    return sendJson(res, 200, { draft: duplicate, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[3] === "notes" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const note = String(body.note || "").trim();
+    if (!note) return sendJson(res, 400, { error: "Note is required." });
+    order.notes = order.notes ? `${order.notes}\n${note}` : note;
+    order.updatedAt = new Date().toISOString();
+    addOrderTimeline(order, {
+      type: "note",
+      title: "Note added",
+      message: note,
+      user: body.user || "Luis"
+    });
+    await postgres.saveOrder(order);
+    const saved = await postgres.readOrderByKey(order.id);
+    return sendJson(res, 200, { order: saved || order, state: publicState({ orders: saved ? [saved] : [order], inventory: [] }, { lite: true }) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/alternates" && postgres.isPostgresEnabled()) {
+    const skus = String(url.searchParams.get("skus") || url.searchParams.get("sku") || "")
+      .split(",")
+      .map((sku) => sku.trim())
+      .filter(Boolean)
+      .slice(0, 100);
+    const [products, sourceCatalogOverrides, vendorCategoryMappings] = await Promise.all([
+      postgres.readProductsByKeys(skus),
+      postgres.readStateField("sourceCatalogOverrides").catch(() => ({})),
+      postgres.readStateField("vendorCategoryMappings").catch(() => ({}))
+    ]);
+    const alternates = await findSourceCatalogAlternatesBySkus(skus, {
+      inventory: products || [],
+      sourceCatalogOverrides: sourceCatalogOverrides || {},
+      vendorCategoryMappings: vendorCategoryMappings || {}
+    });
+    return sendJson(res, 200, { alternates });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "categories" && parts[2] === "coverage" && parts[3] && postgres.isPostgresEnabled()) {
+    const issue = String(parts[3] || "").replace(/\.csv$/i, "");
+    const [categorySettings, vendorCategoryMappings, mainRows] = await Promise.all([
+      postgres.readStateField("categorySettings").catch(() => []),
+      postgres.readStateField("vendorCategoryMappings").catch(() => ({})),
+      postgres.listCategoryProductStats()
+    ]);
+    const db = {
+      inventory: [],
+      categorySettings: normalizeCategorySettings(categorySettings || []),
+      vendorCategoryMappings: normalizeVendorCategoryMappings(vendorCategoryMappings || {}),
+      __mainCategoryRows: mainRows || []
+    };
+    let rows = [];
+    if (issue === "uncategorized-products") {
+      rows = await postgres.listUncategorizedProducts({ limit: 50000 });
+    } else if (issue === "missing-shopify") {
+      const settingsByName = new Map(db.categorySettings.map((row) => [formatCategoryName(row.name).toLowerCase(), row]));
+      const mainByName = new Map();
+      for (const rawRow of mainRows || []) {
+        const name = formatCategoryName(rawRow.name || "Uncategorized") || "Uncategorized";
+        mainByName.set(name.toLowerCase(), {
+          name,
+          productCount: Number(rawRow.productCount || 0),
+          activeProductCount: Number(rawRow.activeProductCount || 0)
+        });
+      }
+      for (const setting of db.categorySettings) {
+        const name = formatCategoryName(setting.name || "");
+        if (name && !mainByName.has(name.toLowerCase())) mainByName.set(name.toLowerCase(), { name, productCount: 0, activeProductCount: 0 });
+      }
+      rows = [...mainByName.values()]
+        .filter((row) => {
+          const setting = settingsByName.get(formatCategoryName(row.name).toLowerCase());
+          return !(setting?.mappings?.shopify?.categoryPath || setting?.mappings?.shopify?.categoryId);
+        })
+        .map((row) => ({
+          category: row.name,
+          products: row.productCount || 0,
+          active_products: row.activeProductCount || 0,
+          issue: "Missing Shopify category mapping",
+          current_shopify_category: ""
+        }));
+    } else if (issue === "missing-taxonomy-id") {
+      rows = db.categorySettings
+        .filter((row) => row.mappings?.shopify?.categoryPath && !row.mappings?.shopify?.categoryId)
+        .map((row) => ({
+          category: row.name,
+          shopify_category: row.mappings.shopify.categoryPath || "",
+          shopify_category_id: "",
+          issue: "Shopify category path did not match a taxonomy ID"
+        }));
+    } else if (issue === "vendor-category-mappings") {
+      rows = Object.values(db.vendorCategoryMappings)
+        .sort((a, b) => String(a.supplier).localeCompare(String(b.supplier)) || String(a.vendorCategory).localeCompare(String(b.vendorCategory)))
+        .map((row) => ({
+          supplier: row.supplier || "",
+          vendor_category: row.vendorCategory || "",
+          main_category: row.mainCategory || "",
+          sample_sku: row.sampleSku || "",
+          match_count: row.matchCount || 0,
+          conflict_count: row.conflictCount || 0,
+          updated_at: row.updatedAt || ""
+        }));
+    } else {
+      rows = categoryCoverageRows(db, issue);
+    }
+    const filename = `${coverageIssueLabel(issue)}.csv`;
+    if (String(parts[3] || "").toLowerCase().endsWith(".csv") || url.searchParams.get("format") === "csv") {
+      return sendCsv(res, rowsToCsv(rows), filename);
+    }
+    return sendJson(res, 200, { issue, label: coverageIssueLabel(issue), rows, total: rows.length, filename });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/export/inventory" && postgres.isPostgresEnabled()) {
+    const headers = ["sku", "title", "marketplaceTitle", "websitePrice", "cost", "listPrice", "msrp", "price", "qty", "reserved", "available", "reorderPoint", "brand", "category", "condition", "status", "barcode", "shortDescription", "longDescription", "images", "tags", "weightOz", "lengthIn", "widthIn", "heightIn", "vendor", "seoKeywords", "sources"];
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=inventory-export.csv"
+    });
+    res.write(`${headers.map(escapeCsv).join(",")}\n`);
+    const pageSize = 2500;
+    let page = 1;
+    while (true) {
+      const result = await postgres.listProducts({ page, limit: pageSize });
+      const items = result?.inventory || result?.items || [];
+      for (const rawItem of items) {
+        const item = publicInventoryItem(rawItem);
+        const row = [
+          item.sku,
+          item.title,
+          item.marketplaceTitle,
+          item.websitePrice ?? item.price,
+          item.cost,
+          item.listPrice ?? item.msrp,
+          item.msrp,
+          item.price,
+          item.qty,
+          item.reserved,
+          Number(item.qty || 0) - Number(item.reserved || 0),
+          rawItem.reorderPoint,
+          item.brand,
+          item.category,
+          item.condition,
+          item.status,
+          item.barcode,
+          item.shortDescription,
+          item.longDescription,
+          (item.images || []).join("|"),
+          (item.tags || []).join("|"),
+          rawItem.weightOz,
+          rawItem.lengthIn,
+          rawItem.widthIn,
+          rawItem.heightIn,
+          item.vendor || item.supplier,
+          rawItem.seoKeywords,
+          Object.entries(rawItem.sources || {}).map(([source, id]) => `${source}:${id}`).join(";")
+        ];
+        res.write(`${row.map(escapeCsv).join(",")}\n`);
+      }
+      if (!items.length || page * pageSize >= Number(result?.total || 0)) break;
+      page += 1;
+    }
+    return res.end();
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[3] === "export" && postgres.isPostgresEnabled()) {
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const baseDb = await readDbFast({ skipInventory: true });
+    const vendor = findVendorById(baseDb, po.vendorId) || findVendorByName(baseDb, po.supplier);
+    const format = parts[4] || "csv";
+    if (format === "csv") {
+      const headers = ["poNumber", "vendor", "sku", "title", "qty", "estimatedUnitCost", "orderNumbers"];
+      const rows = (po.items || []).map((item) => ({
+        poNumber: po.poNumber,
+        vendor: po.supplier,
+        sku: item.sku,
+        title: item.title,
+        qty: item.qty,
+        estimatedUnitCost: item.estimatedUnitCost,
+        orderNumbers: (item.orderNumbers || []).join("|")
+      }));
+      return sendCsv(res, rowsToCsv(rows.length ? rows : [Object.fromEntries(headers.map((header) => [header, ""]))]), `${po.poNumber}.csv`);
+    }
+    if (format === "pdf") {
+      const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(po.poNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}</style></head><body><h1>${escapeHtml(po.poNumber)}</h1><p class="muted">${escapeHtml(po.supplier || "")} / ${escapeHtml(po.status || "")}</p><p>Vendor: ${escapeHtml(vendor?.vendorNumber || "Unassigned")}</p><p>Estimated cost: ${Number(po.estimatedCost || 0).toFixed(2)}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Est. unit cost</th><th>Orders</th></tr></thead><tbody>${(po.items || []).map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.estimatedUnitCost || 0).toFixed(2))}</td><td>${escapeHtml((item.orderNumbers || []).join(", "))}</td></tr>`).join("")}</tbody></table></body></html>`;
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Disposition": `inline; filename=${po.poNumber}.html`
+      });
+      return res.end(htmlDoc);
+    }
+    return sendJson(res, 400, { error: "Unsupported export format." });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[3] === "export" && postgres.isPostgresEnabled()) {
+    const db = await readOrderDraftWorkflowDb();
+    const draft = (db.orderDrafts || []).find((row) => row.id === parts[2]);
+    if (!draft) return notFound(res);
+    const format = parts[4] || "pdf";
+    if (format !== "pdf") return sendJson(res, 400, { error: "Unsupported export format." });
+    const address = draft.shippingAddress || {};
+    const items = Array.isArray(draft.items) ? draft.items : [];
+    const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
+    const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(draft.draftNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}dl{display:grid;grid-template-columns:180px 1fr;gap:8px 16px;margin-top:20px}</style></head><body><h1>${escapeHtml(draft.draftNumber)}</h1><p class="muted">Manual draft / ${escapeHtml(draft.source || "Manual")}</p><p><strong>${escapeHtml(draft.buyer || "Unknown customer")}</strong><br>${escapeHtml(draft.buyerEmail || "")}<br>${escapeHtml(draft.phone || "")}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.price || 0).toFixed(2))}</td><td>${escapeHtml((Number(item.qty || 0) * Number(item.price || 0)).toFixed(2))}</td></tr>`).join("")}</tbody></table><dl><dt>Subtotal</dt><dd>${escapeHtml(subtotal.toFixed(2))}</dd><dt>External reference</dt><dd>${escapeHtml(draft.marketplaceOrderNumber || "N/A")}</dd><dt>Shipping</dt><dd>${escapeHtml([address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join(" / "))}</dd><dt>Notes</dt><dd>${escapeHtml(draft.note || "None")}</dd></dl></body></html>`;
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Disposition": `attachment; filename=${draft.draftNumber}.html`
+    });
+    return res.end(htmlDoc);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/inventory/bulk" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map((id) => String(id || "").trim()).filter(Boolean))];
+    if (!ids.length) return sendJson(res, 400, { error: "Select at least one product." });
+    const action = String(body.action || "");
+    if (action === "delete") {
+      const result = await postgres.deleteProductsByIds(ids);
+      publicStateJsonCache = null;
+      return sendJson(res, 200, { changed: result.deleted || 0, state: await postgresLiteState() });
+    }
+    const statusByAction = {
+      "set-active": "Active",
+      "set-inactive": "Inactive",
+      "set-discontinued": "Discontinued"
+    };
+    const status = statusByAction[action];
+    if (!status) return sendJson(res, 400, { error: "Unsupported bulk action." });
+    const products = await postgres.readProductsByKeys(ids);
+    const now = new Date().toISOString();
+    for (const item of products || []) {
+      item.status = status;
+      item.active = status === "Active";
+      item.updatedAt = now;
+    }
+    if (products?.length) await postgres.upsertProductsFromState(products);
+    publicStateJsonCache = null;
+    return sendJson(res, 200, { changed: products?.length || 0, state: await postgresLiteState() });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/import/inventory" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const records = parseCsv(body.csv || "");
+    const now = new Date().toISOString();
+    const skus = records.map((record) => String(record.sku || record.SKU || "").trim()).filter(Boolean);
+    const existingProducts = await postgres.readProductsByKeys(skus);
+    const bySku = new Map((existingProducts || []).map((item) => [String(item.sku || "").toLowerCase(), item]));
+    const changedItems = [];
+    const errorRows = [];
+    let changed = 0;
+    for (const record of records) {
+      const sku = String(record.sku || record.SKU || "").trim();
+      if (!sku) {
+        errorRows.push(standardImportError({ record, field: "sku", issue: "Missing SKU", rawValue: JSON.stringify(record) }));
+        continue;
+      }
+      const existing = bySku.get(sku.toLowerCase());
+      const qty = Number(record.qty ?? record.quantity ?? record.QTY);
+      const title = String(record.title || record.name || existing?.title || sku).trim();
+      const productFields = inventoryPayloadFromRecord(record);
+      const item = existing || {
+        id: crypto.randomUUID(),
+        sku,
+        title,
+        qty: Number.isFinite(qty) ? qty : 0,
+        reserved: 0,
+        reorderPoint: Number(record.reorderPoint || 0),
+        sources: {},
+        createdAt: now
+      };
+      if (Number.isFinite(qty)) item.qty = qty;
+      item.title = title;
+      Object.assign(item, productFields);
+      if (productFields.brand !== undefined && productFields.brandLocked === undefined) item.brandLocked = true;
+      item.updatedAt = now;
+      changedItems.push(item);
+      changed += 1;
+    }
+    if (changedItems.length) {
+      await postgres.upsertProductsFromState(changedItems);
+      await postgres.upsertInventoryLevelsFromProducts(changedItems);
+    }
+    const status = errorRows.length ? "warning" : "success";
+    const message = `Updated ${changed} inventory row${changed === 1 ? "" : "s"} from CSV${errorRows.length ? `; ${errorRows.length} row${errorRows.length === 1 ? "" : "s"} need review.` : "."}`;
+    const job = createImportJob({ importJobs: [], syncRuns: [] }, {
+      section: "Inventory",
+      operation: "Inventory CSV import",
+      direction: "import",
+      fileName: body.fileName || "inventory.csv",
+      totalRows: records.length,
+      message
+    });
+    attachImportJobOriginalFile(job, body.csv || "", body.fileName || "inventory.csv");
+    attachImportJobErrorsFile(job, errorRows);
+    finishImportJob(job, { status, message, changed, totalRows: records.length, missingCount: errorRows.length, errors: importErrorMessages(errorRows) });
+    upsertImportJobStore(job);
+    await postgres.upsertOperationJob(job);
+    publicStateJsonCache = null;
+    return sendJson(res, 200, { changed, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/status-sync-all" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const limit = Math.max(1, Math.min(500, Number(body.limit || 100)));
+    const db = await readDbFast({ skipInventory: true });
+    const job = createImportJob(db, {
+      section: "Products",
+      operation: "Shopify status sync",
+      direction: "sync",
+      status: "queued",
+      fileName: "shopify-status-sync.json",
+      totalRows: limit,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: shouldRunJobsInline() ? "" : "shopify-status-sync",
+      workerPayload: shouldRunJobsInline() ? {} : { limit },
+      message: `Shopify status sync queued for up to ${limit.toLocaleString()} linked product${limit === 1 ? "" : "s"}.`
+    });
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) {
+      activeJobRecords.set(job.id, normalizeImportJob(job));
+      setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: limit, processedRows: 0, startedAt: job.startedAt || new Date().toISOString() });
+      startShopifyStatusSyncJob(job.id, { limit });
+    }
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/temu/exchange-code" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const result = await exchangeTemuCode(db, body.code);
+    await writeDb(normalizeDb({ ...db, inventory: [] }));
+    return sendJson(res, 200, { ...result, state: await postgresLiteState() });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/ebay/auth-url" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    const authUrl = ebayConsentUrl(db);
+    await writeDb(normalizeDb({ ...db, inventory: [] }));
+    return sendJson(res, 200, { authUrl });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/account-settings/sync" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    const job = queueEbayAccountSettingsSyncJob(db);
+    const channel = (db.connections || []).find((row) => row.name === "eBay");
+    return sendJson(res, 200, {
+      queued: true,
+      job: normalizeImportJob(job),
+      channel,
+      state: await postgresLiteState({ connections: db.connections, importJobs: [job] }),
+      message: job.message
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/locations" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const { job, merchantLocationKey } = queueEbayLocationJob(db, body);
+    const channel = (db.connections || []).find((row) => row.name === "eBay");
+    return sendJson(res, 202, {
+      queued: true,
+      job: normalizeImportJob(job),
+      merchantLocationKey,
+      channel,
+      state: await postgresLiteState({ connections: db.connections, importJobs: [job] }),
+      message: job.message
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/inventory/ebay/bulk-launch" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map(String).filter(Boolean))].slice(0, 200);
+    if (!ids.length) return sendJson(res, 400, { error: "Select eBay-ready products first." });
+    const db = await readDbFast({ skipInventory: true });
+    db.inventory = await postgres.readProductsByKeys(ids);
+    const idSet = new Set(ids);
+    const results = [];
+    let launched = 0;
+    let skipped = 0;
+    let failed = 0;
+    const touched = [];
+    for (const item of db.inventory || []) {
+      if (!idSet.has(String(item.id)) && !idSet.has(String(item.sku))) continue;
+      try {
+        const readiness = await ebayListingReadiness(db, item);
+        if (!readiness.ready) {
+          skipped += 1;
+          results.push({ id: item.id, sku: item.sku, status: "skipped", missing: readiness.missing });
+          continue;
+        }
+        const result = await createOrUpdateEbayListing(db, item, { useChannelPricing: true }, { publish: true });
+        launched += 1;
+        touched.push(item);
+        results.push({
+          id: item.id,
+          sku: item.sku,
+          status: result.config?.listingId ? "live" : "offer",
+          offerId: result.config?.offerId || "",
+          listingId: result.config?.listingId || "",
+          price: result.config?.price || readiness.price,
+          quantity: result.config?.quantity || readiness.quantity
+        });
+      } catch (error) {
+        failed += 1;
+        results.push({ id: item.id, sku: item.sku, status: "failed", error: error.message });
+      }
+    }
+    if (touched.length) await postgres.upsertProductsFromState(touched);
+    return sendJson(res, 200, { launched, skipped, failed, results, state: await postgresLiteState() });
+  }
+
+  const db = await readDb({ skipInventory: postgres.isPostgresEnabled() });
 
   if (req.method === "POST" && url.pathname === "/api/knowledge/articles") {
     const body = await parseBody(req);
@@ -9753,8 +19695,15 @@ async function handleApi(req, res) {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/import-jobs') {
-    db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
-    return sendJson(res, 200, { importJobs: db.importJobs });
+    db.importJobs = await mergedImportJobsAsync(db);
+    if (markInterruptedActiveJobs(db)) {
+      for (const job of db.importJobs) upsertImportJobStore(job);
+    }
+    await backfillMissingExportManifests(db.importJobs).catch((error) => {
+      console.error("Unable to backfill export manifests", error.message || error);
+    });
+    db.importJobs = await mergedImportJobsAsync(db);
+    return sendJson(res, 200, { importJobs: applyActiveJobProgress(db.importJobs) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "stop") {
@@ -9765,12 +19714,13 @@ async function handleApi(req, res) {
     }
     finishImportJob(job, {
       status: "stopped",
-      message: job.message || "Job was stopped.",
+      message: "Job was stopped.",
       details: [job.details, "Stopped by user from Jobs profile."].filter(Boolean).join(" ")
     });
-    await writeDb(db);
-    const normalized = normalizeDb(db);
-    return sendJson(res, 200, { job: normalized.importJobs.find((row) => row.id === job.id) || job, importJobs: normalized.importJobs });
+    setActiveJobProgress(job.id, { status: "stopped", phase: "stopped", estimatedSecondsRemaining: 0 });
+    upsertImportJobStore(job);
+    const jobs = await mergedImportJobsAsync(db);
+    return sendJson(res, 200, { job: jobs.find((row) => row.id === job.id) || job, importJobs: jobs });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3]) {
@@ -9790,6 +19740,10 @@ async function handleApi(req, res) {
       });
       return res.end(rowsToCsv(rows));
     }
+    if (parts[3] === "manifest.json") {
+      if (sendImportJobFile(res, job, "manifest")) return;
+      return sendJson(res, 404, { error: "This job has no manifest file." });
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/catalog/products") {
@@ -9805,6 +19759,121 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/catalog/facets") {
     return sendJson(res, 200, await scanCatalogFacets());
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/changes") {
+    const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get("limit") || 500)));
+    const rows = readCatalogChangeRows(limit);
+    return sendJson(res, 200, {
+      rows,
+      summary: catalogChangeSummary(rows),
+      tracking: catalogChangeTrackingStatus()
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/closeouts.csv") {
+    return streamCloseoutSkusCsv(res);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/collections/closeouts") {
+    try {
+      const result = await syncShopifyCloseoutCollection();
+      return sendJson(res, 200, {
+        ok: true,
+        action: result.action,
+        collection: result.collection,
+        message: result.action === "created"
+          ? "Shopify Closeouts collection created."
+          : result.action === "updated"
+            ? "Shopify Closeouts collection updated."
+            : "Shopify Closeouts collection already exists."
+      });
+    } catch (error) {
+      return sendJson(res, 500, { error: error.message || "Unable to sync Shopify Closeouts collection." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/status-sync") {
+    const body = await parseBody(req);
+    const productId = String(body.productId || body.id || "").trim();
+    const sku = String(body.sku || "").trim().toLowerCase();
+    const gid = normalizeShopifyProductGid(body.gid || body.shopifyId || "");
+    const item = postgres.isPostgresEnabled()
+      ? (gid ? await postgres.readProductByShopifyGid(gid) : await postgres.readProductByKey(productId || sku))
+      : (normalizeDb(await readDbFast()).inventory || []).find((row) => {
+        if (productId && row.id === productId) return true;
+        if (sku && String(row.sku || "").trim().toLowerCase() === sku) return true;
+        if (gid && normalizeShopifyProductGid(row.shopifyId) === gid) return true;
+        return false;
+      });
+    if (!item) return sendJson(res, 404, { error: "No local product found for that Shopify GID or SKU." });
+    try {
+      const result = await syncInventoryItemShopifyStatus(item, gid);
+      if (postgres.isPostgresEnabled()) {
+        await postgres.upsertProductsFromState([item]);
+        mergeShopifyStatusMapSync({ [String(item.sku || "").toLowerCase()]: result.payload });
+      } else {
+        const db = normalizeDb(await readDbFast());
+        const existing = (db.inventory || []).find((row) => row.id === item.id || String(row.sku || "").toLowerCase() === String(item.sku || "").toLowerCase());
+        if (existing) Object.assign(existing, item);
+        await writeDb(normalizeDb(db));
+      }
+      const stateDb = postgres.isPostgresEnabled() ? await postgresLiteState() : normalizeDb(await readDbFast());
+      return sendJson(res, 200, {
+        ok: true,
+        item: publicInventoryItem(item),
+        status: result.payload,
+        changed: result.changed,
+        state: postgres.isPostgresEnabled() ? stateDb : publicState(stateDb),
+        message: result.changed.length
+          ? `Updated Shopify status for ${item.sku || item.title || item.id}.`
+          : `Shopify status already current for ${item.sku || item.title || item.id}.`
+      });
+    } catch (error) {
+      return sendJson(res, 500, { error: error.message || "Unable to sync Shopify status." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/status-sync-all") {
+    const body = await parseBody(req);
+    const limit = Math.max(1, Math.min(500, Number(body.limit || 100)));
+    const db = postgres.isPostgresEnabled() ? null : normalizeDb(await readDbFast());
+    const candidates = postgres.isPostgresEnabled()
+      ? ((await postgres.listProducts({ page: 1, limit, filters: { channelStatus: "shopify-linked" } }))?.inventory || [])
+      : (db.inventory || []).filter((item) => normalizeShopifyProductGid(item.shopifyId)).slice(0, limit);
+    const errors = [];
+    let synced = 0;
+    let changed = 0;
+    const changedItems = [];
+    const statusMap = {};
+    for (const item of candidates) {
+      try {
+        const result = await syncInventoryItemShopifyStatus(item);
+        synced += 1;
+        statusMap[String(item.sku || "").toLowerCase()] = result.payload;
+        if (result.changed.length) {
+          changed += 1;
+          changedItems.push(item);
+        }
+      } catch (error) {
+        errors.push(`${item.sku || item.id}: ${error.message}`);
+      }
+    }
+    if (postgres.isPostgresEnabled()) {
+      if (changedItems.length) await postgres.upsertProductsFromState(changedItems);
+      if (Object.keys(statusMap).length) mergeShopifyStatusMapSync(statusMap);
+    } else if (synced || changed) {
+      await writeDb(normalizeDb(db));
+    }
+    const stateDb = postgres.isPostgresEnabled() ? await postgresLiteState() : normalizeDb(db);
+    return sendJson(res, 200, {
+      ok: !errors.length,
+      synced,
+      changed,
+      errors: errors.slice(0, 25),
+      state: postgres.isPostgresEnabled() ? stateDb : publicState(stateDb),
+      message: `Shopify GraphQL sync checked ${synced.toLocaleString()} product${synced === 1 ? "" : "s"}${changed ? ` and updated ${changed.toLocaleString()}` : ""}${errors.length ? `; ${errors.length.toLocaleString()} failed` : ""}.`
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/catalog/alternates") {
@@ -10424,6 +20493,80 @@ async function handleApi(req, res) {
     const skus = Array.isArray(body.skus)
       ? [...new Set(body.skus.map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, 100000)
       : [];
+    const forceJob = body.forceJob === true || ["1", "true", "yes"].includes(String(body.forceJob || "").toLowerCase());
+    const dataFileName = body.dataFileName || body.fileName || "";
+    const shouldQueue = skus.length > BACKGROUND_EXPORT_PAGE_SIZE || (!skus.length && Number(body.limit || 10000) > BACKGROUND_EXPORT_PAGE_SIZE);
+    if (forceJob || shouldQueue) {
+      const filename = mappedExportFilename(template, dataFileName);
+      const buildExport = async (workDb, jobContext = {}) => {
+        jobContext.progress?.({ phase: "collecting_products", processedRows: 0, totalRows: skus.length || Number(body.limit || 10000) || 0 });
+        workDb.exportMappings = normalizeExportMappings(workDb.exportMappings);
+        const workTemplate = workDb.exportMappings.find((row) => row.id === body.mappingId) || template;
+        const exportFileName = mappedExportFilename(workTemplate, dataFileName);
+        const exportFilePath = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(jobContext.jobId || crypto.randomUUID(), "export-job"), safeImportFileName(exportFileName, "export.csv"));
+        let written;
+        let matched = 0;
+        let limited = false;
+        let productCount = 0;
+        if (!skus.length && postgres.isPostgresEnabled()) {
+          written = await mappedSourceCatalogCsvPostgresFileAsync(workDb, workTemplate, exportFilePath, {
+            query: body.query || "",
+            filters: body.filters || {},
+            limit: body.limit || 10000,
+            progress: jobContext.progress,
+            isCanceled: jobContext.isCanceled
+          });
+          matched = written.matched;
+          limited = written.limited;
+          productCount = written.productCount;
+        } else {
+          let items = [];
+          if (skus.length) {
+            items = await findCatalogProductsBySkus(skus, workDb);
+            matched = items.length;
+          } else {
+            const result = await collectCatalogProductsForExport({
+              query: body.query || "",
+              filters: body.filters || {},
+              limit: body.limit || 10000,
+              db: workDb
+            });
+            items = result.items;
+            matched = result.matched;
+            limited = result.limited;
+          }
+          productCount = items.length;
+          jobContext.progress?.({ phase: "building_csv", processedRows: 0, totalRows: items.length });
+          written = await mappedProductsCsvFileAsync(workDb, workTemplate, items, exportFilePath, { progress: jobContext.progress, isCanceled: jobContext.isCanceled });
+        }
+        return {
+          filename: exportFileName,
+          filePath: written.filePath,
+          count: written.outputRows,
+          changed: written.outputRows,
+          productCount,
+          details: limited && matched > productCount
+            ? `${written.outputRows.toLocaleString()} CSV rows exported from ${Number(productCount || 0).toLocaleString()} products of ${matched.toLocaleString()} matched.`
+            : `${written.outputRows.toLocaleString()} CSV rows exported from ${Number(matched || productCount || 0).toLocaleString()} product${Number(matched || productCount || 0) === 1 ? "" : "s"}.`
+        };
+      };
+      const job = await queueBackgroundExport(db, {
+        section: "Source Catalog",
+        operation: `${template.name} source catalog export`,
+        fileName: filename,
+        totalRows: skus.length || 0,
+        exportManifest: { exportType: "source-catalog", templateId: template.id, templateName: template.name, source: template.source, dataFileName, skus, query: body.query || "", filters: body.filters || {} },
+        message: "Source catalog export queued. You can download it from Jobs when it finishes."
+      }, buildExport);
+      if (!job.duplicateOfActiveJob) {
+        upsertImportJobStore(job);
+        startBackgroundExportJob(job.id, buildExport, {
+          fileName: filename,
+          exportManifest: { exportType: "source-catalog", templateId: template.id, templateName: template.name, source: template.source, dataFileName, skus, query: body.query || "", filters: body.filters || {} }
+        });
+      }
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), count: 0, message: job.message });
+    }
     let items = [];
     let matched = 0;
     let limited = false;
@@ -10442,9 +20585,10 @@ async function handleApi(req, res) {
       limited = result.limited;
     }
     return sendJson(res, 200, {
-      filename: mappedExportFilename(template),
+      filename: mappedExportFilename(template, dataFileName),
       csv: mappedProductsCsv(db, template, items),
-      count: items.length,
+      count: mappedProductsCsvRowCount(db, template, items),
+      productCount: items.length,
       matched,
       limited
     });
@@ -10522,7 +20666,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/temu/exchange-code") {
     const body = await parseBody(req);
     const result = await exchangeTemuCode(db, body.code);
-    const normalized = normalizeDb(await readDb());
+    const normalized = normalizeDb(await readDb({ skipInventory: postgres.isPostgresEnabled() }));
     return sendJson(res, 200, { ...result, state: publicState(normalized) });
   }
 
@@ -10533,36 +20677,57 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/ebay/catalog-import") {
-    const result = await importEbayCatalog(db);
-    const normalized = normalizeDb(db);
-    await writeDb(normalized);
-    return sendJson(res, 200, {
-      ...result,
-      job: normalized.importJobs.find((row) => row.id === result.job?.id) || result.job,
-      state: publicState(normalized)
+    const job = createImportJob(db, {
+      section: "Products",
+      operation: "eBay catalog sync",
+      direction: "import",
+      status: "queued",
+      fileName: "eBay Inventory API",
+      totalRows: 0,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: shouldRunJobsInline() ? "" : "ebay-catalog-sync",
+      workerPayload: shouldRunJobsInline() ? {} : {},
+      message: "eBay catalog sync queued. Matched listings and review rows will update when it finishes."
+    });
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) {
+      activeJobRecords.set(job.id, normalizeImportJob(job));
+      setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: 0, processedRows: 0, startedAt: job.startedAt || new Date().toISOString() });
+      startEbayCatalogImportJob(job.id);
+    }
+    return sendJson(res, 202, {
+      queued: true,
+      job: normalizeImportJob(job),
+      state: postgres.isPostgresEnabled() ? await postgresLiteState({ importJobs: [job] }) : publicState({ ...db, importJobs: [job] }, { lite: true }),
+      message: job.message
     });
   }
 
   if (req.method === "POST" && url.pathname === "/api/ebay/account-settings/sync") {
-    const result = await syncEbayAccountSettings(db);
-    const normalized = normalizeDb(db);
-    await writeDb(normalized);
+    const job = queueEbayAccountSettingsSyncJob(db);
+    const channel = (db.connections || []).find((row) => row.name === "eBay");
     return sendJson(res, 200, {
-      ...result,
-      channel: normalized.connections.find((row) => row.name === "eBay"),
-      state: publicState(normalized)
+      queued: true,
+      job: normalizeImportJob(job),
+      channel,
+      state: publicState({ ...db, importJobs: [job] }, { lite: true }),
+      message: job.message
     });
   }
 
   if (req.method === "POST" && url.pathname === "/api/ebay/locations") {
     const body = await parseBody(req);
-    const result = await createOrEnableEbayLocation(db, body);
-    const normalized = normalizeDb(db);
-    await writeDb(normalized);
-    return sendJson(res, 200, {
-      ...result,
-      channel: normalized.connections.find((row) => row.name === "eBay"),
-      state: publicState(normalized)
+    const { job, merchantLocationKey } = queueEbayLocationJob(db, body);
+    const channel = (db.connections || []).find((row) => row.name === "eBay");
+    return sendJson(res, 202, {
+      queued: true,
+      job: normalizeImportJob(job),
+      merchantLocationKey,
+      channel,
+      state: publicState({ ...db, importJobs: [job] }, { lite: true }),
+      message: job.message
     });
   }
 
@@ -10577,6 +20742,7 @@ async function handleApi(req, res) {
     const template = normalizeExportMapping({
       name: body.name || `${body.source || "Custom"} Product Mapping`,
       source: body.source || "Custom",
+      formatType: body.formatType || body.exportFormat || "normal",
       mode: body.mode || "both",
       mappings: body.mappings || [
         { externalColumn: "SKU", productField: "sku" },
@@ -10596,7 +20762,7 @@ async function handleApi(req, res) {
     db.exportMappings = readExportMappingsStore(db.exportMappings);
     const template = db.exportMappings.find((row) => row.id === parts[2]);
     if (!template) return notFound(res);
-    for (const field of ["name", "source", "mode", "status", "notes"]) {
+    for (const field of ["name", "source", "mode", "status", "notes", "formatType"]) {
       if (body[field] !== undefined) template[field] = String(body[field] || "").trim();
     }
     if (body.mappings !== undefined) template.mappings = parseMappingRows(body.mappings).map(normalizeExportMappingRow).filter((row) => row.externalColumn);
@@ -10617,30 +20783,106 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { exportMappings: db.exportMappings });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/export-mappings/custom-export") {
+    const body = await parseBody(req);
+    const template = normalizeExportMapping({
+      ...(body.template || {}),
+      id: body.template?.id || `custom-export-${crypto.randomUUID()}`,
+      mode: "export",
+      status: "active"
+    });
+    if (!(template.mappings || []).length) return sendJson(res, 400, { error: "Choose at least one export column." });
+    const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))];
+    const dataFileName = body.dataFileName || body.fileName || "";
+    const skus = new Set(requestedSkus.map((sku) => sku.toLowerCase()));
+    const forceJob = body.forceJob === true || ["1", "true", "yes"].includes(String(body.forceJob || "").toLowerCase());
+    const canUsePostgresExport = postgres.isPostgresEnabled();
+    const productTotal = canUsePostgresExport
+      ? (requestedSkus.length || await postgres.countProducts({ q: body.query || "", filters: body.filters || {} }))
+      : 0;
+    const items = canUsePostgresExport ? [] : (skus.size ? db.inventory.filter((item) => skus.has(String(item.sku || "").toLowerCase())) : db.inventory);
+    if (forceJob || (canUsePostgresExport && productTotal > BACKGROUND_EXPORT_PAGE_SIZE) || (!canUsePostgresExport && items.length > BACKGROUND_EXPORT_PAGE_SIZE)) {
+      if (!canUsePostgresExport) {
+        return sendJson(res, 409, { error: "This export is too large for direct download. Start it from the app after Postgres is enabled so it can run as a background job." });
+      }
+      const job = await queueMappedProductsExportJob(db, template.id, template, { skus: requestedSkus, query: body.query || "", filters: body.filters || {}, productTotal, dataFileName, includeTemplateInPayload: true });
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), count: productTotal || items.length, productCount: productTotal || items.length, message: job.message });
+    }
+    if (canUsePostgresExport) {
+      const exportFileName = mappedExportFilename(template, dataFileName);
+      const exportFilePath = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(crypto.randomUUID(), "export-job"), safeImportFileName(exportFileName, "export.csv"));
+      const written = await mappedProductsCsvPostgresFileAsync(db, template, exportFilePath, { skus: requestedSkus, query: body.query || "", filters: body.filters || {} });
+      const csv = fs.readFileSync(written.filePath, "utf8");
+      return sendJson(res, 200, { filename: exportFileName, csv, count: written.outputRows, productCount: written.productCount });
+    }
+    return sendJson(res, 200, { filename: mappedExportFilename(template, dataFileName), csv: mappedProductsCsv(db, template, items), count: mappedProductsCsvRowCount(db, template, items), productCount: items.length });
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "export-mappings" && parts[2] && parts[3] === "export") {
-    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    db.exportMappings = readExportMappingsStore(db.exportMappings);
     const template = db.exportMappings.find((row) => row.id === parts[2]);
     if (!template) return notFound(res);
     if (!(template.mappings || []).length) return sendJson(res, 400, { error: "Template has no mapped columns." });
-    const skus = new Set(String(url.searchParams.get("skus") || "").split(",").map((sku) => sku.trim()).filter(Boolean).map((sku) => sku.toLowerCase()));
+    const requestedSkus = String(url.searchParams.get("skus") || "").split(",").map((sku) => sku.trim()).filter(Boolean);
+    const dataFileName = url.searchParams.get("dataFileName") || url.searchParams.get("fileName") || "";
+    if (postgres.isPostgresEnabled()) {
+      const productTotal = requestedSkus.length || await postgres.countProducts({});
+      if (productTotal > BACKGROUND_EXPORT_PAGE_SIZE) {
+        const job = await queueMappedProductsExportJob(db, parts[2], template, { skus: requestedSkus, productTotal, dataFileName });
+        return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), count: productTotal, productCount: productTotal, message: job.message });
+      }
+      const exportFileName = mappedExportFilename(template, dataFileName);
+      const exportFilePath = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(crypto.randomUUID(), "export-job"), safeImportFileName(exportFileName, "export.csv"));
+      const written = await mappedProductsCsvPostgresFileAsync(db, template, exportFilePath, { skus: requestedSkus });
+      res.writeHead(200, {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename=${exportFileName}`
+      });
+      return fs.createReadStream(written.filePath).pipe(res);
+    }
+    const skus = new Set(requestedSkus.map((sku) => sku.toLowerCase()));
     const items = skus.size ? db.inventory.filter((item) => skus.has(String(item.sku || "").toLowerCase())) : db.inventory;
+    if (items.length > BACKGROUND_EXPORT_PAGE_SIZE) {
+      return sendJson(res, 409, { error: "This export is too large for direct download. Start it from the app so it can run as a background job." });
+    }
     const csv = mappedProductsCsv(db, template, items);
     res.writeHead(200, {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename=${mappedExportFilename(template)}`
+      "Content-Disposition": `attachment; filename=${mappedExportFilename(template, dataFileName)}`
     });
     return res.end(csv);
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "export-mappings" && parts[2] && parts[3] === "export") {
     const body = await parseBody(req);
-    db.exportMappings = normalizeExportMappings(db.exportMappings);
+    db.exportMappings = readExportMappingsStore(db.exportMappings);
     const template = db.exportMappings.find((row) => row.id === parts[2]);
     if (!template) return notFound(res);
     if (!(template.mappings || []).length) return sendJson(res, 400, { error: "Template has no mapped columns." });
-    const skus = new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim().toLowerCase()).filter(Boolean));
-    const items = skus.size ? db.inventory.filter((item) => skus.has(String(item.sku || "").toLowerCase())) : db.inventory;
-    return sendJson(res, 200, { filename: mappedExportFilename(template), csv: mappedProductsCsv(db, template, items), count: items.length });
+    const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))];
+    const dataFileName = body.dataFileName || body.fileName || "";
+    const skus = new Set(requestedSkus.map((sku) => sku.toLowerCase()));
+    const forceJob = body.forceJob === true || ["1", "true", "yes"].includes(String(body.forceJob || "").toLowerCase());
+    const canUsePostgresExport = postgres.isPostgresEnabled();
+    const productTotal = canUsePostgresExport
+      ? (requestedSkus.length || await postgres.countProducts({ q: body.query || "", filters: body.filters || {} }))
+      : 0;
+    const items = canUsePostgresExport ? [] : (skus.size ? db.inventory.filter((item) => skus.has(String(item.sku || "").toLowerCase())) : db.inventory);
+    if (forceJob || (canUsePostgresExport && productTotal > BACKGROUND_EXPORT_PAGE_SIZE) || (!canUsePostgresExport && items.length > BACKGROUND_EXPORT_PAGE_SIZE)) {
+      if (!canUsePostgresExport) {
+        return sendJson(res, 409, { error: "This export is too large for direct download. Start it from the app after Postgres is enabled so it can run as a background job." });
+      }
+      const job = await queueMappedProductsExportJob(db, parts[2], template, { skus: requestedSkus, query: body.query || "", filters: body.filters || {}, productTotal, dataFileName });
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), count: productTotal || items.length, productCount: productTotal || items.length, message: job.message });
+    }
+    if (canUsePostgresExport) {
+      const exportFileName = mappedExportFilename(template, dataFileName);
+      const exportFilePath = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(crypto.randomUUID(), "export-job"), safeImportFileName(exportFileName, "export.csv"));
+      const written = await mappedProductsCsvPostgresFileAsync(db, template, exportFilePath, { skus: requestedSkus, query: body.query || "", filters: body.filters || {} });
+      const csv = fs.readFileSync(written.filePath, "utf8");
+      return sendJson(res, 200, { filename: exportFileName, csv, count: written.outputRows, productCount: written.productCount });
+    }
+    return sendJson(res, 200, { filename: mappedExportFilename(template, dataFileName), csv: mappedProductsCsv(db, template, items), count: mappedProductsCsvRowCount(db, template, items), productCount: items.length });
   }
 
   if (req.method === 'POST' && parts[0] === 'api' && parts[1] === 'export-mappings' && parts[2] && parts[3] === 'import') {
@@ -10727,6 +20969,7 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const records = parseCsv(body.csv || '');
     const maps = buildShopifyLookupMaps(db);
+    const statusMap = readShopifyStatusMapSync();
     const preview = [];
     const missing = [];
     const errorRows = [];
@@ -10749,7 +20992,7 @@ async function handleApi(req, res) {
           field: 'sku',
           issue: 'Missing Shopify match key',
           rawValue: JSON.stringify(record),
-          details: 'Expected Variant SKU, Handle, or Shopify product ID.'
+          details: 'Expected Variant SKU for first-time linking, or Shopify product ID for an already-linked product.'
         }));
         continue;
       }
@@ -10762,21 +21005,22 @@ async function handleApi(req, res) {
           field: payload.sku ? 'sku' : payload.handle ? 'handle' : 'shopifyId',
           issue: 'No matching product found',
           rawValue: key,
-          details: matchBy ? `Tried ${matchBy}.` : 'No matching SKU, handle, or Shopify ID found.'
+          details: matchBy ? `Tried ${matchBy}.` : 'No matching Variant SKU or linked Shopify product ID found.'
         }));
         if (preview.length < 50) preview.push({ sku: payload.sku || '', handle: payload.handle || '', action: 'missing', fields: [] });
         continue;
       }
-      const fields = ['shopifyId', 'shopifyVariantId', 'shopifyHandle', 'shopifyStatus', 'shopifyPublished', 'shopifyPublishedAt', 'shopifyUpdatedAt', 'shopifySyncedAt']
-        .filter((field) => payload[field] !== undefined && payload[field] !== '' && item[field] !== payload[field]);
+      const existing = { ...item, ...(shopifyStatusForSku(statusMap, item.sku) || {}) };
+      const fields = ['shopifyId', 'shopifyVariantId', 'shopifyHandle', 'shopifyStatus', 'shopifyPublished', 'shopifyPublishedAt', 'shopifyUpdatedAt', 'shopifySyncedAt', 'shopifySyncSource']
+        .filter((field) => payload[field] !== undefined && payload[field] !== '' && existing[field] !== payload[field]);
       if (body.dryRun) {
         if (preview.length < 50) preview.push({ sku: item.sku, handle: payload.handle, action: fields.length ? 'update' : 'unchanged', matchBy, fields });
         if (fields.length) changed += 1;
         continue;
       }
-      for (const field of fields) item[field] = payload[field];
+      if (!statusMap[String(item.sku || "").trim().toLowerCase()]) statusMap[String(item.sku || "").trim().toLowerCase()] = {};
+      for (const field of fields) statusMap[String(item.sku || "").trim().toLowerCase()][field] = payload[field];
       if (fields.length) {
-        item.updatedAt = new Date().toISOString();
         changed += 1;
       }
     }
@@ -10804,9 +21048,9 @@ async function handleApi(req, res) {
       createdAt: new Date().toISOString()
     });
     finishImportJob(job, { status, message, changed, totalRows: records.length, missingCount: issueCount, errors: importErrorMessages(errorRows) });
-    const normalized = normalizeDb(db);
-    await writeDb(normalized);
-    return sendJson(res, 200, { changed, missing: missing.slice(0, 100), job: normalized.importJobs.find((row) => row.id === job.id) || job, state: publicState(normalized) });
+    writeShopifyStatusMapSync(statusMap);
+    publicStateJsonCache = null;
+    return sendJson(res, 200, { changed, missing: missing.slice(0, 100), job: normalizeImportJob(job), state: publicState({ ...db, inventory: [] }, { lite: true }) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "catalog-import-reviews" && parts[2] && ["accept", "reject"].includes(parts[3])) {
@@ -10865,42 +21109,45 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/export/inventory") {
     const headers = ["sku", "title", "marketplaceTitle", "websitePrice", "cost", "listPrice", "msrp", "price", "qty", "reserved", "available", "reorderPoint", "brand", "category", "condition", "status", "barcode", "shortDescription", "longDescription", "images", "tags", "weightOz", "lengthIn", "widthIn", "heightIn", "vendor", "seoKeywords", "sources"];
-    const rows = db.inventory.map((item) => [
-      item.sku,
-      item.title,
-      item.marketplaceTitle,
-      item.websitePrice ?? item.price,
-      item.cost,
-      item.listPrice ?? item.msrp,
-      item.msrp,
-      item.price,
-      item.qty,
-      item.reserved,
-      item.qty - item.reserved,
-      item.reorderPoint,
-      item.brand,
-      item.category,
-      item.condition,
-      item.status,
-      item.barcode,
-      item.shortDescription,
-      item.longDescription,
-      (item.images || []).join("|"),
-      (item.tags || []).join("|"),
-      item.weightOz,
-      item.lengthIn,
-      item.widthIn,
-      item.heightIn,
-      item.vendor,
-      item.seoKeywords,
-      Object.entries(item.sources || {}).map(([source, id]) => `${source}:${id}`).join(";")
-    ]);
-    const csv = [headers, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\n");
     res.writeHead(200, {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": "attachment; filename=inventory-export.csv"
     });
-    return res.end(csv);
+    await writeStreamText(res, `${headers.map(escapeCsv).join(",")}\n`);
+    for (const item of db.inventory || []) {
+      const row = [
+        item.sku,
+        item.title,
+        item.marketplaceTitle,
+        item.websitePrice ?? item.price,
+        item.cost,
+        item.listPrice ?? item.msrp,
+        item.msrp,
+        item.price,
+        item.qty,
+        item.reserved,
+        Number(item.qty || 0) - Number(item.reserved || 0),
+        item.reorderPoint,
+        item.brand,
+        item.category,
+        item.condition,
+        item.status,
+        item.barcode,
+        item.shortDescription,
+        item.longDescription,
+        (item.images || []).join("|"),
+        (item.tags || []).join("|"),
+        item.weightOz,
+        item.lengthIn,
+        item.widthIn,
+        item.heightIn,
+        item.vendor,
+        item.seoKeywords,
+        Object.entries(item.sources || {}).map(([source, id]) => `${source}:${id}`).join(";")
+      ];
+      await writeStreamText(res, `${row.map(escapeCsv).join(",")}\n`);
+    }
+    return res.end();
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[3] === "export") {
@@ -13025,7 +23272,7 @@ async function handleApi(req, res) {
 }
 
 async function handleTemuCallback(req, res) {
-  const db = await readDb();
+  const db = await readDb({ skipInventory: postgres.isPostgresEnabled() });
   const url = new URL(req.url, `http://${req.headers.host}`);
   const code = url.searchParams.get("code");
   const error = url.searchParams.get("error") || url.searchParams.get("error_description");
@@ -13075,7 +23322,7 @@ async function handleEbayStart(req, res) {
       res.end();
       return;
     }
-    const db = await readDb();
+    const db = await readDb({ skipInventory: postgres.isPostgresEnabled() });
     const authUrl = ebayConsentUrl(db);
     await writeDb(db);
     res.writeHead(302, { Location: authUrl });
@@ -13136,7 +23383,7 @@ async function handleEbayCallback(req, res) {
     }
   }
 
-  const db = await readDb();
+  const db = await readDb({ skipInventory: postgres.isPostgresEnabled() });
   const url = new URL(req.url, `http://${req.headers.host}`);
   const code = url.searchParams.get("code");
   const stateToken = url.searchParams.get("state");
@@ -13198,33 +23445,64 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
-ensureDb();
+function startServer() {
+  ensureDb();
+  pruneChannelApiLogsSoon(true);
 
-const server = http.createServer((req, res) => {
-  if (req.url.startsWith("/auth/temu/callback")) {
-    handleTemuCallback(req, res).catch((error) => {
-      sendHtml(res, 500, `<h1>Temu callback error</h1><p>${escapeHtml(error.message)}</p>`);
-    });
-  } else if (req.url.startsWith("/auth/ebay/start")) {
-    handleEbayStart(req, res).catch((error) => {
-      sendHtml(res, 500, `<h1>eBay auth start error</h1><p>${escapeHtml(error.message)}</p>`);
-    });
-  } else if (req.url.startsWith("/auth/ebay/callback")) {
-    handleEbayCallback(req, res).catch((error) => {
-      sendHtml(res, 500, `<h1>eBay callback error</h1><p>${escapeHtml(error.message)}</p>`);
-    });
-  } else if (req.url.startsWith("/api/")) {
-    handleApi(req, res).catch(async (error) => {
-      console.error(error);
-      const status = apiErrorStatus(error);
-      const job = await recordApiErrorJob(req, error, status);
-      if (!res.headersSent) sendJson(res, status, { error: error.message, apiJobLogged: Boolean(job), job });
-    });
-  } else {
-    serveStatic(req, res);
-  }
-});
+  const server = http.createServer((req, res) => {
+    if (req.url.startsWith("/auth/temu/callback")) {
+      handleTemuCallback(req, res).catch((error) => {
+        sendHtml(res, 500, `<h1>Temu callback error</h1><p>${escapeHtml(error.message)}</p>`);
+      });
+    } else if (req.url.startsWith("/auth/ebay/start")) {
+      handleEbayStart(req, res).catch((error) => {
+        sendHtml(res, 500, `<h1>eBay auth start error</h1><p>${escapeHtml(error.message)}</p>`);
+      });
+    } else if (req.url.startsWith("/auth/ebay/callback")) {
+      handleEbayCallback(req, res).catch((error) => {
+        sendHtml(res, 500, `<h1>eBay callback error</h1><p>${escapeHtml(error.message)}</p>`);
+      });
+    } else if (req.url.startsWith("/api/")) {
+      handleApi(req, res).catch(async (error) => {
+        console.error(error);
+        const status = apiErrorStatus(error);
+        const job = await recordApiErrorJob(req, error, status);
+        if (!res.headersSent) sendJson(res, status, { error: error.message, apiJobLogged: Boolean(job), job });
+      });
+    } else {
+      serveStatic(req, res);
+    }
+  });
 
-server.listen(PORT, () => {
-  console.log(`DataPlus is running at http://localhost:${PORT}`);
-});
+  server.listen(PORT, () => {
+    console.log(`DataPlus is running at http://localhost:${PORT}`);
+  });
+  return server;
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = {
+  buildCategoryExportFile,
+  categoryExportMeta,
+  attachExportManifestFile,
+  exportManifestPayload,
+  IMPORT_JOB_FILE_DIR,
+  mappedExportFilename,
+  mappedProductsCsvPostgresFileAsync,
+  normalizeDb,
+  readDbFast,
+  readExportMappingsApiStore,
+  runEbayAccountSettingsSyncWorkerJob,
+  runEbayCatalogImportWorkerJob,
+  runEbayLocationWorkerJob,
+  runJobsRetentionCleanupWorkerJob,
+  runMappedProductImportWorkerJob,
+  runShopifyStatusImportWorkerJob,
+  runShopifyStatusSyncWorkerJob,
+  runSourceCatalogImportWorkerJob,
+  safeImportFileName,
+  startServer
+};
