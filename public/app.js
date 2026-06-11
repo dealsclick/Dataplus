@@ -87,6 +87,7 @@ let productCatalogPage = 1;
 let inventoryCatalogPage = 1;
 let productCatalogSort = { key: "", direction: "asc" };
 let inventoryCatalogSort = { key: "", direction: "asc" };
+let productCatalogDensity = "comfortable";
 const PRODUCT_CATALOG_PAGE_SIZE = 100;
 const PRODUCT_CATALOG_COLUMNS = [
   { key: "select", label: "Select", fixed: true },
@@ -368,6 +369,7 @@ function applyTablePreferencesFromState(force = false) {
   const inventory = preferences[TABLE_PREFERENCE_IDS.inventory] || {};
   orderTableSort = normalizedTableSort(orders.sort || {}, { key: "createdAt", direction: "desc" });
   productCatalogSort = normalizedTableSort(products.sort || {}, { key: "", direction: "asc" });
+  productCatalogDensity = products.density === "compact" ? "compact" : "comfortable";
   applyProductCatalogVisibleColumns(products.visibleColumns || []);
   inventoryCatalogSort = normalizedTableSort(inventory.sort || {}, { key: "", direction: "asc" });
   tablePreferencesHydratedForUser = userId;
@@ -375,7 +377,7 @@ function applyTablePreferencesFromState(force = false) {
 
 function tablePreferencePayload(tableId) {
   if (tableId === TABLE_PREFERENCE_IDS.orders) return { sort: orderTableSort };
-  if (tableId === TABLE_PREFERENCE_IDS.products) return { visibleColumns: [...productCatalogVisibleColumns], sort: productCatalogSort };
+  if (tableId === TABLE_PREFERENCE_IDS.products) return { visibleColumns: [...productCatalogVisibleColumns], sort: productCatalogSort, density: productCatalogDensity };
   if (tableId === TABLE_PREFERENCE_IDS.inventory) return { sort: inventoryCatalogSort };
   return {};
 }
@@ -4507,6 +4509,17 @@ function renderReadinessPill(item) {
   return `<span class="status ${readinessTone(readiness.score)}">${withIcon("gauge", String(readiness.score) + "% ready", "status-icon")}</span>`;
 }
 
+function renderCompactReadinessPill(item = {}) {
+  const readiness = productReadiness(item);
+  const missing = readiness.missing.length ? `Missing: ${readiness.missing.join(", ")}` : "Ready";
+  return `<span class="compact-metric-pill ${readinessTone(readiness.score)}" title="${html(missing)}">${Number(readiness.score || 0)}%</span>`;
+}
+
+function finalCategoryLeaf(value = "") {
+  const parts = String(value || "").split(/\s*>\s*/).map((part) => part.trim()).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : "";
+}
+
 async function loadProductAlternates(sku) {
   const key = String(sku || "").toLowerCase();
   if (!key || productAlternatesCache[key]) return;
@@ -8408,31 +8421,58 @@ function openProductFromReviewSku(sku) {
   setView("product-full");
 }
 
-function renderProductCatalogColumnTools() {
+function renderProductCatalogColumnTools(options = {}) {
   const optionalColumns = PRODUCT_CATALOG_COLUMNS.filter((column) => !column.fixed);
   const visibleCount = optionalColumns.filter((column) => productCatalogVisibleColumns.has(column.key)).length;
+  const selectedCount = Number(options.selectedCount || 0);
   return `
     <div class="catalog-table-tools product-catalog-table-tools">
-      <div>
-        <strong>Table view</strong>
-        <small>${visibleCount} of ${optionalColumns.length} optional fields visible</small>
+      <div class="catalog-table-status">
+        <span class="selection-kicker">Selection</span>
+        <strong>${html(options.selectionLabel || "No products selected")}</strong>
+        <small>${html(options.resultMetaLabel || "")}</small>
       </div>
-      <div class="catalog-table-tool-actions">
-        <button class="icon-button table-scroll-button" type="button" data-scroll-product-table="-1" aria-label="Scroll table left" title="Scroll left">${iconMarkup("arrow-left")}</button>
-        <button class="icon-button table-scroll-button" type="button" data-scroll-product-table="1" aria-label="Scroll table right" title="Scroll right">${iconMarkup("arrow-right")}</button>
-        <div class="action-menu">
-          <button class="button secondary compact-button" type="button" data-action-menu="product-catalog-columns">${withIcon("layout-template", "Columns")}</button>
-          <div class="action-popover catalog-column-popover" data-menu-for="product-catalog-columns">
-            <span class="menu-label">Visible fields</span>
-            ${optionalColumns.map((column) => `
-              <label class="column-toggle-row">
-                <input type="checkbox" data-product-catalog-column="${html(column.key)}" ${productCatalogVisibleColumns.has(column.key) ? "checked" : ""} />
-                <span>${html(column.label)}</span>
-              </label>
-            `).join("")}
-            <button type="button" data-reset-product-catalog-columns>${withIcon("undo-2", "Reset default columns")}</button>
+      <div class="catalog-table-selection-actions">
+        <div class="selection-actions">
+          <button class="button secondary compact-button" type="button" data-select-products-page>${withIcon("clipboard-check", "Current page")}</button>
+          <button class="button secondary compact-button" type="button" data-select-products-filtered>${withIcon("list-check", options.allResultsLabel || "Select all results")}</button>
+          <button class="button secondary compact-button" type="button" data-clear-products-selection ${selectedCount ? "" : "disabled"}>Clear</button>
+        </div>
+        <div class="alternate-actions">
+          <button class="button secondary compact-button" type="button" data-load-product-alternates-page>${options.alternatesLabel || "Load alternates"}</button>
+          <label class="auto-alternates-toggle"><input type="checkbox" ${options.autoLoadAlternates ? "checked" : ""} data-system-setting="autoLoadProductAlternates" /> Auto alternates</label>
+        </div>
+      </div>
+      <div class="catalog-table-view-actions">
+        <div class="table-view-label">
+          <strong>Table view</strong>
+          <small>${visibleCount} of ${optionalColumns.length} fields</small>
+        </div>
+        <div class="catalog-table-tool-actions">
+          <div class="segmented-control catalog-density-toggle" aria-label="Catalog table density">
+            <button type="button" class="${productCatalogDensity !== "compact" ? "active" : ""}" data-product-catalog-density="comfortable">Regular</button>
+            <button type="button" class="${productCatalogDensity === "compact" ? "active" : ""}" data-product-catalog-density="compact">Compact</button>
+          </div>
+          <button class="icon-button table-scroll-button" type="button" data-scroll-product-table="-1" aria-label="Scroll table left" title="Scroll left">${iconMarkup("arrow-left")}</button>
+          <button class="icon-button table-scroll-button" type="button" data-scroll-product-table="1" aria-label="Scroll table right" title="Scroll right">${iconMarkup("arrow-right")}</button>
+          <div class="action-menu">
+            <button class="button secondary compact-button" type="button" data-action-menu="product-catalog-columns">${withIcon("layout-template", "Columns")}</button>
+            <div class="action-popover catalog-column-popover" data-menu-for="product-catalog-columns">
+              <span class="menu-label">Visible fields</span>
+              ${optionalColumns.map((column) => `
+                <label class="column-toggle-row">
+                  <input type="checkbox" data-product-catalog-column="${html(column.key)}" ${productCatalogVisibleColumns.has(column.key) ? "checked" : ""} />
+                  <span>${html(column.label)}</span>
+                </label>
+              `).join("")}
+              <button type="button" data-reset-product-catalog-columns>${withIcon("undo-2", "Reset default columns")}</button>
+            </div>
           </div>
         </div>
+      </div>
+      <div class="source-pagination product-inline-pagination">
+        <button class="button secondary compact-button" type="button" data-product-page="${Number(options.previousPage || 1)}" ${options.previousDisabled ? "disabled" : ""}>Previous</button>
+        <button class="button secondary compact-button" type="button" data-product-page="${Number(options.nextPage || 1)}" ${options.nextDisabled ? "disabled" : ""}>Next</button>
       </div>
     </div>
   `;
@@ -8440,18 +8480,28 @@ function renderProductCatalogColumnTools() {
 
 function renderProductCatalogCell(item, key) {
   const stockQty = Number(item.available ?? item.stockQty ?? item.qty ?? 0);
+  const compact = productCatalogDensity === "compact";
+  const rawCategoryPath = item.category || "";
+  const categoryLeaf = finalCategoryLeaf(rawCategoryPath) || "Uncategorized";
+  const categoryPath = categoryLeaf === "Uncategorized" ? "Uncategorized" : rawCategoryPath;
+  const rawVendorCategoryPath = item.sourceCategory || item.vendorCategory || "";
+  const vendorCategoryPath = finalCategoryLeaf(rawVendorCategoryPath) ? rawVendorCategoryPath : "";
   const cells = {
     select: `<input type="checkbox" data-product-check="${html(item.id)}" ${selectedProductAllFiltered || selectedProductIds.has(item.id) ? "checked" : ""} />`,
     product: `
       <button class="order-link product-name-link" data-select-product="${html(item.id)}" data-product-target="product-full">${html(item.sku)}</button>
       <small>${html(item.marketplaceTitle || item.title || "Untitled product")}</small>
     `,
-    readiness: `${renderReadinessPill(item)}<small>${html(productReadiness(item).missing.slice(0, 2).join(", ") || "Ready")}</small>`,
+    readiness: compact
+      ? renderCompactReadinessPill(item)
+      : `${renderReadinessPill(item)}<small>${html(productReadiness(item).missing.slice(0, 2).join(", ") || "Ready")}</small>`,
     stock: `<strong>${stockQty.toLocaleString()}</strong>`,
     price: `<strong>${money(item.price || 0)}</strong>`,
     brand: `${html(item.brand || "No brand")}<small>${verifiedBrandForHandle(item) ? "Verified" : "Unverified"}</small>`,
-    category: `${html(item.category || "Uncategorized")}<small>Vendor: ${html(item.sourceCategory || item.vendorCategory || "n/a")}</small>`,
-    shopify: shopifyReadinessStatusCell(item),
+    category: compact
+      ? `<span class="compact-category-leaf" title="${html([`Main: ${categoryPath}`, vendorCategoryPath ? `Vendor: ${vendorCategoryPath}` : ""].filter(Boolean).join(" | "))}">${html(categoryLeaf)}</span>`
+      : `${html(categoryPath)}<small>Vendor: ${html(vendorCategoryPath || "n/a")}</small>`,
+    shopify: compact ? compactShopifyStatusCell(item) : shopifyReadinessStatusCell(item),
     ebay: ebayListingStatusCell(item),
     images: `<span class="image-count-pill ${productImageCount(item) > 1 ? "has-gallery" : ""}">${productImageCount(item)}</span>`,
     updated: simpleDate(item.updatedAt),
@@ -8516,50 +8566,33 @@ function renderProductsTable(items) {
     ? `${Number(filteredCount).toLocaleString()} filtered results selected`
     : selectedProductIds.size
       ? `${Number(selectedProductIds.size).toLocaleString()} selected`
-      : `${Number(filteredCount).toLocaleString()} filtered products`;
+      : "No products selected";
   const pageRangeLabel = pageItems.length
     ? `${Number(pageStart + 1).toLocaleString()}-${Number(pageStart + pageItems.length).toLocaleString()}`
     : "0";
+  const resultMetaLabel = `${Number(filteredCount).toLocaleString()} filtered | ${pageRangeLabel} shown | Page ${productCatalogPage} of ${pageCount} | ${Number(PRODUCT_CATALOG_PAGE_SIZE).toLocaleString()} per page`;
   const allResultsLabel = `Select all ${Number(filteredCount).toLocaleString()} results`;
   const autoLoadAlternates = Boolean(appSystemSettings().autoLoadProductAlternates);
   if (autoLoadAlternates) loadProductTableAlternates(pageItems).catch((error) => toast(error.message));
   const alternatesLoaded = pageItems.filter((item) => productAlternatesCache[String(item.sku || "").toLowerCase()] && !productAlternatesCache[String(item.sku || "").toLowerCase()].loading).length;
+  const alternatesLabel = alternatesLoaded ? `Refresh alternates (${alternatesLoaded}/${pageItems.length})` : "Load alternates";
   const visibleColumns = visibleProductCatalogColumns();
   $("#products-list").innerHTML = items.length
     ? `
-      <div class="catalog-selection-toolbar product-export-bar catalog-action-summary">
-        <div class="selection-summary">
-          <span class="selection-kicker">Selection</span>
-          <strong>${html(selectionLabel)}</strong>
-          <small>Showing ${Number(pageItems.length).toLocaleString()} on this page</small>
-        </div>
-        <div class="product-selection-actions">
-          <div class="selection-actions">
-            <button class="button secondary" type="button" data-select-products-page>${withIcon("clipboard-check", "Current page")}</button>
-            <button class="button secondary" type="button" data-select-products-filtered>${withIcon("list-check", allResultsLabel)}</button>
-            <button class="button secondary" type="button" data-clear-products-selection ${selectedCount ? "" : "disabled"}>Clear</button>
-          </div>
-          <div class="alternate-actions">
-            <button class="button secondary compact-button" type="button" data-load-product-alternates-page>${alternatesLoaded ? `Refresh alternates (${alternatesLoaded}/${pageItems.length})` : "Load alternates"}</button>
-            <label class="auto-alternates-toggle"><input type="checkbox" ${autoLoadAlternates ? "checked" : ""} data-system-setting="autoLoadProductAlternates" /> Auto alternates</label>
-          </div>
-        </div>
-        <div class="catalog-action-hint">
-          ${withIcon("more-horizontal", "Use Actions for export, templates, and bulk tools")}
-        </div>
-      </div>
-      <div class="catalog-source-summary product-page-summary">
-        <span><strong>${Number(filteredCount).toLocaleString()}</strong><small>filtered products</small></span>
-        <span><strong>Page ${productCatalogPage} of ${pageCount}</strong><small>${pageRangeLabel}</small></span>
-        <span><strong>${Number(PRODUCT_CATALOG_PAGE_SIZE).toLocaleString()}</strong><small>rows per page</small></span>
-        <div class="source-pagination">
-          <button class="button secondary" type="button" data-product-page="${productCatalogPage - 1}" ${productCatalogPage <= 1 ? "disabled" : ""}>Previous</button>
-          <button class="button secondary" type="button" data-product-page="${productCatalogPage + 1}" ${productCatalogPage >= pageCount ? "disabled" : ""}>Next</button>
-        </div>
-      </div>
-      ${renderProductCatalogColumnTools()}
+      ${renderProductCatalogColumnTools({
+        selectionLabel,
+        resultMetaLabel,
+        selectedCount,
+        allResultsLabel,
+        alternatesLabel,
+        autoLoadAlternates,
+        previousPage: productCatalogPage - 1,
+        nextPage: productCatalogPage + 1,
+        previousDisabled: productCatalogPage <= 1,
+        nextDisabled: productCatalogPage >= pageCount
+      })}
       <div class="catalog-table-wrap product-catalog-table-wrap">
-        <table class="catalog-table product-catalog-table">
+        <table class="catalog-table product-catalog-table ${productCatalogDensity === "compact" ? "compact-density" : "regular-density"}">
           <thead>
             <tr>
               ${visibleColumns.map((column) => `
@@ -9238,6 +9271,22 @@ function shopifyReadinessStatusCell(item = {}) {
     ${statusText ? `<small>${html(statusText)}</small>` : ""}
     <small>${idText}</small>
   `;
+}
+
+function compactShopifyStatusCell(item = {}) {
+  const readiness = productShopifyReadiness(item);
+  const sync = shopifySyncSourceMeta(item);
+  const live = readiness.live === true;
+  const label = live ? "Live" : "Not live";
+  const tone = live ? "active" : "draft";
+  const details = [
+    readiness.label,
+    item.shopifyStatus ? `Status: ${item.shopifyStatus}` : "",
+    item.shopifyPublished === true ? "Published" : item.shopifyPublished === false ? "Not published" : "",
+    sync.label ? `Source: ${sync.label}` : "",
+    readiness.missing.length ? `Missing: ${readiness.missing.join(", ")}` : ""
+  ].filter(Boolean).join(" | ");
+  return `<span class="status compact-shopify-status ${tone}" title="${html(details || label)}">${html(label)}</span>`;
 }
 
 function shopifySyncSourceMeta(item = {}) {
@@ -16798,6 +16847,7 @@ document.addEventListener("click", async (event) => {
   const productCheckAll = event.target.closest("[data-product-check-all]");
   const productSortColumnButton = event.target.closest("[data-product-sort-column]");
   const productCatalogColumnToggle = event.target.closest("[data-product-catalog-column]");
+  const productCatalogDensityButton = event.target.closest("[data-product-catalog-density]");
   const resetProductCatalogColumnsButton = event.target.closest("[data-reset-product-catalog-columns]");
   const productTableScrollButton = event.target.closest("[data-scroll-product-table]");
   const productRowActionButton = event.target.closest("[data-product-row-action]");
@@ -18162,6 +18212,13 @@ document.addEventListener("click", async (event) => {
     queueSaveTablePreference(TABLE_PREFERENCE_IDS.products);
     renderProductsTable(filteredCatalogItems());
     document.querySelector(`[data-menu-for="product-catalog-columns"]`)?.classList.add("open");
+    return;
+  }
+  if (productCatalogDensityButton) {
+    event.stopPropagation();
+    productCatalogDensity = productCatalogDensityButton.dataset.productCatalogDensity === "compact" ? "compact" : "comfortable";
+    queueSaveTablePreference(TABLE_PREFERENCE_IDS.products);
+    renderProductsTable(filteredCatalogItems());
     return;
   }
   if (resetProductCatalogColumnsButton) {
