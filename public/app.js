@@ -4,6 +4,7 @@ let selectedProductId = null;
 let selectedProductEditMode = false;
 let orderDetailVisible = false;
 let selectedOrderIds = new Set();
+let orderTableSort = { key: "createdAt", direction: "desc" };
 let activeOrderQueue = "new";
 let purchasingTab = "pos";
 let catalogTab = "products";
@@ -84,9 +85,34 @@ let pendingProductImageManager = { productId: null, images: [], defaultImage: ""
 let pendingProductBulletManager = { productId: null, bulletPoints: [] };
 let productCatalogPage = 1;
 let inventoryCatalogPage = 1;
+let productCatalogSort = { key: "", direction: "asc" };
+let inventoryCatalogSort = { key: "", direction: "asc" };
 const PRODUCT_CATALOG_PAGE_SIZE = 100;
+const PRODUCT_CATALOG_COLUMNS = [
+  { key: "select", label: "Select", fixed: true },
+  { key: "product", label: "Product", fixed: true },
+  { key: "readiness", label: "Readiness", default: true },
+  { key: "stock", label: "Stock", default: true },
+  { key: "price", label: "Price", default: true },
+  { key: "brand", label: "Brand", default: true },
+  { key: "category", label: "Category", default: true },
+  { key: "shopify", label: "Shopify", default: true },
+  { key: "ebay", label: "eBay", default: true },
+  { key: "images", label: "Images", default: true },
+  { key: "updated", label: "Updated", default: true },
+  { key: "alternates", label: "Alternates" },
+  { key: "manufacturer", label: "Manufacturer" },
+  { key: "vendorSku", label: "Vendor SKU" },
+  { key: "status", label: "Status" },
+  { key: "shadows", label: "Shadows" },
+  { key: "actions", label: "Actions", fixed: true }
+];
+const PRODUCT_CATALOG_COLUMN_STORAGE_KEY = "dataplus-product-catalog-columns";
+const PRODUCT_CATALOG_FIXED_COLUMNS = new Set(PRODUCT_CATALOG_COLUMNS.filter((column) => column.fixed).map((column) => column.key));
+const PRODUCT_CATALOG_DEFAULT_COLUMNS = PRODUCT_CATALOG_COLUMNS.filter((column) => column.fixed || column.default).map((column) => column.key);
 let productCatalogState = { items: [], total: 0, page: 1, limit: PRODUCT_CATALOG_PAGE_SIZE, loading: false, loaded: false, query: "", filtersKey: "", storage: "" };
 let inventoryCatalogState = { items: [], total: 0, page: 1, limit: PRODUCT_CATALOG_PAGE_SIZE, loading: false, loaded: false, query: "", filtersKey: "", storage: "" };
+let productCatalogVisibleColumns = loadProductCatalogColumns();
 let inventoryFacetsState = { loaded: false, loading: false, facets: null };
 let productFilterOptionsCache = { inventoryCount: -1, suppliers: [], stockStatuses: [], shopifyStatuses: [], ebayStatuses: [], brands: [], categories: [] };
 let inventoryById = new Map();
@@ -129,11 +155,19 @@ let selectedKnowledgeArticleId = null;
 let editingKnowledgeArticleId = null;
 let knowledgeEditor = null;
 let managingKnowledgeSettings = false;
+const SYSTEM_UI_REVAMP_KEY = "nexora-system-revamp-20260610-2";
+if (localStorage.getItem("dataplus-ui-revamp") !== SYSTEM_UI_REVAMP_KEY) {
+  localStorage.setItem("dataplus-theme", "dark");
+  localStorage.setItem("dataplus-sidebar-collapsed", "false");
+  localStorage.setItem("dataplus-ui-revamp", SYSTEM_UI_REVAMP_KEY);
+}
 let menuGroupsExpanded = localStorage.getItem("dataplus-menu-groups-expanded") === "true";
-let themeMode = localStorage.getItem("dataplus-theme") || "light";
+let sidebarCollapsed = localStorage.getItem("dataplus-sidebar-collapsed") === "true";
+let themeMode = localStorage.getItem("dataplus-theme") || "dark";
 let jobsFilter = { query: "", section: "", status: "", direction: "", channel: "", endpoint: "" };
 let selectedImportJobId = null;
 let channelApiLogState = { channel: "", logs: [], loading: false, loaded: false, error: "", filters: { q: "", status: "", transport: "" } };
+let shopifyMissingVariantState = { items: [], report: null, total: 0, page: 1, limit: 50, q: "", loading: false, loaded: false, error: "" };
 let systemSettingsEditMode = false;
 
 const $ = (selector) => document.querySelector(selector);
@@ -141,12 +175,16 @@ const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
 // Icons are inline SVGs from the open-source Lucide icon set (ISC license).
 const LUCIDE_ICONS = {
+  "activity": '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
   "arrow-left": '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+  "arrow-right": '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
   "badge-check": '<path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.78 4.78 4 4 0 0 1-6.74 0 4 4 0 0 1-4.78-4.78 4 4 0 0 1 0-6.75Z"/><path d="m9 12 2 2 4-4"/>',
   "bar-chart-3": '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
   "book-open": '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3 3 3 0 0 1 3-3h5a2 2 0 0 1 2 2v12a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3Z"/>',
   "boxes": '<path d="M2.97 12.92 12 17.5l9.03-4.58"/><path d="M2.97 17.92 12 22.5l9.03-4.58"/><path d="M12 2 2.97 6.58 12 11.16l9.03-4.58L12 2Z"/>',
   "check": '<path d="M20 6 9 17l-5-5"/>',
+  "chevron-down": '<path d="m6 9 6 6 6-6"/>',
+  "chevron-up": '<path d="m18 15-6-6-6 6"/>',
   "clipboard-check": '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
   "clipboard-list": '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/>',
   "copy": '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
@@ -169,6 +207,8 @@ const LUCIDE_ICONS = {
   "more-horizontal": '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
   "network": '<rect width="6" height="6" x="9" y="2" rx="1"/><rect width="6" height="6" x="16" y="16" rx="1"/><rect width="6" height="6" x="2" y="16" rx="1"/><path d="M12 8v4"/><path d="M5 16v-2a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v2"/>',
   "package": '<path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
+  "panel-left-close": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/>',
+  "panel-left-open": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/>',
   "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
   "radio": '<path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2a6 6 0 0 1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/>',
   "refresh-cw": '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>',
@@ -216,6 +256,7 @@ function iconElement(name, className = "") {
 function hydrateStaticIcons(root = document) {
   root.querySelectorAll("[data-icon]").forEach((element) => {
     if (element.dataset.iconHydrated === "true") return;
+    if (!element.title) element.title = element.textContent.trim();
     const svg = iconElement(element.dataset.icon, element.dataset.iconClass || "");
     if (!svg) return;
     element.prepend(svg);
@@ -262,6 +303,98 @@ function dateLabel(value) {
 function simpleDate(value) {
   if (!value) return "";
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+}
+
+function loadProductCatalogColumns() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PRODUCT_CATALOG_COLUMN_STORAGE_KEY) || "[]");
+    const allowed = new Set(PRODUCT_CATALOG_COLUMNS.map((column) => column.key));
+    const visible = new Set((Array.isArray(parsed) ? parsed : []).filter((key) => allowed.has(key)));
+    for (const key of PRODUCT_CATALOG_FIXED_COLUMNS) visible.add(key);
+    return visible.size > PRODUCT_CATALOG_FIXED_COLUMNS.size ? visible : new Set(PRODUCT_CATALOG_DEFAULT_COLUMNS);
+  } catch {
+    return new Set(PRODUCT_CATALOG_DEFAULT_COLUMNS);
+  }
+}
+
+function saveProductCatalogColumns() {
+  localStorage.setItem(PRODUCT_CATALOG_COLUMN_STORAGE_KEY, JSON.stringify([...productCatalogVisibleColumns]));
+}
+
+function visibleProductCatalogColumns() {
+  return PRODUCT_CATALOG_COLUMNS.filter((column) => PRODUCT_CATALOG_FIXED_COLUMNS.has(column.key) || productCatalogVisibleColumns.has(column.key));
+}
+
+const TABLE_PREFERENCE_IDS = {
+  orders: "orders",
+  products: "catalog.products",
+  inventory: "catalog.inventory"
+};
+const tablePreferenceSaveTimers = {};
+let tablePreferencesHydratedForUser = "";
+
+function currentSystemUserId() {
+  const settings = appSystemSettings();
+  const users = Array.isArray(settings.systemUsers) ? settings.systemUsers : [];
+  return String(settings.activeSystemUserId || users[0]?.id || "owner");
+}
+
+function currentUserTablePreferences() {
+  const preferences = state?.tablePreferences && typeof state.tablePreferences === "object" ? state.tablePreferences : {};
+  return preferences[currentSystemUserId()] || {};
+}
+
+function normalizedTableSort(sort = {}, fallback = { key: "", direction: "asc" }) {
+  const key = String(sort.key || "").trim();
+  const direction = String(sort.direction || "").toLowerCase() === "desc" ? "desc" : "asc";
+  return key ? { key, direction } : { ...fallback };
+}
+
+function applyProductCatalogVisibleColumns(columns = []) {
+  const allowed = new Set(PRODUCT_CATALOG_COLUMNS.map((column) => column.key));
+  const visible = new Set((Array.isArray(columns) ? columns : []).filter((key) => allowed.has(key)));
+  for (const fixedKey of PRODUCT_CATALOG_FIXED_COLUMNS) visible.add(fixedKey);
+  productCatalogVisibleColumns = visible.size > PRODUCT_CATALOG_FIXED_COLUMNS.size
+    ? visible
+    : loadProductCatalogColumns();
+}
+
+function applyTablePreferencesFromState(force = false) {
+  const userId = currentSystemUserId();
+  if (!force && tablePreferencesHydratedForUser === userId) return;
+  const preferences = currentUserTablePreferences();
+  const orders = preferences[TABLE_PREFERENCE_IDS.orders] || {};
+  const products = preferences[TABLE_PREFERENCE_IDS.products] || {};
+  const inventory = preferences[TABLE_PREFERENCE_IDS.inventory] || {};
+  orderTableSort = normalizedTableSort(orders.sort || {}, { key: "createdAt", direction: "desc" });
+  productCatalogSort = normalizedTableSort(products.sort || {}, { key: "", direction: "asc" });
+  applyProductCatalogVisibleColumns(products.visibleColumns || []);
+  inventoryCatalogSort = normalizedTableSort(inventory.sort || {}, { key: "", direction: "asc" });
+  tablePreferencesHydratedForUser = userId;
+}
+
+function tablePreferencePayload(tableId) {
+  if (tableId === TABLE_PREFERENCE_IDS.orders) return { sort: orderTableSort };
+  if (tableId === TABLE_PREFERENCE_IDS.products) return { visibleColumns: [...productCatalogVisibleColumns], sort: productCatalogSort };
+  if (tableId === TABLE_PREFERENCE_IDS.inventory) return { sort: inventoryCatalogSort };
+  return {};
+}
+
+async function saveTablePreference(tableId) {
+  if (!state) return;
+  const userId = currentSystemUserId();
+  const result = await api(`/api/user-preferences/table/${encodeURIComponent(tableId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ userId, preferences: tablePreferencePayload(tableId) })
+  });
+  if (result.tablePreferences) state.tablePreferences = result.tablePreferences;
+}
+
+function queueSaveTablePreference(tableId) {
+  clearTimeout(tablePreferenceSaveTimers[tableId]);
+  tablePreferenceSaveTimers[tableId] = setTimeout(() => {
+    saveTablePreference(tableId).catch((error) => toast(error.message || "Unable to save table preference."));
+  }, 350);
 }
 
 function fileSizeLabel(value) {
@@ -742,6 +875,7 @@ function setState(nextState) {
       ? nextState.workerStatus
       : (previousState.workerStatus || nextState?.workerStatus || {})
   };
+  applyTablePreferencesFromState();
   productDetailCache = {};
   inventoryLoadPromise = null;
   categorySettingsLoadPromise = null;
@@ -792,14 +926,22 @@ function showView(id) {
     button.classList.toggle("active", active);
   });
   $$(".nav-child").forEach((button) => {
-    const active =
-      button.dataset.view === id ||
-      (button.dataset.view === "drafts" && id === "draft-full") ||
-      (button.dataset.view === "returns" && id === "return-full") ||
-      (button.dataset.view === "orders" && id === "order-full") ||
-      (id === "purchasing" && button.dataset.purchasingTabLink === purchasingTab) ||
-      (id === "catalog" && button.dataset.catalogTabLink === catalogTab);
+    let active = false;
+    if (button.dataset.catalogTabLink) {
+      active = id === "catalog" && button.dataset.catalogTabLink === catalogTab;
+    } else if (button.dataset.purchasingTabLink) {
+      active = id === "purchasing" && button.dataset.purchasingTabLink === purchasingTab;
+    } else {
+      active =
+        button.dataset.view === id ||
+        (button.dataset.view === "drafts" && id === "draft-full") ||
+        (button.dataset.view === "returns" && id === "return-full") ||
+        (button.dataset.view === "orders" && id === "order-full");
+    }
     button.classList.toggle("active", active);
+  });
+  $$(".nav-group").forEach((group) => {
+    group.classList.toggle("active-group", Boolean(group.querySelector(".nav-item.active, .nav-child.active")));
   });
   $("#page-title").textContent = ({ dashboard: "Dashboard", orders: "Orders", drafts: "Drafts", "draft-full": "Draft Details", returns: "Returns", "return-full": "Return Details", "order-full": "Order Details", purchasing: "Purchasing", "po-full": "Purchase Order", "vendor-full": "Vendor Profile", "brand-full": "Brand Profile", "warehouse-full": "Warehouse Profile", catalog: "Catalog", jobs: "Jobs", "import-export": "Import / Export", "product-full": "Product Details", "shadow-full": "Shadow SKU Details", "template-full": "Template Preview", "inventory-full": "Inventory Details", "customer-full": "Customer Profile", customers: "Customers", inventory: "Inventory", reports: "Reports", knowledge: "Knowledge Base", connections: "Channels", "channel-full": "Channel Settings", "system-settings": "System Settings" })[id];
   if (id === "order-full") renderFullOrderPage();
@@ -855,8 +997,12 @@ function renderJobsLoadingPage(message = "Checking jobs and worker status...") {
 
 function renderTopbarActions() {
   const target = $("#topbar-actions-slot");
-  if (!target) return;
+  const floatingTarget = $("#floating-actions-slot");
+  if (!target && !floatingTarget) return;
   const actions = [];
+  let actionMenuTone = "";
+  let actionMenuLabel = "Actions";
+  let actionMenuMeta = "";
   if (currentViewId === "orders") {
     actions.push(`<button data-create-po-selected>Create PO from selected</button>`);
     actions.push(`<button data-toggle-order-detail-action>Show / hide preview</button>`);
@@ -931,12 +1077,52 @@ function renderTopbarActions() {
       actions.push(`<button data-warehouse-status="${warehouse.id}" data-warehouse-status-value="inactive">Set inactive</button>`);
     }
   } else if (currentViewId === "catalog") {
-    actions.push(catalogTab === "inventory"
-      ? `<a href="/api/export/inventory">Download inventory CSV</a>`
-      : `<button data-view="catalog" data-catalog-tab-link="inventory">Open inventory</button>`);
-    actions.push(`<button data-sync-shopify-status-all>Sync Shopify status</button>`);
-    actions.push(`<button data-view="catalog" data-catalog-tab-link="products">Open products</button>`);
-    actions.push(`<button data-view="catalog" data-catalog-tab-link="readiness">Open readiness</button>`);
+    const productSelectedCount = selectedProductAllFiltered
+      ? (productCatalogState.loaded ? productCatalogState.total : filteredCatalogItems().length)
+      : selectedProductIds.size;
+    const sourceSelectedCount = selectedSourceAllFiltered
+      ? (sourceCatalogState.totalMatches || 0)
+      : selectedSourceSkus.size;
+    const activeSelectedCount = catalogTab === "source" ? sourceSelectedCount : productSelectedCount;
+    if (activeSelectedCount) {
+      actionMenuTone = "has-selection";
+      actionMenuLabel = `${Number(activeSelectedCount).toLocaleString()} selected`;
+      actionMenuMeta = "Bulk actions ready";
+    }
+    if (catalogTab === "products") {
+      actions.push(`<span class="menu-label">Export</span>`);
+      actions.push(`<button data-open-product-export-modal="profile">Export products...</button>`);
+      actions.push(`<button data-open-product-export-modal="custom">Custom column export...</button>`);
+      actions.push(`<span class="menu-label">Selection</span>`);
+      actions.push(`<button data-select-products-page>Select current page</button>`);
+      actions.push(`<button data-select-products-filtered>Select all ${Number(productCatalogState.loaded ? productCatalogState.total : filteredCatalogItems().length).toLocaleString()} results</button>`);
+      actions.push(`<button data-clear-products-selection ${productSelectedCount ? "" : "disabled"}>Clear product selection</button>`);
+      actions.push(`<span class="menu-label">Tools</span>`);
+      actions.push(`<button data-load-product-alternates-page>Load alternates</button>`);
+      actions.push(`<button data-view="catalog" data-catalog-tab-link="inventory">Open inventory</button>`);
+      actions.push(`<button data-sync-shopify-status-all>Sync Shopify status</button>`);
+      actions.push(`<button data-view="catalog" data-catalog-tab-link="readiness">Open readiness</button>`);
+    } else if (catalogTab === "source") {
+      actions.push(`<span class="menu-label">Selection</span>`);
+      actions.push(`<button data-select-source-page>Select current source page</button>`);
+      actions.push(`<button data-select-source-filtered>Select all filtered source SKUs</button>`);
+      actions.push(`<button data-clear-source-selection ${sourceSelectedCount ? "" : "disabled"}>Clear source selection</button>`);
+      actions.push(`<span class="menu-label">Export</span>`);
+      actions.push(`<button data-export-source-products>Export source selection</button>`);
+      actions.push(`<span class="menu-label">Navigation</span>`);
+      actions.push(`<button data-view="catalog" data-catalog-tab-link="products">Open products</button>`);
+    } else if (catalogTab === "inventory") {
+      actions.push(`<span class="menu-label">Export</span>`);
+      actions.push(`<a href="/api/export/inventory">Download inventory CSV</a>`);
+      actions.push(`<button data-open-product-export-modal="profile">Export products...</button>`);
+      actions.push(`<span class="menu-label">Navigation</span>`);
+      actions.push(`<button data-view="catalog" data-catalog-tab-link="products">Open products</button>`);
+    } else {
+      actions.push(`<span class="menu-label">Navigation</span>`);
+      actions.push(`<button data-view="catalog" data-catalog-tab-link="products">Open products</button>`);
+      actions.push(`<button data-view="catalog" data-catalog-tab-link="readiness">Open readiness</button>`);
+      actions.push(`<button data-sync-shopify-status-all>Sync Shopify status</button>`);
+    }
   } else if (currentViewId === "jobs") {
     actions.push(`<button data-refresh-import-jobs>Refresh jobs</button>`);
     actions.push(`<button data-view-jump="import-export">Open import center</button>`);
@@ -993,24 +1179,41 @@ function renderTopbarActions() {
     actions.push(`<button data-view-jump="purchasing">Open purchasing</button>`);
     actions.push(`<button data-view-jump="catalog">Open catalog</button>`);
   }
-  target.innerHTML = `
-    ${renderExportNotifications()}
+  const actionMarkup = `
     <div class="action-menu topbar-action-menu">
-      <button class="button" data-action-menu="topbar-actions">${withIcon("more-horizontal", "Actions")}</button>
+      <button class="button system-action-button ${actionMenuTone}" data-action-menu="topbar-actions">
+        ${withIcon("more-horizontal", actionMenuLabel)}
+        ${actionMenuMeta ? `<small>${html(actionMenuMeta)}</small>` : ""}
+      </button>
       <div class="action-popover" data-menu-for="topbar-actions">
         ${actions.join("")}
       </div>
     </div>
   `;
+  if (target) target.innerHTML = renderExportNotifications();
+  if (floatingTarget) floatingTarget.innerHTML = actionMarkup;
+  else if (target) target.insertAdjacentHTML("beforeend", actionMarkup);
 }
 
 function applyMenuGroupState() {
   $$(".nav-group").forEach((group) => group.classList.toggle("open", menuGroupsExpanded));
   const button = $("#menu-expand-toggle");
   if (button) {
-    button.textContent = menuGroupsExpanded ? "Hide" : "Show";
+    button.innerHTML = iconMarkup(menuGroupsExpanded ? "chevron-up" : "chevron-down");
+    button.dataset.iconHydrated = "true";
     button.setAttribute("aria-label", menuGroupsExpanded ? "Collapse all menu groups" : "Expand all menu groups");
     button.title = menuGroupsExpanded ? "Collapse all menu groups" : "Expand all menu groups";
+  }
+}
+
+function applySidebarCollapseState() {
+  document.body.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  const button = $("#sidebar-collapse-toggle");
+  if (button) {
+    button.innerHTML = iconMarkup(sidebarCollapsed ? "panel-left-open" : "panel-left-close");
+    button.dataset.iconHydrated = "true";
+    button.setAttribute("aria-label", sidebarCollapsed ? "Expand menu labels" : "Collapse menu to icons");
+    button.title = sidebarCollapsed ? "Expand menu labels" : "Collapse menu to icons";
   }
 }
 
@@ -1219,9 +1422,54 @@ function renderOrderQueues() {
   `).join("");
 }
 
+function compareTableValues(leftValue, rightValue, direction = "asc") {
+  const leftMissing = leftValue === null || leftValue === undefined || leftValue === "";
+  const rightMissing = rightValue === null || rightValue === undefined || rightValue === "";
+  if (leftMissing && rightMissing) return 0;
+  if (leftMissing) return 1;
+  if (rightMissing) return -1;
+  const leftNumber = typeof leftValue === "number" ? leftValue : Number(leftValue);
+  const rightNumber = typeof rightValue === "number" ? rightValue : Number(rightValue);
+  const bothNumeric = Number.isFinite(leftNumber) && Number.isFinite(rightNumber) && String(leftValue).trim?.() !== "" && String(rightValue).trim?.() !== "";
+  const result = bothNumeric
+    ? leftNumber - rightNumber
+    : String(leftValue || "").toLowerCase().localeCompare(String(rightValue || "").toLowerCase(), undefined, { numeric: true, sensitivity: "base" });
+  return direction === "desc" ? -result : result;
+}
+
+function orderSortValue(order = {}, key = "") {
+  const itemCount = (order.items || []).reduce((sum, item) => sum + Number(item.qty || 0), 0) || Number(order.qty || 1);
+  const refundDue = refundDueFor(order);
+  const values = {
+    order: order.orderNumber,
+    createdAt: orderDateValue(order, "createdAt"),
+    buyer: order.buyer,
+    shipBy: orderDateValue(order, "shipBy") || order.shipBy || "",
+    items: itemCount,
+    total: Number(order.total || 0),
+    margin: marginPercent(profitFor(order), order.total),
+    payment: refundDue > 0 ? -refundDue : labelStatus(order.status),
+    source: order.source || "",
+    supply: orderSupplyState(order).label || "",
+    status: order.status || ""
+  };
+  return values[key] ?? "";
+}
+
+function sortableHeader(label, key, activeSort, attrName) {
+  const active = activeSort?.key === key;
+  const direction = active ? activeSort.direction : "";
+  const nextLabel = active && direction === "asc" ? "Sort high to low" : "Sort low to high";
+  return `<button class="table-sort-button ${active ? "active" : ""}" type="button" ${attrName}="${html(key)}" aria-label="${html(`${label}: ${nextLabel}`)}">${html(label)}<span>${active ? (direction === "desc" ? "↓" : "↑") : "↕"}</span></button>`;
+}
+
 function sortOrders(orders) {
   const sort = $("#order-sort")?.value || "created-desc";
   const sorted = orders.slice();
+  if (orderTableSort?.key) {
+    sorted.sort((a, b) => compareTableValues(orderSortValue(a, orderTableSort.key), orderSortValue(b, orderTableSort.key), orderTableSort.direction));
+    return sorted;
+  }
   const text = (value) => String(value || "").toLowerCase();
   const number = (value) => Number(value || 0);
   const compareText = (a, b) => text(a).localeCompare(text(b));
@@ -1309,15 +1557,15 @@ function renderOrders() {
           <thead>
             <tr>
               <th><input type="checkbox" aria-label="Select all orders" /></th>
-              <th>Orders</th>
-              <th>Date</th>
-              <th>Customer</th>
-              <th>Delivery</th>
-              <th>Items</th>
-              <th>Total</th>
-              <th>Margin %</th>
-              <th>Payment</th>
-              <th>Supply</th>
+              <th>${sortableHeader("Orders", "order", orderTableSort, "data-order-sort-column")}</th>
+              <th>${sortableHeader("Date", "createdAt", orderTableSort, "data-order-sort-column")}</th>
+              <th>${sortableHeader("Customer", "buyer", orderTableSort, "data-order-sort-column")}</th>
+              <th>${sortableHeader("Delivery", "shipBy", orderTableSort, "data-order-sort-column")}</th>
+              <th>${sortableHeader("Items", "items", orderTableSort, "data-order-sort-column")}</th>
+              <th>${sortableHeader("Total", "total", orderTableSort, "data-order-sort-column")}</th>
+              <th>${sortableHeader("Margin %", "margin", orderTableSort, "data-order-sort-column")}</th>
+              <th>${sortableHeader("Payment", "payment", orderTableSort, "data-order-sort-column")}</th>
+              <th>${sortableHeader("Supply", "supply", orderTableSort, "data-order-sort-column")}</th>
               <th>Action</th>
             </tr>
           </thead>
@@ -1329,12 +1577,14 @@ function renderOrders() {
               const orderMargin = marginPercent(profitFor(order), order.total);
               const refundDue = refundDueFor(order);
               return `
-                <tr class="${order.id === selectedOrderId ? "selected" : ""} ${supply.rowClass}" data-select-order="${order.id}">
+                <tr class="${order.id === selectedOrderId ? "selected" : ""} ${supply.rowClass}" data-select-order="${html(order.id)}">
                   <td><input type="checkbox" ${selectedOrderIds.has(order.id) ? "checked" : ""} aria-label="Select ${order.orderNumber}" data-order-check="${order.id}" /></td>
-                  <td>
-                    <span class="order-source-badge">${channelLogoMarkup(channel, order.source)}<span>${html(order.source || "")}</span></span>
-                    <button class="order-link" data-select-order="${order.id}" data-open-detail>${order.orderNumber}</button>
-                    <small>${order.source} ref ${order.marketplaceOrderNumber || order.marketplaceOrderId || "n/a"}</small>
+                  <td class="order-primary-cell">
+                    <div class="order-id-line">
+                      <button class="order-link" data-select-order="${html(order.id)}" data-open-detail>${html(order.orderNumber)}</button>
+                      <button class="order-detail-chip" type="button" data-select-order="${html(order.id)}" data-open-detail>${withIcon("panel-left-open", "Details")}</button>
+                    </div>
+                    <small class="order-primary-meta">${channelLogoMarkup(channel, order.source)}<span>${html(order.source || "Marketplace")}</span><span>ref ${html(order.marketplaceOrderNumber || order.marketplaceOrderId || "n/a")}</span></small>
                   </td>
                   <td>${simpleDate(order.createdAt)}</td>
                   <td>
@@ -1361,6 +1611,7 @@ function renderOrders() {
                         <button data-create-po-order="${order.id}">Create PO</button>
                         <button data-open-order-return="${order.id}">Create return</button>
                         <button data-select-order="${order.id}" data-open-detail>View details</button>
+                        <button data-select-order="${order.id}" data-order-target="order-full">Open full page</button>
                       </div>
                     </div>
                   </td>
@@ -2289,103 +2540,106 @@ function renderOrderDetail() {
   const margin = Number(order.total || 0) ? (orderProfit / Number(order.total || 0)) * 100 : 0;
   const customer = (state.customers || []).find((item) => item.id === order.customerId);
   const customerOrders = state.orders.filter((item) => item.customerId === order.customerId);
+  const timeline = order.timeline?.length ? order.timeline : [
+    { label: "Order received", detail: `${html(order.source || "Marketplace")} order imported`, date: order.createdAt },
+    { label: labelStatus(order.status), detail: order.trackingNumber ? `Tracking ${order.trackingNumber}` : "Awaiting next workflow step", date: order.updatedAt || order.shipBy || order.createdAt }
+  ];
+  const refundDue = refundDueFor(order);
+  const itemCount = items.reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1;
 
   detail.innerHTML = `
-    <div class="detail-head">
+    <div class="detail-head order-panel-head">
       <div>
-        <p class="eyebrow">${order.source}</p>
-        <h2>${order.orderNumber}</h2>
-        <p class="muted">Marketplace ref: ${order.marketplaceOrderNumber || order.marketplaceOrderId || "Not mapped"}</p>
-        <span class="status ${order.status}">${order.status}</span>
+        <p class="eyebrow">Order details</p>
+        <h2>${html(order.orderNumber)}</h2>
+        <p class="muted">${simpleDate(order.createdAt)} / ${html(order.source || "Marketplace")} ${order.marketplaceOrderNumber ? `/ ${html(order.marketplaceOrderNumber)}` : ""}</p>
       </div>
-      ${order.status === "confirmed" ? `<span class="muted">Confirmed</span>` : `<button class="button" data-confirm-order="${order.id}">Confirm order</button>`}
+      <button class="icon-button" type="button" data-toggle-order-detail-action aria-label="Close order details" title="Close order details">${iconMarkup("x-circle")}</button>
     </div>
 
-    <div class="detail-grid">
-      <section>
-        <h3>Buyer</h3>
-        <p><strong>${order.buyer}</strong></p>
-        <p>${order.customerNumber || "No customer profile"}${customer?.repeatCustomer ? " / Repeat customer" : ""}</p>
-        <p>${order.buyerEmail || "No email"}</p>
-        <p>${order.phone || "No phone"}</p>
-      </section>
-      <section>
-        <h3>Ship To</h3>
-        <p><strong>${address.name || order.buyer}</strong></p>
-        <p>${address.line1 || ""}${address.line2 ? `, ${address.line2}` : ""}</p>
-        <p>${[address.city, address.state, address.postalCode].filter(Boolean).join(", ")}</p>
-      </section>
-      <section>
-        <h3>Marketplace</h3>
-        <p>Internal: ${order.internalOrderNumber || order.orderNumber}</p>
-        <p>Reference: ${order.marketplaceOrderNumber || order.marketplaceOrderId || "Not mapped"}</p>
-        <p>Ship by: ${order.shipBy}</p>
-        <p>${order.shippingService}</p>
-      </section>
-      <section>
-        <h3>Profit</h3>
-        <p>Sales: ${money(order.total)}</p>
-        <p>Costs: ${money(costTotal)}</p>
-        <p><strong>${money(orderProfit)} / ${margin.toFixed(1)}%</strong></p>
-      </section>
+    <div class="order-panel-status-strip">
+      <span><small>Payment</small><strong class="status ${refundDue > 0 ? "canceled" : "confirmed"}">${refundDue > 0 ? "Refund due" : "Paid"}</strong></span>
+      <span><small>Status</small><strong class="status ${order.status}">${labelStatus(order.status)}</strong></span>
+      <span><small>Items</small><strong>${itemCount}</strong></span>
+      <span><small>Total</small><strong>${money(order.total)}</strong></span>
     </div>
 
-    <section class="detail-section">
-      <h3>Profit and Loss</h3>
-      <div class="money-editor">
-        <label>Gross sales<input type="number" step="0.01" value="${order.total}" data-order-money="total" data-order-id="${order.id}" /></label>
-        <label>Product cost<input type="number" step="0.01" value="${order.productCost || 0}" data-order-money="productCost" data-order-id="${order.id}" /></label>
-        <label>Marketplace fees<input type="number" step="0.01" value="${order.marketplaceFees || 0}" data-order-money="marketplaceFees" data-order-id="${order.id}" /></label>
-        <label>Shipping cost<input type="number" step="0.01" value="${order.shippingCost || 0}" data-order-money="shippingCost" data-order-id="${order.id}" /></label>
-        <label>Refunds<input type="number" step="0.01" value="${order.refundAmount || 0}" data-order-money="refundAmount" data-order-id="${order.id}" /></label>
+    <div class="order-panel-actions">
+      ${order.status === "confirmed" ? `<span class="status confirmed">Confirmed</span>` : `<button class="button" type="button" data-confirm-order="${html(order.id)}">Confirm</button>`}
+      <button class="button secondary" type="button" data-open-order-refund="${html(order.id)}">Refund</button>
+      <button class="button secondary" type="button" data-open-order-edit="${html(order.id)}">Edit</button>
+      <button class="button secondary" type="button" data-create-po-order="${html(order.id)}">Create PO</button>
+      <button class="button secondary" type="button" data-select-order="${html(order.id)}" data-order-target="order-full">Full page</button>
+    </div>
+
+    <section class="detail-section order-panel-section">
+      <div class="order-panel-section-head">
+        <h3>Customer</h3>
+        ${customer ? `<button class="text-button" type="button" data-select-customer="${html(customer.id)}">Open profile</button>` : ""}
       </div>
-      <div class="pnl-strip">
+      <dl class="order-detail-list compact-detail-list">
+        <dt>Full name</dt><dd>${html(order.buyer || "Unknown")}</dd>
+        <dt>Email</dt><dd>${html(order.buyerEmail || "No email")}</dd>
+        <dt>Phone</dt><dd>${html(order.phone || "No phone")}</dd>
+        <dt>Ship to</dt><dd>${html(address.name || order.buyer || "")}<br>${html(address.line1 || "")}${address.line2 ? `<br>${html(address.line2)}` : ""}<br>${html([address.city, address.state, address.postalCode].filter(Boolean).join(", "))}</dd>
+      </dl>
+    </section>
+
+    <section class="detail-section order-panel-section">
+      <div class="order-panel-section-head">
+        <h3>Timeline</h3>
+      </div>
+      <div class="order-panel-timeline">
+        ${timeline.slice(0, 6).map((entry) => `
+          <div>
+            <span></span>
+            <strong>${html(entry.label || entry.title || entry.status || "Update")}</strong>
+            <small>${html(entry.detail || entry.note || "")}</small>
+            <time>${entry.date || entry.createdAt ? simpleDate(entry.date || entry.createdAt) : ""}</time>
+          </div>
+        `).join("")}
+      </div>
+    </section>
+
+    <section class="detail-section order-panel-section">
+      <div class="order-panel-section-head">
+        <h3>Items</h3>
+        <span>${items.length}</span>
+      </div>
+      <div class="order-panel-items">
+        ${items.map((item) => `
+          <div>
+            <strong>${html(item.title || item.sku || "Item")}</strong>
+            <small>${html(item.sku || "")}</small>
+            <span>${Number(item.qty || 1)}</span>
+            <b>${money(item.price)}</b>
+          </div>
+        `).join("")}
+      </div>
+    </section>
+
+    <section class="detail-section order-panel-section">
+      <div class="order-panel-section-head">
+        <h3>Payment and profit</h3>
+      </div>
+      <div class="order-panel-money">
+        <span><small>Gross sales</small><strong>${money(order.total)}</strong></span>
+        <span><small>Total costs</small><strong>${money(costTotal)}</strong></span>
         <span><small>Net profit</small><strong>${money(orderProfit)}</strong></span>
         <span><small>Margin</small><strong>${margin.toFixed(1)}%</strong></span>
-        <span><small>Break-even</small><strong>${money(costTotal)}</strong></span>
       </div>
     </section>
 
-    <section class="detail-section">
-      <h3>Customer Profile</h3>
-      <div class="pnl-strip">
-        <span><small>Customer</small><strong>${customer?.customerNumber || "None"}</strong></span>
-        <span><small>Orders</small><strong>${customerOrders.length}</strong></span>
-        <span><small>Lifetime value</small><strong>${money(customer?.lifetimeValue || 0)}</strong></span>
+    <section class="detail-section order-panel-section">
+      <div class="order-panel-section-head">
+        <h3>Shipping</h3>
       </div>
-      <div class="mini-history">
-        ${customerOrders.slice(0, 5).map((item) => `
-          <button data-select-order="${item.id}">
-            <strong>${item.orderNumber}</strong>
-            <span>${item.source} / ${money(item.total)} / ${simpleDate(item.createdAt)}</span>
-          </button>
-        `).join("") || `<p class="muted">No history yet.</p>`}
-      </div>
-    </section>
-
-    <section class="detail-section">
-      <h3>Items</h3>
-      <table>
-        <thead>
-          <tr><th>SKU</th><th>Product</th><th>Qty</th><th>Price</th></tr>
-        </thead>
-        <tbody>
-          ${items.map((item) => `
-            <tr>
-              <td><strong>${item.sku}</strong></td>
-              <td>${item.title}</td>
-              <td>${item.qty}</td>
-              <td>${money(item.price)}</td>
-            </tr>
-          `).join("")}
-        </tbody>
-      </table>
-    </section>
-
-    <section class="detail-section">
-      <h3>Shipping and Notes</h3>
-      <p>Tracking: ${order.trackingNumber || "Not available yet"}</p>
-      <p>${order.notes || "No notes."}</p>
+      <dl class="order-detail-list compact-detail-list">
+        <dt>Ship by</dt><dd>${html(order.shipBy || "N/A")}</dd>
+        <dt>Service</dt><dd>${html(order.shippingService || "Not selected")}</dd>
+        <dt>Tracking</dt><dd>${html(order.trackingNumber || "Not available yet")}</dd>
+        <dt>Notes</dt><dd>${html(order.notes || "No notes.")}</dd>
+      </dl>
     </section>
   `;
 }
@@ -2876,6 +3130,16 @@ function renderWarehouseProfile() {
             <label class="span-2">Receiving instructions<textarea rows="3" data-warehouse-field="receivingInstructions" data-warehouse-id="${warehouse.id}">${html(warehouse.receivingInstructions || "")}</textarea></label>
             <label class="span-2">Notes<textarea rows="3" data-warehouse-field="notes" data-warehouse-id="${warehouse.id}">${html(warehouse.notes || "")}</textarea></label>
           </div>
+        </section>
+
+        <section class="full-card">
+          <h3>Shopify location mapping</h3>
+          <div class="edit-stack">
+            <label>Shopify location name<input value="${html(warehouse.shopifyLocationName || "")}" data-warehouse-field="shopifyLocationName" data-warehouse-id="${warehouse.id}" placeholder="bk warehouse" /></label>
+            <label>Shopify location GID<input value="${html(warehouse.shopifyLocationId || "")}" data-warehouse-field="shopifyLocationId" data-warehouse-id="${warehouse.id}" placeholder="gid://shopify/Location/108943900976" /></label>
+            <label class="checkbox-row"><input type="checkbox" data-warehouse-field="shopifyInventoryPushEnabled" data-warehouse-id="${warehouse.id}" ${warehouse.shopifyInventoryPushEnabled ? "checked" : ""} /> Allow Shopify inventory pushes from this warehouse</label>
+          </div>
+          <p class="muted">Use this mapping when DataPlus sends inventory to Shopify locations.</p>
         </section>
 
         <section class="full-card">
@@ -4308,7 +4572,7 @@ function renderExportNotifications() {
   if (!jobs.length) return "";
   return `
     <div class="action-menu export-notification-menu">
-      <button class="button secondary export-notification-button" data-action-menu="export-notifications" title="Completed exports">
+      <button class="button secondary export-notification-button" data-action-menu="export-notifications" title="Completed exports" aria-label="${jobs.length} completed exports">
         ${withIcon("download", "Exports")}
         <strong>${jobs.length}</strong>
       </button>
@@ -7460,18 +7724,27 @@ function renderImportSectionBody(sectionId, templates = []) {
 function renderImportExportCenter(templates = []) {
   const sections = importExportSections(templates);
   if (!sections.some((section) => section.id === activeImportSection)) activeImportSection = 'products';
+  const activeTemplates = templates.filter((template) => template.status !== "inactive").length;
+  const mappedColumns = templates.reduce((sum, template) => sum + (template.mappings || []).length, 0);
+  const exportOnly = templates.filter((template) => String(template.mode || "").toLowerCase() === "export").length;
   return `
     <div class="import-center">
       <div class="mapping-directory-head import-center-head">
         <div>
           <p class="eyebrow">Operations</p>
           <h2>Import / Export Center</h2>
-          <p class="muted">Central home for product files today, with room for orders, customers, categories, and inventory workflows.</p>
+          <p class="muted">Manage product imports, marketplace exports, saved profiles, and recent file jobs.</p>
         </div>
         <div class="mapping-actions">
           <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon('refresh-cw', 'Refresh queue')}</button>
           <button class="button" type="button" data-create-export-mapping>${withIcon('plus', 'New template')}</button>
         </div>
+      </div>
+      <div class="import-center-stats">
+        <span><small>Templates</small><strong>${Number(templates.length).toLocaleString()}</strong></span>
+        <span><small>Active</small><strong>${Number(activeTemplates).toLocaleString()}</strong></span>
+        <span><small>Export-only</small><strong>${Number(exportOnly).toLocaleString()}</strong></span>
+        <span><small>Mapped columns</small><strong>${Number(mappedColumns).toLocaleString()}</strong></span>
       </div>
       <div class="import-center-layout">
         ${renderImportSectionMenu(sections)}
@@ -7503,6 +7776,31 @@ function renderJobsApiIssueGroups(groups = []) {
   `;
 }
 
+function exportMappingFormatType(template = {}) {
+  return String(template.formatType || template.exportFormat || "normal").trim().toLowerCase() || "normal";
+}
+
+function exportMappingFormatLabel(value = "normal") {
+  const labels = {
+    normal: "Normal CSV",
+    shopify: "Shopify / Matrixify",
+    matrixify: "Shopify / Matrixify",
+    ebay: "eBay",
+    amazon: "Amazon"
+  };
+  return labels[String(value || "normal").toLowerCase()] || "Custom format";
+}
+
+function renderExportMappingFormatOptions(selected = "normal") {
+  const current = String(selected || "normal").toLowerCase();
+  return [
+    ["normal", "Normal CSV"],
+    ["shopify", "Shopify / Matrixify"],
+    ["ebay", "eBay"],
+    ["amazon", "Amazon"]
+  ].map(([value, label]) => `<option value="${value}" ${current === value ? "selected" : ""}>${html(label)}</option>`).join("");
+}
+
 function renderMappingDirectory(templates = []) {
   const activeCount = templates.filter((template) => template.status !== "inactive").length;
   const shopifyCount = templates.filter((template) => /shopify/i.test(`${template.name} ${template.source}`)).length;
@@ -7525,6 +7823,7 @@ function renderMappingDirectory(templates = []) {
       <div class="mapping-template-grid">
         ${templates.map((template) => {
           const hasSku = (template.mappings || []).some((row) => row.productField === "sku");
+          const formatType = exportMappingFormatType(template);
           return `
             <article class="mapping-template-card">
               <div class="mapping-template-card-head">
@@ -7535,7 +7834,7 @@ function renderMappingDirectory(templates = []) {
               <p>${html(template.source)} / ${(template.mappings || []).length} columns</p>
               <div class="mapping-card-flags">
                 <span>${hasSku ? "SKU mapped" : "Needs SKU"}</span>
-                <span>${/shopify/i.test(`${template.name} ${template.source}`) ? "Shopify" : "Custom"}</span>
+                <span>${html(exportMappingFormatLabel(formatType))}</span>
               </div>
               <div class="mapping-template-actions">
                 <button class="button secondary" type="button" data-open-export-mapping="${template.id}">Open</button>
@@ -7663,6 +7962,7 @@ function renderJobsPage() {
 }
 
 function renderMappingDetailPage(selected) {
+  const formatType = exportMappingFormatType(selected);
   return `
     <div class="mapping-page">
       <div class="mapping-page-head">
@@ -7670,7 +7970,7 @@ function renderMappingDetailPage(selected) {
           <button class="text-button" type="button" data-back-export-mappings>Back to templates</button>
           <p class="eyebrow">Import / Export Mapping</p>
           <h2>${html(selected.name)}</h2>
-          <p class="muted">${html(selected.source)} template / ${(selected.mappings || []).length} mapped columns / ${html(selected.mode || "both")}</p>
+          <p class="muted">${html(selected.source)} template / ${(selected.mappings || []).length} mapped columns / ${html(selected.mode || "both")} / ${html(exportMappingFormatLabel(formatType))}</p>
         </div>
         <div class="mapping-actions">
           <button type="button" class="button" data-save-export-mapping="${selected.id}">Save changes</button>
@@ -7685,6 +7985,7 @@ function renderMappingDetailPage(selected) {
       <div class="mapping-summary-grid">
         <span><small>Source</small><strong>${html(selected.source)}</strong></span>
         <span><small>Columns</small><strong>${(selected.mappings || []).length}</strong></span>
+        <span><small>Format</small><strong>${html(exportMappingFormatLabel(formatType))}</strong></span>
         <span><small>Import key</small><strong>${(selected.mappings || []).some((row) => row.productField === "sku") ? "SKU mapped" : "Needs SKU"}</strong></span>
         <span><small>Status</small><strong>${html(selected.status || "active")}</strong></span>
       </div>
@@ -7701,6 +8002,7 @@ function renderMappingDetailPage(selected) {
             <label>Source / channel<input value="${html(selected.source)}" data-export-mapping-draft-field="source" data-export-mapping-id="${selected.id}" /></label>
             <label>Status<select data-export-mapping-draft-field="status" data-export-mapping-id="${selected.id}"><option value="active" ${selected.status === "active" ? "selected" : ""}>active</option><option value="inactive" ${selected.status === "inactive" ? "selected" : ""}>inactive</option></select></label>
             <label>Mode<select data-export-mapping-draft-field="mode" data-export-mapping-id="${selected.id}"><option value="both" ${selected.mode === "both" ? "selected" : ""}>import + export</option><option value="export" ${selected.mode === "export" ? "selected" : ""}>export only</option><option value="import" ${selected.mode === "import" ? "selected" : ""}>import only</option></select></label>
+            <label>Format type<select data-export-mapping-draft-field="formatType" data-export-mapping-id="${selected.id}">${renderExportMappingFormatOptions(formatType)}</select></label>
             <label class="span-2">Notes<textarea rows="4" data-export-mapping-draft-field="notes" data-export-mapping-id="${selected.id}">${html(selected.notes || "")}</textarea></label>
           </div>
         </section>
@@ -8106,14 +8408,109 @@ function openProductFromReviewSku(sku) {
   setView("product-full");
 }
 
+function renderProductCatalogColumnTools() {
+  const optionalColumns = PRODUCT_CATALOG_COLUMNS.filter((column) => !column.fixed);
+  const visibleCount = optionalColumns.filter((column) => productCatalogVisibleColumns.has(column.key)).length;
+  return `
+    <div class="catalog-table-tools product-catalog-table-tools">
+      <div>
+        <strong>Table view</strong>
+        <small>${visibleCount} of ${optionalColumns.length} optional fields visible</small>
+      </div>
+      <div class="catalog-table-tool-actions">
+        <button class="icon-button table-scroll-button" type="button" data-scroll-product-table="-1" aria-label="Scroll table left" title="Scroll left">${iconMarkup("arrow-left")}</button>
+        <button class="icon-button table-scroll-button" type="button" data-scroll-product-table="1" aria-label="Scroll table right" title="Scroll right">${iconMarkup("arrow-right")}</button>
+        <div class="action-menu">
+          <button class="button secondary compact-button" type="button" data-action-menu="product-catalog-columns">${withIcon("layout-template", "Columns")}</button>
+          <div class="action-popover catalog-column-popover" data-menu-for="product-catalog-columns">
+            <span class="menu-label">Visible fields</span>
+            ${optionalColumns.map((column) => `
+              <label class="column-toggle-row">
+                <input type="checkbox" data-product-catalog-column="${html(column.key)}" ${productCatalogVisibleColumns.has(column.key) ? "checked" : ""} />
+                <span>${html(column.label)}</span>
+              </label>
+            `).join("")}
+            <button type="button" data-reset-product-catalog-columns>${withIcon("undo-2", "Reset default columns")}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderProductCatalogCell(item, key) {
+  const stockQty = Number(item.available ?? item.stockQty ?? item.qty ?? 0);
+  const cells = {
+    select: `<input type="checkbox" data-product-check="${html(item.id)}" ${selectedProductAllFiltered || selectedProductIds.has(item.id) ? "checked" : ""} />`,
+    product: `
+      <button class="order-link product-name-link" data-select-product="${html(item.id)}" data-product-target="product-full">${html(item.sku)}</button>
+      <small>${html(item.marketplaceTitle || item.title || "Untitled product")}</small>
+    `,
+    readiness: `${renderReadinessPill(item)}<small>${html(productReadiness(item).missing.slice(0, 2).join(", ") || "Ready")}</small>`,
+    stock: `<strong>${stockQty.toLocaleString()}</strong>`,
+    price: `<strong>${money(item.price || 0)}</strong>`,
+    brand: `${html(item.brand || "No brand")}<small>${verifiedBrandForHandle(item) ? "Verified" : "Unverified"}</small>`,
+    category: `${html(item.category || "Uncategorized")}<small>Vendor: ${html(item.sourceCategory || item.vendorCategory || "n/a")}</small>`,
+    shopify: shopifyReadinessStatusCell(item),
+    ebay: ebayListingStatusCell(item),
+    images: `<span class="image-count-pill ${productImageCount(item) > 1 ? "has-gallery" : ""}">${productImageCount(item)}</span>`,
+    updated: simpleDate(item.updatedAt),
+    alternates: renderProductAlternatesCell(item),
+    manufacturer: html(item.manufacturer || "No manufacturer"),
+    vendorSku: html(item.vendorSku || "No vendor SKU"),
+    status: `<span class="status ${String(item.status || "draft").toLowerCase()}">${html(item.status || "Draft")}</span>`,
+    shadows: Number(item.shadowSkuCount ?? (item.shadowSkus || []).length).toLocaleString(),
+    actions: `
+      <div class="action-menu">
+        <button class="icon-button" data-action-menu="product-${html(item.id)}" aria-label="Open product actions">...</button>
+        <div class="action-popover" data-menu-for="product-${html(item.id)}">
+          <button data-select-product="${html(item.id)}" data-product-target="product-full">Edit product content</button>
+          <button data-select-product="${html(item.id)}" data-product-target="inventory-full">View inventory details</button>
+          <button data-product-row-action="set-active" data-product-id="${html(item.id)}">Set active</button>
+          <button data-product-row-action="set-inactive" data-product-id="${html(item.id)}">Set inactive</button>
+          <button data-product-row-action="set-discontinued" data-product-id="${html(item.id)}">Set discontinued</button>
+          <button data-product-row-action="delete" data-product-id="${html(item.id)}">Delete from Products</button>
+        </div>
+      </div>
+    `
+  };
+  return cells[key] || "";
+}
+
+function productCatalogSortValue(item = {}, key = "") {
+  const values = {
+    product: item.sku || "",
+    readiness: Number(productReadiness(item).score || 0),
+    stock: Number(item.available ?? item.stockQty ?? item.qty ?? 0),
+    price: Number(item.price || 0),
+    brand: item.brand || "",
+    category: item.category || "",
+    shopify: productShopifyReadiness(item).label,
+    ebay: productEbayStatus(item),
+    images: productImageCount(item),
+    updated: item.updatedAt ? new Date(item.updatedAt).getTime() : 0,
+    alternates: (productAlternatesCache[String(item.sku || "").toLowerCase()]?.items || []).length,
+    manufacturer: item.manufacturer || "",
+    vendorSku: item.vendorSku || "",
+    status: item.status || "",
+    shadows: Number(item.shadowSkuCount ?? (item.shadowSkus || []).length)
+  };
+  return values[key] ?? "";
+}
+
+function sortProductCatalogItems(items = []) {
+  if (!productCatalogSort?.key) return items;
+  return items.slice().sort((a, b) => compareTableValues(productCatalogSortValue(a, productCatalogSort.key), productCatalogSortValue(b, productCatalogSort.key), productCatalogSort.direction));
+}
+
 function renderProductsTable(items) {
-  const exportMappings = state.exportMappings || [];
   const serverPaged = productCatalogState.loaded;
-  const filteredCount = serverPaged ? productCatalogState.total : items.length;
+  const sortedItems = sortProductCatalogItems(items);
+  const filteredCount = serverPaged ? productCatalogState.total : sortedItems.length;
   const pageCount = Math.max(1, Math.ceil(filteredCount / PRODUCT_CATALOG_PAGE_SIZE));
   productCatalogPage = Math.min(Math.max(1, productCatalogPage), pageCount);
   const pageStart = (productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
-  const pageItems = serverPaged ? items : items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
+  const pageItems = serverPaged ? sortedItems : sortedItems.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
   const selectedCount = selectedProductAllFiltered ? filteredCount : selectedProductIds.size;
   const selectionLabel = selectedProductAllFiltered
     ? `${Number(filteredCount).toLocaleString()} filtered results selected`
@@ -8127,9 +8524,10 @@ function renderProductsTable(items) {
   const autoLoadAlternates = Boolean(appSystemSettings().autoLoadProductAlternates);
   if (autoLoadAlternates) loadProductTableAlternates(pageItems).catch((error) => toast(error.message));
   const alternatesLoaded = pageItems.filter((item) => productAlternatesCache[String(item.sku || "").toLowerCase()] && !productAlternatesCache[String(item.sku || "").toLowerCase()].loading).length;
+  const visibleColumns = visibleProductCatalogColumns();
   $("#products-list").innerHTML = items.length
     ? `
-      <div class="catalog-selection-toolbar product-export-bar">
+      <div class="catalog-selection-toolbar product-export-bar catalog-action-summary">
         <div class="selection-summary">
           <span class="selection-kicker">Selection</span>
           <strong>${html(selectionLabel)}</strong>
@@ -8146,13 +8544,8 @@ function renderProductsTable(items) {
             <label class="auto-alternates-toggle"><input type="checkbox" ${autoLoadAlternates ? "checked" : ""} data-system-setting="autoLoadProductAlternates" /> Auto alternates</label>
           </div>
         </div>
-        <div class="product-export-controls">
-          <span class="export-control-label">Export</span>
-          <select id="product-export-template">
-            <option value="custom-export">Custom export...</option>
-            ${exportMappings.map((template) => `<option value="${template.id}" ${template.id === selectedExportMappingId ? "selected" : ""}>${html(template.name)}</option>`).join("")}
-          </select>
-          <button class="button" type="button" data-export-products>${withIcon("download", "Export CSV")}</button>
+        <div class="catalog-action-hint">
+          ${withIcon("more-horizontal", "Use Actions for export, templates, and bulk tools")}
         </div>
       </div>
       <div class="catalog-source-summary product-page-summary">
@@ -8164,45 +8557,26 @@ function renderProductsTable(items) {
           <button class="button secondary" type="button" data-product-page="${productCatalogPage + 1}" ${productCatalogPage >= pageCount ? "disabled" : ""}>Next</button>
         </div>
       </div>
-      <div class="catalog-table-wrap">
-        <table class="catalog-table">
+      ${renderProductCatalogColumnTools()}
+      <div class="catalog-table-wrap product-catalog-table-wrap">
+        <table class="catalog-table product-catalog-table">
           <thead>
-            <tr><th><input type="checkbox" data-product-check-all ${pageItems.length && pageItems.every((item) => selectedProductAllFiltered || selectedProductIds.has(item.id)) ? "checked" : ""} /></th><th>Product</th><th>Readiness</th><th>Alternates</th><th>Manufacturer</th><th>Vendor SKU</th><th>Brand</th><th>Category</th><th>Status</th><th>Shopify</th><th>eBay</th><th>Shadows</th><th>Price</th><th>Images</th><th>Updated</th><th>Action</th></tr>
+            <tr>
+              ${visibleColumns.map((column) => `
+                <th class="col-${html(column.key)}">
+                  ${column.key === "select"
+                    ? `<input type="checkbox" data-product-check-all ${pageItems.length && pageItems.every((item) => selectedProductAllFiltered || selectedProductIds.has(item.id)) ? "checked" : ""} />`
+                    : column.key === "actions"
+                      ? html(column.label)
+                      : sortableHeader(column.label, column.key, productCatalogSort, "data-product-sort-column")}
+                </th>
+              `).join("")}
+            </tr>
           </thead>
           <tbody>
             ${pageItems.map((item) => `
               <tr>
-                <td><input type="checkbox" data-product-check="${item.id}" ${selectedProductAllFiltered || selectedProductIds.has(item.id) ? "checked" : ""} /></td>
-                <td>
-                  <button class="order-link product-name-link" data-select-product="${item.id}" data-product-target="product-full">${html(item.sku)}</button>
-                  <small>${html(item.marketplaceTitle || item.title || "Untitled product")}</small>
-                </td>
-                <td>${renderReadinessPill(item)}<small>${html(productReadiness(item).missing.slice(0, 2).join(", ") || "Ready checks passed")}</small></td>
-                <td>${renderProductAlternatesCell(item)}</td>
-                <td>${html(item.manufacturer || "No manufacturer")}</td>
-                <td>${html(item.vendorSku || "No vendor SKU")}</td>
-                <td>${html(item.brand || "No brand")}<small>${verifiedBrandForHandle(item) ? "Verified" : "Unverified"}</small></td>
-                <td>${html(item.category || "Uncategorized")}<small>Vendor: ${html(item.sourceCategory || item.vendorCategory || "n/a")}</small></td>
-                <td><span class="status ${String(item.status || "draft").toLowerCase()}">${html(item.status || "Draft")}</span></td>
-                <td>${shopifyReadinessStatusCell(item)}</td>
-                <td>${ebayListingStatusCell(item)}</td>
-                <td>${Number(item.shadowSkuCount ?? (item.shadowSkus || []).length)}</td>
-                <td>${money(item.price || 0)}</td>
-                <td><span class="image-count-pill ${productImageCount(item) > 1 ? "has-gallery" : ""}">${productImageCount(item)}</span></td>
-                <td>${simpleDate(item.updatedAt)}</td>
-                <td>
-                  <div class="action-menu">
-                    <button class="icon-button" data-action-menu="product-${item.id}" aria-label="Open product actions">...</button>
-                    <div class="action-popover" data-menu-for="product-${item.id}">
-                      <button data-select-product="${item.id}" data-product-target="product-full">Edit product content</button>
-                      <button data-select-product="${item.id}" data-product-target="inventory-full">View inventory details</button>
-                      <button data-product-row-action="set-active" data-product-id="${item.id}">Set active</button>
-                      <button data-product-row-action="set-inactive" data-product-id="${item.id}">Set inactive</button>
-                      <button data-product-row-action="set-discontinued" data-product-id="${item.id}">Set discontinued</button>
-                      <button data-product-row-action="delete" data-product-id="${item.id}">Delete from Products</button>
-                    </div>
-                  </div>
-                </td>
+                ${visibleColumns.map((column) => `<td class="col-${html(column.key)}">${renderProductCatalogCell(item, column.key)}</td>`).join("")}
               </tr>
             `).join("")}
           </tbody>
@@ -8212,13 +8586,33 @@ function renderProductsTable(items) {
     : `<div class="empty-state">No products match this filter.</div>`;
 }
 
+function inventoryCatalogSortValue(item = {}, key = "") {
+  const values = {
+    sku: item.sku || "",
+    title: item.title || item.marketplaceTitle || "",
+    qty: Number(item.qty || 0),
+    reserved: Number(item.reserved || 0),
+    available: Number(item.qty || 0) - Number(item.reserved || 0),
+    reorderPoint: Number(item.reorderPoint || 0),
+    cost: Number(item.cost || 0),
+    vendor: item.vendor || item.supplier || ""
+  };
+  return values[key] ?? "";
+}
+
+function sortInventoryCatalogItems(items = []) {
+  if (!inventoryCatalogSort?.key) return items;
+  return items.slice().sort((a, b) => compareTableValues(inventoryCatalogSortValue(a, inventoryCatalogSort.key), inventoryCatalogSortValue(b, inventoryCatalogSort.key), inventoryCatalogSort.direction));
+}
+
 function renderInventoryTable(items) {
   const serverPaged = inventoryCatalogState.loaded;
-  const filteredCount = serverPaged ? inventoryCatalogState.total : items.length;
+  const sortedItems = sortInventoryCatalogItems(items);
+  const filteredCount = serverPaged ? inventoryCatalogState.total : sortedItems.length;
   const pageCount = Math.max(1, Math.ceil(filteredCount / PRODUCT_CATALOG_PAGE_SIZE));
   inventoryCatalogPage = Math.min(Math.max(1, inventoryCatalogPage), pageCount);
   const pageStart = (inventoryCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE;
-  const pageItems = serverPaged ? items : items.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
+  const pageItems = serverPaged ? sortedItems : sortedItems.slice(pageStart, pageStart + PRODUCT_CATALOG_PAGE_SIZE);
   $("#inventory-list").innerHTML = items.length
     ? `
       <div class="catalog-source-summary product-page-summary">
@@ -8226,6 +8620,7 @@ function renderInventoryTable(items) {
         <span><strong>Page ${inventoryCatalogPage} of ${pageCount}</strong><small>${Number(pageStart + 1).toLocaleString()}-${Number(pageStart + pageItems.length).toLocaleString()}</small></span>
         <span><strong>${Number(PRODUCT_CATALOG_PAGE_SIZE).toLocaleString()}</strong><small>rows per page</small></span>
         <div class="source-pagination">
+          <button class="button" type="button" data-export-inventory-only>Export inventory</button>
           <button class="button secondary" type="button" data-inventory-page="${inventoryCatalogPage - 1}" ${inventoryCatalogPage <= 1 ? "disabled" : ""}>Previous</button>
           <button class="button secondary" type="button" data-inventory-page="${inventoryCatalogPage + 1}" ${inventoryCatalogPage >= pageCount ? "disabled" : ""}>Next</button>
         </div>
@@ -8233,7 +8628,17 @@ function renderInventoryTable(items) {
       <div class="catalog-table-wrap">
         <table class="catalog-table inventory-table">
           <thead>
-            <tr><th>SKU</th><th>Product</th><th>On hand</th><th>Reserved</th><th>Available</th><th>Reorder point</th><th>Cost</th><th>Vendor</th><th>Action</th></tr>
+            <tr>
+              <th>${sortableHeader("SKU", "sku", inventoryCatalogSort, "data-inventory-sort-column")}</th>
+              <th>${sortableHeader("Product", "title", inventoryCatalogSort, "data-inventory-sort-column")}</th>
+              <th>${sortableHeader("On hand", "qty", inventoryCatalogSort, "data-inventory-sort-column")}</th>
+              <th>${sortableHeader("Reserved", "reserved", inventoryCatalogSort, "data-inventory-sort-column")}</th>
+              <th>${sortableHeader("Available", "available", inventoryCatalogSort, "data-inventory-sort-column")}</th>
+              <th>${sortableHeader("Reorder point", "reorderPoint", inventoryCatalogSort, "data-inventory-sort-column")}</th>
+              <th>${sortableHeader("Cost", "cost", inventoryCatalogSort, "data-inventory-sort-column")}</th>
+              <th>${sortableHeader("Vendor", "vendor", inventoryCatalogSort, "data-inventory-sort-column")}</th>
+              <th>Action</th>
+            </tr>
           </thead>
           <tbody>
             ${pageItems.map((item) => {
@@ -9175,6 +9580,59 @@ function productSellUnitCost(item = {}) {
   return unitCost > 0 ? unitCost * productUomQty(item) : 0;
 }
 
+function variantBaseSku(item = {}) {
+  return String(item.sku || item.vendorSku || item.vendor_sku || item.mfrPartNumber || item.mfr_part_number || "").trim();
+}
+
+function variantSkuFromBase(baseSku = "", suffix = "") {
+  const sku = String(baseSku || "").trim();
+  const cleanSuffix = String(suffix || "").trim().toUpperCase();
+  return sku && cleanSuffix && !sku.toUpperCase().endsWith(`-${cleanSuffix}`) ? `${sku}-${cleanSuffix}` : sku;
+}
+
+function normalizeSystemVariant(variant = {}, parent = {}) {
+  const uom = productUomInfo({ ...parent, uom: variant.uom || parent.uom, uomQty: variant.uomQty || variant.packQty || parent.uomQty });
+  const parentSku = variantBaseSku(parent);
+  const sku = String(variant.sku || (uom.isMultiUnit ? variantSkuFromBase(parentSku, `${uom.qty}PC`) : parentSku)).trim();
+  const available = Math.max(0, Number(parent.qty ?? parent.stockQty ?? 0) - Number(parent.reserved || 0));
+  const key = String(variant.key || (uom.isMultiUnit ? `pack-${uom.qty}` : "each")).trim();
+  return {
+    id: String(variant.id || `${parentSku || "sku"}:${key}`),
+    key,
+    sku,
+    parentSku,
+    title: String(variant.title || parent.marketplaceTitle || parent.title || parentSku || "").trim(),
+    source: String(variant.source || "data-dump"),
+    variantType: String(variant.variantType || "sell-unit"),
+    optionName: String(variant.optionName || (uom.isMultiUnit ? "Purchase Unit" : "Title")),
+    optionValue: String(variant.optionValue || (uom.isMultiUnit ? uom.display : "Default Title")),
+    uom: String(variant.uom || uom.code),
+    uomName: String(variant.uomName || uom.name),
+    uomQty: Number(variant.uomQty || variant.packQty || uom.qty || 1),
+    packQty: Number(variant.packQty || variant.uomQty || uom.qty || 1),
+    inventoryMultiplier: Number(variant.inventoryMultiplier || 1),
+    quantity: Number(variant.quantity ?? available),
+    unitCost: Number(variant.unitCost ?? productSellUnitCost(parent)),
+    actual: variant.actual === undefined ? true : Boolean(variant.actual),
+    generated: variant.generated === undefined ? true : Boolean(variant.generated),
+    status: String(variant.status || "active"),
+    note: String(variant.note || (uom.isMultiUnit ? `Actual sell unit from source data: ${uom.display}.` : "Actual sell unit from source data."))
+  };
+}
+
+function systemProductVariants(item = {}) {
+  const explicit = Array.isArray(item.systemVariants) ? item.systemVariants : [];
+  const generated = normalizeSystemVariant({}, item);
+  const manual = explicit.filter((variant) => variant.generated === false || String(variant.source || "").toLowerCase() === "manual").map((variant) => normalizeSystemVariant(variant, item));
+  const seen = new Set();
+  return [generated, ...manual].filter((variant) => {
+    const key = String(variant.sku || "").trim().toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function shopifyVariantSku(baseSku = "", suffix = "EA") {
   const sku = String(baseSku || "").trim();
   return sku && !sku.toUpperCase().endsWith(`-${suffix}`) ? `${sku}-${suffix}` : sku;
@@ -9193,45 +9651,18 @@ function shopifyUomVariantSku(baseSku = "", uom = {}) {
 
 function shopifyPurchaseVariants(item = {}) {
   if (Array.isArray(item.shopifyPurchaseVariants) && item.shopifyPurchaseVariants.length) return item.shopifyPurchaseVariants;
-  const uom = productUomInfo(item);
   const settings = channelSettingsByName("Shopify");
-  const available = Math.max(0, Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
-  const packPrice = suggestedChannelPrice({ ...item, sellUnitCost: productSellUnitCost(item) }, "Shopify");
-  const variantBaseSku = shopifyVariantBaseSku(item);
-  const variants = [{
-    key: "sell-unit",
-    sku: uom.isMultiUnit ? shopifyUomVariantSku(variantBaseSku, uom) : variantBaseSku,
-    optionName: uom.isMultiUnit ? "Purchase Unit" : "Title",
-    optionValue: uom.isMultiUnit ? uom.display : "Default Title",
-    uom: uom.code,
-    uomName: uom.name,
-    uomQty: uom.qty,
-    inventoryMultiplier: 1,
-    quantity: available,
-    unitCost: productSellUnitCost(item),
-    price: packPrice,
-    compareAtPrice: roundMarketplacePrice(packPrice * 1.2, settings.roundingRule || "none"),
-    note: uom.isMultiUnit ? `Original sell unit from source data: ${uom.display}.` : "Default product variant."
-  }];
-  if (!uom.isMultiUnit) return variants;
-  const unitCost = Number(item.sourceCost ?? item.cost ?? 0);
-  const markup = Number(settings.priceMarkupPercent || 0) + 25;
-  const eachPrice = roundMarketplacePrice(unitCost * (1 + markup / 100), settings.roundingRule || "none");
-  variants.push({
-    key: "each",
-    sku: variantBaseSku,
-    optionName: "Purchase Unit",
-    optionValue: "Each",
-    uom: "EA",
-    uomName: "Each",
-    uomQty: 1,
-    inventoryMultiplier: 1,
-    quantity: available,
-    unitCost,
-    price: eachPrice,
-    note: `Virtual each variant from ${uom.display}; priced 25% above store markup.`
+  return systemProductVariants(item).map((variant) => {
+    const unitCost = Number(variant.unitCost || productSellUnitCost(item));
+    const price = suggestedChannelPrice({ ...item, sellUnitCost: unitCost }, "Shopify");
+    return {
+      ...variant,
+      unitCost,
+      price,
+      compareAtPrice: roundMarketplacePrice(price * 1.2, settings.roundingRule || "none"),
+      note: variant.note || "Actual DataPlus system variant."
+    };
   });
-  return variants;
 }
 
 function productCostValue(item = {}) {
@@ -9358,10 +9789,10 @@ function renderShopifyPurchaseVariants(item = {}) {
   if (!variants.length) return "";
   return `
     <section class="product-section-card product-section-orange">
-      <div class="product-section-title">${sectionIconTitle("git-branch", "Shopify Variations")}<span>${variants.length} purchase unit${variants.length === 1 ? "" : "s"}</span></div>
+      <div class="product-section-title">${sectionIconTitle("git-branch", "DataPlus Variants")}<span>${variants.length} actual sell unit${variants.length === 1 ? "" : "s"}</span></div>
       <div class="catalog-table-wrap compact-availability">
         <table class="catalog-table">
-          <thead><tr><th>Variant</th><th>SKU</th><th>Unit cost</th><th>Price</th><th>Margin</th><th>Qty</th><th>Rule</th></tr></thead>
+          <thead><tr><th>Variant</th><th>SKU</th><th>Source</th><th>Unit cost</th><th>Shopify price</th><th>Margin</th><th>Qty</th><th>Rule</th></tr></thead>
           <tbody>
             ${variants.map((variant) => {
               const profit = Number(variant.price || 0) - Number(variant.unitCost || 0);
@@ -9369,6 +9800,7 @@ function renderShopifyPurchaseVariants(item = {}) {
                 <tr>
                   <td><strong>${html(variant.optionValue || "Default Title")}</strong><small>${html(variant.uom || "")}${variant.uomQty ? ` / ${html(variant.uomQty)}` : ""}</small></td>
                   <td>${html(variant.sku || "")}</td>
+                  <td>${html(variant.source || "data-dump")}</td>
                   <td>${money(variant.unitCost || 0)}</td>
                   <td><strong>${money(variant.price || 0)}</strong></td>
                   <td>${marginPercent(profit, Number(variant.price || 0)).toFixed(1)}%</td>
@@ -10140,7 +10572,7 @@ function renderProductHomeTab(item, context) {
             </div>
             <button class="button secondary compact-button" type="button" data-open-product-images="${item.id}">${withIcon("edit-3", "Edit")}</button>
           </div>
-          <div class="product-main-image product-home-image">
+          <div class="product-main-image product-home-image ${galleryImage ? "" : "is-empty"}">
             ${galleryImage ? `<img src="${html(galleryImage)}" alt="${html(item.title || item.sku)}" />` : `<div class="image-placeholder">No image</div>`}
           </div>
           <div class="product-image-rail">
@@ -10488,7 +10920,7 @@ function renderProductContentPage() {
         <div class="product-workspace-title">
           <button class="text-button" data-view-jump="catalog">${withIcon("arrow-left", "Back to catalog")}</button>
           <div>
-            <h2>Product <span>${html(item.marketplaceTitle || item.title || "Untitled product")}</span></h2>
+            <h2>${html(item.marketplaceTitle || item.title || "Untitled product")}</h2>
             <div class="product-workspace-chips">
               <span>SKU ${html(item.sku)}</span>
               <span>${html(item.vendor || item.supplier || "No vendor")}</span>
@@ -10501,23 +10933,19 @@ function renderProductContentPage() {
         </div>
         <div class="product-editor-actions">
           <button class="button ${selectedProductEditMode ? "" : "secondary"}" data-toggle-product-edit="${item.id}">${withIcon(selectedProductEditMode ? "check" : "edit-3", selectedProductEditMode ? "Done editing" : "Edit product")}</button>
-          <button class="button secondary" data-export-product-shopify="${item.id}">${withIcon("download", "Export Shopify")}</button>
-          <button class="button secondary" data-export-product-template="${item.id}">${withIcon("clipboard-list", "Export Template")}</button>
-          ${item.shopifyId ? `<button class="button secondary" data-sync-product-shopify-status="${item.id}">${withIcon("refresh-cw", "Sync Shopify status")}</button>` : ""}
           <button class="button secondary" data-product-workspace-tab="inventory">${withIcon("warehouse", "Inventory")}</button>
-          <button class="button" data-create-shadow="${item.id}">${withIcon("plus", "Create shadow")}</button>
         </div>
       </div>
       <div class="product-workspace-tabs">
-        ${productTabButton("home", "Product Home")}
+        ${productTabButton("home", "Home")}
         ${productTabButton("shopify", "Shopify")}
         ${productTabButton("ebay", "eBay")}
         ${productTabButton("zoro", "Zoro")}
         ${productTabButton("inventory", "Inventory")}
-        ${productTabButton("shipping", "Shipping Preferences")}
-        ${productTabButton("pricing", "Pricing Management")}
-        ${productTabButton("source", "Source Details")}
-        ${productTabButton("search", "Search Content")}
+        ${productTabButton("shipping", "Shipping")}
+        ${productTabButton("pricing", "Pricing")}
+        ${productTabButton("source", "Source")}
+        ${productTabButton("search", "Search")}
       </div>
       <div class="product-workspace-body">
         ${activeTabContent}
@@ -12144,6 +12572,16 @@ function renderSystemSettingsPage() {
     ];
   const editable = systemSettingsEditMode;
   const roleOptions = (current = "") => roles.map((role) => `<option value="${html(role.name)}" ${String(current || "") === String(role.name || "") ? "selected" : ""}>${html(role.name)}</option>`).join("");
+  const activeUserId = settings.activeSystemUserId || users[0]?.id || "owner";
+  const activeTablePreferences = (state?.tablePreferences || {})[activeUserId] || {};
+  const tablePreferenceSummary = [
+    ["Orders", activeTablePreferences[TABLE_PREFERENCE_IDS.orders]],
+    ["Catalog products", activeTablePreferences[TABLE_PREFERENCE_IDS.products]],
+    ["Catalog inventory", activeTablePreferences[TABLE_PREFERENCE_IDS.inventory]]
+  ];
+  const sortLabel = (preference = {}) => preference.sort?.key
+    ? `${preference.sort.key} ${String(preference.sort.direction || "asc").toUpperCase()}`
+    : "Default";
   target.innerHTML = `
     <div class="system-settings-page">
       <section class="system-settings-hero">
@@ -12162,10 +12600,15 @@ function renderSystemSettingsPage() {
           <div class="section-head compact-head">
             <div>
               <h3>User Profiles</h3>
-              <p class="muted">Starter local profiles for permissions and accountability.</p>
+              <p class="muted">Profiles control permissions and personal workspace preferences like table columns and sorting.</p>
             </div>
             <button class="button secondary compact-button" type="button" data-add-system-user ${editable ? "" : "disabled"}>${withIcon("plus", "Add user")}</button>
           </div>
+          <label class="settings-inline-field">Active profile
+            <select data-system-setting="activeSystemUserId">
+              ${users.map((user) => `<option value="${html(user.id)}" ${String(activeUserId) === String(user.id) ? "selected" : ""}>${html(user.name || user.email || user.id)}</option>`).join("")}
+            </select>
+          </label>
           <div class="system-user-list">
             ${users.map((user) => `
               <article class="system-user-row" data-system-user-row="${html(user.id)}">
@@ -12182,6 +12625,15 @@ function renderSystemSettingsPage() {
           </div>
           <div class="system-settings-actions">
             <button class="button" type="button" data-save-system-users ${editable ? "" : "disabled"}>${withIcon("save", "Save profiles")}</button>
+          </div>
+        </section>
+        <section class="system-settings-card">
+          <h3>Table Preferences</h3>
+          <p class="muted">Saved under the active profile so each user can keep their own table layout.</p>
+          <div class="role-chip-list">
+            ${tablePreferenceSummary.map(([label, preference]) => `
+              <span><strong>${html(label)}</strong><small>${html(sortLabel(preference || {}))}${Array.isArray(preference?.visibleColumns) ? ` · ${preference.visibleColumns.length} columns` : ""}</small></span>
+            `).join("")}
           </div>
         </section>
         <section class="system-settings-card">
@@ -12228,6 +12680,26 @@ function renderSystemSettingsPage() {
               <label><input type="checkbox" ${settings[field] ? "checked" : ""} data-system-setting="${field}" ${editable ? "" : "disabled"} /> ${label}</label>
             `).join("")}
           </div>
+        </section>
+        <section class="system-settings-card span-2">
+          <div class="section-head compact-head">
+            <div>
+              <h3>Shopify Daily Inventory</h3>
+              <p class="muted">Queues the existing Shopify inventory job once per day after the latest product dump is available.</p>
+            </div>
+          </div>
+          <div class="settings-field-stack">
+            <label class="checkbox-row"><input type="checkbox" ${settings.shopifyDailyInventoryUpdateEnabled ? "checked" : ""} data-system-setting="shopifyDailyInventoryUpdateEnabled" ${editable ? "" : "disabled"} /> Enable daily Shopify inventory job</label>
+            <label>Run time<input type="time" value="${html(settings.shopifyDailyInventoryUpdateTime || "06:00")}" data-system-setting="shopifyDailyInventoryUpdateTime" ${editable ? "" : "disabled"} /></label>
+            <label>Mode
+              <select data-system-setting="shopifyDailyInventoryUpdateMode" ${editable ? "" : "disabled"}>
+                <option value="dry-run" ${settings.shopifyDailyInventoryUpdateMode !== "apply" ? "selected" : ""}>Dry run only</option>
+                <option value="apply" ${settings.shopifyDailyInventoryUpdateMode === "apply" ? "selected" : ""}>Apply to Shopify</option>
+              </select>
+            </label>
+            <label class="checkbox-row"><input type="checkbox" ${settings.shopifyDailyInventoryRequireSuccessfulDump !== false ? "checked" : ""} data-system-setting="shopifyDailyInventoryRequireSuccessfulDump" ${editable ? "" : "disabled"} /> Only run after a successful product dump import</label>
+          </div>
+          <p class="muted">Apply mode still requires Shopify inventory push to be enabled under Channels and a mapped Shopify location.</p>
         </section>
       </div>
     </div>
@@ -12429,6 +12901,98 @@ async function loadChannelApiLogs(channelName, force = false) {
   if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
 }
 
+function renderShopifyMissingVariantsPanel() {
+  const stateRows = shopifyMissingVariantState.items || [];
+  const report = shopifyMissingVariantState.report || {};
+  const page = Math.max(1, Number(shopifyMissingVariantState.page || 1) || 1);
+  const limit = Math.max(1, Number(shopifyMissingVariantState.limit || 50) || 50);
+  const total = Number(shopifyMissingVariantState.total || 0) || 0;
+  const start = total ? ((page - 1) * limit) + 1 : 0;
+  const end = Math.min(total, page * limit);
+  const canPrev = page > 1;
+  const canNext = page * limit < total;
+  return `
+    <section class="full-card span-2 shopify-missing-variants-panel">
+      <div class="section-head channel-settings-head">
+        <div>
+          <h3>Missing Variant Matches</h3>
+          <p class="muted">Products skipped by Shopify inventory updates because DataPlus expected SKU variants that were not found on the Shopify product.</p>
+        </div>
+        <div class="button-row compact-buttons">
+          <button class="button secondary" type="button" data-refresh-shopify-missing-variants>${withIcon("refresh-cw", shopifyMissingVariantState.loading ? "Refreshing..." : "Refresh")}</button>
+          <button class="button secondary" type="button" data-shopify-inventory-update="dry-run">${withIcon("clipboard-list", "New dry run")}</button>
+        </div>
+      </div>
+      <div class="shopify-missing-summary">
+        <span><small>Report</small><strong>${html(report.reportFileName || "No report")}</strong></span>
+        <span><small>Generated</small><strong>${report.generatedAt ? dateLabel(report.generatedAt) : "Not run"}</strong></span>
+        <span><small>Location</small><strong>${html(report.locationName || "Unknown")}</strong></span>
+        <span><small>Missing</small><strong>${Number(report.productsMissingVariants || total || 0).toLocaleString()}</strong></span>
+      </div>
+      <div class="api-log-filters">
+        <label>
+          <small>Search</small>
+          <input id="shopify-missing-variant-search" value="${html(shopifyMissingVariantState.q || "")}" placeholder="SKU, expected variant, Shopify variant, product GID" />
+        </label>
+        <button class="button" type="button" data-search-shopify-missing-variants>${withIcon("search", "Search")}</button>
+        <button class="button secondary" type="button" data-clear-shopify-missing-variants>Clear</button>
+      </div>
+      <p class="muted api-log-count">${total ? `${start.toLocaleString()}-${end.toLocaleString()} of ${total.toLocaleString()} shown` : "No missing variant rows loaded"}</p>
+      ${shopifyMissingVariantState.error ? `<div class="notice warning">${html(shopifyMissingVariantState.error)}</div>` : ""}
+      <div class="shopify-missing-table-wrap">
+        <table class="catalog-table compact-table shopify-missing-table">
+          <thead>
+            <tr><th>DataPlus SKU</th><th>Expected Variant SKUs</th><th>Shopify Variant SKUs</th><th>Shopify Product</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            ${shopifyMissingVariantState.loading && !stateRows.length ? `<tr><td colspan="5">Loading missing variant matches...</td></tr>` : stateRows.length ? stateRows.map((row) => `
+              <tr>
+                <td><strong>${html(row.sku || row.productId || "")}</strong>${row.vendorSku ? `<small>${html(row.vendorSku)}</small>` : ""}</td>
+                <td>${(row.expectedSkus || []).length ? row.expectedSkus.map((sku) => `<code>${html(sku)}</code>`).join(" ") : `<span class="muted">None</span>`}</td>
+                <td>${(row.shopifyVariantSkus || []).length ? row.shopifyVariantSkus.map((sku) => `<code>${html(sku)}</code>`).join(" ") : `<span class="muted">No Shopify SKUs found</span>`}</td>
+                <td><small>${html(row.shopifyId || "")}</small></td>
+                <td><button class="button secondary compact-button" type="button" data-select-product="${html(row.sku || row.productId || "")}" data-product-target="product-full">Open SKU</button></td>
+              </tr>
+            `).join("") : `<tr><td colspan="5">${shopifyMissingVariantState.loaded ? "No missing variant matches found for this search." : "Run or refresh the report to load missing variant matches."}</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      <div class="pagination-row compact-pagination">
+        <button class="button secondary" type="button" data-shopify-missing-variant-page="${page - 1}" ${canPrev ? "" : "disabled"}>Previous</button>
+        <span>Page ${page.toLocaleString()}</span>
+        <button class="button secondary" type="button" data-shopify-missing-variant-page="${page + 1}" ${canNext ? "" : "disabled"}>Next</button>
+      </div>
+    </section>
+  `;
+}
+
+async function loadShopifyMissingVariants(options = {}) {
+  const nextPage = Math.max(1, Number(options.page || shopifyMissingVariantState.page || 1) || 1);
+  const q = options.q !== undefined ? String(options.q || "").trim() : String(shopifyMissingVariantState.q || "").trim();
+  shopifyMissingVariantState = { ...shopifyMissingVariantState, loading: true, error: "", page: nextPage, q };
+  if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
+  try {
+    const params = new URLSearchParams({ page: String(nextPage), limit: String(shopifyMissingVariantState.limit || 50) });
+    if (q) params.set("q", q);
+    const result = await api(`/api/shopify/inventory-missing-variants?${params.toString()}`, { feedbackLabel: "Loading missing variant matches..." });
+    shopifyMissingVariantState = {
+      ...shopifyMissingVariantState,
+      items: result.items || [],
+      report: result.report || null,
+      total: Number(result.total || 0) || 0,
+      page: Number(result.page || nextPage) || nextPage,
+      limit: Number(result.limit || shopifyMissingVariantState.limit || 50) || 50,
+      q: result.q ?? q,
+      loading: false,
+      loaded: true,
+      error: result.message || ""
+    };
+  } catch (error) {
+    shopifyMissingVariantState = { ...shopifyMissingVariantState, items: [], loading: false, loaded: true, error: error.message || "Unable to load missing variant matches." };
+  }
+  if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
+}
+
 function renderChannelProfile() {
   const channel = (state.connections || []).find((row) => row.id === selectedChannelId);
   const target = $("#channel-profile-page");
@@ -12559,6 +13123,12 @@ function renderChannelProfile() {
           </div>
         </section>
   ` : "";
+  const shopifyInventoryWarehouse = (state.warehouses || []).find((warehouse) => warehouse.id === settings.shopifyInventoryWarehouseId) || {};
+  const shopifyInventoryLocationId = settings.shopifyInventoryLocationId || shopifyInventoryWarehouse.shopifyLocationId || "";
+  const shopifyWarehouseOptions = (state.warehouses || []).map((warehouse) => {
+    const mapped = warehouse.shopifyLocationId ? ` / ${warehouse.shopifyLocationName || warehouse.shopifyLocationId}` : " / no Shopify location";
+    return `<option value="${html(warehouse.id)}" ${settings.shopifyInventoryWarehouseId === warehouse.id ? "selected" : ""}>${html(`${warehouse.name || warehouse.code || "Warehouse"}${mapped}`)}</option>`;
+  }).join("");
   const shopifySettingsPanel = isShopify ? `
         <section class="full-card span-2 channel-settings-card">
           <div class="section-head channel-settings-head">
@@ -12568,6 +13138,8 @@ function renderChannelProfile() {
             </div>
             <div class="button-row compact-buttons">
               <button class="button secondary" type="button" data-sync-shopify-status-all>${withIcon("refresh-cw", "Sync Shopify status")}</button>
+              <button class="button secondary" type="button" data-shopify-inventory-update="dry-run">${withIcon("clipboard-list", "Inventory dry run")}</button>
+              <button class="button" type="button" data-shopify-inventory-update="apply">${withIcon("warehouse", "Update inventory")}</button>
               <button class="button secondary" type="button" data-sync-shopify-closeouts>${withIcon("store", "Sync Closeouts")}</button>
               <button class="button secondary" type="button" data-open-shopify-status-import>${withIcon("upload", "Import status CSV")}</button>
             </div>
@@ -12606,9 +13178,24 @@ function renderChannelProfile() {
                   ${[
                     ["shopifySyncStatusEnabled", "Enable Shopify status sync"],
                     ["shopifyAutoSyncStatus", "Auto-sync status after API actions"],
-                    ["shopifyCloseoutsEnabled", "Manage Closeouts collection"]
+                    ["shopifyCloseoutsEnabled", "Manage Closeouts collection"],
+                    ["shopifyInventoryPushEnabled", "Enable DataPlus inventory push"]
                   ].map(([field, label]) => `<label><input type="checkbox" ${settings[field] ? "checked" : ""} data-channel-field="${field}" data-channel-id="${channel.id}" /> ${label}</label>`).join("")}
                 </div>
+              </div>
+              <div class="channel-settings-group">
+                <div class="channel-settings-group-head">
+                  <strong>Inventory Push</strong>
+                  <span>Maps DataPlus warehouse stock updates to a Shopify location.</span>
+                </div>
+                <div class="channel-settings-grid listing-grid">
+                  <label>DataPlus warehouse<select data-channel-field="shopifyInventoryWarehouseId" data-channel-id="${channel.id}">
+                    <option value="">Select mapped warehouse</option>
+                    ${shopifyWarehouseOptions}
+                  </select></label>
+                  <label>Fallback Shopify location GID<input value="${html(settings.shopifyInventoryLocationId || "")}" data-channel-field="shopifyInventoryLocationId" data-channel-id="${channel.id}" placeholder="gid://shopify/Location/108943900976" /></label>
+                </div>
+                <p class="muted">Live updates require the inventory push toggle and a mapped Shopify location. Dry runs can still be used to preview differences.</p>
               </div>
             </div>
             <aside class="channel-settings-aside">
@@ -12621,11 +13208,14 @@ function renderChannelProfile() {
                 <span><small>API version</small><strong>${html(channel.shopifyConfig?.apiVersion || "2026-04")}</strong></span>
                 <span><small>Access token</small><strong>${channel.shopifyConfig?.hasAccessToken ? "Set" : "Not set"}</strong></span>
                 <span><small>Client auth</small><strong>${channel.shopifyConfig?.hasClientCredentials ? "Set" : "Not set"}</strong></span>
+                <span><small>Inventory push</small><strong>${settings.shopifyInventoryPushEnabled ? "Enabled" : "Disabled"}</strong></span>
+                <span><small>Inventory target</small><strong>${html(shopifyInventoryLocationId || "Not mapped")}</strong></span>
               </div>
             </aside>
           </div>
         </section>
   ` : "";
+  const shopifyMissingVariantsPanel = isShopify ? renderShopifyMissingVariantsPanel() : "";
   target.innerHTML = `
     <div class="full-order">
       <div class="full-order-head">
@@ -12665,6 +13255,7 @@ function renderChannelProfile() {
         </section>
         ${ebaySettingsPanel}
         ${shopifySettingsPanel}
+        ${shopifyMissingVariantsPanel}
         <section class="full-card span-2">
           <h3>Automation Settings</h3>
           <div class="channel-toggle-grid">
@@ -12717,6 +13308,9 @@ function renderChannelProfile() {
   `;
   if (!channelApiLogState.loading && (channelApiLogState.channel !== channel.name || !channelApiLogState.loaded)) {
     loadChannelApiLogs(channel.name).catch((error) => toast(error.message));
+  }
+  if (isShopify && !shopifyMissingVariantState.loading && !shopifyMissingVariantState.loaded) {
+    loadShopifyMissingVariants().catch((error) => toast(error.message));
   }
 }
 
@@ -14534,12 +15128,13 @@ async function createExportMapping() {
   const formData = form ? new FormData(form) : null;
   const name = String(formData?.get("name") || "Custom Product Mapping").trim();
   const source = String(formData?.get("source") || "Custom").trim();
+  const formatType = String(formData?.get("formatType") || "normal").trim();
   const mode = String(formData?.get("mode") || "both").trim();
   const notes = String(formData?.get("notes") || "").trim();
   if (!name) throw new Error("Template name is required.");
   const result = await api("/api/export-mappings", {
     method: "POST",
-    body: JSON.stringify({ name, source, mode, notes })
+    body: JSON.stringify({ name, source, formatType, mode, notes })
   });
   selectedExportMappingId = result.template.id;
   activeExportMappingPageId = result.template.id;
@@ -14702,6 +15297,7 @@ async function duplicateExportMapping(templateId) {
     body: JSON.stringify({
       name: `${template.name} Copy`,
       source: template.source,
+      formatType: exportMappingFormatType(template),
       mode: template.mode,
       notes: template.notes,
       mappings: template.mappings || []
@@ -14952,6 +15548,11 @@ async function updateSystemSetting(input) {
   });
   if (result.state) setState(result.state);
   else if (result.systemSettings) state.systemSettings = result.systemSettings;
+  if (field === "activeSystemUserId") {
+    applyTablePreferencesFromState(true);
+    if (currentViewId === "orders") renderOrders();
+    if (currentViewId === "catalog") renderCatalog();
+  }
   renderCatalog();
   renderSystemSettingsPage();
   toast("System setting updated.");
@@ -15418,6 +16019,26 @@ async function exportProductsFromProductsTab() {
   }
   downloadCsvResult(result, "product-export.csv");
   toast(`Exported ${Number(result.count || 0).toLocaleString()} product${result.count === 1 ? "" : "s"}.`);
+}
+
+async function exportInventoryOnlyFromInventoryTab() {
+  const templateId = "export-inventory-only";
+  const { query, filters } = productCatalogRequestParams(inventoryCatalogPage);
+  const matchCount = inventoryCatalogState.loaded ? inventoryCatalogState.total : filteredCatalogItems().length;
+  if (!matchCount) return toast("No inventory rows match this export.");
+  const result = await api(`/api/export-mappings/${templateId}/export`, {
+    method: "POST",
+    feedbackLabel: "Queueing inventory export...",
+    body: JSON.stringify({ query, filters, forceJob: true, dataFileName: "inventory.csv" })
+  });
+  if (result.queued) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+    renderTopbarActions();
+    toast(queuedJobToast(result, "Inventory export queued in Jobs."));
+    return;
+  }
+  downloadCsvResult(result, "inventory.csv");
+  toast(`Exported ${Number(result.count || 0).toLocaleString()} inventory row${result.count === 1 ? "" : "s"}.`);
 }
 
 function productExportSelectionBody(fileName = "products.csv") {
@@ -15966,6 +16587,38 @@ async function syncAllShopifyStatuses() {
   toast(result.queued ? (result.message || "Shopify status sync queued in Jobs.") : (result.message || `Shopify status sync complete: ${Number(result.synced || 0).toLocaleString()} checked.`));
 }
 
+async function queueShopifyInventoryUpdate(mode = "apply") {
+  const apply = mode !== "dry-run";
+  const shopifyChannel = (state.connections || []).find((channel) => String(channel.name || "").toLowerCase() === "shopify");
+  const settings = shopifyChannel?.settings || {};
+  const mappedWarehouse = (state.warehouses || []).find((warehouse) => warehouse.id === settings.shopifyInventoryWarehouseId);
+  const locationId = settings.shopifyInventoryLocationId || mappedWarehouse?.shopifyLocationId || "";
+  if (apply && !settings.shopifyInventoryPushEnabled) {
+    toast("Enable DataPlus inventory push in Shopify channel settings before applying inventory.");
+    return;
+  }
+  if (apply && !locationId) {
+    toast("Map a DataPlus warehouse to a Shopify location before applying inventory.");
+    return;
+  }
+  const result = await api("/api/shopify/inventory-update", {
+    method: "POST",
+    feedbackLabel: apply ? "Queueing Shopify inventory update..." : "Queueing Shopify inventory dry run...",
+    body: JSON.stringify({
+      apply,
+      dryRun: !apply,
+      warehouseId: settings.shopifyInventoryWarehouseId || "",
+      locationId
+    })
+  });
+  if (result.state) setState(result.state);
+  if (result.job) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+  }
+  render();
+  toast(queuedJobToast(result, apply ? "Shopify inventory update queued in Jobs." : "Shopify inventory dry run queued in Jobs."));
+}
+
 async function runCategoryExport(type, channel = "") {
   const result = await api("/api/categories/export-job", {
     method: "POST",
@@ -16035,6 +16688,7 @@ document.addEventListener("click", async (event) => {
   const addNoteButton = event.target.closest("[data-add-order-note]");
   const orderCheck = event.target.closest("[data-order-check]");
   const orderQueueButton = event.target.closest("[data-order-queue]");
+  const orderSortColumnButton = event.target.closest("[data-order-sort-column]");
   const createPoOrder = event.target.closest("[data-create-po-order]");
   const createPoSelected = event.target.closest("[data-create-po-selected]");
   const clearOrderSelection = event.target.closest("[data-clear-order-selection]");
@@ -16095,6 +16749,7 @@ document.addEventListener("click", async (event) => {
   const jobChannelApiHistoryButton = event.target.closest("[data-job-channel-api-history]");
   const syncEbaySettingsButton = event.target.closest("[data-sync-ebay-account-settings]");
   const exportProductsButton = event.target.closest("[data-export-products]");
+  const exportInventoryOnlyButton = event.target.closest("[data-export-inventory-only]");
   const exportProductShopifyButton = event.target.closest("[data-export-product-shopify]");
   const exportProductTemplateButton = event.target.closest("[data-export-product-template]");
   const closeProductExportButton = event.target.closest("[data-close-product-export-modal]");
@@ -16119,6 +16774,11 @@ document.addEventListener("click", async (event) => {
   const dataQualityScanButton = event.target.closest("[data-data-quality-scan]");
   const syncShopifyCloseoutsButton = event.target.closest("[data-sync-shopify-closeouts]");
   const syncShopifyStatusAllButton = event.target.closest("[data-sync-shopify-status-all]");
+  const shopifyInventoryUpdateButton = event.target.closest("[data-shopify-inventory-update]");
+  const refreshShopifyMissingVariantsButton = event.target.closest("[data-refresh-shopify-missing-variants]");
+  const searchShopifyMissingVariantsButton = event.target.closest("[data-search-shopify-missing-variants]");
+  const clearShopifyMissingVariantsButton = event.target.closest("[data-clear-shopify-missing-variants]");
+  const shopifyMissingVariantPageButton = event.target.closest("[data-shopify-missing-variant-page]");
   const refreshChannelApiLogsButton = event.target.closest("[data-refresh-channel-api-logs]");
   const channelApiLogSearchButton = event.target.closest("[data-channel-api-log-search]");
   const channelApiLogClearButton = event.target.closest("[data-channel-api-log-clear]");
@@ -16136,12 +16796,18 @@ document.addEventListener("click", async (event) => {
   const removeSourceSupplierButton = event.target.closest("[data-remove-source-supplier]");
   const productCheck = event.target.closest("[data-product-check]");
   const productCheckAll = event.target.closest("[data-product-check-all]");
+  const productSortColumnButton = event.target.closest("[data-product-sort-column]");
+  const productCatalogColumnToggle = event.target.closest("[data-product-catalog-column]");
+  const resetProductCatalogColumnsButton = event.target.closest("[data-reset-product-catalog-columns]");
+  const productTableScrollButton = event.target.closest("[data-scroll-product-table]");
   const productRowActionButton = event.target.closest("[data-product-row-action]");
   const productPageButton = event.target.closest("[data-product-page]");
   const inventoryPageButton = event.target.closest("[data-inventory-page]");
+  const inventorySortColumnButton = event.target.closest("[data-inventory-sort-column]");
   const selectProductsPageButton = event.target.closest("[data-select-products-page]");
   const selectProductsFilteredButton = event.target.closest("[data-select-products-filtered]");
   const clearProductsSelectionButton = event.target.closest("[data-clear-products-selection]");
+  const openProductExportModalButton = event.target.closest("[data-open-product-export-modal]");
   const loadProductAlternatesPageButton = event.target.closest("[data-load-product-alternates-page]");
   const loadProductAlternatesButton = event.target.closest("[data-load-product-alternates]");
   const vendorButton = event.target.closest("[data-select-vendor]");
@@ -16152,6 +16818,7 @@ document.addEventListener("click", async (event) => {
   const vendorActionButton = event.target.closest("[data-vendor-action]");
   const brandActionButton = event.target.closest("[data-brand-action]");
   const menuGroupsToggle = event.target.closest("[data-toggle-menu-groups]");
+  const sidebarCollapseToggle = event.target.closest("[data-toggle-sidebar-collapse]");
   const addCustomerAddressButton = event.target.closest("[data-add-customer-address]");
   const poSubmitButton = event.target.closest("[data-po-submit]");
   const poActionButton = event.target.closest("[data-po-action]");
@@ -16653,6 +17320,10 @@ document.addEventListener("click", async (event) => {
     exportProductsFromProductsTab().catch((error) => toast(error.message));
     return;
   }
+  if (exportInventoryOnlyButton) {
+    exportInventoryOnlyFromInventoryTab().catch((error) => toast(error.message));
+    return;
+  }
   if (closeProductExportButton) {
     closeProductExportModal();
     return;
@@ -16713,6 +17384,27 @@ document.addEventListener("click", async (event) => {
   if (syncShopifyStatusAllButton) {
     closeActionMenus();
     syncAllShopifyStatuses().catch((error) => toast(error.message));
+    return;
+  }
+  if (shopifyInventoryUpdateButton) {
+    closeActionMenus();
+    queueShopifyInventoryUpdate(shopifyInventoryUpdateButton.dataset.shopifyInventoryUpdate || "apply").catch((error) => toast(error.message));
+    return;
+  }
+  if (refreshShopifyMissingVariantsButton) {
+    loadShopifyMissingVariants({ page: shopifyMissingVariantState.page || 1 }).catch((error) => toast(error.message));
+    return;
+  }
+  if (searchShopifyMissingVariantsButton) {
+    loadShopifyMissingVariants({ page: 1, q: $("#shopify-missing-variant-search")?.value || "" }).catch((error) => toast(error.message));
+    return;
+  }
+  if (clearShopifyMissingVariantsButton) {
+    loadShopifyMissingVariants({ page: 1, q: "" }).catch((error) => toast(error.message));
+    return;
+  }
+  if (shopifyMissingVariantPageButton) {
+    loadShopifyMissingVariants({ page: Number(shopifyMissingVariantPageButton.dataset.shopifyMissingVariantPage || 1) || 1 }).catch((error) => toast(error.message));
     return;
   }
   if (refreshChannelApiLogsButton) {
@@ -17177,6 +17869,13 @@ document.addEventListener("click", async (event) => {
     applyMenuGroupState();
     return;
   }
+  if (sidebarCollapseToggle) {
+    event.stopPropagation();
+    sidebarCollapsed = !sidebarCollapsed;
+    localStorage.setItem("dataplus-sidebar-collapsed", String(sidebarCollapsed));
+    applySidebarCollapseState();
+    return;
+  }
   if (vendorActionButton) {
     event.stopPropagation();
     runVendorAction(vendorActionButton.dataset.vendorId, vendorActionButton.dataset.vendorAction);
@@ -17355,18 +18054,21 @@ document.addEventListener("click", async (event) => {
   if (selectSourcePageButton) {
     selectedSourceAllFiltered = false;
     for (const item of sourceCatalogState.items || []) selectedSourceSkus.add(item.sku);
+    renderTopbarActions();
     renderSourceCatalogTable();
     return;
   }
   if (selectSourceFilteredButton) {
     selectedSourceSkus.clear();
     selectedSourceAllFiltered = true;
+    renderTopbarActions();
     renderSourceCatalogTable();
     return;
   }
   if (clearSourceSelectionButton) {
     selectedSourceSkus.clear();
     selectedSourceAllFiltered = false;
+    renderTopbarActions();
     renderSourceCatalogTable();
     return;
   }
@@ -17415,10 +18117,23 @@ document.addEventListener("click", async (event) => {
     renderCatalog();
     return;
   }
+  if (productSortColumnButton) {
+    event.stopPropagation();
+    const key = productSortColumnButton.dataset.productSortColumn;
+    productCatalogSort = {
+      key,
+      direction: productCatalogSort.key === key && productCatalogSort.direction === "asc" ? "desc" : "asc"
+    };
+    productCatalogPage = 1;
+    queueSaveTablePreference(TABLE_PREFERENCE_IDS.products);
+    renderProductsTable(filteredCatalogItems());
+    return;
+  }
   if (productCheck) {
     selectedProductAllFiltered = false;
     if (productCheck.checked) selectedProductIds.add(productCheck.dataset.productCheck);
     else selectedProductIds.delete(productCheck.dataset.productCheck);
+    renderTopbarActions();
     renderProductsTable(filteredCatalogItems());
     updateCatalogBulkBar();
     return;
@@ -17426,13 +18141,45 @@ document.addEventListener("click", async (event) => {
   if (productCheckAll) {
     selectedProductAllFiltered = false;
     const items = filteredCatalogItems();
-    const pageItems = productCatalogState.loaded ? items : items.slice((productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE, productCatalogPage * PRODUCT_CATALOG_PAGE_SIZE);
+    const sortedItems = sortProductCatalogItems(items);
+    const pageItems = productCatalogState.loaded ? sortedItems : sortedItems.slice((productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE, productCatalogPage * PRODUCT_CATALOG_PAGE_SIZE);
     for (const item of pageItems) {
       if (productCheckAll.checked) selectedProductIds.add(item.id);
       else selectedProductIds.delete(item.id);
     }
+    renderTopbarActions();
     renderProductsTable(items);
     updateCatalogBulkBar();
+    return;
+  }
+  if (productCatalogColumnToggle) {
+    event.stopPropagation();
+    const key = productCatalogColumnToggle.dataset.productCatalogColumn;
+    if (productCatalogColumnToggle.checked) productCatalogVisibleColumns.add(key);
+    else productCatalogVisibleColumns.delete(key);
+    for (const fixedKey of PRODUCT_CATALOG_FIXED_COLUMNS) productCatalogVisibleColumns.add(fixedKey);
+    saveProductCatalogColumns();
+    queueSaveTablePreference(TABLE_PREFERENCE_IDS.products);
+    renderProductsTable(filteredCatalogItems());
+    document.querySelector(`[data-menu-for="product-catalog-columns"]`)?.classList.add("open");
+    return;
+  }
+  if (resetProductCatalogColumnsButton) {
+    event.stopPropagation();
+    productCatalogVisibleColumns = new Set(PRODUCT_CATALOG_DEFAULT_COLUMNS);
+    saveProductCatalogColumns();
+    queueSaveTablePreference(TABLE_PREFERENCE_IDS.products);
+    renderProductsTable(filteredCatalogItems());
+    document.querySelector(`[data-menu-for="product-catalog-columns"]`)?.classList.add("open");
+    return;
+  }
+  if (productTableScrollButton) {
+    event.stopPropagation();
+    const wrap = document.querySelector(".product-catalog-table-wrap");
+    if (wrap) {
+      const direction = Number(productTableScrollButton.dataset.scrollProductTable || 1);
+      wrap.scrollBy({ left: direction * Math.max(320, wrap.clientWidth * 0.72), behavior: "smooth" });
+    }
     return;
   }
   if (productPageButton) {
@@ -17447,6 +18194,18 @@ document.addEventListener("click", async (event) => {
     renderCatalog();
     return;
   }
+  if (inventorySortColumnButton) {
+    event.stopPropagation();
+    const key = inventorySortColumnButton.dataset.inventorySortColumn;
+    inventoryCatalogSort = {
+      key,
+      direction: inventoryCatalogSort.key === key && inventoryCatalogSort.direction === "asc" ? "desc" : "asc"
+    };
+    inventoryCatalogPage = 1;
+    queueSaveTablePreference(TABLE_PREFERENCE_IDS.inventory);
+    renderInventoryTable(filteredCatalogItems());
+    return;
+  }
   if (selectProductsPageButton || selectProductsFilteredButton) {
     const items = filteredCatalogItems();
     if (selectProductsFilteredButton) {
@@ -17454,9 +18213,11 @@ document.addEventListener("click", async (event) => {
       selectedProductAllFiltered = true;
     } else {
       selectedProductAllFiltered = false;
-      const nextItems = productCatalogState.loaded ? items : items.slice((productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE, productCatalogPage * PRODUCT_CATALOG_PAGE_SIZE);
+      const sortedItems = sortProductCatalogItems(items);
+      const nextItems = productCatalogState.loaded ? sortedItems : sortedItems.slice((productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE, productCatalogPage * PRODUCT_CATALOG_PAGE_SIZE);
       for (const item of nextItems) selectedProductIds.add(item.id);
     }
+    renderTopbarActions();
     renderProductsTable(items);
     updateCatalogBulkBar();
     return;
@@ -17464,13 +18225,19 @@ document.addEventListener("click", async (event) => {
   if (clearProductsSelectionButton) {
     selectedProductIds.clear();
     selectedProductAllFiltered = false;
+    renderTopbarActions();
     renderProductsTable(filteredCatalogItems());
     updateCatalogBulkBar();
     return;
   }
+  if (openProductExportModalButton) {
+    openProductExportModal(openProductExportModalButton.dataset.openProductExportModal || "profile").catch((error) => toast(error.message));
+    return;
+  }
   if (loadProductAlternatesPageButton) {
     const items = filteredCatalogItems();
-    const pageItems = productCatalogState.loaded ? items : items.slice((productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE, productCatalogPage * PRODUCT_CATALOG_PAGE_SIZE);
+    const sortedItems = sortProductCatalogItems(items);
+    const pageItems = productCatalogState.loaded ? sortedItems : sortedItems.slice((productCatalogPage - 1) * PRODUCT_CATALOG_PAGE_SIZE, productCatalogPage * PRODUCT_CATALOG_PAGE_SIZE);
     loadProductTableAlternates(pageItems).catch((error) => toast(error.message));
     renderProductsTable(items);
     return;
@@ -17486,6 +18253,17 @@ document.addEventListener("click", async (event) => {
   if (productRowActionButton) {
     closeActionMenus();
     runProductRowAction(productRowActionButton.dataset.productId, productRowActionButton.dataset.productRowAction).catch((error) => toast(error.message));
+    return;
+  }
+  if (orderSortColumnButton) {
+    event.stopPropagation();
+    const key = orderSortColumnButton.dataset.orderSortColumn;
+    orderTableSort = {
+      key,
+      direction: orderTableSort.key === key && orderTableSort.direction === "asc" ? "desc" : "asc"
+    };
+    queueSaveTablePreference(TABLE_PREFERENCE_IDS.orders);
+    renderOrders();
     return;
   }
   if (orderCheck) {
@@ -17631,6 +18409,9 @@ document.addEventListener("click", async (event) => {
     if (viewButton.dataset.purchasingTabLink) purchasingTab = viewButton.dataset.purchasingTabLink;
     if (viewButton.dataset.catalogTabLink) catalogTab = viewButton.dataset.catalogTabLink;
     showView(viewButton.dataset.view);
+    if (viewButton.dataset.view === "orders") renderOrders();
+    if (viewButton.dataset.view === "drafts") renderDrafts();
+    if (viewButton.dataset.view === "returns") renderReturnsManagement();
     if (viewButton.dataset.view === "purchasing") renderPurchaseOrders();
     if (viewButton.dataset.view === "catalog") renderCatalog();
     if (viewButton.dataset.view === "jobs") renderJobsPage();
@@ -17638,6 +18419,9 @@ document.addEventListener("click", async (event) => {
   if (jumpButton) {
     closeActionMenus();
     showView(jumpButton.dataset.viewJump);
+    if (jumpButton.dataset.viewJump === "orders") renderOrders();
+    if (jumpButton.dataset.viewJump === "drafts") renderDrafts();
+    if (jumpButton.dataset.viewJump === "returns") renderReturnsManagement();
     if (jumpButton.dataset.viewJump === "catalog") renderCatalog();
     if (jumpButton.dataset.viewJump === "purchasing") renderPurchaseOrders();
     if (jumpButton.dataset.viewJump === "jobs") renderJobsPage();
@@ -17655,8 +18439,14 @@ document.addEventListener("click", async (event) => {
   }
   if (orderButton) {
     selectedOrderId = orderButton.dataset.selectOrder;
-    if (openDetailButton) {
+    closeActionMenus();
+    if (orderButton.dataset.orderTarget === "order-full") {
       showView("order-full");
+      return;
+    }
+    if (openDetailButton || currentViewId === "orders") {
+      orderDetailVisible = true;
+      renderOrders();
       return;
     }
     renderOrders();
@@ -17711,7 +18501,22 @@ $("#order-source").addEventListener("change", () => runWithSearchFeedback(render
 $("#order-status").addEventListener("change", () => runWithSearchFeedback(renderOrders, "Filtering orders..."));
 $("#order-date-from").addEventListener("change", () => runWithSearchFeedback(renderOrders, "Filtering orders..."));
 $("#order-date-to").addEventListener("change", () => runWithSearchFeedback(renderOrders, "Filtering orders..."));
-$("#order-sort").addEventListener("change", () => runWithSearchFeedback(renderOrders, "Sorting orders..."));
+$("#order-sort").addEventListener("change", () => {
+  const [key, direction] = {
+    "created-desc": ["createdAt", "desc"],
+    "created-asc": ["createdAt", "asc"],
+    "shipby-asc": ["shipBy", "asc"],
+    "shipby-desc": ["shipBy", "desc"],
+    "total-desc": ["total", "desc"],
+    "total-asc": ["total", "asc"],
+    "buyer-asc": ["buyer", "asc"],
+    "source-asc": ["source", "asc"],
+    "status-asc": ["status", "asc"]
+  }[$("#order-sort")?.value || "created-desc"] || ["createdAt", "desc"];
+  orderTableSort = { key, direction };
+  queueSaveTablePreference(TABLE_PREFERENCE_IDS.orders);
+  runWithSearchFeedback(renderOrders, "Sorting orders...");
+});
 $("#order-filter-clear").addEventListener("click", () => {
   $("#order-search").value = "";
   $("#order-source").value = "all";
@@ -17719,6 +18524,8 @@ $("#order-filter-clear").addEventListener("click", () => {
   $("#order-date-from").value = "";
   $("#order-date-to").value = "";
   $("#order-sort").value = "created-desc";
+  orderTableSort = { key: "createdAt", direction: "desc" };
+  queueSaveTablePreference(TABLE_PREFERENCE_IDS.orders);
   activeOrderQueue = "new";
   runWithSearchFeedback(renderOrders, "Clearing order filters...");
 });
@@ -18316,6 +19123,7 @@ document.addEventListener("input", (event) => {
 
 hydrateStaticIcons();
 applyMenuGroupState();
+applySidebarCollapseState();
 applyTheme();
 load().catch((error) => toast(error.message));
 setInterval(() => {

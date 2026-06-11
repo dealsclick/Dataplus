@@ -42,15 +42,35 @@ const SUPPORTED_TASKS = [
   "mapped-product-import",
   "shopify-status-import",
   "shopify-status-sync",
+  "shopify-inventory-update",
   "ebay-catalog-sync",
   "ebay-account-settings-sync",
   "ebay-location-sync",
   "product-dump-import"
 ];
 let lastHeartbeatAt = 0;
+let lastScheduleCheckAt = 0;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function localDateKey(date = new Date()) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function minutesSinceMidnight(date = new Date()) {
+  return (date.getHours() * 60) + date.getMinutes();
+}
+
+function scheduledMinutes(value = "06:00") {
+  const match = String(value || "06:00").match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  if (!match) return 360;
+  return (Number(match[1]) * 60) + Number(match[2]);
 }
 
 function normalizeJobPatch(job, patch = {}) {
@@ -300,6 +320,94 @@ async function writeHeartbeat(status = "idle", job = null, force = false) {
       lastSeenAt: new Date(now).toISOString()
     }
   });
+}
+
+function latestSuccessfulProductDumpJob(jobs = []) {
+  return (jobs || [])
+    .filter((job) => {
+      const status = String(job.status || "").toLowerCase();
+      return status === "success"
+        && (String(job.workerTask || "").toLowerCase() === "product-dump-import" || /product dump/i.test(`${job.operation || ""} ${job.name || ""}`));
+    })
+    .sort((a, b) => new Date(b.finishedAt || b.updatedAt || b.createdAt || 0) - new Date(a.finishedAt || a.updatedAt || a.createdAt || 0))[0] || null;
+}
+
+async function checkScheduledShopifyInventoryUpdate(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastScheduleCheckAt < 60000) return false;
+  lastScheduleCheckAt = nowMs;
+  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const settings = dataplus.readSystemSettingsStore(docs.systemSettings || {});
+  if (!settings.shopifyDailyInventoryUpdateEnabled) return false;
+  const now = new Date(nowMs);
+  const today = localDateKey(now);
+  const scheduleState = docs.shopifyDailyInventorySchedule && typeof docs.shopifyDailyInventorySchedule === "object" ? docs.shopifyDailyInventorySchedule : {};
+  if (scheduleState.lastRunDate === today || scheduleState.lastQueuedDate === today) return false;
+  if (minutesSinceMidnight(now) < scheduledMinutes(settings.shopifyDailyInventoryUpdateTime || "06:00")) return false;
+
+  const jobs = await postgres.readOperationJobs(500).catch(() => []) || [];
+  const latestDump = latestSuccessfulProductDumpJob(jobs);
+  if (settings.shopifyDailyInventoryRequireSuccessfulDump && !latestDump) {
+    await postgres.writeStateDocuments({
+      shopifyDailyInventorySchedule: {
+        ...scheduleState,
+        lastCheckedAt: new Date(nowMs).toISOString(),
+        lastSkipReason: "No successful product dump import has been found yet."
+      }
+    });
+    return false;
+  }
+  const latestDumpFinishedAt = latestDump?.finishedAt || latestDump?.updatedAt || "";
+  if (settings.shopifyDailyInventoryRequireSuccessfulDump && latestDumpFinishedAt && scheduleState.lastDumpFinishedAt === latestDumpFinishedAt) {
+    await postgres.writeStateDocuments({
+      shopifyDailyInventorySchedule: {
+        ...scheduleState,
+        lastCheckedAt: new Date(nowMs).toISOString(),
+        lastSkipReason: "Latest successful product dump was already used for a scheduled Shopify inventory run."
+      }
+    });
+    return false;
+  }
+
+  const apply = settings.shopifyDailyInventoryUpdateMode === "apply";
+  const db = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  try {
+    const result = await dataplus.queueShopifyInventoryUpdateJob(db, {
+      apply,
+      dryRun: !apply
+    }, {
+      scheduled: true,
+      scheduleKey: `${today}:${latestDump?.id || latestDumpFinishedAt || "no-dump"}`,
+      operation: apply ? "Scheduled Shopify inventory update" : "Scheduled Shopify inventory dry run"
+    });
+    await postgres.writeStateDocuments({
+      shopifyDailyInventorySchedule: {
+        ...scheduleState,
+        lastCheckedAt: new Date(nowMs).toISOString(),
+        lastQueuedAt: new Date(nowMs).toISOString(),
+        lastQueuedDate: today,
+        lastRunDate: today,
+        lastJobId: result.job?.id || "",
+        lastMode: apply ? "apply" : "dry-run",
+        lastDumpJobId: latestDump?.id || "",
+        lastDumpFinishedAt,
+        lastSkipReason: "",
+        lastError: ""
+      }
+    });
+    console.log(`[${WORKER_ID}] queued scheduled Shopify inventory ${apply ? "update" : "dry run"} (${result.job?.id || "duplicate"})`);
+    return true;
+  } catch (error) {
+    await postgres.writeStateDocuments({
+      shopifyDailyInventorySchedule: {
+        ...scheduleState,
+        lastCheckedAt: new Date(nowMs).toISOString(),
+        lastError: error.message || "Unable to queue scheduled Shopify inventory update."
+      }
+    });
+    console.error(`[${WORKER_ID}] scheduled Shopify inventory check failed:`, error.message || error);
+    return false;
+  }
 }
 
 async function runBackupJob(job) {
@@ -622,6 +730,106 @@ async function runShopifyStatusSyncJob(job) {
   return dataplus.runShopifyStatusSyncWorkerJob(job, job.workerPayload || {});
 }
 
+async function runShopifyInventoryUpdateJob(job) {
+  const payload = job.workerPayload || {};
+  const apply = payload.apply !== false && payload.dryRun !== true;
+  const args = ["scripts/shopify-inventory-update-from-dump.js"];
+  if (apply) args.push("--apply");
+  else args.push("--dry-run");
+  if (payload.limit) args.push(`--limit=${Math.max(1, Number(payload.limit) || 1)}`);
+  args.push(`--product-batch-size=${Math.max(1, Math.min(50, Number(payload.productBatchSize || 35) || 35))}`);
+  args.push(`--batch-size=${Math.max(1, Math.min(250, Number(payload.batchSize || 100) || 100))}`);
+  if (payload.locationId) args.push(`--location=${payload.locationId}`);
+  if (["export", "divide"].includes(String(payload.packMode || "").toLowerCase())) args.push(`--pack-mode=${String(payload.packMode).toLowerCase()}`);
+
+  let current = await persistJob(job, {
+    status: "running",
+    phase: apply ? "updating_shopify_inventory" : "checking_shopify_inventory",
+    message: apply ? "Worker is updating Shopify inventory from the latest data dump..." : "Worker is checking Shopify inventory against the latest data dump...",
+    startedAt: job.startedAt || new Date().toISOString()
+  });
+  const stdout = [];
+  const stderr = [];
+  let lastPersist = 0;
+  await new Promise((resolve, reject) => {
+    const heartbeatTimer = setInterval(() => {
+      writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh Shopify inventory heartbeat:", error.message || error));
+    }, Math.max(1000, Math.min(HEARTBEAT_MS, 5000)));
+    const child = spawn(process.execPath, args, {
+      cwd: ROOT,
+      env: process.env,
+      windowsHide: true
+    });
+    child.stdout.on("data", (chunk) => stdout.push(chunk.toString()));
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderr.push(text);
+      const checked = text.match(/Checked\s+(\d+)\/(\d+);\s+prepared\s+(\d+)/i);
+      const applied = text.match(/Applied\s+(\d+)\/(\d+)/i);
+      if (checked) {
+        current = normalizeJobPatch(current, {
+          status: "running",
+          phase: "checking_shopify_inventory",
+          processedRows: Number(checked[1]) || current.processedRows,
+          totalRows: Number(checked[2]) || current.totalRows,
+          changed: Number(checked[3]) || current.changed,
+          progressPercent: Math.min(95, Math.round((Number(checked[1]) / Math.max(1, Number(checked[2]))) * 80)),
+          message: `Checked ${Number(checked[1]).toLocaleString()} of ${Number(checked[2]).toLocaleString()} linked Shopify products.`
+        });
+      } else if (applied) {
+        current = normalizeJobPatch(current, {
+          status: "running",
+          phase: "applying_shopify_inventory",
+          processedRows: Number(applied[1]) || current.processedRows,
+          totalRows: Number(applied[2]) || current.totalRows,
+          progressPercent: 80 + Math.min(19, Math.round((Number(applied[1]) / Math.max(1, Number(applied[2]))) * 19)),
+          message: `Applied ${Number(applied[1]).toLocaleString()} of ${Number(applied[2]).toLocaleString()} Shopify inventory updates.`
+        });
+      }
+      if (Date.now() - lastPersist > 1500) {
+        lastPersist = Date.now();
+        postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist Shopify inventory progress:", error.message || error));
+        writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh Shopify inventory heartbeat:", error.message || error));
+      }
+    });
+    child.on("error", (error) => {
+      clearInterval(heartbeatTimer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearInterval(heartbeatTimer);
+      if (code) reject(new Error(`Shopify inventory updater exited with code ${code}. ${stderr.join("").slice(-2000)}`));
+      else resolve();
+    });
+  });
+
+  const text = stdout.join("").trim();
+  const report = text ? JSON.parse(text) : {};
+  const reportPath = report.reportPath || "";
+  current = await persistJob(current, {
+    status: report.errors?.length ? "warning" : "success",
+    phase: "complete",
+    fileName: reportPath ? path.basename(reportPath) : "shopify-inventory-report.json",
+    originalFileName: reportPath ? path.basename(reportPath) : "shopify-inventory-report.json",
+    originalFilePath: reportPath,
+    message: apply
+      ? `Shopify inventory update applied ${Number(report.variantsApplied || 0).toLocaleString()} variant${Number(report.variantsApplied || 0) === 1 ? "" : "s"}.`
+      : `Shopify inventory dry run found ${Number(report.variantsChanged || 0).toLocaleString()} variant${Number(report.variantsChanged || 0) === 1 ? "" : "s"} to update.`,
+    details: `${Number(report.variantsPrepared || 0).toLocaleString()} matched variants checked at ${report.locationName || "Shopify location"}; ${Number(report.productsMissingVariants || 0).toLocaleString()} products are missing expected variant SKU matches.`,
+    totalRows: Number(report.productsLoaded || 0) || current.totalRows || 0,
+    processedRows: Number(report.productsLoaded || 0) || current.processedRows || 0,
+    changed: Number(report.variantsApplied || report.variantsChanged || 0) || 0,
+    missingCount: Number(report.productsMissingVariants || 0) || 0,
+    errors: Array.isArray(report.errors) ? report.errors.slice(0, 50).map((row) => typeof row === "string" ? row : JSON.stringify(row)) : [],
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString(),
+    shopifyInventoryReport: report
+  });
+  if (reportPath && fs.existsSync(reportPath)) await postgres.upsertOperationArtifact(current, "original");
+  return current;
+}
+
 async function runEbayCatalogSyncJob(job) {
   return dataplus.runEbayCatalogImportWorkerJob(job);
 }
@@ -692,6 +900,7 @@ async function runJob(job) {
   if (task === "mapped-product-import") return runMappedProductImportJob(job);
   if (task === "shopify-status-import") return runShopifyStatusImportJob(job);
   if (task === "shopify-status-sync") return runShopifyStatusSyncJob(job);
+  if (task === "shopify-inventory-update") return runShopifyInventoryUpdateJob(job);
   if (task === "ebay-catalog-sync") return runEbayCatalogSyncJob(job);
   if (task === "ebay-account-settings-sync") return runEbayAccountSettingsSyncJob(job);
   if (task === "ebay-location-sync") return runEbayLocationSyncJob(job);
@@ -709,6 +918,7 @@ async function runJob(job) {
 
 async function tick() {
   await writeHeartbeat("idle");
+  await checkScheduledShopifyInventoryUpdate();
   const job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS });
   if (!job) return false;
   await writeHeartbeat("running", job, true);

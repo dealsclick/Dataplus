@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DataPlus</title>
-    <link rel="stylesheet" href="/styles.css?v=sku-change-tracking-20260520-1" />
+    <link rel="stylesheet" href="/styles.css?v=user-table-preferences-20260611-1" />
   </head>
   <body>
     <div id="global-save-progress" class="global-save-progress" aria-hidden="true"><span></span></div>
@@ -16,7 +16,8 @@
           <strong>DataPlus</strong>
           <small>Marketplace Ops</small>
         </div>
-        <button id="menu-expand-toggle" class="menu-expand" aria-label="Expand all menu groups" title="Expand all menu groups" data-toggle-menu-groups>+</button>
+        <button id="sidebar-collapse-toggle" class="menu-expand sidebar-collapse-toggle" aria-label="Collapse menu to icons" title="Collapse menu to icons" data-toggle-sidebar-collapse></button>
+        <button id="menu-expand-toggle" class="menu-expand" aria-label="Expand all menu groups" title="Expand all menu groups" data-toggle-menu-groups></button>
       </div>
       <nav aria-label="Primary">
         <span class="nav-section-label">Home</span>
@@ -78,6 +79,7 @@
           <div id="topbar-actions-slot"></div>
         </div>
       </header>
+      <div id="floating-actions-slot" class="floating-actions-slot"></div>
 
       <section id="dashboard" class="view active">
         <div class="metric-grid">
@@ -1184,6 +1186,14 @@
         <div class="modal-grid">
           <label>Name<input id="export-mapping-name" name="name" required placeholder="Shopify custom export" /></label>
           <label>Source / channel<input name="source" placeholder="Shopify, Amazon, Vendor CSV" /></label>
+          <label>Format type
+            <select name="formatType">
+              <option value="normal">Normal CSV</option>
+              <option value="shopify">Shopify / Matrixify</option>
+              <option value="ebay">eBay</option>
+              <option value="amazon">Amazon</option>
+            </select>
+          </label>
           <label>Mode
             <select name="mode">
               <option value="both">Import + export</option>
@@ -1292,6 +1302,6 @@
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/checklist@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/embed@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/image@latest"></script>
-    <script src="/app.js?v=custom-export-format-20260531-1"></script>
+    <script src="/app.js?v=user-table-preferences-20260611-1"></script>
   </body>
 </html>

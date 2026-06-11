@@ -80,6 +80,15 @@ async function initRelationalSchema() {
       updated_at timestamptz not null default now()
     );
 
+    create table if not exists user_table_preferences (
+      user_id text not null,
+      table_id text not null,
+      preferences jsonb not null default '{}'::jsonb,
+      updated_at timestamptz not null default now(),
+      primary key (user_id, table_id)
+    );
+    create index if not exists user_table_preferences_user_idx on user_table_preferences (user_id);
+
     create table if not exists entity_documents (
       collection text not null,
       entity_id text not null,
@@ -813,6 +822,35 @@ async function readStateDocuments() {
     if (Array.isArray(docs[row.collection])) docs[row.collection].push(row.data);
   }
   return docs;
+}
+
+async function readUserTablePreferences() {
+  const client = getPool();
+  if (!client) return {};
+  await initRelationalSchema();
+  const result = await client.query("select user_id, table_id, preferences from user_table_preferences order by user_id, table_id");
+  return result.rows.reduce((prefs, row) => {
+    const userId = String(row.user_id || "").trim();
+    const tableId = String(row.table_id || "").trim();
+    if (!userId || !tableId) return prefs;
+    if (!prefs[userId]) prefs[userId] = {};
+    prefs[userId][tableId] = row.preferences && typeof row.preferences === "object" ? row.preferences : {};
+    return prefs;
+  }, {});
+}
+
+async function upsertUserTablePreference(userId, tableId, preferences = {}) {
+  const client = getPool();
+  if (!client) return {};
+  await initRelationalSchema();
+  const result = await client.query(`
+    insert into user_table_preferences (user_id, table_id, preferences, updated_at)
+    values ($1, $2, $3::jsonb, now())
+    on conflict (user_id, table_id)
+    do update set preferences = excluded.preferences, updated_at = now()
+    returning preferences
+  `, [String(userId || "").trim(), String(tableId || "").trim(), JSON.stringify(preferences && typeof preferences === "object" ? preferences : {})]);
+  return result.rows[0]?.preferences || {};
 }
 
 async function writeStateDocuments(state = {}) {
@@ -3577,8 +3615,65 @@ async function pruneChannelApiLogs(days = 30) {
   return Number(result.rowCount || 0);
 }
 
-function productRowToState(row = {}) {
+function productRowNumber(value, fallback = 0) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const number = Number(String(value).replace(/[$,%\s]/g, ""));
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function productRowUomInfo(item = {}) {
+  const code = String(item.uom || item.unitOfMeasure || item.unit_of_measure || "EA").trim().toUpperCase() || "EA";
+  const qty = Math.max(1, Math.floor(productRowNumber(item.uomQty ?? item.uom_qty ?? item.minQuantity ?? item.min_quantity ?? item.quantityIncrements ?? item.quantity_increments, 1)));
+  const names = { EA: "Each", CS: "Case", PK: "Pack", BX: "Box", CT: "Carton" };
+  const name = names[code] || code || "Each";
   return {
+    code,
+    name,
+    qty,
+    isMultiUnit: qty > 1,
+    display: qty > 1 ? (code === "EA" ? `Pack of ${qty}` : `${name} of ${qty}`) : name
+  };
+}
+
+function productRowVariantSku(baseSku = "", suffix = "") {
+  const sku = String(baseSku || "").trim();
+  const cleanSuffix = String(suffix || "").trim().toUpperCase();
+  return sku && cleanSuffix && !sku.toUpperCase().endsWith(`-${cleanSuffix}`) ? `${sku}-${cleanSuffix}` : sku;
+}
+
+function productRowSystemVariants(item = {}) {
+  const uom = productRowUomInfo(item);
+  const parentSku = String(item.sku || item.vendorSku || item.mfrPartNumber || "").trim();
+  const sku = uom.isMultiUnit ? productRowVariantSku(parentSku, `${uom.qty}PC`) : parentSku;
+  if (!sku) return [];
+  const available = Math.max(0, productRowNumber(item.qty ?? item.stockQty, 0) - productRowNumber(item.reserved, 0));
+  const unitCost = productRowNumber(item.sourceCost ?? item.cost, 0) * uom.qty;
+  return [{
+    id: `${parentSku || "sku"}:${uom.isMultiUnit ? `pack-${uom.qty}` : "each"}`,
+    key: uom.isMultiUnit ? `pack-${uom.qty}` : "each",
+    sku,
+    parentSku,
+    title: String(item.marketplaceTitle || item.title || parentSku || "").trim(),
+    source: "data-dump",
+    variantType: "sell-unit",
+    optionName: uom.isMultiUnit ? "Purchase Unit" : "Title",
+    optionValue: uom.isMultiUnit ? uom.display : "Default Title",
+    uom: uom.code,
+    uomName: uom.name,
+    uomQty: uom.qty,
+    packQty: uom.qty,
+    inventoryMultiplier: 1,
+    quantity: available,
+    unitCost,
+    actual: true,
+    generated: true,
+    status: "active",
+    note: uom.isMultiUnit ? `Actual sell unit from source data: ${uom.display}.` : "Actual sell unit from source data."
+  }];
+}
+
+function productRowToState(row = {}) {
+  const product = {
     ...(row.raw || {}),
     id: row.product_id || row.raw?.id,
     sku: row.sku || row.raw?.sku,
@@ -3603,6 +3698,8 @@ function productRowToState(row = {}) {
     qty: row.qty ?? row.raw?.qty,
     defaultImage: row.default_image ?? row.raw?.defaultImage
   };
+  product.systemVariants = productRowSystemVariants(product);
+  return product;
 }
 
 function aliasRowToState(row = {}) {
@@ -4626,7 +4723,9 @@ module.exports = {
   isPostgresEnabled,
   readState,
   readStateField,
+  readUserTablePreferences,
   upsertCategoryChannelMappingsFromState,
+  upsertUserTablePreference,
   upsertProductSourceEnrichmentMap,
   upsertOperationArtifact,
   upsertOperationJob,

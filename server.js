@@ -15,6 +15,7 @@ const DATA_DIR = path.join(ROOT, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
 const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
+const USER_TABLE_PREFERENCES_FILE = path.join(DATA_DIR, "user-table-preferences.json");
 const STATE_SUMMARY_FILE = path.join(DATA_DIR, "state-summary.json");
 const LITE_STATE_FILE = path.join(DATA_DIR, "lite-state.json");
 const SHOPIFY_STATUS_FILE = path.join(DATA_DIR, "shopify-status-map.json");
@@ -28,6 +29,7 @@ const CATALOG_FILE = path.join(DATA_DIR, "catalog", "products.ndjson");
 const MATRIXIFY_SMART_COLLECTION_DATA_FILE = path.join(ROOT, "outputs", "matrixify-smart-collections", "smart-collections-data.json");
 const MATRIXIFY_MENU_MAPPING_FILE = path.join(DATA_DIR, "templates", "shopify-menu-collection-mapping.csv");
 const MATRIXIFY_MENU_IMPORT_TEMPLATE_FILE = path.join(DATA_DIR, "templates", "matrixify-main-menu-import.csv");
+const SHOPIFY_INVENTORY_OUTPUT_DIR = path.join(ROOT, "outputs", "shopify-inventory");
 const CATALOG_MANIFEST_FILE = `${CATALOG_FILE}.manifest.json`;
 const CATALOG_VENDOR_INDEX_FILE = path.join(DATA_DIR, "catalog", "vendors.json");
 const CATALOG_CATEGORY_INDEX_FILE = path.join(DATA_DIR, "catalog", "categories.json");
@@ -211,6 +213,29 @@ const DEFAULT_EXPORT_MAPPINGS = [
     notes: "Starter Shopify product export. Adjust columns to match the exact Shopify CSV you use."
   },
   {
+    id: "export-inventory-only",
+    name: "Inventory Only CSV",
+    source: "DataPlus",
+    format: "csv",
+    formatType: "normal",
+    mode: "export",
+    mappings: [
+      { externalColumn: "SKU", productField: "sku" },
+      { externalColumn: "Title", productField: "title" },
+      { externalColumn: "Vendor SKU", productField: "vendorSku" },
+      { externalColumn: "Brand", productField: "brand" },
+      { externalColumn: "Quantity", productField: "qty" },
+      { externalColumn: "Reserved", productField: "reserved" },
+      { externalColumn: "Available", productField: "available" },
+      { externalColumn: "Source Stock Quantity", productField: "stockQty" },
+      { externalColumn: "Stock Status", productField: "stockStatus" },
+      { externalColumn: "Discontinued", productField: "toBeDiscontinued" },
+      { externalColumn: "Shopify ID", productField: "shopifyId" },
+      { externalColumn: "Shopify Variant ID", productField: "shopifyVariantId" }
+    ],
+    notes: "Inventory-only export for marketplace quantity reviews and stock updates."
+  },
+  {
     id: "export-ebay-basic",
     name: "eBay Product CSV",
     source: "eBay",
@@ -289,7 +314,10 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyAutoSyncStatus: false,
   shopifyStatusSyncLimit: 100,
   shopifyPublishScope: "global",
-  shopifyCloseoutsEnabled: true
+  shopifyCloseoutsEnabled: true,
+  shopifyInventoryPushEnabled: false,
+  shopifyInventoryWarehouseId: "",
+  shopifyInventoryLocationId: ""
 };
 
 const DEFAULT_SYSTEM_SETTINGS = {
@@ -302,10 +330,15 @@ const DEFAULT_SYSTEM_SETTINGS = {
   backupRetentionDays: 30,
   jobsRetentionDays: IMPORT_JOB_FILE_RETENTION_DAYS,
   jobsRetentionAutoCleanupEnabled: true,
+  shopifyDailyInventoryUpdateEnabled: false,
+  shopifyDailyInventoryUpdateTime: "06:00",
+  shopifyDailyInventoryUpdateMode: "dry-run",
+  shopifyDailyInventoryRequireSuccessfulDump: true,
   requireAdminConfirmationForDeletes: true,
   systemUsers: [
     { id: "owner", name: "Luis", email: "", role: "Owner", status: "active" }
   ],
+  activeSystemUserId: "owner",
   permissionRoles: [
     { id: "owner", name: "Owner", permissions: ["all"] },
     { id: "admin", name: "Admin", permissions: ["catalog", "orders", "channels", "system"] },
@@ -369,6 +402,59 @@ function productSellUnitCost(item = {}) {
   const unitCost = Number(sourceNumberValue(item.sourceCost ?? item.cost ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? item.price ?? 0));
   if (!(unitCost > 0)) return 0;
   return Math.round(unitCost * productUomQty(item) * 10000) / 10000;
+}
+
+function variantBaseSku(item = {}) {
+  return String(item.sku || item.vendorSku || item.vendor_sku || item.mfrPartNumber || item.mfr_part_number || "").trim();
+}
+
+function variantSkuFromBase(baseSku = "", suffix = "") {
+  const sku = String(baseSku || "").trim();
+  const cleanSuffix = String(suffix || "").trim().toUpperCase();
+  return sku && cleanSuffix && !sku.toUpperCase().endsWith(`-${cleanSuffix}`) ? `${sku}-${cleanSuffix}` : sku;
+}
+
+function normalizeSystemVariant(variant = {}, parent = {}) {
+  const uom = productUomInfo({ ...parent, uom: variant.uom || parent.uom, uomQty: variant.uomQty || variant.packQty || parent.uomQty });
+  const parentSku = variantBaseSku(parent);
+  const sku = String(variant.sku || (uom.isMultiUnit ? variantSkuFromBase(parentSku, `${uom.qty}PC`) : parentSku)).trim();
+  const available = Math.max(0, Number(parent.qty ?? parent.stockQty ?? 0) - Number(parent.reserved || 0));
+  const key = String(variant.key || (uom.isMultiUnit ? `pack-${uom.qty}` : "each")).trim();
+  return {
+    id: String(variant.id || `${parentSku || "sku"}:${key}`),
+    key,
+    sku,
+    parentSku,
+    title: String(variant.title || parent.marketplaceTitle || parent.title || parentSku || "").trim(),
+    source: String(variant.source || "data-dump"),
+    variantType: String(variant.variantType || "sell-unit"),
+    optionName: String(variant.optionName || (uom.isMultiUnit ? "Purchase Unit" : "Title")),
+    optionValue: String(variant.optionValue || (uom.isMultiUnit ? uom.display : "Default Title")),
+    uom: String(variant.uom || uom.code),
+    uomName: String(variant.uomName || uom.name),
+    uomQty: Number(variant.uomQty || variant.packQty || uom.qty || 1),
+    packQty: Number(variant.packQty || variant.uomQty || uom.qty || 1),
+    inventoryMultiplier: Number(variant.inventoryMultiplier || 1),
+    quantity: Number(variant.quantity ?? available),
+    unitCost: Number(variant.unitCost ?? productSellUnitCost(parent)),
+    actual: variant.actual === undefined ? true : Boolean(variant.actual),
+    generated: variant.generated === undefined ? true : Boolean(variant.generated),
+    status: String(variant.status || "active"),
+    note: String(variant.note || (uom.isMultiUnit ? `Actual sell unit from source data: ${uom.display}.` : "Actual sell unit from source data."))
+  };
+}
+
+function systemProductVariants(item = {}) {
+  const explicit = Array.isArray(item.systemVariants) ? item.systemVariants : [];
+  const generated = normalizeSystemVariant({}, item);
+  const manual = explicit.filter((variant) => variant.generated === false || String(variant.source || "").toLowerCase() === "manual").map((variant) => normalizeSystemVariant(variant, item));
+  const seen = new Set();
+  return [generated, ...manual].filter((variant) => {
+    const key = String(variant.sku || "").trim().toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function pricedFromCost(cost, markupPercent = DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent) {
@@ -2144,11 +2230,12 @@ function normalizeDb(db) {
       serialUnits: Array.isArray(item.serialUnits) ? item.serialUnits : [],
       warehouseStock: Array.isArray(item.warehouseStock) ? item.warehouseStock : [],
       shadowSkus: Array.isArray(item.shadowSkus) ? item.shadowSkus.map((shadow) => normalizeShadowSku(shadow, item)) : [],
+      systemVariants: systemProductVariants({ ...item, uom: uomInfo.code, uomQty: uomInfo.qty, sellUnitCost, sourceCost, cost: sourceCost }),
       aliases: normalizeProductAliases(item.aliases, item),
       attributes: item.attributes || {}
     };
 
-    const merged = { ...item, ...product, images: product.images, tags: product.tags, serialUnits: product.serialUnits, warehouseStock: product.warehouseStock, shadowSkus: product.shadowSkus, aliases: product.aliases };
+    const merged = { ...item, ...product, images: product.images, tags: product.tags, serialUnits: product.serialUnits, warehouseStock: product.warehouseStock, shadowSkus: product.shadowSkus, systemVariants: product.systemVariants, aliases: product.aliases };
     if (!merged.brandLocked && merged.brand && !brandLooksLikeSupplier(merged)) {
       merged.brandLocked = true;
       changed = true;
@@ -2622,7 +2709,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   return {
@@ -2641,6 +2728,89 @@ function normalizeChannel(channel = {}) {
 function findChannelByName(db, name = "") {
   const key = String(name).toLowerCase();
   return (db.connections || []).find((channel) => String(channel.name || "").toLowerCase() === key);
+}
+
+function resolveShopifyInventoryLocation(db, body = {}) {
+  const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+  const warehouses = Array.isArray(db.warehouses) ? db.warehouses.map(normalizeWarehouse) : [];
+  const requestedWarehouse = warehouses.find((warehouse) => warehouse.id === body.warehouseId)
+    || warehouses.find((warehouse) => warehouse.id === settings.shopifyInventoryWarehouseId)
+    || null;
+  const enabledWarehouse = warehouses.find((warehouse) => warehouse.shopifyInventoryPushEnabled && normalizeShopifyLocationGid(warehouse.shopifyLocationId));
+  const defaultReceivingWarehouse = warehouses.find((warehouse) => warehouse.isDefaultReceiving && normalizeShopifyLocationGid(warehouse.shopifyLocationId));
+  const warehouse = requestedWarehouse || enabledWarehouse || defaultReceivingWarehouse || null;
+  const locationId = normalizeShopifyLocationGid(body.locationId)
+    || normalizeShopifyLocationGid(settings.shopifyInventoryLocationId)
+    || normalizeShopifyLocationGid(warehouse?.shopifyLocationId);
+  return {
+    settings,
+    warehouse,
+    locationId,
+    locationName: warehouse?.shopifyLocationName || ""
+  };
+}
+
+async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
+  const apply = body.apply !== false && body.dryRun !== true;
+  const limit = Math.max(0, Number(body.limit || 0) || 0);
+  const productBatchSize = Math.max(1, Math.min(50, Number(body.productBatchSize || 35) || 35));
+  const batchSize = Math.max(1, Math.min(250, Number(body.batchSize || 100) || 100));
+  const packMode = ["divide", "export"].includes(String(body.packMode || "").toLowerCase()) ? String(body.packMode).toLowerCase() : "export";
+  const inventoryTarget = resolveShopifyInventoryLocation(db, body);
+  if (apply && !inventoryTarget.settings.shopifyInventoryPushEnabled) {
+    const error = new Error("Enable DataPlus inventory push in Shopify channel settings before applying inventory.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (apply && !inventoryTarget.locationId) {
+    const error = new Error("Map a DataPlus warehouse to a Shopify location before applying inventory.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const workerPayload = {
+    apply,
+    dryRun: !apply,
+    limit,
+    productBatchSize,
+    batchSize,
+    packMode,
+    locationId: inventoryTarget.locationId || "",
+    warehouseId: inventoryTarget.warehouse?.id || "",
+    warehouseName: inventoryTarget.warehouse?.name || "",
+    locationName: inventoryTarget.locationName || "",
+    scheduleKey: options.scheduleKey || "",
+    scheduled: options.scheduled === true
+  };
+  const operation = options.operation || (apply ? "Shopify inventory update" : "Shopify inventory dry run");
+  const duplicate = await findActiveDuplicateImportJob(db, {
+    section: "Products",
+    operation,
+    direction: "sync",
+    fileName: "shopify-inventory-report.json",
+    workerTask: "shopify-inventory-update",
+    workerPayload
+  });
+  if (duplicate) return { duplicate, job: duplicate, workerPayload, inventoryTarget };
+  const schedulePrefix = options.scheduled ? "Scheduled " : "";
+  const job = createImportJob(db, {
+    section: "Products",
+    operation,
+    direction: "sync",
+    status: "queued",
+    fileName: "shopify-inventory-report.json",
+    totalRows: limit || 50000,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: "shopify-inventory-update",
+    workerPayload,
+    message: apply
+      ? `${schedulePrefix}Shopify inventory update queued from the latest data dump${inventoryTarget.warehouse?.name ? ` for ${inventoryTarget.warehouse.name}` : ""}.`
+      : `${schedulePrefix}Shopify inventory dry run queued from the latest data dump${inventoryTarget.warehouse?.name ? ` for ${inventoryTarget.warehouse.name}` : ""}.`
+  });
+  upsertImportJobStore(job);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  return { job, workerPayload, inventoryTarget };
 }
 
 function applyChannelDefaultsToShadow(db, shadow, marketplace) {
@@ -2869,6 +3039,10 @@ function normalizeSystemSettings(settings = {}) {
   if (!["new-and-update", "new-only", "update-existing"].includes(String(normalized.sourceCatalogDefaultImportMode || "").toLowerCase())) normalized.sourceCatalogDefaultImportMode = "new-and-update";
   normalized.backgroundJobsMode = String(normalized.backgroundJobsMode || "inline").toLowerCase();
   normalized.sourceCatalogDefaultImportMode = String(normalized.sourceCatalogDefaultImportMode || "new-and-update").toLowerCase();
+  normalized.shopifyDailyInventoryUpdateEnabled = normalized.shopifyDailyInventoryUpdateEnabled === true || String(normalized.shopifyDailyInventoryUpdateEnabled).toLowerCase() === "true";
+  normalized.shopifyDailyInventoryUpdateMode = String(normalized.shopifyDailyInventoryUpdateMode || "dry-run").toLowerCase() === "apply" ? "apply" : "dry-run";
+  normalized.shopifyDailyInventoryRequireSuccessfulDump = normalized.shopifyDailyInventoryRequireSuccessfulDump !== false;
+  normalized.shopifyDailyInventoryUpdateTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(normalized.shopifyDailyInventoryUpdateTime || "")) ? String(normalized.shopifyDailyInventoryUpdateTime) : "06:00";
   normalized.backupRetentionDays = Math.max(1, Math.min(365, Number(normalized.backupRetentionDays || 30) || 30));
   normalized.jobsRetentionDays = IMPORT_JOB_FILE_RETENTION_DAYS;
   normalized.jobsRetentionAutoCleanupEnabled = normalized.jobsRetentionAutoCleanupEnabled !== false;
@@ -2881,6 +3055,10 @@ function normalizeSystemSettings(settings = {}) {
       status: ["active", "inactive"].includes(String(user.status || "").toLowerCase()) ? String(user.status).toLowerCase() : "active"
     }))
     .filter((user) => user.name || user.email);
+  const activeUserIds = new Set(normalized.systemUsers.map((user) => String(user.id || "")));
+  normalized.activeSystemUserId = activeUserIds.has(String(normalized.activeSystemUserId || ""))
+    ? String(normalized.activeSystemUserId)
+    : (normalized.systemUsers[0]?.id || "owner");
   normalized.permissionRoles = (Array.isArray(normalized.permissionRoles) ? normalized.permissionRoles : DEFAULT_SYSTEM_SETTINGS.permissionRoles)
     .map((role, index) => ({
       id: String(role.id || `role-${index + 1}`),
@@ -2915,6 +3093,85 @@ function writeSystemSettingsStore(settings = {}) {
     });
   }
   return normalized;
+}
+
+const TABLE_PREFERENCE_IDS = new Set(["orders", "catalog.products", "catalog.inventory"]);
+const TABLE_PREFERENCE_SORT_DIRECTIONS = new Set(["asc", "desc"]);
+
+function normalizeTablePreference(preference = {}) {
+  const source = preference && typeof preference === "object" ? preference : {};
+  const visibleColumns = Array.isArray(source.visibleColumns)
+    ? [...new Set(source.visibleColumns.map(sourceTextValue).filter(Boolean))]
+    : [];
+  const sortSource = source.sort && typeof source.sort === "object" ? source.sort : {};
+  const sortKey = sourceTextValue(sortSource.key || "");
+  const sortDirection = TABLE_PREFERENCE_SORT_DIRECTIONS.has(String(sortSource.direction || "").toLowerCase())
+    ? String(sortSource.direction).toLowerCase()
+    : "";
+  const normalized = {};
+  if (visibleColumns.length) normalized.visibleColumns = visibleColumns;
+  if (sortKey) normalized.sort = { key: sortKey, direction: sortDirection || "asc" };
+  if (["compact", "comfortable"].includes(String(source.density || "").toLowerCase())) normalized.density = String(source.density).toLowerCase();
+  if (Array.isArray(source.pinnedColumns)) normalized.pinnedColumns = [...new Set(source.pinnedColumns.map(sourceTextValue).filter(Boolean))];
+  return normalized;
+}
+
+function normalizeUserTablePreferences(preferences = {}) {
+  if (!preferences || typeof preferences !== "object") return {};
+  return Object.entries(preferences).reduce((users, [userId, userPrefs]) => {
+    const normalizedUserId = sourceTextValue(userId);
+    if (!normalizedUserId || !userPrefs || typeof userPrefs !== "object") return users;
+    const normalizedTables = {};
+    for (const [tableId, preference] of Object.entries(userPrefs)) {
+      if (!TABLE_PREFERENCE_IDS.has(tableId)) continue;
+      normalizedTables[tableId] = normalizeTablePreference(preference);
+    }
+    if (Object.keys(normalizedTables).length) users[normalizedUserId] = normalizedTables;
+    return users;
+  }, {});
+}
+
+function readUserTablePreferencesFile(fallback = {}) {
+  if (fs.existsSync(USER_TABLE_PREFERENCES_FILE)) {
+    try {
+      return normalizeUserTablePreferences(JSON.parse(fs.readFileSync(USER_TABLE_PREFERENCES_FILE, "utf8")));
+    } catch {
+      return normalizeUserTablePreferences(fallback);
+    }
+  }
+  return normalizeUserTablePreferences(fallback);
+}
+
+async function readUserTablePreferencesStore(fallback = {}) {
+  if (postgres.isPostgresEnabled()) {
+    try {
+      return normalizeUserTablePreferences(await postgres.readUserTablePreferences());
+    } catch (error) {
+      console.error("Unable to read user table preferences from Postgres", error.message || error);
+    }
+  }
+  return readUserTablePreferencesFile(fallback);
+}
+
+async function writeUserTablePreferenceStore(userId, tableId, preference = {}) {
+  const normalizedUserId = sourceTextValue(userId) || "owner";
+  const normalizedTableId = sourceTextValue(tableId);
+  if (!TABLE_PREFERENCE_IDS.has(normalizedTableId)) {
+    const error = new Error("Unknown table preference.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const normalizedPreference = normalizeTablePreference(preference);
+  if (postgres.isPostgresEnabled()) {
+    await postgres.upsertUserTablePreference(normalizedUserId, normalizedTableId, normalizedPreference);
+    return normalizedPreference;
+  }
+  const preferences = readUserTablePreferencesFile();
+  preferences[normalizedUserId] = preferences[normalizedUserId] || {};
+  preferences[normalizedUserId][normalizedTableId] = normalizedPreference;
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(USER_TABLE_PREFERENCES_FILE, JSON.stringify(normalizeUserTablePreferences(preferences), null, 2));
+  return normalizedPreference;
 }
 
 async function readWorkerStatus(settings = readSystemSettingsStore({})) {
@@ -3386,46 +3643,21 @@ function shopifyUomVariantSku(baseSku = "", uom = {}) {
 }
 
 function shopifyPurchaseVariants(item = {}, db = null) {
-  const uom = productUomInfo(item);
   const settings = db ? findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS : DEFAULT_CHANNEL_SETTINGS;
-  const packPrice = Number(shopifyVariantPrice(item, db)) || pricedFromCost(productSellUnitCost(item), settings.priceMarkupPercent);
-  const available = Math.max(0, Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
-  const variantBaseSku = shopifyVariantBaseSku(item);
-  const variants = [{
-    key: "sell-unit",
-    sku: uom.isMultiUnit ? shopifyUomVariantSku(variantBaseSku, uom) : variantBaseSku,
-    optionName: uom.isMultiUnit ? "Purchase Unit" : "Title",
-    optionValue: uom.isMultiUnit ? uom.display : "Default Title",
-    uom: uom.code,
-    uomName: uom.name,
-    uomQty: uom.qty,
-    inventoryMultiplier: 1,
-    quantity: available,
-    unitCost: productSellUnitCost(item),
-    price: packPrice,
-    compareAtPrice: shopifyMoneyValue(packPrice * 1.2),
-    note: uom.isMultiUnit ? `Original sell unit from source data: ${uom.display}.` : "Default product variant."
-  }];
-  if (!uom.isMultiUnit) return variants;
-  const eachPremiumPercent = 25;
-  const unitCost = Number(sourceCatalogCost(item) || item.cost || 0);
-  const eachPrice = pricedFromCost(unitCost, Number(settings.priceMarkupPercent || 0) + eachPremiumPercent);
-  variants.push({
-    key: "each",
-    sku: variantBaseSku,
-    optionName: "Purchase Unit",
-    optionValue: "Each",
-    uom: "EA",
-    uomName: "Each",
-    uomQty: 1,
-    inventoryMultiplier: 1,
-    quantity: available,
-    unitCost,
-    price: eachPrice,
-    compareAtPrice: shopifyMoneyValue(eachPrice * 1.2),
-    note: `Virtual each variant from ${uom.display}; priced ${eachPremiumPercent}% above the store markup.`
+  return systemProductVariants(item).map((variant) => {
+    const unitCost = Number(variant.unitCost || productSellUnitCost(item));
+    const price = Number(shopifyVariantPrice(item, db)) || pricedFromCost(unitCost, settings.priceMarkupPercent);
+    return {
+      ...variant,
+      key: variant.key || "sell-unit",
+      optionName: variant.optionName || (Number(variant.uomQty || 1) > 1 ? "Purchase Unit" : "Title"),
+      optionValue: variant.optionValue || (Number(variant.uomQty || 1) > 1 ? `Pack of ${Number(variant.uomQty || 1)}` : "Default Title"),
+      unitCost,
+      price,
+      compareAtPrice: shopifyMoneyValue(price * 1.2),
+      note: variant.note || "Actual DataPlus system variant."
+    };
   });
-  return variants;
 }
 
 function productIsCloseout(item = {}) {
@@ -6712,6 +6944,9 @@ function normalizeWarehouse(warehouse) {
     requireSerialScan: warehouse.requireSerialScan === undefined ? false : Boolean(warehouse.requireSerialScan),
     requirePhotoForDamage: warehouse.requirePhotoForDamage === undefined ? false : Boolean(warehouse.requirePhotoForDamage),
     autoRouteReturns: warehouse.autoRouteReturns === undefined ? false : Boolean(warehouse.autoRouteReturns),
+    shopifyLocationId: normalizeShopifyLocationGid(warehouse.shopifyLocationId || ""),
+    shopifyLocationName: warehouse.shopifyLocationName || "",
+    shopifyInventoryPushEnabled: warehouse.shopifyInventoryPushEnabled === undefined ? false : Boolean(warehouse.shopifyInventoryPushEnabled),
     bins: Array.isArray(warehouse.bins) ? warehouse.bins.map((bin, index) => normalizeWarehouseBin(bin, index)) : [],
     notes: warehouse.notes || "",
     createdAt: warehouse.createdAt || new Date().toISOString(),
@@ -7946,6 +8181,29 @@ function attachExportManifestFile(job, manifest = {}) {
     });
   }
   return job;
+}
+
+function latestShopifyInventoryMissingReport() {
+  if (!fs.existsSync(SHOPIFY_INVENTORY_OUTPUT_DIR)) return null;
+  const files = fs.readdirSync(SHOPIFY_INVENTORY_OUTPUT_DIR)
+    .filter((file) => /^shopify-inventory-.*\.json$/i.test(file))
+    .map((file) => {
+      const filePath = path.join(SHOPIFY_INVENTORY_OUTPUT_DIR, file);
+      const stat = fs.statSync(filePath);
+      return { file, filePath, mtimeMs: stat.mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  for (const file of files) {
+    try {
+      const report = JSON.parse(fs.readFileSync(file.filePath, "utf8"));
+      if (Array.isArray(report.missingProducts)) {
+        return { ...report, reportPath: report.reportPath || file.filePath, reportFileName: file.file, reportMtimeMs: file.mtimeMs };
+      }
+    } catch {
+      // Ignore partial or invalid report files.
+    }
+  }
+  return null;
 }
 
 function apiErrorStatus(error = {}) {
@@ -9775,6 +10033,7 @@ function publicInventoryItem(item = {}, context = {}) {
     uomQty: item.uomQty,
     uomDisplay: uomInfo.display,
     isMultiUnit: uomInfo.isMultiUnit,
+    systemVariants: systemProductVariants(item),
     shopifyPurchaseVariants: shopifyPurchaseVariants(item),
     hazardous: Boolean(item.hazardous),
     toBeDiscontinued: productIsCloseout(item),
@@ -9895,6 +10154,7 @@ function publicInventoryListItem(item = {}, context = {}) {
     uomQty: item.uomQty,
     uomDisplay: uomInfo.display,
     isMultiUnit: uomInfo.isMultiUnit,
+    systemVariants: systemProductVariants(item),
     qty: Number(item.qty || 0),
     stockQty: Number(item.stockQty || 0),
     reserved: Number(item.reserved || 0),
@@ -9929,7 +10189,8 @@ function publicState(db, options = {}) {
   const sourceEnrichmentMap = lite ? {} : readProductSourceEnrichmentSync();
   const safeDb = {
     ...db,
-    systemSettings: { ...DEFAULT_SYSTEM_SETTINGS, ...(db.systemSettings || {}) },
+    systemSettings: normalizeSystemSettings(db.systemSettings || {}),
+    tablePreferences: normalizeUserTablePreferences(db.tablePreferences || {}),
     connections: (db.connections || []).map(publicConnection),
     inventory: lite ? [] : (db.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap })),
     orders: lite ? (db.orders || []).slice(0, 25) : (db.orders || []),
@@ -9984,18 +10245,20 @@ function publicStateJson(db, options = {}) {
   const lite = Boolean(options.lite);
   const dbMtime = postgres.isPostgresEnabled() ? 0 : (fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).mtimeMs : 0);
   const settingsMtime = fs.existsSync(SYSTEM_SETTINGS_FILE) ? fs.statSync(SYSTEM_SETTINGS_FILE).mtimeMs : 0;
+  const preferencesMtime = fs.existsSync(USER_TABLE_PREFERENCES_FILE) ? fs.statSync(USER_TABLE_PREFERENCES_FILE).mtimeMs : 0;
   const enrichmentMtime = fs.existsSync(PRODUCT_SOURCE_ENRICHMENT_FILE) ? fs.statSync(PRODUCT_SOURCE_ENRICHMENT_FILE).mtimeMs : 0;
   if (
     publicStateJsonCache &&
     publicStateJsonCache.dbMtime === dbMtime &&
     publicStateJsonCache.settingsMtime === settingsMtime &&
+    publicStateJsonCache.preferencesMtime === preferencesMtime &&
     publicStateJsonCache.enrichmentMtime === enrichmentMtime &&
     publicStateJsonCache.lite === lite
   ) {
     return publicStateJsonCache.text;
   }
   const text = JSON.stringify(publicState(db, { lite }));
-  publicStateJsonCache = { dbMtime, settingsMtime, enrichmentMtime, lite, text };
+  publicStateJsonCache = { dbMtime, settingsMtime, preferencesMtime, enrichmentMtime, lite, text };
   return text;
 }
 
@@ -14758,6 +15021,14 @@ function normalizeShopifyProductGid(value = "") {
   return id ? `gid://shopify/Product/${id}` : text;
 }
 
+function normalizeShopifyLocationGid(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (/^gid:\/\/shopify\/Location\/\d+$/i.test(text)) return text;
+  const id = text.match(/Location\/(\d+)/i)?.[1] || text.match(/^\d+$/)?.[0] || "";
+  return id ? `gid://shopify/Location/${id}` : text;
+}
+
 function normalizeShopifyVariantGid(value = "") {
   const text = String(value || "").trim();
   if (!text) return "";
@@ -16580,6 +16851,9 @@ async function handleApi(req, res) {
       requireSerialScan: Boolean(body.requireSerialScan),
       requirePhotoForDamage: Boolean(body.requirePhotoForDamage),
       autoRouteReturns: Boolean(body.autoRouteReturns),
+      shopifyLocationId: normalizeShopifyLocationGid(body.shopifyLocationId || ""),
+      shopifyLocationName: String(body.shopifyLocationName || "").trim(),
+      shopifyInventoryPushEnabled: Boolean(body.shopifyInventoryPushEnabled),
       bins: [],
       notes: String(body.notes || "").trim(),
       createdAt: new Date().toISOString(),
@@ -16602,12 +16876,15 @@ async function handleApi(req, res) {
       "code", "name", "status", "warehouseType", "contactName", "managerName", "phone", "email", "timezone",
       "operatingHours", "carrierCutoffTime", "receivingInstructions", "addressLine1", "addressLine2", "city",
       "state", "postalCode", "country", "isDefaultReceiving", "isDefaultReturns", "requireAppointment",
-      "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "notes"
+      "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "shopifyLocationId",
+      "shopifyLocationName", "shopifyInventoryPushEnabled", "notes"
     ];
     for (const field of fields) {
       if (body[field] === undefined) continue;
-      if (["isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns"].includes(field)) {
+      if (["isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "shopifyInventoryPushEnabled"].includes(field)) {
         warehouse[field] = Boolean(body[field]);
+      } else if (field === "shopifyLocationId") {
+        warehouse[field] = normalizeShopifyLocationGid(body[field]);
       } else {
         warehouse[field] = String(body[field] ?? "").trim();
       }
@@ -17322,6 +17599,7 @@ async function handleApi(req, res) {
     const db = await withOperationalSummary(lite && !postgres.isPostgresEnabled()
       ? readDbLiteFast()
       : await readDbFast({ skipInventory: postgres.isPostgresEnabled() && !includeInventory }));
+    db.tablePreferences = await readUserTablePreferencesStore(db.tablePreferences || {});
     if (postgres.isPostgresEnabled()) {
       const text = JSON.stringify(publicState(db, { lite }));
       if (/\bgzip\b/i.test(String(req.headers["accept-encoding"] || ""))) {
@@ -17573,6 +17851,32 @@ async function handleApi(req, res) {
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
     return sendJson(res, 200, { systemSettings });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/user-preferences/table") {
+    const userId = sourceTextValue(url.searchParams.get("userId") || "");
+    const tablePreferences = await readUserTablePreferencesStore();
+    return sendJson(res, 200, {
+      userId: userId || null,
+      tablePreferences: userId ? (tablePreferences[userId] || {}) : tablePreferences
+    });
+  }
+
+  const tablePreferenceMatch = url.pathname.match(/^\/api\/user-preferences\/table\/(.+)$/);
+  if ((req.method === "PATCH" || req.method === "PUT") && tablePreferenceMatch) {
+    const body = await parseBody(req);
+    const tableId = decodeURIComponent(tablePreferenceMatch[1] || "");
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const userId = sourceTextValue(body.userId || settings.activeSystemUserId || "owner") || "owner";
+    try {
+      const preference = await writeUserTablePreferenceStore(userId, tableId, body.preferences || {});
+      const tablePreferences = await readUserTablePreferencesStore();
+      publicStateJsonCache = null;
+      if (dbCache.data) dbCache.data.tablePreferences = tablePreferences;
+      return sendJson(res, 200, { userId, tableId, preference, tablePreferences });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 500, { error: error.message || "Unable to save table preference." });
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/system/readiness") {
@@ -19530,6 +19834,79 @@ async function handleApi(req, res) {
       startShopifyStatusSyncJob(job.id, { limit });
     }
     return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/inventory-update" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const result = await queueShopifyInventoryUpdateJob(db, body);
+      if (result.duplicate) {
+        return sendJson(res, 202, {
+          queued: true,
+          job: normalizeImportJob(result.duplicate),
+          state: await postgresLiteState({ importJobs: [result.duplicate] }),
+          message: `${result.duplicate.operation || "Shopify inventory job"} is already ${String(result.duplicate.status || "queued").toLowerCase()}.`
+        });
+      }
+      return sendJson(res, 202, {
+        queued: true,
+        job: normalizeImportJob(result.job),
+        state: await postgresLiteState({ importJobs: [result.job] }),
+        message: result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 500, { error: error.message || "Unable to queue Shopify inventory update." });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/shopify/inventory-missing-variants" && postgres.isPostgresEnabled()) {
+    const report = latestShopifyInventoryMissingReport();
+    if (!report) {
+      return sendJson(res, 200, {
+        report: null,
+        items: [],
+        total: 0,
+        page: 1,
+        limit: Math.max(1, Math.min(250, Number(url.searchParams.get("limit") || 50) || 50)),
+        message: "No Shopify inventory report with missing variant details has been generated yet."
+      });
+    }
+    const q = String(url.searchParams.get("q") || "").trim().toLowerCase();
+    const page = Math.max(1, Number(url.searchParams.get("page") || 1) || 1);
+    const limit = Math.max(1, Math.min(250, Number(url.searchParams.get("limit") || 50) || 50));
+    const rows = (report.missingProducts || []).filter((row) => {
+      if (!q) return true;
+      return [
+        row.productId,
+        row.sku,
+        row.vendorSku,
+        row.shopifyId,
+        ...(Array.isArray(row.expectedSkus) ? row.expectedSkus : []),
+        ...(Array.isArray(row.shopifyVariantSkus) ? row.shopifyVariantSkus : [])
+      ].some((value) => String(value || "").toLowerCase().includes(q));
+    });
+    const start = (page - 1) * limit;
+    return sendJson(res, 200, {
+      report: {
+        mode: report.mode || "",
+        generatedAt: report.generatedAt || "",
+        reportPath: report.reportPath || "",
+        reportFileName: report.reportFileName || path.basename(report.reportPath || ""),
+        locationName: report.locationName || "",
+        locationId: report.locationId || "",
+        productsLoaded: Number(report.productsLoaded || 0) || 0,
+        variantsPrepared: Number(report.variantsPrepared || 0) || 0,
+        variantsChanged: Number(report.variantsChanged || 0) || 0,
+        variantsApplied: Number(report.variantsApplied || 0) || 0,
+        productsMissingVariants: Number(report.productsMissingVariants || report.missingProducts?.length || 0) || 0
+      },
+      items: rows.slice(start, start + limit),
+      total: rows.length,
+      page,
+      limit,
+      q
+    });
   }
 
   if (req.method === "POST" && url.pathname === "/api/temu/exchange-code" && postgres.isPostgresEnabled()) {
@@ -23493,8 +23870,10 @@ module.exports = {
   mappedExportFilename,
   mappedProductsCsvPostgresFileAsync,
   normalizeDb,
+  queueShopifyInventoryUpdateJob,
   readDbFast,
   readExportMappingsApiStore,
+  readSystemSettingsStore,
   runEbayAccountSettingsSyncWorkerJob,
   runEbayCatalogImportWorkerJob,
   runEbayLocationWorkerJob,
