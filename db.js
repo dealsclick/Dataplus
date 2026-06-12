@@ -703,6 +703,17 @@ function nullableString(value) {
   return text || null;
 }
 
+function splitFilterValues(value) {
+  return String(value ?? "")
+    .split("|")
+    .map((item) => nullableString(item))
+    .filter(Boolean);
+}
+
+function parseFilterBoolean(value) {
+  return ["true", "1", "yes", "y", "active", "in-stock"].includes(String(value || "").trim().toLowerCase());
+}
+
 function nullableNumber(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
@@ -1800,7 +1811,8 @@ function productChangeRowToState(row = {}) {
   return {
     id: row.event_id,
     sku: row.sku || "",
-    productId: row.product_id || "",
+    productId: row.resolved_product_id || row.product_id || "",
+    activeCatalog: row.active_catalog === true,
     field: row.field_name || "",
     before: row.old_value,
     after: row.new_value,
@@ -1826,6 +1838,9 @@ function productChangeRowToState(row = {}) {
 function productChangeWhere(options = {}) {
   const params = [];
   const where = [];
+  const trackedFields = Array.isArray(options.trackedFields)
+    ? options.trackedFields.map((field) => nullableString(field)).filter(Boolean)
+    : [];
   const q = nullableString(options.q || options.query);
   if (q) {
     params.push(`%${q.toLowerCase()}%`);
@@ -1843,6 +1858,39 @@ function productChangeWhere(options = {}) {
   if (field && field !== "all") {
     params.push(field);
     where.push(`e.field_name = $${params.length}`);
+  } else if (trackedFields.length && options.includeUntracked !== true) {
+    params.push(trackedFields);
+    where.push(`e.field_name = any($${params.length}::text[])`);
+  }
+  const view = nullableString(options.view || options.scope);
+  if (view === "active") {
+    where.push(`p.product_id is not null and coalesce(p.active, true) = true`);
+  } else if (view === "opportunities") {
+    const minCutPercent = Math.max(1, Math.min(95, Number(options.minPriceCutPercent || options.priceCutPercent || 20)));
+    params.push(minCutPercent);
+    const cutParam = params.length;
+    where.push(`exists (
+      select 1
+      from vendor_catalog_items current_item
+      where lower(current_item.source_sku) = lower(e.sku)
+        and coalesce(current_item.to_be_discontinued, false) = true
+        and coalesce(current_item.qty, 0) > 0
+    )`);
+    where.push(`(
+      (e.field_name in ('cost','price','list_price','sourceCost','websitePrice')
+        and e.old_value ~ '^-?[0-9]+(\\.[0-9]+)?$'
+        and e.new_value ~ '^-?[0-9]+(\\.[0-9]+)?$'
+        and e.old_value::numeric > 0
+        and e.new_value::numeric < e.old_value::numeric
+        and ((e.old_value::numeric - e.new_value::numeric) / abs(e.old_value::numeric)) * 100 >= $${cutParam})
+      or (e.field_name in ('to_be_discontinued','toBeDiscontinued')
+        and lower(coalesce(e.new_value, '')) in ('true','1','yes','y')
+        and coalesce(e.raw #>> '{raw,msrp}', e.raw #>> '{raw,listPrice}', e.raw #>> '{raw,list_price}') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+        and coalesce(e.raw #>> '{raw,price}', e.raw #>> '{raw,websitePrice}', e.raw #>> '{raw,cost}') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+        and coalesce(e.raw #>> '{raw,msrp}', e.raw #>> '{raw,listPrice}', e.raw #>> '{raw,list_price}')::numeric > 0
+        and coalesce(e.raw #>> '{raw,price}', e.raw #>> '{raw,websitePrice}', e.raw #>> '{raw,cost}')::numeric < coalesce(e.raw #>> '{raw,msrp}', e.raw #>> '{raw,listPrice}', e.raw #>> '{raw,list_price}')::numeric
+        and ((coalesce(e.raw #>> '{raw,msrp}', e.raw #>> '{raw,listPrice}', e.raw #>> '{raw,list_price}')::numeric - coalesce(e.raw #>> '{raw,price}', e.raw #>> '{raw,websitePrice}', e.raw #>> '{raw,cost}')::numeric) / abs(coalesce(e.raw #>> '{raw,msrp}', e.raw #>> '{raw,listPrice}', e.raw #>> '{raw,list_price}')::numeric)) * 100 >= $${cutParam})
+    )`);
   }
   const source = nullableString(options.source);
   if (source && source !== "all") {
@@ -1896,10 +1944,13 @@ async function listProductChangeEvents(options = {}) {
     select
       e.event_id, e.product_id, e.sku, e.field_name, e.old_value, e.new_value,
       e.source, e.job_id, e.raw, e.created_at,
+      coalesce(e.product_id, p.product_id) as resolved_product_id,
+      coalesce(p.active, false) as active_catalog,
       v.vendor_id, v.vendor_sku, v.title, v.brand, v.category
     from product_change_events e
+    left join products p on lower(p.sku) = lower(e.sku)
     left join lateral (
-      select vendor_id, vendor_sku, title, brand, category
+      select vendor_id, vendor_sku, title, brand, category, mfr_part_number, raw
       from vendor_catalog_items item
       where lower(item.source_sku) = lower(e.sku)
         and (coalesce(e.raw ->> 'vendorId', '') = '' or item.vendor_id = e.raw ->> 'vendorId')
@@ -1924,8 +1975,9 @@ async function listProductChangeEvents(options = {}) {
   const count = await client.query(`
     select count(*)::int as total
     from product_change_events e
+    left join products p on lower(p.sku) = lower(e.sku)
     left join lateral (
-      select vendor_id, vendor_sku, title, brand, category
+      select vendor_id, vendor_sku, title, brand, category, mfr_part_number, raw
       from vendor_catalog_items item
       where lower(item.source_sku) = lower(e.sku)
         and (coalesce(e.raw ->> 'vendorId', '') = '' or item.vendor_id = e.raw ->> 'vendorId')
@@ -1943,8 +1995,9 @@ async function listProductChangeEvents(options = {}) {
       count(*) filter (where e.old_value ~ '^-?[0-9]+(\\.[0-9]+)?$' and e.new_value ~ '^-?[0-9]+(\\.[0-9]+)?$' and e.new_value::numeric > e.old_value::numeric)::int as up,
       count(*) filter (where e.old_value ~ '^-?[0-9]+(\\.[0-9]+)?$' and e.new_value ~ '^-?[0-9]+(\\.[0-9]+)?$' and e.new_value::numeric < e.old_value::numeric)::int as down
     from product_change_events e
+    left join products p on lower(p.sku) = lower(e.sku)
     left join lateral (
-      select vendor_id, vendor_sku, title, brand, category
+      select vendor_id, vendor_sku, title, brand, category, mfr_part_number, raw
       from vendor_catalog_items item
       where lower(item.source_sku) = lower(e.sku)
         and (coalesce(e.raw ->> 'vendorId', '') = '' or item.vendor_id = e.raw ->> 'vendorId')
@@ -3987,71 +4040,169 @@ async function listProducts(options = {}) {
       )
     )`);
   }
-  const supplier = nullableString(filters.supplier);
-  if (supplier) {
-    params.push(supplier.toLowerCase());
-    where.push(`lower(coalesce(supplier, '')) = $${params.length}`);
+  const supplierValues = splitFilterValues(filters.supplier).map((value) => value.toLowerCase());
+  if (supplierValues.length) {
+    params.push(supplierValues);
+    where.push(`lower(coalesce(supplier, '')) = any($${params.length})`);
   }
-  const active = nullableString(filters.active);
-  if (active) {
-    params.push(["true", "1", "yes", "active"].includes(active.toLowerCase()));
+  const activeValues = [...new Set(splitFilterValues(filters.active).map(parseFilterBoolean))];
+  if (activeValues.length === 1) {
+    params.push(activeValues[0]);
     where.push(`coalesce(active, true) = $${params.length}`);
   }
-  const hasStock = nullableString(filters.hasStock);
-  if (hasStock) {
-    if (["true", "1", "yes", "in-stock"].includes(hasStock.toLowerCase())) where.push(`coalesce(qty, 0) > 0`);
-    if (["false", "0", "no", "out-of-stock"].includes(hasStock.toLowerCase())) where.push(`coalesce(qty, 0) <= 0`);
+  const hasStockValues = [...new Set(splitFilterValues(filters.hasStock).map(parseFilterBoolean))];
+  if (hasStockValues.length === 1) {
+    where.push(hasStockValues[0] ? `coalesce(qty, 0) > 0` : `coalesce(qty, 0) <= 0`);
   }
-  const discontinued = nullableString(filters.toBeDiscontinued);
-  if (discontinued) {
-    params.push(["true", "1", "yes", "y"].includes(discontinued.toLowerCase()));
+  const discontinuedValues = [...new Set(splitFilterValues(filters.toBeDiscontinued).map(parseFilterBoolean))];
+  if (discontinuedValues.length === 1) {
+    params.push(discontinuedValues[0]);
     where.push(`coalesce(to_be_discontinued, false) = $${params.length}`);
   }
-  const brand = nullableString(filters.brand);
-  if (brand) {
-    params.push(brand.toLowerCase());
-    where.push(`lower(coalesce(brand, '')) = $${params.length}`);
+  const brandValues = splitFilterValues(filters.brand).map((value) => value.toLowerCase());
+  if (brandValues.length) {
+    params.push(brandValues);
+    where.push(`lower(coalesce(brand, '')) = any($${params.length})`);
   }
-  const category = nullableString(filters.category);
-  if (category) {
-    params.push(category);
-    where.push(`coalesce(category, '') = $${params.length}`);
+  const categoryValues = splitFilterValues(filters.category).map((value) => value.toLowerCase());
+  if (categoryValues.length) {
+    params.push(categoryValues);
+    where.push(`lower(coalesce(category, '')) = any($${params.length})`);
   }
-  const stockStatus = nullableString(filters.stockStatus);
-  if (stockStatus) {
-    params.push(stockStatus);
-    where.push(`coalesce(raw ->> 'stockStatus', '') = $${params.length}`);
+  const stockStatusValues = splitFilterValues(filters.stockStatus);
+  if (stockStatusValues.length) {
+    params.push(stockStatusValues);
+    where.push(`coalesce(raw ->> 'stockStatus', '') = any($${params.length})`);
   }
-  const hazardous = nullableString(filters.hazardous);
-  if (hazardous) {
-    params.push(["true", "1", "yes", "y"].includes(hazardous.toLowerCase()));
+  const stockQtyExpression = `coalesce(
+    qty,
+    case when coalesce(raw ->> 'stockQty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'stockQty')::numeric end,
+    case when coalesce(raw ->> 'qty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'qty')::numeric end
+  )`;
+  const stockQtyOperator = nullableString(filters.stockQtyOperator);
+  const stockQtyValues = splitFilterValues(filters.stockQty).map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  if (stockQtyOperator) {
+    if (stockQtyOperator === "empty") where.push(`${stockQtyExpression} is null`);
+    else if (stockQtyOperator === "notEmpty") where.push(`${stockQtyExpression} is not null`);
+    else if (stockQtyValues.length) {
+      if (stockQtyOperator === "gt") {
+        params.push(stockQtyValues[0]);
+        where.push(`${stockQtyExpression} > $${params.length}`);
+      } else if (stockQtyOperator === "gte") {
+        params.push(stockQtyValues[0]);
+        where.push(`${stockQtyExpression} >= $${params.length}`);
+      } else if (stockQtyOperator === "lt") {
+        params.push(stockQtyValues[0]);
+        where.push(`${stockQtyExpression} < $${params.length}`);
+      } else if (stockQtyOperator === "lte") {
+        params.push(stockQtyValues[0]);
+        where.push(`${stockQtyExpression} <= $${params.length}`);
+      } else if (stockQtyOperator === "between") {
+        params.push(stockQtyValues[0], stockQtyValues[1] ?? stockQtyValues[0]);
+        where.push(`${stockQtyExpression} between $${params.length - 1} and $${params.length}`);
+      } else {
+        params.push(stockQtyValues[0]);
+        where.push(`${stockQtyExpression} = $${params.length}`);
+      }
+    }
+  }
+  const hazardousValues = [...new Set(splitFilterValues(filters.hazardous).map(parseFilterBoolean))];
+  if (hazardousValues.length === 1) {
+    params.push(hazardousValues[0]);
     where.push(`case when lower(coalesce(raw ->> 'hazardous', 'false')) in ('true','1','yes','y') then true else false end = $${params.length}`);
   }
-  const verifiedBrand = nullableString(filters.verifiedBrand);
-  if (verifiedBrand) {
-    params.push(["true", "1", "yes", "y"].includes(verifiedBrand.toLowerCase()));
+  const verifiedBrandValues = [...new Set(splitFilterValues(filters.verifiedBrand).map(parseFilterBoolean))];
+  if (verifiedBrandValues.length === 1) {
+    params.push(verifiedBrandValues[0]);
     where.push(`case when lower(coalesce(raw ->> 'brandLocked', 'false')) in ('true','1','yes','y') then true else false end = $${params.length}`);
   }
-  const channelStatus = nullableString(filters.channelStatus);
-  if (channelStatus) {
+  const hasShopifyLiveStatus = `(
+    (
+      coalesce(raw ->> 'shopifyId', '') <> ''
+      and lower(coalesce(raw ->> 'shopifyStatus', '')) = 'active'
+      and case when lower(coalesce(raw ->> 'shopifyPublished', 'false')) in ('true','1','yes','y') then true else false end = true
+    )
+    or exists (
+      select 1
+      from shopify_product_statuses sps
+      where sps.product_id = products.product_id
+        and coalesce(sps.shopify_id, '') <> ''
+        and lower(coalesce(sps.shopify_status, '')) = 'active'
+        and coalesce(sps.shopify_published, false) = true
+    )
+  )`;
+  const numericPriceExpression = `coalesce(
+    price,
+    case when coalesce(raw ->> 'websitePrice', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'websitePrice')::numeric end,
+    case when coalesce(raw ->> 'shopifyPrice', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'shopifyPrice')::numeric end,
+    case when coalesce(raw ->> 'listPrice', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'listPrice')::numeric end,
+    0
+  )`;
+  const numericQtyExpression = `coalesce(
+    qty,
+    case when coalesce(raw ->> 'inventoryQty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'inventoryQty')::numeric end,
+    case when coalesce(raw ->> 'shopifyInventoryQty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'shopifyInventoryQty')::numeric end,
+    0
+  )`;
+  const ebayListingStatusExpression = `coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '')`;
+  const hasEbayOffer = `(
+    coalesce(raw #>> '{ebayListing,offerId}', '') <> ''
+    or ${ebayListingStatusExpression} = 'Offer'
+  )`;
+  const hasEbayLive = `(
+    coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
+    or ${ebayListingStatusExpression} = 'Live'
+  )`;
+  const numericEbayPriceExpression = `coalesce(
+    case when coalesce(raw #>> '{ebayListing,price}', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw #>> '{ebayListing,price}')::numeric end,
+    price,
+    case when coalesce(raw ->> 'ebayPrice', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'ebayPrice')::numeric end,
+    case when coalesce(raw ->> 'websitePrice', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'websitePrice')::numeric end,
+    case when coalesce(raw ->> 'listPrice', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'listPrice')::numeric end,
+    0
+  )`;
+  const numericEbayQtyExpression = `coalesce(
+    case when coalesce(raw #>> '{ebayListing,quantity}', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw #>> '{ebayListing,quantity}')::numeric end,
+    qty,
+    case when coalesce(raw ->> 'stockQty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'stockQty')::numeric end,
+    0
+  )`;
+  const hasEbayRequiredFields = `(
+    coalesce(raw #>> '{ebayListing,merchantLocationKey}', raw ->> 'ebayMerchantLocationKey', '') <> ''
+    and coalesce(raw #>> '{ebayListing,categoryId}', raw ->> 'ebayCategoryId', category, raw ->> 'category', '') <> ''
+    and coalesce(raw #>> '{ebayListing,paymentPolicyId}', raw ->> 'ebayPaymentPolicyId', '') <> ''
+    and coalesce(raw #>> '{ebayListing,returnPolicyId}', raw ->> 'ebayReturnPolicyId', '') <> ''
+    and coalesce(raw #>> '{ebayListing,fulfillmentPolicyId}', raw ->> 'ebayFulfillmentPolicyId', '') <> ''
+    and ${numericEbayPriceExpression} > 0
+    and ${numericEbayQtyExpression} > 0
+    and (
+      coalesce(raw ->> 'image', raw ->> 'imageUrl', raw ->> 'defaultImage', raw ->> 'primaryImage', raw ->> 'thumbnailUrl', '') <> ''
+      or jsonb_array_length(case when jsonb_typeof(raw -> 'images') = 'array' then raw -> 'images' else '[]'::jsonb end) > 0
+      or jsonb_array_length(case when jsonb_typeof(raw -> 'productImages') = 'array' then raw -> 'productImages' else '[]'::jsonb end) > 0
+    )
+  )`;
+  const hasShopifyRequiredFields = `(
+    coalesce(sku, raw ->> 'sku', raw ->> 'variantSku', raw ->> 'shopifyVariantSku', '') <> ''
+    and coalesce(title, raw ->> 'marketplaceTitle', raw ->> 'title', raw ->> 'name', '') <> ''
+    and coalesce(raw ->> 'bodyHtml', raw ->> 'bodyHTML', raw ->> 'longDescription', raw ->> 'description', raw ->> 'shortDescription', '') <> ''
+    and coalesce(raw ->> 'productType', raw ->> 'shopifyProductType', category, raw ->> 'category', raw ->> 'shopifyTaxonomyId', raw ->> 'shopifyCategoryId', '') <> ''
+    and coalesce(raw ->> 'vendor', raw ->> 'supplier', brand, raw ->> 'brand', '') <> ''
+    and ${numericPriceExpression} > 0
+    and ${numericQtyExpression} > 0
+    and (
+      coalesce(raw ->> 'image', raw ->> 'imageUrl', raw ->> 'defaultImage', raw ->> 'primaryImage', raw ->> 'thumbnailUrl', '') <> ''
+      or jsonb_array_length(case when jsonb_typeof(raw -> 'images') = 'array' then raw -> 'images' else '[]'::jsonb end) > 0
+      or jsonb_array_length(case when jsonb_typeof(raw -> 'shopifyImages') = 'array' then raw -> 'shopifyImages' else '[]'::jsonb end) > 0
+      or jsonb_array_length(case when jsonb_typeof(raw -> 'productImages') = 'array' then raw -> 'productImages' else '[]'::jsonb end) > 0
+    )
+  )`;
+  const channelStatusValues = splitFilterValues(filters.channelStatus).map((value) => value.toLowerCase());
+  const channelStatusClause = (channelStatus) => {
     if (channelStatus === "shopify-live" || channelStatus === "live") {
-      where.push(`(
-        (
-          coalesce(raw ->> 'shopifyId', '') <> ''
-          and lower(coalesce(raw ->> 'shopifyStatus', '')) = 'active'
-          and case when lower(coalesce(raw ->> 'shopifyPublished', 'false')) in ('true','1','yes','y') then true else false end = true
-        )
-        or exists (
-          select 1
-          from shopify_product_statuses sps
-          where sps.product_id = products.product_id
-            and coalesce(sps.shopify_id, '') <> ''
-            and lower(coalesce(sps.shopify_status, '')) = 'active'
-            and coalesce(sps.shopify_published, false) = true
-        )
-      )`);
-    } else if (channelStatus === "shopify-linked") {
-      where.push(`(
+      return hasShopifyLiveStatus;
+    }
+    if (channelStatus === "shopify-linked") {
+      return `(
         coalesce(raw ->> 'shopifyId', '') <> ''
         or exists (
           select 1
@@ -4059,9 +4210,10 @@ async function listProducts(options = {}) {
           where sps.product_id = products.product_id
             and coalesce(sps.shopify_id, '') <> ''
         )
-      )`);
-    } else if (channelStatus === "shopify-published") {
-      where.push(`(
+      )`;
+    }
+    if (channelStatus === "shopify-published") {
+      return `(
         case when lower(coalesce(raw ->> 'shopifyPublished', 'false')) in ('true','1','yes','y') then true else false end = true
         or exists (
           select 1
@@ -4069,9 +4221,10 @@ async function listProducts(options = {}) {
           where sps.product_id = products.product_id
             and coalesce(sps.shopify_published, false) = true
         )
-      )`);
-    } else if (channelStatus === "shopify-unpublished") {
-      where.push(`(
+      )`;
+    }
+    if (channelStatus === "shopify-unpublished") {
+      return `(
         (
           coalesce(raw ->> 'shopifyId', '') <> ''
           and case when lower(coalesce(raw ->> 'shopifyPublished', 'false')) in ('true','1','yes','y') then true else false end = false
@@ -4083,13 +4236,14 @@ async function listProducts(options = {}) {
             and coalesce(sps.shopify_id, '') <> ''
             and coalesce(sps.shopify_published, false) = false
         )
-      )`);
-    } else if (channelStatus === "shopify-sync-graphql" || channelStatus === "shopify-sync-manual" || channelStatus === "shopify-sync-failed") {
+      )`;
+    }
+    if (channelStatus === "shopify-sync-graphql" || channelStatus === "shopify-sync-manual" || channelStatus === "shopify-sync-failed") {
       const syncSource = channelStatus === "shopify-sync-graphql" ? "graphql"
         : channelStatus === "shopify-sync-manual" ? "manual_upload"
           : "failed";
       params.push(syncSource);
-      where.push(`(
+      return `(
         lower(coalesce(raw ->> 'shopifySyncSource', '')) = $${params.length}
         or exists (
           select 1
@@ -4097,9 +4251,12 @@ async function listProducts(options = {}) {
           where sps.product_id = products.product_id
             and lower(coalesce(sps.sync_source, '')) = $${params.length}
         )
-      )`);
-    } else if (channelStatus === "shopify-missing" || channelStatus === "missing") {
-      where.push(`(
+      )`;
+    }
+    if (channelStatus === "shopify-ready") return `(${hasShopifyLiveStatus} or ${hasShopifyRequiredFields})`;
+    if (channelStatus === "shopify-not-ready") return `(not (${hasShopifyLiveStatus}) and not (${hasShopifyRequiredFields}))`;
+    if (channelStatus === "shopify-missing" || channelStatus === "missing") {
+      return `(
         coalesce(raw ->> 'shopifyId', '') = ''
         and not exists (
           select 1
@@ -4107,13 +4264,14 @@ async function listProducts(options = {}) {
           where sps.product_id = products.product_id
             and coalesce(sps.shopify_id, '') <> ''
         )
-      )`);
-    } else if (channelStatus.startsWith("shopify:") || channelStatus.startsWith("shopify-")) {
+      )`;
+    }
+    if (channelStatus.startsWith("shopify:") || channelStatus.startsWith("shopify-")) {
       const statusValue = channelStatus.startsWith("shopify:")
         ? channelStatus.slice("shopify:".length)
         : channelStatus.slice("shopify-".length);
       params.push(statusValue.toLowerCase());
-      where.push(`(
+      return `(
         lower(coalesce(raw ->> 'shopifyStatus', '')) = $${params.length}
         or exists (
           select 1
@@ -4121,17 +4279,22 @@ async function listProducts(options = {}) {
           where sps.product_id = products.product_id
             and lower(coalesce(sps.shopify_status, '')) = $${params.length}
         )
-      )`);
-    } else if (channelStatus === "ebay-live") {
-      where.push(`coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '') = 'Live'`);
-    } else if (channelStatus === "ebay-offer") {
-      where.push(`coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '') = 'Offer'`);
-    } else if (channelStatus === "ebay-missing") {
-      where.push(`coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '') = ''`);
-    } else if (channelStatus.startsWith("ebay:")) {
-      params.push(channelStatus.slice("ebay:".length));
-      where.push(`coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '') = $${params.length}`);
+      )`;
     }
+    if (channelStatus === "ebay-ready") return `(not (${hasEbayLive}) and not (${hasEbayOffer}) and ${hasEbayRequiredFields})`;
+    if (channelStatus === "ebay-not-ready") return `(not (${hasEbayLive}) and not (${hasEbayRequiredFields}))`;
+    if (channelStatus === "ebay-live") return hasEbayLive;
+    if (channelStatus === "ebay-offer") return hasEbayOffer;
+    if (channelStatus === "ebay-missing") return `(not (${hasEbayLive}) and not (${hasEbayOffer}))`;
+    if (channelStatus.startsWith("ebay:")) {
+      params.push(channelStatus.slice("ebay:".length));
+      return `${ebayListingStatusExpression} = $${params.length}`;
+    }
+    return "";
+  };
+  if (channelStatusValues.length) {
+    const channelClauses = channelStatusValues.map((value) => channelStatusClause(value)).filter(Boolean);
+    if (channelClauses.length) where.push(`(${channelClauses.join(" or ")})`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const countResult = await client.query(`select count(*)::int as total from products ${whereSql}`, params);

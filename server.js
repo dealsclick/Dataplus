@@ -326,6 +326,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   autoDataQualityScanAfterImports: true,
   dataQualityWorkerEnabled: true,
   sourceCatalogDefaultImportMode: "new-and-update",
+  skuChangeTrackedFields: ["cost", "price", "list_price", "qty", "stock_status", "to_be_discontinued", "brand", "mfr_part_number", "vendor_sku", "category", "default_image"],
   backupIncludeSourceCatalog: false,
   backupRetentionDays: 30,
   jobsRetentionDays: IMPORT_JOB_FILE_RETENTION_DAYS,
@@ -13062,25 +13063,145 @@ function catalogFilterParams(searchParams) {
     stockStatus: searchParams.get("stockStatus") || "",
     channelStatus: searchParams.get("channelStatus") || searchParams.get("shopifyStatus") || "",
     hasStock: searchParams.get("hasStock") || "",
+    stockQty: searchParams.get("stockQty") || "",
+    stockQtyOperator: searchParams.get("stockQtyOperator") || "",
     hazardous: searchParams.get("hazardous") || "",
     toBeDiscontinued: searchParams.get("toBeDiscontinued") || searchParams.get("discontinued") || "",
+    verifiedBrand: searchParams.get("verifiedBrand") || "",
     brand: searchParams.get("brand") || "",
     category: searchParams.get("category") || ""
   };
 }
 
+function catalogFilterValues(value = "") {
+  return String(value || "").split("|").map((item) => item.trim()).filter(Boolean);
+}
+
+function catalogFilterMatches(value = "", actual = "", normalizer = (item) => String(item || "")) {
+  const values = catalogFilterValues(value);
+  if (!values.length) return true;
+  const normalizedActual = normalizer(actual);
+  return values.some((item) => normalizer(item) === normalizedActual);
+}
+
+function catalogNumberFilterMatches(operator = "", value = "", actualValue = "") {
+  if (!operator) return true;
+  if (operator === "empty") return String(actualValue ?? "").trim() === "";
+  if (operator === "notEmpty") return String(actualValue ?? "").trim() !== "";
+  const values = catalogFilterValues(value).map((item) => Number(item)).filter((item) => Number.isFinite(item));
+  if (!values.length) return true;
+  const actual = Number(actualValue);
+  if (!Number.isFinite(actual)) return false;
+  if (operator === "gt") return actual > values[0];
+  if (operator === "gte") return actual >= values[0];
+  if (operator === "lt") return actual < values[0];
+  if (operator === "lte") return actual <= values[0];
+  if (operator === "between") return actual >= values[0] && actual <= (values[1] ?? values[0]);
+  return actual === values[0];
+}
+
+function catalogProductHasImage(product = {}) {
+  const images = product.images || product.shopifyImages || product.productImages;
+  if (Array.isArray(images) && images.length) return true;
+  return Boolean(product.image || product.imageUrl || product.defaultImage || product.primaryImage || product.thumbnailUrl);
+}
+
+function catalogProductShopifyReadinessStatus(product = {}) {
+  const shopifyLinked = Boolean(String(product.shopifyId || product.shopifyProductId || "").trim());
+  const shopifyStatus = String(product.shopifyStatus || "").trim().toLowerCase();
+  const live = shopifyLinked && shopifyStatus === "active" && product.shopifyPublished === true;
+  if (live) return "live";
+
+  const price = Number(product.price ?? product.websitePrice ?? product.shopifyPrice ?? product.listPrice ?? 0);
+  const stockQty = Number(product.stockQty ?? product.qty ?? product.inventoryQty ?? product.shopifyInventoryQty ?? 0);
+  const missingRequired = [
+    !String(product.sku || product.variantSku || product.shopifyVariantSku || "").trim(),
+    !String(product.marketplaceTitle || product.title || product.name || "").trim(),
+    !String(product.bodyHtml || product.bodyHTML || product.longDescription || product.description || product.shortDescription || "").trim(),
+    !String(product.productType || product.shopifyProductType || product.category || product.shopifyTaxonomyId || product.shopifyCategoryId || "").trim(),
+    !String(product.vendor || product.supplier || product.brand || "").trim(),
+    !(Number.isFinite(price) && price > 0),
+    !(Number.isFinite(stockQty) && stockQty > 0),
+    !catalogProductHasImage(product)
+  ].some(Boolean);
+
+  return missingRequired ? "not-ready" : "ready";
+}
+
+function catalogProductEbayStatus(product = {}) {
+  const listing = product.ebayListing || {};
+  if (listing.listingId || product.ebayId) return "live";
+  if (listing.offerId) return "offer";
+  return "missing";
+}
+
+function catalogProductEbayReadinessStatus(product = {}) {
+  const ebayStatus = catalogProductEbayStatus(product);
+  if (ebayStatus === "live") return "live";
+  const listing = product.ebayListing || {};
+  const price = Number(listing.price ?? product.ebayPrice ?? product.price ?? product.websitePrice ?? product.listPrice ?? 0);
+  const quantity = Number(listing.quantity ?? product.available ?? product.stockQty ?? product.qty ?? 0);
+  const hasRequiredFields = [
+    listing.merchantLocationKey || product.ebayMerchantLocationKey,
+    listing.categoryId || product.ebayCategoryId || product.category,
+    listing.paymentPolicyId || product.ebayPaymentPolicyId,
+    listing.returnPolicyId || product.ebayReturnPolicyId,
+    listing.fulfillmentPolicyId || product.ebayFulfillmentPolicyId,
+    Number.isFinite(price) && price > 0,
+    Number.isFinite(quantity) && quantity > 0,
+    catalogProductHasImage(product)
+  ].every(Boolean);
+  if (ebayStatus === "offer" && hasRequiredFields) return "offer";
+  return hasRequiredFields ? "ready" : "not-ready";
+}
+
+function productMatchesCatalogChannelStatus(product = {}, status = "") {
+  const value = String(status || "").trim().toLowerCase();
+  if (!value) return true;
+  const shopifyLinked = Boolean(String(product.shopifyId || product.shopifyProductId || "").trim());
+  const shopifyStatus = String(product.shopifyStatus || "").trim().toLowerCase();
+  const shopifySyncSource = String(product.shopifySyncSource || product.syncSource || "").trim().toLowerCase();
+  const ebayListing = product.ebayListing || {};
+  const ebayStatus = catalogProductEbayStatus(product);
+  if (value === "shopify-live" || value === "live") return shopifyLinked && shopifyStatus === "active" && product.shopifyPublished === true;
+  if (value === "shopify-ready") {
+    const readiness = catalogProductShopifyReadinessStatus(product);
+    return readiness === "ready" || readiness === "live";
+  }
+  if (value === "shopify-not-ready") return catalogProductShopifyReadinessStatus(product) === "not-ready";
+  if (value === "shopify-linked") return shopifyLinked;
+  if (value === "shopify-published") return shopifyLinked && product.shopifyPublished === true;
+  if (value === "shopify-unpublished") return shopifyLinked && product.shopifyPublished === false;
+  if (value === "shopify-missing" || value === "missing") return !shopifyLinked;
+  if (value === "shopify-sync-graphql") return shopifySyncSource === "graphql";
+  if (value === "shopify-sync-manual") return shopifySyncSource === "manual_upload";
+  if (value === "shopify-sync-failed") return shopifySyncSource === "failed";
+  if (value.startsWith("shopify:")) return shopifyStatus === value.slice("shopify:".length);
+  if (value.startsWith("shopify-")) return shopifyStatus === value.slice("shopify-".length);
+  if (value === "ebay-live") return ebayStatus === "live";
+  if (value === "ebay-offer") return ebayStatus === "offer";
+  if (value === "ebay-missing") return ebayStatus === "missing";
+  if (value === "ebay-ready") return catalogProductEbayReadinessStatus(product) === "ready";
+  if (value === "ebay-not-ready") return catalogProductEbayReadinessStatus(product) === "not-ready";
+  if (value.startsWith("ebay:")) return String(ebayListing.ebayStatus || ebayListing.status || ebayStatus).toLowerCase() === value.slice("ebay:".length);
+  return shopifyStatus === value;
+}
+
 function productMatchesCatalogFilters(product = {}, filters = {}) {
-  const supplierValues = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim().toLowerCase()).filter(Boolean);
+  const supplierValues = catalogFilterValues(filters.suppliers || filters.supplier).map((value) => value.toLowerCase());
   if (supplierValues.length && !supplierValues.includes(String(product.supplier || product.vendor || "").toLowerCase())) return false;
-  if (filters.active && String(product.active !== false) !== filters.active) return false;
+  if (!catalogFilterMatches(filters.active, String(product.active !== false))) return false;
   if (filters.productMembership === "in-products" && !product.inProducts) return false;
   if (filters.productMembership === "not-in-products" && product.inProducts) return false;
-  if (filters.stockStatus && String(product.stockStatus || "") !== filters.stockStatus) return false;
-  if (filters.hasStock && String(Number(product.stockQty ?? product.qty ?? 0) > 0) !== filters.hasStock) return false;
-  if (filters.hazardous && String(Boolean(product.hazardous)) !== filters.hazardous) return false;
-  if (filters.toBeDiscontinued && String(Boolean(product.toBeDiscontinued || product.closeoutEligible)) !== filters.toBeDiscontinued) return false;
-  if (filters.brand && formatBrandName(product.brand || "") !== filters.brand) return false;
-  if (filters.category && formatCategoryName(product.category || "") !== formatCategoryName(filters.category)) return false;
+  if (!catalogFilterMatches(filters.stockStatus, product.stockStatus)) return false;
+  if (filters.channelStatus && !catalogFilterValues(filters.channelStatus).some((value) => productMatchesCatalogChannelStatus(product, value))) return false;
+  if (!catalogFilterMatches(filters.hasStock, String(Number(product.stockQty ?? product.qty ?? 0) > 0))) return false;
+  if (!catalogNumberFilterMatches(filters.stockQtyOperator, filters.stockQty, product.stockQty ?? product.qty)) return false;
+  if (!catalogFilterMatches(filters.hazardous, String(Boolean(product.hazardous)))) return false;
+  if (!catalogFilterMatches(filters.toBeDiscontinued, String(Boolean(product.toBeDiscontinued || product.closeoutEligible)))) return false;
+  if (!catalogFilterMatches(filters.verifiedBrand, String(Boolean(verifiedBrandForHandle(product))))) return false;
+  if (!catalogFilterMatches(filters.brand, product.brand || "", formatBrandName)) return false;
+  if (!catalogFilterMatches(filters.category, product.category || "", formatCategoryName)) return false;
   return true;
 }
 
@@ -13966,7 +14087,7 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, db 
   const filtered = hasCatalogFilters(filters);
   const selectedSuppliers = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim()).filter(Boolean);
   const supplierIndexedFilter = selectedSuppliers.length >= 1 && !q;
-  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.category].every((value) => !value);
+  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.category].every((value) => !value);
   const vendorIndex = supplierIndexedFilter ? readCatalogVendorIndex() : null;
   const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
   const supplierTotal = supplierOnlyFilter
@@ -14148,7 +14269,7 @@ async function collectCatalogProductsForExport({ query = "", filters = {}, limit
   }
   const selectedSuppliers = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim()).filter(Boolean);
   const supplierIndexedFilter = selectedSuppliers.length >= 1 && !q;
-  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.category].every((value) => !value);
+  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.category].every((value) => !value);
   const sourceIndex = supplierIndexedFilter ? readSourceCatalogIndexManifest() : null;
   const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
   const items = [];
@@ -18148,6 +18269,10 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/catalog/changes") {
     const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get("limit") || 500)));
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const trackedFields = Array.isArray(settings.skuChangeTrackedFields) ? settings.skuChangeTrackedFields : DEFAULT_SYSTEM_SETTINGS.skuChangeTrackedFields;
+    const includeUntracked = ["1", "true", "yes"].includes(String(url.searchParams.get("includeUntracked") || "").toLowerCase());
+    const changeView = url.searchParams.get("view") || "";
     if (postgres.isPostgresEnabled()) {
       const result = await postgres.listProductChangeEvents({
         query: url.searchParams.get("q") || "",
@@ -18155,17 +18280,24 @@ async function handleApi(req, res) {
         source: url.searchParams.get("source") || "",
         vendor: url.searchParams.get("vendor") || "",
         direction: url.searchParams.get("direction") || "",
+        view: changeView,
+        minPriceCutPercent: url.searchParams.get("minPriceCutPercent") || "",
+        trackedFields,
+        includeUntracked,
         from: url.searchParams.get("from") || "",
         to: url.searchParams.get("to") || "",
         page: url.searchParams.get("page") || 1,
-        limit
+        limit,
+        skipMeta: true
       });
       return sendJson(res, 200, {
         ...result,
         tracking: {
           ...catalogChangeTrackingStatus(),
           database: "postgres",
-          productChangeEvents: result.total
+          productChangeEvents: result.total,
+          trackedFields,
+          includeUntracked
         }
       });
     }
@@ -18178,6 +18310,9 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/catalog/changes.csv") {
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const trackedFields = Array.isArray(settings.skuChangeTrackedFields) ? settings.skuChangeTrackedFields : DEFAULT_SYSTEM_SETTINGS.skuChangeTrackedFields;
+    const includeUntracked = ["1", "true", "yes"].includes(String(url.searchParams.get("includeUntracked") || "").toLowerCase());
     if (postgres.isPostgresEnabled()) {
       return streamProductChangesCsvFromPostgres(res, {
         query: url.searchParams.get("q") || "",
@@ -18185,6 +18320,10 @@ async function handleApi(req, res) {
         source: url.searchParams.get("source") || "",
         vendor: url.searchParams.get("vendor") || "",
         direction: url.searchParams.get("direction") || "",
+        view: url.searchParams.get("view") || "",
+        minPriceCutPercent: url.searchParams.get("minPriceCutPercent") || "",
+        trackedFields,
+        includeUntracked,
         from: url.searchParams.get("from") || "",
         to: url.searchParams.get("to") || "",
         limit: url.searchParams.get("limit") || 25000

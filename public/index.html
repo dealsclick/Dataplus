@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DataPlus</title>
-    <link rel="stylesheet" href="/styles.css?v=catalog-toolbar-20260611-1" />
+    <link rel="stylesheet" href="/styles.css?v=saved-filter-views-20260612-14" />
   </head>
   <body>
     <div id="global-save-progress" class="global-save-progress" aria-hidden="true"><span></span></div>
@@ -135,7 +135,8 @@
 
       <section id="orders" class="view">
         <div class="orders-command">
-          <div class="order-filter-grid">
+          <div id="order-smart-filters"></div>
+          <div class="order-filter-grid legacy-filter-controls">
             <label class="order-filter-search">Search
               <input id="order-search" type="search" placeholder="Name, order #, phone, SKU" />
             </label>
@@ -288,29 +289,16 @@
         </div>
           <div class="toolbar">
             <input id="catalog-search" type="search" placeholder="Search SKU, title, brand, category" />
-            <label class="file-button" data-icon="upload">
-              Import CSV
-              <input id="inventory-import" type="file" accept=".csv,text/csv" />
-            </label>
-            <label class="file-button source-only-control" data-icon="upload">
-              Add SKUs CSV
-              <input id="source-sku-import" type="file" accept=".csv,text/csv" />
-            </label>
-            <label class="file-button product-only-control" data-icon="upload">
-              Import Shopify Status
-              <input id="shopify-status-import" type="file" accept=".csv,text/csv" />
-            </label>
-            <button id="ebay-catalog-import" class="button secondary product-only-control" type="button" data-icon="store">Sync eBay Catalog</button>
-            <label class="file-button category-only-control" data-icon="upload">
-              Import SKU Categories
-              <input id="category-sku-import" type="file" accept=".csv,text/csv" />
-            </label>
-            <label class="file-button category-only-control" data-icon="upload">
-              Import Category Mapping
-              <input id="category-mapping-import" type="file" accept=".csv,text/csv" />
-            </label>
           </div>
-          <div class="catalog-filters">
+          <div class="catalog-hidden-inputs" aria-hidden="true">
+            <input id="inventory-import" type="file" accept=".csv,text/csv" />
+            <input id="source-sku-import" type="file" accept=".csv,text/csv" />
+            <input id="shopify-status-import" type="file" accept=".csv,text/csv" />
+            <input id="category-sku-import" type="file" accept=".csv,text/csv" />
+            <input id="category-mapping-import" type="file" accept=".csv,text/csv" />
+          </div>
+          <div id="catalog-smart-filters"></div>
+          <div class="catalog-filters legacy-filter-controls">
             <select id="catalog-filter-supplier"><option value="">All suppliers</option></select>
             <select id="catalog-filter-active">
               <option value="">Any active status</option>
@@ -350,19 +338,6 @@
             <select id="catalog-filter-category"><option value="">All categories</option></select>
             <button id="catalog-clear-filters" class="button secondary" type="button">Clear filters</button>
           </div>
-          <div class="catalog-bulk-bar">
-            <span><strong id="catalog-selected-count">0</strong> selected</span>
-            <select id="catalog-bulk-action">
-              <option value="">Bulk action</option>
-              <option value="add-active">Add to Active Catalog</option>
-              <option value="set-active">Set active</option>
-              <option value="set-inactive">Set inactive</option>
-              <option value="set-discontinued">Set discontinued</option>
-              <option value="ebay-bulk-launch">Launch ready to eBay</option>
-              <option value="delete">Delete / hide selected</option>
-            </select>
-            <button id="catalog-apply-bulk" class="button secondary" type="button">Apply</button>
-          </div>
         <div id="products-list" class="catalog-list"></div>
         <div id="source-catalog-list" class="catalog-list"></div>
         <div id="import-review-list" class="catalog-list"></div>
@@ -401,6 +376,7 @@
 
       <section id="customers" class="view">
         <div class="toolbar">
+          <div id="customer-smart-filters"></div>
           <input id="customer-search" type="search" placeholder="Search customers, email, phone" />
           <button class="button secondary" data-create-customer>New customer</button>
         </div>
@@ -1227,6 +1203,57 @@
       </div>
     </div>
 
+    <div id="source-export-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card source-export-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Source catalog</p>
+            <h2>Export source catalog</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-source-export-modal aria-label="Close source export">x</button>
+        </div>
+        <div id="source-export-modal-content"></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-source-export-modal>Cancel</button>
+          <button type="button" class="button" data-export-source-products>Export CSV</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="inventory-export-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card source-export-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Inventory</p>
+            <h2>Export inventory</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-inventory-export-modal aria-label="Close inventory export">x</button>
+        </div>
+        <div id="inventory-export-modal-content"></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-inventory-export-modal>Cancel</button>
+          <button type="button" class="button" data-run-inventory-export-modal>Export CSV</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="category-export-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-card source-export-modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Categories</p>
+            <h2>Export categories</h2>
+          </div>
+          <button type="button" class="icon-button" data-close-category-export-modal aria-label="Close category export">x</button>
+        </div>
+        <div id="category-export-modal-content"></div>
+        <div class="modal-actions">
+          <button type="button" class="button secondary" data-close-category-export-modal>Cancel</button>
+          <button type="button" class="button" data-run-category-export-modal>Export CSV</button>
+        </div>
+      </div>
+    </div>
+
     <div id="product-import-modal" class="modal-backdrop" aria-hidden="true">
       <div class="modal-card product-import-modal-card">
         <div class="modal-head">
@@ -1302,6 +1329,6 @@
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/checklist@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/embed@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/image@latest"></script>
-    <script src="/app.js?v=catalog-toolbar-20260611-1"></script>
+    <script src="/app.js?v=saved-filter-views-20260612-14"></script>
   </body>
 </html>
