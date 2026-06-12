@@ -7615,10 +7615,18 @@ function parseCsv(text) {
 function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const requested = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
-  const filePath = path.normalize(path.join(PUBLIC_DIR, requested));
+  let filePath = path.normalize(path.join(PUBLIC_DIR, requested));
 
   if (!filePath.startsWith(PUBLIC_DIR)) return notFound(res);
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return notFound(res);
+  const acceptsHtml = String(req.headers.accept || "").includes("text/html");
+  const hasExtension = Boolean(path.extname(filePath));
+  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    if (req.method === "GET" && acceptsHtml && !hasExtension && !url.pathname.startsWith("/api/")) {
+      filePath = path.join(PUBLIC_DIR, "index.html");
+    } else {
+      return notFound(res);
+    }
+  }
 
   const ext = path.extname(filePath);
   const contentType = {
@@ -18280,6 +18288,10 @@ async function handleApi(req, res) {
         source: url.searchParams.get("source") || "",
         vendor: url.searchParams.get("vendor") || "",
         direction: url.searchParams.get("direction") || "",
+        catalogPresence: url.searchParams.get("catalogPresence") || "",
+        discontinued: url.searchParams.get("discontinued") || "",
+        stock: url.searchParams.get("stock") || "",
+        priceCut: url.searchParams.get("priceCut") || "",
         view: changeView,
         minPriceCutPercent: url.searchParams.get("minPriceCutPercent") || "",
         trackedFields,
@@ -18320,6 +18332,10 @@ async function handleApi(req, res) {
         source: url.searchParams.get("source") || "",
         vendor: url.searchParams.get("vendor") || "",
         direction: url.searchParams.get("direction") || "",
+        catalogPresence: url.searchParams.get("catalogPresence") || "",
+        discontinued: url.searchParams.get("discontinued") || "",
+        stock: url.searchParams.get("stock") || "",
+        priceCut: url.searchParams.get("priceCut") || "",
         view: url.searchParams.get("view") || "",
         minPriceCutPercent: url.searchParams.get("minPriceCutPercent") || "",
         trackedFields,

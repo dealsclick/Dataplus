@@ -1892,6 +1892,59 @@ function productChangeWhere(options = {}) {
         and ((coalesce(e.raw #>> '{raw,msrp}', e.raw #>> '{raw,listPrice}', e.raw #>> '{raw,list_price}')::numeric - coalesce(e.raw #>> '{raw,price}', e.raw #>> '{raw,websitePrice}', e.raw #>> '{raw,cost}')::numeric) / abs(coalesce(e.raw #>> '{raw,msrp}', e.raw #>> '{raw,listPrice}', e.raw #>> '{raw,list_price}')::numeric)) * 100 >= $${cutParam})
     )`);
   }
+  const catalogPresence = nullableString(options.catalogPresence || options.catalog || options.productPresence);
+  if (catalogPresence && catalogPresence !== "all") {
+    if (catalogPresence === "active") {
+      where.push(`p.product_id is not null and coalesce(p.active, true) = true`);
+    } else if (catalogPresence === "products" || catalogPresence === "product") {
+      where.push(`p.product_id is not null`);
+    } else if (catalogPresence === "source-only" || catalogPresence === "sourceOnly") {
+      where.push(`p.product_id is null`);
+    } else if (catalogPresence === "inactive") {
+      where.push(`p.product_id is not null and coalesce(p.active, true) = false`);
+    }
+  }
+  const discontinued = nullableString(options.discontinued || options.closeout);
+  if (discontinued && discontinued !== "all") {
+    where.push(`exists (
+      select 1
+      from vendor_catalog_items discontinued_item
+      where lower(discontinued_item.source_sku) = lower(e.sku)
+        and (coalesce(e.raw ->> 'vendorId', '') = '' or discontinued_item.vendor_id = e.raw ->> 'vendorId')
+        and coalesce(discontinued_item.to_be_discontinued, false) = ${["yes", "true", "1"].includes(discontinued.toLowerCase()) ? "true" : "false"}
+    )`);
+  }
+  const stock = nullableString(options.stock || options.stockAvailability);
+  if (stock && stock !== "all") {
+    if (stock === "in-stock" || stock === "inStock") {
+      where.push(`exists (
+        select 1
+        from vendor_catalog_items stock_item
+        where lower(stock_item.source_sku) = lower(e.sku)
+          and (coalesce(e.raw ->> 'vendorId', '') = '' or stock_item.vendor_id = e.raw ->> 'vendorId')
+          and coalesce(stock_item.qty, 0) > 0
+      )`);
+    } else if (stock === "out-of-stock" || stock === "outOfStock") {
+      where.push(`exists (
+        select 1
+        from vendor_catalog_items stock_item
+        where lower(stock_item.source_sku) = lower(e.sku)
+          and (coalesce(e.raw ->> 'vendorId', '') = '' or stock_item.vendor_id = e.raw ->> 'vendorId')
+          and coalesce(stock_item.qty, 0) <= 0
+      )`);
+    }
+  }
+  const priceCut = nullableString(options.priceCut || options.priceMovement);
+  if (["yes", "true", "1", "cut", "price-cut"].includes(priceCut.toLowerCase())) {
+    const minCutPercent = Math.max(1, Math.min(95, Number(options.minPriceCutPercent || options.priceCutPercent || 20)));
+    params.push(minCutPercent);
+    where.push(`e.field_name in ('cost','price','list_price','sourceCost','websitePrice')
+      and e.old_value ~ '^-?[0-9]+(\\.[0-9]+)?$'
+      and e.new_value ~ '^-?[0-9]+(\\.[0-9]+)?$'
+      and e.old_value::numeric > 0
+      and e.new_value::numeric < e.old_value::numeric
+      and ((e.old_value::numeric - e.new_value::numeric) / abs(e.old_value::numeric)) * 100 >= $${params.length}`);
+  }
   const source = nullableString(options.source);
   if (source && source !== "all") {
     params.push(source);

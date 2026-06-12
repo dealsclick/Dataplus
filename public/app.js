@@ -5,7 +5,7 @@ let selectedProductEditMode = false;
 let orderDetailVisible = false;
 let selectedOrderIds = new Set();
 let orderTableSort = { key: "createdAt", direction: "desc" };
-let activeOrderQueue = "new";
+let activeOrderQueue = "all";
 let purchasingTab = "pos";
 let catalogTab = "products";
 let sourceCatalogPage = 1;
@@ -24,7 +24,7 @@ let catalogChangeState = {
   loading: false,
   error: "",
   loaded: false,
-  filters: { q: "", field: "", source: "", vendor: "", direction: "", view: "tracked", minPriceCutPercent: "20", includeUntracked: "", from: "", to: "" }
+  filters: { q: "", field: "", source: "", vendor: "", direction: "", catalogPresence: "", discontinued: "", stock: "", priceCut: "", view: "tracked", minPriceCutPercent: "20", includeUntracked: "", from: "", to: "" }
 };
 let dataQualityState = {
   summary: null,
@@ -194,9 +194,64 @@ let selectedImportJobId = null;
 let channelApiLogState = { channel: "", logs: [], loading: false, loaded: false, error: "", filters: { q: "", status: "", transport: "" } };
 let shopifyMissingVariantState = { items: [], report: null, total: 0, page: 1, limit: 50, q: "", loading: false, loaded: false, error: "" };
 let systemSettingsEditMode = false;
+let applyingRoute = false;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+const PAGE_ROUTES = {
+  "/": { view: "dashboard", title: "Dashboard" },
+  "/dashboard": { view: "dashboard", title: "Dashboard" },
+  "/orders": { view: "orders", render: () => renderOrders(), title: "Orders" },
+  "/drafts": { view: "drafts", render: () => renderDrafts(), title: "Drafts" },
+  "/returns": { view: "returns", render: () => renderReturnsManagement(), title: "Returns" },
+  "/customers": { view: "customers", title: "Customers" },
+  "/import-export": { view: "import-export", title: "Import / Export" },
+  "/jobs": { view: "jobs", render: () => renderJobsPage(), title: "Jobs" },
+  "/catalog": { view: "catalog", catalogTab: "products", render: () => renderCatalog(), title: "Catalog" },
+  "/products": { view: "catalog", catalogTab: "products", render: () => renderCatalog(), title: "Products" },
+  "/source-catalog": { view: "catalog", catalogTab: "source", render: () => renderCatalog(), title: "Source Catalog" },
+  "/source": { view: "catalog", catalogTab: "source", render: () => renderCatalog(), title: "Source Catalog" },
+  "/import-review": { view: "catalog", catalogTab: "reviews", render: () => renderCatalog(), title: "Import Review" },
+  "/sku-changes": { view: "catalog", catalogTab: "changes", render: () => renderCatalog(), title: "SKU Changes" },
+  "/categories": { view: "catalog", catalogTab: "categories", render: () => renderCatalog(), title: "Categories" },
+  "/attributes": { view: "catalog", catalogTab: "attributes", render: () => renderCatalog(), title: "Attributes" },
+  "/attribute-groups": { view: "catalog", catalogTab: "attribute-groups", render: () => renderCatalog(), title: "Attribute Groups" },
+  "/inventory": { view: "catalog", catalogTab: "inventory", render: () => renderCatalog(), title: "Inventory" },
+  "/templates": { view: "catalog", catalogTab: "templates", render: () => renderCatalog(), title: "Templates" },
+  "/readiness": { view: "catalog", catalogTab: "readiness", render: () => renderCatalog(), title: "Readiness" },
+  "/purchasing": { view: "purchasing", purchasingTab: "pos", render: () => renderPurchaseOrders(), title: "Purchasing" },
+  "/purchase-orders": { view: "purchasing", purchasingTab: "pos", render: () => renderPurchaseOrders(), title: "Purchase Orders" },
+  "/vendors": { view: "purchasing", purchasingTab: "vendors", render: () => renderPurchaseOrders(), title: "Vendors" },
+  "/brands": { view: "purchasing", purchasingTab: "brands", render: () => renderPurchaseOrders(), title: "Brands" },
+  "/warehouses": { view: "purchasing", purchasingTab: "warehouses", render: () => renderPurchaseOrders(), title: "Warehouses" },
+  "/reports": { view: "reports", title: "Reports" },
+  "/knowledge": { view: "knowledge", title: "Knowledge Base" },
+  "/connections": { view: "connections", title: "Channels" },
+  "/channels": { view: "connections", title: "Channels" },
+  "/system-settings": { view: "system-settings", title: "System Settings" },
+  "/settings": { view: "system-settings", title: "System Settings" }
+};
+
+const CATALOG_TAB_ROUTES = {
+  products: "/products",
+  source: "/source-catalog",
+  reviews: "/import-review",
+  changes: "/sku-changes",
+  categories: "/categories",
+  attributes: "/attributes",
+  "attribute-groups": "/attribute-groups",
+  inventory: "/inventory",
+  templates: "/templates",
+  readiness: "/readiness"
+};
+
+const PURCHASING_TAB_ROUTES = {
+  pos: "/purchase-orders",
+  vendors: "/vendors",
+  brands: "/brands",
+  warehouses: "/warehouses"
+};
 
 // Icons are inline SVGs from the open-source Lucide icon set (ISC license).
 const LUCIDE_ICONS = {
@@ -401,13 +456,13 @@ function setSmartFilterOperator(scope, fieldKey, operator) {
 
 function smartFilterSelectedValues(scope, fieldKey) {
   const saved = smartFilterState.values[smartFilterKey(scope, fieldKey)];
-  if (Array.isArray(saved)) return saved.filter(Boolean);
+  if (Array.isArray(saved)) return saved.map((value) => String(value || "").trim()).filter((value) => value && value.toLowerCase() !== "all");
   const field = smartFilterField(scope, fieldKey);
   if (!field) return [];
   const value = scope === "customers"
     ? customerFilterState[field.key] || ""
     : ($(field.selector)?.value || "");
-  return String(value || "").split("|").map((item) => item.trim()).filter(Boolean);
+  return String(value || "").split("|").map((item) => item.trim()).filter((item) => item && item.toLowerCase() !== "all");
 }
 
 function smartFilterUniqueValues(values = []) {
@@ -1522,7 +1577,209 @@ function setState(nextState) {
   render();
 }
 
-function showView(id) {
+function normalizeAppPath(pathname = "") {
+  const normalized = `/${String(pathname || "/").replace(/^\/+/, "").replace(/\/+$/, "")}`;
+  return normalized === "/" ? "/" : normalized.toLowerCase();
+}
+
+function skuRouteValue(value = "") {
+  return encodeURIComponent(String(value || "").trim());
+}
+
+function orderRouteNumber(order = {}) {
+  return order.displayOrderNumber || order.internalOrderNumber || order.orderNumber || order.id || "";
+}
+
+function findOrderByRouteId(value = "") {
+  const key = String(value || "").trim().toLowerCase();
+  if (!key) return null;
+  return (state?.orders || []).find((order) => [
+    order.id,
+    order.orderId,
+    order.orderNumber,
+    order.displayOrderNumber,
+    order.internalOrderNumber,
+    order.marketplaceOrderNumber,
+    order.marketplaceOrderId
+  ].some((candidate) => String(candidate || "").trim().toLowerCase() === key)) || null;
+}
+
+function routePathFor(route = {}) {
+  const id = route.view || currentViewId;
+  if (id === "order-full" && (route.orderId || selectedOrderId)) {
+    const order = findOrderByRouteId(route.orderId || selectedOrderId);
+    return `/orders/${skuRouteValue(orderRouteNumber(order || { id: route.orderId || selectedOrderId }))}`;
+  }
+  if (id === "draft-full" && (route.draftId || selectedDraftId)) return `/drafts/${skuRouteValue(route.draftId || selectedDraftId)}`;
+  if (id === "return-full" && (route.returnId || selectedReturnId)) return `/returns/${skuRouteValue(route.returnId || selectedReturnId)}`;
+  if (id === "po-full" && (route.poId || selectedPoId)) return `/purchase-orders/${skuRouteValue(route.poId || selectedPoId)}`;
+  if (id === "vendor-full" && (route.vendorId || selectedVendorId)) return `/vendors/${skuRouteValue(route.vendorId || selectedVendorId)}`;
+  if (id === "brand-full" && (route.brandId || selectedBrandId)) return `/brands/${skuRouteValue(route.brandId || selectedBrandId)}`;
+  if (id === "warehouse-full" && (route.warehouseId || selectedWarehouseId)) return `/warehouses/${skuRouteValue(route.warehouseId || selectedWarehouseId)}`;
+  if (id === "customer-full" && (route.customerId || selectedCustomerId)) return `/customers/${skuRouteValue(route.customerId || selectedCustomerId)}`;
+  if (id === "template-full" && (route.templateId || selectedTemplateId)) return `/templates/${skuRouteValue(route.templateId || selectedTemplateId)}`;
+  if (id === "channel-full" && (route.channelId || selectedChannelId)) return `/channels/${skuRouteValue(route.channelId || selectedChannelId)}`;
+  if (id === "product-full" || id === "inventory-full") {
+    const item = productById(route.productId || selectedProductId);
+    const sku = route.productSku || item?.sku || route.productId || selectedProductId;
+    if (sku) return `${id === "inventory-full" ? "/inventory" : "/products"}/${skuRouteValue(sku)}`;
+  }
+  if (id === "catalog") {
+    const nextCatalogTab = route.catalogTab || catalogTab;
+    const sourceSku = route.sourceSku || (nextCatalogTab === "source" ? selectedSourceCatalogSku : "");
+    if (nextCatalogTab === "source" && sourceSku) return `/source-catalog/${skuRouteValue(sourceSku)}`;
+    return CATALOG_TAB_ROUTES[nextCatalogTab] || "/catalog";
+  }
+  if (id === "purchasing") return PURCHASING_TAB_ROUTES[route.purchasingTab || purchasingTab] || "/purchasing";
+  const match = Object.entries(PAGE_ROUTES).find(([, pageRoute]) => pageRoute.view === id && !pageRoute.catalogTab && !pageRoute.purchasingTab);
+  return match?.[0] || "";
+}
+
+async function prepareNavigationRoute(input = {}) {
+  const route = typeof input === "string" ? { view: input } : { ...input };
+  if (route.view === "order-full" && route.orderId) {
+    await ensureOrdersLoaded().catch(() => []);
+    const order = findOrderByRouteId(route.orderId);
+    if (order?.id) {
+      route.orderId = order.id;
+      route.title = orderRouteNumber(order);
+    }
+  }
+  if (route.productSku && !route.productId) {
+    const item = await loadProductDetail(route.productSku).catch(() => null);
+    if (item?.id) route.productId = item.id;
+  }
+  if ((route.view === "product-full" || route.view === "inventory-full") && route.productId) {
+    const item = productById(route.productId) || await loadProductDetail(route.productId).catch(() => null);
+    if (item?.id) {
+      route.productId = item.id;
+      route.productSku = item.sku || route.productSku;
+    }
+  }
+  return route;
+}
+
+function renderRoute(route = {}) {
+  if (route.catalogTab) {
+    catalogTab = route.catalogTab;
+    if (!route.sourceSku) selectedSourceCatalogSku = "";
+  }
+  if (route.purchasingTab) purchasingTab = route.purchasingTab;
+  if (route.sourceSku !== undefined) {
+    selectedSourceCatalogSku = route.sourceSku || "";
+    const search = $("#catalog-search");
+    if (search && route.sourceSku) search.value = route.sourceSku;
+    if (route.sourceSku) sourceCatalogPage = 1;
+  }
+  if (route.productId) selectedProductId = route.productId;
+  if (route.orderId) selectedOrderId = route.orderId;
+  if (route.draftId) selectedDraftId = route.draftId;
+  if (route.returnId) selectedReturnId = route.returnId;
+  if (route.poId) selectedPoId = route.poId;
+  if (route.vendorId) selectedVendorId = route.vendorId;
+  if (route.brandId) selectedBrandId = route.brandId;
+  if (route.warehouseId) selectedWarehouseId = route.warehouseId;
+  if (route.customerId) selectedCustomerId = route.customerId;
+  if (route.templateId) selectedTemplateId = route.templateId;
+  if (route.channelId) selectedChannelId = route.channelId;
+  showView(route.view || "dashboard");
+  route.render?.();
+  if (route.view === "orders") renderOrders();
+  if (route.view === "drafts") renderDrafts();
+  if (route.view === "returns") renderReturnsManagement();
+  if (route.view === "catalog") renderCatalog();
+  if (route.view === "purchasing") renderPurchaseOrders();
+  if (route.view === "jobs") renderJobsPage();
+}
+
+async function navigateTo(input = {}, options = {}) {
+  const route = await prepareNavigationRoute(input);
+  renderRoute(route);
+  if (options.updateUrl !== false && !applyingRoute) {
+    const path = routePathFor(route);
+    if (path && normalizeAppPath(window.location.pathname) !== path) {
+      const method = options.replace ? "replaceState" : "pushState";
+      window.history[method]({ view: route.view, catalogTab, purchasingTab, productId: selectedProductId, sourceSku: selectedSourceCatalogSku }, "", `${path}${window.location.search || ""}`);
+    }
+  }
+  const path = routePathFor(route);
+  document.title = `DataPlus - ${route.title || PAGE_ROUTES[path]?.title || $("#page-title")?.textContent || "Dashboard"}`;
+}
+
+async function resolveAppRoute(path = normalizeAppPath(window.location.pathname)) {
+  const exact = PAGE_ROUTES[path];
+  if (exact) return exact;
+  const [, section, rawSku] = path.match(/^\/(products|inventory|source-catalog|source)\/(.+)$/) || [];
+  if (section && rawSku) {
+    const sku = decodeURIComponent(rawSku).trim();
+    if (!sku) return PAGE_ROUTES["/"];
+    if (section === "source-catalog" || section === "source") {
+      return {
+        view: "catalog",
+        catalogTab: "source",
+        sourceSku: sku,
+        render: () => {
+          const search = $("#catalog-search");
+          if (search) search.value = sku;
+          sourceCatalogPage = 1;
+          renderCatalog();
+        },
+        title: `Source ${sku}`
+      };
+    }
+    const item = await loadProductDetail(sku).catch(() => null);
+    if (!item?.id) {
+      return {
+        view: "catalog",
+        catalogTab: "products",
+        render: () => {
+          const search = $("#catalog-search");
+          if (search) search.value = sku;
+          productCatalogState.loaded = false;
+          renderCatalog();
+        },
+        title: `Product ${sku}`
+      };
+    }
+    selectedProductId = item.id;
+    return {
+      view: section === "inventory" ? "inventory-full" : "product-full",
+      productId: item.id,
+      productSku: item.sku || sku,
+      title: item.sku || sku
+    };
+  }
+  const [, detailSection, rawId] = path.match(/^\/(orders|drafts|returns|purchase-orders|vendors|brands|warehouses|customers|templates|channels)\/(.+)$/) || [];
+  const detailId = rawId ? decodeURIComponent(rawId).trim() : "";
+  if (!detailSection || !detailId) return PAGE_ROUTES["/"];
+  const detailRoutes = {
+    orders: { view: "order-full", orderId: detailId, title: `Order ${detailId}` },
+    drafts: { view: "draft-full", draftId: detailId, title: `Draft ${detailId}` },
+    returns: { view: "return-full", returnId: detailId, title: `Return ${detailId}` },
+    "purchase-orders": { view: "po-full", poId: detailId, title: `PO ${detailId}` },
+    vendors: { view: "vendor-full", vendorId: detailId, title: "Vendor" },
+    brands: { view: "brand-full", brandId: detailId, title: "Brand" },
+    warehouses: { view: "warehouse-full", warehouseId: detailId, title: "Warehouse" },
+    customers: { view: "customer-full", customerId: detailId, title: "Customer" },
+    templates: { view: "template-full", templateId: detailId, title: "Template" },
+    channels: { view: "channel-full", channelId: detailId, title: "Channel" }
+  };
+  return detailRoutes[detailSection] || PAGE_ROUTES["/"];
+}
+
+async function applyRouteFromLocation({ replace = false } = {}) {
+  const path = normalizeAppPath(window.location.pathname);
+  const route = await resolveAppRoute(path);
+  applyingRoute = true;
+  await navigateTo(route, { replace, updateUrl: false });
+  applyingRoute = false;
+  if (replace) {
+    const nextPath = routePathFor(route);
+    if (nextPath) window.history.replaceState({ view: route.view, catalogTab, purchasingTab, productId: selectedProductId, sourceSku: selectedSourceCatalogSku }, "", `${nextPath}${window.location.search || ""}`);
+  }
+}
+
+function showView(id, options = {}) {
   currentViewId = id;
   $$(".view").forEach((view) => view.classList.toggle("active", view.id === id));
   $$(".nav-item").forEach((button) => {
@@ -1548,6 +1805,12 @@ function showView(id) {
     group.classList.toggle("active-group", Boolean(group.querySelector(".nav-item.active, .nav-child.active")));
   });
   $("#page-title").textContent = ({ dashboard: "Dashboard", orders: "Orders", drafts: "Drafts", "draft-full": "Draft Details", returns: "Returns", "return-full": "Return Details", "order-full": "Order Details", purchasing: "Purchasing", "po-full": "Purchase Order", "vendor-full": "Vendor Profile", "brand-full": "Brand Profile", "warehouse-full": "Warehouse Profile", catalog: "Catalog", jobs: "Jobs", "import-export": "Import / Export", "product-full": "Product Details", "shadow-full": "Shadow SKU Details", "template-full": "Template Preview", "inventory-full": "Inventory Details", "customer-full": "Customer Profile", customers: "Customers", inventory: "Inventory", reports: "Reports", knowledge: "Knowledge Base", connections: "Channels", "channel-full": "Channel Settings", "system-settings": "System Settings" })[id];
+  if (id === "catalog") {
+    $("#page-title").textContent = PAGE_ROUTES[CATALOG_TAB_ROUTES[catalogTab]]?.title || "Catalog";
+  }
+  if (id === "purchasing") {
+    $("#page-title").textContent = PAGE_ROUTES[PURCHASING_TAB_ROUTES[purchasingTab]]?.title || "Purchasing";
+  }
   if (id === "order-full") renderFullOrderPage();
   if (id === "drafts") renderDrafts();
   if (id === "draft-full") renderDraftOrderPage();
@@ -1968,6 +2231,13 @@ function orderSearchText(order) {
 
 const ORDER_QUEUE_DEFINITIONS = [
   {
+    id: "all",
+    label: "All",
+    icon: "list-check",
+    description: "All orders",
+    matches: () => true
+  },
+  {
     id: "new",
     label: "New",
     icon: "package-plus",
@@ -2068,6 +2338,7 @@ function orderQueueFor(order) {
 function orderQueueCounts() {
   const counts = Object.fromEntries(ORDER_QUEUE_DEFINITIONS.map((definition) => [definition.id, 0]));
   (state?.orders || []).forEach((order) => {
+    counts.all = Number(counts.all || 0) + 1;
     const queue = orderQueueFor(order);
     counts[queue.id] = Number(counts[queue.id] || 0) + 1;
   });
@@ -2179,12 +2450,12 @@ function filteredOrders() {
   const source = $("#order-source")?.value || "all";
   const statusValues = smartFilterSelectedValues("orders", "status").map((value) => String(value).toLowerCase());
   const sourceValues = smartFilterSelectedValues("orders", "source").map((value) => String(value).toLowerCase());
-  const queue = ORDER_QUEUE_DEFINITIONS.some((definition) => definition.id === activeOrderQueue) ? activeOrderQueue : "new";
+  const queue = ORDER_QUEUE_DEFINITIONS.some((definition) => definition.id === activeOrderQueue) ? activeOrderQueue : "all";
   const from = orderDateInputValue("#order-date-from");
   const to = orderDateInputValue("#order-date-to");
   const toEnd = to === null ? null : to + 24 * 60 * 60 * 1000 - 1;
   const orders = state.orders.filter((order) => {
-    const matchesQueue = orderQueueFor(order).id === queue;
+    const matchesQueue = queue === "all" || orderQueueFor(order).id === queue;
     const matchesStatus = statusValues.length ? statusValues.includes(String(order.status || "").toLowerCase()) : status === "all" || order.status === status;
     const matchesSource = sourceValues.length ? sourceValues.includes(String(order.source || "").toLowerCase()) : source === "all" || String(order.source || "").toLowerCase() === source.toLowerCase();
     const createdAt = orderDateValue(order, "createdAt");
@@ -2248,7 +2519,7 @@ function renderOrders() {
                   <td><input type="checkbox" ${selectedOrderIds.has(order.id) ? "checked" : ""} aria-label="Select ${order.orderNumber}" data-order-check="${order.id}" /></td>
                   <td class="order-primary-cell">
                     <div class="order-id-line">
-                      <button class="order-link" data-select-order="${html(order.id)}" data-open-detail>${html(order.orderNumber)}</button>
+                      <button class="order-link" data-select-order="${html(order.id)}" data-order-target="order-full">${html(order.orderNumber)}</button>
                       <button class="order-detail-chip" type="button" data-select-order="${html(order.id)}" data-open-detail>${withIcon("panel-left-open", "Details")}</button>
                     </div>
                     <small class="order-primary-meta">${channelLogoMarkup(channel, order.source)}<span>${html(order.source || "Marketplace")}</span><span>ref ${html(order.marketplaceOrderNumber || order.marketplaceOrderId || "n/a")}</span></small>
@@ -7165,6 +7436,10 @@ function readCatalogChangeFilters() {
     source: $("#sku-change-source")?.value || "",
     vendor: $("#sku-change-vendor")?.value || "",
     direction: $("#sku-change-direction")?.value || "",
+    catalogPresence: $("#sku-change-catalog-presence")?.value || "",
+    discontinued: $("#sku-change-discontinued")?.value || "",
+    stock: $("#sku-change-stock")?.value || "",
+    priceCut: $("#sku-change-price-cut")?.value || "",
     view: $("#sku-change-view")?.value || catalogChangeState.filters?.view || "tracked",
     minPriceCutPercent: $("#sku-change-min-cut")?.value || catalogChangeState.filters?.minPriceCutPercent || "20",
     includeUntracked: $("#sku-change-include-untracked")?.checked ? "true" : "",
@@ -7278,6 +7553,35 @@ function renderCatalogChanges() {
             <option value="changed" ${filters.direction === "changed" ? "selected" : ""}>Changed</option>
           </select>
         </label>
+        <label>Catalog
+          <select id="sku-change-catalog-presence">
+            <option value="">Any catalog state</option>
+            <option value="active" ${filters.catalogPresence === "active" ? "selected" : ""}>Active products</option>
+            <option value="products" ${filters.catalogPresence === "products" ? "selected" : ""}>Any product</option>
+            <option value="source-only" ${filters.catalogPresence === "source-only" ? "selected" : ""}>Source only</option>
+            <option value="inactive" ${filters.catalogPresence === "inactive" ? "selected" : ""}>Inactive products</option>
+          </select>
+        </label>
+        <label>Discontinued
+          <select id="sku-change-discontinued">
+            <option value="">Any status</option>
+            <option value="yes" ${filters.discontinued === "yes" ? "selected" : ""}>Discontinued</option>
+            <option value="no" ${filters.discontinued === "no" ? "selected" : ""}>Not discontinued</option>
+          </select>
+        </label>
+        <label>Stock
+          <select id="sku-change-stock">
+            <option value="">Any stock</option>
+            <option value="in-stock" ${filters.stock === "in-stock" ? "selected" : ""}>In stock</option>
+            <option value="out-of-stock" ${filters.stock === "out-of-stock" ? "selected" : ""}>Out of stock</option>
+          </select>
+        </label>
+        <label>Price cut
+          <select id="sku-change-price-cut">
+            <option value="">Any pricing</option>
+            <option value="yes" ${filters.priceCut === "yes" ? "selected" : ""}>Price cuts only</option>
+          </select>
+        </label>
         <label>Vendor
           <select id="sku-change-vendor">
             <option value="">All vendors</option>
@@ -7285,7 +7589,7 @@ function renderCatalogChanges() {
           </select>
         </label>
         <label>Min cut
-          <input id="sku-change-min-cut" type="number" min="1" max="95" step="1" value="${html(filters.minPriceCutPercent || "20")}" ${view === "opportunities" ? "" : "disabled"} />
+          <input id="sku-change-min-cut" type="number" min="1" max="95" step="1" value="${html(filters.minPriceCutPercent || "20")}" ${view === "opportunities" || filters.priceCut === "yes" ? "" : "disabled"} />
         </label>
         <label class="checkbox-row sku-change-include-untracked">
           <input id="sku-change-include-untracked" type="checkbox" ${filters.includeUntracked ? "checked" : ""} />
@@ -7669,7 +7973,8 @@ function renderSourceCatalogTable() {
   const target = $("#source-catalog-list");
   if (!target) return;
   const { items = [], manifest, loading, error, totalMatches = 0, hasMore = false, partial = false, scanned = 0 } = sourceCatalogState || {};
-  if (selectedSourceCatalogSku && !sourceCatalogItemBySku(selectedSourceCatalogSku)) selectedSourceCatalogSku = "";
+  const currentSourceQuery = $("#catalog-search")?.value.trim() || "";
+  if (selectedSourceCatalogSku && items.length && sourceCatalogState.query === currentSourceQuery && !sourceCatalogItemBySku(selectedSourceCatalogSku)) selectedSourceCatalogSku = "";
   const importedLabel = manifest?.importedAt ? simpleDate(manifest.importedAt) : "";
   const countLabel = manifest?.productCount ? `${Number(manifest.productCount).toLocaleString()} imported` : "Catalog file pending";
   const selectedCount = selectedSourceAllFiltered ? totalMatches : selectedSourceSkus.size;
@@ -14491,6 +14796,7 @@ function render() {
 
 async function load() {
   setState(await api("/api/state?lite=1"));
+  await applyRouteFromLocation({ replace: true });
 }
 
 async function ensureInventoryLoaded() {
@@ -19378,57 +19684,48 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (vendorButton) {
-    selectedVendorId = vendorButton.dataset.selectVendor;
-    showView("vendor-full");
+    navigateTo({ view: "vendor-full", vendorId: vendorButton.dataset.selectVendor }).catch((error) => toast(error.message));
     return;
   }
   if (brandButton) {
-    selectedBrandId = brandButton.dataset.selectBrand;
-    showView("brand-full");
+    navigateTo({ view: "brand-full", brandId: brandButton.dataset.selectBrand }).catch((error) => toast(error.message));
     return;
   }
   if (customerButton) {
-    selectedCustomerId = customerButton.dataset.selectCustomer;
-    showView("customer-full");
+    navigateTo({ view: "customer-full", customerId: customerButton.dataset.selectCustomer }).catch((error) => toast(error.message));
     return;
   }
   if (returnButton) {
-    selectedReturnId = returnButton.dataset.selectReturn;
-    showView("return-full");
+    navigateTo({ view: "return-full", returnId: returnButton.dataset.selectReturn }).catch((error) => toast(error.message));
     return;
   }
   if (draftButton) {
     selectedDraftId = draftButton.dataset.selectDraft;
     if (openDraftDetailButton) {
-      showView("draft-full");
+      navigateTo({ view: "draft-full", draftId: selectedDraftId }).catch((error) => toast(error.message));
       return;
     }
     renderDrafts();
     return;
   }
   if (warehouseButton) {
-    selectedWarehouseId = warehouseButton.dataset.selectWarehouse;
-    showView("warehouse-full");
+    navigateTo({ view: "warehouse-full", warehouseId: warehouseButton.dataset.selectWarehouse }).catch((error) => toast(error.message));
     return;
   }
   if (poButton) {
-    selectedPoId = poButton.dataset.selectPo;
-    showView("po-full");
+    navigateTo({ view: "po-full", poId: poButton.dataset.selectPo }).catch((error) => toast(error.message));
     return;
   }
   if (templateButton) {
-    selectedTemplateId = templateButton.dataset.selectTemplate;
-    showView("template-full");
+    navigateTo({ view: "template-full", templateId: templateButton.dataset.selectTemplate }).catch((error) => toast(error.message));
     return;
   }
   if (channelButton) {
-    selectedChannelId = channelButton.dataset.selectChannel;
-    showView("channel-full");
+    navigateTo({ view: "channel-full", channelId: channelButton.dataset.selectChannel }).catch((error) => toast(error.message));
     return;
   }
   if (purchasingTabButton) {
-    purchasingTab = purchasingTabButton.dataset.purchasingTab;
-    renderPurchaseOrders();
+    navigateTo({ view: "purchasing", purchasingTab: purchasingTabButton.dataset.purchasingTab || "pos" }).catch((error) => toast(error.message));
     return;
   }
   if (catalogChangesRefreshButton) {
@@ -19451,7 +19748,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (skuChangeClearButton) {
-    catalogChangeState.filters = { q: "", field: "", source: "", vendor: "", direction: "", view: "tracked", minPriceCutPercent: "20", includeUntracked: "", from: "", to: "" };
+    catalogChangeState.filters = { q: "", field: "", source: "", vendor: "", direction: "", catalogPresence: "", discontinued: "", stock: "", priceCut: "", view: "tracked", minPriceCutPercent: "20", includeUntracked: "", from: "", to: "" };
     catalogChangeState.loaded = false;
     await loadCatalogChanges(true, 1);
     return;
@@ -19462,11 +19759,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (sourceChangeOpenButton) {
-    catalogTab = "source";
-    const search = $("#catalog-search");
-    if (search) search.value = sourceChangeOpenButton.dataset.sourceChangeOpen || "";
-    sourceCatalogPage = 1;
-    renderCatalog();
+    navigateTo({ view: "catalog", catalogTab: "source", sourceSku: sourceChangeOpenButton.dataset.sourceChangeOpen || "" }).catch((error) => toast(error.message));
     return;
   }
   if (dataQualitySearchButton) {
@@ -19499,12 +19792,12 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (catalogTabButton) {
-    catalogTab = catalogTabButton.dataset.catalogTab;
-    if (catalogTab === "source") sourceCatalogPage = 1;
-    if (catalogTab === "products") productCatalogState.loaded = false;
-    if (catalogTab === "inventory") inventoryCatalogState.loaded = false;
-    if (catalogTab === "categories") categoryRequestId += 1;
-    renderCatalog();
+    const nextCatalogTab = catalogTabButton.dataset.catalogTab || "products";
+    if (nextCatalogTab === "source") sourceCatalogPage = 1;
+    if (nextCatalogTab === "products") productCatalogState.loaded = false;
+    if (nextCatalogTab === "inventory") inventoryCatalogState.loaded = false;
+    if (nextCatalogTab === "categories") categoryRequestId += 1;
+    navigateTo({ view: "catalog", catalogTab: nextCatalogTab }).catch((error) => toast(error.message));
     return;
   }
   if (sourcePageButton) {
@@ -19525,15 +19818,14 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (openSourceCatalogSkuButton) {
-    selectedSourceCatalogSku = openSourceCatalogSkuButton.dataset.openSourceCatalogSku || "";
+    const sourceSku = openSourceCatalogSkuButton.dataset.openSourceCatalogSku || "";
     closeActionMenus();
-    renderSourceCatalogTable();
+    navigateTo({ view: "catalog", catalogTab: "source", sourceSku }).catch((error) => toast(error.message));
     document.querySelector(".source-catalog-preview-panel")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     return;
   }
   if (closeSourceCatalogDetailButton) {
-    selectedSourceCatalogSku = "";
-    renderSourceCatalogTable();
+    navigateTo({ view: "catalog", catalogTab: "source", sourceSku: "" }).catch((error) => toast(error.message));
     return;
   }
   if (sourceRowActionButton) {
@@ -19883,8 +20175,7 @@ document.addEventListener("click", async (event) => {
     selectedKnowledgeArticleId = null;
     editingKnowledgeArticleId = null;
     managingKnowledgeSettings = false;
-    showView("knowledge");
-    renderKnowledgeBase();
+    navigateTo("knowledge").catch((error) => toast(error.message));
     return;
   }
   if (selectKnowledgeArticleButton) {
@@ -19939,25 +20230,17 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (viewButton) {
-    if (viewButton.dataset.purchasingTabLink) purchasingTab = viewButton.dataset.purchasingTabLink;
-    if (viewButton.dataset.catalogTabLink) catalogTab = viewButton.dataset.catalogTabLink;
-    showView(viewButton.dataset.view);
-    if (viewButton.dataset.view === "orders") renderOrders();
-    if (viewButton.dataset.view === "drafts") renderDrafts();
-    if (viewButton.dataset.view === "returns") renderReturnsManagement();
-    if (viewButton.dataset.view === "purchasing") renderPurchaseOrders();
-    if (viewButton.dataset.view === "catalog") renderCatalog();
-    if (viewButton.dataset.view === "jobs") renderJobsPage();
+    navigateTo({
+      view: viewButton.dataset.view,
+      catalogTab: viewButton.dataset.catalogTabLink || undefined,
+      purchasingTab: viewButton.dataset.purchasingTabLink || undefined
+    }).catch((error) => toast(error.message));
+    return;
   }
   if (jumpButton) {
     closeActionMenus();
-    showView(jumpButton.dataset.viewJump);
-    if (jumpButton.dataset.viewJump === "orders") renderOrders();
-    if (jumpButton.dataset.viewJump === "drafts") renderDrafts();
-    if (jumpButton.dataset.viewJump === "returns") renderReturnsManagement();
-    if (jumpButton.dataset.viewJump === "catalog") renderCatalog();
-    if (jumpButton.dataset.viewJump === "purchasing") renderPurchaseOrders();
-    if (jumpButton.dataset.viewJump === "jobs") renderJobsPage();
+    navigateTo(jumpButton.dataset.viewJump).catch((error) => toast(error.message));
+    return;
   }
   if (confirmButton) confirmOrder(confirmButton.dataset.confirmOrder);
   if (syncButton) syncSource(syncButton.dataset.syncSource);
@@ -19974,7 +20257,7 @@ document.addEventListener("click", async (event) => {
     selectedOrderId = orderButton.dataset.selectOrder;
     closeActionMenus();
     if (orderButton.dataset.orderTarget === "order-full") {
-      showView("order-full");
+      navigateTo({ view: "order-full", orderId: selectedOrderId }).catch((error) => toast(error.message));
       return;
     }
     if (openDetailButton || currentViewId === "orders") {
@@ -19985,7 +20268,7 @@ document.addEventListener("click", async (event) => {
     renderOrders();
   }
   if (productButton) {
-    selectedProductId = productButton.dataset.selectProduct;
+    const nextProductId = productButton.dataset.selectProduct;
     if (productButton.dataset.productTarget === "product-full") {
       selectedProductWorkspaceTab = "home";
       selectedProductEditMode = false;
@@ -19993,12 +20276,14 @@ document.addEventListener("click", async (event) => {
     if (productButton.dataset.productTarget) {
       closeActionMenus();
       if (["product-full", "inventory-full"].includes(productButton.dataset.productTarget)) {
-        await loadProductDetail(selectedProductId);
+        await loadProductDetail(nextProductId);
       }
-      showView(productButton.dataset.productTarget);
+      navigateTo({ view: productButton.dataset.productTarget, productId: nextProductId }).catch((error) => toast(error.message));
     } else {
+      selectedProductId = nextProductId;
       renderCatalog();
     }
+    return;
   }
   if (renameProductSkuButton) {
     renameProductSku(renameProductSkuButton.dataset.renameProductSku).catch((error) => toast(error.message));
@@ -20007,7 +20292,7 @@ document.addEventListener("click", async (event) => {
   if (shadowButton) {
     selectedProductId = shadowButton.dataset.parentProduct || selectedProductId;
     selectedShadowId = shadowButton.dataset.selectShadow;
-    showView("shadow-full");
+    navigateTo("shadow-full").catch((error) => toast(error.message));
     return;
   }
   if (exchangeTemuButton) exchangeTemuCode();
@@ -20051,15 +20336,11 @@ $("#order-sort").addEventListener("change", () => {
   runWithSearchFeedback(renderOrders, "Sorting orders...");
 });
 $("#order-filter-clear").addEventListener("click", () => {
-  $("#order-search").value = "";
-  $("#order-source").value = "all";
-  $("#order-status").value = "all";
-  $("#order-date-from").value = "";
-  $("#order-date-to").value = "";
+  clearOrderSmartFilters();
   $("#order-sort").value = "created-desc";
   orderTableSort = { key: "createdAt", direction: "desc" };
   queueSaveTablePreference(TABLE_PREFERENCE_IDS.orders);
-  activeOrderQueue = "new";
+  activeOrderQueue = "all";
   runWithSearchFeedback(renderOrders, "Clearing order filters...");
 });
 $("#draft-search")?.addEventListener("input", () => runWithSearchFeedback(renderDrafts, "Searching drafts..."));
@@ -20754,6 +21035,10 @@ document.addEventListener("input", (event) => {
     mappingDraftInput.dataset.mappingRawDirty = "true";
   }
   markMappingDraftDirty();
+});
+
+window.addEventListener("popstate", () => {
+  applyRouteFromLocation().catch((error) => toast(error.message));
 });
 
 hydrateStaticIcons();
