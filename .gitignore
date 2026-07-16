@@ -4,6 +4,7 @@ npm-debug.log*
 outputs/
 logos/
 logs/
+backups/
 
 # Local runtime data and backups
 data/
