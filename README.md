@@ -289,13 +289,23 @@ Start the local app:
 npm start
 ```
 
-Import the full product dump into the offline source catalog:
+Import the full product dump into the source catalog:
 
 ```powershell
 npm run import:product-dump -- data/imports/products.bson.gz
 ```
 
-When PostgreSQL is configured, this import also normalizes vendor feed data into `vendor_feed_runs`, `vendor_catalog_items`, `vendor_catalog_snapshots`, and `product_change_events`. The NDJSON catalog remains as a backup/search artifact. Limited test imports write `data/catalog/products.sample-<limit>.ndjson` so they do not replace the full source catalog.
+In production, prefer the app button/API for full data-dump refreshes instead of the direct CLI command. Open Source Catalog or Jobs, run the product dump import, and keep the external worker online with `npm run worker`. The queued job uses the `product-dump-import` worker task and passes `--postgres-only`, so the BSON dump streams directly into PostgreSQL instead of building the huge local NDJSON and change-snapshot files in memory.
+
+The streaming import writes the current vendor feed into:
+- `vendor_feed_runs` for the refresh run record.
+- `vendor_catalog_items` for the latest source catalog row by vendor/source SKU.
+- `vendor_catalog_snapshots` for the feed-run snapshot.
+- `product_change_events` for field-level cost, stock, price, status, and catalog changes.
+
+This is the normal path for large dumps. It avoids the legacy JavaScript heap pressure that came from loading `data/catalog/change-snapshot.tsv` and writing full local artifacts during a multi-million-row import. Jobs shows progress as `Streamed <n> product dump records into PostgreSQL`; if the worker is offline, the job stays queued or shows waiting/stopped worker health until `npm run worker` is running again.
+
+The direct CLI command is still useful for diagnostics and small test runs. Use `--limit` for samples. Limited non-Postgres test imports write `data/catalog/products.sample-<limit>.ndjson` so they do not replace the full source catalog. Only run the legacy artifact-producing path when you intentionally need to rebuild `data/catalog/products.ndjson`.
 
 Rebuild the fast source catalog index after importing or replacing `data/catalog/products.ndjson`:
 
@@ -303,7 +313,7 @@ Rebuild the fast source catalog index after importing or replacing `data/catalog
 npm run catalog:index
 ```
 
-This creates `data/catalog/index`. It makes supplier filtering and SKU CSV promotion much faster. The index should be refreshed after every full product dump import.
+This creates `data/catalog/index`. It makes supplier filtering and SKU CSV promotion much faster for the legacy local catalog artifact. PostgreSQL source catalog screens primarily use `vendor_catalog_items` plus Postgres indexes/facets; use the app's source catalog optimization/facet refresh jobs after large database imports when filters or supplier lists look stale.
 
 Refresh Shopify taxonomy, Shopify category attributes, and Shopify-to-Google category mappings:
 
@@ -324,11 +334,21 @@ Use this when setting up or refreshing PostgreSQL from `data/db.json`.
 Common full refresh order:
 
 ```powershell
-npm run import:product-dump -- data/imports/products.bson.gz
+# In the app, queue the Source Catalog product dump import first.
+npm run worker
 npm run catalog:index
 npm run import:shopify-taxonomy
 npm start
 ```
+
+For a normal large refresh, the practical order is:
+
+1. Confirm `DATABASE_URL` is configured and Jobs > Job runner is set to `External worker`.
+2. Start or verify the worker with `npm run worker`.
+3. Queue the Source Catalog product dump import from the app.
+4. Watch Jobs for the `product-dump-import` job and streamed row count.
+5. After completion, refresh source catalog facets/indexes if filter lists look stale.
+6. Run Shopify/Matrixify exports only after the dump import is complete, because the default worker processes one job at a time.
 
 Only use `--inventory` when you intentionally want dump records added directly to the smaller active catalog:
 

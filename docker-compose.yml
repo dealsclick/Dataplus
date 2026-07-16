@@ -10,15 +10,38 @@ services:
       PORT: "4173"
       DATAPLUS_DOCKER: "1"
     ports:
-      - "4200:4173"
+      - "4173:4173"
     volumes:
       - ./data:/app/data
+      - ./logos:/app/logos
+      - ./logs:/app/logs
+      - ./outputs:/app/outputs
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4173/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  worker:
+    build:
+      context: .
+    container_name: dataplus-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATAPLUS_DOCKER: "1"
+      DATAPLUS_BACKGROUND_JOBS_MODE: "worker"
+    command: ["npm", "run", "worker"]
+    volumes:
+      - ./data:/app/data
+      - ./logos:/app/logos
+      - ./logs:/app/logs
+      - ./outputs:/app/outputs
+    depends_on:
+      dataplus:
+        condition: service_healthy
 
   cloudflared:
     image: cloudflare/cloudflared:latest

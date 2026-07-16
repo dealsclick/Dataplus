@@ -3,6 +3,7 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { spawn } = require("child_process");
 const readline = require("readline");
 const zlib = require("zlib");
 const postgres = require("./db");
@@ -24,7 +25,7 @@ const DATA_QUALITY_SNAPSHOT_FILE = path.join(DATA_DIR, "data-quality-snapshot.js
 const ATTRIBUTE_MAPPINGS_FILE = path.join(DATA_DIR, "attribute-mappings.json");
 const ATTRIBUTE_GROUPS_FILE = path.join(DATA_DIR, "attribute-groups.json");
 const CATEGORY_CACHE_FILE = path.join(DATA_DIR, "category-cache.json");
-const CATEGORY_CACHE_VERSION = 5;
+const CATEGORY_CACHE_VERSION = 12;
 const CATALOG_FILE = path.join(DATA_DIR, "catalog", "products.ndjson");
 const MATRIXIFY_SMART_COLLECTION_DATA_FILE = path.join(ROOT, "outputs", "matrixify-smart-collections", "smart-collections-data.json");
 const MATRIXIFY_MENU_MAPPING_FILE = path.join(DATA_DIR, "templates", "shopify-menu-collection-mapping.csv");
@@ -43,13 +44,14 @@ const CATALOG_CHANGE_SNAPSHOT_FILE = path.join(DATA_DIR, "catalog", "change-snap
 const CATALOG_CLOSEOUT_FILE = path.join(DATA_DIR, "catalog", "closeout-skus.csv");
 const SHOPIFY_TAXONOMY_INDEX_FILE = path.join(DATA_DIR, "channel-taxonomies", "shopify", "taxonomy-index.json");
 const CHANNEL_API_LOG_FILE = path.join(DATA_DIR, "channel-api-log.ndjson");
-const CHANNEL_API_LOG_RETENTION_DAYS = Math.max(1, Number(process.env.CHANNEL_API_LOG_RETENTION_DAYS || 30) || 30);
+const CHANNEL_API_LOG_RETENTION_DAYS = Math.max(60, Number(process.env.CHANNEL_API_LOG_RETENTION_DAYS || 60) || 60);
 const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
 const IMPORT_JOB_STORE_FILE = path.join(DATA_DIR, "import-jobs.json");
 const CONNECTOR_STATE_FILE = path.join(DATA_DIR, "connectors.json");
 const ENV_FILE = path.join(ROOT, ".env");
 const BACKGROUND_EXPORT_PAGE_SIZE = 100;
-const IMPORT_JOB_FILE_RETENTION_DAYS = 30;
+const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(60, Number(process.env.IMPORT_JOB_FILE_RETENTION_DAYS || 60) || 60);
+const IMPORT_JOB_HISTORY_LIMIT = Math.max(1000, Math.min(5000, Number(process.env.IMPORT_JOB_HISTORY_LIMIT || 1000) || 1000));
 const SERVER_STARTED_AT = new Date();
 const activeJobProgress = new Map();
 const activeJobRecords = new Map();
@@ -61,6 +63,113 @@ let productSourceEnrichmentCache = { mtimeMs: 0, data: null };
 let channelApiLogPruneLastRun = 0;
 
 const SOURCES = ["Shopify", "Temu", "eBay", "Whatnot", "TikTok Shop"];
+const SHOPIFY_PRICE_MARKUP_PERCENT = 35;
+const SHOPIFY_MULTIPACK_DISCOUNT_PERCENT = 5;
+const SHOPIFY_DUMP_FIELD_METAFIELDS = {
+  shortDescription: { key: "custom.short_description", type: "multi_line_text_field" },
+  itemHeight: { key: "custom.item_height", type: "dimension" },
+  itemLength: { key: "custom.item_length", type: "dimension" },
+  itemWeight: { key: "custom.item_weight", type: "weight" },
+  itemWidth: { key: "custom.item_width", type: "dimension" },
+  packageHeight: { key: "custom.package_height", type: "dimension" },
+  packageLength: { key: "custom.package_length", type: "dimension" },
+  packageWeight: { key: "custom.package_weight", type: "weight" },
+  packageWidth: { key: "custom.package_width", type: "dimension" },
+  uom: { key: "custom.uom", type: "single_line_text_field" },
+  uomQty: { key: "custom.uom_qty", type: "number_integer" },
+  countryOfOrigin: { key: "custom.country_of_origin", type: "single_line_text_field" },
+  createdBy: { key: "custom.created_by", type: "single_line_text_field" },
+  altSku: { key: "custom.alt_sku", type: "single_line_text_field" },
+  minimumAllowedPrice: { key: "custom.minimum_allowed_price", type: "money" },
+  fobPriceForZoro: { key: "custom.fob_price_for_zoro", type: "money" },
+  preferredVendor: { key: "custom.preferred_vendor", type: "single_line_text_field" },
+  uploadedImage: { key: "custom.uploaded_image", type: "url" },
+  restrictedStates: { key: "custom.restricted_states", type: "single_line_text_field" },
+  shipMode: { key: "custom.ship_mode", type: "single_line_text_field" },
+  dropShip: { key: "custom.drop_ship", type: "boolean" },
+  showProp65: { key: "custom.show_prop_65", type: "boolean" },
+  prop65Message: { key: "custom.prop_65_message", type: "multi_line_text_field" },
+  warranty: { key: "custom.warranty", type: "multi_line_text_field" },
+  dropShipMinQty: { key: "custom.drop_ship_min_qty", type: "single_line_text_field" },
+  additionalAttributes: { key: "custom.additional_attributes", type: "multi_line_text_field" },
+  certifications: { key: "custom.certifications", type: "list.single_line_text_field" },
+  returnable: { key: "custom.returnable", type: "single_line_text_field" },
+  competitorPartNumber: { key: "custom.competitor_part_number", type: "list.single_line_text_field" },
+  oversize: { key: "custom.oversize", type: "boolean" },
+  mappedCategory: { key: "custom.mapped_category", type: "json" },
+  checkedSds: { key: "custom.checked_sds", type: "json" },
+  sourceCategoryId: { key: "custom.source_category_id", type: "single_line_text_field" },
+  vendorWebsitePrice: { key: "custom.vendor_website_price", type: "money" },
+  isBanned: { key: "custom.is_banned", type: "boolean" },
+  isMarketplaceRestricted: { key: "custom.is_marketplace_restricted", type: "boolean" },
+  bulkPrices: { key: "custom.bulk_prices", type: "json" },
+  trustedBrand: { key: "custom.trusted_brand", type: "single_line_text_field" },
+  keywords: { key: "custom.keywords", type: "multi_line_text_field" },
+  subBrand: { key: "custom.sub_brand", type: "single_line_text_field" },
+  replacementSku: { key: "custom.replacement_sku", type: "single_line_text_field" },
+  icons: { key: "custom.icons", type: "list.single_line_text_field" },
+  altVendorSku: { key: "custom.alt_vendor_sku", type: "single_line_text_field" },
+  brand: { key: "custom.brand", type: "single_line_text_field" },
+  ctechId: { key: "custom.ctech_id", type: "single_line_text_field" },
+  defaultSupplier: { key: "custom.default_supplier", type: "single_line_text_field" },
+  dwId: { key: "custom.dw_id", type: "single_line_text_field" },
+  fobPrice: { key: "custom.fob_price", type: "number_decimal" },
+  googleTaxonomyId: { key: "custom.google_taxonomy_id", type: "single_line_text_field" },
+  hazardous: { key: "custom.hazardous", type: "boolean" },
+  lastLocalSyncAt: { key: "custom.last_local_sync_at", type: "date_time" },
+  lastPricesUpdateAt: { key: "custom.last_prices_update_at", type: "single_line_text_field" },
+  lastPricesUpdateBy: { key: "custom.last_prices_update_by", type: "single_line_text_field" },
+  leadTime: { key: "custom.lead_time", type: "single_line_text_field" },
+  leadtime: { key: "custom.leadtime", type: "number_decimal" },
+  listPrice: { key: "custom.list_price", type: "number_decimal" },
+  manufacturer: { key: "custom.manufacturer", type: "single_line_text_field" },
+  mfrPartNumber: { key: "custom.mfr_part_number", type: "single_line_text_field" },
+  minQuantity: { key: "custom.min_quantity", type: "number_integer" },
+  originalJson: { key: "custom.original_json", type: "json" },
+  originalSdsUrl: { key: "custom.original_sds_url", type: "url" },
+  purchaseUnit: { key: "custom.purchase_unit", type: "single_line_text_field" },
+  quantityIncrements: { key: "custom.quantity_increments", type: "number_integer" },
+  relatedSku: { key: "custom.related_sku", type: "variant_reference" },
+  replacedBy: { key: "custom.replaced_by", type: "product_reference" },
+  sdsUrl: { key: "custom.sds_url", type: "url" },
+  sellUnitCost: { key: "custom.sell_unit_cost", type: "number_decimal" },
+  shippingMethod: { key: "custom.shipping_method", type: "list.single_line_text_field" },
+  shippingClass: { key: "custom.shipping_class", type: "single_line_text_field" },
+  shippingClassReason: { key: "custom.shipping_class_reason", type: "multi_line_text_field" },
+  dimensionalWeight: { key: "custom.dimensional_weight", type: "number_decimal" },
+  sourceActive: { key: "custom.source_active", type: "boolean" },
+  sourceCategory: { key: "custom.source_category", type: "single_line_text_field" },
+  sourceCreatedAt: { key: "custom.source_created_at", type: "date_time" },
+  sourceDataHash: { key: "custom.source_data_hash", type: "single_line_text_field" },
+  sourceMongoId: { key: "custom.source_mongo_id", type: "single_line_text_field" },
+  sourceSystem: { key: "custom.source_system", type: "single_line_text_field" },
+  sourceUpdatedAt: { key: "custom.source_updated_at", type: "date_time" },
+  stockQty: { key: "custom.stock_qty", type: "number_decimal" },
+  stockStatus: { key: "custom.stock_status", type: "boolean" },
+  stockUpdatedAt: { key: "custom.stock_updated_at", type: "date_time" },
+  supplier: { key: "custom.supplier", type: "single_line_text_field" },
+  supplierCode: { key: "custom.supplier_code", type: "single_line_text_field" },
+  suppliersJson: { key: "custom.suppliers_json", type: "json" },
+  unspsc: { key: "custom.unspsc", type: "single_line_text_field" },
+  updatedAt: { key: "custom.updated_at", type: "date_time" },
+  uploadedBy: { key: "custom.uploaded_by", type: "single_line_text_field" },
+  validatedAt: { key: "custom.validated_at", type: "date_time" },
+  vendorSku: { key: "custom.vendor_sku", type: "single_line_text_field" }
+};
+const SHOPIFY_SHIPPING_CLASSIFICATION_METAFIELDS = {
+  itemHeight: SHOPIFY_DUMP_FIELD_METAFIELDS.itemHeight,
+  itemLength: SHOPIFY_DUMP_FIELD_METAFIELDS.itemLength,
+  itemWeight: SHOPIFY_DUMP_FIELD_METAFIELDS.itemWeight,
+  itemWidth: SHOPIFY_DUMP_FIELD_METAFIELDS.itemWidth,
+  packageHeight: SHOPIFY_DUMP_FIELD_METAFIELDS.packageHeight,
+  packageLength: SHOPIFY_DUMP_FIELD_METAFIELDS.packageLength,
+  packageWeight: SHOPIFY_DUMP_FIELD_METAFIELDS.packageWeight,
+  packageWidth: SHOPIFY_DUMP_FIELD_METAFIELDS.packageWidth,
+  dimensionalWeight: SHOPIFY_DUMP_FIELD_METAFIELDS.dimensionalWeight,
+  shippingMethod: SHOPIFY_DUMP_FIELD_METAFIELDS.shippingMethod,
+  shippingClass: SHOPIFY_DUMP_FIELD_METAFIELDS.shippingClass,
+  shippingClassReason: SHOPIFY_DUMP_FIELD_METAFIELDS.shippingClassReason
+};
 const ORDER_PREFIX = "DP";
 
 const PRODUCT_MAPPING_FIELDS = [
@@ -129,6 +238,318 @@ const PRODUCT_MAPPING_FIELDS = [
   { key: "sdsUrl", label: "SDS URL", type: "text" },
   { key: "originalSdsUrl", label: "Original SDS URL", type: "text" }
 ];
+
+const PRODUCT_SYSTEM_EXTRA_FIELDS = [
+  { key: "altSku", label: "Alt SKU", type: "text" },
+  { key: "minimumAllowedPrice", label: "Minimum allowed price", type: "money" },
+  { key: "fobPrice", label: "FOB price", type: "money" },
+  { key: "fobPriceForZoro", label: "FOB price for Zoro", type: "money" },
+  { key: "vendorWebsitePrice", label: "Vendor website price", type: "money" },
+  { key: "preferredVendor", label: "Preferred vendor", type: "text" },
+  { key: "uploadedImage", label: "Uploaded image", type: "url" },
+  { key: "restrictedStates", label: "Restricted states", type: "json" },
+  { key: "shipMode", label: "Ship mode", type: "text" },
+  { key: "dropShip", label: "Drop ship", type: "boolean" },
+  { key: "showProp65", label: "Show Prop 65", type: "boolean" },
+  { key: "prop65Message", label: "Prop 65 message", type: "text" },
+  { key: "warranty", label: "Warranty", type: "text" },
+  { key: "dropShipMinQty", label: "Drop ship minimum quantity", type: "text" },
+  { key: "additionalAttributes", label: "Additional attributes", type: "text" },
+  { key: "certifications", label: "Certifications", type: "text" },
+  { key: "returnable", label: "Returnable", type: "text" },
+  { key: "competitorPartNumber", label: "Competitor part number", type: "text" },
+  { key: "oversize", label: "Oversize", type: "boolean" },
+  { key: "mappedCategory", label: "Mapped category", type: "json" },
+  { key: "checkedSds", label: "Checked SDS", type: "json" },
+  { key: "sourceCategoryId", label: "Source category ID", type: "text" },
+  { key: "isBanned", label: "Banned", type: "boolean" },
+  { key: "isMarketplaceRestricted", label: "Marketplace restricted", type: "boolean" },
+  { key: "bulkPrices", label: "Bulk prices", type: "json" },
+  { key: "trustedBrand", label: "Trusted brand", type: "text" },
+  { key: "keywords", label: "Keywords", type: "text" },
+  { key: "subBrand", label: "Sub-brand", type: "text" },
+  { key: "replacementSku", label: "Replacement SKU", type: "text" },
+  { key: "icons", label: "Icons", type: "text" },
+  { key: "itemHeight", label: "Item height", type: "decimal" },
+  { key: "itemLength", label: "Item length", type: "decimal" },
+  { key: "itemWeight", label: "Item weight", type: "decimal" },
+  { key: "itemWidth", label: "Item width", type: "decimal" },
+  { key: "packageHeight", label: "Package height", type: "decimal" },
+  { key: "packageLength", label: "Package length", type: "decimal" },
+  { key: "packageWeight", label: "Package weight", type: "decimal" },
+  { key: "packageWidth", label: "Package width", type: "decimal" },
+  { key: "dimensionalWeight", label: "Dimensional weight", type: "decimal" },
+  { key: "zoroLeadtime", label: "Zoro lead time", type: "text" },
+  { key: "zoroPrice", label: "Zoro price", type: "money" },
+  { key: "zoroSku", label: "Zoro SKU", type: "text" },
+  { key: "zoroMinimumQty", label: "Zoro minimum quantity", type: "decimal" },
+  { key: "varisContractPrice", label: "Varis contract price", type: "money" },
+  { key: "varisListPrice", label: "Varis list price", type: "money" },
+  { key: "varisOdManagedPrice", label: "Varis OD managed price", type: "money" },
+  { key: "varisNonOdManagedPrice", label: "Varis non-OD managed price", type: "money" },
+  { key: "varisOdPrivatePrice", label: "Varis OD private price", type: "money" },
+  { key: "varisNonOdPrivatePrice", label: "Varis non-OD private price", type: "money" },
+  { key: "originalImage", label: "Original image", type: "url" },
+  { key: "defaultSupplier", label: "Default supplier", type: "text" },
+  { key: "lastPricesUpdateAt", label: "Last prices update at", type: "datetime" },
+  { key: "lastPricesUpdateBy", label: "Last prices update by", type: "text" },
+  { key: "leadTime", label: "Lead time", type: "text" },
+  { key: "altVendorSku", label: "Alt vendor SKU", type: "text" },
+  { key: "itemKey", label: "Item key", type: "text" },
+  { key: "itemClearanceIndicator", label: "Item clearance indicator", type: "text" },
+  { key: "vendorDescription", label: "Vendor description", type: "text" },
+  { key: "uploadedBy", label: "Uploaded by", type: "text" },
+  { key: "addTags", label: "Add tags", type: "list" },
+  { key: "removeTags", label: "Remove tags", type: "list" },
+  { key: "binLocation", label: "Bin location", type: "text" },
+  { key: "bscReporting", label: "BSC reporting", type: "json" },
+  { key: "bscReportingUpdatedAt", label: "BSC reporting updated at", type: "datetime" },
+  { key: "ceiId", label: "CEI ID", type: "text" },
+  { key: "contractName", label: "Contract name", type: "text" },
+  { key: "contractShortDescription", label: "Contract short description", type: "text" },
+  { key: "defaultLeadTime", label: "Default lead time", type: "text" },
+  { key: "defaultPrice", label: "Default price", type: "money" },
+  { key: "defaultSupplierPrice", label: "Default supplier price", type: "money" },
+  { key: "defaultSupplierSku", label: "Default supplier SKU", type: "text" },
+  { key: "inventoryByLocation", label: "Inventory by location", type: "json" },
+  { key: "keyFeaturesRaw", label: "Key features raw", type: "json" },
+  { key: "marconeMake", label: "Marcone make", type: "text" },
+  { key: "marconePart", label: "Marcone part", type: "text" },
+  { key: "masterSku", label: "Master SKU", type: "text" },
+  { key: "maxQuantity", label: "Maximum quantity", type: "decimal" },
+  { key: "minimumQuantity", label: "Minimum quantity", type: "decimal" },
+  { key: "notes", label: "Notes", type: "text" },
+  { key: "uKey", label: "U-key", type: "text" },
+  { key: "updatedBy", label: "Updated by", type: "text" },
+  { key: "weight", label: "Weight", type: "decimal" },
+  { key: "dwId", label: "DW ID", type: "text" },
+  { key: "googleTaxonomyId", label: "Google taxonomy ID", type: "text" },
+  { key: "lastLocalSyncAt", label: "Last local sync at", type: "datetime" },
+  { key: "leadtime", label: "Lead time numeric", type: "decimal" },
+  { key: "originalJson", label: "Original JSON", type: "json" },
+  { key: "purchaseUnit", label: "Purchase unit", type: "text" },
+  { key: "relatedSku", label: "Related SKU", type: "text" },
+  { key: "replacedBy", label: "Replaced by", type: "text" },
+  { key: "sellUnitCost", label: "Sell unit cost", type: "decimal" },
+  { key: "shippingMethod", label: "Shipping method", type: "list" },
+  { key: "sourceActive", label: "Source active", type: "boolean" },
+  { key: "sourceCreatedAt", label: "Source created at", type: "datetime" },
+  { key: "sourceDataHash", label: "Source data hash", type: "text" },
+  { key: "sourceMongoId", label: "Source Mongo ID", type: "text" },
+  { key: "sourceSystem", label: "Source system", type: "text" },
+  { key: "sourceUpdatedAt", label: "Source updated at", type: "datetime" },
+  { key: "suppliersJson", label: "Suppliers JSON", type: "json" },
+  { key: "updatedAt", label: "Updated at", type: "datetime" },
+  { key: "validatedAt", label: "Validated at", type: "datetime" },
+  { key: "systemFieldSource", label: "System field source", type: "text" }
+];
+
+const PRODUCT_DUMP_FIELD_ALIASES = {
+  sku: ["_id", "sku", "SKU", "id"],
+  externalId: ["_id", "id"],
+  title: ["name", "title"],
+  marketplaceTitle: ["marketplaceTitle", "name", "title"],
+  shortDescription: ["short_description", "shortDescription", "contract_short_description"],
+  longDescription: ["description", "long_description", "longDescription"],
+  bulletPoints: ["bullet_points", "bulletPoints", "key_features", "keyFeatures", "features"],
+  brand: ["brand", "sourceBrand"],
+  sourceBrand: ["sourceBrand", "brand"],
+  category: ["category", "product_type"],
+  sourceCategory: ["category", "product_type"],
+  condition: ["condition"],
+  status: ["status", "active"],
+  active: ["active"],
+  barcode: ["upc", "barcode", "gtin"],
+  defaultImage: ["default_image", "defaultImage", "image", "image_url"],
+  images: ["images", "image_urls"],
+  manufacturer: ["manufacturer"],
+  mfrPartNumber: ["mfr_part_number", "mfrPartNumber"],
+  vendorSku: ["vendor_sku", "vendorSku"],
+  supplier: ["supplier"],
+  supplierCode: ["supplier_code", "supplierCode"],
+  vendor: ["vendor", "supplier"],
+  unspsc: ["unspsc"],
+  uom: ["uom"],
+  uomQty: ["uom_qty", "uomQty"],
+  minQuantity: ["min_quantity", "minQuantity", "minimum_quantity"],
+  reorderPoint: ["min_quantity", "minimum_quantity"],
+  quantityIncrements: ["quantity_increments", "quantityIncrements"],
+  cost: ["price", "cost", "fob_price", "wholesale_price"],
+  sourceCost: ["price", "cost", "fob_price", "wholesale_price"],
+  price: ["vendor_website_price", "vendorWebsitePrice", "price", "cost"],
+  websitePrice: ["vendor_website_price", "vendorWebsitePrice", "price", "cost"],
+  listPrice: ["list_price", "msrp"],
+  msrp: ["list_price", "msrp"],
+  qty: ["stock_qty", "stockQty", "qty", "quantity"],
+  stockQty: ["stock_qty", "stockQty", "qty", "quantity"],
+  stockStatus: ["stock_status", "stockStatus"],
+  stockUpdatedAt: ["stock_updated_at", "stockUpdatedAt"],
+  toBeDiscontinued: ["to_be_discontinued", "toBeDiscontinued", "discontinued", "is_discontinued"],
+  closeoutEligible: ["to_be_discontinued", "toBeDiscontinued", "item_clearance_indicator", "itemClearanceIndicator"],
+  itemClearanceIndicator: ["item_clearance_indicator", "itemClearanceIndicator"],
+  hazardous: ["hazardous"],
+  sdsUrl: ["sds_url", "sdsUrl"],
+  originalSdsUrl: ["original_sds_url", "originalSdsUrl"],
+  itemHeight: ["item_height", "itemHeight"],
+  itemLength: ["item_length", "itemLength"],
+  itemWeight: ["item_weight", "itemWeight", "weight"],
+  itemWidth: ["item_width", "itemWidth"],
+  packageHeight: ["package_height", "packageHeight"],
+  packageLength: ["package_length", "packageLength"],
+  packageWeight: ["package_weight", "packageWeight"],
+  packageWidth: ["package_width", "packageWidth"],
+  dimensionalWeight: ["dimensional_weight", "dimensionalWeight"],
+  ctechId: ["ctech_id", "ctechId"],
+  ctechIdLastExport: ["ctech_id_last_export", "ctechIdLastExport"],
+  fobPrice: ["fob_price", "fobPrice"],
+  altSku: ["alt_sku", "altSku"],
+  minimumAllowedPrice: ["minimum_allowed_price", "minimumAllowedPrice"],
+  fobPriceForZoro: ["fob_price_for_zoro", "fobPriceForZoro"],
+  preferredVendor: ["preferred_vendor", "preferredVendor"],
+  uploadedImage: ["uploaded_image", "uploadedImage"],
+  restrictedStates: ["restricted_states", "restrictedStates"],
+  shipMode: ["ship_mode", "shipMode"],
+  dropShip: ["drop_ship", "dropShip"],
+  showProp65: ["show_prop_65", "showProp65"],
+  prop65Message: ["prop_65_message", "prop65Message"],
+  dropShipMinQty: ["drop_ship_min_qty", "dropShipMinQty"],
+  additionalAttributes: ["additional_attributes", "additionalAttributes"],
+  competitorPartNumber: ["competitor_part_number", "competitorPartNumber"],
+  mappedCategory: ["mapped_category", "mappedCategory"],
+  checkedSds: ["checked_sds", "checkedSds"],
+  sourceCategoryId: ["category_id", "categoryId"],
+  vendorWebsitePrice: ["vendor_website_price", "vendorWebsitePrice"],
+  isBanned: ["is_banned", "isBanned"],
+  isMarketplaceRestricted: ["is_marketplace_restricted", "isMarketplaceRestricted"],
+  bulkPrices: ["bulk_prices", "bulkPrices"],
+  trustedBrand: ["trusted_brand", "trustedBrand"],
+  subBrand: ["sub_brand", "subBrand"],
+  replacementSku: ["replacement_sku", "replacementSku"],
+  zoroLeadtime: ["zoro_leadtime", "zoroLeadtime"],
+  zoroPrice: ["zoro_price", "zoroPrice"],
+  zoroSku: ["zoro_sku", "zoroSku"],
+  zoroMinimumQty: ["zoro_minimum_qty", "zoroMinimumQty"],
+  varisContractPrice: ["varis_contract_price", "varisContractPrice"],
+  varisListPrice: ["varis_list_price", "varisListPrice"],
+  varisOdManagedPrice: ["varis_od_managed_price", "varisOdManagedPrice"],
+  varisNonOdManagedPrice: ["varis_non_od_managed_price", "varisNonOdManagedPrice"],
+  varisOdPrivatePrice: ["varis_od_private_price", "varisOdPrivatePrice"],
+  varisNonOdPrivatePrice: ["varis_non_od_private_price", "varisNonOdPrivatePrice"],
+  originalImage: ["original_image", "originalImage"],
+  defaultSupplier: ["default_supplier", "defaultSupplier"],
+  dwId: ["dw_id", "dwId"],
+  googleTaxonomyId: ["google_taxonomy_id", "googleTaxonomyId"],
+  lastLocalSyncAt: ["last_local_sync_at", "lastLocalSyncAt"],
+  lastPricesUpdateAt: ["last_prices_update_at", "lastPricesUpdateAt"],
+  lastPricesUpdateBy: ["last_prices_update_by", "lastPricesUpdateBy"],
+  leadTime: ["lead_time", "leadTime", "leadtime"],
+  leadtime: ["leadtime"],
+  altVendorSku: ["alt_vendor_sku", "altVendorSku"],
+  countryOfOrigin: ["country_of_origin", "countryOfOrigin"],
+  originalJson: ["original_json", "originalJson"],
+  purchaseUnit: ["purchase_unit", "purchaseUnit"],
+  relatedSku: ["related_sku", "relatedSku"],
+  replacedBy: ["replaced_by", "replacedBy"],
+  sellUnitCost: ["sell_unit_cost", "sellUnitCost"],
+  shippingMethod: ["shipping_method", "shippingMethod"],
+  sourceActive: ["source_active", "sourceActive"],
+  sourceCreatedAt: ["source_created_at", "sourceCreatedAt"],
+  sourceDataHash: ["source_data_hash", "sourceDataHash"],
+  sourceMongoId: ["source_mongo_id", "sourceMongoId"],
+  sourceSystem: ["source_system", "sourceSystem"],
+  sourceUpdatedAt: ["source_updated_at", "sourceUpdatedAt"],
+  suppliersJson: ["suppliers_json", "suppliersJson"],
+  updatedAt: ["updated_at", "updatedAt"],
+  validatedAt: ["validated_at", "validatedAt"],
+  itemKey: ["item_key", "itemKey"],
+  vendorDescription: ["vendor_descripton", "vendor_description", "vendorDescription"],
+  uploadedBy: ["uploaded_by", "uploadedBy"],
+  addTags: ["add_tags"],
+  removeTags: ["remove_tags"],
+  binLocation: ["bin_location"],
+  bscReporting: ["bsc_reporting"],
+  bscReportingUpdatedAt: ["bsc_reporting_updated_at"],
+  ceiId: ["cei-id"],
+  contractName: ["contract_name"],
+  contractShortDescription: ["contract_short_description"],
+  defaultLeadTime: ["default_lead_time"],
+  defaultPrice: ["default_price"],
+  defaultSupplierPrice: ["default_supplier_price"],
+  defaultSupplierSku: ["default_supplier_sku"],
+  inventoryByLocation: ["i_by_l"],
+  keyFeaturesRaw: ["key_features"],
+  marconeMake: ["marcone_make"],
+  marconePart: ["marcone_part"],
+  masterSku: ["master_sku"],
+  maxQuantity: ["max_quantity"],
+  minimumQuantity: ["minimum_quantity"],
+  uKey: ["u-key"],
+  updatedBy: ["updated_by"],
+  weight: ["weight"]
+};
+
+function systemFieldGroup(key = "") {
+  const text = String(key || "").toLowerCase();
+  if (/price|cost|msrp|list|fob|margin|bulk|varis|zoro/.test(text)) return "Pricing";
+  if (/qty|quantity|stock|inventory|reorder|lead|bin|bsc|location/.test(text)) return "Inventory";
+  if (/sku|id|barcode|brand|category|manufacturer|mfr|vendor|supplier|condition|status|active|unspsc|uom/.test(text)) return "Identity";
+  if (/title|description|bullet|image|tag|keyword|feature|icon/.test(text)) return "Content";
+  if (/height|length|width|weight|dimension|hazard|sds|ship|country|oversize|drop/.test(text)) return "Shipping";
+  if (/shopify|google/.test(text)) return "Shopify";
+  if (/ebay|amazon|temu|tiktok|whatnot/.test(text)) return "Marketplace";
+  if (/created|updated|validated|uploaded|checked|source|original|default|system|notes|cei|marcone|master|key/.test(text)) return "System";
+  return "Other";
+}
+
+function systemFieldType(field = {}) {
+  const key = String(field.key || "").toLowerCase();
+  const explicit = field.type || "";
+  if (/price|cost|msrp|fob|varis/.test(key)) return "money";
+  if (/qty|quantity|stock|weight|height|length|width|dimension|leadtime|lead_time|min|max|minimum|reorder|margin|percent/.test(key)) return explicit === "money" ? "money" : "decimal";
+  if (/active|enabled|published|hazardous|restricted|dropship|drop_ship|banned|clearance|discontinued|trusted|locked/.test(key)) return "boolean";
+  return explicit || "text";
+}
+
+function allSystemFieldDefinitions(exportMappings = []) {
+  const byKey = new Map();
+  const add = (field = {}, origin = "native") => {
+    const key = String(field.key || "").trim();
+    if (!key) return;
+    const existing = byKey.get(key) || {};
+    const extra = PRODUCT_SYSTEM_EXTRA_FIELDS.find((row) => row.key === key) || {};
+    const mapping = PRODUCT_MAPPING_FIELDS.find((row) => row.key === key) || {};
+    byKey.set(key, {
+      key,
+      label: field.label || existing.label || mapping.label || extra.label || key,
+      type: systemFieldType({ ...field, type: field.type || existing.type || mapping.type || extra.type || "text" }),
+      group: field.group || existing.group || systemFieldGroup(key),
+      origins: [...new Set([...(existing.origins || []), origin])],
+      requiredForImport: Boolean(existing.requiredForImport || field.requiredForImport || mapping.requiredForImport),
+      dumpKeys: [...new Set([...(existing.dumpKeys || []), ...(PRODUCT_DUMP_FIELD_ALIASES[key] || [])])],
+      shopifyMetafield: existing.shopifyMetafield || SHOPIFY_DUMP_FIELD_METAFIELDS[key]?.key || "",
+      shopifyType: existing.shopifyType || SHOPIFY_DUMP_FIELD_METAFIELDS[key]?.type || "",
+      rule: existing.rule || (["price", "websitePrice"].includes(key) ? "vendor_website_price wins when present; otherwise cost x 1.35." : ""),
+      templateUsage: existing.templateUsage || []
+    });
+  };
+  for (const field of PRODUCT_MAPPING_FIELDS) add(field, "product");
+  for (const field of PRODUCT_SYSTEM_EXTRA_FIELDS) add(field, "system");
+  for (const key of Object.keys(SHOPIFY_DUMP_FIELD_METAFIELDS)) add({ key, type: SHOPIFY_DUMP_FIELD_METAFIELDS[key].type }, "shopify-metafield");
+  for (const template of exportMappings || []) {
+    const templateName = template.name || template.source || template.id || "Template";
+    for (const row of template.mappings || []) {
+      const key = String(row.productField || "").trim();
+      if (!key) continue;
+      add({ key }, "template");
+      const field = byKey.get(key);
+      field.templateUsage = [...new Set([...(field.templateUsage || []), templateName])];
+    }
+  }
+  return [...byKey.values()].sort((a, b) => {
+    const groupCompare = String(a.group || "").localeCompare(String(b.group || ""));
+    return groupCompare || String(a.key || "").localeCompare(String(b.key || ""));
+  });
+}
 
 const DUMP_REVIEW_FIELDS = new Set([
   "barcode",
@@ -317,7 +738,15 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyCloseoutsEnabled: true,
   shopifyInventoryPushEnabled: false,
   shopifyInventoryWarehouseId: "",
-  shopifyInventoryLocationId: ""
+  shopifyInventoryLocationId: "",
+  inventoryScheduleEnabled: false,
+  inventoryScheduleMode: "dry-run",
+  inventoryScheduleType: "times",
+  inventoryScheduleTimes: "03:00,13:00",
+  inventoryScheduleEveryHours: 12,
+  inventoryScheduleRequireSuccessfulDump: false,
+  shopifyShippingProfiles: [],
+  shopifyShippingProfilesSyncedAt: ""
 };
 
 const DEFAULT_SYSTEM_SETTINGS = {
@@ -326,6 +755,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   autoDataQualityScanAfterImports: true,
   dataQualityWorkerEnabled: true,
   sourceCatalogDefaultImportMode: "new-and-update",
+  trueValueSourceCategoryAsMainCategory: true,
   skuChangeTrackedFields: ["cost", "price", "list_price", "qty", "stock_status", "to_be_discontinued", "brand", "mfr_part_number", "vendor_sku", "category", "default_image"],
   backupIncludeSourceCatalog: false,
   backupRetentionDays: 30,
@@ -386,6 +816,96 @@ function productUomQty(item = {}) {
   return Number.isFinite(qty) && qty > 1 ? qty : 1;
 }
 
+function productSupplierTokens(item = {}) {
+  return [
+    item.supplierCode,
+    item.supplier_code,
+    item.raw?.supplierCode,
+    item.raw?.supplier_code,
+    item.supplier,
+    item.vendor,
+    item.defaultSupplier,
+    item.default_supplier,
+    item.raw?.supplier,
+    item.raw?.vendor,
+    item.raw?.defaultSupplier,
+    item.raw?.default_supplier
+  ].map(sourceTextValue).filter(Boolean);
+}
+
+function vendorProfileForProduct(db = null, item = {}) {
+  const vendors = Array.isArray(db?.vendors) ? db.vendors : [];
+  if (!vendors.length) return null;
+  const tokens = new Set(productSupplierTokens(item).map((value) => value.toLowerCase()).filter(Boolean));
+  if (!tokens.size) return null;
+  return vendors.find((vendor) => {
+    const vendorTokens = [
+      vendor.id,
+      vendor.vendor_id,
+      vendor.code,
+      vendor.vendorCode,
+      vendor.vendorNumber,
+      vendor.name
+    ].map(sourceTextValue).map((value) => value.toLowerCase()).filter(Boolean);
+    return vendorTokens.some((value) => tokens.has(value) || (value && [...tokens].some((token) => token.includes(value) || value.includes(token))));
+  }) || null;
+}
+
+function productPricingRules(item = {}, db = null) {
+  const vendor = vendorProfileForProduct(db, item);
+  const rules = vendor?.pricingRules && typeof vendor.pricingRules === "object" ? vendor.pricingRules : {};
+  return {
+    costBasis: rules.costBasis || (productSupplierTokens(item).some((value) => {
+      const text = value.toLowerCase();
+      return text === "uss" || text.includes("essendant");
+    }) ? "sell-unit" : "each-unit"),
+    enforceMinimumAllowedPrice: rules.enforceMinimumAllowedPrice !== false,
+    suspiciousPriceMultiplier: Number(rules.suspiciousPriceMultiplier || 5),
+    note: rules.note || ""
+  };
+}
+
+function productIsEssendant(item = {}) {
+  return productSupplierTokens(item).some((value) => {
+    const text = value.toLowerCase();
+    return text === "uss" || text.includes("essendant");
+  });
+}
+
+function productVariationRules(item = {}, db = null) {
+  const vendor = vendorProfileForProduct(db, item);
+  const rules = vendor?.variationRules && typeof vendor.variationRules === "object" ? vendor.variationRules : {};
+  const channelRules = vendor?.channelRules?.shopify && typeof vendor.channelRules.shopify === "object" ? vendor.channelRules.shopify : {};
+  const isEssendant = productIsEssendant(item);
+  const isTrueValue = productSupplierTokens(item).some((value) => {
+    const text = value.toLowerCase();
+    return text === "trv" || text.includes("true value");
+  });
+  return {
+    shopifyVariantMode: rules.shopifyVariantMode || channelRules.variantMode || (isEssendant ? "uom-only" : isTrueValue ? "each-and-uom" : "standard"),
+    allowShopifyVariations: rules.allowShopifyVariations ?? channelRules.allowVariations ?? (isEssendant ? false : true),
+    note: rules.note || channelRules.note || ""
+  };
+}
+
+function productUsesSellUnitPricing(item = {}, db = null) {
+  if (productPricingRules(item, db).costBasis === "sell-unit") return true;
+  return productSupplierTokens(item).some((value) => {
+    const text = value.toLowerCase();
+    return text === "uss" || text.includes("essendant");
+  });
+}
+
+function productRequiresUomOnlyVariants(item = {}, db = null) {
+  const rules = productVariationRules(item, db);
+  return rules.shopifyVariantMode === "uom-only" || rules.allowShopifyVariations === false;
+}
+
+function productRequiresEachAndUomVariants(item = {}, db = null) {
+  const rules = productVariationRules(item, db);
+  return rules.shopifyVariantMode === "each-and-uom" && rules.allowShopifyVariations !== false && productUomQty(item) > 1;
+}
+
 function productUomInfo(item = {}) {
   const code = normalizedUomCode(item.uom ?? item.unitOfMeasure ?? item.unit_of_measure ?? "");
   const name = UOM_DEFINITIONS[code] || code || "Each";
@@ -399,10 +919,121 @@ function productUomInfo(item = {}) {
   };
 }
 
-function productSellUnitCost(item = {}) {
-  const unitCost = Number(sourceNumberValue(item.sourceCost ?? item.cost ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? item.price ?? 0));
+function productEachUnitCost(item = {}, db = null) {
+  const cost = Number(sourceNumberValue(
+    item.cost
+    ?? item.sourceCost
+    ?? item.source_cost
+    ?? item.vendorCost
+    ?? item.vendor_cost
+    ?? item.wholesalePrice
+    ?? item.wholesale_price
+    ?? item.price
+    ?? item.websitePrice
+    ?? item.fobPrice
+    ?? item.fob_price
+    ?? 0
+  ));
+  if (productUsesSellUnitPricing(item, db)) {
+    const qty = productUomQty(item);
+    return qty > 1 && cost > 0 ? Math.round((cost / qty) * 10000) / 10000 : cost;
+  }
+  return cost;
+}
+
+function productSellUnitCost(item = {}, db = null) {
+  if (productUsesSellUnitPricing(item, db)) {
+    const cost = Number(sourceNumberValue(
+      item.cost
+      ?? item.sourceCost
+      ?? item.source_cost
+      ?? item.vendorCost
+      ?? item.vendor_cost
+      ?? item.wholesalePrice
+      ?? item.wholesale_price
+      ?? item.price
+      ?? item.websitePrice
+      ?? item.fobPrice
+      ?? item.fob_price
+      ?? 0
+    ));
+    return cost > 0 ? cost : 0;
+  }
+  const unitCost = productEachUnitCost(item, db);
   if (!(unitCost > 0)) return 0;
   return Math.round(unitCost * productUomQty(item) * 10000) / 10000;
+}
+
+function productAvailableQty(item = {}) {
+  return Math.max(0, Number(sourceNumberValue(item.qty ?? item.stockQty ?? item.inventoryQty ?? item.shopifyInventoryQty ?? 0)) - Number(sourceNumberValue(item.reserved || 0)));
+}
+
+function productIsReplenishable(item = {}) {
+  if (item.replenishableUseVendorRules === true || item.raw?.replenishableUseVendorRules === true) return false;
+  const value = item.replenishable ?? item.isReplenishable ?? item.raw?.replenishable ?? item.raw?.isReplenishable;
+  return value === true || ["true", "yes", "y", "1"].includes(String(value || "").trim().toLowerCase());
+}
+
+function productUsesVendorReplenishableRules(item = {}) {
+  const value = item.replenishableUseVendorRules ?? item.raw?.replenishableUseVendorRules;
+  return value === true || ["true", "yes", "y", "1"].includes(String(value || "").trim().toLowerCase());
+}
+
+function productUsesVendorReplenishableQty(item = {}) {
+  const value = item.replenishableQtyUseVendorDefault ?? item.raw?.replenishableQtyUseVendorDefault;
+  return value === true || ["true", "yes", "y", "1"].includes(String(value || "").trim().toLowerCase());
+}
+
+function productReplenishableQty(item = {}, db = null) {
+  const vendor = vendorProfileForProduct(db, item);
+  const vendorRuleEnabled = vendor?.inventoryRules?.replenishableEnabled === true || vendor?.inventoryRules?.enabled === true;
+  const vendorQty = vendorRuleEnabled ? Number(sourceNumberValue(vendor?.inventoryRules?.replenishableQty ?? vendor?.replenishableQty ?? 0)) : 0;
+  if (productUsesVendorReplenishableRules(item)) {
+    if (!vendorRuleEnabled) return 0;
+    return Math.max(1, Math.floor(vendorQty > 0 ? vendorQty : 1));
+  }
+  if (!productIsReplenishable(item)) return 0;
+  if (productUsesVendorReplenishableQty(item)) {
+    if (!vendorRuleEnabled) return 0;
+    return Math.max(1, Math.floor(vendorQty > 0 ? vendorQty : 1));
+  }
+  const skuQty = Number(sourceNumberValue(item.replenishableQty ?? item.raw?.replenishableQty ?? 0));
+  if (skuQty > 0) return Math.max(1, Math.floor(skuQty));
+  return 0;
+}
+
+function productSellableQty(item = {}, db = null) {
+  const replenishableQty = productReplenishableQty(item, db);
+  return replenishableQty > 0 ? replenishableQty : productAvailableQty(item);
+}
+
+function syncReplenishableWarehouseStock(db = {}, item = {}) {
+  const warehouse = (db.warehouses || []).find((row) => String(row.name || "").trim().toLowerCase() === "staten island")
+    || (db.warehouses || []).find((row) => String(row.code || "").trim().toUpperCase() === "WH-SI");
+  if (!warehouse) return null;
+  const qty = productReplenishableQty(item, db);
+  const stockRow = ensureInventoryWarehouseStock(item, warehouse);
+  stockRow.warehouseName = warehouse.name;
+  stockRow.qty = qty > 0 ? qty : 0;
+  stockRow.reserved = 0;
+  stockRow.committed = 0;
+  stockRow.incoming = 0;
+  stockRow.available = stockRow.qty;
+  stockRow.updatedAt = new Date().toISOString();
+  syncInventoryTotalsFromWarehouses(item);
+  return stockRow;
+}
+
+function shopifyVariantPriceBasis(item = {}, variant = {}, db = null) {
+  const eachCost = productEachUnitCost(item, db);
+  const qty = Math.max(1, Number(variant.uomQty || variant.packQty || productUomQty(item) || 1));
+  if (productUsesSellUnitPricing(item, db)) {
+    const sellQty = productUomQty(item);
+    if (qty === sellQty) return productSellUnitCost(item, db);
+    if (eachCost > 0) return Math.round(eachCost * qty * 10000) / 10000;
+  }
+  if (eachCost > 0) return Math.round(eachCost * qty * 10000) / 10000;
+  return Number(variant.unitCost || productSellUnitCost(item, db) || 0);
 }
 
 function variantBaseSku(item = {}) {
@@ -415,12 +1046,15 @@ function variantSkuFromBase(baseSku = "", suffix = "") {
   return sku && cleanSuffix && !sku.toUpperCase().endsWith(`-${cleanSuffix}`) ? `${sku}-${cleanSuffix}` : sku;
 }
 
-function normalizeSystemVariant(variant = {}, parent = {}) {
+function normalizeSystemVariant(variant = {}, parent = {}, db = null) {
   const uom = productUomInfo({ ...parent, uom: variant.uom || parent.uom, uomQty: variant.uomQty || variant.packQty || parent.uomQty });
   const parentSku = variantBaseSku(parent);
   const sku = String(variant.sku || (uom.isMultiUnit ? variantSkuFromBase(parentSku, `${uom.qty}PC`) : parentSku)).trim();
-  const available = Math.max(0, Number(parent.qty ?? parent.stockQty ?? 0) - Number(parent.reserved || 0));
+  const available = productSellableQty(parent, db);
   const key = String(variant.key || (uom.isMultiUnit ? `pack-${uom.qty}` : "each")).trim();
+  const fallbackUnitCost = productUsesSellUnitPricing(parent, db) && uom.qty === productUomQty(parent)
+    ? productSellUnitCost(parent, db)
+    : Math.round((productEachUnitCost(parent, db) * uom.qty) * 10000) / 10000;
   return {
     id: String(variant.id || `${parentSku || "sku"}:${key}`),
     key,
@@ -437,7 +1071,7 @@ function normalizeSystemVariant(variant = {}, parent = {}) {
     packQty: Number(variant.packQty || variant.uomQty || uom.qty || 1),
     inventoryMultiplier: Number(variant.inventoryMultiplier || 1),
     quantity: Number(variant.quantity ?? available),
-    unitCost: Number(variant.unitCost ?? productSellUnitCost(parent)),
+    unitCost: Number(variant.unitCost ?? fallbackUnitCost),
     actual: variant.actual === undefined ? true : Boolean(variant.actual),
     generated: variant.generated === undefined ? true : Boolean(variant.generated),
     status: String(variant.status || "active"),
@@ -445,10 +1079,36 @@ function normalizeSystemVariant(variant = {}, parent = {}) {
   };
 }
 
-function systemProductVariants(item = {}) {
+function systemProductVariants(item = {}, db = null) {
+  if (productRequiresUomOnlyVariants(item, db)) {
+    return [normalizeSystemVariant({
+      sku: variantBaseSku(item),
+      note: "Single vendor UOM sell unit from vendor variation rules. No generated UOM SKU suffix."
+    }, item, db)];
+  }
+  if (productRequiresEachAndUomVariants(item, db)) {
+    return [
+      normalizeSystemVariant({
+        key: "each",
+        optionName: "Purchase Unit",
+        optionValue: "Each",
+        uom: "EA",
+        uomQty: 1,
+        packQty: 1,
+        variantType: "each",
+        note: "Individual unit generated from vendor variation rules."
+      }, item, db),
+      normalizeSystemVariant({
+        key: `pack-${productUomQty(item)}`,
+        optionName: "Purchase Unit",
+        variantType: "sell-unit",
+        note: "Vendor UOM sell unit generated from vendor variation rules."
+      }, item, db)
+    ];
+  }
   const explicit = Array.isArray(item.systemVariants) ? item.systemVariants : [];
-  const generated = normalizeSystemVariant({}, item);
-  const manual = explicit.filter((variant) => variant.generated === false || String(variant.source || "").toLowerCase() === "manual").map((variant) => normalizeSystemVariant(variant, item));
+  const generated = normalizeSystemVariant({}, item, db);
+  const manual = explicit.filter((variant) => variant.generated === false || String(variant.source || "").toLowerCase() === "manual").map((variant) => normalizeSystemVariant(variant, item, db));
   const seen = new Set();
   return [generated, ...manual].filter((variant) => {
     const key = String(variant.sku || "").trim().toLowerCase();
@@ -463,6 +1123,50 @@ function pricedFromCost(cost, markupPercent = DEFAULT_CHANNEL_SETTINGS.priceMark
   const numericMarkup = Number(markupPercent || 0);
   if (!(numericCost > 0)) return 0;
   return Math.round((numericCost * (1 + numericMarkup / 100)) * 100) / 100;
+}
+
+function websitePriceFromRule(item = {}, cost = null, markupPercent = SHOPIFY_PRICE_MARKUP_PERCENT, options = {}, db = null) {
+  const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(item, db);
+  if (options.allowVendorWebsitePrice !== false && vendorWebsitePrice > 0) return vendorWebsitePrice;
+  const basis = cost === null || cost === undefined ? productSellUnitCost(item, db) || sourceCatalogCost(item) : cost;
+  const minimumAllowedPrice = Number(sourceNumberValue(item.minimumAllowedPrice ?? item.minimum_allowed_price ?? item.productManagerFields?.minimum_allowed_price ?? 0));
+  const fallbackPrice = Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
+  const computedPrice = pricedFromCost(basis, markupPercent) || fallbackPrice;
+  return productPricingRules(item, db).enforceMinimumAllowedPrice && minimumAllowedPrice > 0 ? Math.max(computedPrice, minimumAllowedPrice) : computedPrice;
+}
+
+function shopifyUsableVendorWebsitePrice(item = {}, db = null) {
+  const vendorWebsitePrice = Number(sourceNumberValue(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price ?? 0));
+  if (!(vendorWebsitePrice > 0)) return 0;
+  const costFloor = productUsesSellUnitPricing(item, db) ? productSellUnitCost(item, db) : productEachUnitCost(item, db);
+  const minimumAllowedPrice = Number(sourceNumberValue(item.minimumAllowedPrice ?? item.minimum_allowed_price ?? item.productManagerFields?.minimum_allowed_price ?? 0));
+  const floor = Math.max(costFloor || 0, productPricingRules(item, db).enforceMinimumAllowedPrice ? minimumAllowedPrice || 0 : 0);
+  return floor > 0 && vendorWebsitePrice < floor ? 0 : vendorWebsitePrice;
+}
+
+function shopifySingleUnitWebsitePrice(item = {}, markupPercent = SHOPIFY_PRICE_MARKUP_PERCENT, db = null) {
+  const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(item, db);
+  if (vendorWebsitePrice > 0) return vendorWebsitePrice;
+  const eachCost = productEachUnitCost(item, db);
+  if (eachCost > 0) return pricedFromCost(eachCost, markupPercent);
+  return Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
+}
+
+function shopifyVariantWebsitePrice(item = {}, variant = {}, markupPercent = SHOPIFY_PRICE_MARKUP_PERCENT, db = null) {
+  const qty = Math.max(1, Number(variant.uomQty || variant.packQty || productUomQty(item) || 1));
+  if (productUsesSellUnitPricing(item, db)) {
+    return websitePriceFromRule(item, shopifyVariantPriceBasis(item, variant, db), markupPercent, {
+      allowVendorWebsitePrice: true
+    }, db);
+  }
+  if (qty > 1) {
+    const singlePrice = shopifySingleUnitWebsitePrice(item, markupPercent, db);
+    const discountMultiplier = 1 - (SHOPIFY_MULTIPACK_DISCOUNT_PERCENT / 100);
+    if (singlePrice > 0) return Math.round(singlePrice * qty * discountMultiplier * 100) / 100;
+  }
+  return websitePriceFromRule(item, shopifyVariantPriceBasis(item, variant, db), markupPercent, {
+    allowVendorWebsitePrice: qty <= 1
+  }, db);
 }
 
 const DEFAULT_MARKETPLACE_TEMPLATES = [
@@ -890,7 +1594,7 @@ function writeStateSummarySync(db = {}) {
     const liteDb = {
       sequence: db.sequence || {},
       syncRuns: Array.isArray(db.syncRuns) ? db.syncRuns.slice(0, 100) : [],
-      importJobs: Array.isArray(db.importJobs) ? db.importJobs.slice(0, 100) : [],
+      importJobs: clientImportJobs(Array.isArray(db.importJobs) ? db.importJobs.slice(0, 100) : []),
       connections: Array.isArray(db.connections) ? db.connections : [],
       connectorState: db.connectorState || {},
       exportMappings: db.exportMappings || [],
@@ -1084,15 +1788,28 @@ function shopifyStatusForSku(statusMap = {}, sku = "") {
   return statusMap[String(sku || "").trim().toLowerCase()] || null;
 }
 
-function withShopifyStatus(item = {}, statusMap = {}) {
+function withShopifyStatus(item = {}, statusMap = {}, db = null) {
   const status = shopifyStatusForSku(statusMap, item.sku);
-  if (!status) return item;
+  const variants = systemProductVariants(item, db);
+  const variantMatches = {};
+  for (const variant of variants) {
+    const variantKey = String(variant.sku || "").trim().toLowerCase();
+    if (variantKey && statusMap[variantKey]) variantMatches[variantKey] = statusMap[variantKey];
+  }
+  if (status && !Object.keys(variantMatches).length) {
+    const onlyVariant = variants.length === 1 ? variants[0] : null;
+    const onlyVariantKey = String(onlyVariant?.sku || "").trim().toLowerCase();
+    if (onlyVariantKey) variantMatches[onlyVariantKey] = status;
+  }
+  if (!status && !Object.keys(variantMatches).length) return item;
+  const variantPatch = Object.keys(variantMatches).length ? { shopifyVariantMatches: variantMatches } : {};
+  if (!status) return { ...item, ...variantPatch };
   const itemSyncedAt = Date.parse(item.shopifySyncedAt || "");
   const statusSyncedAt = Date.parse(status.shopifySyncedAt || status.syncedAt || "");
   if (Number.isFinite(itemSyncedAt) && (!Number.isFinite(statusSyncedAt) || statusSyncedAt < itemSyncedAt)) {
-    return { ...status, ...item };
+    return { ...status, ...item, ...variantPatch };
   }
-  return { ...item, ...status };
+  return { ...item, ...status, ...variantPatch };
 }
 
 function readProductSourceEnrichmentSync() {
@@ -1156,6 +1873,20 @@ function productSourceEnrichmentForSku(enrichmentMap = {}, skuOrItem = "") {
 function sourceEnrichmentPreserveFields(item = {}) {
   const fields = {
     id: item.id,
+    sku: item.sku,
+    cost: item.cost,
+    sourceCost: item.sourceCost,
+    price: item.price,
+    websitePrice: item.websitePrice,
+    qty: item.qty,
+    stockQty: item.stockQty,
+    stockStatus: item.stockStatus,
+    toBeDiscontinued: item.toBeDiscontinued,
+    closeoutEligible: item.closeoutEligible,
+    active: item.active,
+    status: item.status,
+    uom: item.uom,
+    uomQty: item.uomQty,
     reserved: item.reserved,
     aliases: item.aliases,
     shadowSkus: item.shadowSkus,
@@ -1688,12 +2419,98 @@ function sourceBooleanValue(value, fallback = false) {
   return fallback;
 }
 
+function isClearanceItem(item = {}) {
+  const statusValues = [
+    item.status,
+    item.stockStatus,
+    item.raw?.status,
+    item.raw?.stockStatus
+  ].map((value) => sourceTextValue(value).toLowerCase());
+  const indicatorValues = [
+    item.itemClearanceIndicator,
+    item.item_clearance_indicator,
+    item.raw?.itemClearanceIndicator,
+    item.raw?.item_clearance_indicator
+  ].map((value) => sourceTextValue(value).toLowerCase());
+  return statusValues.some((value) => ["clearance", "clearance item", "closeout"].includes(value))
+    || indicatorValues.some((value) => ["clearance", "clearance item", "closeout", "y", "yes", "true", "1"].includes(value));
+}
+
 function calculateDimensionalWeight(item = {}) {
-  const length = Number(item.packageLength || 0);
-  const width = Number(item.packageWidth || 0);
-  const height = Number(item.packageHeight || 0);
+  const length = Number(sourceNumberValue(item.packageLength ?? item.package_length ?? item.raw?.packageLength ?? item.raw?.package_length ?? 0));
+  const width = Number(sourceNumberValue(item.packageWidth ?? item.package_width ?? item.raw?.packageWidth ?? item.raw?.package_width ?? 0));
+  const height = Number(sourceNumberValue(item.packageHeight ?? item.package_height ?? item.raw?.packageHeight ?? item.raw?.package_height ?? 0));
   if (!(length > 0 && width > 0 && height > 0)) return 0;
   return Math.round(((length * width * height) / 139) * 1000) / 1000;
+}
+
+function productShippingDimensionValue(item = {}, camelKey = "", snakeKey = "") {
+  return sourceNumberValue(item[camelKey] ?? item[snakeKey] ?? item.raw?.[camelKey] ?? item.raw?.[snakeKey] ?? item.original?.[snakeKey] ?? 0);
+}
+
+function productHasShippingMeasurements(item = {}) {
+  return [
+    ["packageLength", "package_length"],
+    ["packageWidth", "package_width"],
+    ["packageHeight", "package_height"],
+    ["packageWeight", "package_weight"],
+    ["itemLength", "item_length"],
+    ["itemWidth", "item_width"],
+    ["itemHeight", "item_height"],
+    ["itemWeight", "item_weight"]
+  ].some(([camelKey, snakeKey]) => productShippingDimensionValue(item, camelKey, snakeKey) > 0);
+}
+
+function productShippingClassification(item = {}) {
+  const packageLength = productShippingDimensionValue(item, "packageLength", "package_length");
+  const packageWidth = productShippingDimensionValue(item, "packageWidth", "package_width");
+  const packageHeight = productShippingDimensionValue(item, "packageHeight", "package_height");
+  const packageWeight = productShippingDimensionValue(item, "packageWeight", "package_weight");
+  const itemLength = productShippingDimensionValue(item, "itemLength", "item_length");
+  const itemWidth = productShippingDimensionValue(item, "itemWidth", "item_width");
+  const itemHeight = productShippingDimensionValue(item, "itemHeight", "item_height");
+  const itemWeight = productShippingDimensionValue(item, "itemWeight", "item_weight");
+  const length = packageLength || itemLength;
+  const width = packageWidth || itemWidth;
+  const height = packageHeight || itemHeight;
+  const weight = packageWeight || itemWeight;
+  const dimensionalWeight = sourceNumberValue(item.dimensionalWeight ?? item.dimensional_weight ?? item.raw?.dimensionalWeight ?? item.raw?.dimensional_weight) || calculateDimensionalWeight({
+    packageLength,
+    packageWidth,
+    packageHeight
+  });
+  const sorted = [length, width, height].sort((a, b) => b - a);
+  const longest = sorted[0] || 0;
+  const girth = 2 * ((sorted[1] || 0) + (sorted[2] || 0));
+  const lengthPlusGirth = longest + girth;
+  const ltlReasons = [];
+  if (longest > 60) ltlReasons.push(`longest side ${longest}" exceeds 60" parcel free-shipping threshold`);
+  if (lengthPlusGirth > 130) ltlReasons.push(`length plus girth ${lengthPlusGirth}" exceeds 130"`);
+  if (weight >= 50) ltlReasons.push(`package weight ${weight} lb is 50 lb or more`);
+  if (dimensionalWeight >= 70) ltlReasons.push(`dimensional weight ${dimensionalWeight} lb is 70 lb or more`);
+  if (ltlReasons.length) return { shippingClass: "ltl", shippingMethod: "LTL", shippingClassReason: ltlReasons.join("; "), dimensionalWeight };
+  const oversizeReasons = [];
+  if (longest > 48) oversizeReasons.push(`longest side ${longest}" exceeds 48"`);
+  if (lengthPlusGirth > 105) oversizeReasons.push(`length plus girth ${lengthPlusGirth}" exceeds 105"`);
+  if (dimensionalWeight >= 50) oversizeReasons.push(`dimensional weight ${dimensionalWeight} lb is 50 lb or more`);
+  if (oversizeReasons.length) return { shippingClass: "oversize_parcel", shippingMethod: "Oversize Parcel", shippingClassReason: oversizeReasons.join("; "), dimensionalWeight };
+  return { shippingClass: "parcel", shippingMethod: "Parcel", shippingClassReason: "Within parcel size and weight thresholds.", dimensionalWeight };
+}
+
+function applyProductShippingClassification(item = {}) {
+  const classification = productShippingClassification(item);
+  if (!productHasShippingMeasurements(item)) return { shippingClass: "", shippingMethod: "", shippingClassReason: "", dimensionalWeight: 0 };
+  item.dimensionalWeight = classification.dimensionalWeight;
+  item.shippingClass = classification.shippingClass;
+  item.shippingMethod = classification.shippingMethod;
+  item.shippingClassReason = classification.shippingClassReason;
+  if (item.raw && typeof item.raw === "object" && !Array.isArray(item.raw)) {
+    item.raw.dimensionalWeight = classification.dimensionalWeight;
+    item.raw.shippingClass = classification.shippingClass;
+    item.raw.shippingMethod = classification.shippingMethod;
+    item.raw.shippingClassReason = classification.shippingClassReason;
+  }
+  return classification;
 }
 
 function normalizedCompareValue(value) {
@@ -1764,6 +2581,45 @@ function formatCategoryName(value) {
         .join("/"))
       .join(" "))
     .join(" > ");
+}
+
+function productSupplierIdentity(item = {}) {
+  return [
+    item.supplier,
+    item.vendor,
+    item.supplierCode,
+    item.defaultSupplier,
+    item.productManagerFields?.supplier,
+    item.productManagerFields?.supplier_code,
+    item.productManagerFields?.default_supplier,
+    item.original?.supplier,
+    item.original?.supplier_code
+  ].map((value) => sourceTextValue(value).toLowerCase()).filter(Boolean);
+}
+
+function shouldPromoteSourceCategoryToMain(item = {}, settings = {}) {
+  if (settings.trueValueSourceCategoryAsMainCategory === false) return false;
+  return productSupplierIdentity(item).some((value) => value === "true value" || value === "trv" || value.includes("true value"));
+}
+
+function effectiveMainCategoryName(item = {}, settings = {}) {
+  const sourceCategory = formatCategoryName(item.sourceCategory || item.vendorCategory || item.productManagerFields?.category || item.original?.category || "");
+  if (shouldPromoteSourceCategoryToMain(item, settings) && sourceCategory) return sourceCategory;
+  return formatCategoryName(item.category || item.mainCategory || sourceCategory || "");
+}
+
+function applySourceCategoryMainPromotion(item = {}, settings = {}) {
+  const sourceCategory = formatCategoryName(item.sourceCategory || item.vendorCategory || item.productManagerFields?.category || item.original?.category || "");
+  if (!shouldPromoteSourceCategoryToMain(item, settings) || !sourceCategory) return item;
+  return {
+    ...item,
+    category: sourceCategory,
+    mainCategory: sourceCategory,
+    sourceCategory,
+    vendorCategory: sourceCategory,
+    categoryVerified: true,
+    mainCategorySource: "vendor-category"
+  };
 }
 
 function sourceBrandFrom(item = {}) {
@@ -1916,8 +2772,17 @@ function applyProtectedSourceProduct(db, existing, incoming, source = "Source ca
     if (field === "category") {
       const formattedCategory = formatCategoryName(incomingValue);
       if (formattedCategory) {
-        existing.sourceCategory = existing.sourceCategory || formattedCategory;
-        existing.vendorCategory = existing.vendorCategory || formattedCategory;
+        if (shouldPromoteSourceCategoryToMain(incoming, readSystemSettingsStore(db.systemSettings || {}))) {
+          existing.category = formattedCategory;
+          existing.mainCategory = formattedCategory;
+          existing.sourceCategory = formattedCategory;
+          existing.vendorCategory = formattedCategory;
+          existing.categoryVerified = true;
+          existing.mainCategorySource = "vendor-category";
+        } else {
+          existing.sourceCategory = existing.sourceCategory || formattedCategory;
+          existing.vendorCategory = existing.vendorCategory || formattedCategory;
+        }
       }
       continue;
     }
@@ -2100,20 +2965,19 @@ function normalizeDb(db) {
   }
   db.connections = connectionRows.map(normalizeChannel);
   const websitePriceSettings = findChannelByName(db, "Shopify")?.settings || db.connections[0]?.settings || DEFAULT_CHANNEL_SETTINGS;
-  const websiteMarkupPercent = Number(websitePriceSettings.priceMarkupPercent || DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent);
+  const websiteMarkupPercent = Number(websitePriceSettings.priceMarkupPercent || SHOPIFY_PRICE_MARKUP_PERCENT);
 
   db.inventory = (db.inventory || []).map((item) => {
     const defaults = PRODUCT_DEFAULTS[item.sku] || {};
     const categoryVerified = sourceBooleanValue(item.categoryVerified ?? item.mainCategoryVerified, Boolean(defaults.category));
     const currentCategory = formatCategoryName(item.category ?? defaults.category ?? "");
     const sourceCategory = formatCategoryName(item.sourceCategory ?? item.vendorCategory ?? item.productManagerFields?.category ?? item.original?.category ?? (categoryVerified ? "" : currentCategory));
+    const effectiveCategory = effectiveMainCategoryName({ ...defaults, ...item, sourceCategory, vendorCategory: sourceCategory }, db.systemSettings);
     const sourceCost = sourceCatalogCost({ ...defaults, ...item });
     const sellUnitCost = productSellUnitCost({ ...defaults, ...item, sourceCost });
-    const listPrice = Number(sourceNumberValue(item.listPrice ?? item.list_price ?? item.msrp ?? defaults.msrp ?? 0));
-    const websitePrice = Math.max(
-      Number(sourceNumberValue(item.websitePrice ?? item.shopifyPrice ?? item.channelPrice ?? 0)),
-      pricedFromCost(sellUnitCost || sourceCost, websiteMarkupPercent)
-    );
+    const listPrice = isClearanceItem(item) ? Number(sourceNumberValue(item.listPrice ?? item.list_price ?? item.msrp ?? defaults.msrp ?? 0)) : 0;
+    const websitePrice = websitePriceFromRule({ ...defaults, ...item }, sellUnitCost || sourceCost, websiteMarkupPercent)
+      || Number(sourceNumberValue(item.shopifyPrice ?? item.channelPrice ?? 0));
     const uomInfo = productUomInfo(item);
     const product = {
       title: item.title ?? item.name ?? defaults.title ?? item.sku ?? "",
@@ -2127,9 +2991,9 @@ function normalizeDb(db) {
       brand: formatBrandName(item.brand ?? defaults.brand ?? ""),
       sourceBrand: item.sourceBrand ?? item.productManagerFields?.brand ?? item.original?.brand ?? item.brand ?? "",
       brandLocked: Boolean(item.brandLocked ?? false),
-      category: categoryVerified ? currentCategory : "",
-      mainCategory: categoryVerified ? currentCategory : "",
-      categoryVerified,
+      category: effectiveCategory || (categoryVerified ? currentCategory : ""),
+      mainCategory: effectiveCategory || (categoryVerified ? currentCategory : ""),
+      categoryVerified: Boolean(effectiveCategory || categoryVerified),
       sourceCategory,
       vendorCategory: sourceCategory,
       condition: item.condition ?? defaults.condition ?? "New",
@@ -2702,9 +3566,14 @@ function backfillAliasesFromMappedOrders(db = {}) {
 
 function normalizeChannel(channel = {}) {
   const rawSettings = channel.settings || {};
-  const settings = { ...DEFAULT_CHANNEL_SETTINGS, ...rawSettings };
+  const isShopify = String(channel.name || "").trim().toLowerCase() === "shopify";
+  const settings = {
+    ...DEFAULT_CHANNEL_SETTINGS,
+    ...rawSettings,
+    ...(isShopify ? { priceMarkupPercent: SHOPIFY_PRICE_MARKUP_PERCENT } : {})
+  };
   if (rawSettings.pricingRuleVersion !== 1 && Number(settings.priceMarkupPercent || 0) <= 0) {
-    settings.priceMarkupPercent = DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
+    settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit"]) {
@@ -2713,6 +3582,15 @@ function normalizeChannel(channel = {}) {
   for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
+  for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump"]) {
+    settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
+  }
+  settings.inventoryScheduleMode = String(settings.inventoryScheduleMode || "dry-run").toLowerCase() === "apply" ? "apply" : "dry-run";
+  settings.inventoryScheduleType = String(settings.inventoryScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
+  settings.inventoryScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.inventoryScheduleEveryHours || 12) || 12));
+  settings.inventoryScheduleTimes = normalizeChannelScheduleTimes(settings.inventoryScheduleTimes || DEFAULT_CHANNEL_SETTINGS.inventoryScheduleTimes);
+  settings.shopifyShippingProfiles = normalizeShopifyShippingProfiles(settings.shopifyShippingProfiles);
+  settings.shopifyShippingProfilesSyncedAt = String(settings.shopifyShippingProfilesSyncedAt || "");
   return {
     id: channel.id || crypto.randomUUID(),
     name: channel.name || "Marketplace",
@@ -2724,6 +3602,41 @@ function normalizeChannel(channel = {}) {
     notes: channel.notes || "",
     settings
   };
+}
+
+function normalizeShopifyShippingProfiles(value = []) {
+  const rows = Array.isArray(value) ? value : [];
+  const byId = new Map();
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const id = String(row.id || row.gid || "").trim();
+    const name = String(row.name || row.title || "").trim();
+    if (!id && !name) continue;
+    const normalized = {
+      id,
+      name: name || id,
+      default: row.default === true || String(row.default || "").toLowerCase() === "true",
+      profileLocationGroupsCount: Number(row.profileLocationGroupsCount || row.locationGroupsCount || 0) || 0,
+      productVariantsCount: Number(row.productVariantsCount || row.variantsCount || 0) || 0
+    };
+    byId.set(id || normalized.name.toLowerCase(), normalized);
+  }
+  return [...byId.values()].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+}
+
+function normalizeChannelScheduleTimes(value = "") {
+  const values = (Array.isArray(value) ? value : String(value || "").split(/[,;\s]+/))
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .map((item) => {
+      const match = item.match(/^(\d{1,2}):([0-5]\d)$/);
+      if (!match) return "";
+      const hour = Number(match[1]);
+      if (hour < 0 || hour > 23) return "";
+      return `${String(hour).padStart(2, "0")}:${match[2]}`;
+    })
+    .filter(Boolean);
+  return [...new Set(values)].join(",") || DEFAULT_CHANNEL_SETTINGS.inventoryScheduleTimes;
 }
 
 function findChannelByName(db, name = "") {
@@ -2791,7 +3704,20 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
     workerTask: "shopify-inventory-update",
     workerPayload
   });
-  if (duplicate) return { duplicate, job: duplicate, workerPayload, inventoryTarget };
+  if (duplicate) {
+    appendChannelApiLog({
+      channel: "Shopify",
+      transport: "Job",
+      method: "QUEUE",
+      path: "shopify-inventory-update",
+      operation: apply ? "Inventory update already queued" : "Inventory dry run already queued",
+      statusCode: 202,
+      ok: true,
+      jobId: duplicate.id,
+      message: `${duplicate.operation || operation} is already ${String(duplicate.status || "queued").toLowerCase()}${inventoryTarget.warehouse?.name ? ` for ${inventoryTarget.warehouse.name}` : ""}.`
+    });
+    return { duplicate, job: duplicate, workerPayload, inventoryTarget };
+  }
   const schedulePrefix = options.scheduled ? "Scheduled " : "";
   const job = createImportJob(db, {
     section: "Products",
@@ -2811,6 +3737,17 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
   });
   upsertImportJobStore(job);
   if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  appendChannelApiLog({
+    channel: "Shopify",
+    transport: "Job",
+    method: "QUEUE",
+    path: "shopify-inventory-update",
+    operation: apply ? "Inventory update queued" : "Inventory dry run queued",
+    statusCode: 202,
+    ok: true,
+    jobId: job.id,
+    message: `${job.message} Location ${inventoryTarget.locationId || "not mapped"}; batch ${batchSize}; product batch ${productBatchSize};${limit ? ` limit ${limit};` : ""} pack mode ${packMode}.`
+  });
   return { job, workerPayload, inventoryTarget };
 }
 
@@ -2947,6 +3884,7 @@ function normalizeExportMapping(template = {}) {
     status: template.status || "active",
     mappings,
     notes: template.notes || "",
+    omitSyntheticShopifyVariantMetafields: template.omitSyntheticShopifyVariantMetafields === true,
     createdAt: template.createdAt || new Date().toISOString(),
     updatedAt: template.updatedAt || template.createdAt || new Date().toISOString()
   };
@@ -3208,9 +4146,13 @@ function workerJobLooksAbandoned(job = {}, workerStatus = {}) {
   const status = String(job.status || "").toLowerCase();
   if (status !== "running") return false;
   if (workerStatus.online) return false;
-  const updatedMs = new Date(job.workerLastSeenAt || job.updatedAt || job.startedAt || 0).getTime();
+  const updatedMs = Math.max(
+    new Date(job.workerLastSeenAt || 0).getTime() || 0,
+    new Date(job.updatedAt || 0).getTime() || 0,
+    new Date(job.startedAt || 0).getTime() || 0
+  );
   if (!updatedMs) return true;
-  const graceSeconds = Math.max(60, Number(workerStatus.staleAfterSeconds || 30) * 2);
+  const graceSeconds = Math.max(600, Number(workerStatus.staleAfterSeconds || 30) * 4);
   return Date.now() - updatedMs > graceSeconds * 1000;
 }
 
@@ -3319,11 +4261,23 @@ function pruneOrphanImportJobDirectories(jobs = []) {
 }
 
 function categoryMappingForProduct(db, item, channel = "shopify") {
-  const category = formatCategoryName(item.category || "").toLowerCase();
+  const category = effectiveMainCategoryName(item, readSystemSettingsStore(db.systemSettings || {})).toLowerCase();
   if (!category) return null;
   const settings = normalizeCategorySettings(db.categorySettings);
   const match = settings.find((row) => formatCategoryName(row.name || "").toLowerCase() === category || String(row.categoryId || "").trim().toLowerCase() === category);
   return match?.mappings?.[channel] || null;
+}
+
+function shopifyProductTypeForProduct(db, item = {}) {
+  const mapping = categoryMappingForProduct(db, item, "shopify") || {};
+  const category = effectiveMainCategoryName(item, readSystemSettingsStore(db.systemSettings || {}));
+  return sourceTextValue(
+    mapping.productType
+    || categoryTypeValue(category)
+    || item.productType
+    || item.shopifyProductType
+    || categoryTypeValue(item.category || item.mainCategory || "")
+  );
 }
 
 function slugPart(value) {
@@ -3353,7 +4307,7 @@ function productExportCache(db, item = {}) {
     shopifyHandle: "",
     shopifyMapping: categoryMappingForProduct(db, item, "shopify") || null,
     uomInfo: productUomInfo(item),
-    sellUnitCost: productSellUnitCost(item),
+    sellUnitCost: productSellUnitCost(item, db),
     imageUrls: productImageUrls(item)
   };
   cache.shopifyHandle = slugPart(cache.shopifyTitle || item.sku || item.id || "product");
@@ -3448,11 +4402,113 @@ function shopifyMoneyValue(value) {
   return number.toFixed(2);
 }
 
+function shopifyReferenceValue(value, type = "") {
+  const text = sourceTextValue(value);
+  if (!text) return "";
+  if (type === "product_reference") return /^gid:\/\/shopify\/Product\/\d+$/i.test(text) ? text : "";
+  if (type === "variant_reference") return /^gid:\/\/shopify\/ProductVariant\/\d+$/i.test(text) ? text : "";
+  return text;
+}
+
+function shopifyDumpMetafieldValue(item = {}, metafieldKey = "") {
+  const entry = Object.entries(SHOPIFY_DUMP_FIELD_METAFIELDS)
+    .find(([, config]) => String(config.key || "").toLowerCase() === String(metafieldKey || "").toLowerCase());
+  if (!entry) return undefined;
+  const [field, config] = entry;
+  const value = SHOPIFY_SHIPPING_CLASSIFICATION_METAFIELDS[field]
+    ? shopifyShippingMetafieldRawValue(item, field, config)
+    : item[field] ?? item.productManagerFields?.[config.key.replace(/^custom\./, "")] ?? item.productManagerFields?.[config.key.replace(/^custom\./, "").replace(/_/g, "")];
+  if (value === undefined || value === null || value === "") return "";
+  if (config.type === "money") return shopifyMoneyValue(value);
+  if (config.type === "dimension" || config.type === "weight") return shopifyMoneyValue(value);
+  if (config.type === "number_integer") {
+    const number = Math.round(Number(sourceNumberValue(value)));
+    return number > 0 ? String(number) : "";
+  }
+  if (config.type === "number_decimal") {
+    const number = Number(sourceNumberValue(value));
+    return Number.isFinite(number) ? String(number) : "";
+  }
+  if (config.type === "date_time") {
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : "";
+  }
+  if (config.type === "boolean") return sourceBooleanValue(value, false) ? "TRUE" : "FALSE";
+  if (config.type === "json") return typeof value === "string" ? value : JSON.stringify(value);
+  if (config.type === "product_reference" || config.type === "variant_reference") return shopifyReferenceValue(value, config.type);
+  if (config.type.startsWith("list.")) {
+    const values = Array.isArray(value) ? value : String(value).split(/[|,]/).map((part) => part.trim()).filter(Boolean);
+    return JSON.stringify(values);
+  }
+  return sourceTextValue(value);
+}
+
+function shopifyShippingMetafieldRawValue(item = {}, field = "", config = {}) {
+  if (["shippingClass", "shippingMethod", "shippingClassReason", "dimensionalWeight"].includes(field)) {
+    if (!productHasShippingMeasurements(item)) return "";
+    const classification = productShippingClassification(item);
+    if (field === "shippingClassReason") return classification.shippingClassReason;
+    return classification[field];
+  }
+  if (field === "itemHeight") return productShippingDimensionValue(item, "itemHeight", "item_height");
+  if (field === "itemLength") return productShippingDimensionValue(item, "itemLength", "item_length");
+  if (field === "itemWeight") return productShippingDimensionValue(item, "itemWeight", "item_weight");
+  if (field === "itemWidth") return productShippingDimensionValue(item, "itemWidth", "item_width");
+  if (field === "packageHeight") return productShippingDimensionValue(item, "packageHeight", "package_height");
+  if (field === "packageLength") return productShippingDimensionValue(item, "packageLength", "package_length");
+  if (field === "packageWeight") return productShippingDimensionValue(item, "packageWeight", "package_weight");
+  if (field === "packageWidth") return productShippingDimensionValue(item, "packageWidth", "package_width");
+  return item[field] ?? item.productManagerFields?.[config.key?.replace(/^custom\./, "") || ""] ?? "";
+}
+
+function shopifyAdminMetafieldValue(value, type = "") {
+  if (value === undefined || value === null || value === "") return "";
+  if (type === "dimension") {
+    const amount = Number(sourceNumberValue(value));
+    return amount > 0 ? JSON.stringify({ value: amount, unit: "INCHES" }) : "";
+  }
+  if (type === "weight") {
+    const amount = Number(sourceNumberValue(value));
+    return amount > 0 ? JSON.stringify({ value: amount, unit: "POUNDS" }) : "";
+  }
+  if (type === "number_decimal") {
+    const amount = Number(sourceNumberValue(value));
+    return amount > 0 ? String(amount) : "";
+  }
+  if (type === "number_integer") {
+    const amount = Math.round(Number(sourceNumberValue(value)));
+    return amount > 0 ? String(amount) : "";
+  }
+  if (type === "boolean") return sourceBooleanValue(value, false) ? "true" : "false";
+  if (type === "json") return typeof value === "string" ? value : JSON.stringify(value);
+  if (type.startsWith("list.")) {
+    const values = Array.isArray(value) ? value.map((part) => sourceTextValue(part)).filter(Boolean) : [sourceTextValue(value)].filter(Boolean);
+    return values.length ? JSON.stringify(values) : "";
+  }
+  return sourceTextValue(value);
+}
+
+function shopifyShippingClassificationMetafields(item = {}) {
+  const metafields = [];
+  for (const [field, config] of Object.entries(SHOPIFY_SHIPPING_CLASSIFICATION_METAFIELDS)) {
+    if (!config?.key) continue;
+    const [namespace, key] = config.key.split(".");
+    const rawValue = shopifyShippingMetafieldRawValue(item, field, config);
+    const value = shopifyAdminMetafieldValue(rawValue, config.type);
+    if (!value) continue;
+    metafields.push({ namespace, key, type: config.type, value });
+  }
+  return metafields;
+}
+
 function shopifyVariantPrice(item = {}, db = null) {
-  const settings = db ? findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS : DEFAULT_CHANNEL_SETTINGS;
-  const calculated = pricedFromCost(productSellUnitCost(item), settings.priceMarkupPercent);
-  const current = Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
-  return shopifyMoneyValue(Math.max(current, calculated));
+  const settings = {
+    ...DEFAULT_CHANNEL_SETTINGS,
+    ...(db ? findChannelByName(db, "Shopify")?.settings || {} : {}),
+    priceMarkupPercent: SHOPIFY_PRICE_MARKUP_PERCENT
+  };
+  const variant = systemProductVariants(item, db)[0] || {};
+  return shopifyMoneyValue(shopifyVariantWebsitePrice(item, variant, settings.priceMarkupPercent, db));
 }
 
 function deterministicMarkupPercent(seed = "") {
@@ -3462,6 +4518,7 @@ function deterministicMarkupPercent(seed = "") {
 }
 
 function shopifyCompareAtPrice(item = {}) {
+  if (!isClearanceItem(item)) return "";
   const price = Number(sourceNumberValue(item.websitePrice ?? item.price));
   if (!(price > 0)) return "";
   const percent = deterministicMarkupPercent(item.sku || item.id || item.title);
@@ -3511,6 +4568,7 @@ function shouldOmitShopifyExportColumn(mapping = {}, template = {}) {
 function exportMappingsForTemplate(template = {}) {
   const mappings = (template.mappings || []).filter((mapping) => !shouldOmitShopifyExportColumn(mapping, template));
   if (!isShopifyTemplate(template)) return mappings;
+  if (template.omitSyntheticShopifyVariantMetafields === true) return mappings;
   const columns = new Set(mappings.map((mapping) => String(mapping.externalColumn || "").trim().toLowerCase()));
   const synthetic = [
     { externalColumn: "Variant Metafield: custom.purchase_unit [single_line_text_field]", productField: "" },
@@ -3620,7 +4678,10 @@ function shopifyInventoryColumnValue(db, item = {}, column = "") {
   const warehouseName = warehouseNameFromInventoryColumn(column);
   if (!warehouseName) return undefined;
   if (/single\s+music/i.test(warehouseName)) return 0;
-  if (/^Inventory\s+Available:/i.test(column)) return inventoryAvailableQtyForWarehouse(item, warehouseName);
+  if (/^Inventory\s+Available:/i.test(column)) {
+    const replenishableQty = productReplenishableQty(item, db);
+    return replenishableQty > 0 ? replenishableQty : inventoryAvailableQtyForWarehouse(item, warehouseName);
+  }
   if (/^Inventory\s+On Hand:/i.test(column)) return inventoryOnHandQtyForWarehouse(item, warehouseName);
   if (/^Inventory\s+Incoming:/i.test(column)) return "";
   if (/^Inventory\s+(Committed|Reserved):/i.test(column)) return inventoryReservedQtyForWarehouse(item, warehouseName);
@@ -3644,21 +4705,60 @@ function shopifyUomVariantSku(baseSku = "", uom = {}) {
 }
 
 function shopifyPurchaseVariants(item = {}, db = null) {
-  const settings = db ? findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS : DEFAULT_CHANNEL_SETTINGS;
-  return systemProductVariants(item).map((variant) => {
-    const unitCost = Number(variant.unitCost || productSellUnitCost(item));
-    const price = Number(shopifyVariantPrice(item, db)) || pricedFromCost(unitCost, settings.priceMarkupPercent);
+  const settings = {
+    ...DEFAULT_CHANNEL_SETTINGS,
+    ...(db ? findChannelByName(db, "Shopify")?.settings || {} : {}),
+    priceMarkupPercent: SHOPIFY_PRICE_MARKUP_PERCENT
+  };
+  const statusMatches = item.shopifyVariantMatches && typeof item.shopifyVariantMatches === "object" ? item.shopifyVariantMatches : {};
+  const variants = systemProductVariants(item, db);
+  return variants.map((variant) => {
+    const matchKey = String(variant.sku || "").trim().toLowerCase();
+    const liveMatch = statusMatches[matchKey] || (variants.length === 1 ? shopifyStatusForSku(statusMatches, item.sku) : null) || null;
+    const unitCost = shopifyVariantPriceBasis(item, variant, db);
+    const price = shopifyVariantWebsitePrice(item, variant, settings.priceMarkupPercent, db);
     return {
       ...variant,
+      shopifyId: liveMatch?.shopifyId || variant.shopifyId || "",
+      shopifyVariantId: liveMatch?.shopifyVariantId || variant.shopifyVariantId || "",
+      shopifyHandle: liveMatch?.shopifyHandle || variant.shopifyHandle || "",
+      shopifyVariantSku: liveMatch?.shopifyVariantSku || liveMatch?.sku || variant.shopifyVariantSku || "",
+      shopifyLivePrice: liveMatch?.shopifyVariantPrice !== undefined && liveMatch?.shopifyVariantPrice !== "" ? Number(liveMatch.shopifyVariantPrice) : null,
+      shopifyLiveCompareAtPrice: liveMatch?.shopifyVariantCompareAtPrice !== undefined && liveMatch?.shopifyVariantCompareAtPrice !== "" ? Number(liveMatch.shopifyVariantCompareAtPrice) : null,
+      shopifyLiveInventoryQuantity: liveMatch?.shopifyVariantInventoryQuantity ?? null,
+      shopifyStatus: liveMatch?.shopifyStatus || variant.shopifyStatus || "",
+      shopifyPublished: liveMatch?.shopifyPublished ?? variant.shopifyPublished,
       key: variant.key || "sell-unit",
       optionName: variant.optionName || (Number(variant.uomQty || 1) > 1 ? "Purchase Unit" : "Title"),
       optionValue: variant.optionValue || (Number(variant.uomQty || 1) > 1 ? `Pack of ${Number(variant.uomQty || 1)}` : "Default Title"),
       unitCost,
       price,
-      compareAtPrice: shopifyMoneyValue(price * 1.2),
+      compareAtPrice: isClearanceItem(item) ? shopifyMoneyValue(price * 1.2) : "",
       note: variant.note || "Actual DataPlus system variant."
     };
   });
+}
+
+function shopifyPriceComparison(item = {}, db = null) {
+  const variants = shopifyPurchaseVariants(item, db);
+  const matched = variants.find((variant) => variant.shopifyVariantId && variant.shopifyLivePrice !== null && variant.shopifyLivePrice !== undefined)
+    || variants.find((variant) => variant.shopifyVariantId)
+    || variants[0]
+    || {};
+  const systemPrice = Number(matched.price ?? item.websitePrice ?? item.price ?? 0);
+  const livePrice = matched.shopifyLivePrice !== null && matched.shopifyLivePrice !== undefined ? Number(matched.shopifyLivePrice) : null;
+  const delta = livePrice !== null && Number.isFinite(livePrice) ? Math.round((systemPrice - livePrice) * 100) / 100 : null;
+  return {
+    systemPrice,
+    livePrice,
+    delta,
+    mismatch: livePrice !== null && Number.isFinite(livePrice) && Math.abs(delta) >= 0.01,
+    variantSku: matched.shopifyVariantSku || matched.sku || item.shopifyVariantSku || item.sku || "",
+    variantId: matched.shopifyVariantId || item.shopifyVariantId || "",
+    handle: matched.shopifyHandle || item.shopifyHandle || "",
+    compareAtPrice: matched.shopifyLiveCompareAtPrice ?? null,
+    inventoryQuantity: matched.shopifyLiveInventoryQuantity ?? null
+  };
 }
 
 function productIsCloseout(item = {}) {
@@ -3667,10 +4767,20 @@ function productIsCloseout(item = {}) {
   return tags.some((tag) => ["closeout", "to-be-discontinued"].includes(String(tag || "").trim().toLowerCase()));
 }
 
+function productBlockedFromShopifyWebsite(item = {}, db = null) {
+  return productIsCloseout(item) && productSellableQty(item, db) <= 0;
+}
+
 function productExportTags(item = {}) {
   const tags = sourceListValue(item.tags || []).map((tag) => String(tag || "").trim()).filter(Boolean);
   if (productIsCloseout(item)) {
     tags.push("closeout", "to-be-discontinued");
+  }
+  if (productHasShippingMeasurements(item)) {
+    const shipping = productShippingClassification(item);
+    if (shipping.shippingClass === "ltl") tags.push("shipping-ltl", "freight-required");
+    if (shipping.shippingClass === "oversize_parcel") tags.push("shipping-oversize-parcel", "oversize-parcel");
+    if (shipping.shippingClass === "parcel") tags.push("shipping-parcel", "ground-eligible");
   }
   const seen = new Set();
   return tags.filter((tag) => {
@@ -3689,24 +4799,32 @@ function productFieldValue(db, item, field, mapping = {}) {
   const cache = source === "shopify" ? productExportCache(db, item) : null;
   if (source === "shopify" && /^Row #$/i.test(column)) return Number(item.__shopifyVariantRow || 1);
   if (source === "shopify" && /^Top Row$/i.test(column)) return variantRow === 1 ? "TRUE" : "FALSE";
-  if (source === "shopify" && /^ID$/i.test(column)) return shopifyLegacyId(item.shopifyId);
+  if (source === "shopify" && /^ID$/i.test(column)) return shopifyLegacyId(variant?.shopifyId || item.shopifyId);
   if (source === "shopify" && /^Variant ID$/i.test(column)) return shopifyLegacyId(variant?.shopifyVariantId || item.shopifyVariantId);
+  if (source === "shopify" && /^Handle$/i.test(column)) return variant?.shopifyHandle || item.shopifyHandle || cache?.shopifyHandle || shopifyHandleForProduct(item);
+  if (source === "shopify" && /^Type$/i.test(column)) return shopifyProductTypeForProduct(db, item);
   if (source === "shopify" && /^Inventory\s+/.test(column)) {
     const inventoryValue = shopifyInventoryColumnValue(db, item, column);
     if (inventoryValue !== undefined) return inventoryValue;
   }
   if (source === "shopify" && /^Metafield:/i.test(column) && variantRow > 1) return "";
+  if (source === "shopify" && /^Metafield:\s*custom\./i.test(column)) {
+    const metafieldKey = column.replace(/^Metafield:\s*/i, "").trim().split(/\s/)[0];
+    const value = shopifyDumpMetafieldValue(item, metafieldKey);
+    if (value !== undefined) return value;
+  }
   if (source === "shopify" && /^Variant Metafield:\s*custom\.purchase_unit\s/i.test(column)) return variant?.optionValue || cache.uomInfo.display;
   if (source === "shopify" && /^Variant Metafield:\s*custom\.uom\s/i.test(column)) return variant?.uom || cache.uomInfo.code;
   if (source === "shopify" && /^Variant Metafield:\s*custom\.uom_qty\s/i.test(column)) return variant?.uomQty || cache.uomInfo.qty;
-  if (source === "shopify" && /^Variant Metafield:\s*custom\.sell_unit_cost\s/i.test(column)) return variant?.unitCost !== undefined ? Number(variant.unitCost).toFixed(2) : productSellUnitCost(item).toFixed(2);
+  if (source === "shopify" && /^Variant Metafield:\s*custom\.sell_unit_cost\s/i.test(column)) return variant?.unitCost !== undefined ? Number(variant.unitCost).toFixed(2) : productSellUnitCost(item, db).toFixed(2);
   if (source === "shopify" && /^Option1 Name$/i.test(column)) return variant?.optionName || (cache.uomInfo.isMultiUnit ? "Purchase Unit" : "Title");
   if (source === "shopify" && /^Option1 Value$/i.test(column)) return variant?.optionValue || (cache.uomInfo.isMultiUnit ? cache.uomInfo.display : "Default Title");
-  if (source === "shopify" && /^Variant SKU$/i.test(column)) return variant?.sku || item.sku || "";
+  if (source === "shopify" && /^Variant SKU$/i.test(column)) return variant?.shopifyVariantSku || variant?.sku || item.sku || "";
   if (source === "shopify" && /^Variant Price$/i.test(column)) return variant?.price !== undefined ? shopifyMoneyValue(variant.price) : shopifyVariantPrice(item, db);
   if (source === "shopify" && /^Variant Compare At Price$/i.test(column)) return variant?.compareAtPrice !== undefined ? shopifyMoneyValue(variant.compareAtPrice) : shopifyCompareAtPrice(item);
+  if (source === "shopify" && /^(Variant Cost|Cost per item)$/i.test(column)) return variant?.unitCost !== undefined ? shopifyMoneyValue(variant.unitCost) : shopifyMoneyValue(productSellUnitCost(item, db));
   if (source === "shopify" && /^Variant Weight$/i.test(column)) return shopifyVariantWeightValue(item, variant);
-  if (source === "shopify" && /^Variant Inventory Qty$/i.test(column)) return variant?.quantity ?? (Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
+  if (source === "shopify" && /^Variant Inventory Qty$/i.test(column)) return variant?.quantity ?? productSellableQty(item, db);
   if (source === "shopify" && /^Metafield:\s*custom\.uom\s/i.test(column)) return variant?.uom || cache.uomInfo.code;
   if (source === "shopify" && /^Metafield:\s*custom\.uom_qty\s/i.test(column)) return variant?.uomQty || cache.uomInfo.qty;
   if (source === "shopify" && /^Metafield:\s*custom\.item_height\s/i.test(column)) return shopifyDimensionSourceValue(item, "height", false);
@@ -3722,7 +4840,7 @@ function productFieldValue(db, item, field, mapping = {}) {
   if (source === "shopify" && /^Image Alt Text$/i.test(column)) return cache.shopifyTitle;
   if (/^Variant Price$/i.test(column)) return shopifyVariantPrice(item, db);
   if (/^Variant Compare At Price$/i.test(column) || field === "shopifyCompareAtPrice") return shopifyCompareAtPrice(item);
-  if (field === "available") return Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0);
+  if (field === "available") return productSellableQty(item, db);
   if (field === "vendor") return item.vendor ?? item.supplier ?? "";
   if (field === "qty") return item.qty ?? item.stockQty ?? "";
   if (field === "shopifyHandle") return cache?.shopifyHandle || shopifyHandleForProduct(item);
@@ -3730,6 +4848,7 @@ function productFieldValue(db, item, field, mapping = {}) {
   if (field === "tags") return productExportTags(item).join("|");
   if (field === "toBeDiscontinued") return productIsCloseout(item) ? "TRUE" : "FALSE";
   if (field === "closeoutEligible") return productIsCloseout(item) ? "TRUE" : "FALSE";
+  if (field === "listPrice" || field === "msrp") return isClearanceItem(item) ? item[field] ?? "" : "";
   if (field === "bulletPoints") return (item.bulletPoints || []).join("|");
   if (field === "sources") return Object.entries(item.sources || {}).map(([source, id]) => `${source}:${id}`).join(";");
   if (field === "shopifyCategoryId") return (cache?.shopifyMapping || categoryMappingForProduct(db, item, "shopify"))?.categoryId || "";
@@ -4380,6 +5499,19 @@ function matrixifyMenuItemId(...parts) {
   return smartCollectionHandle(parts.filter(Boolean).join("-"));
 }
 
+function uniqueMatrixifyMenuEntries(entries = []) {
+  const byHandle = new Map();
+  for (const entry of entries) {
+    const handle = String(entry?.collectionHandle || "").trim().toLowerCase();
+    if (!handle) continue;
+    const existing = byHandle.get(handle);
+    if (!existing || Number(entry.productCount || 0) > Number(existing.productCount || 0)) {
+      byHandle.set(handle, entry);
+    }
+  }
+  return [...byHandle.values()];
+}
+
 async function matrixifyMenuRows() {
   const categoryData = await publicCategoriesFast("", "main");
   const seedMap = menuMappingLookup(readShopifyMenuCollectionMapping());
@@ -4387,7 +5519,7 @@ async function matrixifyMenuRows() {
   const idRegistry = matrixifyMenuTemplateIds(templateRows);
   const orderRegistry = matrixifyMenuTemplateOrder(templateRows);
   const titleRegistry = matrixifyMenuTemplateTitles(templateRows);
-  const entries = (categoryData.categories || [])
+  const entries = uniqueMatrixifyMenuEntries((categoryData.categories || [])
     .filter((category) => Number(category.productCount || 0) > 0)
     .filter((category) => category.mappings?.shopify?.categoryId || category.mappings?.shopify?.categoryPath)
     .map((category) => {
@@ -4411,10 +5543,11 @@ async function matrixifyMenuRows() {
         collectionHandle,
         productType: seed?.["Product Type Rule"] || defaults.productType,
         originalCategoryPath: seed?.["Original Full Category Path"] || defaults.originalCategoryPath,
-        menuPath: seed?.["Menu Path"] || defaults.menuPath
+        menuPath: seed?.["Menu Path"] || defaults.menuPath,
+        productCount: Number(category.productCount || 0)
       };
     })
-    .filter((entry) => entry.collectionHandle && entry.label)
+    .filter((entry) => entry.collectionHandle && entry.label))
     .sort((a, b) => {
       const departmentDiff = orderRegistry.value(`department|${a.topDepartment}`) - orderRegistry.value(`department|${b.topDepartment}`);
       if (departmentDiff) return departmentDiff;
@@ -4781,9 +5914,10 @@ function mappedProductsCsv(db, template, items, options = {}) {
   const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
   const exportItems = items.flatMap((item) => isShopifyTemplate(template)
     ? (() => {
-      const shopifyItem = withShopifyStatus(sourceEnrichedItem(item, sourceEnrichmentMap), shopifyStatusMap);
-      productExportCache(db, shopifyItem);
-      return shopifyPurchaseVariants(shopifyItem, db).map((variant, index) => ({ ...shopifyItem, __shopifyVariant: variant, __shopifyVariantRow: index + 1 }));
+      const shopifyItem = withShopifyStatus(sourceEnrichedItem(item, sourceEnrichmentMap), shopifyStatusMap, db);
+      const pricedItem = shopifyPricedExportItem(shopifyItem, null, db);
+      productExportCache(db, pricedItem);
+      return shopifyPurchaseVariants(pricedItem, db).map((variant, index) => ({ ...pricedItem, __shopifyVariant: variant, __shopifyVariantRow: index + 1 }));
     })()
     : [item]);
   const rows = exportItems.map((item) => mappings.map((mapping) => {
@@ -4792,6 +5926,98 @@ function mappedProductsCsv(db, template, items, options = {}) {
     return formatted === "" || formatted === undefined || formatted === null ? mapping.defaultValue || "" : formatted;
   }));
   return [headers, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\n");
+}
+
+function hasUsableShopifyExportPricing(item = {}) {
+  const cost = sourceCatalogCost(item);
+  const sellUnitCost = productSellUnitCost({ ...item, sourceCost: cost });
+  return websitePriceFromRule(item, sellUnitCost || cost, SHOPIFY_PRICE_MARKUP_PERCENT) > 0;
+}
+
+function titleLooksLikeSku(value = "", sku = "") {
+  const title = sourceTextValue(value).toLowerCase();
+  const key = sourceTextValue(sku).toLowerCase();
+  return Boolean(title && key && title === key);
+}
+
+function mergeSourceCatalogExportFallback(item = {}, sourceItem = null) {
+  if (!sourceItem) return item;
+  const source = normalizeCatalogProductForInventory(sourceItem);
+  if (!source?.sku) return item;
+  const merged = { ...item };
+  for (const field of [
+    "title", "marketplaceTitle", "brand", "sourceBrand", "manufacturer", "mfrPartNumber",
+    "vendorSku", "supplier", "supplierCode", "barcode", "uom", "uomQty", "minQuantity",
+    "quantityIncrements", "stockStatus", "countryOfOrigin", "sourceCategory", "vendorCategory",
+    "defaultImage", "originalImage", "shortDescription", "longDescription", "vendorDescription"
+  ]) {
+    const current = sourceTextValue(merged[field]);
+    const incoming = sourceTextValue(source[field]);
+    if (!incoming) continue;
+    if (!current || titleLooksLikeSku(current, item.sku)) merged[field] = source[field];
+  }
+  for (const field of ["stockQty", "qty", "toBeDiscontinued", "closeoutEligible"]) {
+    if (source[field] !== undefined && source[field] !== null && source[field] !== "") merged[field] = source[field];
+  }
+  for (const field of [
+    "cost", "sourceCost", "sellUnitCost", "price", "websitePrice", "vendorWebsitePrice",
+    "minimumAllowedPrice", "fobPrice", "listPrice", "msrp",
+    "itemHeight", "itemLength", "itemWeight", "itemWidth",
+    "packageHeight", "packageLength", "packageWeight", "packageWidth",
+    "dimensionalWeight"
+  ]) {
+    if (!(Number(sourceNumberValue(merged[field])) > 0) && Number(sourceNumberValue(source[field])) > 0) {
+      merged[field] = source[field];
+    }
+  }
+  if ((!Array.isArray(merged.images) || !merged.images.length) && Array.isArray(source.images)) merged.images = source.images;
+  merged.productManagerFields = Object.keys(merged.productManagerFields || {}).length ? merged.productManagerFields : source.productManagerFields;
+  merged.original = merged.original || source.original;
+  merged.sources = { ...(source.sources || {}), ...(merged.sources || {}), sourceCatalogExportFallback: source.sku };
+  return merged;
+}
+
+async function sourceCatalogExportFallbackMap(items = []) {
+  if (!postgres.isPostgresEnabled()) return new Map();
+  const needsFallback = (Array.isArray(items) ? items : []).filter((item) => {
+    if (!item?.sku) return false;
+    const vendorWebsitePrice = Number(sourceNumberValue(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price ?? 0));
+    const missingText = ["shortDescription", "longDescription"].some((field) => !sourceTextValue(item[field]));
+    const missingMeasurement = [
+      "itemHeight", "itemLength", "itemWeight", "itemWidth",
+      "packageHeight", "packageLength", "packageWeight", "packageWidth"
+    ].some((field) => !(Number(sourceNumberValue(item[field])) > 0));
+    const missingCore = ["brand", "manufacturer", "mfrPartNumber", "vendorSku", "uom", "uomQty"].some((field) => !sourceTextValue(item[field]));
+    return !hasUsableShopifyExportPricing(item) || !(vendorWebsitePrice > 0) || missingText || missingMeasurement || missingCore;
+  });
+  if (!needsFallback.length) return new Map();
+  const rows = await postgres.readVendorCatalogItemsBySkus(needsFallback.map((item) => item.sku)).catch((error) => {
+    console.warn("Unable to load source catalog export fallback pricing:", error.message);
+    return [];
+  });
+  const map = new Map();
+  for (const row of rows || []) {
+    for (const key of [row.sku, row.sourceSku, row.internalSku, row.vendorSku]) {
+      const normalized = sourceTextValue(key).toLowerCase();
+      if (normalized && !map.has(normalized)) map.set(normalized, row);
+    }
+  }
+  return map;
+}
+
+function shopifyPricedExportItem(item = {}, sourceFallbackMap = null, db = null) {
+  const fallback = sourceFallbackMap?.get?.(sourceTextValue(item.sku).toLowerCase()) || null;
+  const exportItem = mergeSourceCatalogExportFallback(item, fallback);
+  const cost = sourceCatalogCost(exportItem);
+  const pricedItem = { ...exportItem, cost, sourceCost: cost };
+  const variant = systemProductVariants(pricedItem, db)[0] || {};
+  const websitePrice = shopifyVariantWebsitePrice(pricedItem, variant, SHOPIFY_PRICE_MARKUP_PERCENT, db);
+  return {
+    ...pricedItem,
+    price: websitePrice || pricedItem.price,
+    websitePrice: websitePrice || pricedItem.websitePrice,
+    sellUnitCost: shopifyVariantPriceBasis(pricedItem, variant, db)
+  };
 }
 
 function mappedProductsCsvRowCount(db, template, items = []) {
@@ -4810,9 +6036,11 @@ async function mappedProductsCsvAsync(db, template, items, options = {}) {
   const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
   const shopifyStatusMap = isShopifyTemplate(template) ? (options.shopifyStatusMap || readShopifyStatusMapSync()) : {};
   const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
+  const shopifySourceFallbackMap = isShopifyTemplate(template) ? await sourceCatalogExportFallbackMap(items) : null;
   for (let index = 0; index < total; index += 1) {
     if (isCanceled()) throw new Error("Job was canceled.");
-    const item = isShopifyTemplate(template) ? withShopifyStatus(sourceEnrichedItem(items[index], sourceEnrichmentMap), shopifyStatusMap) : sourceEnrichedItem(items[index], sourceEnrichmentMap);
+    const sourceItem = isShopifyTemplate(template) ? withShopifyStatus(sourceEnrichedItem(items[index], sourceEnrichmentMap), shopifyStatusMap, db) : sourceEnrichedItem(items[index], sourceEnrichmentMap);
+    const item = isShopifyTemplate(template) ? shopifyPricedExportItem(sourceItem, shopifySourceFallbackMap, db) : sourceItem;
     if (isShopifyTemplate(template)) productExportCache(db, item);
     const exportItems = isShopifyTemplate(template)
       ? shopifyPurchaseVariants(item, db).map((variant, variantIndex) => ({ ...item, __shopifyVariant: variant, __shopifyVariantRow: variantIndex + 1 }))
@@ -4858,6 +6086,7 @@ async function mappedProductsCsvFileAsync(db, template, items, filePath, options
   const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
   const shopifyStatusMap = isShopifyTemplate(template) ? (options.shopifyStatusMap || readShopifyStatusMapSync()) : {};
   const sourceEnrichmentMap = options.sourceEnrichmentMap || readProductSourceEnrichmentSync();
+  const shopifySourceFallbackMap = isShopifyTemplate(template) ? await sourceCatalogExportFallbackMap(items) : null;
   let outputRows = 0;
   const lineBuffer = [];
   const flushLineBuffer = async () => {
@@ -4869,7 +6098,8 @@ async function mappedProductsCsvFileAsync(db, template, items, filePath, options
     await writeStreamText(stream, `${headers.map(escapeCsv).join(",")}\n`);
     for (let index = 0; index < total; index += 1) {
       if (isCanceled()) throw new Error("Job was canceled.");
-      const item = isShopifyTemplate(template) ? withShopifyStatus(sourceEnrichedItem(items[index], sourceEnrichmentMap), shopifyStatusMap) : sourceEnrichedItem(items[index], sourceEnrichmentMap);
+      const sourceItem = isShopifyTemplate(template) ? withShopifyStatus(sourceEnrichedItem(items[index], sourceEnrichmentMap), shopifyStatusMap, db) : sourceEnrichedItem(items[index], sourceEnrichmentMap);
+      const item = isShopifyTemplate(template) ? shopifyPricedExportItem(sourceItem, shopifySourceFallbackMap, db) : sourceItem;
       if (isShopifyTemplate(template)) productExportCache(db, item);
       const exportItems = isShopifyTemplate(template)
         ? shopifyPurchaseVariants(item, db).map((variant, variantIndex) => ({ ...item, __shopifyVariant: variant, __shopifyVariantRow: variantIndex + 1 }))
@@ -4936,10 +6166,12 @@ async function mappedProductsCsvPostgresFileAsync(db, template, filePath, option
     await new Promise((resolve) => setImmediate(resolve));
     if (isCanceled()) throw new Error("Job was canceled.");
   };
-  const writeProduct = async (sourceItem) => {
-    const item = shopifyTemplate
-      ? withShopifyStatus(sourceEnrichedItem(sourceItem, sourceEnrichmentMap), shopifyStatusMap)
+  const writeProduct = async (sourceItem, sourceFallbackMap = null) => {
+    const enrichedItem = shopifyTemplate
+      ? withShopifyStatus(sourceEnrichedItem(sourceItem, sourceEnrichmentMap), shopifyStatusMap, db)
       : sourceEnrichedItem(sourceItem, sourceEnrichmentMap);
+    const item = shopifyTemplate ? shopifyPricedExportItem(enrichedItem, sourceFallbackMap, db) : enrichedItem;
+    if (shopifyTemplate && !options.includeBlockedShopifyProducts && productBlockedFromShopifyWebsite(item)) return;
     if (shopifyTemplate) productExportCache(db, item);
     const exportItems = shopifyTemplate
       ? shopifyPurchaseVariants(item, db).map((variant, variantIndex) => ({ ...item, __shopifyVariant: variant, __shopifyVariantRow: variantIndex + 1 }))
@@ -4962,10 +6194,12 @@ async function mappedProductsCsvPostgresFileAsync(db, template, filePath, option
   try {
     await writeStreamText(stream, `${headers.map(escapeCsv).join(",")}\n`);
     if (selectedSkus.length) {
+      const selectedFallbackMap = shopifyTemplate ? await sourceCatalogExportFallbackMap(selectedSkus.map((sku) => ({ sku }))) : null;
       for (const sku of selectedSkus) {
         if (isCanceled()) throw new Error("Job was canceled.");
         const item = await postgres.readProductByKey(sku);
-        if (item) await writeProduct(item);
+        if (!item) continue;
+        await writeProduct(item, selectedFallbackMap);
         processedProducts += 1;
         if (processedProducts % yieldEvery === 0) await checkpoint(totalProducts);
         if (processedProducts === totalProducts || processedProducts % batchSize === 0) {
@@ -4978,9 +6212,10 @@ async function mappedProductsCsvPostgresFileAsync(db, template, filePath, option
         const result = await postgres.listProducts({ q: query, filters, page, limit: batchSize });
         const items = result?.items || result?.inventory || [];
         if (!items.length) break;
+        const pageFallbackMap = shopifyTemplate ? await sourceCatalogExportFallbackMap(items) : null;
         for (const item of items) {
           if (isCanceled()) throw new Error("Job was canceled.");
-          await writeProduct(item);
+          await writeProduct(item, pageFallbackMap);
           processedProducts += 1;
           if (processedProducts % yieldEvery === 0) await checkpoint(result.total || totalProducts);
         }
@@ -5034,9 +6269,10 @@ async function mappedSourceCatalogCsvPostgresFileAsync(db, template, filePath, o
     const decorated = decorateSourceCatalogProduct(normalizeCatalogProductForInventory(sourceItem), overrides, productsBySku, vendorMappings);
     if (!decorated || decorated.sourceCatalogDeleted) return;
     const sourceProduct = catalogSummary(decorated);
-    const item = isShopifyTemplate(template)
-      ? withShopifyStatus(sourceEnrichedItem(sourceProduct, sourceEnrichmentMap), shopifyStatusMap)
+    const enrichedItem = isShopifyTemplate(template)
+      ? withShopifyStatus(sourceEnrichedItem(sourceProduct, sourceEnrichmentMap), shopifyStatusMap, db)
       : sourceEnrichedItem(sourceProduct, sourceEnrichmentMap);
+    const item = isShopifyTemplate(template) ? shopifyPricedExportItem(enrichedItem, null, db) : enrichedItem;
     if (isShopifyTemplate(template)) productExportCache(db, item);
     const exportItems = isShopifyTemplate(template)
       ? shopifyPurchaseVariants(item, db).map((variant, variantIndex) => ({ ...item, __shopifyVariant: variant, __shopifyVariantRow: variantIndex + 1 }))
@@ -5056,7 +6292,7 @@ async function mappedSourceCatalogCsvPostgresFileAsync(db, template, filePath, o
     await writeStreamText(stream, `${headers.map(escapeCsv).join(",")}\n`);
     for (let page = 1; processedProducts < maxItems; page += 1) {
       if (isCanceled()) throw new Error("Job was canceled.");
-      const result = await postgres.listVendorCatalogItems({ query, filters, page, limit: Math.min(batchSize, maxItems - processedProducts) });
+      const result = await postgres.listVendorCatalogItems({ query, filters: catalogFiltersWithIndexedSupplierKeys(filters), page, limit: Math.min(batchSize, maxItems - processedProducts) });
       const items = result?.items || [];
       if (page === 1) {
         matched = Number(result?.total || 0);
@@ -5225,6 +6461,9 @@ function normalizeCategorySettings(settings = []) {
         returnPolicy: category.defaults?.returnPolicy || ""
       },
       requiredAttributes: Array.isArray(category.requiredAttributes) ? category.requiredAttributes : [],
+      createdBy: category.createdBy || "",
+      updatedBy: category.updatedBy || category.createdBy || "",
+      createdSource: category.createdSource || category.source || "",
       updatedAt: category.updatedAt || category.createdAt || new Date().toISOString(),
       createdAt: category.createdAt || new Date().toISOString()
     };
@@ -5563,6 +6802,174 @@ function searchShopifyTaxonomy(query = "", limit = 20) {
   };
 }
 
+function shopifyTaxonomyMatchTokens(value = "") {
+  const stop = new Set([
+    "and", "or", "the", "for", "with", "without", "of", "to", "a", "an", "in", "on", "by",
+    "other", "misc", "miscellaneous", "accessory", "accessories", "supplies", "products",
+    "product", "equipment", "commercial", "general", "category", "categories"
+  ]);
+  const synonyms = {
+    faucets: "faucet",
+    sinks: "sink",
+    bathrooms: "bathroom",
+    cleaners: "cleaner",
+    cleaning: "clean",
+    mowers: "mower",
+    tractors: "tractor",
+    trimmers: "trimmer",
+    edgers: "edger",
+    blowers: "blower",
+    fittings: "fitting",
+    fasteners: "fastener",
+    screws: "screw",
+    nails: "nail",
+    paints: "paint",
+    primers: "primer",
+    aerosols: "aerosol",
+    brushes: "brush",
+    hoses: "hose",
+    valves: "valve",
+    pipes: "pipe",
+    tools: "tool",
+    lights: "light",
+    lamps: "lamp",
+    batteries: "battery",
+    knives: "knife",
+    cards: "card"
+  };
+  return String(value || "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 2 && !stop.has(token))
+    .map((token) => synonyms[token] || token.replace(/ies$/, "y").replace(/s$/, ""))
+    .filter((token) => token.length > 2 && !stop.has(token));
+}
+
+function buildShopifyTaxonomyMatchIndex() {
+  const index = readShopifyTaxonomyIndex();
+  return {
+    version: index.version || "",
+    categories: (index.categories || []).map((category) => {
+      const compact = compactShopifyCategory(category);
+      const leafTokens = shopifyTaxonomyMatchTokens(compact.name);
+      const pathTokens = shopifyTaxonomyMatchTokens(compact.fullName);
+      return {
+        category: compact,
+        leafTokens,
+        pathTokens,
+        tokenSet: new Set([...leafTokens, ...pathTokens]),
+        leafSet: new Set(leafTokens),
+        pathText: String(compact.fullName || compact.name || "").toLowerCase()
+      };
+    }).filter((row) => row.category.id && row.category.fullName)
+  };
+}
+
+function scoreShopifyTaxonomyMatch(sourceCategory = "", row = {}) {
+  const sourceParts = String(sourceCategory || "").split(">").map((part) => part.trim()).filter(Boolean);
+  const sourceLeaf = sourceParts[sourceParts.length - 1] || sourceCategory;
+  const sourceTokens = shopifyTaxonomyMatchTokens(sourceCategory);
+  const sourceLeafTokens = shopifyTaxonomyMatchTokens(sourceLeaf);
+  if (!sourceTokens.length) return 0;
+  const sourceSet = new Set(sourceTokens);
+  const sourceLeafSet = new Set(sourceLeafTokens);
+  let score = 0;
+  for (const token of sourceSet) {
+    if (row.leafSet?.has(token)) score += 8;
+    else if (row.tokenSet?.has(token)) score += 3;
+  }
+  for (const token of sourceLeafSet) {
+    if (row.leafSet?.has(token)) score += 10;
+    else if (row.tokenSet?.has(token)) score += 4;
+  }
+  const sourceText = String(sourceCategory || "").toLowerCase();
+  const leafText = String(sourceLeaf || "").toLowerCase();
+  const targetPath = row.pathText || "";
+  if (leafText && targetPath.includes(leafText.replace(/[^a-z0-9]+/g, " ").trim())) score += 16;
+  if (/paint|primer|stain|aerosol|enamel/.test(sourceText) && /hardware|paint|decor/.test(targetPath)) score += 7;
+  if (/plumb|pipe|faucet|sink|valve|fitting/.test(sourceText) && /hardware|plumbing|building materials|kitchen|bath/.test(targetPath)) score += 7;
+  if (/lawn|garden|mower|trimmer|edger|blower|outdoor|tractor/.test(sourceText) && /lawn|garden|outdoor|hardware/.test(targetPath)) score += 7;
+  if (/fastener|screw|nail|bolt|washer|anchor/.test(sourceText) && /hardware|fastener|building materials/.test(targetPath)) score += 7;
+  if (/clean|janitorial|mold|mildew|chemical/.test(sourceText) && /clean|household|hardware/.test(targetPath)) score += 7;
+  if (/food service|hospitality|kitchen|storage/.test(sourceText) && /kitchen|dining|food|business/.test(targetPath)) score += 6;
+  if (/electrical|lighting|receptacle|switch|battery|wire/.test(sourceText) && /electrical|lighting|hardware/.test(targetPath)) score += 7;
+  if (/automotive|vehicle|fleet/.test(sourceText) && /vehicle|automotive/.test(targetPath)) score += 8;
+  if (/medical|lab|exercise|fitness|sport/.test(sourceText) && /sport|medical|health/.test(targetPath)) score += 6;
+  if (/hardware|farm|plumb|fastener|lawn|garden|paint|electrical|clean/.test(sourceText) && /arts & entertainment|apparel|jewelry|media|software|religious|baby/.test(targetPath)) score -= 28;
+  if (/\bcard\b/.test(sourceText) && !/credit|gift|greeting|memory|playing/.test(sourceText) && /\bcard\b/.test(targetPath)) score -= 14;
+  score -= Math.max(0, Number(row.category.level || 0) - 4);
+  return score;
+}
+
+function bestShopifyTaxonomyMatch(sourceCategory = "", matchIndex = buildShopifyTaxonomyMatchIndex()) {
+  const sourceTokens = new Set(shopifyTaxonomyMatchTokens(sourceCategory));
+  if (!sourceTokens.size) return null;
+  let best = null;
+  for (const row of matchIndex.categories || []) {
+    let hasOverlap = false;
+    for (const token of sourceTokens) {
+      if (row.tokenSet.has(token)) {
+        hasOverlap = true;
+        break;
+      }
+    }
+    if (!hasOverlap) continue;
+    const score = scoreShopifyTaxonomyMatch(sourceCategory, row);
+    if (!best || score > best.score || (score === best.score && row.category.level > best.level)) {
+      best = { ...row.category, score };
+    }
+  }
+  return best;
+}
+
+async function autoMapShopifyCategories(db, options = {}) {
+  const scope = options.scope === "source" ? "source" : "main";
+  const overwrite = Boolean(options.overwrite);
+  const refreshSuggestions = Boolean(options.refreshSuggestions);
+  const limit = Math.max(1, Math.min(Number(options.limit || 10000), 25000));
+  const minScore = Math.max(1, Number(options.minScore || 12));
+  const rows = publicCategories(db, "", scope).categories
+    .filter((category) => {
+      const mapping = category.mappings?.shopify || {};
+      const autoSuggested = /auto-suggested closest shopify taxonomy/i.test(String(mapping.notes || ""));
+      return overwrite || !(mapping.categoryId || mapping.categoryPath) || (refreshSuggestions && autoSuggested);
+    })
+    .sort((a, b) => Number(b.productCount || 0) - Number(a.productCount || 0) || a.name.localeCompare(b.name))
+    .slice(0, limit);
+  const matchIndex = buildShopifyTaxonomyMatchIndex();
+  const results = [];
+  let mapped = 0;
+  let missing = 0;
+  for (const row of rows) {
+    const match = bestShopifyTaxonomyMatch(row.name, matchIndex);
+    if (!match || Number(match.score || 0) < minScore) {
+      missing += 1;
+      results.push({ category: row.name, status: "missing", score: match?.score || 0, message: "No close Shopify taxonomy match found." });
+      continue;
+    }
+    const setting = findOrCreateCategorySetting(db, row.name);
+    setting.mappings.shopify = normalizeChannelCategoryMapping({
+      ...setting.mappings.shopify,
+      categoryId: match.id,
+      categoryPath: match.fullName || match.name,
+      categoryHandle: match.handle,
+      taxonomyVersion: matchIndex.version,
+      googleCategory: match.googleCategory,
+      attributes: match.attributes,
+      status: "needs_review",
+      notes: `Auto-suggested closest Shopify taxonomy match from "${row.name}" with score ${Number(match.score || 0).toFixed(1)}. Review before pushing taxonomy to Shopify.`
+    });
+    setting.status = "needs_review";
+    setting.updatedAt = new Date().toISOString();
+    mapped += 1;
+    results.push({ category: row.name, status: "needs_review", score: match.score, shopifyCategoryId: match.id, shopifyCategoryPath: match.fullName || match.name });
+  }
+  return { requested: rows.length, mapped, missing, results, scope, taxonomyVersion: matchIndex.version, minScore };
+}
+
 function enrichShopifyCategoryMapping(mapping = {}) {
   const next = { ...mapping };
   const shopifyIndex = readShopifyTaxonomyIndex();
@@ -5797,10 +7204,34 @@ function categoryMappingSummary(category, saved) {
   };
 }
 
-function publicCategoryRow(category, settings, scope) {
+function categorySourceMappingCount(vendorMappings = {}, categoryName = "") {
+  const key = formatCategoryName(categoryName).toLowerCase();
+  if (!key) return 0;
+  return Object.values(normalizeVendorCategoryMappings(vendorMappings))
+    .filter((mapping) => formatCategoryName(mapping.mainCategory).toLowerCase() === key)
+    .length;
+}
+
+function categoryDeleteBlockers(category = {}) {
+  const blockers = [];
+  if (Number(category.productCount || 0) > 0) blockers.push(`${Number(category.productCount || 0).toLocaleString()} products use this category`);
+  if (Number(category.sourceMappingCount || 0) > 0) blockers.push(`${Number(category.sourceMappingCount || 0).toLocaleString()} source categories map here`);
+  return blockers;
+}
+
+function publicCategoryRow(category, settings, scope, context = {}) {
   const categoryName = formatCategoryName(category.name);
   const saved = categorySavedSettings(settings, { ...category, name: categoryName });
   const { mappings, mappingCount, missingMappings } = categoryMappingSummary(category, saved);
+  const savedExists = Boolean(saved.name);
+  const sourceMappingCount = Number(context.sourceMappingCounts?.get(categoryName.toLowerCase()) || category.sourceMappingCount || 0);
+  const productCount = Number(category.productCount || 0);
+  const lifecycle = !savedExists && productCount > 0 ? "new" : savedExists && productCount === 0 ? "outdated" : "current";
+  const createdSource = saved.createdSource || category.createdSource || (scope === "main" && productCount > 0 ? "system:true-value" : "manual");
+  const createdByLabel = createdSource === "system:true-value"
+    ? "System - True Value"
+    : (saved.createdBy || category.createdBy || "Manual");
+  const blockers = categoryDeleteBlockers({ ...category, productCount, sourceMappingCount });
   return {
     ...category,
     scope,
@@ -5819,6 +7250,17 @@ function publicCategoryRow(category, settings, scope) {
     smartCollection: normalizeSmartCollectionProfile(saved.smartCollection || saved.shopifyCollection || {}, categoryName),
     defaults: normalizeCategorySettings([{ ...saved, name: categoryName, categoryId: category.id }])[0].defaults,
     requiredAttributes: Array.isArray(saved.requiredAttributes) ? saved.requiredAttributes : [],
+    savedExists,
+    createdBy: saved.createdBy || category.createdBy || "",
+    updatedBy: saved.updatedBy || category.updatedBy || "",
+    createdSource,
+    createdByLabel,
+    createdAt: saved.createdAt || category.createdAt || "",
+    updatedAt: saved.updatedAt || category.updatedAt || "",
+    lifecycle,
+    sourceMappingCount,
+    canDelete: blockers.length === 0,
+    deleteBlockers: blockers,
     mappingCount,
     missingMappings
   };
@@ -5842,27 +7284,13 @@ function aggregateMainCatalogCategories(db) {
         topBrands: Array.isArray(rawRow.topBrands) ? rawRow.topBrands : []
       });
     }
-    for (const setting of normalizeCategorySettings(db.categorySettings)) {
-      const name = formatCategoryName(setting.name || "");
-      if (!name || byCategory.has(name.toLowerCase())) continue;
-      const identity = categoryIdentity(name, "main");
-      byCategory.set(name.toLowerCase(), {
-        id: identity.id,
-        categoryId: identity.id,
-        name,
-        productCount: 0,
-        activeProductCount: 0,
-        stockProductCount: 0,
-        hazardousProductCount: 0,
-        topVendors: [],
-        topBrands: []
-      });
-    }
     return [...byCategory.values()].sort((a, b) => b.productCount - a.productCount || a.name.localeCompare(b.name));
   }
   const byCategory = new Map();
+  const systemSettings = readSystemSettingsStore(db.systemSettings || {});
   for (const item of db.inventory || []) {
-    const name = item.categoryVerified ? (formatCategoryName(item.category || item.mainCategory || "Uncategorized") || "Uncategorized") : "Uncategorized";
+    const promoted = applySourceCategoryMainPromotion(item, systemSettings);
+    const name = promoted.categoryVerified ? (formatCategoryName(promoted.category || promoted.mainCategory || "Uncategorized") || "Uncategorized") : "Uncategorized";
     const key = name.toLowerCase();
     if (!byCategory.has(key)) {
       const identity = categoryIdentity(name, "main");
@@ -5928,11 +7356,15 @@ function sourceCatalogCategoryRows() {
 }
 
 function categoryCoverage(db) {
+  if (db.__categoryCoverageOverride) return db.__categoryCoverageOverride;
   const settings = normalizeCategorySettings(db.categorySettings);
   const mainRows = aggregateMainCatalogCategories(db);
   const sourceRows = sourceCatalogCategoryRows().rows;
   const vendorMappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings);
-  const mappedMainNames = new Set(settings.map((row) => formatCategoryName(row.name).toLowerCase()).filter(Boolean));
+  const mainRowNames = new Set(mainRows.map((row) => formatCategoryName(row.name).toLowerCase()).filter(Boolean));
+  const mappedMainNames = new Set(settings
+    .map((row) => formatCategoryName(row.name).toLowerCase())
+    .filter((name) => name && mainRowNames.has(name)));
   for (const row of mainRows) mappedMainNames.add(formatCategoryName(row.name).toLowerCase());
   const shopifyMapped = settings.filter((row) => row.mappings?.shopify?.categoryPath || row.mappings?.shopify?.categoryId);
   const shopifyWithTaxonomyId = shopifyMapped.filter((row) => row.mappings?.shopify?.categoryId);
@@ -6388,12 +7820,21 @@ function importErrorMessages(rows = []) {
 
 function publicCategories(db, query = "", scope = "source") {
   const settings = categorySettingsMap(db);
+  const vendorMappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings);
+  const sourceMappingCounts = new Map();
+  for (const mapping of Object.values(vendorMappings)) {
+    const key = formatCategoryName(mapping.mainCategory).toLowerCase();
+    if (key) sourceMappingCounts.set(key, (sourceMappingCounts.get(key) || 0) + 1);
+  }
   const q = String(query || "").trim().toLowerCase();
   const normalizedScope = scope === "main" ? "main" : "source";
   const source = normalizedScope === "main"
     ? { rows: aggregateMainCatalogCategories(db), index: { generatedAt: "", catalogImportedAt: "" } }
     : sourceCatalogCategoryRows();
-  const rows = source.rows.map((category) => publicCategoryRow(category, settings, normalizedScope)).filter((category) => !q || `${category.name} ${category.status} ${category.notes} ${(category.topVendors || []).map((v) => v.name).join(" ")}`.toLowerCase().includes(q));
+  const matchingRows = q
+    ? source.rows.filter((category) => `${category.name || ""} ${category.status || ""} ${category.notes || ""} ${(category.topVendors || []).map((v) => v.name).join(" ")}`.toLowerCase().includes(q))
+    : source.rows;
+  const rows = matchingRows.map((category) => publicCategoryRow(category, settings, normalizedScope, { sourceMappingCounts }));
   return {
     categories: rows,
     total: rows.length,
@@ -6401,6 +7842,272 @@ function publicCategories(db, query = "", scope = "source") {
     coverage: categoryCoverage(db),
     indexGeneratedAt: source.index.generatedAt || "",
     catalogImportedAt: source.index.catalogImportedAt || ""
+  };
+}
+
+function compactPublicCategoryMapping(mapping = {}) {
+  const normalized = normalizeChannelCategoryMapping(mapping || {});
+  const hasMapping = Boolean(normalized.categoryId || normalized.categoryPath || normalized.collectionHandle || normalized.categoryHandle);
+  const hasReview = /review/i.test(`${normalized.status || ""} ${normalized.notes || ""}`);
+  if (!hasMapping && !hasReview) return null;
+  return {
+    categoryId: normalized.categoryId || "",
+    categoryPath: normalized.categoryPath || "",
+    categoryHandle: normalized.categoryHandle || "",
+    collectionHandle: normalized.collectionHandle || "",
+    attributeCount: Array.isArray(normalized.attributes) ? normalized.attributes.length : 0,
+    status: normalized.status || (hasMapping ? "mapped" : "missing"),
+    review: hasReview
+  };
+}
+
+function compactPublicSmartCollection(profile = {}) {
+  const normalized = normalizeSmartCollectionProfile(profile || {});
+  const result = {};
+  if (normalized.enabled === false) result.enabled = false;
+  if (normalized.productType) result.productType = normalized.productType;
+  if (normalized.handle) result.handle = normalized.handle;
+  if (normalized.title) result.title = normalized.title;
+  return result;
+}
+
+function compactPublicCategoryRow(row = {}) {
+  return {
+    ...row,
+    notes: row.notes || "",
+    topVendors: Array.isArray(row.topVendors) ? row.topVendors.slice(0, 6) : [],
+    topBrands: Array.isArray(row.topBrands) ? row.topBrands.slice(0, 6) : [],
+    mappings: Object.fromEntries([
+      ["shopify", compactPublicCategoryMapping(row.mappings?.shopify)],
+      ["temu", compactPublicCategoryMapping(row.mappings?.temu)],
+      ["tiktok", compactPublicCategoryMapping(row.mappings?.tiktok)],
+      ["ebay", compactPublicCategoryMapping(row.mappings?.ebay)],
+      ["whatnot", compactPublicCategoryMapping(row.mappings?.whatnot)]
+    ].filter(([, mapping]) => mapping)),
+    smartCollection: compactPublicSmartCollection(row.smartCollection || {}),
+    defaults: undefined,
+    requiredAttributes: Array.isArray(row.requiredAttributes) && row.requiredAttributes.length ? row.requiredAttributes.slice(0, 20) : []
+  };
+}
+
+function compactCategoryResponse(data = {}) {
+  return {
+    ...data,
+    categories: (Array.isArray(data.categories) ? data.categories : []).map(compactPublicCategoryRow)
+  };
+}
+
+function rawChannelMappingForList(mapping = {}) {
+  const hasMapping = Boolean(mapping?.categoryId || mapping?.categoryPath || mapping?.collectionHandle || mapping?.categoryHandle);
+  const hasReview = /review/i.test(`${mapping?.status || ""} ${mapping?.notes || ""}`);
+  if (!hasMapping && !hasReview) return null;
+  return {
+    categoryId: mapping.categoryId || "",
+    categoryPath: mapping.categoryPath || "",
+    categoryHandle: mapping.categoryHandle || "",
+    collectionHandle: mapping.collectionHandle || "",
+    attributeCount: Array.isArray(mapping.attributes) ? mapping.attributes.length : 0,
+    status: mapping.status || (hasMapping ? "mapped" : "missing"),
+    review: hasReview
+  };
+}
+
+function rawCategoryMappingsForList(saved = {}) {
+  const mappings = saved.mappings || {};
+  const result = {};
+  for (const channel of ["shopify", "temu", "tiktok", "ebay", "whatnot"]) {
+    const compact = rawChannelMappingForList(mappings[channel] || {});
+    if (compact) result[channel] = compact;
+  }
+  return result;
+}
+
+function categoryMappingCountForList(mappings = {}) {
+  return ["shopify", "temu", "tiktok", "ebay", "whatnot"].filter((key) => {
+    const mapping = mappings[key] || {};
+    return mapping.categoryId || mapping.categoryPath || mapping.collectionHandle;
+  }).length;
+}
+
+function categoryMissingMappingsForList(mappings = {}) {
+  return ["shopify", "temu", "tiktok", "ebay", "whatnot"].filter((key) => {
+    const mapping = mappings[key] || {};
+    return !(mapping.categoryId || mapping.categoryPath || mapping.collectionHandle);
+  });
+}
+
+function compactCoverageForList(categories = []) {
+  const shopifyMapped = categories.filter((row) => row.mappings?.shopify?.categoryId || row.mappings?.shopify?.categoryPath);
+  const shopifyWithTaxonomyId = shopifyMapped.filter((row) => row.mappings?.shopify?.categoryId);
+  const missingShopify = categories.filter((row) => !(row.mappings?.shopify?.categoryId || row.mappings?.shopify?.categoryPath));
+  const pathMissingTaxonomy = shopifyMapped.filter((row) => row.mappings?.shopify?.categoryPath && !row.mappings?.shopify?.categoryId);
+  return {
+    mainCategoryCount: categories.length,
+    sourceCategoryCount: 0,
+    shopifyMappedCount: shopifyMapped.length,
+    shopifyTaxonomyIdCount: shopifyWithTaxonomyId.length,
+    shopifyMissingCount: missingShopify.length,
+    shopifyPathMissingTaxonomyIdCount: pathMissingTaxonomy.length,
+    productCount: categories.reduce((sum, row) => sum + Number(row.productCount || 0), 0),
+    verifiedProductCount: categories.reduce((sum, row) => sum + Number(row.productCount || 0), 0),
+    uncategorizedProductCount: 0,
+    activeUncategorizedProductCount: 0,
+    vendorCategoryMappingCount: 0,
+    sourceVendorCategoryMappedCount: 0,
+    matrixify: {},
+    attention: [
+      { key: "missing-shopify", label: "Main categories missing Shopify mapping", count: missingShopify.length, sample: missingShopify.slice(0, 5).map((row) => row.name) },
+      { key: "missing-taxonomy-id", label: "Shopify paths missing taxonomy ID", count: pathMissingTaxonomy.length, sample: pathMissingTaxonomy.slice(0, 5).map((row) => row.name) }
+    ]
+  };
+}
+
+function publicCategoriesLiteFromPostgresState(db = {}, query = "", scope = "main", options = {}) {
+  const normalizedScope = scope === "main" ? "main" : "source";
+  const settings = Array.isArray(db.categorySettings) ? db.categorySettings : [];
+  const settingsByName = new Map();
+  for (const saved of settings) {
+    const name = formatCategoryName(saved.name || saved.category || "");
+    if (name) settingsByName.set(name.toLowerCase(), saved);
+  }
+  const byName = new Map();
+  const sourceRows = normalizedScope === "main"
+    ? (Array.isArray(db.__mainCategoryRows) ? db.__mainCategoryRows : [])
+    : sourceCatalogCategoryRows().rows;
+  for (const rawRow of sourceRows) {
+    const name = formatCategoryName(rawRow.name || "Uncategorized") || "Uncategorized";
+    byName.set(name.toLowerCase(), {
+      id: rawRow.id || categoryIdentity(name, normalizedScope).id,
+      categoryId: rawRow.categoryId || rawRow.id || categoryIdentity(name, normalizedScope).id,
+      name,
+      productCount: Number(rawRow.productCount || 0),
+      activeProductCount: Number(rawRow.activeProductCount || 0),
+      stockProductCount: Number(rawRow.stockProductCount || 0),
+      hazardousProductCount: Number(rawRow.hazardousProductCount || 0),
+      sourceCatalogProductCount: Number(rawRow.sourceCatalogProductCount || 0),
+      createdSource: rawRow.createdSource || "",
+      topVendors: Array.isArray(rawRow.topVendors) ? rawRow.topVendors.slice(0, 6) : [],
+      topBrands: Array.isArray(rawRow.topBrands) ? rawRow.topBrands.slice(0, 6) : []
+    });
+  }
+  if (normalizedScope !== "main") {
+    for (const saved of settings) {
+      const name = formatCategoryName(saved.name || saved.category || "");
+      if (!name || byName.has(name.toLowerCase())) continue;
+      const identity = categoryIdentity(name, normalizedScope);
+      byName.set(name.toLowerCase(), {
+        id: saved.id || saved.categoryId || identity.id,
+        categoryId: saved.categoryId || saved.id || identity.id,
+        name,
+        productCount: 0,
+        activeProductCount: 0,
+        stockProductCount: 0,
+        hazardousProductCount: 0,
+        topVendors: [],
+        topBrands: []
+      });
+    }
+  }
+  const categories = [...byName.values()].map((row) => {
+    const saved = settingsByName.get(row.name.toLowerCase()) || {};
+    const mappings = rawCategoryMappingsForList(saved);
+    const mappingCount = categoryMappingCountForList(mappings);
+    const missingMappings = categoryMissingMappingsForList(mappings);
+    const savedExists = Boolean(saved.name || saved.categoryId || saved.id);
+    const lifecycle = !savedExists && row.productCount > 0 ? "new" : savedExists && row.productCount === 0 ? "outdated" : "current";
+    const sourceMappingCount = Number(row.sourceMappingCount || 0);
+    const createdSource = saved.createdSource || row.createdSource || (normalizedScope === "main" && row.productCount > 0 ? "system:true-value" : "manual");
+    const createdByLabel = ["system:true-value", "system:true-value-source"].includes(createdSource)
+      ? "System - True Value"
+      : (saved.createdBy || row.createdBy || "Manual");
+    const blockers = categoryDeleteBlockers({ ...row, sourceMappingCount });
+    return {
+      ...row,
+      scope: normalizedScope,
+      status: saved.status || (mappingCount ? "mapped" : "needs_review"),
+      owner: saved.owner || "",
+      notes: saved.notes || "",
+      mappings,
+      smartCollection: compactPublicSmartCollection(saved.smartCollection || saved.shopifyCollection || {}),
+      requiredAttributes: Array.isArray(saved.requiredAttributes) && saved.requiredAttributes.length ? saved.requiredAttributes.slice(0, 20) : [],
+      savedExists,
+      createdBy: saved.createdBy || row.createdBy || "",
+      updatedBy: saved.updatedBy || row.updatedBy || "",
+      createdSource,
+      createdByLabel,
+      createdAt: saved.createdAt || row.createdAt || "",
+      updatedAt: saved.updatedAt || row.updatedAt || "",
+      lifecycle,
+      sourceMappingCount,
+      canDelete: blockers.length === 0,
+      deleteBlockers: blockers,
+      mappingCount,
+      missingMappings
+    };
+  }).sort((a, b) => Number(b.productCount || 0) - Number(a.productCount || 0) || a.name.localeCompare(b.name));
+  const q = String(query || "").trim().toLowerCase();
+  const filtered = q
+    ? categories.filter((category) => `${category.name} ${category.status} ${category.notes} ${(category.topVendors || []).map((v) => v.name).join(" ")}`.toLowerCase().includes(q))
+    : categories;
+  const responseCategories = normalizedScope === "source" && !q && !options.full ? filtered.slice(0, 3000) : filtered;
+  return {
+    categories: responseCategories,
+    total: filtered.length,
+    scope: normalizedScope,
+    coverage: db.__categoryCoverageOverride || compactCoverageForList(categories),
+    indexGeneratedAt: "",
+    catalogImportedAt: ""
+  };
+}
+
+async function rebuildStoredCategorySummaryIndex(scope = "main") {
+  if (!postgres.isPostgresEnabled()) return null;
+  const normalizedScope = scope === "source" ? "source" : "main";
+  let db;
+  if (normalizedScope === "main") {
+    const [categorySettings, vendorCategoryMappings, mainRows] = await Promise.all([
+      postgres.readStateField("categorySettings").catch(() => []),
+      postgres.readStateField("vendorCategoryMappings").catch(() => ({})),
+      postgres.listCategoryProductStats()
+    ]);
+    db = {
+      inventory: [],
+      categorySettings: categorySettings || [],
+      vendorCategoryMappings: vendorCategoryMappings || {},
+      __mainCategoryRows: mainRows || []
+    };
+  } else {
+    const [categorySettings, vendorCategoryMappings] = await Promise.all([
+      postgres.readStateField("categorySettings").catch(() => []),
+      postgres.readStateField("vendorCategoryMappings").catch(() => ({}))
+    ]);
+    db = {
+      inventory: [],
+      categorySettings: categorySettings || [],
+      vendorCategoryMappings: vendorCategoryMappings || {}
+    };
+  }
+  const data = publicCategoriesLiteFromPostgresState(db, "", normalizedScope, { full: true });
+  await postgres.replaceCategorySummaryIndex(normalizedScope, data.categories || [], {
+    generatedAt: new Date().toISOString(),
+    source: "server-rebuild"
+  });
+  return data;
+}
+
+function categoryResponseFromStoredIndex(index = {}, query = "", scope = "main", coverageOverride = null) {
+  const normalizedScope = scope === "source" ? "source" : "main";
+  const categories = Array.isArray(index.rows) ? index.rows : [];
+  const q = String(query || "").trim();
+  return {
+    categories,
+    total: Number(index.total || categories.length || 0),
+    scope: normalizedScope,
+    coverage: coverageOverride || compactCoverageForList(categories),
+    indexGeneratedAt: index.generatedAt || categories[0]?.__indexMeta?.generatedAt || "",
+    catalogImportedAt: "",
+    storedIndex: true,
+    query: q
   };
 }
 
@@ -6412,6 +8119,24 @@ async function publicCategoriesFast(query = "", scope = "source") {
   const cached = categoryResponseCache.get(key);
   if (cached && now - cached.createdAt < 10 * 60_000) return cached.data;
   const stored = readCategoryResponseCacheFile();
+  const staleStored = stored || readCategoryResponseCacheFile({ allowStale: true });
+  if (postgres.isPostgresEnabled()) {
+    const limit = normalizedScope === "source" && !normalizedQuery ? 3000 : 100000;
+    let index = await postgres.readCategorySummaryIndex(normalizedScope, { q: normalizedQuery, limit }).catch(() => null);
+    if (!index?.rows?.length && !normalizedQuery) {
+      const rebuilt = await rebuildStoredCategorySummaryIndex(normalizedScope);
+      index = rebuilt ? {
+        rows: normalizedScope === "source" ? (rebuilt.categories || []).slice(0, limit) : (rebuilt.categories || []),
+        total: rebuilt.total || rebuilt.categories?.length || 0,
+        generatedAt: new Date().toISOString()
+      } : index;
+    }
+    if (index?.rows?.length || normalizedQuery) {
+      const data = categoryResponseFromStoredIndex(index || { rows: [], total: 0 }, query, normalizedScope, normalizedScope === "source" ? staleStored?.main?.coverage : null);
+      categoryResponseCache.set(key, { createdAt: Date.now(), data });
+      return data;
+    }
+  }
   if (stored?.[normalizedScope]) {
     const data = filterCategoryResponse(stored[normalizedScope], query, normalizedScope);
     categoryResponseCache.set(key, { createdAt: Date.now(), data });
@@ -6424,13 +8149,27 @@ async function publicCategoriesFast(query = "", scope = "source") {
       postgres.readStateField("vendorCategoryMappings")
     ]);
     db = { inventory: [], categorySettings, vendorCategoryMappings };
+    const data = publicCategoriesLiteFromPostgresState(db, query, normalizedScope);
+    if (staleStored?.main?.coverage) data.coverage = staleStored.main.coverage;
+    writeCategoryResponseCacheFile(normalizedScope, data);
+    categoryResponseCache.set(key, { createdAt: Date.now(), data });
+    return data;
+  } else if (postgres.isPostgresEnabled() && normalizedScope === "main") {
+    const [categorySettings, vendorCategoryMappings, mainRows] = await Promise.all([
+      postgres.readStateField("categorySettings"),
+      postgres.readStateField("vendorCategoryMappings"),
+      postgres.listCategoryProductStats()
+    ]);
+    db = { inventory: [], categorySettings, vendorCategoryMappings, __mainCategoryRows: mainRows || [], __categoryCoverageOverride: staleStored?.main?.coverage || staleStored?.source?.coverage || null };
+    const data = publicCategoriesLiteFromPostgresState(db, query, normalizedScope);
+    writeCategoryResponseCacheFile(normalizedScope, data);
+    categoryResponseCache.set(key, { createdAt: Date.now(), data });
+    return data;
   } else {
-    db = postgres.isPostgresEnabled()
-      ? await postgres.readCategoryState()
-      : await readDbFast();
+    db = await readDbFast();
   }
-  const fullData = publicCategories(db, "", normalizedScope);
-  if (normalizedScope === "source" && stored?.main?.coverage) fullData.coverage = stored.main.coverage;
+  const fullData = compactCategoryResponse(publicCategories(db, "", normalizedScope));
+  if (normalizedScope === "source" && staleStored?.main?.coverage) fullData.coverage = staleStored.main.coverage;
   const data = normalizedQuery ? filterCategoryResponse(fullData, query, normalizedScope) : fullData;
   writeCategoryResponseCacheFile(normalizedScope, fullData);
   categoryResponseCache.set(key, { createdAt: Date.now(), data });
@@ -6441,11 +8180,11 @@ async function publicCategoriesFast(query = "", scope = "source") {
   return data;
 }
 
-function readCategoryResponseCacheFile() {
+function readCategoryResponseCacheFile(options = {}) {
   if (!fs.existsSync(CATEGORY_CACHE_FILE)) return null;
   try {
     const data = JSON.parse(fs.readFileSync(CATEGORY_CACHE_FILE, "utf8"));
-    return data.cacheVersion === CATEGORY_CACHE_VERSION ? data : null;
+    return data.cacheVersion === CATEGORY_CACHE_VERSION || options.allowStale ? data : null;
   } catch {
     return null;
   }
@@ -6483,6 +8222,26 @@ function clearCategoryResponseCache() {
     if (fs.existsSync(CATEGORY_CACHE_FILE)) fs.unlinkSync(CATEGORY_CACHE_FILE);
   } catch {
     // Cache invalidation is best-effort; the in-memory cache is cleared above.
+  }
+  scheduleStoredCategorySummaryRebuild("both");
+}
+
+const categorySummaryRebuildTimers = new Map();
+
+function scheduleStoredCategorySummaryRebuild(scope = "both") {
+  if (!postgres.isPostgresEnabled()) return;
+  const scopes = scope === "both" ? ["main", "source"] : [scope === "source" ? "source" : "main"];
+  for (const targetScope of scopes) {
+    if (categorySummaryRebuildTimers.has(targetScope)) clearTimeout(categorySummaryRebuildTimers.get(targetScope));
+    categorySummaryRebuildTimers.set(targetScope, setTimeout(async () => {
+      categorySummaryRebuildTimers.delete(targetScope);
+      try {
+        await rebuildStoredCategorySummaryIndex(targetScope);
+        categoryResponseCache = new Map();
+      } catch (error) {
+        console.error(`Unable to rebuild ${targetScope} category summary index`, error);
+      }
+    }, 500));
   }
 }
 
@@ -6963,6 +8722,56 @@ function normalizeWarehouse(warehouse) {
 
 function normalizeVendor(db, vendor) {
   const createdAt = vendor.createdAt || new Date().toISOString();
+  const vendorName = String(vendor.name || "").trim();
+  const vendorCode = String(vendor.code || vendor.vendorCode || "").trim();
+  const isEssendant = vendorName.toLowerCase().includes("essendant") || vendorCode.toLowerCase() === "uss";
+  const isTrueValue = vendorName.toLowerCase().includes("true value") || vendorCode.toLowerCase() === "trv";
+  const existingChannelRules = vendor.channelRules && typeof vendor.channelRules === "object" ? vendor.channelRules : {};
+  const existingShopifyRules = existingChannelRules.shopify && typeof existingChannelRules.shopify === "object" ? existingChannelRules.shopify : {};
+  const existingPricingRules = vendor.pricingRules && typeof vendor.pricingRules === "object" ? vendor.pricingRules : {};
+  const existingVariationRules = vendor.variationRules && typeof vendor.variationRules === "object" ? vendor.variationRules : {};
+  const existingInventoryRules = vendor.inventoryRules && typeof vendor.inventoryRules === "object" ? vendor.inventoryRules : {};
+  const pricingRuleDefaults = isEssendant
+    ? {
+        costBasis: "sell-unit",
+        enforceMinimumAllowedPrice: true,
+        suspiciousPriceMultiplier: 5,
+        note: "Essendant cost, price, and MAP values are sell-unit/UOM prices. Do not multiply by UOM quantity."
+      }
+    : {
+        costBasis: existingPricingRules.costBasis || "each-unit",
+        enforceMinimumAllowedPrice: existingPricingRules.enforceMinimumAllowedPrice !== false,
+        suspiciousPriceMultiplier: Number(existingPricingRules.suspiciousPriceMultiplier || 5),
+        note: existingPricingRules.note || ""
+      };
+  const variationRuleDefaults = isEssendant
+    ? {
+        shopifyVariantMode: "uom-only",
+        allowShopifyVariations: false,
+        note: "Essendant SKUs must follow the vendor UOM only. Do not create Shopify variations."
+      }
+    : isTrueValue
+      ? {
+          shopifyVariantMode: "each-and-uom",
+          allowShopifyVariations: true,
+          note: "True Value SKUs may be sold individually and as the vendor UOM pack/case when UOM quantity is greater than 1."
+        }
+    : {
+        shopifyVariantMode: existingVariationRules.shopifyVariantMode || "standard",
+        allowShopifyVariations: existingVariationRules.allowShopifyVariations !== false,
+        note: existingVariationRules.note || ""
+      };
+  const shopifyRuleDefaults = isEssendant
+    ? {
+        variantMode: "uom-only",
+        allowVariations: false,
+        note: "Essendant SKUs must follow the vendor UOM only. Do not create Shopify variations."
+      }
+    : {
+        variantMode: existingShopifyRules.variantMode || "standard",
+        allowVariations: existingShopifyRules.allowVariations !== false,
+        note: existingShopifyRules.note || ""
+      };
   const changeLog = Array.isArray(vendor.changeLog) && vendor.changeLog.length ? vendor.changeLog : [
     {
       id: crypto.randomUUID(),
@@ -6976,7 +8785,8 @@ function normalizeVendor(db, vendor) {
   return {
     id: vendor.id || crypto.randomUUID(),
     vendorNumber: vendor.vendorNumber || nextVendorNumber(db),
-    name: vendor.name || "Unnamed vendor",
+    name: vendorName || "Unnamed vendor",
+    code: vendorCode,
     status: vendor.status || "active",
     type: vendor.type || "Supplier",
     contactName: vendor.contactName || "",
@@ -7013,6 +8823,27 @@ function normalizeVendor(db, vendor) {
       emailSubjectTemplate: vendor.submissionSettings?.emailSubjectTemplate || "Purchase order {{poNumber}}",
       attachCsv: vendor.submissionSettings?.attachCsv !== false,
       attachPdf: vendor.submissionSettings?.attachPdf !== false
+    },
+    channelRules: {
+      ...existingChannelRules,
+      shopify: {
+        ...existingShopifyRules,
+        ...shopifyRuleDefaults
+      }
+    },
+    pricingRules: {
+      ...existingPricingRules,
+      ...pricingRuleDefaults
+    },
+    variationRules: {
+      ...existingVariationRules,
+      ...variationRuleDefaults
+    },
+    inventoryRules: {
+      ...existingInventoryRules,
+      replenishableEnabled: existingInventoryRules.replenishableEnabled === true || existingInventoryRules.enabled === true,
+      replenishableQty: Math.max(0, Number(existingInventoryRules.replenishableQty ?? vendor.replenishableQty ?? 0) || 0),
+      note: existingInventoryRules.note || ""
     },
     openPOs: Number(vendor.openPOs || 0),
     totalPOs: Number(vendor.totalPOs || 0),
@@ -7529,8 +9360,27 @@ function sendJsonText(res, status, text, req = null) {
   res.end(text);
 }
 
+function shopifyFrameAncestorsHeader() {
+  const shop = shopifyAdminConfig().shop || process.env.SHOPIFY_STORE_DOMAIN || "";
+  const hosts = [
+    "https://admin.shopify.com",
+    "https://*.myshopify.com",
+    shop ? `https://${String(shop).replace(/^https?:\/\//i, "").replace(/\/+$/g, "")}` : ""
+  ].filter(Boolean);
+  return `frame-ancestors ${[...new Set(hosts)].join(" ")};`;
+}
+
+function htmlResponseHeaders(extra = {}) {
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": shopifyFrameAncestorsHeader(),
+    "Cache-Control": "no-store, max-age=0",
+    ...extra
+  };
+}
+
 function sendHtml(res, status, html) {
-  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
+  res.writeHead(status, htmlResponseHeaders());
   res.end(html);
 }
 
@@ -7612,6 +9462,16 @@ function parseCsv(text) {
   });
 }
 
+function csvRecordsToText(records = []) {
+  const rows = Array.isArray(records) ? records : [];
+  if (!rows.length) return "";
+  const headers = [...new Set(rows.flatMap((row) => Object.keys(row || {})))];
+  return [
+    `${headers.map(escapeCsv).join(",")}\n`,
+    ...rows.map((row) => `${headers.map((header) => escapeCsv(row?.[header] ?? "")).join(",")}\n`)
+  ].join("");
+}
+
 function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const requested = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
@@ -7636,10 +9496,12 @@ function serveStatic(req, res) {
     ".svg": "image/svg+xml"
   }[ext] || "application/octet-stream";
 
-  res.writeHead(200, {
-    "Content-Type": contentType,
-    "Cache-Control": "no-store, max-age=0"
-  });
+  res.writeHead(200, ext === ".html"
+    ? htmlResponseHeaders()
+    : {
+      "Content-Type": contentType,
+      "Cache-Control": "no-store, max-age=0"
+    });
   fs.createReadStream(filePath).pipe(res);
 }
 
@@ -7776,6 +9638,10 @@ function normalizeImportJob(job = {}) {
     created: Number(job.created ?? 0) || 0,
     missingCount: Number(job.missingCount ?? job.missing ?? 0) || 0,
     errors,
+    rowLabel: job.rowLabel || job.metricLabel || job.raw?.rowLabel || '',
+    progressLabel: job.progressLabel || job.raw?.progressLabel || '',
+    estimatedVariantRows: Number(job.estimatedVariantRows ?? job.raw?.estimatedVariantRows ?? 0) || 0,
+    estimatedProductRows: Number(job.estimatedProductRows ?? job.raw?.estimatedProductRows ?? 0) || 0,
     workerTask: job.workerTask || '',
     workerPayload: job.workerPayload && typeof job.workerPayload === "object" ? job.workerPayload : {},
     workerId: job.workerId || '',
@@ -7795,6 +9661,35 @@ function normalizeImportJob(job = {}) {
     finishedAt,
     updatedAt: job.updatedAt || finishedAt || createdAt
   };
+}
+
+function compactImportJobPayloadValue(value) {
+  if (Array.isArray(value)) {
+    return {
+      count: value.length,
+      sample: value.slice(0, 10)
+    };
+  }
+  if (value && typeof value === "object") {
+    const result = {};
+    for (const [key, child] of Object.entries(value)) {
+      result[key] = compactImportJobPayloadValue(child);
+    }
+    return result;
+  }
+  return value;
+}
+
+function clientImportJob(job = {}) {
+  const normalized = normalizeImportJob(job);
+  return {
+    ...normalized,
+    workerPayload: compactImportJobPayloadValue(normalized.workerPayload || {})
+  };
+}
+
+function clientImportJobs(jobs = []) {
+  return (Array.isArray(jobs) ? jobs : []).map(clientImportJob);
 }
 
 function syncRunToImportJob(run = {}) {
@@ -7829,7 +9724,7 @@ function normalizeImportJobs(jobs = [], syncRuns = []) {
       return true;
     })
     .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))
-    .slice(0, 250);
+    .slice(0, IMPORT_JOB_HISTORY_LIMIT);
 }
 
 function progressPercent(processedRows = 0, totalRows = 0) {
@@ -7888,7 +9783,7 @@ function readImportJobStore() {
 function writeImportJobStore(jobs = []) {
   try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(IMPORT_JOB_STORE_FILE, JSON.stringify(normalizeImportJobs(jobs, []).slice(0, 250), null, 2));
+    fs.writeFileSync(IMPORT_JOB_STORE_FILE, JSON.stringify(normalizeImportJobs(jobs, []).slice(0, IMPORT_JOB_HISTORY_LIMIT), null, 2));
   } catch (error) {
     console.error("Unable to write import job store", error.message || error);
   }
@@ -7921,7 +9816,7 @@ function mergedImportJobs(db = {}) {
   return applyActiveJobProgress([...byId.values()]
     .map(normalizeImportJob)
     .sort((a, b) => new Date(b.createdAt || b.startedAt || 0) - new Date(a.createdAt || a.startedAt || 0))
-    .slice(0, 250));
+    .slice(0, IMPORT_JOB_HISTORY_LIMIT));
 }
 
 async function mergedImportJobsAsync(db = {}) {
@@ -7929,7 +9824,7 @@ async function mergedImportJobsAsync(db = {}) {
     const byId = new Map();
     const workerStatus = await readWorkerStatus(readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {})).catch(() => ({}));
     try {
-      const pgJobs = await postgres.readOperationJobs(250);
+      const pgJobs = await postgres.readOperationJobs(IMPORT_JOB_HISTORY_LIMIT);
       for (const job of pgJobs) {
         const status = String(job.status || "").toLowerCase();
         const updatedAt = new Date(job.updatedAt || job.startedAt || job.createdAt || 0);
@@ -7994,7 +9889,7 @@ async function mergedImportJobsAsync(db = {}) {
     return applyActiveJobProgress([...byId.values()]
       .map(normalizeImportJob)
       .sort((a, b) => new Date(b.createdAt || b.startedAt || 0) - new Date(a.createdAt || a.startedAt || 0))
-      .slice(0, 250));
+      .slice(0, IMPORT_JOB_HISTORY_LIMIT));
   }
   const dbJobs = normalizeImportJobs(db.importJobs || [], db.syncRuns || []);
   const byId = new Map();
@@ -8002,7 +9897,7 @@ async function mergedImportJobsAsync(db = {}) {
   for (const job of readImportJobStore()) byId.set(job.id, { ...(byId.get(job.id) || {}), ...job });
   if (postgres.isPostgresEnabled()) {
     try {
-      const pgJobs = await postgres.readOperationJobs(250);
+      const pgJobs = await postgres.readOperationJobs(IMPORT_JOB_HISTORY_LIMIT);
       for (const job of pgJobs) byId.set(job.id, { ...(byId.get(job.id) || {}), ...job });
     } catch (error) {
       console.error("Unable to read Postgres job store", error.message || error);
@@ -8017,7 +9912,7 @@ async function mergedImportJobsAsync(db = {}) {
   return applyActiveJobProgress([...byId.values()]
     .map(normalizeImportJob)
     .sort((a, b) => new Date(b.createdAt || b.startedAt || 0) - new Date(a.createdAt || a.startedAt || 0))
-    .slice(0, 250));
+    .slice(0, IMPORT_JOB_HISTORY_LIMIT));
 }
 
 function createImportJob(db, attrs = {}) {
@@ -8032,7 +9927,7 @@ function createImportJob(db, attrs = {}) {
     ...attrs
   });
   db.importJobs.unshift(job);
-  db.importJobs = db.importJobs.slice(0, 250);
+  db.importJobs = db.importJobs.slice(0, IMPORT_JOB_HISTORY_LIMIT);
   upsertImportJobStore(job);
   return job;
 }
@@ -8079,6 +9974,128 @@ function finishImportJob(job, attrs = {}) {
   }));
   upsertImportJobStore(job);
   return job;
+}
+
+function estimatedProductDumpRows() {
+  const auditPath = path.join(ROOT, "logs", "data-dump-key-audit-full.json");
+  try {
+    if (fs.existsSync(auditPath)) {
+      const audit = JSON.parse(fs.readFileSync(auditPath, "utf8"));
+      const scanned = Number(audit.scanned || 0);
+      if (scanned > 0) return scanned;
+    }
+  } catch {}
+  return 0;
+}
+
+function startPricingInventoryRefreshJob(jobId, options = {}) {
+  const existing = activeJobRecords.get(jobId);
+  if (!existing) return null;
+  const dumpPath = String(options.path || options.filePath || "").trim();
+  const args = ["scripts/import-product-pricing-inventory.js", "--batch-size", String(options.batchSize || 10000)];
+  if (dumpPath) args.push("--dump", dumpPath);
+  const totalRows = Number(options.totalRows || existing.totalRows || estimatedProductDumpRows() || 0) || 0;
+  let job = normalizeImportJob({
+    ...existing,
+    status: "running",
+    phase: "refreshing_pricing_inventory",
+    message: "Refreshing pricing, inventory, promo, and closeout fields from the product dump...",
+    startedAt: existing.startedAt || new Date().toISOString(),
+    totalRows
+  });
+  activeJobRecords.set(job.id, job);
+  setActiveJobProgress(job.id, {
+    status: "running",
+    phase: "refreshing_pricing_inventory",
+    processedRows: Number(job.processedRows || 0),
+    totalRows,
+    startedAt: job.startedAt,
+    message: job.message
+  });
+  upsertImportJobStore(job);
+
+  const output = [];
+  const updateFromText = (text = "") => {
+    output.push(text);
+    const matches = [...String(text).matchAll(/Pricing\/inventory\s+([0-9,]+)\s+records\s+\(([0-9,]+)\s+imported,\s+([0-9,]+)\s+closeout\/promo\)/g)];
+    for (const match of matches) {
+      const processedRows = Number(String(match[1] || "").replace(/,/g, "")) || 0;
+      const importedRows = Number(String(match[2] || "").replace(/,/g, "")) || processedRows;
+      const closeoutPromoRows = Number(String(match[3] || "").replace(/,/g, "")) || 0;
+      const progress = setActiveJobProgress(job.id, {
+        status: "running",
+        phase: "refreshing_pricing_inventory",
+        processedRows,
+        totalRows,
+        changed: importedRows,
+        missingCount: closeoutPromoRows,
+        message: `Pricing/inventory refresh imported ${importedRows.toLocaleString()} rows; ${closeoutPromoRows.toLocaleString()} closeout/promo rows found.`
+      });
+      job = normalizeImportJob({
+        ...job,
+        ...progress,
+        processedRows,
+        changed: importedRows,
+        missingCount: closeoutPromoRows,
+        updatedAt: new Date().toISOString()
+      });
+      activeJobRecords.set(job.id, job);
+      upsertImportJobStore(job);
+    }
+  };
+
+  const child = spawn(process.execPath, args, {
+    cwd: ROOT,
+    env: process.env,
+    windowsHide: true
+  });
+  child.stdout.on("data", (chunk) => updateFromText(chunk.toString()));
+  child.stderr.on("data", (chunk) => updateFromText(chunk.toString()));
+  child.on("error", (error) => {
+    finishImportJob(job, {
+      status: "failed",
+      phase: "failed",
+      message: error.message || "Pricing/inventory refresh failed.",
+      errors: [error.message || String(error)],
+      estimatedSecondsRemaining: 0
+    });
+    activeJobProgress.delete(job.id);
+    activeJobRecords.delete(job.id);
+  });
+  child.on("close", (code) => {
+    const text = output.join("");
+    const finalLine = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop() || "";
+    const finalMatch = text.match(/Imported pricing\/inventory for\s+([0-9,]+)\s+products\s+\(([0-9,]+)\s+skipped,\s+([0-9,]+)\s+closeout\/promo\)/);
+    if (code) {
+      finishImportJob(job, {
+        status: "failed",
+        phase: "failed",
+        message: `Pricing/inventory refresh exited with code ${code}.`,
+        details: text.slice(-2000),
+        errors: [`Pricing/inventory refresh exited with code ${code}.`],
+        estimatedSecondsRemaining: 0
+      });
+    } else {
+      const importedRows = finalMatch ? Number(finalMatch[1].replace(/,/g, "")) : Number(job.changed || job.processedRows || 0);
+      const skippedRows = finalMatch ? Number(finalMatch[2].replace(/,/g, "")) : Number(job.missingRows || 0);
+      const closeoutPromoRows = finalMatch ? Number(finalMatch[3].replace(/,/g, "")) : Number(job.missingCount || 0);
+      finishImportJob(job, {
+        status: skippedRows ? "warning" : "success",
+        phase: "complete",
+        message: finalLine || `Pricing/inventory refresh imported ${importedRows.toLocaleString()} products.`,
+        details: `Updated pricing, stock, promo/default price, and closeout fields from ${dumpPath || "data/imports/products.bson.gz"}.`,
+        totalRows: totalRows || importedRows,
+        processedRows: importedRows,
+        changed: importedRows,
+        missingCount: closeoutPromoRows,
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0
+      });
+    }
+    activeJobProgress.delete(job.id);
+    activeJobRecords.delete(job.id);
+  });
+  return child;
 }
 
 function safeImportFileName(fileName, fallback = "import.csv") {
@@ -8622,7 +10639,7 @@ async function backfillMissingExportManifests(jobs = []) {
   return changed;
 }
 
-function sendImportJobFile(res, job, kind) {
+function sendImportJobFile(res, job, kind, options = {}) {
   const isOriginal = kind === "original";
   const isManifest = kind === "manifest";
   const filePath = isManifest ? job?.manifestFilePath : isOriginal ? job?.originalFilePath : job?.errorFilePath;
@@ -8635,11 +10652,39 @@ function sendImportJobFile(res, job, kind) {
       : isManifest
         ? "application/json; charset=utf-8"
         : "text/csv; charset=utf-8";
+  const disposition = options.inline ? "inline" : "attachment";
   res.writeHead(200, {
     "Content-Type": contentType,
-    "Content-Disposition": `attachment; filename=${safeImportFileName(fileName || (isManifest ? "manifest.json" : isOriginal ? "original.csv" : "errors.csv"))}`
+    "Content-Disposition": `${disposition}; filename=${safeImportFileName(fileName || (isManifest ? "manifest.json" : isOriginal ? "original.csv" : "errors.csv"))}`
   });
   fs.createReadStream(filePath).pipe(res);
+  return true;
+}
+
+function contentTypeForJobFile(fileName = "", fallback = "") {
+  const name = String(fileName || "").toLowerCase();
+  if (fallback) return fallback;
+  if (name.endsWith(".json")) return "application/json; charset=utf-8";
+  if (name.endsWith(".jsonl") || name.endsWith(".ndjson")) return "application/x-ndjson; charset=utf-8";
+  if (name.endsWith(".csv")) return "text/csv; charset=utf-8";
+  if (name.endsWith(".txt") || name.endsWith(".log")) return "text/plain; charset=utf-8";
+  if (name.endsWith(".gz")) return "application/gzip";
+  if (name.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  return "application/octet-stream";
+}
+
+function sendImportJobArtifactFile(res, job, artifactIndex = 0, options = {}) {
+  const artifacts = Array.isArray(job?.artifacts) ? job.artifacts : [];
+  const artifact = artifacts[Number(artifactIndex || 0)];
+  if (!artifact?.filePath || !fs.existsSync(artifact.filePath)) return false;
+  const fileName = artifact.fileName || path.basename(artifact.filePath) || "job-artifact";
+  const contentType = contentTypeForJobFile(fileName, artifact.contentType || "");
+  const disposition = options.inline ? "inline" : "attachment";
+  res.writeHead(200, {
+    "Content-Type": contentType,
+    "Content-Disposition": `${disposition}; filename=${safeImportFileName(fileName, "job-artifact")}`
+  });
+  fs.createReadStream(artifact.filePath).pipe(res);
   return true;
 }
 
@@ -9084,6 +11129,7 @@ function startShopifyStatusSyncJob(jobId, attrs = {}) {
       let changed = 0;
       let processed = 0;
       const touched = [];
+      const db = normalizeDb(await readDbFast({ skipInventory: true }));
       const existingShopifyStatusMap = await postgres.readShopifyStatusMap().catch(() => ({})) || {};
       const syncedStatusMap = {};
       let lastProgressPersistedAt = 0;
@@ -9118,7 +11164,7 @@ function startShopifyStatusSyncJob(jobId, attrs = {}) {
         for (const item of candidates) {
           if (isCanceled()) throw new Error("Shopify status sync canceled.");
           try {
-            const hydratedItem = withShopifyStatus(item, existingShopifyStatusMap);
+            const hydratedItem = withShopifyStatus(item, existingShopifyStatusMap, db);
             const syncResult = await syncInventoryItemShopifyStatus(hydratedItem, "", { jobId });
             synced += 1;
             syncedStatusMap[String(item.sku || "").toLowerCase()] = syncResult.payload;
@@ -9491,6 +11537,7 @@ async function runShopifyStatusSyncWorkerJob(job = {}, attrs = {}) {
   let changed = 0;
   let processed = 0;
   const touched = [];
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
   const existingShopifyStatusMap = await postgres.readShopifyStatusMap().catch(() => ({})) || {};
   const syncedStatusMap = {};
   let lastPersistedAt = 0;
@@ -9516,7 +11563,7 @@ async function runShopifyStatusSyncWorkerJob(job = {}, attrs = {}) {
     if (!candidates.length) break;
     for (const item of candidates) {
       try {
-        const hydratedItem = withShopifyStatus(item, existingShopifyStatusMap);
+        const hydratedItem = withShopifyStatus(item, existingShopifyStatusMap, db);
         const syncResult = await syncInventoryItemShopifyStatus(hydratedItem, "", { jobId: job.id });
         synced += 1;
         syncedStatusMap[String(item.sku || "").toLowerCase()] = syncResult.payload;
@@ -9550,6 +11597,1414 @@ async function runShopifyStatusSyncWorkerJob(job = {}, attrs = {}) {
     lastProgressAt: new Date().toISOString()
   });
   await postgres.upsertOperationJob(job);
+  publicStateJsonCache = null;
+  return job;
+}
+
+async function runShopifySkuMapSyncWorkerJob(job = {}, attrs = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  const pageSize = Math.max(1, Math.min(250, Number(attrs.pageSize || job.workerPayload?.pageSize || 250)));
+  const maxVariants = Math.max(0, Number(attrs.limit || job.workerPayload?.limit || 0) || 0);
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "fetching_shopify_variants",
+    totalRows: maxVariants || pageSize,
+    processedRows: 0,
+    startedAt,
+    message: "Downloading Shopify variant SKUs from the Admin API..."
+  });
+  let processed = 0;
+  let matched = 0;
+  let duplicateSkus = 0;
+  let blankSkus = 0;
+  let after = null;
+  const seen = new Set();
+  const errors = [];
+  let lastPersistedAt = 0;
+  const persistProgress = async (hasNext = true) => {
+    const totalRows = maxVariants || (processed + (hasNext ? pageSize : 0));
+    const now = Date.now();
+    if (now - lastPersistedAt < 1000 && hasNext) return;
+    lastPersistedAt = now;
+    await persistWorkerImportJob(job, {
+      status: "running",
+      phase: "fetching_shopify_variants",
+      totalRows,
+      processedRows: processed,
+      changed: matched,
+      missingCount: blankSkus + duplicateSkus,
+      progressPercent: maxVariants ? progressPercent(processed, maxVariants) : 0,
+      estimatedSecondsRemaining: maxVariants ? estimateRemainingSeconds(startedAt, processed, maxVariants) : null,
+      lastProgressAt: new Date().toISOString()
+    });
+  };
+  while (true) {
+    try {
+      const page = await fetchShopifyVariantSkuPage(after, { first: pageSize, jobId: job.id });
+      const patch = {};
+      for (const variant of page.variants) {
+        if (maxVariants && processed >= maxVariants) break;
+        processed += 1;
+        const payload = shopifyStatusPayloadFromVariantNode(variant);
+        const skuKey = String(payload.sku || "").trim().toLowerCase();
+        if (!skuKey) {
+          blankSkus += 1;
+          continue;
+        }
+        if (seen.has(skuKey)) {
+          duplicateSkus += 1;
+          continue;
+        }
+        seen.add(skuKey);
+        patch[skuKey] = payload;
+        matched += 1;
+      }
+      if (Object.keys(patch).length) mergeShopifyStatusMapSync(patch);
+      await persistProgress(page.hasNextPage && (!maxVariants || processed < maxVariants));
+      if (!page.hasNextPage || !page.endCursor || (maxVariants && processed >= maxVariants)) break;
+      after = page.endCursor;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } catch (error) {
+      errors.push(error.message || String(error));
+      break;
+    }
+  }
+  finishImportJob(job, {
+    status: errors.length ? "warning" : "success",
+    message: `Shopify SKU map synced ${matched.toLocaleString()} variant SKU${matched === 1 ? "" : "s"} from ${processed.toLocaleString()} Shopify variant${processed === 1 ? "" : "s"}${blankSkus ? `; ${blankSkus.toLocaleString()} blank SKU${blankSkus === 1 ? "" : "s"}` : ""}${duplicateSkus ? `; ${duplicateSkus.toLocaleString()} duplicate SKU${duplicateSkus === 1 ? "" : "s"} skipped` : ""}${errors.length ? `; ${errors.length.toLocaleString()} API issue${errors.length === 1 ? "" : "s"}` : ""}.`,
+    totalRows: processed,
+    processedRows: processed,
+    changed: matched,
+    missingCount: blankSkus + duplicateSkus + errors.length,
+    errors: errors.slice(0, 50),
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    phase: "complete",
+    lastProgressAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job);
+  publicStateJsonCache = null;
+  return job;
+}
+
+function selectShopifyPricePushTemplate(templates = [], templateId = "") {
+  const rows = Array.isArray(templates) ? templates : [];
+  const requested = String(templateId || "").trim();
+  const candidates = requested
+    ? rows.filter((template) => String(template.id || "") === requested)
+    : rows;
+  const hasColumn = (template, column) => (exportMappingsForTemplate(template) || [])
+    .some((mapping) => String(mapping.externalColumn || "").trim().toLowerCase() === column);
+  return candidates.find((template) => (
+    isShopifyTemplate(template)
+    && hasColumn(template, "id")
+    && hasColumn(template, "variant id")
+    && hasColumn(template, "variant price")
+  )) || rows.find((template) => (
+    isShopifyTemplate(template)
+    && hasColumn(template, "id")
+    && hasColumn(template, "variant id")
+    && hasColumn(template, "variant price")
+  )) || null;
+}
+
+function moneyStringOrBlank(value = "") {
+  const text = String(value ?? "").trim().replace(/[$,]/g, "");
+  if (!text) return "";
+  const amount = Number(text);
+  if (!(amount >= 0)) return "";
+  return amount.toFixed(2);
+}
+
+function shopifyVariantPricePushRows(records = []) {
+  const prepared = [];
+  const skipped = [];
+  for (const record of Array.isArray(records) ? records : []) {
+    const sku = String(record["Variant SKU"] || record.SKU || "").trim();
+    const productId = normalizeShopifyProductGid(record.ID || record["Product ID"] || record["Shopify ID"] || "");
+    const variantId = normalizeShopifyVariantGid(record["Variant ID"] || record["Shopify Variant ID"] || "");
+    const price = moneyStringOrBlank(record["Variant Price"]);
+    const compareAtPrice = moneyStringOrBlank(record["Variant Compare At Price"]);
+    if (!productId || !variantId || !price) {
+      skipped.push({
+        sku,
+        productId: record.ID || record["Product ID"] || record["Shopify ID"] || "",
+        variantId: record["Variant ID"] || record["Shopify Variant ID"] || "",
+        price: record["Variant Price"] || "",
+        issue: !productId ? "Missing Shopify product ID" : !variantId ? "Missing Shopify variant ID" : "Missing variant price"
+      });
+      continue;
+    }
+    const variant = { id: variantId, price };
+    if (compareAtPrice) variant.compareAtPrice = compareAtPrice;
+    prepared.push({ sku, productId, variantId, price, compareAtPrice, variant });
+  }
+  return { prepared, skipped };
+}
+
+function shopifyProductCreateReadiness(db, item = {}) {
+  const mapping = categoryMappingForProduct(db, item, "shopify") || {};
+  const productType = shopifyProductTypeForProduct(db, item);
+  const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
+  const available = Math.max(0, Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
+  const missing = [];
+  if (!sourceTextValue(item.sku)) missing.push("SKU");
+  if (!sourceTextValue(shopifyExportTitle(item))) missing.push("Title");
+  if (!sourceTextValue(item.longDescription || item.shortDescription || item.description)) missing.push("Description");
+  if (!sourceTextValue(productType)) missing.push("Product type");
+  if (!sourceTextValue(item.vendor || item.supplier || item.brand)) missing.push("Vendor");
+  if (!(price > 0)) missing.push("Price");
+  if (!(available > 0)) missing.push("Inventory qty");
+  if (productBlockedFromShopifyWebsite(item)) missing.push("Discontinued with zero inventory");
+  if (!productImageUrls(item).length) missing.push("Images");
+  return { ready: !missing.length, missing, productType, available };
+}
+
+function shopifyProductCreateDraftMinimumReadiness(db, item = {}) {
+  const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
+  const missing = [];
+  if (!sourceTextValue(item.sku)) missing.push("SKU");
+  if (!sourceTextValue(shopifyExportTitle(item))) missing.push("Title");
+  if (!(price > 0)) missing.push("Price");
+  if (productBlockedFromShopifyWebsite(item)) missing.push("Discontinued with zero inventory");
+  return { ready: !missing.length, missing };
+}
+
+function shopifyProductCreatePayload(db, item = {}, options = {}) {
+  const cache = productExportCache(db, item);
+  const mapping = cache.shopifyMapping || {};
+  const variants = shopifyPurchaseVariants(item, db).filter((variant) => sourceTextValue(variant.sku));
+  const shippingClassification = applyProductShippingClassification(item);
+  const optionName = sourceTextValue(variants[0]?.optionName || "Title") || "Title";
+  const optionValues = [...new Set(variants.map((variant) => sourceTextValue(variant.optionValue || "Default Title") || "Default Title"))];
+  const settings = findChannelByName(db, "Shopify")?.settings || {};
+  const status = String(settings.shopifyDefaultStatus || "draft").trim().toUpperCase();
+  const safeStatus = options.forceDraft ? "DRAFT" : (["ACTIVE", "ARCHIVED", "DRAFT"].includes(status) ? status : "DRAFT");
+  const bodyHtml = sanitizeProductHtml(item.longDescription || item.description || item.shortDescription || "");
+  const baseHandle = slugPart(item.shopifyHandle || cache.shopifyHandle || shopifyHandleForProduct(item));
+  const skuHandle = slugPart(item.sku || "");
+  const productHandle = productIsEssendant(item) && !item.shopifyHandle && skuHandle && !baseHandle.includes(skuHandle)
+    ? `${baseHandle || "product"}-${skuHandle}`
+    : baseHandle;
+  const product = {
+    title: cache.shopifyTitle || shopifyExportTitle(item) || item.sku,
+    handle: productHandle || skuHandle || "product",
+    descriptionHtml: bodyHtml,
+    vendor: sourceTextValue(item.vendor || item.supplier || item.brand),
+    productType: shopifyProductTypeForProduct(db, item),
+    status: safeStatus,
+    tags: productExportTags(item),
+    productOptions: [{ name: optionName, values: optionValues.map((name) => ({ name })) }],
+    metafields: [
+      {
+        namespace: "custom",
+        key: "created_by",
+        type: "single_line_text_field",
+        value: sourceTextValue(settings.shopifyCreatedByMetafieldValue || "DataPlus API")
+      },
+      ...shopifyShippingClassificationMetafields(item)
+    ]
+  };
+  const categoryId = sourceTextValue(mapping.categoryId || item.shopifyCategoryId || "");
+  if (/^gid:\/\/shopify\/TaxonomyCategory\//i.test(categoryId)) product.category = categoryId;
+  const imageUrls = productImageUrls(item).slice(0, 10);
+  const media = imageUrls.map((url, index) => ({
+    mediaContentType: "IMAGE",
+    originalSource: url,
+    alt: index === 0 ? product.title : `${product.title} ${index + 1}`
+  }));
+  const variantInputs = variants.map((variant) => {
+    const input = {
+      price: moneyStringOrBlank(variant.price),
+      optionValues: [{ optionName, name: sourceTextValue(variant.optionValue || "Default Title") || "Default Title" }],
+      inventoryItem: {
+        sku: sourceTextValue(variant.sku),
+        tracked: true,
+        requiresShipping: true
+      },
+      inventoryPolicy: "DENY",
+      taxable: true
+    };
+    const compareAtPrice = moneyStringOrBlank(variant.compareAtPrice);
+    if (compareAtPrice) input.compareAtPrice = compareAtPrice;
+    const barcode = sourceTextValue(item.barcode || item.upc || item.gtin);
+    if (barcode) input.barcode = barcode;
+    const cost = moneyStringOrBlank(variant.unitCost);
+    if (cost) input.inventoryItem.cost = cost;
+    return input;
+  });
+  return {
+    sku: sourceTextValue(item.sku),
+    product,
+    media,
+    variants,
+    variantInputs,
+    productType: product.productType,
+    shippingClass: shippingClassification.shippingClass,
+    shippingMethod: shippingClassification.shippingMethod,
+    shippingClassReason: shippingClassification.shippingClassReason,
+    dimensionalWeight: shippingClassification.dimensionalWeight,
+    shippingMetafieldCount: product.metafields.length,
+    imageCount: imageUrls.length
+  };
+}
+
+function shopifyExistingVariantMatch(item = {}) {
+  const matches = item.shopifyVariantMatches && typeof item.shopifyVariantMatches === "object" ? item.shopifyVariantMatches : {};
+  const variants = systemProductVariants(item);
+  for (const variant of variants) {
+    const key = sourceTextValue(variant.sku).toLowerCase();
+    const match = key ? matches[key] : null;
+    if (match?.shopifyId && match?.shopifyVariantId) return { ...match, matchedVariantSku: variant.sku };
+  }
+  return null;
+}
+
+function applyShopifyVariantMatchToProduct(item = {}, match = {}) {
+  if (!item || !match?.shopifyId) return item;
+  item.shopifyId = normalizeShopifyProductGid(match.shopifyId);
+  item.shopifyHandle = match.shopifyHandle || item.shopifyHandle || "";
+  item.shopifyStatus = normalizeShopifyStatus(match.shopifyStatus || item.shopifyStatus);
+  item.shopifyPublished = match.shopifyPublished ?? item.shopifyPublished;
+  item.shopifyPublishedAt = match.shopifyPublishedAt || item.shopifyPublishedAt || "";
+  item.shopifyUpdatedAt = match.shopifyUpdatedAt || item.shopifyUpdatedAt || "";
+  item.shopifySyncedAt = new Date().toISOString();
+  item.shopifySyncSource = match.shopifySyncSource || "shopify-api-sku-map";
+  item.shopifyOnlineStoreUrl = match.shopifyOnlineStoreUrl || item.shopifyOnlineStoreUrl || "";
+  item.shopifyVariantId = normalizeShopifyVariantGid(match.shopifyVariantId || item.shopifyVariantId);
+  item.shopifyVariantSku = match.shopifyVariantSku || match.sku || match.matchedVariantSku || item.shopifyVariantSku || "";
+  return item;
+}
+
+function shopifyStatusPayloadFromCreatedVariant(product = {}, variant = {}) {
+  return {
+    sku: sourceTextValue(variant.sku || variant.inventoryItem?.sku),
+    shopifyId: normalizeShopifyProductGid(product.id),
+    shopifyVariantId: normalizeShopifyVariantGid(variant.id),
+    shopifyHandle: product.handle || "",
+    shopifyStatus: normalizeShopifyStatus(product.status),
+    shopifyPublished: Boolean(product.publishedAt),
+    shopifyPublishedAt: product.publishedAt || "",
+    shopifyUpdatedAt: product.updatedAt || "",
+    shopifySyncedAt: new Date().toISOString(),
+    shopifySyncSource: "shopify-api-create",
+    shopifyOnlineStoreUrl: product.onlineStoreUrl || "",
+    shopifyTitle: product.title || "",
+    shopifyVariantSku: sourceTextValue(variant.sku || variant.inventoryItem?.sku),
+    shopifyVariantTitle: variant.title || "",
+    shopifyVariantPrice: variant.price || "",
+    shopifyVariantCompareAtPrice: variant.compareAtPrice || "",
+    shopifyVariantBarcode: variant.barcode || "",
+    shopifyVariantInventoryQuantity: Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null
+  };
+}
+
+async function createShopifyProductFromPayload(payload = {}, options = {}) {
+  const createMutation = `
+    mutation DataPlusProductCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
+      productCreate(product: $product, media: $media) {
+        product {
+          id
+          title
+          handle
+          status
+          publishedAt
+          updatedAt
+          onlineStoreUrl
+          options { id name position }
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+  const createdData = await shopifyGraphqlRequestAuto(createMutation, {
+    product: payload.product,
+    media: payload.media || []
+  }, { jobId: options.jobId, operation: "Shopify product create" });
+  const createResult = createdData.productCreate || {};
+  if (Array.isArray(createResult.userErrors) && createResult.userErrors.length) {
+    return { product: createResult.product || null, variants: [], userErrors: createResult.userErrors };
+  }
+  const product = createResult.product || {};
+  const variantsMutation = `
+    mutation DataPlusProductVariantsCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $strategy: ProductVariantsBulkCreateStrategy) {
+      productVariantsBulkCreate(productId: $productId, variants: $variants, strategy: $strategy) {
+        product {
+          id
+          title
+          handle
+          status
+          publishedAt
+          updatedAt
+          onlineStoreUrl
+        }
+        productVariants {
+          id
+          sku
+          title
+          price
+          compareAtPrice
+          barcode
+          inventoryQuantity
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+  const variantsData = await shopifyGraphqlRequestAuto(variantsMutation, {
+    productId: product.id,
+    variants: payload.variantInputs || [],
+    strategy: "REMOVE_STANDALONE_VARIANT"
+  }, { jobId: options.jobId, operation: "Shopify product variant create" });
+  const variantResult = variantsData.productVariantsBulkCreate || {};
+  return {
+    product: variantResult.product || product,
+    variants: Array.isArray(variantResult.productVariants) ? variantResult.productVariants : [],
+    userErrors: Array.isArray(variantResult.userErrors) ? variantResult.userErrors : []
+  };
+}
+
+async function runShopifyVariantPricePushWorkerJob(job = {}, attrs = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const dryRun = payload.apply === true ? false : payload.dryRun !== false;
+  const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
+    .map((sku) => String(sku || "").trim())
+    .filter(Boolean))];
+  const query = String(payload.query || "");
+  const filters = payload.filters || {};
+  const liveVariantEstimate = await postgres.countShopifyVariantStatuses({
+    skus: requestedSkus,
+    liveOnly: requestedSkus.length ? false : shopifyPricePushUsesLiveVariantTotal(filters)
+  }).catch(() => 0);
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "building_shopify_price_rows",
+    totalRows: liveVariantEstimate || Number(job.totalRows || 0) || 0,
+    processedRows: 0,
+    rowLabel: liveVariantEstimate ? "variant SKUs" : "products",
+    progressLabel: liveVariantEstimate ? "Preparing Shopify variant SKU count" : "Preparing Shopify product rows",
+    estimatedVariantRows: liveVariantEstimate || Number(job.estimatedVariantRows || 0) || 0,
+    startedAt,
+    message: dryRun
+      ? "Building Shopify price update rows from the export template..."
+      : "Building Shopify price update rows before sending them to Shopify..."
+  });
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  db.exportMappings = await readExportMappingsApiStore();
+  const template = selectShopifyPricePushTemplate(db.exportMappings, payload.templateId || "");
+  if (!template) {
+    throw new Error("No Shopify price template with ID, Variant ID, and Variant Price columns was found.");
+  }
+  const exportFileName = mappedExportFilename(template, "shopify-price-api-push.csv");
+  const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "shopify-price-push"));
+  const exportFilePath = path.join(jobDir, safeImportFileName(exportFileName, "shopify-price-api-push.csv"));
+  const written = await mappedProductsCsvPostgresFileAsync(db, template, exportFilePath, {
+    skus: requestedSkus,
+    query,
+    filters,
+    includeBlockedShopifyProducts: true,
+    progress: (patch = {}) => {
+      const estimatedTotalRows = liveVariantEstimate || patch.totalRows || job.totalRows || 0;
+      persistWorkerImportJob(job, {
+        status: "running",
+        phase: patch.phase || "building_shopify_price_rows",
+        totalRows: estimatedTotalRows,
+        processedRows: liveVariantEstimate ? 0 : patch.processedRows || job.processedRows || 0,
+        rowLabel: liveVariantEstimate ? "variant SKUs" : "products",
+        progressLabel: liveVariantEstimate
+          ? `${Number(liveVariantEstimate || 0).toLocaleString()} Shopify variant SKU${Number(liveVariantEstimate || 0) === 1 ? "" : "s"} estimated; scanning products`
+          : "Scanning products",
+        progressPercent: Math.min(40, Math.round((Number(patch.processedRows || 0) / Math.max(1, Number(patch.totalRows || 1))) * 40)),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, patch.processedRows || 0, patch.totalRows || 0)
+      }).catch(() => {});
+    }
+  });
+  const csv = fs.readFileSync(written.filePath, "utf8");
+  const records = parseCsv(csv);
+  const { prepared, skipped } = shopifyVariantPricePushRows(records);
+  const byProduct = new Map();
+  for (const row of prepared) {
+    if (!byProduct.has(row.productId)) byProduct.set(row.productId, []);
+    byProduct.get(row.productId).push(row);
+  }
+  const report = {
+    dryRun,
+    templateId: template.id,
+    templateName: template.name,
+    productsPrepared: byProduct.size,
+    variantsPrepared: prepared.length,
+    variantsSkipped: skipped.length,
+    variantsApplied: 0,
+    userErrors: [],
+    skipped: skipped.slice(0, 500),
+    sample: prepared.slice(0, 100).map((row) => ({
+      sku: row.sku,
+      productId: row.productId,
+      variantId: row.variantId,
+      price: row.price,
+      compareAtPrice: row.compareAtPrice
+    }))
+  };
+  await persistWorkerImportJob(job, {
+    status: "running",
+    phase: dryRun ? "preparing_report" : "pushing_shopify_prices",
+    totalRows: prepared.length,
+    processedRows: 0,
+    changed: prepared.length,
+    missingCount: skipped.length,
+    rowLabel: "variant SKUs",
+    progressLabel: dryRun ? "Prepared Shopify variant SKUs" : "Pushing Shopify variant SKUs",
+    estimatedVariantRows: prepared.length,
+    progressPercent: dryRun ? 80 : 45,
+    message: dryRun
+      ? `Dry run prepared ${prepared.length.toLocaleString()} Shopify variant price update${prepared.length === 1 ? "" : "s"}.`
+      : `Sending ${prepared.length.toLocaleString()} Shopify variant price update${prepared.length === 1 ? "" : "s"}...`
+  });
+  if (!dryRun && prepared.length) {
+    const mutation = `
+      mutation DataPlusVariantPricePush($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $allowPartialUpdates: Boolean) {
+        productVariantsBulkUpdate(productId: $productId, variants: $variants, allowPartialUpdates: $allowPartialUpdates) {
+          product { id }
+          productVariants { id sku price compareAtPrice }
+          userErrors { field message }
+        }
+      }
+    `;
+    let processed = 0;
+    for (const [productId, rows] of byProduct.entries()) {
+      const variants = rows.map((row) => row.variant);
+      try {
+        const data = await shopifyGraphqlRequestAuto(mutation, {
+          productId,
+          variants,
+          allowPartialUpdates: true
+        }, { jobId: job.id, operation: "Shopify variant price push" });
+        const result = data.productVariantsBulkUpdate || {};
+        const userErrors = Array.isArray(result.userErrors) ? result.userErrors : [];
+        if (userErrors.length) {
+          report.userErrors.push(...userErrors.map((error) => ({
+            productId,
+            field: Array.isArray(error.field) ? error.field.join(".") : String(error.field || ""),
+            message: error.message || "Shopify rejected this variant update."
+          })));
+        }
+        report.variantsApplied += Array.isArray(result.productVariants) ? result.productVariants.length : Math.max(0, rows.length - userErrors.length);
+      } catch (error) {
+        report.userErrors.push({ productId, message: error.message || String(error) });
+      }
+      processed += rows.length;
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "pushing_shopify_prices",
+        totalRows: prepared.length,
+        processedRows: processed,
+        changed: report.variantsApplied,
+        missingCount: skipped.length + report.userErrors.length,
+        progressPercent: 45 + Math.min(50, Math.round((processed / Math.max(1, prepared.length)) * 50)),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, prepared.length),
+        message: `Pushed ${processed.toLocaleString()} of ${prepared.length.toLocaleString()} prepared Shopify variant price update${prepared.length === 1 ? "" : "s"}.`
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  fs.mkdirSync(jobDir, { recursive: true });
+  const reportPath = path.join(jobDir, safeImportFileName(dryRun ? "shopify-price-push-dry-run.json" : "shopify-price-push-report.json", "shopify-price-push-report.json"));
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  const skippedCsv = skipped.length ? csvRecordsToText(skipped) : "";
+  if (skippedCsv) fs.writeFileSync(path.join(jobDir, "shopify-price-push-skipped.csv"), skippedCsv);
+  job.originalFilePath = reportPath;
+  job.originalFileName = path.basename(reportPath);
+  job.fileName = path.basename(reportPath);
+  const status = report.userErrors.length ? "warning" : "success";
+  finishImportJob(job, {
+    status,
+    phase: "complete",
+    message: dryRun
+      ? `Shopify price push dry run prepared ${prepared.length.toLocaleString()} variant${prepared.length === 1 ? "" : "s"} from ${Number(written.productCount || 0).toLocaleString()} product${Number(written.productCount || 0) === 1 ? "" : "s"}.`
+      : `Shopify price push applied ${report.variantsApplied.toLocaleString()} variant price update${report.variantsApplied === 1 ? "" : "s"}.`,
+    details: `${skipped.length.toLocaleString()} row${skipped.length === 1 ? "" : "s"} skipped; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
+    totalRows: prepared.length + skipped.length,
+    processedRows: prepared.length,
+    changed: dryRun ? prepared.length : report.variantsApplied,
+    missingCount: skipped.length + report.userErrors.length,
+    errors: [
+      ...skipped.slice(0, 25).map((row) => `${row.sku || "blank sku"}: ${row.issue}`),
+      ...report.userErrors.slice(0, 25).map((row) => `${row.productId || "Shopify"}: ${row.message}`)
+    ].slice(0, 50),
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job);
+  await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+  publicStateJsonCache = null;
+  return job;
+}
+
+function shopifyPricePushUsesLiveVariantTotal(filters = {}) {
+  const values = [filters.channelStatus, filters.channelStatusAll]
+    .flatMap((value) => String(value || "").split(/[|,]/))
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  return values.includes("shopify-live") || values.includes("live");
+}
+
+async function shopifyProductCreateCandidateProducts(db, payload = {}) {
+  const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
+    .map((sku) => String(sku || "").trim())
+    .filter(Boolean))];
+  if (requestedSkus.length) return postgres.readProductsByKeys(requestedSkus);
+  const filters = Object.keys(payload.filters || {}).length
+    ? payload.filters
+    : (payload.allowDraftIncomplete ? { channelStatus: "shopify-missing" } : { channelStatusAll: "shopify-missing|shopify-ready" });
+  const limit = Math.max(1, Math.min(1000, Number(payload.limit || 100) || 100));
+  const result = await postgres.listProducts({ q: payload.query || "", filters, page: 1, limit });
+  return result?.items || result?.inventory || [];
+}
+
+async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const dryRun = payload.apply === true ? false : payload.dryRun !== false;
+  const allowDraftIncomplete = payload.allowDraftIncomplete === true;
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "preparing_shopify_products",
+    startedAt,
+    message: dryRun
+      ? "Preparing Shopify product create dry run..."
+      : "Preparing Shopify product create payloads..."
+  });
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  db.exportMappings = await readExportMappingsApiStore();
+  const shopifyStatusMap = readShopifyStatusMapSync();
+  const sourceEnrichmentMap = readProductSourceEnrichmentSync();
+  const rawItems = await shopifyProductCreateCandidateProducts(db, payload);
+  const sourceFallbackMap = await sourceCatalogExportFallbackMap(rawItems);
+  const prepared = [];
+  const skipped = [];
+  const existingLinked = [];
+  for (const rawItem of rawItems) {
+    const item = shopifyPricedExportItem(withShopifyStatus(sourceEnrichedItem(rawItem, sourceEnrichmentMap), shopifyStatusMap, db), sourceFallbackMap, db);
+    const variantMatch = shopifyExistingVariantMatch(item);
+    const linked = sourceTextValue(item.shopifyId || item.shopifyProductId || variantMatch?.shopifyId);
+    const readiness = shopifyProductCreateReadiness(db, item);
+    if (linked) {
+      if (!item.shopifyId && variantMatch?.shopifyId) existingLinked.push(applyShopifyVariantMatchToProduct(item, variantMatch));
+      skipped.push({
+        sku: item.sku || rawItem.sku || "",
+        issue: variantMatch?.matchedVariantSku ? `Already on Shopify via variant ${variantMatch.matchedVariantSku}` : "Already linked to Shopify",
+        shopifyId: linked,
+        shopifyVariantId: variantMatch?.shopifyVariantId || item.shopifyVariantId || ""
+      });
+      continue;
+    }
+    const draftMinimum = allowDraftIncomplete ? shopifyProductCreateDraftMinimumReadiness(db, item) : { ready: true, missing: [] };
+    if (!readiness.ready && !allowDraftIncomplete) {
+      skipped.push({ sku: item.sku || rawItem.sku || "", issue: `Not ready: ${readiness.missing.join(", ")}` });
+      continue;
+    }
+    if (!draftMinimum.ready) {
+      skipped.push({ sku: item.sku || rawItem.sku || "", issue: `Draft create blocked: ${draftMinimum.missing.join(", ")}` });
+      continue;
+    }
+    const createPayload = shopifyProductCreatePayload(db, item, { forceDraft: allowDraftIncomplete && !readiness.ready });
+    if (!createPayload.variantInputs.length) {
+      skipped.push({ sku: item.sku || rawItem.sku || "", issue: "No Shopify variants could be built" });
+      continue;
+    }
+    prepared.push({ item, createPayload });
+  }
+  const report = {
+    dryRun,
+    productsLoaded: rawItems.length,
+    productsPrepared: prepared.length,
+    productsCreated: 0,
+    existingLinked: existingLinked.length,
+    variantsPrepared: prepared.reduce((sum, row) => sum + row.createPayload.variantInputs.length, 0),
+    variantsCreated: 0,
+    skipped: skipped.slice(0, 1000),
+    userErrors: [],
+    created: [],
+    sample: prepared.slice(0, 100).map(({ item, createPayload }) => ({
+      sku: item.sku,
+      title: createPayload.product.title,
+      handle: createPayload.product.handle,
+      status: createPayload.product.status,
+      vendor: createPayload.product.vendor,
+      productType: createPayload.product.productType,
+      tags: createPayload.product.tags,
+      shippingClass: createPayload.shippingClass,
+      shippingMethod: createPayload.shippingMethod,
+      dimensionalWeight: createPayload.dimensionalWeight,
+      shippingMetafields: createPayload.shippingMetafieldCount,
+      imageCount: createPayload.media.length,
+      variants: createPayload.variantInputs.map((variant) => ({
+        sku: variant.inventoryItem?.sku,
+        price: variant.price,
+        compareAtPrice: variant.compareAtPrice || "",
+        option: variant.optionValues?.[0]?.name || ""
+      }))
+    }))
+  };
+  if (!dryRun && existingLinked.length) await postgres.upsertProductsFromState(existingLinked);
+  await persistWorkerImportJob(job, {
+    status: "running",
+    phase: dryRun ? "writing_report" : "creating_shopify_products",
+    totalRows: prepared.length,
+    processedRows: 0,
+    changed: prepared.length,
+    missingCount: skipped.length,
+    progressPercent: dryRun ? 80 : 10,
+    message: dryRun
+      ? `Dry run prepared ${prepared.length.toLocaleString()} Shopify product create payload${prepared.length === 1 ? "" : "s"}.`
+      : `Creating ${prepared.length.toLocaleString()} Shopify product${prepared.length === 1 ? "" : "s"}...`
+  });
+  const touched = [];
+  const statusPatch = {};
+  if (!dryRun) {
+    let processed = 0;
+    for (const { item, createPayload } of prepared) {
+      try {
+        const result = await createShopifyProductFromPayload(createPayload, { jobId: job.id });
+        if (result.userErrors.length) {
+          report.userErrors.push(...result.userErrors.map((error) => ({
+            sku: item.sku,
+            field: Array.isArray(error.field) ? error.field.join(".") : String(error.field || ""),
+            message: error.message || "Shopify rejected this product."
+          })));
+        }
+        if (result.product?.id && result.variants.length) {
+          report.productsCreated += 1;
+          report.variantsCreated += result.variants.length;
+          const variantBySku = new Map(result.variants.map((variant) => [sourceTextValue(variant.sku || variant.inventoryItem?.sku).toLowerCase(), variant]));
+          const firstVariant = result.variants[0] || {};
+          const firstPayload = shopifyStatusPayloadFromCreatedVariant(result.product, firstVariant);
+          item.shopifyId = normalizeShopifyProductGid(result.product.id);
+          item.shopifyHandle = result.product.handle || createPayload.product.handle || "";
+          item.shopifyStatus = normalizeShopifyStatus(result.product.status);
+          item.shopifyPublished = Boolean(result.product.publishedAt);
+          item.shopifyPublishedAt = result.product.publishedAt || "";
+          item.shopifyUpdatedAt = result.product.updatedAt || "";
+          item.shopifySyncedAt = new Date().toISOString();
+          item.shopifySyncSource = "shopify-api-create";
+          item.shopifyOnlineStoreUrl = result.product.onlineStoreUrl || "";
+          item.shopifyVariantId = normalizeShopifyVariantGid(firstVariant.id);
+          item.shopifyVariantSku = firstPayload.shopifyVariantSku || "";
+          touched.push(item);
+          if (item.sku) statusPatch[sourceTextValue(item.sku).toLowerCase()] = { ...firstPayload, sku: item.sku };
+          for (const expected of createPayload.variants) {
+            const createdVariant = variantBySku.get(sourceTextValue(expected.sku).toLowerCase());
+            if (!createdVariant) continue;
+            const variantPayload = shopifyStatusPayloadFromCreatedVariant(result.product, createdVariant);
+            if (variantPayload.sku) statusPatch[variantPayload.sku.toLowerCase()] = variantPayload;
+          }
+          report.created.push({
+            sku: item.sku,
+            productId: item.shopifyId,
+            handle: item.shopifyHandle,
+            variants: result.variants.map((variant) => ({ sku: variant.sku, variantId: normalizeShopifyVariantGid(variant.id), price: variant.price }))
+          });
+        }
+      } catch (error) {
+        report.userErrors.push({ sku: item.sku, message: error.message || String(error) });
+      }
+      processed += 1;
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "creating_shopify_products",
+        totalRows: prepared.length,
+        processedRows: processed,
+        changed: report.productsCreated,
+        missingCount: skipped.length + report.userErrors.length,
+        progressPercent: 10 + Math.min(85, Math.round((processed / Math.max(1, prepared.length)) * 85)),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, prepared.length),
+        message: `Created ${report.productsCreated.toLocaleString()} of ${prepared.length.toLocaleString()} prepared Shopify product${prepared.length === 1 ? "" : "s"}.`
+      });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    if (touched.length) await postgres.upsertProductsFromState(touched);
+    if (Object.keys(statusPatch).length) mergeShopifyStatusMapSync(statusPatch);
+  }
+  const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "shopify-product-create"));
+  fs.mkdirSync(jobDir, { recursive: true });
+  const reportPath = path.join(jobDir, safeImportFileName(dryRun ? "shopify-product-create-dry-run.json" : "shopify-product-create-report.json", "shopify-product-create-report.json"));
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  if (skipped.length) fs.writeFileSync(path.join(jobDir, "shopify-product-create-skipped.csv"), csvRecordsToText(skipped));
+  job.originalFilePath = reportPath;
+  job.originalFileName = path.basename(reportPath);
+  job.fileName = path.basename(reportPath);
+  finishImportJob(job, {
+    status: report.userErrors.length ? "warning" : "success",
+    phase: "complete",
+    message: dryRun
+      ? `Shopify product create dry run prepared ${prepared.length.toLocaleString()} product${prepared.length === 1 ? "" : "s"} and ${report.variantsPrepared.toLocaleString()} variant${report.variantsPrepared === 1 ? "" : "s"}.`
+      : `Shopify product create made ${report.productsCreated.toLocaleString()} product${report.productsCreated === 1 ? "" : "s"} and ${report.variantsCreated.toLocaleString()} variant${report.variantsCreated === 1 ? "" : "s"}.`,
+    details: `${skipped.length.toLocaleString()} product${skipped.length === 1 ? "" : "s"} skipped; ${dryRun ? existingLinked.length.toLocaleString() + " existing Shopify link" + (existingLinked.length === 1 ? "" : "s") + " found" : existingLinked.length.toLocaleString() + " existing Shopify link" + (existingLinked.length === 1 ? "" : "s") + " backfilled"}; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
+    totalRows: rawItems.length,
+    processedRows: dryRun ? rawItems.length : prepared.length,
+    changed: dryRun ? prepared.length : report.productsCreated,
+    missingCount: skipped.length + report.userErrors.length,
+    errors: [
+      ...skipped.slice(0, 25).map((row) => `${row.sku || "blank sku"}: ${row.issue}`),
+      ...report.userErrors.slice(0, 25).map((row) => `${row.sku || "Shopify"}: ${row.message}`)
+    ].slice(0, 50),
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job);
+  await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+  publicStateJsonCache = null;
+  return job;
+}
+
+async function runShopifyExistingVariantLinkWorkerJob(job = {}, attrs = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const dryRun = payload.apply === true ? false : payload.dryRun !== false;
+  const limit = Math.max(1, Math.min(100000, Number(payload.limit || 50000) || 50000));
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "checking_shopify_variant_links",
+    startedAt,
+    totalRows: limit,
+    processedRows: 0,
+    message: dryRun
+      ? "Checking missing DataPlus parents against live Shopify variant SKUs..."
+      : "Linking missing DataPlus parents to existing live Shopify variant SKUs..."
+  });
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const defaultLinkedFilter = !payload.query && JSON.stringify(payload.filters || { channelStatus: "shopify-linked" }) === JSON.stringify({ channelStatus: "shopify-linked" });
+  const shopifyStatusMap = defaultLinkedFilter ? {} : readShopifyStatusMapSync();
+  const sourceEnrichmentMap = defaultLinkedFilter ? {} : readProductSourceEnrichmentSync();
+  const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
+    .map((sku) => String(sku || "").trim())
+    .filter(Boolean))];
+  let rawItems = [];
+  if (requestedSkus.length) {
+    rawItems = await postgres.readProductsByKeys(requestedSkus);
+  } else {
+    const filters = payload.filters && Object.keys(payload.filters || {}).length ? payload.filters : { channelStatus: "shopify-missing" };
+    const pageSize = Math.max(100, Math.min(1000, Number(payload.pageSize || 1000) || 1000));
+    for (let page = 1; rawItems.length < limit; page += 1) {
+      const result = await postgres.listProducts({
+        q: payload.query || "",
+        filters,
+        page,
+        limit: Math.min(pageSize, limit - rawItems.length)
+      });
+      const items = result?.items || result?.inventory || [];
+      if (!items.length) break;
+      rawItems.push(...items);
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "loading_missing_shopify_parents",
+        totalRows: Number(result.total || limit) || limit,
+        processedRows: Math.min(rawItems.length, limit),
+        progressPercent: Math.min(20, Math.round((rawItems.length / Math.max(1, Math.min(Number(result.total || limit) || limit, limit))) * 20)),
+        message: `Loaded ${rawItems.length.toLocaleString()} missing Shopify parent SKU${rawItems.length === 1 ? "" : "s"} for link checking...`
+      });
+      if (items.length < pageSize || rawItems.length >= Number(result.total || 0)) break;
+    }
+  }
+  const matched = [];
+  const skipped = [];
+  const touched = [];
+  let processed = 0;
+  for (const rawItem of rawItems) {
+    const item = withShopifyStatus(sourceEnrichedItem(rawItem, sourceEnrichmentMap), shopifyStatusMap, db);
+    const parentLinked = sourceTextValue(item.shopifyId || item.shopifyProductId);
+    const match = shopifyExistingVariantMatch(item);
+    if (parentLinked) {
+      skipped.push({ sku: item.sku || rawItem.sku || "", issue: "Parent already has Shopify ID", shopifyId: parentLinked });
+    } else if (match?.shopifyId && match?.shopifyVariantId) {
+      matched.push({
+        sku: item.sku || rawItem.sku || "",
+        matchedVariantSku: match.matchedVariantSku || match.shopifyVariantSku || match.sku || "",
+        shopifyId: normalizeShopifyProductGid(match.shopifyId),
+        shopifyVariantId: normalizeShopifyVariantGid(match.shopifyVariantId),
+        shopifyHandle: match.shopifyHandle || ""
+      });
+      if (!dryRun) touched.push(applyShopifyVariantMatchToProduct(rawItem, match));
+    } else {
+      skipped.push({ sku: item.sku || rawItem.sku || "", issue: "No generated variant SKU found on Shopify" });
+    }
+    processed += 1;
+    if (processed % 100 === 0 || processed === rawItems.length) {
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "checking_shopify_variant_links",
+        totalRows: rawItems.length || limit,
+        processedRows: processed,
+        changed: matched.length,
+        missingCount: skipped.length,
+        progressPercent: 20 + Math.min(75, Math.round((processed / Math.max(1, rawItems.length || limit)) * 75)),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, rawItems.length || limit)
+      });
+    }
+  }
+  if (!dryRun && touched.length) await postgres.upsertProductsFromState(touched);
+  const report = {
+    dryRun,
+    productsChecked: rawItems.length,
+    existingLinksFound: matched.length,
+    existingLinksBackfilled: dryRun ? 0 : touched.length,
+    skipped: skipped.slice(0, 1000),
+    matched: matched.slice(0, 5000)
+  };
+  const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "shopify-existing-link"));
+  fs.mkdirSync(jobDir, { recursive: true });
+  const reportPath = path.join(jobDir, safeImportFileName(dryRun ? "shopify-existing-link-dry-run.json" : "shopify-existing-link-report.json", "shopify-existing-link-report.json"));
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  if (matched.length) fs.writeFileSync(path.join(jobDir, "shopify-existing-link-matches.csv"), csvRecordsToText(matched));
+  job.originalFilePath = reportPath;
+  job.originalFileName = path.basename(reportPath);
+  job.fileName = path.basename(reportPath);
+  finishImportJob(job, {
+    status: "success",
+    phase: "complete",
+    message: dryRun
+      ? `Shopify existing-link dry run found ${matched.length.toLocaleString()} parent SKU${matched.length === 1 ? "" : "s"} with live Shopify variants.`
+      : `Shopify existing-link backfilled ${touched.length.toLocaleString()} parent SKU${touched.length === 1 ? "" : "s"} from live Shopify variants.`,
+    details: `${skipped.length.toLocaleString()} product${skipped.length === 1 ? "" : "s"} had no link to backfill.`,
+    totalRows: rawItems.length,
+    processedRows: rawItems.length,
+    changed: dryRun ? matched.length : touched.length,
+    missingCount: skipped.length,
+    errors: skipped.slice(0, 50).map((row) => `${row.sku || "blank sku"}: ${row.issue}`),
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job);
+  await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+  publicStateJsonCache = null;
+  return job;
+}
+
+async function runShopifyProductTypeCollectionSyncWorkerJob(job = {}, attrs = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const dryRun = payload.apply === true ? false : payload.dryRun !== false;
+  const limit = Math.max(1, Math.min(250000, Number(payload.limit || 250000) || 250000));
+  const pageSize = Math.max(50, Math.min(10000, Number(payload.pageSize || 2500) || 2500));
+  const updateDelayMs = Math.max(500, Math.min(5000, Number(payload.updateDelayMs || 850) || 850));
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "loading_shopify_products",
+    startedAt,
+    totalRows: limit,
+    processedRows: 0,
+    message: dryRun
+      ? "Preparing Shopify product type and collection sync dry run..."
+      : "Preparing Shopify product type and collection sync..."
+  });
+
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const defaultLinkedFilter = !payload.query && JSON.stringify(payload.filters || { channelStatus: "shopify-linked" }) === JSON.stringify({ channelStatus: "shopify-linked" });
+  const shopifyStatusMap = defaultLinkedFilter ? {} : readShopifyStatusMapSync();
+  const sourceEnrichmentMap = defaultLinkedFilter ? {} : readProductSourceEnrichmentSync();
+  const desiredByProductId = new Map();
+  const skipped = [];
+  let loaded = 0;
+  let scanned = 0;
+
+  for (let page = 1; loaded < limit; page += 1) {
+    const result = defaultLinkedFilter
+      ? await postgres.listShopifyLinkedProducts({ offset: loaded, limit: Math.min(pageSize, limit - loaded) })
+      : await postgres.listProducts({
+        q: payload.query || "",
+        filters: payload.filters && Object.keys(payload.filters || {}).length ? payload.filters : { channelStatus: "shopify-linked" },
+        page,
+        limit: Math.min(pageSize, limit - loaded)
+      });
+    const rawItems = result?.items || result?.inventory || [];
+    if (!rawItems.length) break;
+    loaded += rawItems.length;
+    scanned += rawItems.length;
+    const sourceFallbackMap = await sourceCatalogExportFallbackMap(rawItems);
+    for (const rawItem of rawItems) {
+      const item = shopifyPricedExportItem(withShopifyStatus(sourceEnrichedItem(rawItem, sourceEnrichmentMap), shopifyStatusMap, db), sourceFallbackMap, db);
+      const productId = normalizeShopifyProductGid(item.shopifyId || item.shopifyProductId);
+      const legacyId = shopifyLegacyId(productId);
+      const desiredType = shopifyProductTypeForProduct(db, item);
+      if (!legacyId) {
+        skipped.push({ sku: item.sku || rawItem.sku || "", issue: "Missing Shopify product ID" });
+        continue;
+      }
+      if (!desiredType) {
+        skipped.push({ sku: item.sku || rawItem.sku || "", shopifyId: productId, issue: "Missing desired Shopify product type" });
+        continue;
+      }
+      const existing = desiredByProductId.get(productId);
+      if (!existing) {
+        desiredByProductId.set(productId, {
+          productId,
+          legacyId,
+          desiredType,
+          desiredHandle: smartCollectionHandle(desiredType),
+          title: smartCollectionTitle(desiredType),
+          skus: [item.sku || rawItem.sku || ""].filter(Boolean),
+          sourceCategories: [effectiveMainCategoryName(item, readSystemSettingsStore(db.systemSettings || {}))].filter(Boolean)
+        });
+      } else {
+        if (item.sku) existing.skus.push(item.sku);
+        const category = effectiveMainCategoryName(item, readSystemSettingsStore(db.systemSettings || {}));
+        if (category && !existing.sourceCategories.includes(category)) existing.sourceCategories.push(category);
+        if (existing.desiredType !== desiredType) {
+          existing.typeConflict = true;
+          existing.conflictingTypes = [...new Set([...(existing.conflictingTypes || []), existing.desiredType, desiredType])];
+        }
+      }
+    }
+    await persistWorkerImportJob(job, {
+      status: "running",
+      phase: "loading_shopify_products",
+      totalRows: Number(result.total || limit) || limit,
+      processedRows: loaded,
+      changed: desiredByProductId.size,
+      missingCount: skipped.length,
+      progressPercent: Math.min(20, Math.round((loaded / Math.max(1, Math.min(Number(result.total || limit) || limit, limit))) * 20)),
+      message: `Loaded ${desiredByProductId.size.toLocaleString()} linked Shopify product${desiredByProductId.size === 1 ? "" : "s"} for product type sync...`
+    });
+    if (rawItems.length < pageSize || loaded >= Number(result.total || 0)) break;
+  }
+
+  const desiredRows = [...desiredByProductId.values()].filter((row) => !row.typeConflict);
+  const conflictRows = [...desiredByProductId.values()].filter((row) => row.typeConflict);
+  for (const row of conflictRows) {
+    skipped.push({
+      shopifyId: row.productId,
+      skus: row.skus.join("|"),
+      issue: `Multiple desired product types for same Shopify product: ${(row.conflictingTypes || []).join(" | ")}`
+    });
+  }
+  const typeRows = [...new Map(desiredRows.map((row) => [row.desiredType.toLowerCase(), row])).values()]
+    .map((row) => ({ productType: row.desiredType, handle: row.desiredHandle, title: row.title }));
+  const report = {
+    dryRun,
+    scanned,
+    uniqueShopifyProducts: desiredByProductId.size,
+    productTypeUpdatesPrepared: desiredRows.length,
+    smartCollectionsPrepared: typeRows.length,
+    smartCollectionsCreated: 0,
+    smartCollectionsUpdated: 0,
+    productTypeUpdatesApplied: 0,
+    skipped: skipped.slice(0, 5000),
+    collections: [],
+    products: desiredRows.slice(0, 20000).map((row) => ({
+      shopifyId: row.productId,
+      productId: row.legacyId,
+      desiredType: row.desiredType,
+      collectionHandle: row.desiredHandle,
+      skus: row.skus.slice(0, 20).join("|"),
+      sourceCategory: row.sourceCategories[0] || ""
+    })),
+    userErrors: []
+  };
+  const throttleState = { count: 0, waitedSeconds: 0 };
+  const throttleOptions = (operation, progress = {}) => ({
+    retryOnThrottle: true,
+    maxThrottleAttempts: 10,
+    jobId: job.id,
+    operation,
+    onThrottle: async ({ attempt, waitSeconds, error }) => {
+      throttleState.count += 1;
+      throttleState.waitedSeconds += waitSeconds;
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "waiting_shopify_rate_limit",
+        totalRows: desiredRows.length + typeRows.length,
+        ...progress,
+        missingCount: skipped.length + report.userErrors.length,
+        estimatedSecondsRemaining: waitSeconds,
+        message: `Shopify rate limit reached. Waiting ${waitSeconds}s before retrying ${operation} (attempt ${attempt}/10). ${error.shopifyApiCallLimit ? `API call limit ${error.shopifyApiCallLimit}.` : ""}`.trim()
+      });
+    }
+  });
+
+  await persistWorkerImportJob(job, {
+    status: "running",
+    phase: dryRun ? "writing_report" : "syncing_shopify_collections",
+    totalRows: desiredRows.length + typeRows.length,
+    processedRows: 0,
+    changed: desiredRows.length,
+    missingCount: skipped.length,
+    progressPercent: dryRun ? 85 : 20,
+    message: dryRun
+      ? `Dry run prepared ${desiredRows.length.toLocaleString()} Shopify product type update${desiredRows.length === 1 ? "" : "s"} and ${typeRows.length.toLocaleString()} collection upsert${typeRows.length === 1 ? "" : "s"}.`
+      : `Creating/updating ${typeRows.length.toLocaleString()} Shopify smart collection${typeRows.length === 1 ? "" : "s"} before product type updates...`
+  });
+
+  if (!dryRun) {
+    let processedCollections = 0;
+    for (const typeRow of typeRows) {
+      try {
+        const result = await upsertShopifySmartCollectionForType(typeRow.productType, throttleOptions("Sync Shopify smart collection", {
+          processedRows: processedCollections,
+          changed: report.smartCollectionsCreated + report.smartCollectionsUpdated,
+          progressPercent: 20 + Math.min(20, Math.round((processedCollections / Math.max(1, typeRows.length)) * 20))
+        }));
+        report.collections.push({
+          action: result.action,
+          productType: typeRow.productType,
+          handle: result.handle || typeRow.handle,
+          collectionId: result.collection?.id || ""
+        });
+        if (result.action === "created") report.smartCollectionsCreated += 1;
+        if (result.action === "updated") report.smartCollectionsUpdated += 1;
+      } catch (error) {
+        report.userErrors.push({ productType: typeRow.productType, handle: typeRow.handle, message: error.message || String(error) });
+      }
+      processedCollections += 1;
+      if (processedCollections % 25 === 0 || processedCollections === typeRows.length) {
+        await persistWorkerImportJob(job, {
+          status: "running",
+          phase: "syncing_shopify_collections",
+          totalRows: desiredRows.length + typeRows.length,
+          processedRows: processedCollections,
+          changed: report.smartCollectionsCreated + report.smartCollectionsUpdated,
+          missingCount: skipped.length + report.userErrors.length,
+          progressPercent: 20 + Math.min(20, Math.round((processedCollections / Math.max(1, typeRows.length)) * 20)),
+          estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processedCollections, typeRows.length + desiredRows.length),
+          message: `Synced ${processedCollections.toLocaleString()} of ${typeRows.length.toLocaleString()} Shopify smart collection${typeRows.length === 1 ? "" : "s"}...`
+        });
+      }
+      if (updateDelayMs) await new Promise((resolve) => setTimeout(resolve, updateDelayMs));
+    }
+
+    let processedProducts = 0;
+    for (const row of desiredRows) {
+      try {
+        await shopifyRestRequestAuto("PUT", `/products/${encodeURIComponent(row.legacyId)}.json`, {
+          product: {
+            id: row.legacyId,
+            product_type: row.desiredType
+          }
+        }, throttleOptions("Update Shopify product type", {
+          processedRows: typeRows.length + processedProducts,
+          changed: report.productTypeUpdatesApplied,
+          progressPercent: 40 + Math.min(58, Math.round((processedProducts / Math.max(1, desiredRows.length)) * 58))
+        }));
+        report.productTypeUpdatesApplied += 1;
+      } catch (error) {
+        report.userErrors.push({
+          shopifyId: row.productId,
+          productId: row.legacyId,
+          desiredType: row.desiredType,
+          skus: row.skus.slice(0, 20).join("|"),
+          message: error.message || String(error)
+        });
+      }
+      processedProducts += 1;
+      if (processedProducts % 50 === 0 || processedProducts === desiredRows.length) {
+        await persistWorkerImportJob(job, {
+          status: "running",
+          phase: "updating_shopify_product_types",
+          totalRows: desiredRows.length + typeRows.length,
+          processedRows: typeRows.length + processedProducts,
+          changed: report.productTypeUpdatesApplied,
+          missingCount: skipped.length + report.userErrors.length,
+          progressPercent: 40 + Math.min(58, Math.round((processedProducts / Math.max(1, desiredRows.length)) * 58)),
+          estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, typeRows.length + processedProducts, typeRows.length + desiredRows.length),
+          message: `Updated ${report.productTypeUpdatesApplied.toLocaleString()} of ${desiredRows.length.toLocaleString()} Shopify product type${desiredRows.length === 1 ? "" : "s"}...`
+        });
+      }
+      if (updateDelayMs) await new Promise((resolve) => setTimeout(resolve, updateDelayMs));
+    }
+  }
+
+  const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "shopify-product-type-collections"));
+  fs.mkdirSync(jobDir, { recursive: true });
+  const reportPath = path.join(jobDir, safeImportFileName(dryRun ? "shopify-product-type-collections-dry-run.json" : "shopify-product-type-collections-report.json", "shopify-product-type-collections-report.json"));
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  if (report.products.length) fs.writeFileSync(path.join(jobDir, "shopify-product-type-updates.csv"), csvRecordsToText(report.products));
+  if (typeRows.length) fs.writeFileSync(path.join(jobDir, "shopify-smart-collections.csv"), csvRecordsToText(typeRows));
+  if (skipped.length || report.userErrors.length) fs.writeFileSync(path.join(jobDir, "shopify-product-type-sync-issues.csv"), csvRecordsToText([...skipped, ...report.userErrors]));
+  job.originalFilePath = reportPath;
+  job.originalFileName = path.basename(reportPath);
+  job.fileName = path.basename(reportPath);
+  finishImportJob(job, {
+    status: report.userErrors.length ? "warning" : "success",
+    phase: "complete",
+    message: dryRun
+      ? `Shopify product type and collection dry run prepared ${desiredRows.length.toLocaleString()} product update${desiredRows.length === 1 ? "" : "s"} and ${typeRows.length.toLocaleString()} smart collection${typeRows.length === 1 ? "" : "s"}.`
+      : `Shopify product type sync updated ${report.productTypeUpdatesApplied.toLocaleString()} product${report.productTypeUpdatesApplied === 1 ? "" : "s"} after syncing ${report.smartCollectionsCreated + report.smartCollectionsUpdated} collection${report.smartCollectionsCreated + report.smartCollectionsUpdated === 1 ? "" : "s"}.`,
+    details: `${report.smartCollectionsCreated.toLocaleString()} collection${report.smartCollectionsCreated === 1 ? "" : "s"} created; ${report.smartCollectionsUpdated.toLocaleString()} updated; ${skipped.length.toLocaleString()} skipped; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
+    totalRows: desiredRows.length + typeRows.length,
+    processedRows: dryRun ? scanned : desiredRows.length + typeRows.length,
+    changed: dryRun ? desiredRows.length : report.productTypeUpdatesApplied,
+    missingCount: skipped.length + report.userErrors.length,
+    errors: [
+      ...(throttleState.count ? [`Shopify throttled ${throttleState.count.toLocaleString()} request${throttleState.count === 1 ? "" : "s"}; job waited ${throttleState.waitedSeconds.toLocaleString()}s and continued.`] : []),
+      ...skipped.slice(0, 25).map((row) => `${row.sku || row.skus || row.shopifyId || row.productType || "row"}: ${row.issue || row.message}`),
+      ...report.userErrors.slice(0, 25).map((row) => `${row.sku || row.skus || row.shopifyId || row.productType || "Shopify"}: ${row.message}`)
+    ].slice(0, 50),
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job);
+  await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+  publicStateJsonCache = null;
+  return job;
+}
+
+function shopifyApprovedTaxonomyMappingForProduct(db = {}, item = {}) {
+  const settings = normalizeCategorySettings(db.categorySettings || []);
+  const systemSettings = readSystemSettingsStore(db.systemSettings || {});
+  const categoryName = effectiveMainCategoryName(item, systemSettings);
+  const setting = settings.find((row) => formatCategoryName(row.name || "").toLowerCase() === formatCategoryName(categoryName).toLowerCase());
+  const mapping = setting?.mappings?.shopify || {};
+  const categoryId = sourceTextValue(mapping.categoryId || "");
+  const reviewText = `${setting?.status || ""} ${mapping.status || ""} ${setting?.notes || ""} ${mapping.notes || ""}`;
+  if (!/^gid:\/\/shopify\/TaxonomyCategory\//i.test(categoryId)) {
+    return { ready: false, categoryName, reason: mapping.categoryPath ? "Shopify mapping has path but no taxonomy ID" : "Missing Shopify taxonomy ID" };
+  }
+  if (/needs[_\s-]?review|review before|auto-suggested closest shopify taxonomy/i.test(reviewText)) {
+    return { ready: false, categoryName, categoryId, reason: "Shopify taxonomy mapping needs review" };
+  }
+  return {
+    ready: true,
+    categoryName,
+    categoryId,
+    categoryPath: mapping.categoryPath || "",
+    settingStatus: setting?.status || "",
+    mappingStatus: mapping.status || ""
+  };
+}
+
+function shopifyApprovedTaxonomyLookup(db = {}) {
+  const lookup = new Map();
+  for (const setting of normalizeCategorySettings(db.categorySettings || [])) {
+    const categoryName = formatCategoryName(setting.name || "");
+    if (!categoryName) continue;
+    const mapping = setting.mappings?.shopify || {};
+    const categoryId = sourceTextValue(mapping.categoryId || "");
+    const reviewText = `${setting.status || ""} ${mapping.status || ""} ${setting.notes || ""} ${mapping.notes || ""}`;
+    let value;
+    if (!/^gid:\/\/shopify\/TaxonomyCategory\//i.test(categoryId)) {
+      value = { ready: false, categoryName, reason: mapping.categoryPath ? "Shopify mapping has path but no taxonomy ID" : "Missing Shopify taxonomy ID" };
+    } else if (/needs[_\s-]?review|review before|auto-suggested closest shopify taxonomy/i.test(reviewText)) {
+      value = { ready: false, categoryName, categoryId, reason: "Shopify taxonomy mapping needs review" };
+    } else {
+      value = {
+        ready: true,
+        categoryName,
+        categoryId,
+        categoryPath: mapping.categoryPath || "",
+        settingStatus: setting.status || "",
+        mappingStatus: mapping.status || ""
+      };
+    }
+    lookup.set(categoryName.toLowerCase(), value);
+  }
+  return lookup;
+}
+
+async function runShopifyTaxonomyPushWorkerJob(job = {}, attrs = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const dryRun = payload.apply === true ? false : payload.dryRun !== false;
+  const limit = Math.max(1, Math.min(250000, Number(payload.limit || 250000) || 250000));
+  const pageSize = Math.max(50, Math.min(10000, Number(payload.pageSize || 2500) || 2500));
+  const updateDelayMs = Math.max(150, Math.min(5000, Number(payload.updateDelayMs || 650) || 650));
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "loading_shopify_taxonomy_updates",
+    startedAt,
+    totalRows: limit,
+    processedRows: 0,
+    message: dryRun ? "Preparing Shopify taxonomy push dry run..." : "Preparing Shopify taxonomy push..."
+  });
+
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const defaultLinkedFilter = !payload.query && JSON.stringify(payload.filters || { channelStatus: "shopify-linked" }) === JSON.stringify({ channelStatus: "shopify-linked" });
+  const shopifyStatusMap = defaultLinkedFilter ? {} : readShopifyStatusMapSync();
+  const sourceEnrichmentMap = defaultLinkedFilter ? {} : readProductSourceEnrichmentSync();
+  const taxonomyLookup = shopifyApprovedTaxonomyLookup(db);
+  const systemSettings = readSystemSettingsStore(db.systemSettings || {});
+  const desiredByProductId = new Map();
+  const skipped = [];
+  let loaded = 0;
+  let scanned = 0;
+
+  for (let page = 1; loaded < limit; page += 1) {
+    const result = defaultLinkedFilter
+      ? await postgres.listShopifyLinkedProducts({ offset: loaded, limit: Math.min(pageSize, limit - loaded) })
+      : await postgres.listProducts({
+        q: payload.query || "",
+        filters: payload.filters && Object.keys(payload.filters || {}).length ? payload.filters : { channelStatus: "shopify-linked" },
+        page,
+        limit: Math.min(pageSize, limit - loaded)
+      });
+    const rawItems = result?.items || result?.inventory || [];
+    if (!rawItems.length) break;
+    loaded += rawItems.length;
+    scanned += rawItems.length;
+    for (const rawItem of rawItems) {
+      const item = defaultLinkedFilter ? rawItem : withShopifyStatus(sourceEnrichedItem(rawItem, sourceEnrichmentMap), shopifyStatusMap, db);
+      const productId = normalizeShopifyProductGid(item.shopifyId || item.shopifyProductId);
+      if (!productId) {
+        skipped.push({ sku: item.sku || rawItem.sku || "", issue: "Missing Shopify product ID" });
+        continue;
+      }
+      const categoryName = effectiveMainCategoryName(item, systemSettings);
+      const taxonomy = taxonomyLookup.get(formatCategoryName(categoryName).toLowerCase()) || { ready: false, categoryName, reason: "Missing Shopify taxonomy ID" };
+      if (!taxonomy.ready) {
+        skipped.push({
+          sku: item.sku || rawItem.sku || "",
+          shopifyId: productId,
+          sourceCategory: taxonomy.categoryName || "",
+          shopifyCategoryId: taxonomy.categoryId || "",
+          issue: taxonomy.reason || "Taxonomy mapping not ready"
+        });
+        continue;
+      }
+      const existing = desiredByProductId.get(productId);
+      if (!existing) {
+        desiredByProductId.set(productId, {
+          productId,
+          categoryId: taxonomy.categoryId,
+          categoryPath: taxonomy.categoryPath,
+          sourceCategory: taxonomy.categoryName,
+          skus: [item.sku || rawItem.sku || ""].filter(Boolean)
+        });
+      } else {
+        if (item.sku) existing.skus.push(item.sku);
+        if (existing.categoryId !== taxonomy.categoryId) {
+          existing.conflict = true;
+          existing.conflictingCategories = [...new Set([...(existing.conflictingCategories || []), existing.categoryPath || existing.categoryId, taxonomy.categoryPath || taxonomy.categoryId])];
+        }
+      }
+    }
+    await persistWorkerImportJob(job, {
+      status: "running",
+      phase: "loading_shopify_taxonomy_updates",
+      totalRows: Number(result.total || limit) || limit,
+      processedRows: loaded,
+      changed: desiredByProductId.size,
+      missingCount: skipped.length,
+      progressPercent: Math.min(20, Math.round((loaded / Math.max(1, Math.min(Number(result.total || limit) || limit, limit))) * 20)),
+      message: `Loaded ${desiredByProductId.size.toLocaleString()} Shopify product taxonomy update${desiredByProductId.size === 1 ? "" : "s"}...`
+    });
+    if (rawItems.length < pageSize || loaded >= Number(result.total || 0)) break;
+  }
+
+  const conflictRows = [...desiredByProductId.values()].filter((row) => row.conflict);
+  for (const row of conflictRows) {
+    skipped.push({
+      shopifyId: row.productId,
+      skus: row.skus.slice(0, 20).join("|"),
+      issue: `Multiple approved taxonomy categories for same Shopify product: ${(row.conflictingCategories || []).join(" | ")}`
+    });
+    desiredByProductId.delete(row.productId);
+  }
+  const desiredRows = [...desiredByProductId.values()];
+  const report = {
+    dryRun,
+    scanned,
+    taxonomyUpdatesPrepared: desiredRows.length,
+    taxonomyUpdatesApplied: 0,
+    skipped: skipped.slice(0, 10000),
+    products: desiredRows.slice(0, 50000).map((row) => ({
+      shopifyId: row.productId,
+      shopifyCategoryId: row.categoryId,
+      shopifyCategoryPath: row.categoryPath,
+      sourceCategory: row.sourceCategory,
+      skus: row.skus.slice(0, 20).join("|")
+    })),
+    userErrors: []
+  };
+
+  const mutation = `
+    mutation DataPlusProductTaxonomyUpdate($product: ProductUpdateInput!) {
+      productUpdate(product: $product) {
+        product { id category { id fullName } }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  if (!dryRun) {
+    let processed = 0;
+    for (const row of desiredRows) {
+      try {
+        const data = await shopifyGraphqlRequestAuto(mutation, {
+          product: {
+            id: row.productId,
+            category: row.categoryId
+          }
+        }, { jobId: job.id, operation: "Update Shopify product taxonomy" });
+        const userErrors = data?.productUpdate?.userErrors || [];
+        if (userErrors.length) {
+          report.userErrors.push({
+            shopifyId: row.productId,
+            shopifyCategoryId: row.categoryId,
+            skus: row.skus.slice(0, 20).join("|"),
+            message: userErrors.map((error) => `${(error.field || []).join(".")}: ${error.message}`).join("; ")
+          });
+        } else {
+          report.taxonomyUpdatesApplied += 1;
+        }
+      } catch (error) {
+        report.userErrors.push({
+          shopifyId: row.productId,
+          shopifyCategoryId: row.categoryId,
+          skus: row.skus.slice(0, 20).join("|"),
+          message: error.message || String(error)
+        });
+      }
+      processed += 1;
+      if (processed % 50 === 0 || processed === desiredRows.length) {
+        await persistWorkerImportJob(job, {
+          status: "running",
+          phase: "updating_shopify_taxonomy",
+          totalRows: desiredRows.length,
+          processedRows: processed,
+          changed: report.taxonomyUpdatesApplied,
+          missingCount: skipped.length + report.userErrors.length,
+          progressPercent: 20 + Math.min(78, Math.round((processed / Math.max(1, desiredRows.length)) * 78)),
+          estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, desiredRows.length),
+          message: `Updated Shopify taxonomy for ${report.taxonomyUpdatesApplied.toLocaleString()} of ${desiredRows.length.toLocaleString()} product${desiredRows.length === 1 ? "" : "s"}...`
+        });
+      }
+      if (updateDelayMs) await new Promise((resolve) => setTimeout(resolve, updateDelayMs));
+    }
+  }
+
+  const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "shopify-taxonomy-push"));
+  fs.mkdirSync(jobDir, { recursive: true });
+  const reportPath = path.join(jobDir, safeImportFileName(dryRun ? "shopify-taxonomy-push-dry-run.json" : "shopify-taxonomy-push-report.json", "shopify-taxonomy-push-report.json"));
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  if (report.products.length) fs.writeFileSync(path.join(jobDir, "shopify-taxonomy-updates.csv"), csvRecordsToText(report.products));
+  if (skipped.length || report.userErrors.length) fs.writeFileSync(path.join(jobDir, "shopify-taxonomy-push-issues.csv"), csvRecordsToText([...skipped, ...report.userErrors]));
+  job.originalFilePath = reportPath;
+  job.originalFileName = path.basename(reportPath);
+  job.fileName = path.basename(reportPath);
+  finishImportJob(job, {
+    status: report.userErrors.length ? "warning" : "success",
+    phase: "complete",
+    message: dryRun
+      ? `Shopify taxonomy dry run prepared ${desiredRows.length.toLocaleString()} approved product update${desiredRows.length === 1 ? "" : "s"}.`
+      : `Shopify taxonomy push updated ${report.taxonomyUpdatesApplied.toLocaleString()} approved product${report.taxonomyUpdatesApplied === 1 ? "" : "s"}.`,
+    details: `${skipped.length.toLocaleString()} skipped for review/missing/conflict; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
+    totalRows: dryRun ? scanned : desiredRows.length,
+    processedRows: dryRun ? scanned : desiredRows.length,
+    changed: dryRun ? desiredRows.length : report.taxonomyUpdatesApplied,
+    missingCount: skipped.length + report.userErrors.length,
+    errors: [
+      ...skipped.slice(0, 25).map((row) => `${row.sku || row.skus || row.shopifyId || "row"}: ${row.issue || row.message}`),
+      ...report.userErrors.slice(0, 25).map((row) => `${row.skus || row.shopifyId || "Shopify"}: ${row.message}`)
+    ].slice(0, 50),
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job);
+  await postgres.upsertOperationArtifact(job, "original").catch(() => {});
   publicStateJsonCache = null;
   return job;
 }
@@ -10007,14 +13462,19 @@ function publicEbayListing(listing = null) {
 }
 
 function publicInventoryItem(item = {}, context = {}) {
+  const rulesDb = context.db || dbCache.data || null;
   item = sourceEnrichedItem(item, context.sourceEnrichmentMap || {});
-  item = withShopifyStatus(item, context.shopifyStatusMap || {});
+  item = withShopifyStatus(item, context.shopifyStatusMap || {}, rulesDb);
+  const fallback = context.sourceFallbackMap?.get?.(sourceTextValue(item.sku).toLowerCase()) || null;
+  item = mergeSourceCatalogExportFallback(item, fallback);
+  item = applySourceCategoryMainPromotion(item, context.systemSettings || readSystemSettingsStore(dbCache.data?.systemSettings || {}));
   const cost = sourceCatalogCost(item);
-  const sellUnitCost = productSellUnitCost(item);
+  const pricedItem = { ...item, cost, sourceCost: cost };
+  const sellUnitCost = productSellUnitCost(pricedItem, rulesDb);
   const uomInfo = productUomInfo(item);
-  const listPrice = Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0));
-  const rawPrice = Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
-  const websitePrice = rawPrice > sellUnitCost ? rawPrice : pricedFromCost(sellUnitCost || cost);
+  const listPrice = isClearanceItem(item) ? Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0)) : 0;
+  const websitePrice = shopifyVariantWebsitePrice(pricedItem, systemProductVariants(pricedItem, rulesDb)[0] || {}, SHOPIFY_PRICE_MARKUP_PERCENT, rulesDb);
+  const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
   return {
     id: item.id,
     sku: item.sku,
@@ -10042,8 +13502,8 @@ function publicInventoryItem(item = {}, context = {}) {
     uomQty: item.uomQty,
     uomDisplay: uomInfo.display,
     isMultiUnit: uomInfo.isMultiUnit,
-    systemVariants: systemProductVariants(item),
-    shopifyPurchaseVariants: shopifyPurchaseVariants(item),
+    systemVariants: systemProductVariants(pricedItem, rulesDb),
+    shopifyPurchaseVariants: shopifyPurchaseVariants(pricedItem, rulesDb),
     hazardous: Boolean(item.hazardous),
     toBeDiscontinued: productIsCloseout(item),
     closeoutEligible: productIsCloseout(item),
@@ -10070,6 +13530,14 @@ function publicInventoryItem(item = {}, context = {}) {
     shopifyOnlineStoreUrl: item.shopifyOnlineStoreUrl || "",
     shopifyVariantSku: item.shopifyVariantSku || "",
     shopifyVariantCount: Number(item.shopifyVariantCount || 0),
+    shopifyLivePrice: shopifyPrice.livePrice,
+    shopifySystemPrice: shopifyPrice.systemPrice,
+    shopifyPriceDelta: shopifyPrice.delta,
+    shopifyPriceMismatch: shopifyPrice.mismatch,
+    shopifyLiveVariantSku: shopifyPrice.variantSku,
+    shopifyLiveVariantId: shopifyPrice.variantId,
+    shopifyLiveCompareAtPrice: shopifyPrice.compareAtPrice,
+    shopifyLiveInventoryQuantity: shopifyPrice.inventoryQuantity,
     qty: Number(item.qty || 0),
     stockQty: Number(item.stockQty || 0),
     reserved: Number(item.reserved || 0),
@@ -10108,6 +13576,7 @@ function publicInventoryItem(item = {}, context = {}) {
 
 function publicInventoryContext() {
   return {
+    db: dbCache.data || null,
     shopifyStatusMap: readShopifyStatusMapSync(),
     sourceEnrichmentMap: readProductSourceEnrichmentSync()
   };
@@ -10118,14 +13587,22 @@ function publicProductItem(item = {}) {
 }
 
 function publicInventoryListItem(item = {}, context = {}) {
+  const rulesDb = context.db || dbCache.data || null;
   item = sourceEnrichedItem(item, context.sourceEnrichmentMap || {});
-  item = withShopifyStatus(item, context.shopifyStatusMap || {});
+  item = withShopifyStatus(item, context.shopifyStatusMap || {}, rulesDb);
+  const fallback = context.sourceFallbackMap?.get?.(sourceTextValue(item.sku).toLowerCase()) || null;
+  item = mergeSourceCatalogExportFallback(item, fallback);
+  item = applySourceCategoryMainPromotion(
+    item,
+    context.systemSettings || readSystemSettingsStore(dbCache.data?.systemSettings || {})
+  );
   const cost = sourceCatalogCost(item);
-  const sellUnitCost = productSellUnitCost(item);
+  const pricedItem = { ...item, cost, sourceCost: cost };
+  const sellUnitCost = productSellUnitCost(pricedItem, rulesDb);
   const uomInfo = productUomInfo(item);
-  const listPrice = Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0));
-  const rawPrice = Number(sourceNumberValue(item.websitePrice ?? item.price ?? 0));
-  const websitePrice = rawPrice > sellUnitCost ? rawPrice : pricedFromCost(sellUnitCost || cost);
+  const listPrice = isClearanceItem(item) ? Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0)) : 0;
+  const websitePrice = websitePriceFromRule(item, sellUnitCost || cost, SHOPIFY_PRICE_MARKUP_PERCENT, {}, rulesDb);
+  const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
   const images = Array.isArray(item.images) ? item.images : [];
   return {
     id: item.id,
@@ -10141,7 +13618,9 @@ function publicInventoryListItem(item = {}, context = {}) {
     vendorSku: item.vendorSku,
     barcode: item.barcode,
     category: item.category,
+    mainCategory: item.mainCategory || item.category || "",
     categoryVerified: item.categoryVerified,
+    mainCategorySource: item.mainCategorySource || "",
     sourceCategory: item.sourceCategory,
     supplier: item.supplier,
     vendor: item.vendor,
@@ -10158,12 +13637,18 @@ function publicInventoryListItem(item = {}, context = {}) {
     shopifyStatus: item.shopifyStatus || "",
     shopifyPublished: Boolean(item.shopifyPublished),
     shopifySyncSource: item.shopifySyncSource || "",
+    shopifyLivePrice: shopifyPrice.livePrice,
+    shopifySystemPrice: shopifyPrice.systemPrice,
+    shopifyPriceDelta: shopifyPrice.delta,
+    shopifyPriceMismatch: shopifyPrice.mismatch,
+    shopifyLiveVariantSku: shopifyPrice.variantSku,
+    shopifyLiveVariantId: shopifyPrice.variantId,
     uom: item.uom,
     uomName: uomInfo.name,
     uomQty: item.uomQty,
     uomDisplay: uomInfo.display,
     isMultiUnit: uomInfo.isMultiUnit,
-    systemVariants: systemProductVariants(item),
+    systemVariants: systemProductVariants(pricedItem, rulesDb),
     qty: Number(item.qty || 0),
     stockQty: Number(item.stockQty || 0),
     reserved: Number(item.reserved || 0),
@@ -10196,13 +13681,15 @@ function publicState(db, options = {}) {
   const lite = Boolean(options.lite);
   const shopifyStatusMap = lite ? {} : readShopifyStatusMapSync();
   const sourceEnrichmentMap = lite ? {} : readProductSourceEnrichmentSync();
+  const systemSettings = normalizeSystemSettings(db.systemSettings || {});
   const safeDb = {
     ...db,
-    systemSettings: normalizeSystemSettings(db.systemSettings || {}),
+    systemSettings,
     tablePreferences: normalizeUserTablePreferences(db.tablePreferences || {}),
     connections: (db.connections || []).map(publicConnection),
-    inventory: lite ? [] : (db.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap })),
+    inventory: lite ? [] : (db.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, systemSettings })),
     orders: lite ? (db.orders || []).slice(0, 25) : (db.orders || []),
+    importJobs: clientImportJobs(Array.isArray(db.importJobs) ? db.importJobs.slice(0, IMPORT_JOB_HISTORY_LIMIT) : []),
     categorySettings: lite ? [] : (db.categorySettings || []),
     vendorCategoryMappings: lite ? {} : (db.vendorCategoryMappings || {}),
     sourceCatalogOverrides: {},
@@ -12862,8 +16349,8 @@ function inventoryPayloadFromRecord(record) {
     brand: record.brand ?? record.Brand ?? record.brandName ?? record.brand_name ?? record["Brand Name"] ?? record["brand name"] ?? record["brand_name"]
   };
   const payload = {};
-  const textFields = ["marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
-  const numberFields = ["price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "reorderPoint", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
+  const textFields = ["marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy", "binLocation", "bscReportingUpdatedAt", "ceiId", "contractName", "contractShortDescription", "defaultLeadTime", "defaultSupplierSku", "marconeMake", "marconePart", "masterSku", "notes", "uKey", "updatedBy", "systemFieldSource"];
+  const numberFields = ["price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "reorderPoint", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "replenishableQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice", "defaultPrice", "defaultSupplierPrice", "maxQuantity", "minimumQuantity", "weight"];
 
   for (const field of textFields) {
     if (record[field] !== undefined) payload[field] = String(record[field]).trim();
@@ -12885,11 +16372,19 @@ function inventoryPayloadFromRecord(record) {
   if (payload.msrp !== undefined && payload.listPrice === undefined) payload.listPrice = payload.msrp;
   if (record.hazardous !== undefined) payload.hazardous = record.hazardous === true || String(record.hazardous).toLowerCase() === "true";
   if (record.active !== undefined) payload.active = record.active === true || String(record.active).toLowerCase() === "true";
+  if (record.replenishable !== undefined) payload.replenishable = record.replenishable === true || String(record.replenishable).toLowerCase() === "true";
+  if (record.replenishableUseVendorRules !== undefined) payload.replenishableUseVendorRules = record.replenishableUseVendorRules === true || String(record.replenishableUseVendorRules).toLowerCase() === "true";
+  if (record.replenishableQtyUseVendorDefault !== undefined) payload.replenishableQtyUseVendorDefault = record.replenishableQtyUseVendorDefault === true || String(record.replenishableQtyUseVendorDefault).toLowerCase() === "true";
   if (record.brandLocked !== undefined) payload.brandLocked = record.brandLocked === true || String(record.brandLocked).toLowerCase() === "true";
   if (record.categoryVerified !== undefined) payload.categoryVerified = record.categoryVerified === true || String(record.categoryVerified).toLowerCase() === "true";
   if (record.shopifyPublished !== undefined) payload.shopifyPublished = record.shopifyPublished === true || String(record.shopifyPublished).toLowerCase() === "true";
   if (record.images !== undefined) payload.images = parseList(record.images);
   if (record.tags !== undefined) payload.tags = parseList(record.tags);
+  if (record.addTags !== undefined) payload.addTags = parseList(record.addTags);
+  if (record.removeTags !== undefined) payload.removeTags = parseList(record.removeTags);
+  if (record.keyFeaturesRaw !== undefined) payload.keyFeaturesRaw = Array.isArray(record.keyFeaturesRaw) ? record.keyFeaturesRaw : parseList(record.keyFeaturesRaw);
+  if (record.bscReporting && typeof record.bscReporting === "object") payload.bscReporting = record.bscReporting;
+  if (record.inventoryByLocation && typeof record.inventoryByLocation === "object") payload.inventoryByLocation = record.inventoryByLocation;
   if (record.productManagerFields && typeof record.productManagerFields === "object") payload.productManagerFields = record.productManagerFields;
   if (record.dimensionWeightSources && typeof record.dimensionWeightSources === "object") payload.dimensionWeightSources = record.dimensionWeightSources;
   if (record.checkedImage && typeof record.checkedImage === "object") payload.checkedImage = record.checkedImage;
@@ -12899,8 +16394,8 @@ function inventoryPayloadFromRecord(record) {
 }
 
 function applyInventoryPatch(item, body) {
-  const textFields = ["title", "marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy"];
-  const numberFields = ["qty", "reserved", "reorderPoint", "price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"];
+  const textFields = ["title", "marketplaceTitle", "brand", "sourceBrand", "category", "mainCategory", "sourceCategory", "vendorCategory", "condition", "status", "barcode", "shortDescription", "longDescription", "vendor", "seoKeywords", "externalId", "shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource", "defaultImage", "manufacturer", "mfrPartNumber", "vendorSku", "supplier", "supplierCode", "unspsc", "uom", "uomQty", "minQuantity", "quantityIncrements", "sdsUrl", "stockStatus", "stockUpdatedAt", "ctechId", "ctechIdLastExport", "wildcardSearch", "productDumpCreatedAt", "productDumpUpdatedAt", "inactiveMailedAt", "validatedAt", "checkedImageUrl", "checkedImageError", "checkedImageSize", "checkedImageTimestamp", "zoroLeadtime", "zoroSku", "originalImage", "defaultSupplier", "lastPricesUpdateAt", "lastPricesUpdateBy", "leadTime", "leadtime", "altVendorSku", "countryOfOrigin", "originalSdsUrl", "itemKey", "itemClearanceIndicator", "vendorDescription", "uploadedBy", "binLocation", "bscReportingUpdatedAt", "ceiId", "contractName", "contractShortDescription", "defaultLeadTime", "defaultSupplierSku", "marconeMake", "marconePart", "masterSku", "notes", "uKey", "updatedBy", "systemFieldSource"];
+  const numberFields = ["qty", "reserved", "reorderPoint", "price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "replenishableQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice", "defaultPrice", "defaultSupplierPrice", "maxQuantity", "minimumQuantity", "weight"];
 
   for (const field of textFields) {
     if (body[field] !== undefined) item[field] = String(body[field]);
@@ -12926,12 +16421,20 @@ function applyInventoryPatch(item, body) {
   if (body.msrp !== undefined) item.listPrice = item.msrp;
   if (body.hazardous !== undefined) item.hazardous = body.hazardous === true || String(body.hazardous).toLowerCase() === "true";
   if (body.active !== undefined) item.active = body.active === true || String(body.active).toLowerCase() === "true";
+  if (body.replenishable !== undefined) item.replenishable = body.replenishable === true || String(body.replenishable).toLowerCase() === "true";
+  if (body.replenishableUseVendorRules !== undefined) item.replenishableUseVendorRules = body.replenishableUseVendorRules === true || String(body.replenishableUseVendorRules).toLowerCase() === "true";
+  if (body.replenishableQtyUseVendorDefault !== undefined) item.replenishableQtyUseVendorDefault = body.replenishableQtyUseVendorDefault === true || String(body.replenishableQtyUseVendorDefault).toLowerCase() === "true";
   if (body.brandLocked !== undefined) item.brandLocked = body.brandLocked === true || String(body.brandLocked).toLowerCase() === "true";
   if (body.categoryVerified !== undefined) item.categoryVerified = body.categoryVerified === true || String(body.categoryVerified).toLowerCase() === "true";
   if (body.shopifyPublished !== undefined) item.shopifyPublished = body.shopifyPublished === true || String(body.shopifyPublished).toLowerCase() === "true";
   if (body.images !== undefined) item.images = parseList(body.images);
   if (body.tags !== undefined) item.tags = parseList(body.tags);
+  if (body.addTags !== undefined) item.addTags = parseList(body.addTags);
+  if (body.removeTags !== undefined) item.removeTags = parseList(body.removeTags);
   if (body.bulletPoints !== undefined) item.bulletPoints = parseList(body.bulletPoints);
+  if (body.keyFeaturesRaw !== undefined) item.keyFeaturesRaw = Array.isArray(body.keyFeaturesRaw) ? body.keyFeaturesRaw : parseList(body.keyFeaturesRaw);
+  if (body.bscReporting && typeof body.bscReporting === "object") item.bscReporting = body.bscReporting;
+  if (body.inventoryByLocation && typeof body.inventoryByLocation === "object") item.inventoryByLocation = body.inventoryByLocation;
   if (body.productManagerFields && typeof body.productManagerFields === "object") item.productManagerFields = body.productManagerFields;
   if (body.dimensionWeightSources && typeof body.dimensionWeightSources === "object") item.dimensionWeightSources = body.dimensionWeightSources;
   if (body.checkedImage && typeof body.checkedImage === "object") item.checkedImage = body.checkedImage;
@@ -13122,6 +16625,7 @@ function catalogProductShopifyReadinessStatus(product = {}) {
 
   const price = Number(product.price ?? product.websitePrice ?? product.shopifyPrice ?? product.listPrice ?? 0);
   const stockQty = Number(product.stockQty ?? product.qty ?? product.inventoryQty ?? product.shopifyInventoryQty ?? 0);
+  if (Boolean(product.toBeDiscontinued || product.closeoutEligible) && !(Number.isFinite(stockQty) && stockQty > 0)) return "not-ready";
   const missingRequired = [
     !String(product.sku || product.variantSku || product.shopifyVariantSku || "").trim(),
     !String(product.marketplaceTitle || product.title || product.name || "").trim(),
@@ -13172,6 +16676,9 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
   const ebayListing = product.ebayListing || {};
   const ebayStatus = catalogProductEbayStatus(product);
   if (value === "shopify-live" || value === "live") return shopifyLinked && shopifyStatus === "active" && product.shopifyPublished === true;
+  if (value === "shopify-not-live") return !(shopifyLinked && shopifyStatus === "active" && product.shopifyPublished === true);
+  if (value === "shopify-price-mismatch") return Boolean(product.shopifyPriceMismatch)
+    || (Number(product.shopifyLivePrice || 0) > 0 && Math.abs(Number(product.websitePrice ?? product.price ?? 0) - Number(product.shopifyLivePrice || 0)) >= 0.01);
   if (value === "shopify-ready") {
     const readiness = catalogProductShopifyReadinessStatus(product);
     return readiness === "ready" || readiness === "live";
@@ -13436,8 +16943,8 @@ function sourceCatalogCost(product = {}) {
 
 function catalogSummary(product = {}) {
   const cost = sourceCatalogCost(product);
-  const listPrice = Number(sourceNumberValue(product.listPrice ?? product.msrp ?? 0));
-  const websitePrice = Number(sourceNumberValue(product.websitePrice ?? 0)) || pricedFromCost(cost);
+  const listPrice = isClearanceItem(product) ? Number(sourceNumberValue(product.listPrice ?? product.msrp ?? 0)) : 0;
+  const websitePrice = websitePriceFromRule(product, cost, SHOPIFY_PRICE_MARKUP_PERCENT);
   return {
     id: product.id || product.sku,
     sku: product.sku || "",
@@ -13504,6 +17011,29 @@ function readCatalogVendorIndex() {
   } catch {
     return null;
   }
+}
+
+function catalogFiltersWithIndexedSupplierKeys(filters = {}) {
+  const selectedSuppliers = String(filters.suppliers || filters.supplier || "")
+    .split("|")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!selectedSuppliers.length) return filters;
+  const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
+  const keys = new Set(selectedSuppliers);
+  const vendorIndex = readCatalogVendorIndex();
+  for (const row of vendorIndex?.vendors || vendorIndex?.suppliers || []) {
+    const name = typeof row === "string" ? row : row?.name;
+    if (!name || !supplierNames.has(String(name).toLowerCase())) continue;
+    keys.add(String(name));
+    for (const code of row?.supplierCodes || row?.codes || []) {
+      if (!code) continue;
+      keys.add(String(code));
+      keys.add(String(code).toLowerCase());
+      keys.add(String(code).toUpperCase());
+    }
+  }
+  return { ...filters, supplierKeys: [...keys] };
 }
 
 function readSourceCatalogIndexManifest() {
@@ -13635,9 +17165,12 @@ function normalizeCatalogProductForInventory(record) {
     ctechId: sourceTextValue(record.ctechId || record.ctech_id),
     ctechIdLastExport: sourceTextValue(record.ctechIdLastExport || record.ctech_id_last_export),
     fobPrice: sourceNumberValue(record.fobPrice || record.fob_price),
+    vendorWebsitePrice: sourceNumberValue(record.vendorWebsitePrice || record.vendor_website_price),
     price: sourceNumberValue(record.price || record.sale_price || record.sell_price),
     cost: sourceNumberValue(record.cost || record.fob_price || record.wholesale_price),
-    msrp: sourceNumberValue(record.msrp || record.list_price),
+    msrp: isClearanceItem(record) ? sourceNumberValue(record.msrp || record.list_price) : 0,
+    toBeDiscontinued: sourceBooleanValue(record.toBeDiscontinued ?? record.to_be_discontinued, false),
+    closeoutEligible: sourceBooleanValue(record.closeoutEligible ?? record.closeout_eligible ?? record.toBeDiscontinued ?? record.to_be_discontinued, false),
     wildcardSearch: sourceTextValue(record.wildcardSearch),
     tags: sourceListValue(record.tags),
     attributes: record.attributes && typeof record.attributes === "object" ? record.attributes : {},
@@ -13658,6 +17191,8 @@ function normalizeCatalogProductForInventory(record) {
     importedFrom: record.importedFrom || "source catalog",
     updatedAt: new Date().toISOString()
   };
+  product.websitePrice = websitePriceFromRule(product, product.cost, SHOPIFY_PRICE_MARKUP_PERCENT);
+  product.price = product.websitePrice;
   product.dimensionalWeight = product.dimensionalWeight || calculateDimensionalWeight(product);
   return product;
 }
@@ -14115,7 +17650,7 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, db 
   };
   if (postgres.isPostgresEnabled()) {
     try {
-      const pgResult = await postgres.listVendorCatalogItems({ query, page: pageNumber, limit: pageSize, filters });
+      const pgResult = await postgres.listVendorCatalogItems({ query, page: pageNumber, limit: pageSize, filters: catalogFiltersWithIndexedSupplierKeys(filters) });
       if (pgResult) {
         const overrides = sourceCatalogOverrideMap(db);
         const vendorMappings = vendorCategoryMappingMap(db);
@@ -14257,7 +17792,7 @@ async function collectCatalogProductsForExport({ query = "", filters = {}, limit
   const productsBySku = inventoryBySkuMap(db);
   if (postgres.isPostgresEnabled()) {
     try {
-      const pgResult = await postgres.collectVendorCatalogItems({ query, filters, limit: maxItems });
+      const pgResult = await postgres.collectVendorCatalogItems({ query, filters: catalogFiltersWithIndexedSupplierKeys(filters), limit: maxItems });
       if (pgResult) {
         return {
           items: pgResult.items
@@ -14351,7 +17886,7 @@ async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query
   if (allFiltered) {
     const collected = await postgres.collectVendorCatalogItems({
       query,
-      filters,
+      filters: catalogFiltersWithIndexedSupplierKeys(filters),
       limit: Math.max(1, Math.min(25000, Number(limit || 25000))),
       includeCount: false
     });
@@ -14617,12 +18152,23 @@ function startSourceCatalogImportJob(jobId, body = {}) {
 }
 
 async function scanCatalogFacets() {
+  const sourceCatalogIndexSupplierNames = () => {
+    const sourceIndex = readSourceCatalogIndexManifest();
+    const vendorIndex = readCatalogVendorIndex();
+    return [
+      ...(sourceIndex?.suppliers || []),
+      ...(vendorIndex?.vendors || []),
+      ...(vendorIndex?.suppliers || [])
+    ]
+      .map((supplier) => typeof supplier === "string" ? supplier : supplier?.name)
+      .filter(Boolean);
+  };
   if (postgres.isPostgresEnabled()) {
     try {
       const facets = await postgres.vendorCatalogFacets();
       if (facets) {
         const sortValues = (values = [], limit = 500) => [...new Set(values.filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b))).slice(0, limit);
-        const suppliers = sortValues(facets.suppliers, 10000);
+        const suppliers = sortValues([...(facets.suppliers || []), ...sourceCatalogIndexSupplierNames()], 50000);
         const stockStatuses = sortValues(facets.stockStatuses);
         const brands = sortValues((facets.brands || []).map(formatBrandName));
         const categories = sortValues((facets.categories || []).map(formatCategoryName));
@@ -14799,6 +18345,10 @@ function publicShopifyConfigStatus() {
   };
 }
 
+function configuredShopifyAppUrl() {
+  return String(process.env.SHOPIFY_APP_URL || process.env.APPLICATION_URL || "").trim();
+}
+
 function sanitizeApiLogMessage(value = "") {
   return String(value || "")
     .replace(/shpat_[A-Za-z0-9_\-]+/g, "[token]")
@@ -14879,9 +18429,10 @@ function appendChannelApiLog(entry = {}) {
   }
 }
 
-function readFileChannelApiLogs({ channel = "", days = 30, limit = 250 } = {}) {
+function readFileChannelApiLogs({ channel = "", days = 30, limit = 250, jobId = "" } = {}) {
   if (!fs.existsSync(CHANNEL_API_LOG_FILE)) return [];
   const channelKey = String(channel || "").trim().toLowerCase();
+  const jobKey = String(jobId || "").trim();
   const minTime = Date.now() - Math.max(1, Number(days || 30)) * 24 * 60 * 60 * 1000;
   const maxRows = Math.max(1, Math.min(1000, Number(limit || 250)));
   const rows = [];
@@ -14892,6 +18443,7 @@ function readFileChannelApiLogs({ channel = "", days = 30, limit = 250 } = {}) {
       const time = Date.parse(row.createdAt || "");
       if (!Number.isFinite(time) || time < minTime) continue;
       if (channelKey && String(row.channel || "").trim().toLowerCase() !== channelKey) continue;
+      if (jobKey && String(row.jobId || "").trim() !== jobKey) continue;
       rows.push(row);
     } catch {
       // Ignore malformed log lines.
@@ -14900,11 +18452,11 @@ function readFileChannelApiLogs({ channel = "", days = 30, limit = 250 } = {}) {
   return rows;
 }
 
-async function readChannelApiLogs({ channel = "", days = 30, limit = 250 } = {}) {
-  const fileRows = readFileChannelApiLogs({ channel, days, limit });
+async function readChannelApiLogs({ channel = "", days = 30, limit = 250, jobId = "" } = {}) {
+  const fileRows = readFileChannelApiLogs({ channel, days, limit, jobId });
   if (!postgres.isPostgresEnabled()) return fileRows;
   try {
-    const pgRows = await postgres.readChannelApiLogs({ channel, days, limit });
+    const pgRows = await postgres.readChannelApiLogs({ channel, days, limit, jobId });
     const byKey = new Map();
     for (const row of [...pgRows, ...fileRows]) {
       const key = `${row.createdAt}|${row.channel}|${row.transport || ""}|${row.method}|${row.path}|${row.statusCode}|${row.ok}|${row.requestId || ""}|${row.jobId || ""}|${row.message}`;
@@ -14916,6 +18468,57 @@ async function readChannelApiLogs({ channel = "", days = 30, limit = 250 } = {})
   } catch {
     return fileRows;
   }
+}
+
+async function fetchShopifyShippingProfiles() {
+  async function fetchPage(useMerchantFilter = true, cursor = null) {
+    const args = useMerchantFilter ? "first: $first, after: $after, merchantOwnedOnly: true" : "first: $first, after: $after";
+    return shopifyGraphqlRequestAuto(`
+      query DeliveryProfiles($first: Int!, $after: String) {
+        deliveryProfiles(${args}) {
+          edges {
+            cursor
+            node {
+              id
+              name
+              default
+            }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    `, { first: 50, after: cursor }, { operation: "Fetch Shopify shipping profiles" });
+  }
+  const profiles = [];
+  let after = null;
+  let useMerchantFilter = true;
+  do {
+    let data;
+    try {
+      data = await fetchPage(useMerchantFilter, after);
+    } catch (error) {
+      if (!useMerchantFilter || after || !/merchantOwnedOnly|argument/i.test(error.message || "")) throw error;
+      useMerchantFilter = false;
+      data = await fetchPage(false, after);
+    }
+    const connection = data.deliveryProfiles || {};
+    for (const edge of connection.edges || []) {
+      const node = edge.node || {};
+      const id = String(node.id || "").trim();
+      const name = String(node.name || "").trim();
+      if (!id && !name) continue;
+      profiles.push({
+        id,
+        name: name || id,
+        default: Boolean(node.default)
+      });
+    }
+    after = connection.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : null;
+  } while (after);
+  return normalizeShopifyShippingProfiles(profiles);
 }
 
 function shopifyGraphqlOperationName(query = "") {
@@ -15058,9 +18661,52 @@ async function shopifyAdminAccessToken(options = {}) {
   throw new Error("Shopify Admin API is not configured. Add SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET, or SHOPIFY_ADMIN_ACCESS_TOKEN, to .env.");
 }
 
+async function refreshShopifyAdminAccessToken(options = {}) {
+  shopifyAccessTokenCache = { token: "", expiresAt: 0, scope: "" };
+  const config = shopifyAdminConfig();
+  if (config.clientId && config.clientSecret) {
+    const tokenState = await shopifyTokenRequest({ ...options, operation: options.operation || "Refresh Shopify token" });
+    return {
+      tokenSource: "client_credentials",
+      hasToken: Boolean(tokenState.token),
+      scope: tokenState.scope || "",
+      scopes: String(tokenState.scope || "").split(/[\s,]+/).filter(Boolean),
+      expiresAt: tokenState.expiresAt ? new Date(tokenState.expiresAt).toISOString() : ""
+    };
+  }
+  if (config.accessToken) {
+    return {
+      tokenSource: "env_admin_token",
+      hasToken: true,
+      scope: "",
+      scopes: [],
+      expiresAt: "",
+      message: "Using SHOPIFY_ADMIN_ACCESS_TOKEN from .env. Update that token in Shopify if scopes changed."
+    };
+  }
+  throw new Error("Shopify Admin API is not configured. Add SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET, or SHOPIFY_ADMIN_ACCESS_TOKEN, to .env.");
+}
+
 async function shopifyRestRequestAuto(method, resourcePath, body = null, options = {}) {
   const token = await shopifyAdminAccessToken(options);
-  return shopifyRestRequestWithToken(method, resourcePath, body, token, options);
+  const maxAttempts = options.retryOnThrottle ? Math.max(1, Math.min(10, Number(options.maxThrottleAttempts || 8) || 8)) : 1;
+  let attempt = 0;
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    try {
+      return await shopifyRestRequestWithToken(method, resourcePath, body, token, options);
+    } catch (error) {
+      if (error.statusCode !== 429 || attempt >= maxAttempts) throw error;
+      const retryAfterSeconds = Math.max(1, Number(error.retryAfter || 0) || 0);
+      const fallbackSeconds = Math.min(120, Math.max(8, attempt * attempt * 3));
+      const waitSeconds = retryAfterSeconds || fallbackSeconds;
+      if (typeof options.onThrottle === "function") {
+        await options.onThrottle({ attempt, maxAttempts, waitSeconds, error });
+      }
+      await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+    }
+  }
+  throw new Error("Shopify request failed after throttle retries.");
 }
 
 async function shopifyGraphqlRequestAuto(query, variables = {}, options = {}) {
@@ -15104,7 +18750,12 @@ function shopifyRestRequestWithToken(method, resourcePath, body = null, accessTo
         }
         if (response.statusCode < 200 || response.statusCode >= 300) {
           appendChannelApiLog({ channel: "Shopify", transport: "REST", method, path: requestPath, operation: options.operation || resourcePath, statusCode: response.statusCode, ok: false, durationMs: Date.now() - startedAt, message: text, requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
-          return reject(new Error(`Shopify API error (${response.statusCode}): ${text}`));
+          const error = new Error(`Shopify API error (${response.statusCode}): ${text}`);
+          error.statusCode = response.statusCode;
+          error.retryAfter = Number(response.headers["retry-after"] || 0) || 0;
+          error.shopifyApiCallLimit = String(response.headers["x-shopify-shop-api-call-limit"] || "");
+          error.responseText = text;
+          return reject(error);
         }
         appendChannelApiLog({ channel: "Shopify", transport: "REST", method, path: requestPath, operation: options.operation || resourcePath, statusCode: response.statusCode, ok: true, durationMs: Date.now() - startedAt, message: "OK", requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
         resolve(data);
@@ -15140,6 +18791,52 @@ async function syncShopifyCloseoutCollection() {
   }
   const created = await shopifyRestRequestAuto("POST", "/smart_collections.json", { smart_collection: smartCollection });
   return { action: "created", collection: created.smart_collection };
+}
+
+function shopifySmartCollectionPayloadForType(productType = "") {
+  const type = sourceTextValue(productType);
+  const title = smartCollectionTitle(type);
+  return {
+    title,
+    handle: smartCollectionHandle(type),
+    body_html: "",
+    published: true,
+    published_scope: "global",
+    sort_order: "best-selling",
+    rules: [{ column: "type", relation: "equals", condition: type }],
+    disjunctive: false,
+    metafields_global_title_tag: smartCollectionSeoTitle(title),
+    metafields_global_description_tag: smartCollectionSeoDescription(title, type)
+  };
+}
+
+async function upsertShopifySmartCollectionForType(productType = "", options = {}) {
+  const smartCollection = shopifySmartCollectionPayloadForType(productType);
+  if (!smartCollection.handle || !sourceTextValue(productType)) return { action: "skipped", reason: "Missing product type" };
+  const existing = await shopifyRestRequestAuto("GET", `/smart_collections.json?handle=${encodeURIComponent(smartCollection.handle)}&limit=1`, null, {
+    ...options,
+    jobId: options.jobId || "",
+    operation: "Find Shopify type collection"
+  });
+  const current = Array.isArray(existing.smart_collections) ? existing.smart_collections[0] : null;
+  if (current?.id) {
+    const updated = await shopifyRestRequestAuto("PUT", `/smart_collections/${encodeURIComponent(current.id)}.json`, {
+      smart_collection: { id: current.id, ...smartCollection }
+    }, {
+      ...options,
+      jobId: options.jobId || "",
+      operation: "Update Shopify type collection"
+    });
+    return { action: "updated", collection: updated.smart_collection || current, handle: smartCollection.handle, productType };
+  }
+  const created = await shopifyRestRequestAuto("POST", "/smart_collections.json", {
+    smart_collection: smartCollection
+  }, {
+    ...options,
+    jobId: options.jobId || "",
+    operation: "Create Shopify type collection"
+  });
+  return { action: "created", collection: created.smart_collection, handle: smartCollection.handle, productType };
 }
 
 function normalizeShopifyProductGid(value = "") {
@@ -15225,6 +18922,72 @@ function shopifyStatusPayloadFromProduct(product = {}, item = {}) {
     shopifyOnlineStoreUrl: product.onlineStoreUrl || "",
     shopifyVariantSku: matchedVariant?.sku || "",
     shopifyVariantCount: variants.length
+  };
+}
+
+function shopifyStatusPayloadFromVariantNode(variant = {}) {
+  const product = variant.product || {};
+  const status = normalizeShopifyStatus(product.status);
+  return {
+    sku: String(variant.sku || "").trim(),
+    shopifyId: normalizeShopifyProductGid(product.id),
+    shopifyVariantId: normalizeShopifyVariantGid(variant.id),
+    shopifyHandle: product.handle || "",
+    shopifyStatus: status,
+    shopifyPublished: Boolean(product.publishedAt),
+    shopifyPublishedAt: product.publishedAt || "",
+    shopifyUpdatedAt: product.updatedAt || "",
+    shopifySyncedAt: new Date().toISOString(),
+    shopifySyncSource: "shopify-api-sku-map",
+    shopifyOnlineStoreUrl: product.onlineStoreUrl || "",
+    shopifyTitle: product.title || "",
+    shopifyVariantSku: String(variant.sku || "").trim(),
+    shopifyVariantTitle: variant.title || "",
+    shopifyVariantPrice: variant.price || "",
+    shopifyVariantCompareAtPrice: variant.compareAtPrice || "",
+    shopifyVariantBarcode: variant.barcode || "",
+    shopifyVariantInventoryQuantity: Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null
+  };
+}
+
+async function fetchShopifyVariantSkuPage(after = null, options = {}) {
+  const query = `
+    query DataPlusShopifyVariantSkuMap($first: Int!, $after: String) {
+      productVariants(first: $first, after: $after) {
+        nodes {
+          id
+          legacyResourceId
+          title
+          sku
+          barcode
+          price
+          compareAtPrice
+          inventoryQuantity
+          product {
+            id
+            legacyResourceId
+            title
+            handle
+            status
+            publishedAt
+            updatedAt
+            onlineStoreUrl
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  `;
+  const first = Math.max(1, Math.min(250, Number(options.first || 250)));
+  const data = await shopifyGraphqlRequestAuto(query, { first, after }, { jobId: options.jobId, operation: "Build Shopify SKU map" });
+  const connection = data?.productVariants || {};
+  return {
+    variants: Array.isArray(connection.nodes) ? connection.nodes : [],
+    hasNextPage: Boolean(connection.pageInfo?.hasNextPage),
+    endCursor: connection.pageInfo?.endCursor || ""
   };
 }
 
@@ -15351,13 +19114,27 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/product-fields") {
-    return sendJson(res, 200, { fields: PRODUCT_MAPPING_FIELDS });
+    const exportMappings = readExportMappingsStore([]);
+    return sendJson(res, 200, { fields: PRODUCT_MAPPING_FIELDS, systemFields: allSystemFieldDefinitions(exportMappings) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/system-fields") {
+    const exportMappings = readExportMappingsStore([]);
+    const fields = allSystemFieldDefinitions(exportMappings);
+    const dumpKeys = [...new Set(fields.flatMap((field) => field.dumpKeys || []))].sort((a, b) => String(a).localeCompare(String(b)));
+    return sendJson(res, 200, {
+      fields,
+      dumpKeys,
+      groups: [...new Set(fields.map((field) => field.group).filter(Boolean))],
+      templates: (exportMappings || []).map((template) => ({ id: template.id, name: template.name, source: template.source, mappings: (template.mappings || []).length }))
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/channel-api-logs") {
     return sendJson(res, 200, {
       logs: await readChannelApiLogs({
         channel: url.searchParams.get("channel") || "",
+        jobId: url.searchParams.get("jobId") || "",
         days: url.searchParams.get("days") || 30,
         limit: url.searchParams.get("limit") || 250
       })
@@ -15369,12 +19146,21 @@ async function handleApi(req, res) {
       const facets = await postgres.productFacets();
       if (facets) return sendJson(res, 200, { facets });
       return sendJson(res, 200, {
-        facets: { suppliers: [], stockStatuses: [], shopifyStatuses: [], ebayStatuses: [], brands: [], categories: [] },
+        facets: { suppliers: [], stockStatuses: [], shopifyStatuses: [], ebayStatuses: [], brands: [], categories: [], shopifyLiveProducts: 0, shopifyLiveVariants: 0 },
         storage: "postgres"
       });
     }
     const db = await readDbFast();
     const products = db.inventory || [];
+    const shopifyStatusMap = readShopifyStatusMapSync();
+    const liveVariantRows = Object.values(shopifyStatusMap || {}).filter((payload) =>
+      payload
+      && String(payload.shopifyId || "").trim()
+      && String(payload.shopifyVariantId || "").trim()
+      && String(payload.shopifyStatus || "").toLowerCase() === "active"
+      && payload.shopifyPublished === true
+      && ["shopify-api-sku-map", "graphql"].includes(String(payload.shopifySyncSource || payload.syncSource || "").toLowerCase())
+    );
     return sendJson(res, 202, {
       facets: {
         suppliers: products.map((item) => item.supplier || item.vendor).filter(Boolean),
@@ -15382,7 +19168,9 @@ async function handleApi(req, res) {
         shopifyStatuses: products.map((item) => item.shopifyStatus).filter(Boolean),
         ebayStatuses: products.map((item) => item.ebayListing?.ebayStatus || item.ebayListing?.status).filter(Boolean),
         brands: products.map((item) => item.brand).filter(Boolean),
-        categories: products.map((item) => item.category).filter(Boolean)
+        categories: products.map((item) => item.category).filter(Boolean),
+        shopifyLiveProducts: new Set(liveVariantRows.map((payload) => payload.shopifyId)).size,
+        shopifyLiveVariants: liveVariantRows.length
       }
     });
   }
@@ -15391,14 +19179,16 @@ async function handleApi(req, res) {
     if (postgres.isPostgresEnabled()) {
       const pgItem = await postgres.readProductByKey(parts[2]);
       if (pgItem) {
-        return sendJson(res, 200, { item: publicInventoryItem(pgItem, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) });
+        const sourceFallbackMap = await sourceCatalogExportFallbackMap([pgItem]);
+        return sendJson(res, 200, { item: publicInventoryItem(pgItem, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync(), sourceFallbackMap }) });
       }
       return notFound(res);
     }
     const db = await readDbFast();
     const item = (db.inventory || []).find((row) => row.id === parts[2] || String(row.sku || "").toLowerCase() === String(parts[2] || "").toLowerCase());
     if (!item) return notFound(res);
-    return sendJson(res, 200, { item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) });
+    const sourceFallbackMap = await sourceCatalogExportFallbackMap([item]);
+    return sendJson(res, 200, { item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync(), sourceFallbackMap }) });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
@@ -15410,11 +19200,16 @@ async function handleApi(req, res) {
     applyInventoryPatch(item, body);
     if (body.brand !== undefined && body.brandLocked === undefined) item.brandLocked = true;
     item.updatedAt = new Date().toISOString();
+    const replenishableFieldsChanged = ["replenishableUseVendorRules", "replenishable", "replenishableQtyUseVendorDefault", "replenishableQty"].some((field) => body[field] !== undefined);
+    let db = null;
+    if (replenishableFieldsChanged) {
+      db = await readDbFast({ skipInventory: true });
+      syncReplenishableWarehouseStock(db, item);
+    }
     const qtyAfter = Number(item.qty || 0);
     const reservedAfter = Number(item.reserved || 0);
-    let db = null;
     if (qtyBefore !== qtyAfter || reservedBefore !== reservedAfter) {
-      db = await readDbFast({ skipInventory: true });
+      db = db || await readDbFast({ skipInventory: true });
       const warehouse = (db.warehouses || []).find((row) => row.isDefaultReceiving) || (db.warehouses || [])[0] || { id: "default", name: "Default" };
       const stockRow = ensureInventoryWarehouseStock(item, warehouse);
       stockRow.qty = qtyAfter;
@@ -15437,8 +19232,10 @@ async function handleApi(req, res) {
       });
     }
     await postgres.upsertProductsFromState([item]);
-    if (qtyBefore !== qtyAfter || reservedBefore !== reservedAfter) {
+    if (qtyBefore !== qtyAfter || reservedBefore !== reservedAfter || replenishableFieldsChanged) {
       await postgres.upsertInventoryLevelsFromProducts([item]);
+    }
+    if (qtyBefore !== qtyAfter || reservedBefore !== reservedAfter) {
       await postgres.writeStateDocuments({ inventoryLedger: db?.inventoryLedger || [] });
     }
     const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
@@ -15509,8 +19306,10 @@ async function handleApi(req, res) {
       if (result) {
         const shopifyStatusMap = readShopifyStatusMapSync();
         const sourceEnrichmentMap = readProductSourceEnrichmentSync();
+        const sourceFallbackMap = await sourceCatalogExportFallbackMap(result.inventory || []);
+        const systemSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
         return sendJson(res, 200, {
-          inventory: (result.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap })),
+          inventory: (result.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, sourceFallbackMap, systemSettings })),
           inventoryLoaded: true,
           total: result.total,
           page: result.page,
@@ -15523,7 +19322,8 @@ async function handleApi(req, res) {
     const db = await readDbFast();
     const shopifyStatusMap = readShopifyStatusMapSync();
     const sourceEnrichmentMap = readProductSourceEnrichmentSync();
-    return sendJson(res, 200, { inventory: (db.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap })), inventoryLoaded: true });
+    const systemSettings = readSystemSettingsStore(db.systemSettings || {});
+    return sendJson(res, 200, { inventory: (db.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, systemSettings })), inventoryLoaded: true });
   }
 
 
@@ -17257,8 +21057,30 @@ async function handleApi(req, res) {
     const numericFields = new Set(["leadTimeDays", "moq", "rating"]);
     const submissionFields = new Set(["preferredMethod", "apiEnabled", "apiBaseUrl", "apiAuthType", "apiKeyReference", "ftpEnabled", "ftpHost", "ftpPort", "ftpUsername", "ftpPath", "emailEnabled", "emailTo", "emailCc", "emailSubjectTemplate", "attachCsv", "attachPdf"]);
     const booleanSubmissionFields = new Set(["apiEnabled", "ftpEnabled", "emailEnabled", "attachCsv", "attachPdf"]);
+    const shopifyRuleFields = new Set(["variantMode", "allowVariations", "note"]);
+    const booleanShopifyRuleFields = new Set(["allowVariations"]);
+    const pricingRuleFields = new Set(["costBasis", "enforceMinimumAllowedPrice", "suspiciousPriceMultiplier", "note"]);
+    const booleanPricingRuleFields = new Set(["enforceMinimumAllowedPrice"]);
+    const numericPricingRuleFields = new Set(["suspiciousPriceMultiplier"]);
+    const variationRuleFields = new Set(["shopifyVariantMode", "allowShopifyVariations", "note"]);
+    const booleanVariationRuleFields = new Set(["allowShopifyVariations"]);
+    const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
+    const numericInventoryRuleFields = new Set(["replenishableQty"]);
+    const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
+    const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
+      if (field.startsWith("address.")) {
+        const key = field.split(".")[1];
+        if (!addressFields.has(key)) continue;
+        vendor.address = vendor.address || { line1: "", line2: "", city: "", state: "", postalCode: "", country: "US" };
+        const value = String(rawValue ?? "");
+        if (vendor.address[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.address[key] = value;
+        }
+        continue;
+      }
       if (field.startsWith("submissionSettings.")) {
         const key = field.split(".")[1];
         if (!submissionFields.has(key)) continue;
@@ -17267,6 +21089,51 @@ async function handleApi(req, res) {
         if (vendor.submissionSettings[key] !== value) {
           changes.push(`${field} changed`);
           vendor.submissionSettings[key] = value;
+        }
+        continue;
+      }
+      if (field.startsWith("channelRules.shopify.")) {
+        const key = field.split(".")[2];
+        if (!shopifyRuleFields.has(key)) continue;
+        vendor.channelRules = vendor.channelRules || {};
+        vendor.channelRules.shopify = vendor.channelRules.shopify || {};
+        const value = booleanShopifyRuleFields.has(key) ? Boolean(rawValue) : String(rawValue ?? "");
+        if (vendor.channelRules.shopify[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.channelRules.shopify[key] = value;
+        }
+        continue;
+      }
+      if (field.startsWith("pricingRules.")) {
+        const key = field.split(".")[1];
+        if (!pricingRuleFields.has(key)) continue;
+        vendor.pricingRules = vendor.pricingRules || {};
+        const value = booleanPricingRuleFields.has(key) ? Boolean(rawValue) : numericPricingRuleFields.has(key) ? Number(rawValue || 0) : String(rawValue ?? "");
+        if (vendor.pricingRules[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.pricingRules[key] = value;
+        }
+        continue;
+      }
+      if (field.startsWith("variationRules.")) {
+        const key = field.split(".")[1];
+        if (!variationRuleFields.has(key)) continue;
+        vendor.variationRules = vendor.variationRules || {};
+        const value = booleanVariationRuleFields.has(key) ? Boolean(rawValue) : String(rawValue ?? "");
+        if (vendor.variationRules[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.variationRules[key] = value;
+        }
+        continue;
+      }
+      if (field.startsWith("inventoryRules.")) {
+        const key = field.split(".")[1];
+        if (!inventoryRuleFields.has(key)) continue;
+        vendor.inventoryRules = vendor.inventoryRules || {};
+        const value = booleanInventoryRuleFields.has(key) ? Boolean(rawValue) : numericInventoryRuleFields.has(key) ? Math.max(0, Number(rawValue || 0)) : String(rawValue ?? "");
+        if (vendor.inventoryRules[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.inventoryRules[key] = value;
         }
         continue;
       }
@@ -17359,7 +21226,7 @@ async function handleApi(req, res) {
     });
     db.importJobs = await mergedImportJobsAsync(db);
     return sendJson(res, 200, {
-      importJobs: applyActiveJobProgress(db.importJobs),
+      importJobs: clientImportJobs(applyActiveJobProgress(db.importJobs)),
       workerStatus: await readWorkerStatus(readSystemSettingsStore(db.systemSettings || {}))
     });
   }
@@ -17375,7 +21242,7 @@ async function handleApi(req, res) {
       expiredArtifacts: result.expiredArtifacts || 0,
       removedArtifactFiles: result.removedArtifactFiles || 0,
       orphanArtifactDirs: result.orphanArtifactDirs || 0,
-      importJobs: applyActiveJobProgress(result.importJobs),
+      importJobs: clientImportJobs(applyActiveJobProgress(result.importJobs)),
       message: result.cleaned
         ? `Cleaned ${result.cleaned.toLocaleString()} job${result.cleaned === 1 ? "" : "s"}${result.normalizedApiJobs ? `, including ${result.normalizedApiJobs.toLocaleString()} API metadata normalization${result.normalizedApiJobs === 1 ? "" : "s"}` : ""}${result.expiredArtifacts ? `, ${result.expiredArtifacts.toLocaleString()} expired file set${result.expiredArtifacts === 1 ? "" : "s"} older than ${IMPORT_JOB_FILE_RETENTION_DAYS} days` : ""}${result.orphanArtifactDirs ? `, ${result.orphanArtifactDirs.toLocaleString()} orphan export folder${result.orphanArtifactDirs === 1 ? "" : "s"}` : ""}${result.duplicates ? `, ${result.duplicates.toLocaleString()} duplicate queue entr${result.duplicates === 1 ? "y" : "ies"}` : ""}${result.abandoned ? `, and ${result.abandoned.toLocaleString()} abandoned worker job${result.abandoned === 1 ? "" : "s"}` : ""}.`
         : "No stale queued/running jobs needed cleanup."
@@ -17388,8 +21255,8 @@ async function handleApi(req, res) {
     const jobs = await mergedImportJobsAsync(db);
     return sendJson(res, 202, {
       queued: true,
-      job: normalizeImportJob(job),
-      importJobs: jobs,
+      job: clientImportJob(job),
+      importJobs: clientImportJobs(jobs),
       message: job.message || `Jobs retention cleanup queued. Files older than ${IMPORT_JOB_FILE_RETENTION_DAYS} days will be removed.`
     });
   }
@@ -17436,7 +21303,7 @@ async function handleApi(req, res) {
     await postgres.upsertOperationJob(job);
     if (job.originalFilePath) await postgres.upsertOperationArtifact(job, "original");
     const jobs = await mergedImportJobsAsync(db);
-    return sendJson(res, 202, { queued: true, job, importJobs: jobs, message: job.message });
+    return sendJson(res, 202, { queued: true, job: clientImportJob(job), importJobs: clientImportJobs(jobs), message: job.message });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "stop" && postgres.isPostgresEnabled()) {
@@ -17455,7 +21322,7 @@ async function handleApi(req, res) {
     setActiveJobProgress(job.id, { status: "stopped", phase: "stopped", estimatedSecondsRemaining: 0 });
     upsertImportJobStore(job);
     const jobs = await mergedImportJobsAsync(db);
-    return sendJson(res, 200, { job: jobs.find((row) => row.id === job.id) || job, importJobs: jobs });
+    return sendJson(res, 200, { job: clientImportJob(jobs.find((row) => row.id === job.id) || job), importJobs: clientImportJobs(jobs) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "retry" && postgres.isPostgresEnabled()) {
@@ -17498,8 +21365,8 @@ async function handleApi(req, res) {
     const jobs = await mergedImportJobsAsync(db);
     return sendJson(res, 202, {
       queued: true,
-      job,
-      importJobs: jobs,
+      job: clientImportJob(job),
+      importJobs: clientImportJobs(jobs),
       message: job.message
     });
   }
@@ -17509,12 +21376,16 @@ async function handleApi(req, res) {
     db.importJobs = await mergedImportJobsAsync(db);
     const job = findImportJob(db, parts[2]);
     if (!job) return notFound(res);
+    if (parts[3] === "artifacts" && parts[4] !== undefined) {
+      if (sendImportJobArtifactFile(res, job, Number(parts[4] || 0), { inline: url.searchParams.get("inline") === "1" })) return;
+      return sendJson(res, 404, { error: "This job artifact was not found or the file is no longer available." });
+    }
     if (parts[3] === "original") {
-      if (sendImportJobFile(res, job, "original")) return;
+      if (sendImportJobFile(res, job, "original", { inline: url.searchParams.get("inline") === "1" })) return;
       return sendJson(res, 404, { error: "Original file was not saved for this job." });
     }
     if (parts[3] === "errors.csv") {
-      if (sendImportJobFile(res, job, "errors")) return;
+      if (sendImportJobFile(res, job, "errors", { inline: url.searchParams.get("inline") === "1" })) return;
       const rows = (job.errors || []).map((error) => ({ error }));
       if (!rows.length) return sendJson(res, 404, { error: "This job has no errors." });
       res.writeHead(200, {
@@ -17524,7 +21395,7 @@ async function handleApi(req, res) {
       return res.end(rowsToCsv(rows));
     }
     if (parts[3] === "manifest.json") {
-      if (sendImportJobFile(res, job, "manifest")) return;
+      if (sendImportJobFile(res, job, "manifest", { inline: url.searchParams.get("inline") === "1" })) return;
       return sendJson(res, 404, { error: "This job has no manifest file." });
     }
   }
@@ -17752,12 +21623,153 @@ async function handleApi(req, res) {
     return sendJson(res, 200, await publicCategoriesFast(url.searchParams.get("q") || "", url.searchParams.get("scope") || "source"));
   }
 
+  if (req.method === "POST" && url.pathname === "/api/categories/summary-index/rebuild") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 400, { error: "Postgres is required for the stored category summary index." });
+    const body = await parseBody(req);
+    const requestedScope = body.scope || url.searchParams.get("scope") || "both";
+    const scopes = requestedScope === "both" ? ["main", "source"] : [requestedScope === "source" ? "source" : "main"];
+    const results = [];
+    for (const targetScope of scopes) {
+      const data = await rebuildStoredCategorySummaryIndex(targetScope);
+      results.push({ scope: targetScope, rows: data?.categories?.length || 0, total: data?.total || data?.categories?.length || 0 });
+    }
+    categoryResponseCache = new Map();
+    return sendJson(res, 200, { rebuilt: true, results });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/category-settings") {
     const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
     return sendJson(res, 200, {
       categorySettings: db.categorySettings || [],
       vendorCategoryMappings: db.vendorCategoryMappings || {},
       categorySettingsLoaded: true
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/vendor-category-mappings") {
+    const supplier = sourceTextValue(url.searchParams.get("supplier") || url.searchParams.get("vendor") || "");
+    const query = sourceTextValue(url.searchParams.get("q") || "");
+    const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get("limit") || 500)));
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    const mappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings || {});
+    const sources = postgres.isPostgresEnabled()
+      ? await postgres.listVendorCategoryMappingSources({ supplier, query, limit })
+      : (Array.isArray(db.inventory) ? db.inventory : []).reduce((rows, item) => {
+          const rowSupplier = sourceTextValue(item.supplier || item.vendor || item.defaultSupplier);
+          const vendorCategory = formatCategoryName(item.sourceCategory || item.vendorCategory || item.category || "");
+          if (!rowSupplier || !vendorCategory) return rows;
+          if (supplier && rowSupplier.toLowerCase() !== supplier.toLowerCase()) return rows;
+          if (query && !vendorCategory.toLowerCase().includes(query.toLowerCase())) return rows;
+          const key = vendorCategoryMappingKey(rowSupplier, vendorCategory);
+          const existing = rows.get(key) || { supplier: rowSupplier, vendorCategory, sampleSku: item.sku || "", matchCount: 0 };
+          existing.matchCount += 1;
+          if (!existing.sampleSku && item.sku) existing.sampleSku = item.sku;
+          rows.set(key, existing);
+          return rows;
+        }, new Map()).values();
+    const sourceRows = Array.from(sources || []);
+    const sourceKeys = new Set(sourceRows.map((row) => vendorCategoryMappingKey(row.supplier, row.vendorCategory)).filter(Boolean));
+    const mappingRows = Object.values(mappings)
+      .filter((row) => !supplier || row.supplier.toLowerCase() === supplier.toLowerCase())
+      .filter((row) => !query || row.vendorCategory.toLowerCase().includes(query.toLowerCase()) || row.mainCategory.toLowerCase().includes(query.toLowerCase()));
+    const rows = [
+      ...sourceRows.map((row) => {
+        const mapping = mappings[vendorCategoryMappingKey(row.supplier, row.vendorCategory)] || null;
+        return {
+          ...row,
+          mainCategory: mapping?.mainCategory || "",
+          categoryVerified: Boolean(mapping?.categoryVerified),
+          source: mapping?.source || "",
+          updatedAt: mapping?.updatedAt || "",
+          mapped: Boolean(mapping)
+        };
+      }),
+      ...mappingRows
+        .filter((row) => !sourceKeys.has(vendorCategoryMappingKey(row.supplier, row.vendorCategory)))
+        .map((row) => ({ ...row, mapped: true }))
+    ].sort((a, b) => Number(Boolean(b.mapped)) - Number(Boolean(a.mapped)) || Number(b.matchCount || 0) - Number(a.matchCount || 0) || String(a.vendorCategory || "").localeCompare(String(b.vendorCategory || "")));
+    const mainCategoryRows = postgres.isPostgresEnabled()
+      ? (await postgres.readCategorySummaryIndex("main", { limit: 100000 }))?.rows || []
+      : publicCategories(db, "", "main").categories || [];
+    return sendJson(res, 200, {
+      rows: rows.slice(0, limit),
+      total: rows.length,
+      supplier,
+      mappings,
+      mappedCount: rows.filter((row) => row.mapped).length,
+      unmappedCount: rows.filter((row) => !row.mapped).length,
+      mainCategories: (mainCategoryRows || []).map((row) => row.name || row.category || "").filter(Boolean)
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/vendor-category-mappings") {
+    const body = await parseBody(req);
+    const supplier = sourceTextValue(body.supplier || body.vendor || "");
+    const vendorCategory = formatCategoryName(body.vendorCategory || body.sourceCategory || body.category || "");
+    const addAsMainCategory = body.addAsMainCategory === true || String(body.addAsMainCategory || "").toLowerCase() === "true";
+    const mainCategory = formatCategoryName(body.mainCategory || body.mappedCategory || (addAsMainCategory ? vendorCategory : ""));
+    if (!supplier || !vendorCategory || !mainCategory) return sendJson(res, 400, { error: "Supplier, vendor category, and main category are required." });
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    const mappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings || {});
+    db.categorySettings = normalizeCategorySettings(db.categorySettings || []);
+    let categoryCreated = false;
+    if (addAsMainCategory) {
+      const identity = categoryIdentity(mainCategory, "main");
+      let category = db.categorySettings.find((row) => row.categoryId === identity.id || row.id === identity.id || formatCategoryName(row.name).toLowerCase() === identity.name.toLowerCase());
+      if (!category) {
+        category = normalizeCategorySettings([{
+          categoryId: identity.id,
+          name: identity.name,
+          status: "needs_review",
+          notes: `Added from ${supplier} vendor category mapping.`,
+          createdBy: "Vendor Settings",
+          updatedBy: "Vendor Settings",
+          createdSource: "vendor-category-main"
+        }])[0];
+        db.categorySettings.push(category);
+        categoryCreated = true;
+      } else {
+        category.createdSource = category.createdSource || "vendor-category-main";
+        category.updatedBy = "Vendor Settings";
+        category.updatedAt = new Date().toISOString();
+      }
+    }
+    const key = vendorCategoryMappingKey(supplier, vendorCategory);
+    const now = new Date().toISOString();
+    const existing = mappings[key] || {};
+    mappings[key] = {
+      ...existing,
+      supplier,
+      vendorCategory,
+      mainCategory,
+      categoryVerified: true,
+      source: body.source || (addAsMainCategory ? "vendor-category-main" : "vendor-profile-setting"),
+      sampleSku: body.sampleSku || existing.sampleSku || "",
+      matchCount: Number(body.matchCount || existing.matchCount || 0),
+      conflictCount: Number(existing.conflictCount || 0),
+      updatedAt: now,
+      createdAt: existing.createdAt || now
+    };
+    db.vendorCategoryMappings = mappings;
+    let productsMapped = 0;
+    if (addAsMainCategory && postgres.isPostgresEnabled()) {
+      const updateResult = await postgres.applyVendorCategoryMainMapping({ supplier, vendorCategory, mainCategory });
+      productsMapped = Number(updateResult?.updatedProducts || 0);
+    }
+    if (postgres.isPostgresEnabled()) await postgres.writeStateDocuments({ vendorCategoryMappings: mappings, categorySettings: db.categorySettings || [] });
+    else await writeDb(normalizeDb(db));
+    publicStateJsonCache = null;
+    clearCategoryResponseCache();
+    if (addAsMainCategory && postgres.isPostgresEnabled()) {
+      await rebuildStoredCategorySummaryIndex("main").catch((error) => console.warn("Failed to rebuild main category index after vendor category add", error.message));
+    }
+    return sendJson(res, 200, {
+      mapping: mappings[key],
+      vendorCategoryMappings: mappings,
+      categorySettings: db.categorySettings || [],
+      addAsMainCategory,
+      categoryCreated,
+      productsMapped
     });
   }
 
@@ -18069,7 +22081,7 @@ async function handleApi(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/api/import-jobs') {
     const jobs = await mergedImportJobsAsync({});
-    return sendJson(res, 200, { importJobs: applyActiveJobProgress(jobs) });
+    return sendJson(res, 200, { importJobs: clientImportJobs(applyActiveJobProgress(jobs)) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "stop") {
@@ -18354,13 +22366,17 @@ async function handleApi(req, res) {
   }
 
   async function readCategoryWorkflowDb() {
-    const [baseDb, categoryDb] = await Promise.all([
+    const [baseDb, categoryDb, mainCategoryRows] = await Promise.all([
       readDbFast({ skipInventory: postgres.isPostgresEnabled() }),
-      postgres.isPostgresEnabled() ? postgres.readCategoryState() : Promise.resolve(null)
+      postgres.isPostgresEnabled() ? postgres.readCategoryState() : Promise.resolve(null),
+      postgres.isPostgresEnabled() ? postgres.listCategoryProductStats() : Promise.resolve(null)
     ]);
+    const cachedCategories = readCategoryResponseCacheFile({ allowStale: true });
     return normalizeDb({
       ...baseDb,
       ...(categoryDb || {}),
+      __mainCategoryRows: mainCategoryRows || undefined,
+      __categoryCoverageOverride: cachedCategories?.main?.coverage || cachedCategories?.source?.coverage || null,
       connections: baseDb.connections || [],
       channels: baseDb.channels || [],
       systemSettings: baseDb.systemSettings || {},
@@ -18494,6 +22510,54 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/shopify/map-current") {
+    const db = await readCategoryWorkflowDb();
+    const body = await parseBody(req);
+    const result = await autoMapShopifyCategories(db, body);
+    await persistCategoryWorkflowDb(db);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, {
+      ...result,
+      categories: publicCategories(db, "", body.scope || "main"),
+      state: publicState(db, { lite: true })
+    });
+  }
+
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "categories" && parts[2]) {
+    const db = await readCategoryWorkflowDb();
+    const body = await parseBody(req);
+    const scope = url.searchParams.get("scope") || "main";
+    const requestedCategoryId = decodeURIComponent(parts[2] || "");
+    const cachedCategories = categoryResponseCache.get(`${scope}|`)?.data?.categories
+      || readCategoryResponseCacheFile({ allowStale: true })?.[scope]?.categories
+      || [];
+    const source = cachedCategories.find((category) => category.id === requestedCategoryId || category.categoryId === requestedCategoryId)
+      || findPublicCategory(db, requestedCategoryId, scope)
+      || (body.category && typeof body.category === "object" ? body.category : null);
+    if (!source) return notFound(res);
+    const blockers = categoryDeleteBlockers(source);
+    if (blockers.length) {
+      return sendJson(res, 409, {
+        error: "This category cannot be deleted while products or source categories are mapped to it.",
+        blockers
+      });
+    }
+    const sourceName = formatCategoryName(source.name).toLowerCase();
+    db.categorySettings = normalizeCategorySettings(db.categorySettings);
+    const before = db.categorySettings.length;
+    db.categorySettings = db.categorySettings.filter((row) => !(
+      row.categoryId === source.id ||
+      row.id === source.id ||
+      formatCategoryName(row.name).toLowerCase() === sourceName
+    ));
+    if (db.categorySettings.length === before) {
+      return sendJson(res, 404, { error: "No saved category settings were found for this category." });
+    }
+    await persistCategoryWorkflowDb(db);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", scope));
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "categories" && parts[2]) {
     const db = await readCategoryWorkflowDb();
     const body = await parseBody(req);
@@ -18503,7 +22567,13 @@ async function handleApi(req, res) {
     db.categorySettings = normalizeCategorySettings(db.categorySettings);
     let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
     if (!category) {
-      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name }])[0];
+      category = normalizeCategorySettings([{
+        categoryId: source.id,
+        name: source.name,
+        createdBy: body.createdBy || body.updatedBy || "Manual",
+        updatedBy: body.updatedBy || body.createdBy || "Manual",
+        createdSource: "manual"
+      }])[0];
       db.categorySettings.push(category);
     }
     for (const field of ["status", "owner", "notes"]) {
@@ -18532,6 +22602,9 @@ async function handleApi(req, res) {
     if (body.requiredAttributes !== undefined) {
       category.requiredAttributes = Array.isArray(body.requiredAttributes) ? body.requiredAttributes : String(body.requiredAttributes || "").split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
     }
+    if (!category.createdBy) category.createdBy = body.createdBy || body.updatedBy || "Manual";
+    if (!category.createdSource) category.createdSource = body.createdSource || "manual";
+    category.updatedBy = body.updatedBy || body.createdBy || category.updatedBy || "Manual";
     category.updatedAt = new Date().toISOString();
     await persistCategoryWorkflowDb(db);
     clearCategoryResponseCache();
@@ -18547,7 +22620,7 @@ async function handleApi(req, res) {
     db.categorySettings = normalizeCategorySettings(db.categorySettings);
     let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
     if (!category) {
-      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name }])[0];
+      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name, createdBy: body.createdBy || body.updatedBy || "Manual", updatedBy: body.updatedBy || body.createdBy || "Manual", createdSource: "manual" }])[0];
       db.categorySettings.push(category);
     }
     if (category.mappings?.shopify?.categoryId) {
@@ -18556,6 +22629,9 @@ async function handleApi(req, res) {
     if (category.mappings?.ebay?.categoryId) {
       category.mappings.ebay = normalizeChannelCategoryMapping(await enrichEbayCategoryMapping(db, category.mappings.ebay));
     }
+    if (!category.createdBy) category.createdBy = body.createdBy || body.updatedBy || "Manual";
+    if (!category.createdSource) category.createdSource = body.createdSource || "manual";
+    category.updatedBy = body.updatedBy || body.createdBy || category.updatedBy || "Manual";
     category.updatedAt = new Date().toISOString();
     await persistCategoryWorkflowDb(db);
     clearCategoryResponseCache();
@@ -18858,6 +22934,7 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const db = normalizeDb(await readDbFast({ skipInventory: true }));
     const dumpPath = String(body.path || body.filePath || process.env.DATAPLUS_PRODUCT_DUMP_PATH || "").trim();
+    const limit = Math.max(0, Number(body.limit || 0) || 0);
     const job = createImportJob(db, {
       section: "Source Catalog",
       operation: "Product dump import",
@@ -18869,10 +22946,46 @@ async function handleApi(req, res) {
       progressPercent: 0,
       phase: "queued",
       workerTask: "product-dump-import",
-      workerPayload: { path: dumpPath },
-      message: "Product dump import queued. The source catalog will refresh in the background."
+      workerPayload: { path: dumpPath, postgresOnly: true, batchSize: 5000, limit },
+      message: limit
+        ? `Product dump sample import queued for ${limit.toLocaleString()} rows. The dump will stream into PostgreSQL and SQL change events will be recorded.`
+        : "Product dump import queued. The dump will stream into PostgreSQL and SQL change events will be recorded."
     });
     upsertImportJobStore(job);
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: publicState({ ...db, inventory: [] }, { lite: true }), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/source-catalog/pricing-inventory/refresh" && postgres.isPostgresEnabled()) {
+    const active = [...activeJobRecords.values()].find((job) => {
+      const status = String(job.status || "").toLowerCase();
+      return ["queued", "running"].includes(status) && /pricing.*inventory/i.test(String(job.operation || ""));
+    });
+    if (active) return sendJson(res, 200, { queued: true, job: normalizeImportJob(active), message: "Pricing/inventory refresh is already running." });
+    const body = await parseBody(req);
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const dumpPath = String(body.path || body.filePath || process.env.DATAPLUS_PRODUCT_DUMP_PATH || path.join(DATA_DIR, "imports", "products.bson.gz")).trim();
+    if (!fs.existsSync(dumpPath)) return sendJson(res, 400, { error: `Product dump file was not found: ${dumpPath}` });
+    const totalRows = estimatedProductDumpRows();
+    const job = createImportJob(db, {
+      section: "Source Catalog",
+      category: "Source Catalog",
+      operation: "Refresh pricing & inventory from product dump",
+      direction: "import",
+      status: "queued",
+      fileName: path.basename(dumpPath),
+      originalFileName: path.basename(dumpPath),
+      originalFilePath: dumpPath,
+      totalRows,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: "",
+      workerPayload: { path: dumpPath, batchSize: 10000 },
+      message: "Pricing/inventory refresh queued. This updates cost, Shopify price, stock, promos, and closeout pricing only."
+    });
+    activeJobRecords.set(job.id, normalizeImportJob(job));
+    setActiveJobProgress(job.id, { status: "queued", phase: "queued", processedRows: 0, totalRows, progressPercent: 0, message: job.message });
+    setTimeout(() => startPricingInventoryRefreshJob(job.id, { path: dumpPath, batchSize: 10000, totalRows }), 10);
     return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: publicState({ ...db, inventory: [] }, { lite: true }), message: job.message });
   }
 
@@ -19848,10 +23961,9 @@ async function handleApi(req, res) {
     }
     if (format === "pdf") {
       const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(po.poNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}</style></head><body><h1>${escapeHtml(po.poNumber)}</h1><p class="muted">${escapeHtml(po.supplier || "")} / ${escapeHtml(po.status || "")}</p><p>Vendor: ${escapeHtml(vendor?.vendorNumber || "Unassigned")}</p><p>Estimated cost: ${Number(po.estimatedCost || 0).toFixed(2)}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Est. unit cost</th><th>Orders</th></tr></thead><tbody>${(po.items || []).map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.estimatedUnitCost || 0).toFixed(2))}</td><td>${escapeHtml((item.orderNumbers || []).join(", "))}</td></tr>`).join("")}</tbody></table></body></html>`;
-      res.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8",
+      res.writeHead(200, htmlResponseHeaders({
         "Content-Disposition": `inline; filename=${po.poNumber}.html`
-      });
+      }));
       return res.end(htmlDoc);
     }
     return sendJson(res, 400, { error: "Unsupported export format." });
@@ -19867,10 +23979,9 @@ async function handleApi(req, res) {
     const items = Array.isArray(draft.items) ? draft.items : [];
     const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
     const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(draft.draftNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}dl{display:grid;grid-template-columns:180px 1fr;gap:8px 16px;margin-top:20px}</style></head><body><h1>${escapeHtml(draft.draftNumber)}</h1><p class="muted">Manual draft / ${escapeHtml(draft.source || "Manual")}</p><p><strong>${escapeHtml(draft.buyer || "Unknown customer")}</strong><br>${escapeHtml(draft.buyerEmail || "")}<br>${escapeHtml(draft.phone || "")}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.price || 0).toFixed(2))}</td><td>${escapeHtml((Number(item.qty || 0) * Number(item.price || 0)).toFixed(2))}</td></tr>`).join("")}</tbody></table><dl><dt>Subtotal</dt><dd>${escapeHtml(subtotal.toFixed(2))}</dd><dt>External reference</dt><dd>${escapeHtml(draft.marketplaceOrderNumber || "N/A")}</dd><dt>Shipping</dt><dd>${escapeHtml([address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join(" / "))}</dd><dt>Notes</dt><dd>${escapeHtml(draft.note || "None")}</dd></dl></body></html>`;
-    res.writeHead(200, {
-      "Content-Type": "text/html; charset=utf-8",
+    res.writeHead(200, htmlResponseHeaders({
       "Content-Disposition": `attachment; filename=${draft.draftNumber}.html`
-    });
+    }));
     return res.end(htmlDoc);
   }
 
@@ -19987,6 +24098,364 @@ async function handleApi(req, res) {
       activeJobRecords.set(job.id, normalizeImportJob(job));
       setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: limit, processedRows: 0, startedAt: job.startedAt || new Date().toISOString() });
       startShopifyStatusSyncJob(job.id, { limit });
+    }
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/sku-map-sync" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const limit = Math.max(0, Math.min(500000, Number(body.limit || 0) || 0));
+    const pageSize = Math.max(1, Math.min(250, Number(body.pageSize || 250) || 250));
+    const db = await readDbFast({ skipInventory: true });
+    const job = createImportJob(db, {
+      section: "Products",
+      operation: "Shopify SKU map sync",
+      direction: "sync",
+      status: "queued",
+      fileName: "shopify-sku-map-sync.json",
+      totalRows: limit || pageSize,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: shouldRunJobsInline() ? "" : "shopify-sku-map-sync",
+      workerPayload: shouldRunJobsInline() ? {} : { limit, pageSize },
+      message: limit
+        ? `Shopify SKU map sync queued for up to ${limit.toLocaleString()} variant${limit === 1 ? "" : "s"}.`
+        : "Shopify SKU map sync queued for the full Shopify variant catalog."
+    });
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) {
+      setTimeout(() => runShopifySkuMapSyncWorkerJob(job, { limit, pageSize }).catch((error) => {
+        finishImportJob(job, {
+          status: "failed",
+          message: error.message || "Shopify SKU map sync failed.",
+          errors: [error.message || "Shopify SKU map sync failed."],
+          missingCount: 1,
+          phase: "failed",
+          estimatedSecondsRemaining: 0
+        });
+        upsertImportJobStore(job);
+      }), 250);
+    }
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/shipping-profiles/sync") {
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    const channel = findChannelByName(db, "Shopify");
+    if (!channel) return sendJson(res, 404, { error: "Shopify channel was not found." });
+    const profiles = await fetchShopifyShippingProfiles();
+    channel.settings = { ...(channel.settings || DEFAULT_CHANNEL_SETTINGS) };
+    channel.settings.shopifyShippingProfiles = profiles;
+    channel.settings.shopifyShippingProfilesSyncedAt = new Date().toISOString();
+    if (!profiles.some((profile) => profile.name === channel.settings.defaultShippingProfile || profile.id === channel.settings.defaultShippingProfile)) {
+      const defaultProfile = profiles.find((profile) => profile.default) || profiles[0];
+      if (defaultProfile && !channel.settings.defaultShippingProfile) channel.settings.defaultShippingProfile = defaultProfile.name;
+    }
+    Object.assign(channel, normalizeChannel(channel));
+    await writeDb(db);
+    return sendJson(res, 200, {
+      profiles,
+      channel,
+      state: postgres.isPostgresEnabled() ? await postgresLiteState() : publicState(db),
+      message: `Imported ${profiles.length.toLocaleString()} Shopify shipping profile${profiles.length === 1 ? "" : "s"}.`
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/token-refresh") {
+    const tokenState = await refreshShopifyAdminAccessToken({ operation: "Refresh Shopify token" });
+    const hasReadShipping = tokenState.scopes.includes("read_shipping");
+    return sendJson(res, 200, {
+      ...tokenState,
+      hasReadShipping,
+      message: hasReadShipping
+        ? "Shopify token refreshed with read_shipping."
+        : "Shopify token refreshed, but read_shipping is not present yet. Reauthorize or reinstall the Shopify app so the store accepts the updated scope."
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/shopify/embed-diagnostics") {
+    const config = shopifyAdminConfig();
+    const appUrl = configuredShopifyAppUrl() || "http://localhost:4173";
+    const isHttps = /^https:\/\//i.test(appUrl);
+    return sendJson(res, 200, {
+      appUrl,
+      appUrlIsHttps: isHttps,
+      shop: config.shop,
+      frameAncestors: shopifyFrameAncestorsHeader(),
+      likelyBlockedInShopifyAdmin: !isHttps,
+      message: isHttps
+        ? "App URL is HTTPS and HTML responses include Shopify frame-ancestors CSP."
+        : "Shopify Admin embeds require a public HTTPS app URL. http://localhost will be blocked inside Shopify Admin."
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/variant-price-push" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : [])
+      .map((sku) => String(sku || "").trim())
+      .filter(Boolean))];
+    const dryRun = body.apply === true ? false : body.dryRun !== false;
+    const filters = body.filters || {};
+    const query = String(body.query || "");
+    const db = await readDbFast({ skipInventory: true });
+    const productTotal = requestedSkus.length || await postgres.countProducts({ q: query, filters }).catch(() => 0);
+    const variantTotal = await postgres.countShopifyVariantStatuses({
+      skus: requestedSkus,
+      liveOnly: requestedSkus.length ? false : shopifyPricePushUsesLiveVariantTotal(filters)
+    }).catch(() => 0);
+    const totalRows = variantTotal || productTotal;
+    const totalLabel = variantTotal ? "Shopify variant SKU" : "product";
+    const job = createImportJob(db, {
+      section: "Products",
+      operation: dryRun ? "Shopify price push dry run" : "Shopify price push",
+      direction: "sync",
+      status: "queued",
+      fileName: dryRun ? "shopify-price-push-dry-run.json" : "shopify-price-push-report.json",
+      totalRows,
+      processedRows: 0,
+      progressPercent: 0,
+      rowLabel: variantTotal ? "variant SKUs" : "products",
+      progressLabel: variantTotal ? "Queued Shopify variant SKU update" : "Queued Shopify product scan",
+      estimatedVariantRows: variantTotal,
+      estimatedProductRows: productTotal,
+      phase: "queued",
+      workerTask: shouldRunJobsInline() ? "" : "shopify-variant-price-push",
+      workerPayload: shouldRunJobsInline() ? {} : {
+        skus: requestedSkus,
+        query,
+        filters,
+        templateId: body.templateId || "",
+        dryRun,
+        apply: !dryRun
+      },
+      message: dryRun
+        ? `Shopify price push dry run queued for ${Number(totalRows || 0).toLocaleString()} ${totalLabel}${Number(totalRows || 0) === 1 ? "" : "s"}.`
+        : `Shopify price push queued for ${Number(totalRows || 0).toLocaleString()} ${totalLabel}${Number(totalRows || 0) === 1 ? "" : "s"}.`
+    });
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) {
+      setTimeout(() => runShopifyVariantPricePushWorkerJob(job, {
+        skus: requestedSkus,
+        query,
+        filters,
+        templateId: body.templateId || "",
+        dryRun,
+        apply: !dryRun
+      }).catch((error) => {
+        finishImportJob(job, {
+          status: "failed",
+          message: error.message || "Shopify price push failed.",
+          errors: [error.message || "Shopify price push failed."],
+          missingCount: 1,
+          phase: "failed",
+          estimatedSecondsRemaining: 0
+        });
+        upsertImportJobStore(job);
+      }), 250);
+    } else {
+      await postgres.upsertOperationJob(normalizeImportJob(job));
+    }
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/product-create" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : [])
+      .map((sku) => String(sku || "").trim())
+      .filter(Boolean))];
+    const dryRun = body.apply === true ? false : body.dryRun !== false;
+    const query = String(body.query || "");
+    const limit = Math.max(1, Math.min(1000, Number(body.limit || 100) || 100));
+    const allowDraftIncomplete = body.allowDraftIncomplete === true;
+    const filters = body.filters && Object.keys(body.filters || {}).length
+      ? body.filters
+      : (allowDraftIncomplete ? { channelStatus: "shopify-missing" } : { channelStatusAll: "shopify-missing|shopify-ready" });
+    const db = await readDbFast({ skipInventory: true });
+    const productTotal = requestedSkus.length || limit;
+    const job = createImportJob(db, {
+      section: "Products",
+      operation: dryRun ? "Shopify product create dry run" : "Shopify product create",
+      direction: "sync",
+      status: "queued",
+      fileName: dryRun ? "shopify-product-create-dry-run.json" : "shopify-product-create-report.json",
+      totalRows: productTotal,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: shouldRunJobsInline() ? "" : "shopify-product-create",
+      workerPayload: shouldRunJobsInline() ? {} : {
+        skus: requestedSkus,
+        query,
+        filters,
+        limit,
+        dryRun,
+        apply: !dryRun,
+        allowDraftIncomplete
+      },
+      message: dryRun
+        ? `Shopify product create dry run queued for up to ${Number(productTotal || 0).toLocaleString()} product${Number(productTotal || 0) === 1 ? "" : "s"}.`
+        : `Shopify product create queued for up to ${Number(productTotal || 0).toLocaleString()} product${Number(productTotal || 0) === 1 ? "" : "s"}.`
+    });
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) {
+      setTimeout(() => runShopifyProductCreateWorkerJob(job, {
+        skus: requestedSkus,
+        query,
+        filters,
+        limit,
+        dryRun,
+        apply: !dryRun,
+        allowDraftIncomplete
+      }).catch((error) => {
+        finishImportJob(job, {
+          status: "failed",
+          message: error.message || "Shopify product create failed.",
+          errors: [error.message || "Shopify product create failed."],
+          missingCount: 1,
+          phase: "failed",
+          estimatedSecondsRemaining: 0
+        });
+        upsertImportJobStore(job);
+      }), 250);
+    } else {
+      await postgres.upsertOperationJob(normalizeImportJob(job));
+    }
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/link-existing-variants" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : [])
+      .map((sku) => String(sku || "").trim())
+      .filter(Boolean))];
+    const dryRun = body.apply === true ? false : body.dryRun !== false;
+    const limit = Math.max(1, Math.min(100000, Number(body.limit || 50000) || 50000));
+    const filters = body.filters && Object.keys(body.filters || {}).length ? body.filters : { channelStatus: "shopify-missing" };
+    const query = String(body.query || "");
+    const db = await readDbFast({ skipInventory: true });
+    const totalRows = requestedSkus.length || limit;
+    const job = createImportJob(db, {
+      section: "Products",
+      operation: dryRun ? "Shopify existing-link dry run" : "Shopify existing-link backfill",
+      direction: "sync",
+      status: "queued",
+      fileName: dryRun ? "shopify-existing-link-dry-run.json" : "shopify-existing-link-report.json",
+      totalRows,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: shouldRunJobsInline() ? "" : "shopify-existing-variant-link",
+      workerPayload: shouldRunJobsInline() ? {} : { skus: requestedSkus, query, filters, limit, dryRun, apply: !dryRun },
+      message: dryRun
+        ? `Shopify existing-link dry run queued for up to ${Number(totalRows || 0).toLocaleString()} product${Number(totalRows || 0) === 1 ? "" : "s"}.`
+        : `Shopify existing-link backfill queued for up to ${Number(totalRows || 0).toLocaleString()} product${Number(totalRows || 0) === 1 ? "" : "s"}.`
+    });
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) {
+      setTimeout(() => runShopifyExistingVariantLinkWorkerJob(job, { skus: requestedSkus, query, filters, limit, dryRun, apply: !dryRun }).catch((error) => {
+        finishImportJob(job, {
+          status: "failed",
+          message: error.message || "Shopify existing-link job failed.",
+          errors: [error.message || "Shopify existing-link job failed."],
+          missingCount: 1,
+          phase: "failed",
+          estimatedSecondsRemaining: 0
+        });
+        upsertImportJobStore(job);
+      }), 250);
+    } else {
+      await postgres.upsertOperationJob(normalizeImportJob(job));
+    }
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/product-type-collections-sync" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const dryRun = body.apply === true ? false : body.dryRun !== false;
+    const limit = Math.max(1, Math.min(250000, Number(body.limit || 250000) || 250000));
+    const pageSize = Math.max(50, Math.min(10000, Number(body.pageSize || 2500) || 2500));
+    const updateDelayMs = Math.max(500, Math.min(5000, Number(body.updateDelayMs || 850) || 850));
+    const filters = body.filters && Object.keys(body.filters || {}).length ? body.filters : { channelStatus: "shopify-linked" };
+    const query = String(body.query || "");
+    const db = await readDbFast({ skipInventory: true });
+    const productTotal = Math.min(limit, await postgres.countProducts({ q: query, filters }).catch(() => limit));
+    const job = createImportJob(db, {
+      section: "Products",
+      operation: dryRun ? "Shopify product type + collections dry run" : "Shopify product type + collections sync",
+      direction: "sync",
+      status: "queued",
+      fileName: dryRun ? "shopify-product-type-collections-dry-run.json" : "shopify-product-type-collections-report.json",
+      totalRows: productTotal,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: shouldRunJobsInline() ? "" : "shopify-product-type-collections-sync",
+      workerPayload: shouldRunJobsInline() ? {} : { query, filters, limit, pageSize, updateDelayMs, dryRun, apply: !dryRun },
+      message: dryRun
+        ? `Shopify product type and collections dry run queued for up to ${Number(productTotal || 0).toLocaleString()} linked product${Number(productTotal || 0) === 1 ? "" : "s"}.`
+        : `Shopify product type and collections sync queued for up to ${Number(productTotal || 0).toLocaleString()} linked product${Number(productTotal || 0) === 1 ? "" : "s"}.`
+    });
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) {
+      setTimeout(() => runShopifyProductTypeCollectionSyncWorkerJob(job, { query, filters, limit, pageSize, updateDelayMs, dryRun, apply: !dryRun }).catch((error) => {
+        finishImportJob(job, {
+          status: "failed",
+          message: error.message || "Shopify product type and collections sync failed.",
+          errors: [error.message || "Shopify product type and collections sync failed."],
+          missingCount: 1,
+          phase: "failed",
+          estimatedSecondsRemaining: 0
+        });
+        upsertImportJobStore(job);
+      }), 250);
+    } else {
+      await postgres.upsertOperationJob(normalizeImportJob(job));
+    }
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/taxonomy-push" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const dryRun = body.apply === true ? false : body.dryRun !== false;
+    const limit = Math.max(1, Math.min(250000, Number(body.limit || 250000) || 250000));
+    const pageSize = Math.max(50, Math.min(10000, Number(body.pageSize || 2500) || 2500));
+    const updateDelayMs = Math.max(150, Math.min(5000, Number(body.updateDelayMs || 650) || 650));
+    const filters = body.filters && Object.keys(body.filters || {}).length ? body.filters : { channelStatus: "shopify-linked" };
+    const query = String(body.query || "");
+    const db = await readDbFast({ skipInventory: true });
+    const productTotal = Math.min(limit, await postgres.countProducts({ q: query, filters }).catch(() => limit));
+    const job = createImportJob(db, {
+      section: "Products",
+      operation: dryRun ? "Shopify taxonomy push dry run" : "Shopify taxonomy push",
+      direction: "sync",
+      status: "queued",
+      fileName: dryRun ? "shopify-taxonomy-push-dry-run.json" : "shopify-taxonomy-push-report.json",
+      totalRows: productTotal,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: shouldRunJobsInline() ? "" : "shopify-taxonomy-push",
+      workerPayload: shouldRunJobsInline() ? {} : { query, filters, limit, pageSize, updateDelayMs, dryRun, apply: !dryRun },
+      message: dryRun
+        ? `Shopify taxonomy dry run queued for up to ${Number(productTotal || 0).toLocaleString()} linked product${Number(productTotal || 0) === 1 ? "" : "s"}.`
+        : `Shopify taxonomy push queued for up to ${Number(productTotal || 0).toLocaleString()} linked product${Number(productTotal || 0) === 1 ? "" : "s"}.`
+    });
+    upsertImportJobStore(job);
+    if (shouldRunJobsInline()) {
+      setTimeout(() => runShopifyTaxonomyPushWorkerJob(job, { query, filters, limit, pageSize, updateDelayMs, dryRun, apply: !dryRun }).catch((error) => {
+        finishImportJob(job, {
+          status: "failed",
+          message: error.message || "Shopify taxonomy push failed.",
+          errors: [error.message || "Shopify taxonomy push failed."],
+          missingCount: 1,
+          phase: "failed",
+          estimatedSecondsRemaining: 0
+        });
+        upsertImportJobStore(job);
+      }), 250);
+    } else {
+      await postgres.upsertOperationJob(normalizeImportJob(job));
     }
     return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
   }
@@ -20235,7 +24704,7 @@ async function handleApi(req, res) {
       console.error("Unable to backfill export manifests", error.message || error);
     });
     db.importJobs = await mergedImportJobsAsync(db);
-    return sendJson(res, 200, { importJobs: applyActiveJobProgress(db.importJobs) });
+    return sendJson(res, 200, { importJobs: clientImportJobs(applyActiveJobProgress(db.importJobs)) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "stop") {
@@ -20252,18 +24721,18 @@ async function handleApi(req, res) {
     setActiveJobProgress(job.id, { status: "stopped", phase: "stopped", estimatedSecondsRemaining: 0 });
     upsertImportJobStore(job);
     const jobs = await mergedImportJobsAsync(db);
-    return sendJson(res, 200, { job: jobs.find((row) => row.id === job.id) || job, importJobs: jobs });
+    return sendJson(res, 200, { job: clientImportJob(jobs.find((row) => row.id === job.id) || job), importJobs: clientImportJobs(jobs) });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3]) {
     const job = findImportJob(db, parts[2]);
     if (!job) return notFound(res);
     if (parts[3] === "original") {
-      if (sendImportJobFile(res, job, "original")) return;
+      if (sendImportJobFile(res, job, "original", { inline: url.searchParams.get("inline") === "1" })) return;
       return sendJson(res, 404, { error: "Original file was not saved for this job." });
     }
     if (parts[3] === "errors.csv") {
-      if (sendImportJobFile(res, job, "errors")) return;
+      if (sendImportJobFile(res, job, "errors", { inline: url.searchParams.get("inline") === "1" })) return;
       const rows = (job.errors || []).map((error) => ({ error }));
       if (!rows.length) return sendJson(res, 404, { error: "This job has no errors." });
       res.writeHead(200, {
@@ -20273,7 +24742,7 @@ async function handleApi(req, res) {
       return res.end(rowsToCsv(rows));
     }
     if (parts[3] === "manifest.json") {
-      if (sendImportJobFile(res, job, "manifest")) return;
+      if (sendImportJobFile(res, job, "manifest", { inline: url.searchParams.get("inline") === "1" })) return;
       return sendJson(res, 404, { error: "This job has no manifest file." });
     }
   }
@@ -20418,7 +24887,40 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { alternates });
   }
   if (req.method === "GET" && url.pathname === "/api/categories") {
-    return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", url.searchParams.get("scope") || "source"));
+    return sendJson(res, 200, compactCategoryResponse(publicCategories(db, url.searchParams.get("q") || "", url.searchParams.get("scope") || "source")));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/categories/samples") {
+    const scope = url.searchParams.get("scope") || "main";
+    const category = url.searchParams.get("category") || "";
+    const limit = url.searchParams.get("limit") || "5";
+    if (postgres.isPostgresEnabled()) {
+      const samples = await postgres.listCategoryProductSamples({ scope, category, limit });
+      return sendJson(res, 200, samples);
+    }
+    const normalizedScope = String(scope || "").toLowerCase() === "source" ? "source" : "main";
+    const categoryKey = formatCategoryName(category).toLowerCase();
+    const rows = normalizedScope === "source" ? (db.sourceCatalog || db.products || []) : (db.inventory || []);
+    const matches = rows.filter((item) => {
+      const rowCategory = normalizedScope === "source"
+        ? formatCategoryName(item.sourceCategory || item.vendorCategory || item.category)
+        : formatCategoryName(item.category || item.mainCategory);
+      return rowCategory.toLowerCase() === categoryKey;
+    });
+    return sendJson(res, 200, {
+      scope: normalizedScope,
+      category,
+      items: matches.slice(0, Math.max(1, Math.min(25, Number(limit || 5)))).map((item) => ({
+        sku: item.sku || item.id || "",
+        title: item.title || item.marketplaceTitle || "",
+        brand: item.brand || "",
+        supplier: item.supplier || item.vendor || "",
+        qty: item.qty ?? item.stockQty,
+        price: item.price ?? item.websitePrice
+      })),
+      total: matches.length,
+      limit: Math.max(1, Math.min(25, Number(limit || 5)))
+    });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "categories" && parts[2] === "coverage" && parts[3]) {
@@ -20746,6 +25248,19 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/shopify/map-current") {
+    const body = await parseBody(req);
+    const result = await autoMapShopifyCategories(db, body);
+    const normalized = normalizeDb(db);
+    await writeDb(normalized);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, {
+      ...result,
+      categories: publicCategories(normalized, "", body.scope || "main"),
+      state: publicState(normalized)
+    });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "apply-channel-to-products") {
     const body = await parseBody(req);
     const scope = body.scope || url.searchParams.get("scope") || "main";
@@ -20818,6 +25333,50 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "categories" && parts[2]) {
+    const body = await parseBody(req);
+    const scope = url.searchParams.get("scope") || "main";
+    const requestedCategoryId = decodeURIComponent(parts[2] || "");
+    const cachedCategories = categoryResponseCache.get(`${scope}|`)?.data?.categories
+      || readCategoryResponseCacheFile({ allowStale: true })?.[scope]?.categories
+      || [];
+    const source = cachedCategories.find((category) => category.id === requestedCategoryId || category.categoryId === requestedCategoryId)
+      || findPublicCategory(db, requestedCategoryId, scope)
+      || (body.category && typeof body.category === "object" ? body.category : null);
+    if (!source) return notFound(res);
+    const blockers = categoryDeleteBlockers(source);
+    if (blockers.length) {
+      return sendJson(res, 409, {
+        error: "This category cannot be deleted while products or source categories are mapped to it.",
+        blockers
+      });
+    }
+    const sourceName = formatCategoryName(source.name).toLowerCase();
+    db.categorySettings = normalizeCategorySettings(db.categorySettings);
+    const before = db.categorySettings.length;
+    db.categorySettings = db.categorySettings.filter((row) => !(
+      row.categoryId === source.id ||
+      row.id === source.id ||
+      formatCategoryName(row.name).toLowerCase() === sourceName
+    ));
+    if (db.categorySettings.length === before) {
+      return sendJson(res, 404, { error: "No saved category settings were found for this category." });
+    }
+    const normalized = normalizeDb(db);
+    if (postgres.isPostgresEnabled()) {
+      await postgres.writeStateDocuments({
+        categorySettings: normalized.categorySettings || [],
+        vendorCategoryMappings: normalized.vendorCategoryMappings || {},
+        sourceCatalogOverrides: normalized.sourceCatalogOverrides || {}
+      });
+      publicStateJsonCache = null;
+    } else {
+      await writeDb(normalized);
+    }
+    clearCategoryResponseCache();
+    return sendJson(res, 200, publicCategories(normalized, url.searchParams.get("q") || "", scope));
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "categories" && parts[2]) {
     const body = await parseBody(req);
     const scope = body.scope || url.searchParams.get("scope") || "source";
@@ -20826,7 +25385,7 @@ async function handleApi(req, res) {
     db.categorySettings = normalizeCategorySettings(db.categorySettings);
     let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
     if (!category) {
-      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name }])[0];
+      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name, createdBy: body.createdBy || body.updatedBy || "Manual", updatedBy: body.updatedBy || body.createdBy || "Manual", createdSource: "manual" }])[0];
       db.categorySettings.push(category);
     }
     for (const field of ["status", "owner", "notes"]) {
@@ -20859,6 +25418,9 @@ async function handleApi(req, res) {
     if (body.requiredAttributes !== undefined) {
       category.requiredAttributes = Array.isArray(body.requiredAttributes) ? body.requiredAttributes : String(body.requiredAttributes || "").split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
     }
+    if (!category.createdBy) category.createdBy = body.createdBy || body.updatedBy || "Manual";
+    if (!category.createdSource) category.createdSource = body.createdSource || "manual";
+    category.updatedBy = body.updatedBy || body.createdBy || category.updatedBy || "Manual";
     category.updatedAt = new Date().toISOString();
     await writeDb(db);
     clearCategoryResponseCache();
@@ -20873,7 +25435,7 @@ async function handleApi(req, res) {
     db.categorySettings = normalizeCategorySettings(db.categorySettings);
     let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
     if (!category) {
-      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name }])[0];
+      category = normalizeCategorySettings([{ categoryId: source.id, name: source.name, createdBy: body.createdBy || body.updatedBy || "Manual", updatedBy: body.updatedBy || body.createdBy || "Manual", createdSource: "manual" }])[0];
       db.categorySettings.push(category);
     }
     if (category.mappings?.shopify?.categoryId) {
@@ -20882,6 +25444,9 @@ async function handleApi(req, res) {
     if (category.mappings?.ebay?.categoryId) {
       category.mappings.ebay = normalizeChannelCategoryMapping(await enrichEbayCategoryMapping(db, category.mappings.ebay));
     }
+    if (!category.createdBy) category.createdBy = body.createdBy || body.updatedBy || "Manual";
+    if (!category.createdSource) category.createdSource = body.createdSource || "manual";
+    category.updatedBy = body.updatedBy || body.createdBy || category.updatedBy || "Manual";
     category.updatedAt = new Date().toISOString();
     await writeDb(db);
     clearCategoryResponseCache();
@@ -21707,10 +26272,9 @@ async function handleApi(req, res) {
     }
     if (format === "pdf") {
       const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(po.poNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}</style></head><body><h1>${escapeHtml(po.poNumber)}</h1><p class="muted">${escapeHtml(po.supplier || "")} / ${escapeHtml(po.status || "")}</p><p>Vendor: ${escapeHtml(vendor?.vendorNumber || "Unassigned")}</p><p>Estimated cost: ${Number(po.estimatedCost || 0).toFixed(2)}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Est. unit cost</th><th>Orders</th></tr></thead><tbody>${(po.items || []).map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.estimatedUnitCost || 0).toFixed(2))}</td><td>${escapeHtml((item.orderNumbers || []).join(", "))}</td></tr>`).join("")}</tbody></table></body></html>`;
-      res.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8",
+      res.writeHead(200, htmlResponseHeaders({
         "Content-Disposition": `inline; filename=${po.poNumber}.html`
-      });
+      }));
       return res.end(htmlDoc);
     }
     return sendJson(res, 400, { error: "Unsupported export format." });
@@ -21725,10 +26289,9 @@ async function handleApi(req, res) {
     const items = Array.isArray(draft.items) ? draft.items : [];
     const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
     const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(draft.draftNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}dl{display:grid;grid-template-columns:180px 1fr;gap:8px 16px;margin-top:20px}</style></head><body><h1>${escapeHtml(draft.draftNumber)}</h1><p class="muted">Manual draft / ${escapeHtml(draft.source || "Manual")}</p><p><strong>${escapeHtml(draft.buyer || "Unknown customer")}</strong><br>${escapeHtml(draft.buyerEmail || "")}<br>${escapeHtml(draft.phone || "")}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.price || 0).toFixed(2))}</td><td>${escapeHtml((Number(item.qty || 0) * Number(item.price || 0)).toFixed(2))}</td></tr>`).join("")}</tbody></table><dl><dt>Subtotal</dt><dd>${escapeHtml(subtotal.toFixed(2))}</dd><dt>External reference</dt><dd>${escapeHtml(draft.marketplaceOrderNumber || "N/A")}</dd><dt>Shipping</dt><dd>${escapeHtml([address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join(" / "))}</dd><dt>Notes</dt><dd>${escapeHtml(draft.note || "None")}</dd></dl></body></html>`;
-    res.writeHead(200, {
-      "Content-Type": "text/html; charset=utf-8",
+    res.writeHead(200, htmlResponseHeaders({
       "Content-Disposition": `attachment; filename=${draft.draftNumber}.html`
-    });
+    }));
     return res.end(htmlDoc);
   }
 
@@ -22918,8 +27481,30 @@ async function handleApi(req, res) {
     const numericFields = new Set(["leadTimeDays", "moq", "rating"]);
     const submissionFields = new Set(["preferredMethod", "apiEnabled", "apiBaseUrl", "apiAuthType", "apiKeyReference", "ftpEnabled", "ftpHost", "ftpPort", "ftpUsername", "ftpPath", "emailEnabled", "emailTo", "emailCc", "emailSubjectTemplate", "attachCsv", "attachPdf"]);
     const booleanSubmissionFields = new Set(["apiEnabled", "ftpEnabled", "emailEnabled", "attachCsv", "attachPdf"]);
+    const shopifyRuleFields = new Set(["variantMode", "allowVariations", "note"]);
+    const booleanShopifyRuleFields = new Set(["allowVariations"]);
+    const pricingRuleFields = new Set(["costBasis", "enforceMinimumAllowedPrice", "suspiciousPriceMultiplier", "note"]);
+    const booleanPricingRuleFields = new Set(["enforceMinimumAllowedPrice"]);
+    const numericPricingRuleFields = new Set(["suspiciousPriceMultiplier"]);
+    const variationRuleFields = new Set(["shopifyVariantMode", "allowShopifyVariations", "note"]);
+    const booleanVariationRuleFields = new Set(["allowShopifyVariations"]);
+    const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
+    const numericInventoryRuleFields = new Set(["replenishableQty"]);
+    const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
+    const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
+      if (field.startsWith("address.")) {
+        const key = field.split(".")[1];
+        if (!addressFields.has(key)) continue;
+        vendor.address = vendor.address || { line1: "", line2: "", city: "", state: "", postalCode: "", country: "US" };
+        const value = String(rawValue ?? "");
+        if (vendor.address[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.address[key] = value;
+        }
+        continue;
+      }
       if (field.startsWith("submissionSettings.")) {
         const key = field.split(".")[1];
         if (!submissionFields.has(key)) continue;
@@ -22928,6 +27513,51 @@ async function handleApi(req, res) {
         if (vendor.submissionSettings[key] !== value) {
           changes.push(`${field} changed`);
           vendor.submissionSettings[key] = value;
+        }
+        continue;
+      }
+      if (field.startsWith("channelRules.shopify.")) {
+        const key = field.split(".")[2];
+        if (!shopifyRuleFields.has(key)) continue;
+        vendor.channelRules = vendor.channelRules || {};
+        vendor.channelRules.shopify = vendor.channelRules.shopify || {};
+        const value = booleanShopifyRuleFields.has(key) ? Boolean(rawValue) : String(rawValue ?? "");
+        if (vendor.channelRules.shopify[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.channelRules.shopify[key] = value;
+        }
+        continue;
+      }
+      if (field.startsWith("pricingRules.")) {
+        const key = field.split(".")[1];
+        if (!pricingRuleFields.has(key)) continue;
+        vendor.pricingRules = vendor.pricingRules || {};
+        const value = booleanPricingRuleFields.has(key) ? Boolean(rawValue) : numericPricingRuleFields.has(key) ? Number(rawValue || 0) : String(rawValue ?? "");
+        if (vendor.pricingRules[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.pricingRules[key] = value;
+        }
+        continue;
+      }
+      if (field.startsWith("variationRules.")) {
+        const key = field.split(".")[1];
+        if (!variationRuleFields.has(key)) continue;
+        vendor.variationRules = vendor.variationRules || {};
+        const value = booleanVariationRuleFields.has(key) ? Boolean(rawValue) : String(rawValue ?? "");
+        if (vendor.variationRules[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.variationRules[key] = value;
+        }
+        continue;
+      }
+      if (field.startsWith("inventoryRules.")) {
+        const key = field.split(".")[1];
+        if (!inventoryRuleFields.has(key)) continue;
+        vendor.inventoryRules = vendor.inventoryRules || {};
+        const value = booleanInventoryRuleFields.has(key) ? Boolean(rawValue) : numericInventoryRuleFields.has(key) ? Math.max(0, Number(rawValue || 0)) : String(rawValue ?? "");
+        if (vendor.inventoryRules[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.inventoryRules[key] = value;
         }
         continue;
       }
@@ -24019,8 +28649,11 @@ if (require.main === module) {
 module.exports = {
   buildCategoryExportFile,
   categoryExportMeta,
+  applyProductShippingClassification,
   attachExportManifestFile,
+  productShippingClassification,
   exportManifestPayload,
+  appendChannelApiLog,
   IMPORT_JOB_FILE_DIR,
   mappedExportFilename,
   mappedProductsCsvPostgresFileAsync,
@@ -24034,9 +28667,17 @@ module.exports = {
   runEbayLocationWorkerJob,
   runJobsRetentionCleanupWorkerJob,
   runMappedProductImportWorkerJob,
+  runShopifyExistingVariantLinkWorkerJob,
+  runShopifyProductCreateWorkerJob,
+  runShopifyProductTypeCollectionSyncWorkerJob,
+  runShopifyTaxonomyPushWorkerJob,
+  runShopifyVariantPricePushWorkerJob,
+  runShopifySkuMapSyncWorkerJob,
   runShopifyStatusImportWorkerJob,
   runShopifyStatusSyncWorkerJob,
   runSourceCatalogImportWorkerJob,
   safeImportFileName,
+  shopifyPurchaseVariants,
+  systemProductVariants,
   startServer
 };

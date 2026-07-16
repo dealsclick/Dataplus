@@ -6,6 +6,97 @@ const DB_FILE = path.join(ROOT, "data", "db.json");
 const MAPPINGS_FILE = path.join(ROOT, "data", "export-mappings.json");
 const OUTPUT_FILE = path.join(ROOT, "outputs", `shopify-full-template-variations-fast-${new Date().toISOString().replace(/[:.]/g, "-")}.csv`);
 const TEMPLATE_ID = "bfdc1242-7a78-4a22-8d81-b3f335636c9e";
+const SHOPIFY_DUMP_FIELD_METAFIELDS = {
+  shortDescription: { key: "custom.short_description", type: "multi_line_text_field" },
+  itemHeight: { key: "custom.item_height", type: "dimension" },
+  itemLength: { key: "custom.item_length", type: "dimension" },
+  itemWeight: { key: "custom.item_weight", type: "weight" },
+  itemWidth: { key: "custom.item_width", type: "dimension" },
+  packageHeight: { key: "custom.package_height", type: "dimension" },
+  packageLength: { key: "custom.package_length", type: "dimension" },
+  packageWeight: { key: "custom.package_weight", type: "weight" },
+  packageWidth: { key: "custom.package_width", type: "dimension" },
+  uom: { key: "custom.uom", type: "single_line_text_field" },
+  uomQty: { key: "custom.uom_qty", type: "number_integer" },
+  countryOfOrigin: { key: "custom.country_of_origin", type: "single_line_text_field" },
+  createdBy: { key: "custom.created_by", type: "single_line_text_field" },
+  altSku: { key: "custom.alt_sku", type: "single_line_text_field" },
+  minimumAllowedPrice: { key: "custom.minimum_allowed_price", type: "money" },
+  fobPriceForZoro: { key: "custom.fob_price_for_zoro", type: "money" },
+  preferredVendor: { key: "custom.preferred_vendor", type: "single_line_text_field" },
+  uploadedImage: { key: "custom.uploaded_image", type: "url" },
+  restrictedStates: { key: "custom.restricted_states", type: "single_line_text_field" },
+  shipMode: { key: "custom.ship_mode", type: "single_line_text_field" },
+  dropShip: { key: "custom.drop_ship", type: "boolean" },
+  showProp65: { key: "custom.show_prop_65", type: "boolean" },
+  prop65Message: { key: "custom.prop_65_message", type: "multi_line_text_field" },
+  warranty: { key: "custom.warranty", type: "multi_line_text_field" },
+  dropShipMinQty: { key: "custom.drop_ship_min_qty", type: "single_line_text_field" },
+  additionalAttributes: { key: "custom.additional_attributes", type: "multi_line_text_field" },
+  certifications: { key: "custom.certifications", type: "list.single_line_text_field" },
+  returnable: { key: "custom.returnable", type: "single_line_text_field" },
+  competitorPartNumber: { key: "custom.competitor_part_number", type: "list.single_line_text_field" },
+  oversize: { key: "custom.oversize", type: "boolean" },
+  mappedCategory: { key: "custom.mapped_category", type: "json" },
+  checkedSds: { key: "custom.checked_sds", type: "json" },
+  sourceCategoryId: { key: "custom.source_category_id", type: "single_line_text_field" },
+  vendorWebsitePrice: { key: "custom.vendor_website_price", type: "money" },
+  isBanned: { key: "custom.is_banned", type: "boolean" },
+  isMarketplaceRestricted: { key: "custom.is_marketplace_restricted", type: "boolean" },
+  bulkPrices: { key: "custom.bulk_prices", type: "json" },
+  trustedBrand: { key: "custom.trusted_brand", type: "single_line_text_field" },
+  keywords: { key: "custom.keywords", type: "multi_line_text_field" },
+  subBrand: { key: "custom.sub_brand", type: "single_line_text_field" },
+  replacementSku: { key: "custom.replacement_sku", type: "single_line_text_field" },
+  icons: { key: "custom.icons", type: "list.single_line_text_field" },
+  altVendorSku: { key: "custom.alt_vendor_sku", type: "single_line_text_field" },
+  brand: { key: "custom.brand", type: "single_line_text_field" },
+  ctechId: { key: "custom.ctech_id", type: "single_line_text_field" },
+  defaultSupplier: { key: "custom.default_supplier", type: "single_line_text_field" },
+  dwId: { key: "custom.dw_id", type: "single_line_text_field" },
+  fobPrice: { key: "custom.fob_price", type: "number_decimal" },
+  googleTaxonomyId: { key: "custom.google_taxonomy_id", type: "single_line_text_field" },
+  hazardous: { key: "custom.hazardous", type: "boolean" },
+  lastLocalSyncAt: { key: "custom.last_local_sync_at", type: "date_time" },
+  lastPricesUpdateAt: { key: "custom.last_prices_update_at", type: "single_line_text_field" },
+  lastPricesUpdateBy: { key: "custom.last_prices_update_by", type: "single_line_text_field" },
+  leadTime: { key: "custom.lead_time", type: "single_line_text_field" },
+  leadtime: { key: "custom.leadtime", type: "number_decimal" },
+  listPrice: { key: "custom.list_price", type: "number_decimal" },
+  manufacturer: { key: "custom.manufacturer", type: "single_line_text_field" },
+  mfrPartNumber: { key: "custom.mfr_part_number", type: "single_line_text_field" },
+  minQuantity: { key: "custom.min_quantity", type: "number_integer" },
+  originalJson: { key: "custom.original_json", type: "json" },
+  originalSdsUrl: { key: "custom.original_sds_url", type: "url" },
+  purchaseUnit: { key: "custom.purchase_unit", type: "single_line_text_field" },
+  quantityIncrements: { key: "custom.quantity_increments", type: "number_integer" },
+  relatedSku: { key: "custom.related_sku", type: "variant_reference" },
+  replacedBy: { key: "custom.replaced_by", type: "product_reference" },
+  sdsUrl: { key: "custom.sds_url", type: "url" },
+  sellUnitCost: { key: "custom.sell_unit_cost", type: "number_decimal" },
+  shippingMethod: { key: "custom.shipping_method", type: "list.single_line_text_field" },
+  shippingClass: { key: "custom.shipping_class", type: "single_line_text_field" },
+  shippingClassReason: { key: "custom.shipping_class_reason", type: "multi_line_text_field" },
+  dimensionalWeight: { key: "custom.dimensional_weight", type: "number_decimal" },
+  sourceActive: { key: "custom.source_active", type: "boolean" },
+  sourceCategory: { key: "custom.source_category", type: "single_line_text_field" },
+  sourceCreatedAt: { key: "custom.source_created_at", type: "date_time" },
+  sourceDataHash: { key: "custom.source_data_hash", type: "single_line_text_field" },
+  sourceMongoId: { key: "custom.source_mongo_id", type: "single_line_text_field" },
+  sourceSystem: { key: "custom.source_system", type: "single_line_text_field" },
+  sourceUpdatedAt: { key: "custom.source_updated_at", type: "date_time" },
+  stockQty: { key: "custom.stock_qty", type: "number_decimal" },
+  stockStatus: { key: "custom.stock_status", type: "boolean" },
+  stockUpdatedAt: { key: "custom.stock_updated_at", type: "date_time" },
+  supplier: { key: "custom.supplier", type: "single_line_text_field" },
+  supplierCode: { key: "custom.supplier_code", type: "single_line_text_field" },
+  suppliersJson: { key: "custom.suppliers_json", type: "json" },
+  unspsc: { key: "custom.unspsc", type: "single_line_text_field" },
+  updatedAt: { key: "custom.updated_at", type: "date_time" },
+  uploadedBy: { key: "custom.uploaded_by", type: "single_line_text_field" },
+  validatedAt: { key: "custom.validated_at", type: "date_time" },
+  vendorSku: { key: "custom.vendor_sku", type: "single_line_text_field" }
+};
 
 const UOM_DEFINITIONS = {
   EA: "Each",
@@ -85,6 +176,90 @@ function money(value) {
   return parsed > 0 ? parsed.toFixed(2) : "";
 }
 
+function dumpFieldValue(item = {}, field = "", key = "") {
+  const rawKey = String(key || "").replace(/^custom\./, "");
+  return item[field]
+    ?? item.productManagerFields?.[rawKey]
+    ?? item.productManagerFields?.[rawKey.replace(/_/g, "")]
+    ?? "";
+}
+
+function shopifyDumpMetafieldValue(item = {}, metafieldKey = "") {
+  const entry = Object.entries(SHOPIFY_DUMP_FIELD_METAFIELDS)
+    .find(([, config]) => String(config.key).toLowerCase() === String(metafieldKey || "").toLowerCase());
+  if (!entry) return undefined;
+  const [field, config] = entry;
+  const value = dumpFieldValue(item, field, config.key);
+  if (value === undefined || value === null || value === "") return "";
+  if (config.type === "money") return money(value);
+  if (config.type === "dimension" || config.type === "weight") return money(value);
+  if (config.type === "number_integer") {
+    const parsed = Math.round(number(value, 0));
+    return parsed > 0 ? String(parsed) : "";
+  }
+  if (config.type === "number_decimal") {
+    const parsed = number(value, 0);
+    return Number.isFinite(parsed) ? String(parsed) : "";
+  }
+  if (config.type === "date_time") {
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : "";
+  }
+  if (config.type === "boolean") return ["true", "1", "yes", "y"].includes(String(value).trim().toLowerCase()) ? "TRUE" : "FALSE";
+  if (config.type === "json") return typeof value === "string" ? value : JSON.stringify(value);
+  if (config.type === "product_reference") return /^gid:\/\/shopify\/Product\/\d+$/i.test(String(value).trim()) ? String(value).trim() : "";
+  if (config.type === "variant_reference") return /^gid:\/\/shopify\/ProductVariant\/\d+$/i.test(String(value).trim()) ? String(value).trim() : "";
+  if (config.type.startsWith("list.")) {
+    const values = Array.isArray(value) ? value : String(value).split(/[|,]/).map((part) => part.trim()).filter(Boolean);
+    return JSON.stringify(values);
+  }
+  return String(value).trim();
+}
+
+function isClearanceItem(item = {}) {
+  const statusValues = [item.status, item.stockStatus].map((value) => String(value ?? "").trim().toLowerCase());
+  const indicatorValues = [item.itemClearanceIndicator, item.item_clearance_indicator].map((value) => String(value ?? "").trim().toLowerCase());
+  return statusValues.some((value) => ["clearance", "clearance item", "closeout"].includes(value))
+    || indicatorValues.some((value) => ["clearance", "clearance item", "closeout", "y", "yes", "true", "1"].includes(value));
+}
+
+function formatCategoryName(value) {
+  return String(value || "")
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.toLowerCase().replace(/\b[a-z]/g, (letter) => letter.toUpperCase()).replace(/\b(?:Usa|Usb|Led|Pvc|Hvac|Nsf|Ansi|Astm|Osha|Ada|Gfci|AfcI)\b/g, (word) => word.toUpperCase()))
+    .join(" > ");
+}
+
+function productSupplierIdentity(item = {}) {
+  return [
+    item.supplier,
+    item.vendor,
+    item.supplierCode,
+    item.defaultSupplier,
+    item.productManagerFields?.supplier,
+    item.productManagerFields?.vendor
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+}
+
+function shouldPromoteSourceCategoryToMain(item = {}, db = {}) {
+  const settings = db.systemSettings || {};
+  if (settings.trueValueSourceCategoryAsMainCategory === false) return false;
+  return productSupplierIdentity(item).some((value) => value === "true value" || value === "trv" || value.includes("true value"));
+}
+
+function effectiveMainCategoryName(item = {}, db = {}) {
+  const sourceCategory = formatCategoryName(item.sourceCategory || item.vendorCategory || item.productManagerFields?.category || item.original?.category || "");
+  if (shouldPromoteSourceCategoryToMain(item, db) && sourceCategory) return sourceCategory;
+  return formatCategoryName(item.category || item.mainCategory || sourceCategory || "");
+}
+
+function categoryTypeValue(value) {
+  const parts = String(value || "").split(">").map((part) => part.trim()).filter(Boolean);
+  return parts.slice(-2).join(" > ") || parts[0] || "";
+}
+
 function booleanValue(value) {
   if (value === true) return "TRUE";
   if (value === false) return "FALSE";
@@ -129,7 +304,20 @@ function availableQty(item) {
 }
 
 function unitCost(item) {
-  return number(item.sourceCost ?? item.cost ?? item.fobPrice, 0);
+  return number(
+    item.cost
+    ?? item.sourceCost
+    ?? item.source_cost
+    ?? item.vendorCost
+    ?? item.vendor_cost
+    ?? item.wholesalePrice
+    ?? item.wholesale_price
+    ?? item.price
+    ?? item.websitePrice
+    ?? item.fobPrice
+    ?? item.fob_price,
+    0
+  );
 }
 
 function sellUnitCost(item) {
@@ -139,13 +327,14 @@ function sellUnitCost(item) {
 
 function roundedPrice(value) {
   const parsed = number(value, 0);
-  return parsed > 0 ? Math.max(0.99, Math.ceil(parsed) - 0.01) : "";
+  return parsed > 0 ? Math.round(parsed * 100) / 100 : "";
 }
 
 function variants(item, settings) {
   const uom = uomInfo(item);
-  const markup = number(settings?.priceMarkupPercent, 0);
-  const basePackPrice = number(item.shopifyPrice ?? item.websitePrice ?? item.price, 0) || roundedPrice(sellUnitCost(item) * (1 + markup / 100));
+  const markup = 35;
+  const vendorWebsitePrice = roundedPrice(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price);
+  const basePackPrice = vendorWebsitePrice || roundedPrice(sellUnitCost(item) * (1 + markup / 100));
   const variantBaseSku = String(item.vendorSku || item.mfrPartNumber || item.sku || "").trim();
   const rows = [{
     key: "sell-unit",
@@ -160,7 +349,7 @@ function variants(item, settings) {
     price: basePackPrice
   }];
   if (uom.isMultiUnit) {
-    const eachPrice = roundedPrice(unitCost(item) * (1 + (markup + 25) / 100));
+    const eachPrice = vendorWebsitePrice ? roundedPrice(Number(vendorWebsitePrice) / uom.qty) : roundedPrice(unitCost(item) * (1 + markup / 100));
     rows.push({
       key: "each",
       sku: variantBaseSku,
@@ -186,12 +375,18 @@ function buildCategoryMaps(settings) {
   return byName;
 }
 
-function categoryMapping(item, categoryByName) {
-  const keys = [item.category, item.mainCategory, item.sourceCategory, item.vendorCategory].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+function categoryMapping(item, categoryByName, db = {}) {
+  const effectiveCategory = effectiveMainCategoryName(item, db);
+  const keys = [effectiveCategory, item.mainCategory, item.category, item.sourceCategory, item.vendorCategory].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
   for (const key of keys) {
     if (categoryByName.has(key)) return categoryByName.get(key);
   }
   return {};
+}
+
+function shopifyProductType(item, categoryByName, db = {}) {
+  const mapping = categoryMapping(item, categoryByName, db);
+  return mapping.productType || categoryTypeValue(effectiveMainCategoryName(item, db)) || item.productType || item.shopifyProductType || "";
 }
 
 function dimension(item, keys) {
@@ -211,8 +406,8 @@ function weight(item, keys, unit = "POUNDS") {
   return parsed > 0 ? `{"value":${jsonNumber(parsed)},"unit":"${unit}"}` : "";
 }
 
-function valueFor(column, field, item, variant, rowNumber, categoryByName) {
-  const mapping = categoryMapping(item, categoryByName);
+function valueFor(column, field, item, variant, rowNumber, categoryByName, db) {
+  const mapping = categoryMapping(item, categoryByName, db);
   const topRow = rowNumber === 1;
   const isProductMetafield = /^Metafield:/i.test(column);
   if (isProductMetafield && !topRow) return "";
@@ -222,7 +417,7 @@ function valueFor(column, field, item, variant, rowNumber, categoryByName) {
   if (/^Title$/i.test(column)) return item.marketplaceTitle || item.title || item.sku || "";
   if (/^Body HTML$/i.test(column)) return htmlDescription(item);
   if (/^Vendor$/i.test(column)) return item.vendor || item.supplier || "";
-  if (/^Type$/i.test(column)) return item.shopifyProductType || item.productType || item.category || "";
+  if (/^Type$/i.test(column)) return shopifyProductType(item, categoryByName, db);
   if (/^Tags$/i.test(column)) return Array.isArray(item.tags) ? item.tags.join(", ") : String(item.tags || "");
   if (/^Status$/i.test(column)) return item.shopifyStatus || item.status || "Draft";
   if (/^Published$/i.test(column)) return item.shopifyPublished === false ? "FALSE" : "TRUE";
@@ -245,7 +440,7 @@ function valueFor(column, field, item, variant, rowNumber, categoryByName) {
   if (/^Variant SKU$/i.test(column)) return variant.sku || "";
   if (/^Variant Barcode$/i.test(column)) return uomInfo(item).isMultiUnit ? (variant.key === "each" ? item.barcode || item.upc || "" : "") : item.barcode || item.upc || "";
   if (/^Variant Price$/i.test(column)) return money(variant.price);
-  if (/^Variant Compare At Price$/i.test(column)) return money(number(variant.price, 0) * 1.2);
+  if (/^Variant Compare At Price$/i.test(column)) return isClearanceItem(item) ? money(number(variant.price, 0) * 1.2) : "";
   if (/^Variant Taxable$/i.test(column)) return "TRUE";
   if (/^Variant Inventory Tracker$/i.test(column)) return "shopify";
   if (/^Variant Inventory Policy$/i.test(column)) return "deny";
@@ -259,6 +454,11 @@ function valueFor(column, field, item, variant, rowNumber, categoryByName) {
   if (/^Inventory Available:/i.test(column) || /^Inventory On Hand:/i.test(column)) return /single\s+music/i.test(column) ? 0 : availableQty(item);
   if (/^Inventory Committed:/i.test(column) || /^Inventory Reserved:/i.test(column)) return /single\s+music/i.test(column) ? 0 : number(item.reserved, 0);
   if (/^Inventory Incoming:/i.test(column)) return "";
+  if (/^Metafield:\s*custom\./i.test(column)) {
+    const metafieldKey = column.replace(/^Metafield:\s*/i, "").trim().split(/\s/)[0];
+    const value = shopifyDumpMetafieldValue(item, metafieldKey);
+    if (value !== undefined) return value;
+  }
   if (/^Variant Metafield:\s*custom\.purchase_unit/i.test(column)) return variant.optionValue;
   if (/^Variant Metafield:\s*custom\.uom\s/i.test(column)) return variant.uom;
   if (/^Variant Metafield:\s*custom\.uom_qty/i.test(column)) return variant.uomQty;
@@ -273,7 +473,7 @@ function valueFor(column, field, item, variant, rowNumber, categoryByName) {
   if (/^Metafield:\s*custom\.unspsc/i.test(column)) return item.unspsc || "";
   if (/^Metafield:\s*custom\.source_active/i.test(column)) return booleanValue(item.active ?? item.status);
   if (/^Metafield:\s*custom\.short_description/i.test(column)) return item.shortDescription || "";
-  if (/^Metafield:\s*custom\.list_price/i.test(column)) return money(item.msrp || item.listPrice);
+  if (/^Metafield:\s*custom\.list_price/i.test(column)) return isClearanceItem(item) ? money(item.msrp || item.listPrice) : "";
   if (/^Metafield:\s*custom\.uom\s/i.test(column)) return uomInfo(item).code;
   if (/^Metafield:\s*custom\.uom_qty/i.test(column)) return uomInfo(item).qty;
   if (/^Metafield:\s*custom\.item_height/i.test(column)) return dimension(item, ["itemHeight", "item_height", "heightIn", "height_in"]);
@@ -307,7 +507,10 @@ async function main() {
   if (!template) throw new Error(`Missing export template ${TEMPLATE_ID}`);
   const columns = template.mappings || [];
   const categoryByName = buildCategoryMaps(db.categorySettings || []);
-  const shopifySettings = (db.connections || []).find((row) => /shopify/i.test(row.name || ""))?.settings || {};
+  const shopifySettings = {
+    ...((db.connections || []).find((row) => /shopify/i.test(row.name || ""))?.settings || {}),
+    priceMarkupPercent: 35
+  };
   const stream = fs.createWriteStream(OUTPUT_FILE, { encoding: "utf8" });
   stream.write(columns.map((mapping) => csv(mapping.externalColumn)).join(",") + "\n");
   let productCount = 0;
@@ -320,7 +523,7 @@ async function main() {
       const variant = itemVariants[index];
       const rowNumber = index + 1;
       const row = columns.map((mapping) => {
-        const value = valueFor(mapping.externalColumn, mapping.productField, item, variant, rowNumber, categoryByName);
+        const value = valueFor(mapping.externalColumn, mapping.productField, item, variant, rowNumber, categoryByName, db);
         return csv(value === "" || value === undefined || value === null ? mapping.defaultValue || "" : value);
       });
       if (!stream.write(row.join(",") + "\n")) {

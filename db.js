@@ -261,6 +261,83 @@ async function initRelationalSchema() {
     create index if not exists vendor_catalog_items_category_idx on vendor_catalog_items (category);
     create index if not exists vendor_catalog_items_discontinued_idx on vendor_catalog_items (to_be_discontinued);
     create index if not exists vendor_catalog_items_qty_idx on vendor_catalog_items (qty);
+    create table if not exists product_dump_commercial_fields (
+      vendor_id text not null,
+      source_sku text not null,
+      alt_sku text,
+      minimum_allowed_price numeric,
+      fob_price_for_varis numeric,
+      fob_destination numeric,
+      fob_price_for_zoro numeric,
+      preferred_vendor text,
+      uploaded_image text,
+      restricted_states jsonb,
+      ship_mode text,
+      drop_ship boolean,
+      show_prop_65 boolean,
+      prop_65_message text,
+      warranty text,
+      drop_ship_min_qty text,
+      additional_attributes text,
+      certifications text,
+      returnable text,
+      competitor_part_number text,
+      oversize boolean,
+      mapped_category jsonb,
+      checked_sds jsonb,
+      category_id text,
+      vendor_website_price numeric,
+      is_banned boolean,
+      is_marketplace_restricted boolean,
+      bulk_prices jsonb,
+      trusted_brand text,
+      keywords text,
+      sub_brand text,
+      replacement_sku text,
+      icons text,
+      raw jsonb not null default '{}'::jsonb,
+      updated_at timestamptz not null default now(),
+      primary key (vendor_id, source_sku)
+    );
+    create index if not exists product_dump_commercial_fields_alt_sku_idx on product_dump_commercial_fields (lower(alt_sku));
+    create index if not exists product_dump_commercial_fields_preferred_vendor_idx on product_dump_commercial_fields (lower(preferred_vendor));
+    create index if not exists product_dump_commercial_fields_replacement_sku_idx on product_dump_commercial_fields (lower(replacement_sku));
+    create index if not exists product_dump_commercial_fields_compliance_idx on product_dump_commercial_fields (is_banned, is_marketplace_restricted, show_prop_65);
+    create table if not exists product_dump_system_fields (
+      vendor_id text not null,
+      source_sku text not null,
+      add_tags jsonb,
+      remove_tags jsonb,
+      bin_location text,
+      bsc_reporting jsonb,
+      bsc_reporting_updated_at timestamptz,
+      cei_id text,
+      contract_name text,
+      contract_short_description text,
+      default_lead_time text,
+      default_price numeric,
+      default_supplier_price numeric,
+      default_supplier_sku text,
+      i_by_l jsonb,
+      key_features jsonb,
+      marcone_make text,
+      marcone_part text,
+      master_sku text,
+      max_quantity numeric,
+      minimum_quantity numeric,
+      notes text,
+      u_key text,
+      updated_by text,
+      weight numeric,
+      source text not null default 'system_default',
+      raw jsonb not null default '{}'::jsonb,
+      updated_at timestamptz not null default now(),
+      primary key (vendor_id, source_sku)
+    );
+    create index if not exists product_dump_system_fields_cei_id_idx on product_dump_system_fields (lower(cei_id));
+    create index if not exists product_dump_system_fields_master_sku_idx on product_dump_system_fields (lower(master_sku));
+    create index if not exists product_dump_system_fields_marcone_part_idx on product_dump_system_fields (lower(marcone_part));
+    create index if not exists product_dump_system_fields_u_key_idx on product_dump_system_fields (lower(u_key));
     create table if not exists vendor_catalog_facets (
       facet_type text not null,
       facet_value text not null,
@@ -304,6 +381,17 @@ async function initRelationalSchema() {
     );
     create unique index if not exists category_channel_mappings_category_channel_idx on category_channel_mappings (lower(category_name), lower(channel));
     create index if not exists category_channel_mappings_channel_status_idx on category_channel_mappings (lower(channel), status);
+
+    create table if not exists category_summary_index (
+      scope text not null,
+      category_key text not null,
+      position integer not null default 0,
+      data jsonb not null default '{}'::jsonb,
+      generated_at timestamptz not null default now(),
+      primary key (scope, category_key)
+    );
+    create index if not exists category_summary_index_scope_position_idx on category_summary_index (scope, position);
+    create index if not exists category_summary_index_scope_generated_idx on category_summary_index (scope, generated_at desc);
 
     create table if not exists order_records (
       order_id text primary key,
@@ -495,6 +583,7 @@ async function initRelationalSchema() {
     );
     create index if not exists shopify_product_statuses_product_idx on shopify_product_statuses (product_id);
     create index if not exists shopify_product_statuses_shopify_id_idx on shopify_product_statuses (shopify_id);
+    create index if not exists shopify_product_statuses_lower_sku_idx on shopify_product_statuses (lower(sku));
     create index if not exists shopify_product_statuses_status_idx on shopify_product_statuses (shopify_status, updated_at desc);
 
     create table if not exists product_quality_rows (
@@ -714,10 +803,36 @@ function parseFilterBoolean(value) {
   return ["true", "1", "yes", "y", "active", "in-stock"].includes(String(value || "").trim().toLowerCase());
 }
 
+function isClearanceCatalogItem(item = {}) {
+  const statusValues = [
+    item.status,
+    item.stockStatus,
+    item.stock_status,
+    item.raw?.status,
+    item.raw?.stockStatus,
+    item.raw?.stock_status
+  ].map((value) => String(value ?? "").trim().toLowerCase());
+  const indicatorValues = [
+    item.itemClearanceIndicator,
+    item.item_clearance_indicator,
+    item.raw?.itemClearanceIndicator,
+    item.raw?.item_clearance_indicator
+  ].map((value) => String(value ?? "").trim().toLowerCase());
+  return statusValues.some((value) => ["clearance", "clearance item", "closeout"].includes(value))
+    || indicatorValues.some((value) => ["clearance", "clearance item", "closeout", "y", "yes", "true", "1"].includes(value));
+}
+
 function nullableNumber(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function nullableTimestamp(value) {
+  const text = nullableString(value);
+  if (!text) return null;
+  const date = new Date(text);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
 function boolOrNull(value) {
@@ -727,6 +842,18 @@ function boolOrNull(value) {
   if (["1", "true", "yes", "y", "active"].includes(text)) return true;
   if (["0", "false", "no", "n", "inactive"].includes(text)) return false;
   return null;
+}
+
+function nullableJson(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "object") return value;
+  const text = String(value).trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
 
 const STATE_DOCUMENT_KEYS = [
@@ -941,6 +1068,53 @@ async function readAllProducts(options = {}) {
   return result.rows.map(productRowToState);
 }
 
+async function listShopifyLinkedProducts(options = {}) {
+  const client = getPool();
+  if (!client) return { items: [], total: 0 };
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(10000, Number(options.limit || 1000)));
+  const offset = Math.max(0, Number(options.offset || 0));
+  const countResult = await client.query(`
+    select count(distinct p.product_id)::int as total
+    from (
+      select distinct lower(s.sku) as sku_key
+      from shopify_product_statuses s
+      where coalesce(s.shopify_id, '') <> ''
+        and coalesce(s.sku, '') <> ''
+    ) linked
+    join products p on lower(p.sku) = linked.sku_key
+  `);
+  const result = await client.query(`
+    select p.*,
+      coalesce(p.raw, '{}'::jsonb) || jsonb_build_object(
+        'shopifyId', linked.shopify_id,
+        'shopifyProductId', linked.shopify_id,
+        'shopifyVariantId', linked.shopify_variant_id,
+        'shopifyStatus', linked.shopify_status,
+        'shopifyPublished', linked.shopify_published
+      ) as raw
+    from products p
+    join (
+      select distinct on (lower(s.sku))
+        lower(s.sku) as sku_key,
+        s.shopify_id,
+        s.shopify_variant_id,
+        s.shopify_status,
+        s.shopify_published
+      from shopify_product_statuses s
+      where coalesce(s.shopify_id, '') <> ''
+        and coalesce(s.sku, '') <> ''
+      order by lower(s.sku), s.updated_at desc
+    ) linked on lower(p.sku) = linked.sku_key
+    order by p.sku
+    limit $1 offset $2
+  `, [limit, offset]);
+  return {
+    items: result.rows.map(productRowToState),
+    total: countResult.rows[0]?.total || result.rows.length
+  };
+}
+
 async function readRelationalState(options = {}) {
   const client = getPool();
   if (!client) return null;
@@ -1051,7 +1225,7 @@ function vendorCatalogRecordFromProduct(item = {}, feedRunId = "") {
     source_category: nullableString(item.sourceCategory || item.vendorCategory || item.category),
     cost: nullableNumber(item.sourceCost ?? item.cost),
     price: nullableNumber(item.websitePrice ?? item.price),
-    list_price: nullableNumber(item.listPrice ?? item.msrp),
+    list_price: isClearanceCatalogItem(item) ? nullableNumber(item.listPrice ?? item.msrp) : null,
     qty: nullableNumber(item.stockQty ?? item.qty),
     stock_status: nullableString(item.stockStatus),
     uom: nullableString(item.uom),
@@ -1059,6 +1233,170 @@ function vendorCatalogRecordFromProduct(item = {}, feedRunId = "") {
     to_be_discontinued: Boolean(boolOrNull(item.toBeDiscontinued ?? item.closeoutEligible ?? item.discontinued)),
     default_image: nullableString(item.defaultImage || (Array.isArray(item.images) ? item.images[0] : "")),
     raw: item
+  };
+}
+
+function productDumpCommercialRecordFromProduct(item = {}) {
+  const sourceSku = nullableString(item.sku || item.externalId);
+  if (!sourceSku) return null;
+  const raw = item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {};
+  return {
+    vendor_id: vendorCatalogIdFor(item),
+    source_sku: sourceSku,
+    alt_sku: nullableString(item.altSku ?? raw.alt_sku),
+    minimum_allowed_price: nullableNumber(item.minimumAllowedPrice ?? raw.minimum_allowed_price),
+    fob_price_for_zoro: nullableNumber(item.fobPriceForZoro ?? raw.fob_price_for_zoro),
+    preferred_vendor: nullableString(item.preferredVendor ?? raw.preferred_vendor),
+    uploaded_image: nullableString(item.uploadedImage ?? raw.uploaded_image),
+    restricted_states: nullableJson(item.restrictedStates ?? raw.restricted_states),
+    ship_mode: nullableString(item.shipMode ?? raw.ship_mode),
+    drop_ship: boolOrNull(item.dropShip ?? raw.drop_ship),
+    show_prop_65: boolOrNull(item.showProp65 ?? raw.show_prop_65),
+    prop_65_message: nullableString(item.prop65Message ?? raw.prop_65_message),
+    warranty: nullableString(item.warranty ?? raw.warranty),
+    drop_ship_min_qty: nullableString(item.dropShipMinQty ?? raw.drop_ship_min_qty),
+    additional_attributes: nullableString(item.additionalAttributes ?? raw.additional_attributes),
+    certifications: nullableString(item.certifications ?? raw.certifications),
+    returnable: nullableString(item.returnable ?? raw.returnable),
+    competitor_part_number: nullableString(item.competitorPartNumber ?? raw.competitor_part_number),
+    oversize: boolOrNull(item.oversize ?? raw.oversize),
+    mapped_category: nullableJson(item.mappedCategory ?? raw.mapped_category),
+    checked_sds: nullableJson(item.checkedSds ?? raw.checked_sds),
+    category_id: nullableString(item.sourceCategoryId ?? raw.category_id),
+    vendor_website_price: nullableNumber(item.vendorWebsitePrice ?? raw.vendor_website_price),
+    is_banned: boolOrNull(item.isBanned ?? raw.is_banned),
+    is_marketplace_restricted: boolOrNull(item.isMarketplaceRestricted ?? raw.is_marketplace_restricted),
+    bulk_prices: nullableJson(item.bulkPrices ?? raw.bulk_prices),
+    trusted_brand: nullableString(item.trustedBrand ?? raw.trusted_brand),
+    keywords: nullableString(item.keywords ?? raw.keywords),
+    sub_brand: nullableString(item.subBrand ?? raw.sub_brand),
+    replacement_sku: nullableString(item.replacementSku ?? raw.replacement_sku),
+    icons: nullableString(item.icons ?? raw.icons),
+    raw: {
+      alt_sku: raw.alt_sku,
+      minimum_allowed_price: raw.minimum_allowed_price,
+      fob_price_for_zoro: raw.fob_price_for_zoro,
+      preferred_vendor: raw.preferred_vendor,
+      uploaded_image: raw.uploaded_image,
+      restricted_states: raw.restricted_states,
+      ship_mode: raw.ship_mode,
+      drop_ship: raw.drop_ship,
+      show_prop_65: raw.show_prop_65,
+      prop_65_message: raw.prop_65_message,
+      warranty: raw.warranty,
+      drop_ship_min_qty: raw.drop_ship_min_qty,
+      additional_attributes: raw.additional_attributes,
+      certifications: raw.certifications,
+      returnable: raw.returnable,
+      competitor_part_number: raw.competitor_part_number,
+      oversize: raw.oversize,
+      mapped_category: raw.mapped_category,
+      checked_sds: raw.checked_sds,
+      category_id: raw.category_id,
+      vendor_website_price: raw.vendor_website_price,
+      is_banned: raw.is_banned,
+      is_marketplace_restricted: raw.is_marketplace_restricted,
+      bulk_prices: raw.bulk_prices,
+      trusted_brand: raw.trusted_brand,
+      keywords: raw.keywords,
+      sub_brand: raw.sub_brand,
+      replacement_sku: raw.replacement_sku,
+      icons: raw.icons
+    }
+  };
+}
+
+function productDumpSystemRecordFromProduct(item = {}) {
+  const sourceSku = nullableString(item.sku || item.externalId);
+  if (!sourceSku) return null;
+  const raw = item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {};
+  return {
+    vendor_id: vendorCatalogIdFor(item),
+    source_sku: sourceSku,
+    add_tags: nullableJson(item.addTags ?? raw.add_tags),
+    remove_tags: nullableJson(item.removeTags ?? raw.remove_tags),
+    bin_location: nullableString(item.binLocation ?? raw.bin_location),
+    bsc_reporting: nullableJson(item.bscReporting ?? raw.bsc_reporting),
+    bsc_reporting_updated_at: nullableTimestamp(item.bscReportingUpdatedAt ?? raw.bsc_reporting_updated_at),
+    cei_id: nullableString(item.ceiId ?? raw["cei-id"]),
+    contract_name: nullableString(item.contractName ?? raw.contract_name),
+    contract_short_description: nullableString(item.contractShortDescription ?? raw.contract_short_description),
+    default_lead_time: nullableString(item.defaultLeadTime ?? raw.default_lead_time),
+    default_price: nullableNumber(item.defaultPrice ?? raw.default_price),
+    default_supplier_price: nullableNumber(item.defaultSupplierPrice ?? raw.default_supplier_price),
+    default_supplier_sku: nullableString(item.defaultSupplierSku ?? raw.default_supplier_sku),
+    i_by_l: nullableJson(item.inventoryByLocation ?? raw.i_by_l),
+    key_features: nullableJson(item.keyFeaturesRaw ?? raw.key_features),
+    marcone_make: nullableString(item.marconeMake ?? raw.marcone_make),
+    marcone_part: nullableString(item.marconePart ?? raw.marcone_part),
+    master_sku: nullableString(item.masterSku ?? raw.master_sku),
+    max_quantity: nullableNumber(item.maxQuantity ?? raw.max_quantity),
+    minimum_quantity: nullableNumber(item.minimumQuantity ?? raw.minimum_quantity),
+    notes: nullableString(item.notes ?? raw.notes),
+    u_key: nullableString(item.uKey ?? raw["u-key"]),
+    updated_by: nullableString(item.updatedBy ?? raw.updated_by),
+    weight: nullableNumber(item.weight ?? raw.weight),
+    source: nullableString(item.systemFieldSource ?? raw.systemFieldSource) || "system_default",
+    raw: {
+      add_tags: raw.add_tags,
+      remove_tags: raw.remove_tags,
+      bin_location: raw.bin_location,
+      bsc_reporting: raw.bsc_reporting,
+      bsc_reporting_updated_at: raw.bsc_reporting_updated_at,
+      "cei-id": raw["cei-id"],
+      contract_name: raw.contract_name,
+      contract_short_description: raw.contract_short_description,
+      default_lead_time: raw.default_lead_time,
+      default_price: raw.default_price,
+      default_supplier_price: raw.default_supplier_price,
+      default_supplier_sku: raw.default_supplier_sku,
+      i_by_l: raw.i_by_l,
+      key_features: raw.key_features,
+      marcone_make: raw.marcone_make,
+      marcone_part: raw.marcone_part,
+      master_sku: raw.master_sku,
+      max_quantity: raw.max_quantity,
+      minimum_quantity: raw.minimum_quantity,
+      notes: raw.notes,
+      "u-key": raw["u-key"],
+      updated_by: raw.updated_by,
+      weight: raw.weight
+    }
+  };
+}
+
+function commercialStateFromRaw(raw = {}) {
+  const source = raw.productManagerFields && typeof raw.productManagerFields === "object" ? raw.productManagerFields : raw;
+  return {
+    altSku: raw.altSku ?? source.alt_sku ?? "",
+    minimumAllowedPrice: nullableNumber(raw.minimumAllowedPrice ?? source.minimum_allowed_price) ?? 0,
+    fobPriceForZoro: nullableNumber(raw.fobPriceForZoro ?? source.fob_price_for_zoro) ?? 0,
+    preferredVendor: raw.preferredVendor ?? source.preferred_vendor ?? "",
+    uploadedImage: raw.uploadedImage ?? source.uploaded_image ?? "",
+    restrictedStates: raw.restrictedStates ?? source.restricted_states ?? "",
+    shipMode: raw.shipMode ?? source.ship_mode ?? "",
+    dropShip: boolOrNull(raw.dropShip ?? source.drop_ship),
+    showProp65: boolOrNull(raw.showProp65 ?? source.show_prop_65),
+    prop65Message: raw.prop65Message ?? source.prop_65_message ?? "",
+    warranty: raw.warranty ?? source.warranty ?? "",
+    dropShipMinQty: raw.dropShipMinQty ?? source.drop_ship_min_qty ?? "",
+    additionalAttributes: raw.additionalAttributes ?? source.additional_attributes ?? "",
+    certifications: raw.certifications ?? source.certifications ?? "",
+    returnable: raw.returnable ?? source.returnable ?? "",
+    competitorPartNumber: raw.competitorPartNumber ?? source.competitor_part_number ?? "",
+    oversize: boolOrNull(raw.oversize ?? source.oversize),
+    mappedCategory: raw.mappedCategory ?? source.mapped_category ?? null,
+    checkedSds: raw.checkedSds ?? source.checked_sds ?? null,
+    sourceCategoryId: raw.sourceCategoryId ?? source.category_id ?? "",
+    vendorWebsitePrice: nullableNumber(raw.vendorWebsitePrice ?? source.vendor_website_price) ?? 0,
+    isBanned: boolOrNull(raw.isBanned ?? source.is_banned),
+    isMarketplaceRestricted: boolOrNull(raw.isMarketplaceRestricted ?? source.is_marketplace_restricted),
+    bulkPrices: raw.bulkPrices ?? source.bulk_prices ?? [],
+    trustedBrand: raw.trustedBrand ?? source.trusted_brand ?? "",
+    keywords: raw.keywords ?? source.keywords ?? "",
+    subBrand: raw.subBrand ?? source.sub_brand ?? "",
+    replacementSku: raw.replacementSku ?? source.replacement_sku ?? "",
+    icons: raw.icons ?? source.icons ?? ""
   };
 }
 
@@ -1133,9 +1471,10 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
   const client = getPool();
   if (!client) return { enabled: false, items: 0, changes: 0 };
   await initRelationalSchema();
-  const records = (Array.isArray(products) ? products : [])
-    .map((item) => vendorCatalogRecordFromProduct(item, feedRunId))
-    .filter(Boolean);
+  const sourceProducts = Array.isArray(products) ? products : [];
+  const records = sourceProducts.map((item) => vendorCatalogRecordFromProduct(item, feedRunId)).filter(Boolean);
+  const commercialRecords = sourceProducts.map((item) => productDumpCommercialRecordFromProduct(item)).filter(Boolean);
+  const systemRecords = sourceProducts.map((item) => productDumpSystemRecordFromProduct(item)).filter(Boolean);
   if (!records.length) return { enabled: true, items: 0, changes: 0 };
   const source = nullableString(options.source) || "vendor_feed";
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
@@ -1267,6 +1606,132 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
           last_seen_at = now(),
           updated_at = now()
       `, [JSON.stringify(batch)]);
+      const commercialBatch = commercialRecords.slice(i, i + batchSize);
+      if (commercialBatch.length) {
+        await client.query(`
+          insert into product_dump_commercial_fields (
+            vendor_id, source_sku, alt_sku, minimum_allowed_price,
+            fob_price_for_zoro, preferred_vendor, uploaded_image,
+            restricted_states, ship_mode, drop_ship, show_prop_65, prop_65_message,
+            warranty, drop_ship_min_qty, additional_attributes, certifications,
+            returnable, competitor_part_number, oversize, mapped_category, checked_sds,
+            category_id, vendor_website_price, is_banned, is_marketplace_restricted,
+            bulk_prices, trusted_brand, keywords, sub_brand, replacement_sku, icons,
+            raw, updated_at
+          )
+          select
+            vendor_id, source_sku, alt_sku, minimum_allowed_price,
+            fob_price_for_zoro, preferred_vendor, uploaded_image,
+            restricted_states, ship_mode, drop_ship, show_prop_65, prop_65_message,
+            warranty, drop_ship_min_qty, additional_attributes, certifications,
+            returnable, competitor_part_number, oversize, mapped_category, checked_sds,
+            category_id, vendor_website_price, is_banned, is_marketplace_restricted,
+            bulk_prices, trusted_brand, keywords, sub_brand, replacement_sku, icons,
+            raw, now()
+          from jsonb_to_recordset($1::jsonb) as x(
+            vendor_id text, source_sku text, alt_sku text, minimum_allowed_price numeric,
+            fob_price_for_zoro numeric, preferred_vendor text, uploaded_image text, restricted_states jsonb,
+            ship_mode text, drop_ship boolean, show_prop_65 boolean, prop_65_message text,
+            warranty text, drop_ship_min_qty text, additional_attributes text,
+            certifications text, returnable text, competitor_part_number text,
+            oversize boolean, mapped_category jsonb, checked_sds jsonb, category_id text,
+            vendor_website_price numeric, is_banned boolean, is_marketplace_restricted boolean,
+            bulk_prices jsonb, trusted_brand text, keywords text, sub_brand text,
+            replacement_sku text, icons text, raw jsonb
+          )
+          on conflict (vendor_id, source_sku) do update set
+            alt_sku = excluded.alt_sku,
+            minimum_allowed_price = excluded.minimum_allowed_price,
+            fob_price_for_zoro = excluded.fob_price_for_zoro,
+            preferred_vendor = excluded.preferred_vendor,
+            uploaded_image = excluded.uploaded_image,
+            restricted_states = excluded.restricted_states,
+            ship_mode = excluded.ship_mode,
+            drop_ship = excluded.drop_ship,
+            show_prop_65 = excluded.show_prop_65,
+            prop_65_message = excluded.prop_65_message,
+            warranty = excluded.warranty,
+            drop_ship_min_qty = excluded.drop_ship_min_qty,
+            additional_attributes = excluded.additional_attributes,
+            certifications = excluded.certifications,
+            returnable = excluded.returnable,
+            competitor_part_number = excluded.competitor_part_number,
+            oversize = excluded.oversize,
+            mapped_category = excluded.mapped_category,
+            checked_sds = excluded.checked_sds,
+            category_id = excluded.category_id,
+            vendor_website_price = excluded.vendor_website_price,
+            is_banned = excluded.is_banned,
+            is_marketplace_restricted = excluded.is_marketplace_restricted,
+            bulk_prices = excluded.bulk_prices,
+            trusted_brand = excluded.trusted_brand,
+            keywords = excluded.keywords,
+            sub_brand = excluded.sub_brand,
+            replacement_sku = excluded.replacement_sku,
+            icons = excluded.icons,
+            raw = excluded.raw,
+            updated_at = now()
+        `, [JSON.stringify(commercialBatch)]);
+      }
+      const systemBatch = systemRecords.slice(i, i + batchSize);
+      if (systemBatch.length) {
+        await client.query(`
+          insert into product_dump_system_fields (
+            vendor_id, source_sku, add_tags, remove_tags, bin_location,
+            bsc_reporting, bsc_reporting_updated_at, cei_id, contract_name,
+            contract_short_description, default_lead_time, default_price,
+            default_supplier_price, default_supplier_sku, i_by_l, key_features,
+            marcone_make, marcone_part, master_sku, max_quantity,
+            minimum_quantity, notes, u_key, updated_by, weight, source, raw,
+            updated_at
+          )
+          select
+            vendor_id, source_sku, add_tags, remove_tags, bin_location,
+            bsc_reporting, bsc_reporting_updated_at, cei_id, contract_name,
+            contract_short_description, default_lead_time, default_price,
+            default_supplier_price, default_supplier_sku, i_by_l, key_features,
+            marcone_make, marcone_part, master_sku, max_quantity,
+            minimum_quantity, notes, u_key, updated_by, weight,
+            coalesce(source, 'system_default'), raw, now()
+          from jsonb_to_recordset($1::jsonb) as x(
+            vendor_id text, source_sku text, add_tags jsonb, remove_tags jsonb,
+            bin_location text, bsc_reporting jsonb, bsc_reporting_updated_at timestamptz,
+            cei_id text, contract_name text, contract_short_description text,
+            default_lead_time text, default_price numeric, default_supplier_price numeric,
+            default_supplier_sku text, i_by_l jsonb, key_features jsonb,
+            marcone_make text, marcone_part text, master_sku text,
+            max_quantity numeric, minimum_quantity numeric, notes text, u_key text,
+            updated_by text, weight numeric, source text, raw jsonb
+          )
+          on conflict (vendor_id, source_sku) do update set
+            add_tags = excluded.add_tags,
+            remove_tags = excluded.remove_tags,
+            bin_location = excluded.bin_location,
+            bsc_reporting = excluded.bsc_reporting,
+            bsc_reporting_updated_at = excluded.bsc_reporting_updated_at,
+            cei_id = excluded.cei_id,
+            contract_name = excluded.contract_name,
+            contract_short_description = excluded.contract_short_description,
+            default_lead_time = excluded.default_lead_time,
+            default_price = excluded.default_price,
+            default_supplier_price = excluded.default_supplier_price,
+            default_supplier_sku = excluded.default_supplier_sku,
+            i_by_l = excluded.i_by_l,
+            key_features = excluded.key_features,
+            marcone_make = excluded.marcone_make,
+            marcone_part = excluded.marcone_part,
+            master_sku = excluded.master_sku,
+            max_quantity = excluded.max_quantity,
+            minimum_quantity = excluded.minimum_quantity,
+            notes = excluded.notes,
+            u_key = excluded.u_key,
+            updated_by = excluded.updated_by,
+            weight = excluded.weight,
+            source = excluded.source,
+            raw = excluded.raw,
+            updated_at = now()
+        `, [JSON.stringify(systemBatch)]);
+      }
       await client.query("commit");
     } catch (error) {
       await client.query("rollback");
@@ -1277,6 +1742,12 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
 }
 
 function vendorCatalogRowToState(row = {}) {
+  const listPrice = isClearanceCatalogItem(row) ? row.list_price ?? row.raw?.listPrice ?? row.raw?.msrp : null;
+  const commercial = commercialStateFromRaw(row.raw || {});
+  const commercialMinimumAllowedPrice = nullableNumber(row.commercial_minimum_allowed_price);
+  if (commercialMinimumAllowedPrice !== null) commercial.minimumAllowedPrice = commercialMinimumAllowedPrice;
+  const commercialVendorWebsitePrice = nullableNumber(row.commercial_vendor_website_price);
+  if (commercialVendorWebsitePrice !== null) commercial.vendorWebsitePrice = commercialVendorWebsitePrice;
   return {
     ...(row.raw || {}),
     id: row.source_sku || row.raw?.id,
@@ -1301,8 +1772,8 @@ function vendorCatalogRowToState(row = {}) {
     sourceCost: row.cost ?? row.raw?.sourceCost ?? row.raw?.cost,
     price: row.price ?? row.raw?.price,
     websitePrice: row.price ?? row.raw?.websitePrice ?? row.raw?.price,
-    listPrice: row.list_price ?? row.raw?.listPrice ?? row.raw?.msrp,
-    msrp: row.list_price ?? row.raw?.msrp,
+    listPrice,
+    msrp: listPrice,
     qty: row.qty ?? row.raw?.qty,
     stockQty: row.qty ?? row.raw?.stockQty ?? row.raw?.qty,
     stockStatus: row.stock_status ?? row.raw?.stockStatus,
@@ -1311,6 +1782,7 @@ function vendorCatalogRowToState(row = {}) {
     toBeDiscontinued: row.to_be_discontinued ?? row.raw?.toBeDiscontinued,
     closeoutEligible: row.to_be_discontinued ?? row.raw?.closeoutEligible,
     defaultImage: row.default_image ?? row.raw?.defaultImage,
+    ...commercial,
     lastSeenAt: row.last_seen_at?.toISOString?.() || row.raw?.lastSeenAt || "",
     updatedAt: row.updated_at?.toISOString?.() || row.raw?.updatedAt || ""
   };
@@ -1378,7 +1850,7 @@ function vendorCatalogWhere(options = {}) {
     where.push(`vendor_id = any($${params.length})`);
   } else if (suppliers.length) {
     params.push(suppliers);
-    where.push(`lower(vendor_id) = any($${params.length})`);
+    where.push(`lower(coalesce(vendor_id, '')) = any($${params.length})`);
   }
   const productMembership = nullableString(filters.productMembership);
   if (productMembership === "in-products") {
@@ -1396,6 +1868,29 @@ function vendorCatalogWhere(options = {}) {
     if (["true", "1", "yes", "in-stock"].includes(hasStock.toLowerCase())) where.push(`coalesce(qty, 0) > 0`);
     if (["false", "0", "no", "out-of-stock"].includes(hasStock.toLowerCase())) where.push(`coalesce(qty, 0) <= 0`);
   }
+  const stockQtyOperator = nullableString(filters.stockQtyOperator);
+  const stockQtyValues = String(filters.stockQty || "")
+    .split("|")
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value));
+  if (stockQtyOperator === "empty") {
+    where.push(`qty is null`);
+  } else if (stockQtyOperator === "notEmpty") {
+    where.push(`qty is not null`);
+  } else if (stockQtyOperator && stockQtyValues.length) {
+    params.push(stockQtyValues[0]);
+    const firstParam = params.length;
+    if (stockQtyOperator === "gt") where.push(`qty > $${firstParam}`);
+    else if (stockQtyOperator === "gte") where.push(`qty >= $${firstParam}`);
+    else if (stockQtyOperator === "lt") where.push(`qty < $${firstParam}`);
+    else if (stockQtyOperator === "lte") where.push(`qty <= $${firstParam}`);
+    else if (stockQtyOperator === "between") {
+      params.push(stockQtyValues[1] ?? stockQtyValues[0]);
+      where.push(`qty >= $${firstParam} and qty <= $${params.length}`);
+    } else {
+      where.push(`qty = $${firstParam}`);
+    }
+  }
   const discontinued = nullableString(filters.toBeDiscontinued || filters.discontinued);
   if (discontinued) {
     params.push(["true", "1", "yes", "y"].includes(discontinued.toLowerCase()));
@@ -1409,7 +1904,7 @@ function vendorCatalogWhere(options = {}) {
   const category = nullableString(filters.category);
   if (category) {
     params.push(category.toLowerCase());
-    where.push(`lower(coalesce(category, '')) = $${params.length}`);
+    where.push(`lower(coalesce(source_category, category, '')) = $${params.length}`);
   }
   const hazardous = nullableString(filters.hazardous);
   if (hazardous) {
@@ -1432,14 +1927,30 @@ async function vendorCatalogFiltersWithSupplierKeys(client, filters = {}) {
     .split("|")
     .map((value) => nullableString(value))
     .filter(Boolean);
-  if (!suppliers.length) return filters;
+  const existingSupplierKeys = Array.isArray(filters.supplierKeys)
+    ? filters.supplierKeys.map((value) => nullableString(value)).filter(Boolean)
+    : [];
+  if (!suppliers.length && !existingSupplierKeys.length) return filters;
   const lowerSuppliers = [...new Set(suppliers.map((value) => value.toLowerCase()))];
-  const keys = new Set(suppliers);
+  const keys = new Set([...existingSupplierKeys, ...suppliers]);
   for (const value of suppliers) {
     keys.add(value.toLowerCase());
     keys.add(value.toUpperCase());
   }
-  try {
+  if (lowerSuppliers.length) try {
+    const facetResult = await client.query(`
+      select facet_value, display_value
+      from vendor_catalog_facets
+      where facet_type = 'supplier'
+        and (
+          lower(coalesce(facet_value, '')) = any($1)
+          or lower(coalesce(display_value, '')) = any($1)
+        )
+    `, [lowerSuppliers]);
+    for (const row of facetResult.rows) {
+      if (row.facet_value) keys.add(row.facet_value);
+      if (row.display_value) keys.add(row.display_value);
+    }
     const vendorResult = await client.query(`
       select vendor_id, code, name
       from vendors
@@ -1556,6 +2067,96 @@ async function collectVendorCatalogItems(options = {}) {
   };
 }
 
+async function listVendorCategoryMappingSources(options = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(1000, Number(options.limit || 500)));
+  const supplier = nullableString(options.supplier || options.vendor || "");
+  const supplierKeys = supplier
+    ? [...new Set([supplier, supplier.toLowerCase(), supplier.toUpperCase()])]
+    : [];
+  if (!supplier) return [];
+  if (supplier.toLowerCase() === "essendant") supplierKeys.push("uss", "USS");
+  if (supplier) {
+    const aliasResult = await client.query(`
+      select vendor_id, code, name
+      from vendors
+      where lower(coalesce(vendor_id, '')) = lower($1)
+         or lower(coalesce(code, '')) = lower($1)
+         or lower(coalesce(name, '')) = lower($1)
+    `, [supplier]);
+    for (const row of aliasResult.rows) {
+      if (row.vendor_id) supplierKeys.push(row.vendor_id);
+      if (row.code) supplierKeys.push(row.code, String(row.code).toLowerCase(), String(row.code).toUpperCase());
+      if (row.name) supplierKeys.push(row.name);
+    }
+  }
+  const params = [];
+  const where = [];
+  if (supplierKeys.length) {
+    params.push([...new Set(supplierKeys.map((value) => String(value || "").trim()).filter(Boolean))]);
+    where.push(`vendor_id = any($${params.length})`);
+  }
+  const categoryQuery = nullableString(options.q || options.query || "");
+  if (categoryQuery) {
+    params.push(`%${categoryQuery.toLowerCase()}%`);
+    where.push(`lower(coalesce(source_category, category, '')) like $${params.length}`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  params.push(limit);
+  const result = await client.query(`
+    select
+      coalesce(nullif(raw ->> 'supplier', ''), nullif(raw ->> 'vendor', ''), nullif(vendor_id, ''), 'Unknown') as supplier,
+      coalesce(nullif(source_category, ''), nullif(category, ''), 'Uncategorized') as vendor_category,
+      min(coalesce(nullif(source_sku, ''), nullif(internal_sku, ''), nullif(vendor_sku, ''))) as sample_sku,
+      count(*)::int as match_count
+    from vendor_catalog_items
+    ${whereSql}
+    group by 1, 2
+    order by count(*) desc, vendor_category
+    limit $${params.length}
+  `, params);
+  return result.rows.map((row) => ({
+    supplier: supplier || row.supplier || "",
+    vendorCategory: row.vendor_category || "",
+    sampleSku: row.sample_sku || "",
+    matchCount: Number(row.match_count || 0)
+  }));
+}
+
+async function applyVendorCategoryMainMapping(options = {}) {
+  const client = getPool();
+  if (!client) return { updatedProducts: 0 };
+  await initRelationalSchema();
+  const supplier = nullableString(options.supplier || options.vendor || "");
+  const vendorCategory = nullableString(options.vendorCategory || options.sourceCategory || options.category || "");
+  const mainCategory = nullableString(options.mainCategory || vendorCategory || "");
+  if (!supplier || !vendorCategory || !mainCategory) return { updatedProducts: 0 };
+  const supplierKeys = [...new Set([supplier, supplier.toLowerCase(), supplier.toUpperCase()])];
+  if (supplier.toLowerCase() === "essendant") supplierKeys.push("USS", "uss");
+  const result = await client.query(`
+    update products
+    set
+      category = $3,
+      main_category = $3,
+      raw = coalesce(raw, '{}'::jsonb)
+        || jsonb_build_object(
+          'categoryVerified', true,
+          'vendorCategoryMappingUpdatedAt', now(),
+          'vendorCategoryMappedFrom', 'vendor-category-main'
+        ),
+      updated_at = now()
+    where lower(coalesce(source_category, raw ->> 'vendorCategory', category, '')) = lower($2)
+      and (
+        lower(coalesce(supplier, raw ->> 'supplier', raw ->> 'vendor', '')) = lower($1)
+        or supplier_code = any($4)
+        or lower(coalesce(raw ->> 'supplierCode', raw ->> 'defaultSupplier', '')) in (select lower(x) from unnest($4::text[]) x)
+      )
+  `, [supplier, vendorCategory, mainCategory, supplierKeys]);
+  return { updatedProducts: Number(result.rowCount || 0) };
+}
+
 async function readVendorCatalogItemsBySkus(skus = []) {
   const client = getPool();
   if (!client) return null;
@@ -1563,8 +2164,7 @@ async function readVendorCatalogItemsBySkus(skus = []) {
   if (!values.length) return [];
   await initRelationalSchema();
   const result = await client.query(`
-    select distinct on (source_sku) *
-    from (
+    with matched as (
       select *
       from vendor_catalog_items
       where lower(source_sku) = any($1)
@@ -1576,8 +2176,15 @@ async function readVendorCatalogItemsBySkus(skus = []) {
       select *
       from vendor_catalog_items
       where lower(vendor_sku) = any($1)
-    ) matched
-    order by source_sku, updated_at desc
+    )
+    select distinct on (matched.source_sku)
+      matched.*,
+      commercial.minimum_allowed_price as commercial_minimum_allowed_price,
+      commercial.vendor_website_price as commercial_vendor_website_price
+    from matched
+    left join product_dump_commercial_fields commercial
+      on lower(commercial.source_sku) = lower(matched.source_sku)
+    order by matched.source_sku, matched.updated_at desc
   `, [values]);
   return result.rows.map(vendorCatalogRowToState);
 }
@@ -1586,6 +2193,22 @@ async function vendorCatalogFacets() {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
+  const liveSupplierValues = async () => {
+    const result = await client.query(`
+      select value
+      from (
+        select name as value from vendors where coalesce(name, '') <> ''
+        union
+        select code as value from vendors where coalesce(code, '') <> ''
+        union
+        select vendor_id as value from vendor_catalog_items where coalesce(vendor_id, '') <> ''
+      ) values
+      where coalesce(value, '') <> ''
+      order by value
+      limit 50000
+    `);
+    return result.rows.map((row) => row.value).filter(Boolean);
+  };
   try {
     const cached = await client.query(`
       select facet_type, display_value, facet_value, row_count
@@ -1620,19 +2243,7 @@ async function vendorCatalogFacets() {
     }
   };
   const [suppliers, brands, categories, stockStatuses, totalResult] = await Promise.all([
-    facetQuery(`
-      select value
-      from (
-        select name as value from vendors where coalesce(name, '') <> ''
-        union
-        select code as value from vendors where coalesce(code, '') <> ''
-        union
-        select vendor_id as value from vendor_catalog_items where coalesce(vendor_id, '') <> '' group by vendor_id
-      ) values
-      where coalesce(value, '') <> ''
-      order by value
-      limit 10000
-    `),
+    liveSupplierValues(),
     facetQuery(`
       select brand as value
       from vendor_catalog_items
@@ -1935,7 +2546,8 @@ function productChangeWhere(options = {}) {
     }
   }
   const priceCut = nullableString(options.priceCut || options.priceMovement);
-  if (["yes", "true", "1", "cut", "price-cut"].includes(priceCut.toLowerCase())) {
+  const priceCutValue = String(priceCut || "").toLowerCase();
+  if (["yes", "true", "1", "cut", "price-cut"].includes(priceCutValue)) {
     const minCutPercent = Math.max(1, Math.min(95, Number(options.minPriceCutPercent || options.priceCutPercent || 20)));
     params.push(minCutPercent);
     where.push(`e.field_name in ('cost','price','list_price','sourceCost','websitePrice')
@@ -2511,6 +3123,81 @@ async function upsertCategoryChannelMappingsFromState(categorySettings = []) {
     throw error;
   }
   return { enabled: true, mappings: records.length };
+}
+
+async function replaceCategorySummaryIndex(scope = "main", rows = [], meta = {}) {
+  const client = getPool();
+  if (!client) return { enabled: false, rows: 0 };
+  await initRelationalSchema();
+  const normalizedScope = String(scope || "main").trim().toLowerCase() === "source" ? "source" : "main";
+  const generatedAt = meta.generatedAt || new Date().toISOString();
+  const records = (Array.isArray(rows) ? rows : []).map((row, index) => {
+    const name = nullableString(row.name || row.category || row.categoryName);
+    const categoryKey = nullableString(row.id || row.categoryId)
+      || (name ? crypto.createHash("sha1").update(`${normalizedScope}:${name.toLowerCase()}`).digest("hex") : `${normalizedScope}:${index}`);
+    return {
+      scope: normalizedScope,
+      category_key: categoryKey,
+      position: index,
+      data: {
+        ...row,
+        __indexMeta: {
+          generatedAt,
+          scope: normalizedScope,
+          source: meta.source || "category-summary-index"
+        }
+      }
+    };
+  });
+  await client.query("begin");
+  try {
+    await client.query("delete from category_summary_index where scope = $1", [normalizedScope]);
+    const batchSize = 1000;
+    for (let i = 0; i < records.length; i += batchSize) {
+      await client.query(`
+        insert into category_summary_index (scope, category_key, position, data, generated_at)
+        select scope, category_key, position, data, $2::timestamptz
+        from jsonb_to_recordset($1::jsonb) as x(scope text, category_key text, position integer, data jsonb)
+        on conflict (scope, category_key) do update set
+          position = excluded.position,
+          data = excluded.data,
+          generated_at = excluded.generated_at
+      `, [JSON.stringify(records.slice(i, i + batchSize)), generatedAt]);
+    }
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  }
+  return { enabled: true, rows: records.length, scope: normalizedScope, generatedAt };
+}
+
+async function readCategorySummaryIndex(scope = "main", options = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const normalizedScope = String(scope || "main").trim().toLowerCase() === "source" ? "source" : "main";
+  const limit = Math.max(1, Math.min(100000, Number(options.limit || 100000)));
+  const offset = Math.max(0, Number(options.offset || 0));
+  const q = String(options.q || "").trim().toLowerCase();
+  const params = [normalizedScope, limit, offset];
+  const where = ["scope = $1"];
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`lower(coalesce(data ->> 'name', '') || ' ' || coalesce(data ->> 'status', '') || ' ' || coalesce(data ->> 'notes', '')) like $${params.length}`);
+  }
+  const result = await client.query(`
+    select data, generated_at, count(*) over()::int as total
+    from category_summary_index
+    where ${where.join(" and ")}
+    order by position, category_key
+    limit $2 offset $3
+  `, params);
+  return {
+    rows: result.rows.map((row) => row.data),
+    total: result.rows[0]?.total || 0,
+    generatedAt: result.rows[0]?.generated_at ? result.rows[0].generated_at.toISOString() : ""
+  };
 }
 
 function orderIsReportable(order = {}) {
@@ -3358,7 +4045,7 @@ async function readOperationJobs(limit = 250) {
     from operations_jobs
     order by coalesce(created_at, updated_at) desc, updated_at desc
     limit $1
-  `, [Math.max(1, Math.min(1000, Number(limit || 250)))]);
+  `, [Math.max(1, Math.min(5000, Number(limit || 250)))]);
   const jobs = result.rows.map((row) => ({
     ...(row.raw || {}),
     id: row.job_id,
@@ -3685,24 +4372,31 @@ async function insertChannelApiLog(entry = {}) {
   return true;
 }
 
-async function readChannelApiLogs({ channel = "", days = 30, limit = 250 } = {}) {
+async function readChannelApiLogs({ channel = "", days = 30, limit = 250, jobId = "" } = {}) {
   const client = getPool();
   if (!client) return [];
   await initRelationalSchema();
   const channelKey = nullableString(channel);
+  const jobKey = nullableString(jobId);
   const maxRows = Math.max(1, Math.min(1000, Number(limit || 250)));
   const daysBack = Math.max(1, Math.min(365, Number(days || 30)));
   const params = [daysBack, maxRows];
   let channelClause = "";
   if (channelKey) {
     params.push(channelKey);
-    channelClause = `and lower(channel) = lower($3)`;
+    channelClause = `and lower(channel) = lower($${params.length})`;
+  }
+  let jobClause = "";
+  if (jobKey) {
+    params.push(jobKey);
+    jobClause = `and job_id = $${params.length}`;
   }
   const result = await client.query(`
     select log_id, channel, operation, method, path, status_code, ok, request_id, job_id, message, raw, created_at
     from channel_api_logs
     where created_at >= now() - ($1::int * interval '1 day')
       ${channelClause}
+      ${jobClause}
     order by created_at desc
     limit $2
   `, params);
@@ -3982,31 +4676,36 @@ async function readProductByKey(key) {
     item.available = item.warehouseStock.reduce((sum, row) => sum + Number(row.available || 0), 0);
   }
   item.recentChanges = changes.rows.map(changeEventRowToState);
-  item.sourceCatalogMatches = sourceRows.rows.map((row) => ({
-    vendorId: row.vendor_id,
-    sourceSku: row.source_sku,
-    internalSku: row.internal_sku,
-    vendorSku: row.vendor_sku,
-    title: row.title,
-    brand: row.brand,
-    manufacturer: row.manufacturer,
-    mfrPartNumber: row.mfr_part_number,
-    barcode: row.barcode,
-    category: row.category,
-    sourceCategory: row.source_category,
-    cost: row.cost,
-    price: row.price,
-    listPrice: row.list_price,
-    qty: row.qty,
-    stockStatus: row.stock_status,
-    uom: row.uom,
-    uomQty: row.uom_qty,
-    toBeDiscontinued: row.to_be_discontinued,
-    defaultImage: row.default_image,
-    raw: row.raw,
-    lastSeenAt: row.last_seen_at?.toISOString?.() || "",
-    updatedAt: row.updated_at?.toISOString?.() || ""
-  }));
+  item.sourceCatalogMatches = sourceRows.rows.map((row) => {
+    const listPrice = isClearanceCatalogItem(row) ? row.list_price : null;
+    const commercial = commercialStateFromRaw(row.raw || {});
+    return {
+      vendorId: row.vendor_id,
+      sourceSku: row.source_sku,
+      internalSku: row.internal_sku,
+      vendorSku: row.vendor_sku,
+      title: row.title,
+      brand: row.brand,
+      manufacturer: row.manufacturer,
+      mfrPartNumber: row.mfr_part_number,
+      barcode: row.barcode,
+      category: row.category,
+      sourceCategory: row.source_category,
+      cost: row.cost,
+      price: row.price,
+      listPrice,
+      qty: row.qty,
+      stockStatus: row.stock_status,
+      uom: row.uom,
+      uomQty: row.uom_qty,
+      toBeDiscontinued: row.to_be_discontinued,
+      defaultImage: row.default_image,
+      ...commercial,
+      raw: row.raw,
+      lastSeenAt: row.last_seen_at?.toISOString?.() || "",
+      updatedAt: row.updated_at?.toISOString?.() || ""
+    };
+  });
   return item;
 }
 
@@ -4191,6 +4890,19 @@ async function listProducts(options = {}) {
     case when coalesce(raw ->> 'listPrice', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'listPrice')::numeric end,
     0
   )`;
+  const uomQtyExpression = `coalesce(
+    case when coalesce(raw ->> 'uomQty', '') ~ '^[0-9]+(\\.[0-9]+)?$' then (raw ->> 'uomQty')::numeric end,
+    case when coalesce(raw ->> 'uom_qty', '') ~ '^[0-9]+(\\.[0-9]+)?$' then (raw ->> 'uom_qty')::numeric end,
+    1
+  )`;
+  const shopifyStatusSkuMatch = `(
+    sps.product_id = products.product_id
+    or lower(sps.sku) = lower(products.sku)
+    or (
+      ${uomQtyExpression} > 1
+      and lower(sps.sku) = lower(products.sku || '-' || floor(${uomQtyExpression})::text || 'pc')
+    )
+  )`;
   const numericQtyExpression = `coalesce(
     qty,
     case when coalesce(raw ->> 'inventoryQty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'inventoryQty')::numeric end,
@@ -4236,6 +4948,10 @@ async function listProducts(options = {}) {
   )`;
   const hasShopifyRequiredFields = `(
     coalesce(sku, raw ->> 'sku', raw ->> 'variantSku', raw ->> 'shopifyVariantSku', '') <> ''
+    and not (
+      coalesce(to_be_discontinued, false) = true
+      and ${numericQtyExpression} <= 0
+    )
     and coalesce(title, raw ->> 'marketplaceTitle', raw ->> 'title', raw ->> 'name', '') <> ''
     and coalesce(raw ->> 'bodyHtml', raw ->> 'bodyHTML', raw ->> 'longDescription', raw ->> 'description', raw ->> 'shortDescription', '') <> ''
     and coalesce(raw ->> 'productType', raw ->> 'shopifyProductType', category, raw ->> 'category', raw ->> 'shopifyTaxonomyId', raw ->> 'shopifyCategoryId', '') <> ''
@@ -4253,6 +4969,21 @@ async function listProducts(options = {}) {
   const channelStatusClause = (channelStatus) => {
     if (channelStatus === "shopify-live" || channelStatus === "live") {
       return hasShopifyLiveStatus;
+    }
+    if (channelStatus === "shopify-not-live") {
+      return `(not (${hasShopifyLiveStatus}))`;
+    }
+    if (channelStatus === "shopify-price-mismatch") {
+      return `exists (
+        select 1
+        from shopify_product_statuses sps
+        where sps.product_id = products.product_id
+          and coalesce(sps.status_payload ->> 'shopifyVariantPrice', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+          and abs(
+            ${numericPriceExpression}
+            - (sps.status_payload ->> 'shopifyVariantPrice')::numeric
+          ) >= 0.01
+      )`;
     }
     if (channelStatus === "shopify-linked") {
       return `(
@@ -4349,6 +5080,11 @@ async function listProducts(options = {}) {
     const channelClauses = channelStatusValues.map((value) => channelStatusClause(value)).filter(Boolean);
     if (channelClauses.length) where.push(`(${channelClauses.join(" or ")})`);
   }
+  const channelStatusAllValues = splitFilterValues(filters.channelStatusAll).map((value) => value.toLowerCase());
+  if (channelStatusAllValues.length) {
+    const channelClauses = channelStatusAllValues.map((value) => channelStatusClause(value)).filter(Boolean);
+    for (const clause of channelClauses) where.push(`(${clause})`);
+  }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const countResult = await client.query(`select count(*)::int as total from products ${whereSql}`, params);
   params.push(limit, offset);
@@ -4372,7 +5108,7 @@ async function productFacets() {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
-  const [suppliers, brands, categories, shopifyStatuses, ebayStatuses] = await Promise.all([
+  const [suppliers, brands, categories, shopifyStatuses, ebayStatuses, shopifyLiveCounts] = await Promise.all([
     client.query("select supplier as value, count(*)::int as count from products where coalesce(supplier, '') <> '' group by supplier order by supplier limit 500"),
     client.query("select brand as value, count(*)::int as count from products where coalesce(brand, '') <> '' group by brand order by brand limit 1000"),
     client.query("select category as value, count(*)::int as count from products where coalesce(category, '') <> '' group by category order by category limit 2000"),
@@ -4393,6 +5129,16 @@ async function productFacets() {
       where coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '') <> ''
       order by value
       limit 100
+    `),
+    client.query(`
+      select
+        count(distinct nullif(shopify_id, ''))::int as live_products,
+        count(*) filter (where coalesce(shopify_variant_id, '') <> '')::int as live_variants
+      from shopify_product_statuses
+      where coalesce(shopify_id, '') <> ''
+        and lower(coalesce(shopify_status, '')) = 'active'
+        and coalesce(shopify_published, false) = true
+        and lower(coalesce(sync_source, '')) in ('shopify-api-sku-map', 'graphql')
     `)
   ]);
   return {
@@ -4401,7 +5147,9 @@ async function productFacets() {
     categories: categories.rows.map((row) => row.value),
     stockStatuses: [],
     shopifyStatuses: shopifyStatuses.rows.map((row) => row.value),
-    ebayStatuses: ebayStatuses.rows.map((row) => row.value)
+    ebayStatuses: ebayStatuses.rows.map((row) => row.value),
+    shopifyLiveProducts: Number(shopifyLiveCounts.rows[0]?.live_products || 0),
+    shopifyLiveVariants: Number(shopifyLiveCounts.rows[0]?.live_variants || 0)
   };
 }
 
@@ -4426,28 +5174,111 @@ async function listCategoryProductStats() {
   if (!client) return [];
   await initRelationalSchema();
   const result = await client.query(`
-    with categorized as (
+    with saved_main_categories_raw as (
+      select distinct
+        coalesce(row ->> 'name', row ->> 'category', '') as category_name,
+        lower(coalesce(row ->> 'name', row ->> 'category', '')) as category_key
+      from state_documents doc,
+        jsonb_array_elements(case when jsonb_typeof(doc.data) = 'array' then doc.data else '[]'::jsonb end) row
+      where doc.doc_key = 'categorySettings'
+        and coalesce(row ->> 'name', row ->> 'category', '') <> ''
+      union
+      select distinct
+        coalesce(data ->> 'name', data ->> 'category', '') as category_name,
+        lower(coalesce(data ->> 'name', data ->> 'category', '')) as category_key
+      from entity_documents
+      where collection = 'categorySettings'
+        and coalesce(data ->> 'name', data ->> 'category', '') <> ''
+    ),
+    saved_main_categories as (
+      select
+        min(category_name) as category_name,
+        category_key
+      from saved_main_categories_raw
+      where category_key <> ''
+      group by category_key
+    ),
+    true_value_source_categories as (
+      select
+        coalesce(nullif(source_category, ''), nullif(category, ''), 'Uncategorized') as category_name,
+        lower(coalesce(nullif(source_category, ''), nullif(category, ''), 'Uncategorized')) as category_key,
+        count(*)::int as source_product_count
+      from vendor_catalog_items
+      where vendor_id = 'trv'
+        and coalesce(nullif(source_category, ''), nullif(category, '')) is not null
+      group by 1, 2
+    ),
+    product_categories as (
+      select
+        *,
+        (
+          lower(coalesce(supplier, raw ->> 'supplier', raw ->> 'vendor', '')) like '%true value%'
+          or lower(coalesce(supplier_code, raw ->> 'supplierCode', raw ->> 'defaultSupplier', '')) = 'trv'
+        ) as is_true_value_supplier,
+        coalesce(nullif(source_category, ''), nullif(raw ->> 'vendorCategory', ''), nullif(raw -> 'productManagerFields' ->> 'category', '')) as vendor_category_name,
+        coalesce(nullif(category, ''), nullif(main_category, '')) as verified_category_name
+      from products
+    ),
+    true_value_categories as (
+      select distinct lower(vendor_category_name) as category_key
+      from product_categories
+      where is_true_value_supplier = true
+        and vendor_category_name is not null
+      union
+      select category_key
+      from true_value_source_categories
+      where category_key <> ''
+      union
+      select category_key
+      from saved_main_categories
+      where category_key <> ''
+    ),
+    categorized as (
       select
         case
+          when is_true_value_supplier = true and vendor_category_name is not null
+          then vendor_category_name
           when lower(coalesce(raw ->> 'categoryVerified', 'false')) in ('true', '1', 'yes', 'y')
-            and coalesce(nullif(category, ''), nullif(main_category, '')) is not null
-          then coalesce(nullif(category, ''), nullif(main_category, ''))
+            and verified_category_name is not null
+            and lower(verified_category_name) in (select category_key from true_value_categories)
+          then verified_category_name
           else 'Uncategorized'
         end as category_name,
         coalesce(active, true) as active,
         coalesce(qty, 0) as qty,
         lower(coalesce(raw ->> 'hazardous', 'false')) in ('true', '1', 'yes', 'y') as hazardous
-      from products
+      from product_categories
+    ),
+    product_category_stats as (
+      select
+        category_name as name,
+        lower(category_name) as category_key,
+        count(*)::int as "productCount",
+        count(*) filter (where active = true)::int as "activeProductCount",
+        count(*) filter (where qty > 0)::int as "stockProductCount",
+        count(*) filter (where hazardous = true)::int as "hazardousProductCount"
+      from categorized
+      group by category_name
+    ),
+    canonical_categories as (
+      select category_name as name, category_key, source_product_count as "sourceCatalogProductCount"
+      from true_value_source_categories
+      union
+      select category_name as name, category_key, 0::int as "sourceCatalogProductCount"
+      from saved_main_categories
+      where category_key <> ''
     )
     select
-      category_name as name,
-      count(*)::int as "productCount",
-      count(*) filter (where active = true)::int as "activeProductCount",
-      count(*) filter (where qty > 0)::int as "stockProductCount",
-      count(*) filter (where hazardous = true)::int as "hazardousProductCount"
-    from categorized
-    group by category_name
-    order by count(*) desc, category_name
+      coalesce(stats.name, canonical.name) as name,
+      coalesce(stats."productCount", 0)::int as "productCount",
+      coalesce(stats."activeProductCount", 0)::int as "activeProductCount",
+      coalesce(stats."stockProductCount", 0)::int as "stockProductCount",
+      coalesce(stats."hazardousProductCount", 0)::int as "hazardousProductCount",
+      coalesce(canonical."sourceCatalogProductCount", 0)::int as "sourceCatalogProductCount",
+      case when canonical.category_key is not null then 'system:true-value-source' else '' end as "createdSource"
+    from product_category_stats stats
+    full join canonical_categories canonical on canonical.category_key = stats.category_key
+    order by coalesce(stats."productCount", 0) desc, coalesce(canonical."sourceCatalogProductCount", 0) desc, coalesce(stats.name, canonical.name)
   `);
   return result.rows;
 }
@@ -4489,6 +5320,33 @@ async function countProducts(options = {}) {
   await initRelationalSchema();
   const result = await listProducts({ ...options, page: 1, limit: 1 });
   return result?.total || 0;
+}
+
+async function countShopifyVariantStatuses(options = {}) {
+  const client = getPool();
+  if (!client) return 0;
+  await initRelationalSchema();
+  const params = [];
+  const where = ["coalesce(shopify_variant_id, '') <> ''"];
+  const skus = [...new Set((Array.isArray(options.skus) ? options.skus : [])
+    .map((sku) => nullableString(sku)?.toLowerCase())
+    .filter(Boolean))];
+  if (skus.length) {
+    params.push(skus);
+    where.push(`lower(sku) = any($${params.length})`);
+  }
+  if (options.liveOnly) {
+    where.push("coalesce(shopify_id, '') <> ''");
+    where.push("lower(coalesce(shopify_status, '')) = 'active'");
+    where.push("coalesce(shopify_published, false) = true");
+    where.push("lower(coalesce(sync_source, '')) in ('shopify-api-sku-map', 'graphql')");
+  }
+  const result = await client.query(`
+    select count(*)::int as total
+    from shopify_product_statuses
+    where ${where.join(" and ")}
+  `, params);
+  return Number(result.rows[0]?.total || 0) || 0;
 }
 
 function keyedObjectRows(map = {}) {
@@ -4555,8 +5413,13 @@ async function readShopifyStatusMap() {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
-  const result = await client.query("select sku, status_payload from shopify_product_statuses order by sku");
-  return Object.fromEntries(result.rows.map((row) => [String(row.sku || "").toLowerCase(), row.status_payload || {}]));
+  const result = await client.query("select sku, status_payload from shopify_product_statuses order by lower(sku), updated_at asc");
+  const map = {};
+  for (const row of result.rows) {
+    const key = String(row.sku || "").trim().toLowerCase();
+    if (key) map[key] = row.status_payload || {};
+  }
+  return map;
 }
 
 async function upsertShopifyStatusMap(statusMap = {}) {
@@ -4569,6 +5432,8 @@ async function upsertShopifyStatusMap(statusMap = {}) {
   try {
     for (const row of rows) {
       const payload = row.payload || {};
+      const skuKey = row.key || String(row.sku || "").trim().toLowerCase();
+      await client.query("delete from shopify_product_statuses where lower(sku) = $1 and sku <> $1", [skuKey]);
       await client.query(`
         insert into shopify_product_statuses (
           sku, product_id, shopify_id, shopify_variant_id, shopify_handle, shopify_status,
@@ -4593,7 +5458,7 @@ async function upsertShopifyStatusMap(statusMap = {}) {
           status_payload = excluded.status_payload,
           updated_at = now()
       `, [
-        row.sku,
+        skuKey,
         payload.shopifyId || "",
         payload.shopifyVariantId || "",
         payload.shopifyHandle || "",
@@ -4647,6 +5512,88 @@ async function replaceProductQualityRows(rows = []) {
     await client.query("rollback").catch(() => {});
     throw error;
   }
+}
+
+async function listCategoryProductSamples({ scope = "main", category = "", limit = 5 } = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const normalizedScope = nullableString(scope).toLowerCase() === "source" ? "source" : "main";
+  const categoryName = nullableString(category);
+  const sampleLimit = Math.max(1, Math.min(25, Number(limit || 5)));
+  if (!categoryName) return { scope: normalizedScope, category: "", items: [], total: 0, limit: sampleLimit };
+
+  if (normalizedScope === "source") {
+    const lowerCategory = categoryName.toLowerCase();
+    const params = [lowerCategory, sampleLimit];
+    let rows = await client.query(`
+      select source_sku, title, brand, vendor_id, qty, price
+      from vendor_catalog_items
+      where lower(coalesce(category, '')) = $1
+      order by source_sku
+      limit $2
+    `, params);
+    if (!rows.rows.length) {
+      rows = await client.query(`
+        select source_sku, title, brand, vendor_id, qty, price
+        from vendor_catalog_items
+        where lower(coalesce(source_category, '')) = $1
+        order by source_sku
+        limit $2
+      `, params);
+    }
+    const total = await client.query(`
+      select coalesce((data ->> 'productCount')::int, 0) as total
+      from category_summary_index
+      where scope = 'source'
+        and lower(coalesce(data ->> 'name', '')) = $1
+      limit 1
+    `, [lowerCategory]).catch(() => ({ rows: [] }));
+    return {
+      scope: normalizedScope,
+      category: categoryName,
+      items: rows.rows.map((row) => ({
+        sku: row.source_sku || "",
+        title: row.title || "",
+        brand: row.brand || "",
+        supplier: row.vendor_id || "",
+        qty: row.qty,
+        price: row.price
+      })),
+      total: total.rows[0]?.total || rows.rows.length,
+      limit: sampleLimit
+    };
+  }
+
+  const params = [categoryName.toLowerCase(), sampleLimit];
+  const [rows, total] = await Promise.all([
+    client.query(`
+      select sku, title, brand, supplier, qty, price
+      from products
+      where lower(coalesce(category, main_category, '')) = $1
+      order by sku
+      limit $2
+    `, params),
+    client.query(`
+      select count(*)::int as total
+      from products
+      where lower(coalesce(category, main_category, '')) = $1
+    `, [params[0]])
+  ]);
+  return {
+    scope: normalizedScope,
+    category: categoryName,
+    items: rows.rows.map((row) => ({
+      sku: row.sku || "",
+      title: row.title || "",
+      brand: row.brand || "",
+      supplier: row.supplier || "",
+      qty: row.qty,
+      price: row.price
+    })),
+    total: total.rows[0]?.total || 0,
+    limit: sampleLimit
+  };
 }
 
 async function readProductQualityRows(options = {}) {
@@ -4926,14 +5873,21 @@ module.exports = {
   readProductsByKeys,
   readPurchaseOrderByKey,
   readShopifyStatusMap,
+  countShopifyVariantStatuses,
   readRelationalState,
   readAllProducts,
+  listShopifyLinkedProducts,
   countProducts,
+  listCategoryProductSamples,
+  readCategorySummaryIndex,
+  replaceCategorySummaryIndex,
   listCategoryProductStats,
   listUncategorizedProducts,
   listProducts,
   productFacets,
   listVendorCatalogItems,
+  listVendorCategoryMappingSources,
+  applyVendorCategoryMainMapping,
   vendorCatalogFacets,
   refreshVendorCatalogFacets,
   isPostgresEnabled,

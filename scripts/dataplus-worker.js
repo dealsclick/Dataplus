@@ -41,6 +41,12 @@ const SUPPORTED_TASKS = [
   "source-catalog-import",
   "mapped-product-import",
   "shopify-status-import",
+  "shopify-sku-map-sync",
+  "shopify-variant-price-push",
+  "shopify-product-create",
+  "shopify-existing-variant-link",
+  "shopify-product-type-collections-sync",
+  "shopify-taxonomy-push",
   "shopify-status-sync",
   "shopify-inventory-update",
   "ebay-catalog-sync",
@@ -71,6 +77,29 @@ function scheduledMinutes(value = "06:00") {
   const match = String(value || "06:00").match(/^([01]\d|2[0-3]):([0-5]\d)$/);
   if (!match) return 360;
   return (Number(match[1]) * 60) + Number(match[2]);
+}
+
+function scheduleTimeValues(value = "") {
+  const values = (Array.isArray(value) ? value : String(value || "").split(/[,;\s]+/))
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .filter((item) => /^([01]\d|2[0-3]):[0-5]\d$/.test(item));
+  return [...new Set(values)].sort((a, b) => scheduledMinutes(a) - scheduledMinutes(b));
+}
+
+function dueChannelInventoryScheduleSlot(settings = {}, now = new Date()) {
+  const nowMinutes = minutesSinceMidnight(now);
+  if (String(settings.inventoryScheduleType || "times").toLowerCase() === "interval") {
+    const everyHours = Math.max(1, Math.min(24, Number(settings.inventoryScheduleEveryHours || 12) || 12));
+    const intervalMinutes = everyHours * 60;
+    const slotStart = Math.floor(nowMinutes / intervalMinutes) * intervalMinutes;
+    const hour = Math.floor(slotStart / 60);
+    const minute = slotStart % 60;
+    return nowMinutes >= slotStart ? `${pad2(hour)}:${pad2(minute)}` : "";
+  }
+  return scheduleTimeValues(settings.inventoryScheduleTimes || "03:00,13:00")
+    .filter((time) => nowMinutes >= scheduledMinutes(time))
+    .pop() || "";
 }
 
 function normalizeJobPatch(job, patch = {}) {
@@ -186,6 +215,13 @@ function sellPrice(item = {}) {
 }
 
 function itemAvailable(item = {}) {
+  const replenishable = item.replenishable === true
+    || item.raw?.replenishable === true
+    || ["true", "yes", "y", "1"].includes(String(item.replenishable ?? item.raw?.replenishable ?? "").trim().toLowerCase());
+  if (replenishable) {
+    const qty = numberValue(item.replenishableQty ?? item.raw?.replenishableQty, 0);
+    return qty > 0 ? Math.max(1, Math.floor(qty)) : 1;
+  }
   return numberValue(item.qty ?? item.stockQty ?? item.raw?.qty ?? item.raw?.stockQty, 0) - numberValue(item.reserved ?? item.raw?.reserved, 0);
 }
 
@@ -338,51 +374,59 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
   lastScheduleCheckAt = nowMs;
   const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
   const settings = dataplus.readSystemSettingsStore(docs.systemSettings || {});
-  if (!settings.shopifyDailyInventoryUpdateEnabled) return false;
+  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const channels = Array.isArray(stateDb.connections) ? stateDb.connections : [];
+  const scheduledChannels = channels.filter((channel) => {
+    const channelSettings = channel.settings || {};
+    if (channelSettings.inventoryScheduleEnabled === true || String(channelSettings.inventoryScheduleEnabled).toLowerCase() === "true") return true;
+    return String(channel.name || "").toLowerCase() === "shopify" && settings.shopifyDailyInventoryUpdateEnabled;
+  });
+  if (!scheduledChannels.length) return false;
   const now = new Date(nowMs);
   const today = localDateKey(now);
-  const scheduleState = docs.shopifyDailyInventorySchedule && typeof docs.shopifyDailyInventorySchedule === "object" ? docs.shopifyDailyInventorySchedule : {};
-  if (scheduleState.lastRunDate === today || scheduleState.lastQueuedDate === today) return false;
-  if (minutesSinceMidnight(now) < scheduledMinutes(settings.shopifyDailyInventoryUpdateTime || "06:00")) return false;
-
   const jobs = await postgres.readOperationJobs(500).catch(() => []) || [];
   const latestDump = latestSuccessfulProductDumpJob(jobs);
-  if (settings.shopifyDailyInventoryRequireSuccessfulDump && !latestDump) {
-    await postgres.writeStateDocuments({
-      shopifyDailyInventorySchedule: {
-        ...scheduleState,
+  const latestDumpFinishedAt = latestDump?.finishedAt || latestDump?.updatedAt || "";
+  const scheduleState = docs.channelInventorySchedules && typeof docs.channelInventorySchedules === "object" ? docs.channelInventorySchedules : {};
+  let queued = false;
+  for (const channel of scheduledChannels) {
+    const channelSettings = channel.settings || {};
+    const isLegacyShopify = String(channel.name || "").toLowerCase() === "shopify" && !channelSettings.inventoryScheduleEnabled && settings.shopifyDailyInventoryUpdateEnabled;
+    const dueSlot = isLegacyShopify
+      ? (minutesSinceMidnight(now) >= scheduledMinutes(settings.shopifyDailyInventoryUpdateTime || "06:00") ? String(settings.shopifyDailyInventoryUpdateTime || "06:00") : "")
+      : dueChannelInventoryScheduleSlot(channelSettings, now);
+    if (!dueSlot) continue;
+    const scheduleId = `${channel.id || channel.name || "channel"}:${today}:${dueSlot}`;
+    const previous = scheduleState[scheduleId] || {};
+    if (previous.lastRunDate === today || previous.lastQueuedDate === today) continue;
+    const requireDump = isLegacyShopify ? settings.shopifyDailyInventoryRequireSuccessfulDump : channelSettings.inventoryScheduleRequireSuccessfulDump === true || String(channelSettings.inventoryScheduleRequireSuccessfulDump).toLowerCase() === "true";
+    if (requireDump && !latestDump) {
+      scheduleState[scheduleId] = {
+        ...previous,
         lastCheckedAt: new Date(nowMs).toISOString(),
         lastSkipReason: "No successful product dump import has been found yet."
-      }
-    });
-    return false;
-  }
-  const latestDumpFinishedAt = latestDump?.finishedAt || latestDump?.updatedAt || "";
-  if (settings.shopifyDailyInventoryRequireSuccessfulDump && latestDumpFinishedAt && scheduleState.lastDumpFinishedAt === latestDumpFinishedAt) {
-    await postgres.writeStateDocuments({
-      shopifyDailyInventorySchedule: {
-        ...scheduleState,
-        lastCheckedAt: new Date(nowMs).toISOString(),
-        lastSkipReason: "Latest successful product dump was already used for a scheduled Shopify inventory run."
-      }
-    });
-    return false;
-  }
-
-  const apply = settings.shopifyDailyInventoryUpdateMode === "apply";
-  const db = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
-  try {
-    const result = await dataplus.queueShopifyInventoryUpdateJob(db, {
-      apply,
-      dryRun: !apply
-    }, {
-      scheduled: true,
-      scheduleKey: `${today}:${latestDump?.id || latestDumpFinishedAt || "no-dump"}`,
-      operation: apply ? "Scheduled Shopify inventory update" : "Scheduled Shopify inventory dry run"
-    });
-    await postgres.writeStateDocuments({
-      shopifyDailyInventorySchedule: {
-        ...scheduleState,
+      };
+      continue;
+    }
+    const apply = isLegacyShopify
+      ? settings.shopifyDailyInventoryUpdateMode === "apply"
+      : String(channelSettings.inventoryScheduleMode || "dry-run").toLowerCase() === "apply";
+    try {
+      const result = await dataplus.queueShopifyInventoryUpdateJob(stateDb, {
+        apply,
+        dryRun: !apply,
+        warehouseId: channelSettings.shopifyInventoryWarehouseId || "",
+        locationId: channelSettings.shopifyInventoryLocationId || ""
+      }, {
+        scheduled: true,
+        scheduleKey: scheduleId,
+        operation: apply ? `Scheduled ${channel.name || "channel"} inventory update` : `Scheduled ${channel.name || "channel"} inventory dry run`
+      });
+      scheduleState[scheduleId] = {
+        ...previous,
+        channelId: channel.id || "",
+        channelName: channel.name || "",
+        time: dueSlot,
         lastCheckedAt: new Date(nowMs).toISOString(),
         lastQueuedAt: new Date(nowMs).toISOString(),
         lastQueuedDate: today,
@@ -393,21 +437,23 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
         lastDumpFinishedAt,
         lastSkipReason: "",
         lastError: ""
-      }
-    });
-    console.log(`[${WORKER_ID}] queued scheduled Shopify inventory ${apply ? "update" : "dry run"} (${result.job?.id || "duplicate"})`);
-    return true;
-  } catch (error) {
-    await postgres.writeStateDocuments({
-      shopifyDailyInventorySchedule: {
-        ...scheduleState,
+      };
+      queued = true;
+      console.log(`[${WORKER_ID}] queued scheduled ${channel.name || "channel"} inventory ${apply ? "update" : "dry run"} for ${dueSlot} (${result.job?.id || "duplicate"})`);
+    } catch (error) {
+      scheduleState[scheduleId] = {
+        ...previous,
+        channelId: channel.id || "",
+        channelName: channel.name || "",
+        time: dueSlot,
         lastCheckedAt: new Date(nowMs).toISOString(),
-        lastError: error.message || "Unable to queue scheduled Shopify inventory update."
-      }
-    });
-    console.error(`[${WORKER_ID}] scheduled Shopify inventory check failed:`, error.message || error);
-    return false;
+        lastError: error.message || "Unable to queue scheduled inventory update."
+      };
+      console.error(`[${WORKER_ID}] scheduled ${channel.name || "channel"} inventory check failed:`, error.message || error);
+    }
   }
+  await postgres.writeStateDocuments({ channelInventorySchedules: scheduleState });
+  return queued;
 }
 
 async function runBackupJob(job) {
@@ -587,28 +633,36 @@ async function runSourceFacetsRefreshJob(job) {
     message: "Worker is refreshing source catalog facets...",
     startedAt: job.startedAt || new Date().toISOString()
   });
-  const result = await postgres.refreshVendorCatalogFacets({
-    isCanceled: () => false,
-    onProgress: (patch = {}) => {
-      current = normalizeJobPatch(current, {
-        ...patch,
-        status: "running",
-        message: patch.message || current.message
-      });
-      postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist facet refresh progress:", error.message || error));
-    }
-  });
-  return persistJob(current, {
-    status: "success",
-    phase: "complete",
-    message: "Source catalog facets refreshed.",
-    totalRows: result.totalRows || current.totalRows || 4,
-    processedRows: result.processedRows || result.totalRows || current.totalRows || 4,
-    changed: 1,
-    progressPercent: 100,
-    estimatedSecondsRemaining: 0,
-    finishedAt: new Date().toISOString()
-  });
+  const heartbeatTimer = setInterval(() => {
+    writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh facet refresh heartbeat:", error.message || error));
+  }, 10000);
+  try {
+    const result = await postgres.refreshVendorCatalogFacets({
+      isCanceled: () => false,
+      onProgress: (patch = {}) => {
+        current = normalizeJobPatch(current, {
+          ...patch,
+          status: "running",
+          message: patch.message || current.message
+        });
+        postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist facet refresh progress:", error.message || error));
+        writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh facet refresh heartbeat:", error.message || error));
+      }
+    });
+    return persistJob(current, {
+      status: "success",
+      phase: "complete",
+      message: "Source catalog facets refreshed.",
+      totalRows: result.totalRows || current.totalRows || 4,
+      processedRows: result.processedRows || result.totalRows || current.totalRows || 4,
+      changed: 1,
+      progressPercent: 100,
+      estimatedSecondsRemaining: 0,
+      finishedAt: new Date().toISOString()
+    });
+  } finally {
+    clearInterval(heartbeatTimer);
+  }
 }
 
 function workerExportPath(job, filename = "export.csv") {
@@ -647,6 +701,7 @@ async function runMappedProductExportJob(job) {
       if (Date.now() - lastPersist > 1000 || Number(current.progressPercent || 0) >= 99) {
         lastPersist = Date.now();
         postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist export progress:", error.message || error));
+        writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh export heartbeat:", error.message || error));
       }
     },
     isCanceled: () => false
@@ -684,6 +739,7 @@ async function runCategoryExportJob(job) {
     progress: (patch = {}) => {
       current = normalizeJobPatch(current, { ...patch, status: "running", message: patch.message || current.message });
       postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist category export progress:", error.message || error));
+      writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh category export heartbeat:", error.message || error));
     },
     isCanceled: () => false
   });
@@ -730,6 +786,30 @@ async function runShopifyStatusSyncJob(job) {
   return dataplus.runShopifyStatusSyncWorkerJob(job, job.workerPayload || {});
 }
 
+async function runShopifySkuMapSyncJob(job) {
+  return dataplus.runShopifySkuMapSyncWorkerJob(job, job.workerPayload || {});
+}
+
+async function runShopifyVariantPricePushJob(job) {
+  return dataplus.runShopifyVariantPricePushWorkerJob(job, job.workerPayload || {});
+}
+
+async function runShopifyProductCreateJob(job) {
+  return dataplus.runShopifyProductCreateWorkerJob(job, job.workerPayload || {});
+}
+
+async function runShopifyExistingVariantLinkJob(job) {
+  return dataplus.runShopifyExistingVariantLinkWorkerJob(job, job.workerPayload || {});
+}
+
+async function runShopifyProductTypeCollectionsSyncJob(job) {
+  return dataplus.runShopifyProductTypeCollectionSyncWorkerJob(job, job.workerPayload || {});
+}
+
+async function runShopifyTaxonomyPushJob(job) {
+  return dataplus.runShopifyTaxonomyPushWorkerJob(job, job.workerPayload || {});
+}
+
 async function runShopifyInventoryUpdateJob(job) {
   const payload = job.workerPayload || {};
   const apply = payload.apply !== false && payload.dryRun !== true;
@@ -748,10 +828,22 @@ async function runShopifyInventoryUpdateJob(job) {
     message: apply ? "Worker is updating Shopify inventory from the latest data dump..." : "Worker is checking Shopify inventory against the latest data dump...",
     startedAt: job.startedAt || new Date().toISOString()
   });
+  dataplus.appendChannelApiLog?.({
+    channel: "Shopify",
+    transport: "Job",
+    method: "RUN",
+    path: "shopify-inventory-update",
+    operation: apply ? "Inventory update started" : "Inventory dry run started",
+    statusCode: 102,
+    ok: true,
+    jobId: current.id,
+    message: `${current.message}${payload.warehouseName ? ` Warehouse ${payload.warehouseName}.` : ""}${payload.locationId ? ` Location ${payload.locationId}.` : ""}`
+  });
   const stdout = [];
   const stderr = [];
   let lastPersist = 0;
-  await new Promise((resolve, reject) => {
+  try {
+    await new Promise((resolve, reject) => {
     const heartbeatTimer = setInterval(() => {
       writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh Shopify inventory heartbeat:", error.message || error));
     }, Math.max(1000, Math.min(HEARTBEAT_MS, 5000)));
@@ -801,7 +893,21 @@ async function runShopifyInventoryUpdateJob(job) {
       if (code) reject(new Error(`Shopify inventory updater exited with code ${code}. ${stderr.join("").slice(-2000)}`));
       else resolve();
     });
-  });
+    });
+  } catch (error) {
+    dataplus.appendChannelApiLog?.({
+      channel: "Shopify",
+      transport: "Job",
+      method: "RUN",
+      path: "shopify-inventory-update",
+      operation: apply ? "Inventory update failed" : "Inventory dry run failed",
+      statusCode: 500,
+      ok: false,
+      jobId: current.id,
+      message: error.message || "Shopify inventory updater failed."
+    });
+    throw error;
+  }
 
   const text = stdout.join("").trim();
   const report = text ? JSON.parse(text) : {};
@@ -826,6 +932,19 @@ async function runShopifyInventoryUpdateJob(job) {
     finishedAt: new Date().toISOString(),
     shopifyInventoryReport: report
   });
+  dataplus.appendChannelApiLog?.({
+    channel: "Shopify",
+    transport: "Job",
+    method: apply ? "SEND" : "CHECK",
+    path: "shopify-inventory-update",
+    operation: apply ? "Inventory update completed" : "Inventory dry run completed",
+    statusCode: report.errors?.length ? 207 : 200,
+    ok: !report.errors?.length,
+    jobId: current.id,
+    message: apply
+      ? `Sent ${Number(report.variantsApplied || 0).toLocaleString()} Shopify inventory update${Number(report.variantsApplied || 0) === 1 ? "" : "s"} to ${report.locationName || payload.locationName || "Shopify location"}.`
+      : `Prepared ${Number(report.variantsChanged || 0).toLocaleString()} Shopify inventory update${Number(report.variantsChanged || 0) === 1 ? "" : "s"} for review at ${report.locationName || payload.locationName || "Shopify location"}.`
+  });
   if (reportPath && fs.existsSync(reportPath)) await postgres.upsertOperationArtifact(current, "original");
   return current;
 }
@@ -846,17 +965,30 @@ async function runProductDumpImportJob(job) {
   const payload = job.workerPayload || {};
   const args = ["scripts/import-product-dump.js"];
   if (payload.path) args.push(String(payload.path));
+  args.push("--job-id", String(job.id));
+  if (payload.postgresOnly !== false) args.push("--postgres-only");
+  if (Number(payload.limit || 0) > 0) args.push("--limit", String(Number(payload.limit || 0)));
+  args.push("--batch-size", String(Math.max(1000, Math.min(10000, Number(payload.batchSize || 5000) || 5000))));
   let current = await persistJob(job, {
     status: "running",
     phase: "importing_product_dump",
-    message: "Worker is importing the product dump...",
+    message: payload.postgresOnly === false
+      ? "Worker is importing the product dump..."
+      : "Worker is streaming the product dump into PostgreSQL...",
     startedAt: job.startedAt || new Date().toISOString()
   });
   const output = [];
+  let lastPersist = 0;
   await new Promise((resolve, reject) => {
+    const heartbeatTimer = setInterval(() => {
+      writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh product dump heartbeat:", error.message || error));
+    }, Math.max(1000, Math.min(HEARTBEAT_MS, 5000)));
     const child = spawn(process.execPath, args, {
       cwd: ROOT,
-      env: process.env,
+      env: {
+        ...process.env,
+        NODE_OPTIONS: process.env.NODE_OPTIONS || "--max-old-space-size=16384"
+      },
       windowsHide: true
     });
     child.stdout.on("data", (chunk) => {
@@ -868,18 +1000,54 @@ async function runProductDumpImportJob(job) {
         postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist dump progress:", error.message || error));
       }
     });
-    child.stderr.on("data", (chunk) => output.push(chunk.toString()));
-    child.on("error", reject);
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      output.push(text);
+      const matches = [...text.matchAll(/Processed\s+(\d+)\s+records\s+\((\d+)\s+catalog products,\s+(\d+)\s+skipped\)/gi)];
+      const match = matches[matches.length - 1];
+      if (match) {
+        const processedRows = Number(match[1]) || current.processedRows || 0;
+        const changed = Number(match[2]) || current.changed || 0;
+        const missingCount = Number(match[3]) || current.missingCount || 0;
+        current = normalizeJobPatch(current, {
+          status: "running",
+          phase: "streaming_product_dump",
+          processedRows,
+          changed,
+          missingCount,
+          message: `Streamed ${processedRows.toLocaleString()} product dump records into PostgreSQL.`
+        });
+      }
+      if (Date.now() - lastPersist > 1500) {
+        lastPersist = Date.now();
+        postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist dump progress:", error.message || error));
+        writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh product dump heartbeat:", error.message || error));
+      }
+    });
+    child.on("error", (error) => {
+      clearInterval(heartbeatTimer);
+      reject(error);
+    });
     child.on("close", (code) => {
+      clearInterval(heartbeatTimer);
       if (code) reject(new Error(`Product dump import exited with code ${code}. ${output.join("").slice(-2000)}`));
       else resolve();
     });
   });
+  const outputText = output.join("");
+  const summaryMatch = outputText.match(/(?:Normalized|Imported)\s+(\d+)\s+catalog products\s+\((\d+)\s+skipped\)/i);
+  const finalProcessedRows = summaryMatch ? Number(summaryMatch[1]) + Number(summaryMatch[2]) : current.processedRows;
+  const finalChanged = summaryMatch ? Number(summaryMatch[1]) : current.changed;
+  const finalMissing = summaryMatch ? Number(summaryMatch[2]) : current.missingCount;
   return persistJob(current, {
     status: "success",
     phase: "complete",
     message: "Product dump import finished.",
-    details: output.join("").split(/\r?\n/).filter(Boolean).slice(-8).join(" "),
+    details: outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "),
+    totalRows: finalProcessedRows || current.totalRows || 0,
+    processedRows: finalProcessedRows || current.processedRows || 0,
+    changed: finalChanged || current.changed || 0,
+    missingCount: finalMissing || current.missingCount || 0,
     progressPercent: 100,
     estimatedSecondsRemaining: 0,
     finishedAt: new Date().toISOString()
@@ -899,6 +1067,12 @@ async function runJob(job) {
   if (task === "source-catalog-import") return runSourceCatalogImportJob(job);
   if (task === "mapped-product-import") return runMappedProductImportJob(job);
   if (task === "shopify-status-import") return runShopifyStatusImportJob(job);
+  if (task === "shopify-sku-map-sync") return runShopifySkuMapSyncJob(job);
+  if (task === "shopify-variant-price-push") return runShopifyVariantPricePushJob(job);
+  if (task === "shopify-product-create") return runShopifyProductCreateJob(job);
+  if (task === "shopify-existing-variant-link") return runShopifyExistingVariantLinkJob(job);
+  if (task === "shopify-product-type-collections-sync") return runShopifyProductTypeCollectionsSyncJob(job);
+  if (task === "shopify-taxonomy-push") return runShopifyTaxonomyPushJob(job);
   if (task === "shopify-status-sync") return runShopifyStatusSyncJob(job);
   if (task === "shopify-inventory-update") return runShopifyInventoryUpdateJob(job);
   if (task === "ebay-catalog-sync") return runEbayCatalogSyncJob(job);

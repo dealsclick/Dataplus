@@ -100,6 +100,7 @@ function parseArgs(argv) {
     inventory: false,
     postgresOnly: false,
     snapshotOnly: false,
+    jobId: "",
     limit: 0
   };
 
@@ -117,6 +118,9 @@ function parseArgs(argv) {
       options.postgresOnly = true;
     } else if (arg === "--snapshot-only") {
       options.snapshotOnly = true;
+    } else if (arg === "--job-id") {
+      options.jobId = String(argv[index + 1] || "").trim();
+      index += 1;
     } else if (arg === "--limit") {
       options.limit = Number(argv[index + 1] || 0);
       index += 1;
@@ -226,6 +230,16 @@ function numberValue(value, fallback = 0) {
 function yesValue(value) {
   const text = textValue(value).toLowerCase();
   return ["y", "yes", "true", "1", "discontinued", "to be discontinued"].includes(text);
+}
+
+function clearanceStatusValue(value) {
+  const text = textValue(value).toLowerCase();
+  return ["clearance", "clearance item", "closeout"].includes(text);
+}
+
+function clearanceIndicatorValue(value) {
+  const text = textValue(value).toLowerCase();
+  return ["clearance", "clearance item", "closeout", "y", "yes", "true", "1"].includes(text);
 }
 
 function textValue(value) {
@@ -459,6 +473,17 @@ function formatCategoryName(value) {
     .join(" > ");
 }
 
+function isTrueValueSupplier(record = {}) {
+  return [
+    record.supplier,
+    record.vendor,
+    record.supplier_code,
+    record.supplierCode,
+    record.default_supplier,
+    record.defaultSupplier
+  ].map((value) => textValue(value).toLowerCase()).some((value) => value === "true value" || value === "trv" || value.includes("true value"));
+}
+
 function isEmptyCatalogValue(value) {
   if (Array.isArray(value)) return value.length === 0;
   if (value === undefined || value === null) return true;
@@ -679,13 +704,18 @@ function buildProduct(record) {
   const defaultImage = textValue(normalizedRecord.default_image || normalizedRecord.defaultImage || normalizedRecord.image || normalizedRecord.image_url);
   const images = [...new Set([defaultImage, ...listValue(normalizedRecord.images || normalizedRecord.image_urls)].filter(Boolean))];
   const sourceCost = numberValue(normalizedRecord.price || normalizedRecord.cost || normalizedRecord.fob_price || normalizedRecord.wholesale_price);
-  const listPrice = numberValue(normalizedRecord.list_price || normalizedRecord.msrp);
-  const websitePrice = sourceCost > 0 ? Math.round((sourceCost * 1.6) * 100) / 100 : 0;
+  const status = normalizedRecord.active === false ? "Draft" : textValue(normalizedRecord.status) || "Draft";
+  const itemClearanceIndicator = textValue(normalizedRecord.item_clearance_indicator || normalizedRecord.itemClearanceIndicator);
+  const isClearance = clearanceStatusValue(status) || clearanceIndicatorValue(itemClearanceIndicator);
+  const listPrice = isClearance ? numberValue(normalizedRecord.list_price || normalizedRecord.msrp) : 0;
+  const vendorWebsitePrice = numberValue(normalizedRecord.vendor_website_price || normalizedRecord.vendorWebsitePrice);
+  const websitePrice = vendorWebsitePrice > 0 ? vendorWebsitePrice : sourceCost > 0 ? Math.round((sourceCost * 1.35) * 100) / 100 : 0;
   const stockQty = numberValue(normalizedRecord.stock_qty ?? normalizedRecord.stockQty ?? normalizedRecord.qty ?? normalizedRecord.quantity);
-  const minQuantity = textValue(normalizedRecord.min_quantity || normalizedRecord.minQuantity);
+  const minQuantity = textValue(normalizedRecord.min_quantity || normalizedRecord.minQuantity || normalizedRecord.minimum_quantity);
   const checkedImage = normalizedRecord.checked_image && typeof normalizedRecord.checked_image === "object" ? normalizedRecord.checked_image : {};
   const sourceBrand = textValue(normalizedRecord.sourceBrand || normalizedRecord.brand);
   const sourceCategory = formatCategoryName(normalizedRecord.category || normalizedRecord.product_type);
+  const promoteSourceCategory = isTrueValueSupplier(normalizedRecord) && sourceCategory;
   const toBeDiscontinued = yesValue(normalizedRecord.to_be_discontinued ?? normalizedRecord.toBeDiscontinued ?? normalizedRecord.discontinued ?? normalizedRecord.is_discontinued);
   const tags = [...new Set([
     ...listValue(normalizedRecord.tags),
@@ -699,17 +729,17 @@ function buildProduct(record) {
     marketplaceTitle: textValue(normalizedRecord.marketplaceTitle || normalizedRecord.name || normalizedRecord.title || sku),
     shortDescription: textValue(normalizedRecord.short_description || normalizedRecord.shortDescription),
     longDescription: textValue(normalizedRecord.description || normalizedRecord.long_description || normalizedRecord.longDescription),
-    bulletPoints: listValue(normalizedRecord.bullet_points || normalizedRecord.bulletPoints || normalizedRecord.keyFeatures || normalizedRecord.features),
+    bulletPoints: listValue(normalizedRecord.bullet_points || normalizedRecord.bulletPoints || normalizedRecord.key_features || normalizedRecord.keyFeatures || normalizedRecord.features),
     brand: formatBrandName(sourceBrand),
     sourceBrand,
     brandLocked: booleanValue(normalizedRecord.brandLocked, false),
     category: sourceCategory,
     sourceCategory,
     vendorCategory: sourceCategory,
-    mainCategory: "",
-    categoryVerified: false,
+    mainCategory: promoteSourceCategory ? sourceCategory : "",
+    categoryVerified: Boolean(promoteSourceCategory),
     condition: textValue(normalizedRecord.condition) || "New",
-    status: normalizedRecord.active === false ? "Draft" : textValue(normalizedRecord.status) || "Draft",
+    status,
     active: booleanValue(normalizedRecord.active, true),
     toBeDiscontinued,
     closeoutEligible: toBeDiscontinued,
@@ -727,11 +757,35 @@ function buildProduct(record) {
     uomQty: textValue(normalizedRecord.uom_qty || normalizedRecord.uomQty),
     minQuantity,
     quantityIncrements: textValue(normalizedRecord.quantity_increments || normalizedRecord.quantityIncrements),
+    addTags: listValue(normalizedRecord.add_tags),
+    removeTags: listValue(normalizedRecord.remove_tags),
+    binLocation: textValue(normalizedRecord.bin_location),
+    bscReporting: normalizedRecord.bsc_reporting && typeof normalizedRecord.bsc_reporting === "object" ? normalizedRecord.bsc_reporting : null,
+    bscReportingUpdatedAt: textValue(normalizedRecord.bsc_reporting_updated_at),
+    ceiId: textValue(normalizedRecord["cei-id"]),
+    contractName: textValue(normalizedRecord.contract_name),
+    contractShortDescription: textValue(normalizedRecord.contract_short_description),
+    defaultLeadTime: textValue(normalizedRecord.default_lead_time),
+    defaultPrice: numberValue(normalizedRecord.default_price),
+    defaultSupplierPrice: numberValue(normalizedRecord.default_supplier_price),
+    defaultSupplierSku: textValue(normalizedRecord.default_supplier_sku),
+    inventoryByLocation: normalizedRecord.i_by_l && typeof normalizedRecord.i_by_l === "object" ? normalizedRecord.i_by_l : null,
+    keyFeaturesRaw: normalizedRecord.key_features === undefined ? [] : normalizedRecord.key_features,
+    marconeMake: textValue(normalizedRecord.marcone_make),
+    marconePart: textValue(normalizedRecord.marcone_part),
+    masterSku: textValue(normalizedRecord.master_sku),
+    maxQuantity: numberValue(normalizedRecord.max_quantity),
+    minimumQuantity: numberValue(normalizedRecord.minimum_quantity),
+    notes: textValue(normalizedRecord.notes),
+    uKey: textValue(normalizedRecord["u-key"]),
+    updatedBy: textValue(normalizedRecord.updated_by),
+    weight: numberValue(normalizedRecord.weight),
+    systemFieldSource: "system_default",
     hazardous: booleanValue(normalizedRecord.hazardous, false),
     sdsUrl: textValue(normalizedRecord.sds_url || normalizedRecord.sdsUrl),
     itemHeight: numberValue(normalizedRecord.item_height || normalizedRecord.itemHeight),
     itemLength: numberValue(normalizedRecord.item_length || normalizedRecord.itemLength),
-    itemWeight: numberValue(normalizedRecord.item_weight || normalizedRecord.itemWeight),
+    itemWeight: numberValue(normalizedRecord.item_weight || normalizedRecord.itemWeight || normalizedRecord.weight),
     itemWidth: numberValue(normalizedRecord.item_width || normalizedRecord.itemWidth),
     packageHeight: numberValue(normalizedRecord.package_height || normalizedRecord.packageHeight),
     packageLength: numberValue(normalizedRecord.package_length || normalizedRecord.packageLength),
@@ -746,6 +800,35 @@ function buildProduct(record) {
     ctechId: textValue(normalizedRecord.ctech_id || normalizedRecord.ctechId),
     ctechIdLastExport: textValue(normalizedRecord.ctech_id_last_export || normalizedRecord.ctechIdLastExport),
     fobPrice: numberValue(normalizedRecord.fob_price || normalizedRecord.fobPrice),
+    altSku: textValue(normalizedRecord.alt_sku || normalizedRecord.altSku),
+    minimumAllowedPrice: numberValue(normalizedRecord.minimum_allowed_price || normalizedRecord.minimumAllowedPrice),
+    fobPriceForZoro: numberValue(normalizedRecord.fob_price_for_zoro || normalizedRecord.fobPriceForZoro),
+    preferredVendor: textValue(normalizedRecord.preferred_vendor || normalizedRecord.preferredVendor),
+    uploadedImage: textValue(normalizedRecord.uploaded_image || normalizedRecord.uploadedImage),
+    restrictedStates: normalizedRecord.restricted_states ?? normalizedRecord.restrictedStates ?? "",
+    shipMode: textValue(normalizedRecord.ship_mode || normalizedRecord.shipMode),
+    dropShip: booleanValue(normalizedRecord.drop_ship ?? normalizedRecord.dropShip, null),
+    showProp65: booleanValue(normalizedRecord.show_prop_65 ?? normalizedRecord.showProp65, null),
+    prop65Message: textValue(normalizedRecord.prop_65_message || normalizedRecord.prop65Message),
+    warranty: textValue(normalizedRecord.warranty),
+    dropShipMinQty: textValue(normalizedRecord.drop_ship_min_qty || normalizedRecord.dropShipMinQty),
+    additionalAttributes: textValue(normalizedRecord.additional_attributes || normalizedRecord.additionalAttributes),
+    certifications: textValue(normalizedRecord.certifications),
+    returnable: textValue(normalizedRecord.returnable),
+    competitorPartNumber: textValue(normalizedRecord.competitor_part_number || normalizedRecord.competitorPartNumber),
+    oversize: booleanValue(normalizedRecord.oversize, null),
+    mappedCategory: normalizedRecord.mapped_category ?? normalizedRecord.mappedCategory ?? null,
+    checkedSds: normalizedRecord.checked_sds ?? normalizedRecord.checkedSds ?? null,
+    sourceCategoryId: textValue(normalizedRecord.category_id || normalizedRecord.categoryId),
+    vendorWebsitePrice,
+    isBanned: booleanValue(normalizedRecord.is_banned ?? normalizedRecord.isBanned, null),
+    isMarketplaceRestricted: booleanValue(normalizedRecord.is_marketplace_restricted ?? normalizedRecord.isMarketplaceRestricted, null),
+    bulkPrices: normalizedRecord.bulk_prices ?? normalizedRecord.bulkPrices ?? [],
+    trustedBrand: textValue(normalizedRecord.trusted_brand || normalizedRecord.trustedBrand),
+    keywords: textValue(normalizedRecord.keywords),
+    subBrand: textValue(normalizedRecord.sub_brand || normalizedRecord.subBrand),
+    replacementSku: textValue(normalizedRecord.replacement_sku || normalizedRecord.replacementSku),
+    icons: textValue(normalizedRecord.icons),
     price: websitePrice,
     websitePrice,
     cost: sourceCost,
@@ -785,7 +868,7 @@ function buildProduct(record) {
     countryOfOrigin: textValue(normalizedRecord.country_of_origin || normalizedRecord.countryOfOrigin),
     originalSdsUrl: textValue(normalizedRecord.original_sds_url || normalizedRecord.originalSdsUrl),
     itemKey: textValue(normalizedRecord.item_key || normalizedRecord.itemKey),
-    itemClearanceIndicator: textValue(normalizedRecord.item_clearance_indicator || normalizedRecord.itemClearanceIndicator),
+    itemClearanceIndicator,
     original: normalizedRecord.original === undefined ? null : normalizedRecord.original,
     vendorDescription: textValue(normalizedRecord.vendor_descripton || normalizedRecord.vendor_description || normalizedRecord.vendorDescription),
     uploadedBy: textValue(normalizedRecord.uploaded_by || normalizedRecord.uploadedBy),
@@ -816,8 +899,28 @@ async function createDumpImportJob(attrs = {}) {
   if (attrs.dryRun) return null;
   const { state, write } = await readAppState();
   const now = new Date().toISOString();
+  state.importJobs = normalizeImportJobs(state.importJobs);
+  if (attrs.jobId) {
+    const existing = state.importJobs.find((row) => row.id === attrs.jobId);
+    if (existing) {
+      Object.assign(existing, {
+        section: attrs.section || existing.section || "Source Catalog",
+        operation: attrs.operation || existing.operation || "Product dump import",
+        direction: "import",
+        status: "running",
+        fileName: attrs.fileName || existing.fileName || "",
+        originalFileName: attrs.fileName || existing.originalFileName || "",
+        originalFilePath: attrs.filePath || existing.originalFilePath || "",
+        message: attrs.message || existing.message || "Import started.",
+        updatedAt: now,
+        startedAt: existing.startedAt || now
+      });
+      await write(state);
+      return { id: existing.id, write };
+    }
+  }
   const job = {
-    id: crypto.randomUUID(),
+    id: attrs.jobId || crypto.randomUUID(),
     section: attrs.section || "Source Catalog",
     operation: attrs.operation || "Product dump import",
     direction: "import",
@@ -840,7 +943,7 @@ async function createDumpImportJob(attrs = {}) {
     finishedAt: "",
     updatedAt: now
   };
-  state.importJobs = [job, ...normalizeImportJobs(state.importJobs)].slice(0, 200);
+  state.importJobs = [job, ...state.importJobs].slice(0, 200);
   await write(state);
   return { id: job.id, write };
 }
@@ -890,8 +993,17 @@ function mergeProduct(existing, product, state) {
     if (field === "category") {
       const formattedCategory = formatCategoryName(incomingValue);
       if (formattedCategory) {
-        next.sourceCategory = next.sourceCategory || formattedCategory;
-        next.vendorCategory = next.vendorCategory || formattedCategory;
+        if (isTrueValueSupplier(product)) {
+          next.category = formattedCategory;
+          next.mainCategory = formattedCategory;
+          next.sourceCategory = formattedCategory;
+          next.vendorCategory = formattedCategory;
+          next.categoryVerified = true;
+          next.mainCategorySource = "vendor-category";
+        } else {
+          next.sourceCategory = next.sourceCategory || formattedCategory;
+          next.vendorCategory = next.vendorCategory || formattedCategory;
+        }
       }
       continue;
     }
@@ -945,8 +1057,10 @@ async function importCatalogStore(dumpPath, options) {
   const startedAt = new Date().toISOString();
   const importId = crypto.randomUUID();
   const errorRows = [];
-  const previousSnapshot = options.dryRun ? new Map() : await readChangeSnapshot();
+  const trackLocalChanges = !options.dryRun && !options.postgresOnly;
+  const previousSnapshot = trackLocalChanges ? await readChangeSnapshot() : new Map();
   const job = await createDumpImportJob({
+    jobId: options.jobId,
     dryRun: options.dryRun,
     section: "Source Catalog",
     operation: options.downloadFtp ? "FTP product dump import" : "Product dump import",
@@ -963,7 +1077,7 @@ async function importCatalogStore(dumpPath, options) {
       startedAt
     });
   }
-  const seen = new Set();
+  const seen = options.postgresOnly ? null : new Set();
   const vendorCatalogBatch = [];
   const flushVendorCatalogBatch = async () => {
     if (options.dryRun || !vendorCatalogBatch.length) return;
@@ -979,7 +1093,7 @@ async function importCatalogStore(dumpPath, options) {
   const snapshotFinished = snapshotWriter ? finished(snapshotWriter) : null;
   const closeoutWriter = writeCatalogArtifacts ? fs.createWriteStream(closeoutTempPath, { encoding: "utf8" }) : null;
   const closeoutFinished = closeoutWriter ? finished(closeoutWriter) : null;
-  const changeWriter = options.dryRun ? null : fs.createWriteStream(CATALOG_CHANGE_LOG_FILE, { flags: "a", encoding: "utf8" });
+  const changeWriter = trackLocalChanges ? fs.createWriteStream(CATALOG_CHANGE_LOG_FILE, { flags: "a", encoding: "utf8" }) : null;
   const changeFinished = changeWriter ? finished(changeWriter) : null;
 
   if (snapshotWriter) await writeLine(snapshotWriter, `${SNAPSHOT_COLUMNS.join("\t")}\n`);
@@ -1012,7 +1126,7 @@ async function importCatalogStore(dumpPath, options) {
         return;
       }
       stats.importable += 1;
-      seen.add(product.sku.toLowerCase());
+      if (seen) seen.add(product.sku.toLowerCase());
       vendorCatalogBatch.push(product);
       if (vendorCatalogBatch.length >= 1000) await flushVendorCatalogBatch();
       if (writer) {
@@ -1110,7 +1224,7 @@ async function importCatalogStore(dumpPath, options) {
       recordsRead: stats.read,
       productCount: stats.importable,
       skipped: stats.skipped,
-      uniqueSkuCount: seen.size,
+        uniqueSkuCount: seen ? seen.size : stats.importable,
       changeTracking: {
         baselineAvailable: previousSnapshot.size > 0,
         previousSnapshotCount: previousSnapshot.size,
@@ -1135,7 +1249,7 @@ async function importCatalogStore(dumpPath, options) {
     missingCount: stats.skipped,
     errors: importErrorMessages(errorRows),
     errorRows,
-    details: `${seen.size} unique SKUs written to ${path.relative(ROOT, effectiveCatalogPath)}. ${previousSnapshot.size ? `${stats.changes.toLocaleString()} tracked field changes detected.` : "Change tracking baseline snapshot created."} ${Number(stats.sqlChanges || 0).toLocaleString()} SQL change events recorded. ${stats.closeouts.toLocaleString()} closeout SKUs found.`
+    details: `${seen ? seen.size : stats.importable} unique SKUs ${options.postgresOnly ? "normalized into PostgreSQL" : `written to ${path.relative(ROOT, effectiveCatalogPath)}`}. ${previousSnapshot.size ? `${stats.changes.toLocaleString()} tracked field changes detected.` : options.postgresOnly ? "Local change tracking skipped for Postgres-only import." : "Change tracking baseline snapshot created."} ${Number(stats.sqlChanges || 0).toLocaleString()} SQL change events recorded. ${stats.closeouts.toLocaleString()} closeout SKUs found.`
   });
   if (!options.dryRun) {
     await finishVendorFeedRun(importId, {

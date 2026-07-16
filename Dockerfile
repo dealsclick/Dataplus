@@ -9,10 +9,11 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 COPY server.js db.js ./
+COPY lib ./lib
 COPY public ./public
 COPY scripts ./scripts
 
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data /app/logos /app/logs /app/outputs
 
 EXPOSE 4173
 

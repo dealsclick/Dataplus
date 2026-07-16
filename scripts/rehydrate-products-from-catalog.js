@@ -48,6 +48,13 @@ function booleanValue(value, fallback = false) {
   return fallback;
 }
 
+function isClearanceRecord(record = {}) {
+  const statusValues = [record.status, record.stockStatus, record.stock_status].map((value) => textValue(value).toLowerCase());
+  const indicatorValues = [record.itemClearanceIndicator, record.item_clearance_indicator].map((value) => textValue(value).toLowerCase());
+  return statusValues.some((value) => ["clearance", "clearance item", "closeout"].includes(value))
+    || indicatorValues.some((value) => ["clearance", "clearance item", "closeout", "y", "yes", "true", "1"].includes(value));
+}
+
 function dimensionalWeightValue(record) {
   const length = numberValue(record.packageLength || record.package_length);
   const width = numberValue(record.packageWidth || record.package_width);
@@ -169,9 +176,38 @@ function normalizeCatalogProduct(record) {
     ctechId: textValue(record.ctechId || record.ctech_id),
     ctechIdLastExport: textValue(record.ctechIdLastExport || record.ctech_id_last_export),
     fobPrice: numberValue(record.fobPrice || record.fob_price),
+    altSku: textValue(record.altSku || record.alt_sku),
+    minimumAllowedPrice: numberValue(record.minimumAllowedPrice || record.minimum_allowed_price),
+    fobPriceForZoro: numberValue(record.fobPriceForZoro || record.fob_price_for_zoro),
+    preferredVendor: textValue(record.preferredVendor || record.preferred_vendor),
+    uploadedImage: textValue(record.uploadedImage || record.uploaded_image),
+    restrictedStates: record.restrictedStates ?? record.restricted_states ?? "",
+    shipMode: textValue(record.shipMode || record.ship_mode),
+    dropShip: booleanValue(record.dropShip ?? record.drop_ship, null),
+    showProp65: booleanValue(record.showProp65 ?? record.show_prop_65, null),
+    prop65Message: textValue(record.prop65Message || record.prop_65_message),
+    warranty: textValue(record.warranty),
+    dropShipMinQty: textValue(record.dropShipMinQty || record.drop_ship_min_qty),
+    additionalAttributes: textValue(record.additionalAttributes || record.additional_attributes),
+    certifications: textValue(record.certifications),
+    returnable: textValue(record.returnable),
+    competitorPartNumber: textValue(record.competitorPartNumber || record.competitor_part_number),
+    oversize: booleanValue(record.oversize, null),
+    mappedCategory: record.mappedCategory ?? record.mapped_category ?? null,
+    checkedSds: record.checkedSds ?? record.checked_sds ?? null,
+    sourceCategoryId: textValue(record.sourceCategoryId || record.category_id),
+    vendorWebsitePrice: numberValue(record.vendorWebsitePrice || record.vendor_website_price),
+    isBanned: booleanValue(record.isBanned ?? record.is_banned, null),
+    isMarketplaceRestricted: booleanValue(record.isMarketplaceRestricted ?? record.is_marketplace_restricted, null),
+    bulkPrices: record.bulkPrices ?? record.bulk_prices ?? [],
+    trustedBrand: textValue(record.trustedBrand || record.trusted_brand),
+    keywords: textValue(record.keywords),
+    subBrand: textValue(record.subBrand || record.sub_brand),
+    replacementSku: textValue(record.replacementSku || record.replacement_sku),
+    icons: textValue(record.icons),
     price: numberValue(record.price || record.sale_price || record.sell_price),
     cost: numberValue(record.cost || record.fob_price || record.wholesale_price),
-    msrp: numberValue(record.msrp || record.list_price),
+    msrp: isClearanceRecord(record) ? numberValue(record.msrp || record.list_price) : 0,
     wildcardSearch: textValue(record.wildcardSearch),
     tags: listValue(record.tags),
     attributes: record.attributes && typeof record.attributes === "object" ? record.attributes : {},

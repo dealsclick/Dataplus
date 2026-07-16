@@ -25,6 +25,13 @@ function shardForSku(sku) {
   return (key.slice(0, 2) || "__").padEnd(2, "_");
 }
 
+function isClearanceProduct(product = {}) {
+  const statusValues = [product.status, product.stockStatus].map((value) => String(value || "").trim().toLowerCase());
+  const indicatorValues = [product.itemClearanceIndicator, product.item_clearance_indicator].map((value) => String(value || "").trim().toLowerCase());
+  return statusValues.some((value) => ["clearance", "clearance item", "closeout"].includes(value))
+    || indicatorValues.some((value) => ["clearance", "clearance item", "closeout", "y", "yes", "true", "1"].includes(value));
+}
+
 function summary(product = {}) {
   return {
     id: product.id || product.sku,
@@ -39,10 +46,29 @@ function summary(product = {}) {
     supplier: product.supplier || product.vendor || "",
     supplierCode: product.supplierCode || "",
     stockStatus: product.stockStatus || "",
+    altSku: product.altSku || product.alt_sku || "",
+    minimumAllowedPrice: Number(product.minimumAllowedPrice || product.minimum_allowed_price || 0),
+    preferredVendor: product.preferredVendor || product.preferred_vendor || "",
+    uploadedImage: product.uploadedImage || product.uploaded_image || "",
+    shipMode: product.shipMode || product.ship_mode || "",
+    dropShip: Boolean(product.dropShip ?? product.drop_ship),
+    showProp65: Boolean(product.showProp65 ?? product.show_prop_65),
+    warranty: product.warranty || "",
+    certifications: product.certifications || "",
+    returnable: product.returnable || "",
+    competitorPartNumber: product.competitorPartNumber || product.competitor_part_number || "",
+    oversize: Boolean(product.oversize),
+    vendorWebsitePrice: Number(product.vendorWebsitePrice || product.vendor_website_price || 0),
+    isBanned: Boolean(product.isBanned ?? product.is_banned),
+    isMarketplaceRestricted: Boolean(product.isMarketplaceRestricted ?? product.is_marketplace_restricted),
+    trustedBrand: product.trustedBrand || product.trusted_brand || "",
+    keywords: product.keywords || "",
+    subBrand: product.subBrand || product.sub_brand || "",
+    replacementSku: product.replacementSku || product.replacement_sku || "",
     hazardous: Boolean(product.hazardous),
     price: Number(product.price || 0),
     cost: Number(product.cost || 0),
-    msrp: Number(product.msrp || 0),
+    msrp: isClearanceProduct(product) ? Number(product.msrp || 0) : 0,
     stockQty: Number(product.stockQty ?? product.qty ?? 0),
     active: product.active !== false,
     status: product.status || "Draft",

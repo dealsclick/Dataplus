@@ -40,10 +40,36 @@ let selectedSourceSuppliers = new Set();
 let supplierMultiOpen = false;
 let categoryState = { categories: [], total: 0, query: "", scope: "main", loading: false };
 let categoryScope = "main";
+let categoryFilters = { channel: "shopify", mapping: "", review: "", lifecycle: "", supplier: "", minProducts: "" };
 let categoryRequestId = 0;
+let categorySampleState = {};
+let vendorCategoryMappingState = { supplier: "", rows: [], mainCategories: [], total: 0, mappedCount: 0, unmappedCount: 0, query: "", loading: false, loaded: false, error: "" };
+let vendorProfileCategoryMappingState = { supplier: "", rows: [], mainCategories: [], total: 0, mappedCount: 0, unmappedCount: 0, loading: false, loaded: false, error: "" };
+let vendorCategoryOptionFilters = { catalog: "", "vendor-profile": "" };
+let vendorGoogleTaxonomySuggestionCache = {};
+let selectedVendorProfileTab = "overview";
+let selectedVendorRuleTab = "pricing";
+let selectedChannelProfileTab = "overview";
+let selectedChannelDefaultsEditMode = false;
+let selectedVendorOverviewEditMode = false;
+let selectedVendorRulesEditMode = false;
+let vendorRulesDraftDirty = false;
 let selectedCategoryId = null;
 let categoryViewMode = "table";
+let categoryChannelTab = "shopify";
+let shopifyCategoryTab = "category";
 let attributeState = { rows: [], total: 0, mappedCount: 0, requiredCount: 0, channel: "", query: "", loading: false, groups: [], editingGroupId: "" };
+let channelAttributeState = {
+  channel: "",
+  rows: [],
+  total: 0,
+  mappedCount: 0,
+  requiredCount: 0,
+  loading: false,
+  loaded: false,
+  error: "",
+  filters: { q: "", category: "", requirement: "all" }
+};
 let pendingAttributeMapping = null;
 let pendingCategoryOpenName = "";
 let shopifyTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
@@ -56,6 +82,8 @@ let activeExportMappingPageId = null;
 let activeImportSection = "products";
 let mappingDraftDirty = false;
 let productFieldOptions = null;
+let systemFieldRegistry = null;
+let systemFieldFilters = { query: "", group: "", type: "" };
 let pendingProductImport = { templateId: null, fileName: "", csv: "", preview: null, mode: "mapped" };
 let selectedSourceSkus = new Set();
 let selectedSourceAllFiltered = false;
@@ -94,6 +122,7 @@ let productCatalogSort = { key: "", direction: "asc" };
 let inventoryCatalogSort = { key: "", direction: "asc" };
 let productCatalogDensity = "comfortable";
 const PRODUCT_CATALOG_PAGE_SIZE = 100;
+const SHOPIFY_MULTIPACK_DISCOUNT_PERCENT = 5;
 const PRODUCT_CATALOG_COLUMNS = [
   { key: "select", label: "Select", fixed: true },
   { key: "product", label: "Product", fixed: true },
@@ -215,6 +244,7 @@ const PAGE_ROUTES = {
   "/import-review": { view: "catalog", catalogTab: "reviews", render: () => renderCatalog(), title: "Import Review" },
   "/sku-changes": { view: "catalog", catalogTab: "changes", render: () => renderCatalog(), title: "SKU Changes" },
   "/categories": { view: "catalog", catalogTab: "categories", render: () => renderCatalog(), title: "Categories" },
+  "/vendor-category-mappings": { view: "catalog", catalogTab: "vendor-category-mappings", render: () => renderCatalog(), title: "Vendor Category Mappings" },
   "/attributes": { view: "catalog", catalogTab: "attributes", render: () => renderCatalog(), title: "Attributes" },
   "/attribute-groups": { view: "catalog", catalogTab: "attribute-groups", render: () => renderCatalog(), title: "Attribute Groups" },
   "/inventory": { view: "catalog", catalogTab: "inventory", render: () => renderCatalog(), title: "Inventory" },
@@ -229,8 +259,13 @@ const PAGE_ROUTES = {
   "/knowledge": { view: "knowledge", title: "Knowledge Base" },
   "/connections": { view: "connections", title: "Channels" },
   "/channels": { view: "connections", title: "Channels" },
-  "/system-settings": { view: "system-settings", title: "System Settings" },
-  "/settings": { view: "system-settings", title: "System Settings" }
+  "/system-settings": { view: "system-settings", title: "User Profiles" },
+  "/settings": { view: "system-settings", title: "User Profiles" },
+  "/user-profiles": { view: "system-settings", title: "User Profiles" },
+  "/system-operations": { view: "system-operations", title: "System Operations" },
+  "/settings/operations": { view: "system-operations", title: "System Operations" },
+  "/system-fields": { view: "system-fields", title: "System Fields" },
+  "/settings/fields": { view: "system-fields", title: "System Fields" }
 };
 
 const CATALOG_TAB_ROUTES = {
@@ -239,6 +274,7 @@ const CATALOG_TAB_ROUTES = {
   reviews: "/import-review",
   changes: "/sku-changes",
   categories: "/categories",
+  "vendor-category-mappings": "/vendor-category-mappings",
   attributes: "/attributes",
   "attribute-groups": "/attribute-groups",
   inventory: "/inventory",
@@ -769,6 +805,28 @@ function setSmartFilterValue(scope, fieldKey, value) {
 function smartFilterOptions(scope, field) {
   if (scope === "customers") return customerSmartOptions(field.key);
   if (field.type === "date" || field.type === "number") return [];
+  if (scope === "catalog" && catalogTab === "source") {
+    if (field.key === "supplier") {
+      return [...new Set((sourceCatalogFacets?.suppliers || []).filter(Boolean).map(String))]
+        .sort((a, b) => a.localeCompare(b))
+        .map((value) => ({ value, label: value }));
+    }
+    if (field.key === "brand") {
+      return [...new Set((sourceCatalogFacets?.brands || []).filter(Boolean).map(String))]
+        .sort((a, b) => a.localeCompare(b))
+        .map((value) => ({ value, label: value }));
+    }
+    if (field.key === "category") {
+      return [...new Set((sourceCatalogFacets?.categories || []).filter(Boolean).map(String))]
+        .sort((a, b) => a.localeCompare(b))
+        .map((value) => ({ value, label: value }));
+    }
+    if (field.key === "stockStatus") {
+      return [...new Set((sourceCatalogFacets?.stockStatuses || []).filter(Boolean).map(String))]
+        .sort((a, b) => a.localeCompare(b))
+        .map((value) => ({ value, label: value }));
+    }
+  }
   return selectOptionsFrom(field.selector);
 }
 
@@ -997,6 +1055,14 @@ function currentSystemUserId() {
   return String(settings.activeSystemUserId || users[0]?.id || "owner");
 }
 
+function currentSystemUserLabel() {
+  const settings = appSystemSettings();
+  const users = Array.isArray(settings.systemUsers) ? settings.systemUsers : [];
+  const userId = currentSystemUserId();
+  const user = users.find((row) => String(row.id || "") === userId);
+  return String(user?.name || user?.email || userId || "Manual").trim() || "Manual";
+}
+
 function currentUserTablePreferences() {
   const preferences = state?.tablePreferences && typeof state.tablePreferences === "object" ? state.tablePreferences : {};
   return preferences[currentSystemUserId()] || {};
@@ -1200,47 +1266,66 @@ function dimensionSourceBadge(item = {}, field = "") {
   const title = detail.defaulted
     ? "No saved value found. Marketplace exports use this unverified system default."
     : `Value source: ${detail.label}.`;
-  return `<em class="dimension-source-badge ${className}" title="${html(title)}">${html(detail.label)}${html(suffix)}</em>`;
+  const label = detail.defaulted ? "!" : `${detail.label}${suffix}`;
+  const ariaLabel = detail.defaulted ? `${title} Default value: ${cleanExportNumber(detail.value, 3)} ${/weight/i.test(field) ? "lb" : "in"}.` : title;
+  return `<em class="dimension-source-badge ${className}" title="${html(ariaLabel)}" aria-label="${html(ariaLabel)}">${html(label)}</em>`;
 }
 
 function productDimensionInput(label, field, item) {
   return `
     <label>
-      <span>${html(label)} ${dimensionSourceBadge(item, field)}</span>
+      <span class="dimension-field-head"><strong>${html(label)}</strong></span>
       <input type="number" step="0.001" value="${html(item[field] ?? 0)}" data-product-field="${field}" data-product-dimension-field="${field}" data-product-id="${item.id}"${editableAttr()} />
     </label>
   `;
 }
 
+function dimensionGroupWarning(item = {}, fields = []) {
+  const defaulted = fields
+    .map((field) => ({ field, detail: dimensionWeightFieldDetail(item, field) }))
+    .filter((row) => row.detail.defaulted);
+  if (!defaulted.length) return "";
+  const parts = defaulted.map(({ field, detail }) => {
+    const label = String(field).replace(/^(item|package)/, "").replace(/([A-Z])/g, " $1").trim().toLowerCase();
+    const unit = /weight/i.test(field) ? "lb" : "in";
+    return `${label}: ${cleanExportNumber(detail.value, 3)} ${unit}`;
+  });
+  const title = `Missing source values. DataPlus is using system defaults for ${parts.join(", ")}.`;
+  return `<em class="dimension-group-warning" title="${html(title)}" aria-label="${html(title)}">!</em>`;
+}
+
 function renderProductDimensionsCard(item) {
   const dimensionalWeight = Number(item.dimensionalWeight ?? calculateDimensionalWeight(item) ?? 0);
+  const itemDimensionFields = ["itemLength", "itemWidth", "itemHeight"];
+  const packageDimensionFields = ["packageLength", "packageWidth", "packageHeight"];
+  const weightFields = ["itemWeight", "packageWeight"];
   return `
     <section class="product-section-card product-section-orange">
       <div class="product-section-title">${sectionIconTitle("ruler", "Dimensions")}</div>
       <div class="dimension-editor">
-        <div class="dimension-group">
-          <div class="dimension-group-title"><strong>Item dimensions</strong><span>Length x Width x Height</span></div>
+        <div class="dimension-group dimension-group-item">
+          <div class="dimension-group-title"><strong>Item dimensions ${dimensionGroupWarning(item, itemDimensionFields)}</strong><span>Length x Width x Height</span></div>
           <div class="dimension-triplet">
             ${productDimensionInput("Length", "itemLength", item)}
             ${productDimensionInput("Width", "itemWidth", item)}
             ${productDimensionInput("Height", "itemHeight", item)}
           </div>
         </div>
-        <div class="dimension-group">
-          <div class="dimension-group-title"><strong>Package dimensions</strong><span>Length x Width x Height</span></div>
+        <div class="dimension-group dimension-group-package">
+          <div class="dimension-group-title"><strong>Package dimensions ${dimensionGroupWarning(item, packageDimensionFields)}</strong><span>Length x Width x Height</span></div>
           <div class="dimension-triplet">
             ${productDimensionInput("Length", "packageLength", item)}
             ${productDimensionInput("Width", "packageWidth", item)}
             ${productDimensionInput("Height", "packageHeight", item)}
           </div>
         </div>
-        <div class="dimension-group">
-          <div class="dimension-group-title"><strong>Weights</strong><span>Item vs package weight</span></div>
+        <div class="dimension-group dimension-group-weight">
+          <div class="dimension-group-title"><strong>Weights ${dimensionGroupWarning(item, weightFields)}</strong><span>Item vs package weight</span></div>
           <div class="dimension-weight-grid">
             ${productDimensionInput("Item weight", "itemWeight", item)}
             ${productDimensionInput("Package weight", "packageWeight", item)}
             <label>
-              <span>Dimensional weight</span>
+              <span class="dimension-field-head"><strong>Dimensional</strong></span>
               <input type="number" step="0.001" value="${html(dimensionalWeight)}" data-dimensional-weight-preview="${item.id}" readonly />
             </label>
           </div>
@@ -1469,6 +1554,70 @@ function toast(message) {
   node.classList.add("show");
   window.clearTimeout(toast.timer);
   toast.timer = window.setTimeout(() => node.classList.remove("show"), 2600);
+}
+
+function fieldLabelFromPath(field = "") {
+  return String(field || "")
+    .split(".")
+    .filter(Boolean)
+    .map((part) => part.replace(/([A-Z])/g, " $1").replace(/([a-z])([0-9])/gi, "$1 $2").replace(/_/g, " "))
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" / ");
+}
+
+function highlightUpdatedField(field = "") {
+  const key = String(field || "");
+  if (!key) return;
+  const fields = [
+    "vendorField",
+    "brandField",
+    "warehouseField",
+    "warehouseBinField",
+    "customerField",
+    "productField",
+    "shadowField",
+    "shadowAttribute",
+    "templateField",
+    "exportMappingField",
+    "channelField",
+    "systemSetting",
+    "poField",
+    "inventoryField",
+    "warehouseStockField",
+    "categoryField",
+    "categoryDefault",
+    "mapField",
+    "orderMoney"
+  ];
+  const match = Array.from(document.querySelectorAll("input, select, textarea, button")).find((node) => fields.some((name) => node.dataset?.[name] === key));
+  const target = match?.closest("label, .vendor-setting-switch, .full-card, .product-section-card, .system-settings-card") || match;
+  if (!target) return;
+  target.classList.remove("save-focus-flash");
+  void target.offsetWidth;
+  target.classList.add("save-focus-flash");
+  window.clearTimeout(highlightUpdatedField.timer);
+  highlightUpdatedField.timer = window.setTimeout(() => target.classList.remove("save-focus-flash"), 1800);
+}
+
+function showUpdateFocusModal(title = "Updated", detail = "Your change was saved.", field = "") {
+  const label = title || detail || "Saved";
+  document.body.classList.add("is-saved");
+  setSavingIndicator(true, label);
+  highlightUpdatedField(field);
+  window.clearTimeout(showUpdateFocusModal.timer);
+  showUpdateFocusModal.timer = window.setTimeout(() => {
+    document.body.classList.remove("is-saved");
+    if (!activeApiRequests) setSavingIndicator(false);
+  }, 1800);
+}
+
+function closeUpdateFocusModal() {
+  document.body.classList.remove("is-saved");
+  if (!activeApiRequests) setSavingIndicator(false);
+}
+
+function showSavedUpdate(entity = "Record", field = "") {
+  showUpdateFocusModal(`${entity} updated`, field ? `${fieldLabelFromPath(field)} was saved.` : "Your change was saved.", field);
 }
 
 function setSavingIndicator(active, label = "Saving...") {
@@ -1783,7 +1932,10 @@ function showView(id, options = {}) {
   currentViewId = id;
   $$(".view").forEach((view) => view.classList.toggle("active", view.id === id));
   $$(".nav-item").forEach((button) => {
-    const active = button.dataset.view === id || (button.dataset.view === "orders" && ["drafts", "returns", "order-full", "draft-full", "return-full"].includes(id));
+    const active =
+      button.dataset.view === id ||
+      (button.dataset.view === "orders" && ["drafts", "returns", "order-full", "draft-full", "return-full"].includes(id)) ||
+      (button.dataset.view === "system-settings" && ["connections", "system-operations", "system-fields", "channel-full"].includes(id));
     button.classList.toggle("active", active);
   });
   $$(".nav-child").forEach((button) => {
@@ -1797,14 +1949,15 @@ function showView(id, options = {}) {
         button.dataset.view === id ||
         (button.dataset.view === "drafts" && id === "draft-full") ||
         (button.dataset.view === "returns" && id === "return-full") ||
-        (button.dataset.view === "orders" && id === "order-full");
+        (button.dataset.view === "orders" && id === "order-full") ||
+        (button.dataset.view === "connections" && id === "channel-full");
     }
     button.classList.toggle("active", active);
   });
   $$(".nav-group").forEach((group) => {
     group.classList.toggle("active-group", Boolean(group.querySelector(".nav-item.active, .nav-child.active")));
   });
-  $("#page-title").textContent = ({ dashboard: "Dashboard", orders: "Orders", drafts: "Drafts", "draft-full": "Draft Details", returns: "Returns", "return-full": "Return Details", "order-full": "Order Details", purchasing: "Purchasing", "po-full": "Purchase Order", "vendor-full": "Vendor Profile", "brand-full": "Brand Profile", "warehouse-full": "Warehouse Profile", catalog: "Catalog", jobs: "Jobs", "import-export": "Import / Export", "product-full": "Product Details", "shadow-full": "Shadow SKU Details", "template-full": "Template Preview", "inventory-full": "Inventory Details", "customer-full": "Customer Profile", customers: "Customers", inventory: "Inventory", reports: "Reports", knowledge: "Knowledge Base", connections: "Channels", "channel-full": "Channel Settings", "system-settings": "System Settings" })[id];
+  $("#page-title").textContent = ({ dashboard: "Dashboard", orders: "Orders", drafts: "Drafts", "draft-full": "Draft Details", returns: "Returns", "return-full": "Return Details", "order-full": "Order Details", purchasing: "Purchasing", "po-full": "Purchase Order", "vendor-full": "Vendor Profile", "brand-full": "Brand Profile", "warehouse-full": "Warehouse Profile", catalog: "Catalog", jobs: "Jobs", "import-export": "Import / Export", "product-full": "Product Details", "shadow-full": "Shadow SKU Details", "template-full": "Template Preview", "inventory-full": "Inventory Details", "customer-full": "Customer Profile", customers: "Customers", inventory: "Inventory", reports: "Reports", knowledge: "Knowledge Base", connections: "Channels", "channel-full": "Channel Settings", "system-settings": "User Profiles", "system-operations": "System Operations", "system-fields": "System Fields" })[id];
   if (id === "catalog") {
     $("#page-title").textContent = PAGE_ROUTES[CATALOG_TAB_ROUTES[catalogTab]]?.title || "Catalog";
   }
@@ -1831,6 +1984,8 @@ function showView(id, options = {}) {
   if (id === "inventory-full") renderInventoryProductPage();
   if (id === "channel-full") renderChannelProfile();
   if (id === "system-settings") renderSystemSettingsPage();
+  if (id === "system-operations") renderSystemOperationsPage();
+  if (id === "system-fields") renderSystemFieldsPage();
   if (id === "customer-full") renderCustomerProfile();
   if (id === "knowledge") renderKnowledgeBase();
   renderTopbarActions();
@@ -1926,6 +2081,11 @@ function renderTopbarActions() {
       actions.push(`<button data-po-return="${po.id}">Create vendor return</button>`);
     }
   } else if (currentViewId === "vendor-full") {
+    actions.push(`<button data-toggle-vendor-overview-edit>${selectedVendorOverviewEditMode ? "Save overview" : "Edit overview"}</button>`);
+    if (selectedVendorProfileTab === "rules") {
+      actions.push(selectedVendorRulesEditMode ? `<button data-save-vendor-rules>Save rules</button>` : `<button data-toggle-vendor-rules-edit>Edit rules</button>`);
+      if (selectedVendorRulesEditMode) actions.push(`<button data-cancel-vendor-rules-edit>Cancel rule edits</button>`);
+    }
     actions.push(`<button data-view-jump="orders">Create from orders</button>`);
     actions.push(`<button data-create-vendor>New vendor</button>`);
   } else if (currentViewId === "brand-full") {
@@ -2020,6 +2180,13 @@ function renderTopbarActions() {
         description: "Refresh sidebar values and counts",
         title: "Recalculates Source Catalog facet values and counts from the data already imported. This does not import a new dump."
       }));
+      actions.push(sourceMaintenanceMenuButton({
+        action: "refresh-pricing-inventory",
+        icon: "refresh-cw",
+        label: "Refresh pricing & inventory",
+        description: "Update costs, stock, promos, and closeouts",
+        title: "Runs the fast product-dump refresh for pricing, inventory, promo/default price, and closeout fields only."
+      }));
       actions.push(`<span class="menu-label">Export</span>`);
       actions.push(`<button data-open-source-export-modal ${exportMappings.length ? "" : "disabled"}>Export source catalog...</button>`);
       actions.push(`<span class="menu-label">Selection</span>`);
@@ -2088,11 +2255,47 @@ function renderTopbarActions() {
     actions.push(`<button data-create-customer>New customer</button>`);
     actions.push(`<button data-view-jump="orders">Open orders</button>`);
   } else if (currentViewId === "connections" || currentViewId === "channel-full") {
+    const channel = (state.connections || []).find((row) => row.id === selectedChannelId);
+    const isShopifyChannel = currentViewId === "channel-full" && String(channel?.name || "").toLowerCase() === "shopify";
+    if (isShopifyChannel) {
+      actions.push(`<span class="menu-label">Shopify sync</span>`);
+      actions.push(`<button data-refresh-shopify-token>Request new token</button>`);
+      actions.push(`<button data-sync-shopify-sku-map>Sync SKU map</button>`);
+      actions.push(`<button data-sync-shopify-status-all>Sync Shopify status</button>`);
+      actions.push(`<button data-sync-shopify-closeouts>Sync Closeouts</button>`);
+      actions.push(`<button data-sync-shopify-shipping-profiles>Import shipping profiles</button>`);
+      actions.push(`<button data-open-shopify-status-import>Import status CSV</button>`);
+      actions.push(`<span class="menu-label">Shopify products</span>`);
+      actions.push(`<button data-shopify-existing-link="dry-run">Link dry run</button>`);
+      actions.push(`<button data-shopify-existing-link="apply">Link existing</button>`);
+      actions.push(`<button data-shopify-product-create="dry-run">Create dry run</button>`);
+      actions.push(`<button data-shopify-product-create="apply">Create products</button>`);
+      actions.push(`<span class="menu-label">Shopify pricing & inventory</span>`);
+      actions.push(`<button data-shopify-price-push="dry-run">Price dry run</button>`);
+      actions.push(`<button data-shopify-price-push="apply">Push prices</button>`);
+      actions.push(`<button data-shopify-inventory-update="dry-run">Inventory dry run</button>`);
+      actions.push(`<button data-shopify-inventory-update="apply">Update inventory</button>`);
+      actions.push(`<span class="menu-label">Navigation</span>`);
+    }
     actions.push(`<button id="topbar-sync-trigger" data-topbar-sync>Sync enabled channels</button>`);
     actions.push(`<button data-view-jump="connections">Open channels</button>`);
-    actions.push(`<button data-view-jump="system-settings">System settings</button>`);
+    actions.push(`<button data-view-jump="system-settings">User profiles</button>`);
+    actions.push(`<button data-view-jump="system-operations">Operations</button>`);
+    actions.push(`<button data-view-jump="system-fields">System fields</button>`);
   } else if (currentViewId === "system-settings") {
     actions.push(`<button data-toggle-system-settings-edit>${systemSettingsEditMode ? "Done editing" : "Edit settings"}</button>`);
+    actions.push(`<button data-view-jump="connections">Open channels</button>`);
+    actions.push(`<button data-view-jump="system-operations">Operations</button>`);
+    actions.push(`<button data-view-jump="system-fields">System fields</button>`);
+  } else if (currentViewId === "system-operations") {
+    actions.push(`<button data-toggle-system-settings-edit>${systemSettingsEditMode ? "Done editing" : "Edit operations"}</button>`);
+    actions.push(`<button data-view-jump="system-settings">User profiles</button>`);
+    actions.push(`<button data-view-jump="connections">Open channels</button>`);
+    actions.push(`<button data-view-jump="system-fields">System fields</button>`);
+  } else if (currentViewId === "system-fields") {
+    actions.push(`<button data-refresh-system-fields>Refresh system fields</button>`);
+    actions.push(`<button data-view-jump="system-settings">User profiles</button>`);
+    actions.push(`<button data-view-jump="system-operations">Operations</button>`);
     actions.push(`<button data-view-jump="connections">Open channels</button>`);
   } else if (currentViewId === "knowledge") {
     actions.push(`<button data-knowledge-tab-jump="whats-new">What's new</button>`);
@@ -3087,7 +3290,7 @@ async function submitOrderEdit(form) {
   selectedOrderId = orderId;
   closeOrderEditModal();
   setState(result.state);
-  toast("Order updated.");
+  showSavedUpdate("Order", "Order details");
 }
 
 async function submitOrderRefund(form) {
@@ -3147,7 +3350,7 @@ async function submitReturnWorkflow(form) {
   });
   closeReturnWorkflowModal();
   setState(result.state);
-  toast("Return workflow updated.");
+  showUpdateFocusModal("Return workflow updated", "The return workflow changes were saved.");
 }
 
 async function submitReturnReceive(form) {
@@ -4808,6 +5011,319 @@ function renderVendorCatalogCharts(vendor, pos = []) {
     </section>
   `;
 }
+
+function vendorCategoryMappingSupplier(vendor = {}) {
+  return vendor.name || vendor.supplier || vendor.vendor || vendor.vendorNumber || "";
+}
+
+function vendorCategoryMainCategoryOptions(categories = [], filter = "") {
+  const q = String(filter || "").trim().toLowerCase();
+  return [...new Set((categories || []).map((category) => String(category || "").trim()).filter(Boolean))]
+    .filter((category) => !q || category.toLowerCase().includes(q))
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, q ? 400 : 120)
+    .map((category) => `<option value="${html(category)}"></option>`)
+    .join("");
+}
+
+function vendorCategorySuggestionList(context = "catalog", query = "") {
+  const categories = context === "vendor-profile" ? vendorProfileCategoryMappingState.mainCategories : vendorCategoryMappingState.mainCategories;
+  const tokens = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const rows = [...new Set((categories || []).map((category) => String(category || "").trim()).filter(Boolean))]
+    .filter((category) => {
+      const lower = category.toLowerCase();
+      return tokens.length ? tokens.every((token) => lower.includes(token)) : true;
+    })
+    .sort((a, b) => {
+      const q = tokens.join(" ");
+      const aLower = a.toLowerCase();
+      const bLower = b.toLowerCase();
+      const aScore = q && aLower.startsWith(q) ? 0 : q && aLower.includes(`> ${q}`) ? 1 : 2;
+      const bScore = q && bLower.startsWith(q) ? 0 : q && bLower.includes(`> ${q}`) ? 1 : 2;
+      return aScore - bScore || a.localeCompare(b);
+    })
+    .slice(0, tokens.length ? 80 : 40);
+  return rows;
+}
+
+function vendorCategorySourceTools(context = "catalog", rowIndex = "") {
+  return `
+    <div class="vendor-category-source-tools">
+      <span>Fallback sources</span>
+      <button type="button" data-search-vendor-taxonomy="shopify" data-context="${html(context)}" data-row-index="${html(rowIndex)}">Search Google taxonomy</button>
+      <button type="button" data-search-vendor-taxonomy="ebay" data-context="${html(context)}" data-row-index="${html(rowIndex)}">Search eBay</button>
+    </div>
+  `;
+}
+
+function renderVendorCategorySuggestionButtons(context = "catalog", query = "", rowIndex = "", extraGroups = "") {
+  const rows = vendorCategorySuggestionList(context, query);
+  const suggestions = rows.length
+    ? rows.map((category) => `<button type="button" data-select-vendor-main-category="${html(category)}" data-row-index="${html(rowIndex)}">${html(category)}</button>`).join("")
+    : `<div class="vendor-category-no-suggestions">No matching main categories. Use Add as main category to create this vendor path.</div>`;
+  return `${vendorCategorySourceTools(context, rowIndex)}${extraGroups}<div class="vendor-category-suggestion-group"><strong>True Value / Main categories</strong>${suggestions}</div>`;
+}
+
+function showVendorCategorySuggestions(input) {
+  const rowIndex = input?.dataset.rowIndex || "";
+  const context = input?.dataset.vendorCategoryContext || "catalog";
+  const row = document.querySelector(`[data-vendor-category-suggestion-context="${CSS.escape(context)}"][data-row-index="${CSS.escape(rowIndex)}"]`);
+  const panel = row?.querySelector("[data-vendor-category-suggestions]");
+  if (!input || !panel) return;
+  hideVendorCategorySuggestions();
+  const vendorCategory = row?.dataset.vendorCategory || "";
+  const vendorCategoryLeaf = vendorCategory.split(">").map((part) => part.trim()).filter(Boolean).pop() || vendorCategory;
+  const query = input.value.trim() || vendorCategoryLeaf.trim();
+  panel.innerHTML = renderVendorCategorySuggestionButtons(context, query, rowIndex);
+  row.hidden = false;
+  if (query && vendorCategorySuggestionList(context, query).length === 0) {
+    searchVendorGoogleTaxonomySuggestions(context, rowIndex, query).catch((error) => {
+      const errorGroup = renderVendorTaxonomySuggestionGroup("Google taxonomy", [], rowIndex, query, `Google taxonomy search failed: ${error.message || error}`);
+      panel.innerHTML = renderVendorCategorySuggestionButtons(context, query, rowIndex, errorGroup);
+    });
+  }
+}
+
+function hideVendorCategorySuggestions(root = document) {
+  root.querySelectorAll("[data-vendor-category-suggestion-row]").forEach((row) => {
+    row.hidden = true;
+  });
+}
+
+function selectVendorMainCategoryOption(button) {
+  const suggestionRow = button?.closest("[data-vendor-category-suggestion-row]");
+  const context = suggestionRow?.dataset.vendorCategorySuggestionContext || "catalog";
+  const rowIndex = button?.dataset.rowIndex || suggestionRow?.dataset.rowIndex || "";
+  const input = document.querySelector(`[data-vendor-category-context="${CSS.escape(context)}"][data-row-index="${CSS.escape(rowIndex)}"]`);
+  if (input) {
+    input.value = button.dataset.selectVendorMainCategory || "";
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.focus();
+  }
+  hideVendorCategorySuggestions();
+}
+
+function vendorCategoryInputFor(context = "catalog", rowIndex = "") {
+  return document.querySelector(`[data-vendor-category-context="${CSS.escape(context)}"][data-row-index="${CSS.escape(rowIndex)}"]`);
+}
+
+function googleTaxonomyLabel(category = {}) {
+  return category.googleCategory?.fullName
+    || category.googleCategory?.name
+    || category.fullName
+    || category.categoryPath
+    || category.name
+    || category.id
+    || "";
+}
+
+function vendorTaxonomyRows(source = "shopify", categories = []) {
+  return (categories || []).map((category) => {
+    const label = source === "ebay"
+      ? (category.fullName || category.categoryPath || category.name || category.id || "")
+      : googleTaxonomyLabel(category);
+    const meta = source === "ebay"
+      ? [category.categoryId, category.taxonomyVersion].filter(Boolean).join(" / ")
+      : [category.fullName, category.id].filter(Boolean).join(" / ");
+    return { label, meta };
+  }).filter((row) => row.label);
+}
+
+function renderVendorTaxonomySuggestionGroup(label = "Google taxonomy", rows = [], rowIndex = "", query = "", emptyMessage = "") {
+  return `
+    <div class="vendor-category-suggestion-group taxonomy">
+      <strong>${html(label)} results</strong>
+      ${rows.length ? rows.map((row) => `
+        <button type="button" data-select-vendor-main-category="${html(row.label)}" data-row-index="${html(rowIndex)}">
+          ${html(row.label)}
+          ${row.meta ? `<small>${html(row.meta)}</small>` : ""}
+        </button>
+      `).join("") : `<div class="vendor-category-no-suggestions">${html(emptyMessage || `No ${label} matches found for "${query}".`)}</div>`}
+    </div>
+  `;
+}
+
+async function searchVendorGoogleTaxonomySuggestions(context = "catalog", rowIndex = "", query = "") {
+  const suggestionRow = document.querySelector(`[data-vendor-category-suggestion-context="${CSS.escape(context)}"][data-row-index="${CSS.escape(rowIndex)}"]`);
+  const panel = suggestionRow?.querySelector("[data-vendor-category-suggestions]");
+  if (!panel || !query) return;
+  const cacheKey = query.toLowerCase();
+  const cachedRows = vendorGoogleTaxonomySuggestionCache[cacheKey];
+  if (cachedRows) {
+    const taxonomyGroup = renderVendorTaxonomySuggestionGroup("Google taxonomy", cachedRows, rowIndex, query);
+    panel.innerHTML = renderVendorCategorySuggestionButtons(context, query, rowIndex, taxonomyGroup);
+    return;
+  }
+  const loadingGroup = `<div class="vendor-category-suggestion-group taxonomy"><strong>Google taxonomy results</strong><div class="vendor-category-no-suggestions">Searching Google taxonomy for "${html(query)}"...</div></div>`;
+  panel.innerHTML = renderVendorCategorySuggestionButtons(context, query, rowIndex, loadingGroup);
+  const result = await api(`/api/channel-taxonomies/shopify/categories?q=${encodeURIComponent(query)}&limit=20`, { feedbackLabel: "Searching Google taxonomy..." });
+  const rows = vendorTaxonomyRows("shopify", result.categories || []);
+  vendorGoogleTaxonomySuggestionCache[cacheKey] = rows;
+  const taxonomyGroup = renderVendorTaxonomySuggestionGroup("Google taxonomy", rows, rowIndex, query);
+  panel.innerHTML = renderVendorCategorySuggestionButtons(context, query, rowIndex, taxonomyGroup);
+}
+
+async function searchVendorTaxonomyFallback(button) {
+  const source = button?.dataset.searchVendorTaxonomy || "";
+  const context = button?.dataset.context || "catalog";
+  const rowIndex = button?.dataset.rowIndex || "";
+  const input = vendorCategoryInputFor(context, rowIndex);
+  const suggestionRow = document.querySelector(`[data-vendor-category-suggestion-context="${CSS.escape(context)}"][data-row-index="${CSS.escape(rowIndex)}"]`);
+  const panel = suggestionRow?.querySelector("[data-vendor-category-suggestions]");
+  const vendorCategory = suggestionRow?.dataset.vendorCategory || "";
+  const vendorCategoryLeaf = vendorCategory.split(">").map((part) => part.trim()).filter(Boolean).pop() || vendorCategory;
+  const query = input?.value.trim() || vendorCategoryLeaf;
+  if (!query) {
+    toast("Type a category search before using a taxonomy source.");
+    input?.focus();
+    return;
+  }
+  if (!panel) return;
+  const label = source === "ebay" ? "eBay" : "Google taxonomy";
+  panel.innerHTML = `<div class="vendor-category-no-suggestions">Searching ${html(label)} taxonomy for "${html(query)}"...</div>`;
+  try {
+    const path = source === "ebay"
+      ? `/api/channel-taxonomies/ebay/categories?q=${encodeURIComponent(query)}&limit=12`
+      : `/api/channel-taxonomies/shopify/categories?q=${encodeURIComponent(query)}&limit=20`;
+    const result = await api(path, { feedbackLabel: `Searching ${label} taxonomy...` });
+    const rows = vendorTaxonomyRows(source, result.categories || []);
+    if (source !== "ebay") {
+      vendorGoogleTaxonomySuggestionCache[query.toLowerCase()] = rows;
+    }
+    const taxonomyGroup = renderVendorTaxonomySuggestionGroup(label, rows, rowIndex, query);
+    panel.innerHTML = renderVendorCategorySuggestionButtons(context, query, rowIndex, taxonomyGroup);
+    panel.scrollTop = 0;
+  } catch (error) {
+    const errorGroup = renderVendorTaxonomySuggestionGroup(label, [], rowIndex, query, `${label} search failed: ${error.message || error}`);
+    panel.innerHTML = renderVendorCategorySuggestionButtons(context, query, rowIndex, errorGroup);
+  }
+}
+
+function renderVendorCategoryMappingRows(rows = [], mainCategories = [], context = "catalog") {
+  const optionFilter = vendorCategoryOptionFilters[context] || "";
+  return `
+    <div class="vendor-category-map-tools">
+      <label>Main category search
+        <input value="${html(optionFilter)}" data-vendor-category-option-filter="${html(context)}" placeholder="Filter main category suggestions" />
+      </label>
+      <span>${countLabel(mainCategories.length)} main categories available</span>
+    </div>
+    <div class="vendor-category-mapping-table-wrap">
+      <table class="vendor-category-mapping-table">
+        <thead>
+          <tr>
+            <th>Supplier</th>
+            <th>Vendor category</th>
+            <th>Main category</th>
+            <th>SKUs</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((row, index) => `
+            <tr class="${row.mapped ? "mapped" : "unmapped"}">
+              <td>${html(row.supplier || "")}</td>
+              <td>
+                <strong>${html(row.vendorCategory || "")}</strong>
+                ${row.sampleSku ? `<small>Sample ${html(row.sampleSku)}</small>` : ""}
+              </td>
+              <td>
+                <div class="vendor-category-combobox">
+                  <input class="vendor-category-main-input" value="${html(row.mainCategory || "")}" data-vendor-category-main="${index}" data-row-index="${index}" data-vendor-category-context="${html(context)}" placeholder="Search or enter main category" autocomplete="off" />
+                </div>
+              </td>
+              <td>${countLabel(row.matchCount || 0)}</td>
+              <td><span class="status ${row.mapped ? "live" : "draft"}">${row.mapped ? "Mapped" : "Unmapped"}</span></td>
+              <td>
+                <div class="vendor-category-row-actions">
+                  <button class="button secondary compact-action" type="button"
+                    data-save-vendor-category-mapping
+                    data-context="${html(context)}"
+                    data-row-index="${index}"
+                    data-supplier="${html(row.supplier || "")}"
+                    data-vendor-category="${html(row.vendorCategory || "")}"
+                    data-sample-sku="${html(row.sampleSku || "")}"
+                    data-match-count="${Number(row.matchCount || 0)}">${withIcon("save", "Save")}</button>
+                  <button class="button secondary compact-action" type="button"
+                    data-add-vendor-category-main
+                    data-context="${html(context)}"
+                    data-row-index="${index}"
+                    data-supplier="${html(row.supplier || "")}"
+                    data-vendor-category="${html(row.vendorCategory || "")}"
+                    data-sample-sku="${html(row.sampleSku || "")}"
+                    data-match-count="${Number(row.matchCount || 0)}">${withIcon("plus", "Add as main category")}</button>
+                </div>
+              </td>
+            </tr>
+            <tr class="vendor-category-suggestion-row" data-vendor-category-suggestion-row="${html(`${context}-${index}`)}" data-vendor-category-suggestion-context="${html(context)}" data-row-index="${index}" data-vendor-category="${html(row.vendorCategory || "")}" hidden>
+              <td colspan="6">
+                <div class="vendor-category-suggestions" data-vendor-category-suggestions>
+                  ${renderVendorCategorySuggestionButtons(context, row.mainCategory || optionFilter, index)}
+                </div>
+              </td>
+            </tr>
+          `).join("") || `<tr><td colspan="6">No vendor categories found.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function loadVendorProfileCategoryMappings(vendor) {
+  const supplier = vendorCategoryMappingSupplier(vendor);
+  if (!supplier) return;
+  vendorProfileCategoryMappingState = { ...vendorProfileCategoryMappingState, supplier, loading: true, loaded: false, error: "" };
+  renderVendorProfile();
+  try {
+    const result = await api(`/api/vendor-category-mappings?supplier=${encodeURIComponent(supplier)}&limit=300`, { feedbackLabel: "Loading vendor categories..." });
+    vendorProfileCategoryMappingState = {
+      supplier,
+      rows: result.rows || [],
+      mainCategories: result.mainCategories || [],
+      total: result.total || 0,
+      mappedCount: result.mappedCount || 0,
+      unmappedCount: result.unmappedCount || 0,
+      loading: false,
+      loaded: true,
+      error: ""
+    };
+  } catch (error) {
+    vendorProfileCategoryMappingState = { ...vendorProfileCategoryMappingState, supplier, loading: false, loaded: true, error: error.message || String(error) };
+  }
+  if ($("#vendor-full")?.classList.contains("active")) renderVendorProfile();
+}
+
+function renderVendorCategoryMappingPanel(vendor) {
+  const supplier = vendorCategoryMappingSupplier(vendor);
+  const mappingState = vendorProfileCategoryMappingState;
+  if (supplier && mappingState.supplier !== supplier && !mappingState.loading) {
+    setTimeout(() => loadVendorProfileCategoryMappings(vendor).catch((error) => toast(error.message)), 0);
+  }
+  const isLoading = mappingState.loading || mappingState.supplier !== supplier;
+  const rows = isLoading ? [] : mappingState.rows || [];
+  return `
+    <section class="full-card span-2 vendor-admin-card vendor-category-mapping-card">
+      <div class="section-head">
+        <div>
+          <h3>Vendor Category Mapping</h3>
+          <p class="muted">Map this supplier's category names to the main catalog categories used for future SKUs.</p>
+        </div>
+        <div class="button-row compact-buttons">
+          <button class="button secondary" type="button" data-refresh-vendor-category-mappings="${html(supplier)}">${withIcon("refresh-cw", "Refresh")}</button>
+          <button class="button secondary" type="button" data-catalog-tab="vendor-category-mappings">${withIcon("tags", "Open tab")}</button>
+        </div>
+      </div>
+      <div class="vendor-category-summary">
+        <span><small>Vendor categories</small><strong>${isLoading ? "..." : countLabel(mappingState.total || rows.length)}</strong></span>
+        <span><small>Mapped</small><strong>${isLoading ? "..." : countLabel(mappingState.mappedCount || 0)}</strong></span>
+        <span><small>Unmapped</small><strong>${isLoading ? "..." : countLabel(mappingState.unmappedCount || 0)}</strong></span>
+      </div>
+      ${mappingState.error ? `<div class="empty-state">Unable to load vendor mappings: ${html(mappingState.error)}</div>` : isLoading ? `<div class="empty-state">Loading vendor categories...</div>` : renderVendorCategoryMappingRows(rows.slice(0, 80), mappingState.mainCategories, "vendor-profile")}
+    </section>
+  `;
+}
+
 function renderVendorProfile() {
   const vendor = (state.vendors || []).find((item) => item.id === selectedVendorId) || state.vendors?.[0];
   const target = $("#vendor-profile-page");
@@ -4821,6 +5337,9 @@ function renderVendorProfile() {
   const changeLog = Array.isArray(vendor.changeLog) ? [...vendor.changeLog].reverse() : [];
   const submission = vendor.submissionSettings || {};
   const fileFeeds = vendor.fileFeeds || {};
+  const pricingRules = vendor.pricingRules || {};
+  const variationRules = vendor.variationRules || {};
+  const inventoryRules = vendor.inventoryRules || {};
 
   const fileSection = (key, title) => {
     const files = Array.isArray(fileFeeds[key]) ? fileFeeds[key] : [];
@@ -4853,6 +5372,433 @@ function renderVendorProfile() {
     `;
   };
 
+  const vendorRulesEditing = selectedVendorRulesEditMode;
+  const vendorRuleControlAttrs = () => vendorRulesEditing ? `data-vendor-rule-edit-field data-vendor-field-source="rules"` : "disabled";
+  const vendorSwitch = (field, checked, label, description = "") => `
+    <label class="vendor-setting-switch ${vendorRulesEditing ? "" : "is-locked"}">
+      <input type="checkbox" ${checked ? "checked" : ""} data-vendor-field="${field}" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} />
+      <span class="vendor-switch-copy">
+        <strong>${html(label)}</strong>
+        ${description ? `<small>${html(description)}</small>` : ""}
+      </span>
+      <span class="vendor-switch-control" aria-hidden="true"></span>
+      <span class="vendor-switch-state">${checked ? "True" : "False"}</span>
+    </label>
+  `;
+
+  const vendorRuleSubtab = (id, label) => `
+    <button type="button" class="vendor-settings-subtab ${selectedVendorRuleTab === id ? "active" : ""}" data-vendor-rule-tab="${id}">${html(label)}</button>
+  `;
+  const overviewEditing = selectedVendorOverviewEditMode;
+  const displayValue = (value, fallback = "Not set") => {
+    const text = String(value ?? "").trim();
+    return text ? html(text) : `<span class="muted">${html(fallback)}</span>`;
+  };
+  const lockedField = (label, value, fallback = "Not set") => `
+    <div class="vendor-locked-field">
+      <small>${html(label)}</small>
+      <strong>${displayValue(value, fallback)}</strong>
+    </div>
+  `;
+  const addressLines = [
+    address.line1,
+    address.line2,
+    [address.city, address.state, address.postalCode].filter(Boolean).join(", "),
+    address.country || "US"
+  ].filter((line) => String(line || "").trim());
+
+  const summarySection = `
+    <section class="full-card span-2 vendor-summary-card">
+      <h3>Vendor Summary</h3>
+      <div class="summary-grid">
+        <span><small>Open POs</small><strong>${vendor.openPOs}</strong></span>
+        <span><small>Total POs</small><strong>${vendor.totalPOs}</strong></span>
+        <span><small>Total spend</small><strong>${money(vendor.totalSpend)}</strong></span>
+        <span><small>Lead time</small><strong>${vendor.leadTimeDays} days</strong></span>
+        <span><small>MOQ</small><strong>${vendor.moq}</strong></span>
+        <span><small>Rating</small><strong>${vendor.rating || "N/A"}</strong></span>
+        <span><small>Source SKUs</small><strong>${countLabel(vendor.catalogStats?.productCount)}</strong></span>
+        <span><small>In-stock SKUs</small><strong>${countLabel(vendor.catalogStats?.stockProductCount)}</strong></span>
+      </div>
+    </section>
+  `;
+
+  const contactSection = overviewEditing
+    ? `
+      <section class="full-card vendor-overview-card">
+        <div class="section-head compact-section-head">
+          <h3>Primary Contact</h3>
+          <button class="button compact-button" type="button" data-toggle-vendor-overview-edit>${withIcon("check", "Save")}</button>
+        </div>
+        <div class="edit-stack compact-edit-stack">
+          <label>Vendor name<input value="${html(vendor.name)}" data-vendor-field="name" data-vendor-id="${vendor.id}" /></label>
+          <label>POC<input value="${html(vendor.contactName)}" data-vendor-field="contactName" data-vendor-id="${vendor.id}" /></label>
+          <label>Email<input value="${html(vendor.email)}" data-vendor-field="email" data-vendor-id="${vendor.id}" /></label>
+          <label>Phone<input value="${html(vendor.phone)}" data-vendor-field="phone" data-vendor-id="${vendor.id}" /></label>
+          <label>Website<input value="${html(vendor.website)}" data-vendor-field="website" data-vendor-id="${vendor.id}" /></label>
+        </div>
+      </section>
+      <section class="full-card vendor-overview-card">
+        <h3>Address</h3>
+        <div class="edit-stack compact-edit-stack vendor-address-grid">
+          <label class="span-2">Address line 1<input value="${html(address.line1 || "")}" data-vendor-field="address.line1" data-vendor-id="${vendor.id}" /></label>
+          <label class="span-2">Address line 2<input value="${html(address.line2 || "")}" data-vendor-field="address.line2" data-vendor-id="${vendor.id}" /></label>
+          <label>City<input value="${html(address.city || "")}" data-vendor-field="address.city" data-vendor-id="${vendor.id}" /></label>
+          <label>State<input value="${html(address.state || "")}" data-vendor-field="address.state" data-vendor-id="${vendor.id}" /></label>
+          <label>Postal code<input value="${html(address.postalCode || "")}" data-vendor-field="address.postalCode" data-vendor-id="${vendor.id}" /></label>
+          <label>Country<input value="${html(address.country || "US")}" data-vendor-field="address.country" data-vendor-id="${vendor.id}" /></label>
+        </div>
+      </section>
+      <section class="full-card vendor-overview-card">
+        <h3>Terms</h3>
+        <div class="edit-stack compact-edit-stack">
+          <label>Payment terms
+            <select data-vendor-field="paymentTerms" data-vendor-id="${vendor.id}">
+              ${["TBD", "Prepaid", "Due on receipt", "COD", "Net 7", "Net 10", "Net 15", "Net 30", "Net 45", "Net 60", "2% 10 Net 30"].map((term) => `<option value="${html(term)}" ${String(vendor.paymentTerms || "TBD") === term ? "selected" : ""}>${html(term)}</option>`).join("")}
+            </select>
+          </label>
+          <label>Lead time days<input type="number" value="${vendor.leadTimeDays}" data-vendor-field="leadTimeDays" data-vendor-id="${vendor.id}" /></label>
+          <label>Minimum order<input type="number" value="${vendor.moq}" data-vendor-field="moq" data-vendor-id="${vendor.id}" /></label>
+        </div>
+      </section>
+      <section class="full-card vendor-overview-card">
+        <h3>Notes</h3>
+        <textarea rows="4" data-vendor-field="notes" data-vendor-id="${vendor.id}">${html(vendor.notes || "")}</textarea>
+      </section>
+    `
+    : `
+      <section class="full-card vendor-overview-card locked">
+        <div class="section-head compact-section-head">
+          <h3>Primary Contact</h3>
+          <button class="button secondary compact-button" type="button" data-toggle-vendor-overview-edit>${withIcon("edit-3", "Edit")}</button>
+        </div>
+        <div class="vendor-locked-grid">
+          ${lockedField("Vendor name", vendor.name)}
+          ${lockedField("POC", vendor.contactName)}
+          ${lockedField("Email", vendor.email)}
+          ${lockedField("Phone", vendor.phone)}
+          ${lockedField("Website", vendor.website)}
+        </div>
+      </section>
+      <section class="full-card vendor-overview-card locked">
+        <h3>Address</h3>
+        <div class="vendor-locked-note">${addressLines.length ? addressLines.map((line) => `<strong>${html(line)}</strong>`).join("") : `<span class="muted">No address on file</span>`}</div>
+      </section>
+      <section class="full-card vendor-overview-card locked">
+        <h3>Terms</h3>
+        <div class="vendor-locked-grid">
+          ${lockedField("Payment terms", vendor.paymentTerms || "TBD")}
+          ${lockedField("Lead time", `${vendor.leadTimeDays} days`)}
+          ${lockedField("Minimum order", vendor.moq)}
+        </div>
+      </section>
+      <section class="full-card vendor-overview-card locked">
+        <h3>Notes</h3>
+        <div class="vendor-locked-note">${displayValue(vendor.notes, "No notes")}</div>
+      </section>
+    `;
+
+  const pricingRulesPanel = `
+    <div class="vendor-settings-grid">
+      <article class="vendor-setting-card">
+        <div class="vendor-setting-card-head">
+          <span class="vendor-setting-icon">${iconMarkup("dollar-sign")}</span>
+          <div>
+            <h3>Pricing Rules</h3>
+            <p>Controls how vendor cost becomes Shopify sell price.</p>
+          </div>
+        </div>
+        <div class="vendor-setting-fields">
+          <label>Cost basis
+            <select data-vendor-field="pricingRules.costBasis" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()}>
+              ${[
+                ["each-unit", "Each unit"],
+                ["sell-unit", "Sell unit / vendor UOM"]
+              ].map(([value, label]) => `<option value="${value}" ${String(pricingRules.costBasis || "each-unit") === value ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+          <label>Suspicious multiplier
+            <input type="number" step="0.1" value="${html(pricingRules.suspiciousPriceMultiplier ?? 5)}" data-vendor-field="pricingRules.suspiciousPriceMultiplier" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} />
+          </label>
+        </div>
+      </article>
+      <article class="vendor-setting-card">
+        <div class="vendor-setting-card-head">
+          <span class="vendor-setting-icon">${iconMarkup("badge-check")}</span>
+          <div>
+            <h3>Price Protection</h3>
+            <p>Prevents marketplace pushes from ignoring MAP or minimum price.</p>
+          </div>
+        </div>
+        <div class="vendor-switch-list">
+          ${vendorSwitch("pricingRules.enforceMinimumAllowedPrice", pricingRules.enforceMinimumAllowedPrice !== false, "Enforce MAP/min price", "Use minimum allowed price when a supplier provides one.")}
+        </div>
+      </article>
+      <article class="vendor-setting-card span-2">
+        <label class="vendor-note-field">Pricing note
+          <input value="${html(pricingRules.note || "")}" data-vendor-field="pricingRules.note" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} />
+        </label>
+      </article>
+    </div>
+  `;
+
+  const variationRulesPanel = `
+    <div class="vendor-settings-grid">
+      <article class="vendor-setting-card">
+        <div class="vendor-setting-card-head">
+          <span class="vendor-setting-icon">${iconMarkup("package")}</span>
+          <div>
+            <h3>Variant Creation</h3>
+            <p>Determines whether SKUs create one variant or multiple purchase units.</p>
+          </div>
+        </div>
+        <div class="vendor-setting-fields">
+          <label>Shopify variant mode
+            <select data-vendor-field="variationRules.shopifyVariantMode" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()}>
+              ${[
+                ["standard", "Standard"],
+                ["uom-only", "Follow UOM only"],
+                ["each-and-uom", "Each + UOM pack/case"]
+              ].map(([value, label]) => `<option value="${value}" ${String(variationRules.shopifyVariantMode || "standard") === value ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+      </article>
+      <article class="vendor-setting-card">
+        <div class="vendor-setting-card-head">
+          <span class="vendor-setting-icon">${iconMarkup("settings")}</span>
+          <div>
+            <h3>Variation Policy</h3>
+            <p>Enable or block Shopify variations for this supplier.</p>
+          </div>
+        </div>
+        <div class="vendor-switch-list">
+          ${vendorSwitch("variationRules.allowShopifyVariations", variationRules.allowShopifyVariations !== false, "Allow Shopify variations", "False means create only the vendor UOM sell unit.")}
+        </div>
+      </article>
+      <article class="vendor-setting-card span-2">
+        <label class="vendor-note-field">Variation note
+          <input value="${html(variationRules.note || "")}" data-vendor-field="variationRules.note" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} />
+        </label>
+      </article>
+    </div>
+  `;
+
+  const inventoryRulesPanel = `
+    <div class="vendor-settings-grid">
+      <article class="vendor-setting-card">
+        <div class="vendor-setting-card-head">
+          <span class="vendor-setting-icon">${iconMarkup("warehouse")}</span>
+          <div>
+            <h3>Replenishable Inventory</h3>
+            <p>Default sellable quantity for SKUs marked always in stock.</p>
+          </div>
+        </div>
+        <div class="vendor-switch-list">
+          ${vendorSwitch("inventoryRules.replenishableEnabled", inventoryRules.replenishableEnabled === true || inventoryRules.enabled === true, "Enable replenishable defaults", "Use the default quantity below when a SKU is marked always in stock and does not have its own qty.")}
+        </div>
+        <div class="vendor-setting-fields">
+          <label>Default replenishable qty
+            <input type="number" min="0" value="${html(inventoryRules.replenishableQty ?? 0)}" data-vendor-field="inventoryRules.replenishableQty" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} />
+          </label>
+        </div>
+      </article>
+      <article class="vendor-setting-card span-2">
+        <label class="vendor-note-field">Inventory rule note
+          <input value="${html(inventoryRules.note || "")}" data-vendor-field="inventoryRules.note" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} />
+        </label>
+      </article>
+    </div>
+  `;
+
+  const submissionRulesPanel = `
+    <div class="vendor-settings-grid">
+      <article class="vendor-setting-card">
+        <div class="vendor-setting-card-head">
+          <span class="vendor-setting-icon">${iconMarkup("file-pen-line")}</span>
+          <div>
+            <h3>Email</h3>
+            <p>Send purchase orders to supplier contacts.</p>
+          </div>
+        </div>
+        <div class="vendor-switch-list">
+          ${vendorSwitch("submissionSettings.emailEnabled", submission.emailEnabled !== false, "Email enabled", "Allow PO delivery by email.")}
+        </div>
+        <div class="vendor-setting-fields">
+          <label>Email to<input value="${html(submission.emailTo || vendor.email || "")}" data-vendor-field="submissionSettings.emailTo" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} /></label>
+          <label>Email cc<input value="${html(submission.emailCc || "")}" data-vendor-field="submissionSettings.emailCc" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} /></label>
+          <label class="span-2">Subject<input value="${html(submission.emailSubjectTemplate || "")}" data-vendor-field="submissionSettings.emailSubjectTemplate" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} /></label>
+        </div>
+      </article>
+      <article class="vendor-setting-card">
+        <div class="vendor-setting-card-head">
+          <span class="vendor-setting-icon">${iconMarkup("upload")}</span>
+          <div>
+            <h3>FTP</h3>
+            <p>Drop PO files into a supplier folder.</p>
+          </div>
+        </div>
+        <div class="vendor-switch-list">
+          ${vendorSwitch("submissionSettings.ftpEnabled", Boolean(submission.ftpEnabled), "FTP enabled", "Allow PO delivery by FTP/SFTP.")}
+        </div>
+        <div class="vendor-setting-fields">
+          <label>FTP host<input value="${html(submission.ftpHost || "")}" data-vendor-field="submissionSettings.ftpHost" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} /></label>
+          <label>FTP port<input value="${html(submission.ftpPort || "22")}" data-vendor-field="submissionSettings.ftpPort" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} /></label>
+          <label>FTP username<input value="${html(submission.ftpUsername || "")}" data-vendor-field="submissionSettings.ftpUsername" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} /></label>
+          <label>FTP path<input value="${html(submission.ftpPath || "/incoming/po")}" data-vendor-field="submissionSettings.ftpPath" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} /></label>
+        </div>
+      </article>
+      <article class="vendor-setting-card">
+        <div class="vendor-setting-card-head">
+          <span class="vendor-setting-icon">${iconMarkup("network")}</span>
+          <div>
+            <h3>API</h3>
+            <p>Use supplier API credentials for PO submission.</p>
+          </div>
+        </div>
+        <div class="vendor-switch-list">
+          ${vendorSwitch("submissionSettings.apiEnabled", Boolean(submission.apiEnabled), "API enabled", "Allow PO delivery by supplier API.")}
+        </div>
+        <div class="vendor-setting-fields">
+          <label>API base URL<input value="${html(submission.apiBaseUrl || "")}" data-vendor-field="submissionSettings.apiBaseUrl" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} /></label>
+          <label>API auth type<input value="${html(submission.apiAuthType || "API key")}" data-vendor-field="submissionSettings.apiAuthType" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} /></label>
+          <label class="span-2">API key reference<input value="${html(submission.apiKeyReference || "")}" data-vendor-field="submissionSettings.apiKeyReference" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()} /></label>
+        </div>
+      </article>
+      <article class="vendor-setting-card">
+        <div class="vendor-setting-card-head">
+          <span class="vendor-setting-icon">${iconMarkup("clipboard-list")}</span>
+          <div>
+            <h3>Attachments</h3>
+            <p>Choose the generated files included with PO submissions.</p>
+          </div>
+        </div>
+        <div class="vendor-switch-list">
+          ${vendorSwitch("submissionSettings.attachCsv", submission.attachCsv !== false, "Attach CSV", "Include the machine-readable purchase order file.")}
+          ${vendorSwitch("submissionSettings.attachPdf", submission.attachPdf !== false, "Attach PDF", "Include the human-readable purchase order file.")}
+        </div>
+      </article>
+      <article class="vendor-setting-card span-2">
+        <div class="vendor-setting-fields compact">
+          <label>Preferred method
+            <select data-vendor-field="submissionSettings.preferredMethod" data-vendor-id="${vendor.id}" ${vendorRuleControlAttrs()}>
+              ${["email", "ftp", "api"].map((method) => `<option value="${method}" ${submission.preferredMethod === method ? "selected" : ""}>${method.toUpperCase()}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+      </article>
+    </div>
+  `;
+
+  const rulePanels = {
+    pricing: pricingRulesPanel,
+    variations: variationRulesPanel,
+    inventory: inventoryRulesPanel,
+    submission: submissionRulesPanel
+  };
+  if (!rulePanels[selectedVendorRuleTab]) selectedVendorRuleTab = "pricing";
+  const ruleSections = `
+    <section class="full-card span-2 vendor-settings-shell">
+      <div class="vendor-settings-head">
+        <div>
+          <h3>Vendor Rules</h3>
+          <p class="muted">${vendorRulesEditing ? "Editing vendor rules. Click Save rules to commit changes." : "Saved supplier-specific rules used by imports, exports, and Shopify pushes."}</p>
+        </div>
+        <div class="vendor-rule-actions">
+          <span class="vendor-rule-status ${vendorRulesEditing ? "editing" : "saved"}" data-vendor-rule-save-status>${vendorRulesEditing ? (vendorRulesDraftDirty ? "Unsaved changes" : "Editing") : "Saved"}</span>
+          ${vendorRulesEditing
+            ? `<button class="button secondary compact-button" type="button" data-cancel-vendor-rules-edit>${withIcon("x", "Cancel")}</button><button class="button compact-button" type="button" data-save-vendor-rules>${withIcon("check", "Save rules")}</button>`
+            : `<button class="button secondary compact-button" type="button" data-toggle-vendor-rules-edit>${withIcon("edit-3", "Edit")}</button>`}
+        </div>
+      </div>
+      <div class="vendor-settings-subtabs" role="tablist" aria-label="Vendor rule sections">
+        ${vendorRuleSubtab("pricing", "Pricing")}
+        ${vendorRuleSubtab("variations", "Variations")}
+        ${vendorRuleSubtab("inventory", "Inventory")}
+        ${vendorRuleSubtab("submission", "PO Submission")}
+      </div>
+      <div class="vendor-settings-panel">
+        ${rulePanels[selectedVendorRuleTab]}
+      </div>
+    </section>
+  `;
+
+  const brandsSection = `
+    <section class="full-card span-2 vendor-admin-card">
+      <h3>Brands Carried</h3>
+      <div class="vendor-check-list vendor-profile-brands">
+        ${(state.brands || []).map((brand) => `
+          <label><input type="checkbox" ${brand.vendorIds?.includes(vendor.id) ? "checked" : ""} data-vendor-brand="${vendor.id}" data-brand-id="${brand.id}" />${html(brand.name)}</label>
+        `).join("")}
+      </div>
+    </section>
+  `;
+
+  const filesSection = `
+    <section class="full-card span-2 vendor-admin-card">
+      <h3>Vendor Files</h3>
+      <div class="file-section-grid">
+        ${fileSection("priceUpdates", "Price Update Files")}
+        ${fileSection("inventory", "Inventory Files")}
+        ${fileSection("productCatalog", "Product Catalog Files")}
+        ${fileSection("attachments", "Other Attachments")}
+      </div>
+    </section>
+  `;
+
+  const purchaseOrderSection = `
+    <section class="full-card span-2">
+      <h3>Purchase Orders</h3>
+      <div class="table-wrap compact-table">
+        <table>
+          <thead><tr><th>PO</th><th>Status</th><th>Orders</th><th>Units</th><th>Est. Cost</th><th>Created</th></tr></thead>
+          <tbody>
+            ${pos.map((po) => `
+              <tr>
+                <td><button class="order-link po-link" data-select-po="${po.id}">${html(po.poNumber)}</button></td>
+                <td><span class="status ${po.status}">${po.status}</span></td>
+                <td class="inline-links">${orderLinksForPo(po)}</td>
+                <td>${po.totalUnits}</td>
+                <td>${money(po.estimatedCost)}</td>
+                <td>${simpleDate(po.createdAt)}</td>
+              </tr>
+            `).join("") || `<tr><td colspan="6">No purchase orders yet.</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+
+  const historySection = `
+    <section class="full-card span-2" id="vendor-change-log">
+      <h3>Change Log</h3>
+      <div class="timeline">
+        ${changeLog.map((event) => `
+          <article class="timeline-event ${html(event.type || "edited")}">
+            <span class="timeline-dot"></span>
+            <div>
+              <strong>${html(event.title || "Vendor updated")}</strong>
+              <p>${html(event.message || "")}</p>
+              <small>${html(event.user || "System")} / ${dateLabel(event.createdAt)}</small>
+            </div>
+          </article>
+        `).join("") || `<p class="muted">No vendor changes yet.</p>`}
+      </div>
+    </section>
+  `;
+
+  const tabs = [
+    { id: "overview", label: "Overview", body: `${summarySection}${contactSection}` },
+    { id: "rules", label: "Rules", body: ruleSections },
+    { id: "categories", label: "Categories", body: renderVendorCategoryMappingPanel(vendor) },
+    { id: "brands", label: "Brands", body: brandsSection },
+    { id: "files", label: "Files", body: filesSection },
+    { id: "performance", label: "Performance", body: `${renderVendorCatalogCharts(vendor, pos)}${purchaseOrderSection}` },
+    { id: "history", label: "History", body: historySection }
+  ];
+  if (!tabs.some((tab) => tab.id === selectedVendorProfileTab)) selectedVendorProfileTab = "overview";
+  const activeTab = tabs.find((tab) => tab.id === selectedVendorProfileTab) || tabs[0];
+
   target.innerHTML = `
     <div class="full-order vendor-profile">
       <div class="full-order-head">
@@ -4863,137 +5809,18 @@ function renderVendorProfile() {
           <p class="muted">${html(vendor.type)} / ${html(vendor.status)}</p>
         </div>
         <div class="full-order-actions">
+          <button class="button ${overviewEditing ? "" : "secondary"}" type="button" data-toggle-vendor-overview-edit>${withIcon(overviewEditing ? "check" : "lock", overviewEditing ? "Save overview" : "Edit")}</button>
           <button class="button secondary">Request quote</button>
           <button class="button">New PO</button>
         </div>
       </div>
 
-      <div class="full-order-grid">
-        <section class="full-card span-2 vendor-summary-card">
-          <h3>Vendor Summary</h3>
-          <div class="summary-grid">
-            <span><small>Open POs</small><strong>${vendor.openPOs}</strong></span>
-            <span><small>Total POs</small><strong>${vendor.totalPOs}</strong></span>
-            <span><small>Total spend</small><strong>${money(vendor.totalSpend)}</strong></span>
-            <span><small>Lead time</small><strong>${vendor.leadTimeDays} days</strong></span>
-            <span><small>MOQ</small><strong>${vendor.moq}</strong></span>
-            <span><small>Rating</small><strong>${vendor.rating || "N/A"}</strong></span>
-            <span><small>Source SKUs</small><strong>${countLabel(vendor.catalogStats?.productCount)}</strong></span>
-            <span><small>In-stock SKUs</small><strong>${countLabel(vendor.catalogStats?.stockProductCount)}</strong></span>
-          </div>
-        </section>
-        ${renderVendorCatalogCharts(vendor, pos)}
-        <section class="full-card">
-          <h3>Primary Contact</h3>
-          <div class="edit-stack">
-            <label>Vendor name<input value="${html(vendor.name)}" data-vendor-field="name" data-vendor-id="${vendor.id}" /></label>
-            <label>POC<input value="${html(vendor.contactName)}" data-vendor-field="contactName" data-vendor-id="${vendor.id}" /></label>
-            <label>Email<input value="${html(vendor.email)}" data-vendor-field="email" data-vendor-id="${vendor.id}" /></label>
-            <label>Phone<input value="${html(vendor.phone)}" data-vendor-field="phone" data-vendor-id="${vendor.id}" /></label>
-            <label>Website<input value="${html(vendor.website)}" data-vendor-field="website" data-vendor-id="${vendor.id}" /></label>
-          </div>
-        </section>
-        <section class="full-card">
-          <h3>Address</h3>
-          <p>${html(address.line1 || "")}${address.line2 ? `, ${html(address.line2)}` : ""}</p>
-          <p>${html([address.city, address.state, address.postalCode].filter(Boolean).join(", "))}</p>
-          <p>${html(address.country || "")}</p>
-        </section>
-        <section class="full-card">
-          <h3>Terms</h3>
-          <div class="edit-stack">
-            <label>Payment terms<input value="${html(vendor.paymentTerms)}" data-vendor-field="paymentTerms" data-vendor-id="${vendor.id}" /></label>
-            <label>Lead time days<input type="number" value="${vendor.leadTimeDays}" data-vendor-field="leadTimeDays" data-vendor-id="${vendor.id}" /></label>
-            <label>Minimum order<input type="number" value="${vendor.moq}" data-vendor-field="moq" data-vendor-id="${vendor.id}" /></label>
-          </div>
-        </section>
-        <section class="full-card span-2 vendor-admin-card">
-          <h3>Brands Carried</h3>
-          <div class="vendor-check-list vendor-profile-brands">
-            ${(state.brands || []).map((brand) => `
-              <label><input type="checkbox" ${brand.vendorIds?.includes(vendor.id) ? "checked" : ""} data-vendor-brand="${vendor.id}" data-brand-id="${brand.id}" />${html(brand.name)}</label>
-            `).join("")}
-          </div>
-        </section>
-        <section class="full-card span-2 vendor-admin-card">
-          <h3>PO Submission Setup</h3>
-          <div class="submission-grid">
-            <div class="edit-stack">
-              <label>Preferred method
-                <select data-vendor-field="submissionSettings.preferredMethod" data-vendor-id="${vendor.id}">
-                  ${["email", "ftp", "api"].map((method) => `<option value="${method}" ${submission.preferredMethod === method ? "selected" : ""}>${method.toUpperCase()}</option>`).join("")}
-                </select>
-              </label>
-              <label>Email enabled<input type="checkbox" ${submission.emailEnabled !== false ? "checked" : ""} data-vendor-field="submissionSettings.emailEnabled" data-vendor-id="${vendor.id}" /></label>
-              <label>Email to<input value="${html(submission.emailTo || vendor.email || "")}" data-vendor-field="submissionSettings.emailTo" data-vendor-id="${vendor.id}" /></label>
-              <label>Email cc<input value="${html(submission.emailCc || "")}" data-vendor-field="submissionSettings.emailCc" data-vendor-id="${vendor.id}" /></label>
-              <label>Subject<input value="${html(submission.emailSubjectTemplate || "")}" data-vendor-field="submissionSettings.emailSubjectTemplate" data-vendor-id="${vendor.id}" /></label>
-            </div>
-            <div class="edit-stack">
-              <label>FTP enabled<input type="checkbox" ${submission.ftpEnabled ? "checked" : ""} data-vendor-field="submissionSettings.ftpEnabled" data-vendor-id="${vendor.id}" /></label>
-              <label>FTP host<input value="${html(submission.ftpHost || "")}" data-vendor-field="submissionSettings.ftpHost" data-vendor-id="${vendor.id}" /></label>
-              <label>FTP port<input value="${html(submission.ftpPort || "22")}" data-vendor-field="submissionSettings.ftpPort" data-vendor-id="${vendor.id}" /></label>
-              <label>FTP username<input value="${html(submission.ftpUsername || "")}" data-vendor-field="submissionSettings.ftpUsername" data-vendor-id="${vendor.id}" /></label>
-              <label>FTP path<input value="${html(submission.ftpPath || "/incoming/po")}" data-vendor-field="submissionSettings.ftpPath" data-vendor-id="${vendor.id}" /></label>
-            </div>
-            <div class="edit-stack">
-              <label>API enabled<input type="checkbox" ${submission.apiEnabled ? "checked" : ""} data-vendor-field="submissionSettings.apiEnabled" data-vendor-id="${vendor.id}" /></label>
-              <label>API base URL<input value="${html(submission.apiBaseUrl || "")}" data-vendor-field="submissionSettings.apiBaseUrl" data-vendor-id="${vendor.id}" /></label>
-              <label>API auth type<input value="${html(submission.apiAuthType || "API key")}" data-vendor-field="submissionSettings.apiAuthType" data-vendor-id="${vendor.id}" /></label>
-              <label>API key reference<input value="${html(submission.apiKeyReference || "")}" data-vendor-field="submissionSettings.apiKeyReference" data-vendor-id="${vendor.id}" /></label>
-              <label>Attach CSV<input type="checkbox" ${submission.attachCsv !== false ? "checked" : ""} data-vendor-field="submissionSettings.attachCsv" data-vendor-id="${vendor.id}" /></label>
-              <label>Attach PDF<input type="checkbox" ${submission.attachPdf !== false ? "checked" : ""} data-vendor-field="submissionSettings.attachPdf" data-vendor-id="${vendor.id}" /></label>
-            </div>
-          </div>
-        </section>
-        <section class="full-card span-2 vendor-admin-card">
-          <h3>Vendor Files</h3>
-          <div class="file-section-grid">
-            ${fileSection("priceUpdates", "Price Update Files")}
-            ${fileSection("inventory", "Inventory Files")}
-            ${fileSection("productCatalog", "Product Catalog Files")}
-            ${fileSection("attachments", "Other Attachments")}
-          </div>
-        </section>
-        <section class="full-card">
-          <h3>Notes</h3>
-          <textarea rows="5" data-vendor-field="notes" data-vendor-id="${vendor.id}">${html(vendor.notes || "")}</textarea>
-        </section>
-        <section class="full-card span-2">
-          <h3>Purchase Orders</h3>
-          <div class="table-wrap compact-table">
-            <table>
-              <thead><tr><th>PO</th><th>Status</th><th>Orders</th><th>Units</th><th>Est. Cost</th><th>Created</th></tr></thead>
-              <tbody>
-                ${pos.map((po) => `
-                  <tr>
-                    <td><button class="order-link po-link" data-select-po="${po.id}">${html(po.poNumber)}</button></td>
-                    <td><span class="status ${po.status}">${po.status}</span></td>
-                    <td class="inline-links">${orderLinksForPo(po)}</td>
-                    <td>${po.totalUnits}</td>
-                    <td>${money(po.estimatedCost)}</td>
-                    <td>${simpleDate(po.createdAt)}</td>
-                  </tr>
-                `).join("") || `<tr><td colspan="6">No purchase orders yet.</td></tr>`}
-              </tbody>
-            </table>
-          </div>
-        </section>
-        <section class="full-card span-2" id="vendor-change-log">
-          <h3>Change Log</h3>
-          <div class="timeline">
-            ${changeLog.map((event) => `
-              <article class="timeline-event ${html(event.type || "edited")}">
-                <span class="timeline-dot"></span>
-                <div>
-                  <strong>${html(event.title || "Vendor updated")}</strong>
-                  <p>${html(event.message || "")}</p>
-                  <small>${html(event.user || "System")} / ${dateLabel(event.createdAt)}</small>
-                </div>
-              </article>
-            `).join("") || `<p class="muted">No vendor changes yet.</p>`}
-          </div>
-        </section>
+      <div class="vendor-profile-tabs" role="tablist" aria-label="Vendor sections">
+        ${tabs.map((tab) => `<button type="button" class="vendor-profile-tab ${activeTab.id === tab.id ? "active" : ""}" data-vendor-profile-tab="${tab.id}" role="tab" aria-selected="${activeTab.id === tab.id ? "true" : "false"}">${html(tab.label)}</button>`).join("")}
+      </div>
+
+      <div class="full-order-grid vendor-profile-tab-body">
+        ${activeTab.body}
       </div>
     </div>
   `;
@@ -5297,9 +6124,13 @@ function filteredCatalogItems() {
 
 function catalogFilters() {
   const smartValue = (fieldKey, fallback = "") => smartFilterSelectedValues("catalog", fieldKey).join("|") || fallback;
+  const sourceSupplierValues = smartFilterUniqueValues([
+    ...selectedSourceSuppliers,
+    ...smartFilterSelectedValues("catalog", "supplier")
+  ]);
   return {
     supplier: catalogTab === "source" ? "" : smartValue("supplier", $("#catalog-filter-supplier")?.value || ""),
-    suppliers: catalogTab === "source" ? [...selectedSourceSuppliers].join("|") : "",
+    suppliers: catalogTab === "source" ? sourceSupplierValues.join("|") : "",
     active: smartValue("active", $("#catalog-filter-active")?.value || ""),
     productMembership: $("#catalog-filter-product-membership")?.value || "",
     stockStatus: smartValue("stockStatus", $("#catalog-filter-stock-status")?.value || ""),
@@ -5339,6 +6170,8 @@ function productMatchesChannelStatus(item = {}, status = "") {
   const value = String(status || "");
   if (!value) return true;
   if (value === "shopify-live" || value === "live") return Boolean(isShopifyLinked(item) && String(item.shopifyStatus || "").toLowerCase() === "active" && item.shopifyPublished === true);
+  if (value === "shopify-not-live") return !Boolean(isShopifyLinked(item) && String(item.shopifyStatus || "").toLowerCase() === "active" && item.shopifyPublished === true);
+  if (value === "shopify-price-mismatch") return Boolean(item.shopifyPriceMismatch);
   if (value === "shopify-linked") return isShopifyLinked(item);
   if (value === "shopify-published") return isShopifyLinked(item) && item.shopifyPublished === true;
   if (value === "shopify-unpublished") return isShopifyLinked(item) && item.shopifyPublished === false;
@@ -5385,6 +6218,26 @@ function shopifyProductAdminUrl(value = "") {
   return `https://admin.shopify.com/store/dealsclick-2/products/${encodeURIComponent(productId)}`;
 }
 
+function shopifyCollectionUrl(handle = "") {
+  const value = String(handle || "").trim().replace(/^\/?collections\//i, "");
+  if (!value) return "";
+  return `https://dealsclick.com/collections/${encodeURIComponent(value)}`;
+}
+
+function shopifyAdminCollectionSearchUrl(handleOrTitle = "") {
+  const query = String(handleOrTitle || "").trim();
+  if (!query) return "https://admin.shopify.com/store/dealsclick-2/collections";
+  return `https://admin.shopify.com/store/dealsclick-2/collections?query=${encodeURIComponent(query)}`;
+}
+
+function shopifyCategoryTargetUrl(category = {}) {
+  const mapping = category.mappings?.shopify || {};
+  const profile = category.smartCollection || {};
+  const handle = profile.handle || mapping.collectionHandle || "";
+  if (handle) return shopifyCollectionUrl(handle);
+  return shopifyAdminCollectionSearchUrl(profile.title || profile.productType || category.name || mapping.categoryPath || "");
+}
+
 function shopifyProductLink(value = "", label = "") {
   const text = String(label || value || "").trim();
   const url = shopifyProductAdminUrl(value);
@@ -5393,30 +6246,52 @@ function shopifyProductLink(value = "", label = "") {
   return `<a class="inline-id-link" href="${html(url)}" target="_blank" rel="noreferrer">${html(text)}</a>`;
 }
 
+function shopifySkuLink(item = {}) {
+  const sku = String(item.shopifyLiveVariantSku || item.shopifyVariantSku || item.sku || "").trim();
+  if (!sku) return "";
+  const url = shopifyProductAdminUrl(item.shopifyId || "");
+  const label = html(sku);
+  if (!url) return `<span class="shopify-sku-link">${label}</span>`;
+  return `<a class="shopify-sku-link" href="${html(url)}" target="_blank" rel="noreferrer">${label}</a>`;
+}
+
+function shopifyLiveCounts(facets = {}, products = []) {
+  const liveProducts = Number(facets.shopifyLiveProducts || 0);
+  const liveVariants = Number(facets.shopifyLiveVariants || 0);
+  if (liveProducts || liveVariants) {
+    return { products: liveProducts, variants: liveVariants, loaded: false };
+  }
+  const pageLiveProducts = products.filter((item) => productMatchesChannelStatus(item, "shopify-live")).length;
+  const pageLiveVariants = products.reduce((sum, item) => {
+    if (!productMatchesChannelStatus(item, "shopify-live")) return sum;
+    const variants = Array.isArray(item.shopifyPurchaseVariants) ? item.shopifyPurchaseVariants : [];
+    const mapped = variants.filter((variant) => variant.shopifyVariantId && (variant.shopifyPublished === true || item.shopifyPublished === true)).length;
+    return sum + (mapped || (item.shopifyVariantId ? 1 : 0));
+  }, 0);
+  return { products: pageLiveProducts, variants: pageLiveVariants, loaded: true };
+}
+
+function shopifyLiveCountText(facets = {}, products = []) {
+  const counts = shopifyLiveCounts(facets, products);
+  if (counts.products || counts.variants) return `${counts.products.toLocaleString()} live products / ${counts.variants.toLocaleString()} live variants${counts.loaded ? " loaded" : ""}`;
+  return "";
+}
+
+function shopifyLiveFilterLabel() {
+  return "Shopify live";
+}
+
 function fillChannelStatusOptions(select, products = [], facets = {}) {
   if (!select) return;
   const current = select.value;
-  const shopifyStatuses = [...new Set([...(facets.shopifyStatuses || []), ...products.map((item) => item.shopifyStatus)].filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b));
-  const ebayStatuses = [...new Set([...(facets.ebayStatuses || []), ...products.map((item) => item.ebayListing?.ebayStatus || item.ebayListing?.status)].filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b));
   const options = [
-    ["", "Any channel status"],
-    ["shopify-live", "Shopify live"],
-    ["shopify-published", "Shopify published"],
-    ["shopify-unpublished", "Shopify unpublished"],
-    ["shopify-ready", "Shopify ready"],
-    ["shopify-linked", "Shopify linked"],
-    ["shopify-sync-graphql", "Shopify synced by API"],
-    ["shopify-sync-manual", "Shopify from upload"],
-    ["shopify-sync-failed", "Shopify sync failed"],
-    ["shopify-not-ready", "Shopify not ready"],
-    ["shopify-missing", "Shopify missing ID"],
-    ...shopifyStatuses.map((status) => [`shopify:${status}`, `Shopify ${status}`]),
-    ["ebay-ready", "eBay ready"],
-    ["ebay-live", "eBay live"],
-    ["ebay-offer", "eBay offer created"],
-    ["ebay-not-ready", "eBay not ready"],
-    ["ebay-missing", "eBay not synced"],
-    ...ebayStatuses.map((status) => [`ebay:${status}`, `eBay ${status}`])
+    ["", "Any Shopify status"],
+    ["shopify-live", shopifyLiveFilterLabel()],
+    ["shopify-not-live", "Shopify not live"],
+    ["shopify-price-mismatch", "Shopify price mismatch"],
+    ["shopify-ready", "Ready for Shopify"],
+    ["shopify-not-ready", "Not ready for Shopify"],
+    ["shopify-missing", "Not on Shopify"]
   ];
   const seen = new Set();
   const unique = options.filter(([value]) => {
@@ -5696,8 +6571,7 @@ function renderSupplierMultiSelect(suppliers = []) {
   const q = query.trim().toLowerCase();
   const selected = [...selectedSourceSuppliers];
   const filtered = suppliers
-    .filter((supplier) => !q || String(supplier).toLowerCase().includes(q))
-    .slice(0, 120);
+    .filter((supplier) => !q || String(supplier).toLowerCase().includes(q));
   container.innerHTML = `
     <button type="button" class="supplier-chip-control ${supplierMultiOpen ? "open" : ""}" data-toggle-supplier-filter>
       <span class="supplier-chip-list">
@@ -5749,10 +6623,10 @@ async function loadSourceCatalog(page = sourceCatalogPage) {
 
 function mergeSourceFacetsFromItems(items = []) {
   const current = sourceCatalogFacets || { suppliers: [], stockStatuses: [], brands: [], categories: [] };
-  const merge = (existing = [], values = []) => [...new Set([...existing, ...values.filter(Boolean).map(String)])].sort((a, b) => a.localeCompare(b)).slice(0, 500);
+  const merge = (existing = [], values = [], limit = 500) => [...new Set([...existing, ...values.filter(Boolean).map(String)])].sort((a, b) => a.localeCompare(b)).slice(0, limit);
   sourceCatalogFacets = {
     ...current,
-    suppliers: merge(current.suppliers, items.map((item) => item.supplier)),
+    suppliers: merge(current.suppliers, items.map((item) => item.supplier || item.vendor), 50000),
     stockStatuses: merge(current.stockStatuses, items.map((item) => item.stockStatus)),
     brands: merge(current.brands, items.map((item) => item.brand)),
     categories: merge(current.categories, items.map((item) => item.category))
@@ -5818,6 +6692,18 @@ async function refreshSourceFacets() {
     renderTopbarActions();
   } catch (error) {
     toast(error.message || "Unable to refresh source catalog facets");
+  }
+}
+
+async function refreshPricingInventory() {
+  try {
+    const result = await api("/api/source-catalog/pricing-inventory/refresh", { method: "POST", feedbackLabel: "Queuing pricing/inventory refresh..." });
+    toast(result.message || "Pricing/inventory refresh queued.");
+    if (result.importJobs) state.importJobs = result.importJobs;
+    await loadImportJobs?.();
+    showView("jobs");
+  } catch (error) {
+    toast(error.message || "Unable to start pricing/inventory refresh");
   }
 }
 
@@ -6457,6 +7343,69 @@ function renderShopifyCategoryMapper(category) {
     : { query: mapping.categoryPath || "", results: [], total: 0, loading: false };
   const status = mappingStatus(category, "shopify");
   const productType = mapping.productType || category.shopifyProductType || category.productType || categoryTypeValue(category.name);
+  const activeTab = ["category", "attributes", "collection"].includes(shopifyCategoryTab) ? shopifyCategoryTab : "category";
+  const tabButton = (key, label) => `<button type="button" class="${activeTab === key ? "active" : ""}" data-shopify-category-tab="${key}">${html(label)}</button>`;
+  const categoryPanel = `
+    <div class="shopify-selected-category">
+      <span><small>Selected category</small><strong>${html(mapping.categoryPath || "None selected")}</strong></span>
+      ${productType ? `<div class="shopify-product-type-chip"><small>Product type</small><strong>${html(productType)}</strong></div>` : ""}
+      ${mapping.categoryId ? `<code>${html(mapping.categoryId)}</code>` : ""}
+      ${mapping.googleCategory?.id ? `<div class="google-category-chip"><strong>Google ${html(mapping.googleCategory.id)}</strong><small>${html(mapping.googleCategory.breadcrumb || mapping.googleCategory.fullName || "")}</small></div>` : ""}
+      ${mapping.taxonomyVersion ? `<small>Taxonomy ${html(mapping.taxonomyVersion)}</small>` : ""}
+    </div>
+    <label class="shopify-taxonomy-search">Search Shopify taxonomy
+      <input value="${html(selectedSearch.query || "")}" placeholder="Search category, e.g. air fryer, safety gloves" data-shopify-taxonomy-search="${category.id}" />
+    </label>
+    <div class="shopify-taxonomy-results">
+      ${selectedSearch.loading ? `<div class="empty-state compact">Searching Shopify...</div>` : ""}
+      ${selectedSearch.error ? `<div class="empty-state compact">${html(selectedSearch.error)}</div>` : ""}
+      ${(!selectedSearch.loading && selectedSearch.results.length) ? selectedSearch.results.map((result) => `
+        <button class="shopify-taxonomy-result" data-apply-shopify-taxonomy="${category.id}" data-shopify-category-id="${html(result.id)}">
+          <span><strong>${html(result.name)}</strong><small>${html(result.fullName)}</small>${result.googleCategory?.id ? `<small>Google ${html(result.googleCategory.id)} / ${html(result.googleCategory.breadcrumb || result.googleCategory.fullName || "")}</small>` : ""}</span>
+          <em>${Number(result.attributeCount || 0).toLocaleString()} attrs</em>
+        </button>
+      `).join("") : ""}
+      ${(!selectedSearch.loading && selectedSearch.query && !selectedSearch.results.length && !selectedSearch.error) ? `<div class="empty-state compact">No Shopify categories found.</div>` : ""}
+    </div>
+    <div class="category-map-grid shopify-manual-fields">
+      <label>Category ID<input value="${html(mapping.categoryId || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="categoryId" /></label>
+      <label>Category path<input value="${html(mapping.categoryPath || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="categoryPath" /></label>
+      <label>Collection / handle<input value="${html(mapping.collectionHandle || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="collectionHandle" /></label>
+      <label>Notes<input value="${html(mapping.notes || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="notes" /></label>
+    </div>
+  `;
+  const collectionPanel = `
+    <div class="smart-collection-profile">
+      <div class="section-head">
+        <div>
+          <h4>Smart Collection Export</h4>
+          <p class="muted">These fields feed the Matrixify smart collections export. New master categories get these defaults automatically.</p>
+        </div>
+        <span class="status ${profile.enabled === false ? "hold" : "active"}">${profile.enabled === false ? "Disabled" : "Ready profile"}</span>
+      </div>
+      <div class="category-map-grid">
+        <label>Product type<input value="${html(profile.productType || productType || "")}" data-smart-collection="${category.id}" data-smart-field="productType" /></label>
+        <label>SEO handle<input value="${html(profile.handle || "")}" data-smart-collection="${category.id}" data-smart-field="handle" /></label>
+        <label>Collection title<input value="${html(profile.title || "")}" data-smart-collection="${category.id}" data-smart-field="title" /></label>
+        <label>Image URL<input value="${html(profile.imageSrc || "")}" data-smart-collection="${category.id}" data-smart-field="imageSrc" /></label>
+        <label>Published scope
+          <select data-smart-collection="${category.id}" data-smart-field="publishedScope">
+            ${["global", "web"].map((value) => `<option value="${value}" ${String(profile.publishedScope || "global").toLowerCase() === value ? "selected" : ""}>${value}</option>`).join("")}
+          </select>
+        </label>
+        <label>Sort order
+          <select data-smart-collection="${category.id}" data-smart-field="sortOrder">
+            ${["Best Selling", "Alpha Asc", "Alpha Desc", "Created Desc", "Created", "Manual"].map((value) => `<option value="${value}" ${String(profile.sortOrder || "Best Selling") === value ? "selected" : ""}>${value}</option>`).join("")}
+          </select>
+        </label>
+        <label>Rule column<input value="${html(profile.ruleProductColumn || "Type")}" data-smart-collection="${category.id}" data-smart-field="ruleProductColumn" /></label>
+        <label>Rule relation<input value="${html(profile.ruleRelation || "Equals")}" data-smart-collection="${category.id}" data-smart-field="ruleRelation" /></label>
+        <label class="span-2">SEO title tag<input value="${html(profile.titleTag || "")}" data-smart-collection="${category.id}" data-smart-field="titleTag" /></label>
+        <label class="span-2">Meta description<textarea rows="2" data-smart-collection="${category.id}" data-smart-field="descriptionTag">${html(profile.descriptionTag || "")}</textarea></label>
+        <label class="checkbox-row"><input type="checkbox" ${profile.published === false ? "" : "checked"} data-smart-collection="${category.id}" data-smart-field="published" /> Published in Matrixify export</label>
+      </div>
+    </div>
+  `;
   return `
     <section class="category-map-card shopify-taxonomy-card ${status}">
       <div class="section-head">
@@ -6466,63 +7415,13 @@ function renderShopifyCategoryMapper(category) {
         </div>
         ${renderChannelMappingBadge(category, "shopify")}
       </div>
-      <div class="shopify-selected-category">
-        <span><small>Selected category</small><strong>${html(mapping.categoryPath || "None selected")}</strong></span>
-        ${productType ? `<div class="shopify-product-type-chip"><small>Product type</small><strong>${html(productType)}</strong></div>` : ""}
-        ${mapping.categoryId ? `<code>${html(mapping.categoryId)}</code>` : ""}
-        ${mapping.googleCategory?.id ? `<div class="google-category-chip"><strong>Google ${html(mapping.googleCategory.id)}</strong><small>${html(mapping.googleCategory.breadcrumb || mapping.googleCategory.fullName || "")}</small></div>` : ""}
-        ${mapping.taxonomyVersion ? `<small>Taxonomy ${html(mapping.taxonomyVersion)}</small>` : ""}
+      <div class="category-subtabs" role="tablist" aria-label="Shopify category settings">
+        ${tabButton("category", "Category")}
+        ${tabButton("attributes", "Attributes")}
+        ${tabButton("collection", "Smart Collection Export")}
       </div>
-      ${renderShopifyMappedAttributes(category)}
-      <label class="shopify-taxonomy-search">Search Shopify taxonomy
-        <input value="${html(selectedSearch.query || "")}" placeholder="Search category, e.g. air fryer, safety gloves" data-shopify-taxonomy-search="${category.id}" />
-      </label>
-      <div class="shopify-taxonomy-results">
-        ${selectedSearch.loading ? `<div class="empty-state compact">Searching Shopify...</div>` : ""}
-        ${selectedSearch.error ? `<div class="empty-state compact">${html(selectedSearch.error)}</div>` : ""}
-        ${(!selectedSearch.loading && selectedSearch.results.length) ? selectedSearch.results.map((result) => `
-          <button class="shopify-taxonomy-result" data-apply-shopify-taxonomy="${category.id}" data-shopify-category-id="${html(result.id)}">
-            <span><strong>${html(result.name)}</strong><small>${html(result.fullName)}</small>${result.googleCategory?.id ? `<small>Google ${html(result.googleCategory.id)} / ${html(result.googleCategory.breadcrumb || result.googleCategory.fullName || "")}</small>` : ""}</span>
-            <em>${Number(result.attributeCount || 0).toLocaleString()} attrs</em>
-          </button>
-        `).join("") : ""}
-        ${(!selectedSearch.loading && selectedSearch.query && !selectedSearch.results.length && !selectedSearch.error) ? `<div class="empty-state compact">No Shopify categories found.</div>` : ""}
-      </div>
-      <div class="category-map-grid shopify-manual-fields">
-        <label>Category ID<input value="${html(mapping.categoryId || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="categoryId" /></label>
-        <label>Category path<input value="${html(mapping.categoryPath || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="categoryPath" /></label>
-        <label>Collection / handle<input value="${html(mapping.collectionHandle || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="collectionHandle" /></label>
-        <label>Notes<input value="${html(mapping.notes || "")}" data-category-map="${category.id}" data-channel="shopify" data-map-field="notes" /></label>
-      </div>
-      <div class="smart-collection-profile">
-        <div class="section-head">
-          <div>
-            <h4>Smart Collection Export</h4>
-            <p class="muted">These fields feed the Matrixify smart collections export. New master categories get these defaults automatically.</p>
-          </div>
-          <span class="status ${profile.enabled === false ? "hold" : "active"}">${profile.enabled === false ? "Disabled" : "Ready profile"}</span>
-        </div>
-        <div class="category-map-grid">
-          <label>Product type<input value="${html(profile.productType || productType || "")}" data-smart-collection="${category.id}" data-smart-field="productType" /></label>
-          <label>SEO handle<input value="${html(profile.handle || "")}" data-smart-collection="${category.id}" data-smart-field="handle" /></label>
-          <label>Collection title<input value="${html(profile.title || "")}" data-smart-collection="${category.id}" data-smart-field="title" /></label>
-          <label>Image URL<input value="${html(profile.imageSrc || "")}" data-smart-collection="${category.id}" data-smart-field="imageSrc" /></label>
-          <label>Published scope
-            <select data-smart-collection="${category.id}" data-smart-field="publishedScope">
-              ${["global", "web"].map((value) => `<option value="${value}" ${String(profile.publishedScope || "global").toLowerCase() === value ? "selected" : ""}>${value}</option>`).join("")}
-            </select>
-          </label>
-          <label>Sort order
-            <select data-smart-collection="${category.id}" data-smart-field="sortOrder">
-              ${["Best Selling", "Alpha Asc", "Alpha Desc", "Created Desc", "Created", "Manual"].map((value) => `<option value="${value}" ${String(profile.sortOrder || "Best Selling") === value ? "selected" : ""}>${value}</option>`).join("")}
-            </select>
-          </label>
-          <label>Rule column<input value="${html(profile.ruleProductColumn || "Type")}" data-smart-collection="${category.id}" data-smart-field="ruleProductColumn" /></label>
-          <label>Rule relation<input value="${html(profile.ruleRelation || "Equals")}" data-smart-collection="${category.id}" data-smart-field="ruleRelation" /></label>
-          <label class="span-2">SEO title tag<input value="${html(profile.titleTag || "")}" data-smart-collection="${category.id}" data-smart-field="titleTag" /></label>
-          <label class="span-2">Meta description<textarea rows="2" data-smart-collection="${category.id}" data-smart-field="descriptionTag">${html(profile.descriptionTag || "")}</textarea></label>
-          <label class="checkbox-row"><input type="checkbox" ${profile.published === false ? "" : "checked"} data-smart-collection="${category.id}" data-smart-field="published" /> Published in Matrixify export</label>
-        </div>
+      <div class="category-tab-panel">
+        ${activeTab === "category" ? categoryPanel : activeTab === "attributes" ? renderShopifyMappedAttributes(category) : collectionPanel}
       </div>
       <div class="category-map-actions">
         <button class="button secondary" type="button" data-save-category-map="${category.id}" data-channel="shopify">${withIcon("save", "Save Shopify mapping")}</button>
@@ -6593,7 +7492,7 @@ async function applyShopifyTaxonomyCategory(button) {
   if (!categoryId || !shopifyCategoryId) return;
   const result = await api(`/api/categories/${categoryId}`, {
     method: "PATCH",
-    body: JSON.stringify({ scope: categoryScope, channel: "shopify", mapping: { categoryId: shopifyCategoryId } })
+    body: JSON.stringify({ scope: categoryScope, channel: "shopify", mapping: { categoryId: shopifyCategoryId }, createdBy: currentSystemUserLabel(), updatedBy: currentSystemUserLabel() })
   });
   categoryState = { ...result, query: categoryState.query, scope: categoryScope, loading: false };
   selectedCategoryId = categoryId;
@@ -6610,6 +7509,8 @@ async function applyEbayTaxonomyCategory(button) {
     method: "PATCH",
     body: JSON.stringify({
       scope: categoryScope,
+      createdBy: currentSystemUserLabel(),
+      updatedBy: currentSystemUserLabel(),
       channel: "ebay",
       mapping: {
         categoryId: ebayCategoryId,
@@ -6641,6 +7542,21 @@ async function autoMapEbayCategories() {
   toast(`eBay auto-map: ${result.mapped} of ${result.requested} categories mapped.`);
 }
 
+async function autoMapShopifyCategories() {
+  if (!confirm("Find the closest Shopify taxonomy match for every unmapped DataPlus category? Suggested matches will be marked Needs review, not approved.")) return;
+  const result = await api("/api/channel-taxonomies/shopify/map-current", {
+    feedbackLabel: "Mapping Shopify taxonomy...",
+    method: "POST",
+    body: JSON.stringify({ scope: categoryScope, limit: 10000, overwrite: false })
+  });
+  setState(result.state);
+  categoryState = { ...result.categories, query: categoryState.query, scope: categoryScope, loading: false };
+  categoryViewMode = "table";
+  categoryFilters = { ...categoryFilters, channel: "shopify", review: "needs-review", mapping: "" };
+  renderCategories();
+  toast(`Shopify taxonomy: ${result.mapped} suggested, ${result.missing} still missing.`);
+}
+
 async function syncCategoryAttributes(categoryId) {
   if (!categoryId) return;
   const result = await api(`/api/categories/${categoryId}/attributes/sync`, {
@@ -6653,6 +7569,17 @@ async function syncCategoryAttributes(categoryId) {
   categoryViewMode = "detail";
   renderCategories();
   toast("Marketplace attributes refreshed.");
+}
+
+async function rebuildCategorySummaryIndex() {
+  const result = await api("/api/categories/summary-index/rebuild", {
+    feedbackLabel: "Rebuilding category index...",
+    method: "POST",
+    body: JSON.stringify({ scope: "both" })
+  });
+  await loadCategories();
+  const rows = (result.results || []).map((row) => `${row.scope}: ${Number(row.rows || 0).toLocaleString()}`).join(" / ");
+  toast(`Category index rebuilt${rows ? ` (${rows})` : ""}.`);
 }
 
 function mappingStatus(category, channel) {
@@ -6678,6 +7605,36 @@ function renderCategoryMappingFields(category, channel, label) {
       </div>
       <div class="category-map-actions">
         <button class="button secondary" type="button" data-save-category-map="${category.id}" data-channel="${channel}">${withIcon("save", `Save ${label} mapping`)}</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderCategoryChannelWorkspace(category) {
+  const channels = [
+    ["shopify", "Shopify"],
+    ["ebay", "eBay"],
+    ["whatnot", "Whatnot"],
+    ["temu", "Temu"],
+    ["tiktok", "TikTok Shop"]
+  ];
+  if (!channels.some(([key]) => key === categoryChannelTab)) categoryChannelTab = "shopify";
+  const active = channels.find(([key]) => key === categoryChannelTab) || channels[0];
+  return `
+    <section class="category-channel-workspace">
+      <div class="category-channel-tabs" role="tablist" aria-label="Marketplace category settings">
+        ${channels.map(([key, label]) => {
+          const status = mappingStatus(category, key);
+          return `
+            <button type="button" class="${categoryChannelTab === key ? "active" : ""} ${status}" data-category-channel-tab="${key}">
+              <strong>${html(label)}</strong>
+              <small>${html(status === "mapped" ? "Mapped" : "Missing")}</small>
+            </button>
+          `;
+        }).join("")}
+      </div>
+      <div class="category-channel-panel">
+        ${renderCategoryMappingFields(category, active[0], active[1])}
       </div>
     </section>
   `;
@@ -6745,13 +7702,16 @@ function renderCategoryStatus(category) {
 function renderChannelMappingBadge(category, channel) {
   const status = mappingStatus(category, channel);
   const mapping = category.mappings?.[channel] || {};
-  const label = status === "mapped" ? "Mapped" : "Missing";
+  const needsReview = status === "mapped" && String(mapping.status || category.status || "").toLowerCase().includes("review");
+  const label = status === "mapped" ? (needsReview ? "Needs review" : "Mapped") : "Missing";
   const detail = mapping.categoryId || mapping.categoryPath || "";
+  const href = channel === "shopify" && status === "mapped" && !needsReview ? shopifyCategoryTargetUrl(category) : "";
+  const tag = href ? "a" : "span";
   return `
-    <span class="channel-map-badge ${status}">
+    <${tag} class="channel-map-badge ${channel} ${status} ${needsReview ? "needs-review" : ""}" ${href ? `href="${html(href)}" target="_blank" rel="noreferrer"` : ""}>
       <strong>${label}</strong>
       ${detail ? `<small>${html(detail)}</small>` : ""}
-    </span>
+    </${tag}>
   `;
 }
 
@@ -6768,20 +7728,238 @@ function renderCategoryChannelPills(category) {
       ${channels.map(([key, label]) => {
         const status = mappingStatus(category, key);
         const mapping = category.mappings?.[key] || {};
+        const needsReview = status === "mapped" && String(mapping.status || category.status || "").toLowerCase().includes("review");
         const title = mapping.categoryPath || mapping.categoryId || "Missing";
-        return `<span class="${status}" title="${html(title)}">${html(label)}</span>`;
+        const href = key === "shopify" && status === "mapped" && !needsReview ? shopifyCategoryTargetUrl(category) : "";
+        const tag = href ? "a" : "span";
+        return `<${tag} class="${html(key)} ${status} ${needsReview ? "needs-review" : ""}" title="${html(title)}" ${href ? `href="${html(href)}" target="_blank" rel="noreferrer"` : ""}>${html(needsReview ? `${label} review` : label)}</${tag}>`;
       }).join("")}
     </div>
   `;
 }
 
-function renderCategoryTable(categories, scopeLabel) {
+function categoryNeedsReview(category = {}) {
+  const shopify = category.mappings?.shopify || {};
+  const status = String(category.status || "").toLowerCase();
+  const mappingStatusText = String(shopify.status || "").toLowerCase();
+  const notes = String(shopify.notes || category.notes || "").toLowerCase();
+  return status.includes("review")
+    || mappingStatusText.includes("review")
+    || notes.includes("review before")
+    || notes.includes("needs review");
+}
+
+function categoryMatchesFilters(category = {}) {
+  const filters = categoryFilters || {};
+  const channel = filters.channel || "";
+  const mapping = filters.mapping || "";
+  const supplier = String(filters.supplier || "").trim().toLowerCase();
+  const minProducts = Number(filters.minProducts || 0) || 0;
+  if (channel && mapping) {
+    const mapped = mappingStatus(category, channel) === "mapped";
+    if (mapping === "mapped" && !mapped) return false;
+    if (mapping === "missing" && mapped) return false;
+  }
+  if (filters.review === "needs-review" && !categoryNeedsReview(category)) return false;
+  if (filters.review === "clean" && categoryNeedsReview(category)) return false;
+  if (filters.lifecycle && String(category.lifecycle || "") !== filters.lifecycle) return false;
+  if (supplier) {
+    const haystack = [
+      category.id,
+      category.name,
+      category.status,
+      category.mappings?.shopify?.categoryPath,
+      category.mappings?.ebay?.categoryPath,
+      category.mappings?.temu?.categoryPath,
+      category.mappings?.tiktok?.categoryPath,
+      category.mappings?.whatnot?.categoryPath,
+      ...(category.topVendors || []).map((vendor) => vendor.name),
+      ...(category.topBrands || []).map((brand) => brand.name)
+    ].filter(Boolean).join(" ").toLowerCase();
+    if (!haystack.includes(supplier)) return false;
+  }
+  if (minProducts && Number(category.productCount || 0) < minProducts) return false;
+  return true;
+}
+
+function filteredCategoryRows(categories = []) {
+  return (categories || []).filter(categoryMatchesFilters);
+}
+
+function renderCategoryLifecycle(category = {}) {
+  const lifecycle = String(category.lifecycle || "current");
+  const labels = { new: "New", current: "Current", outdated: "Outdated" };
+  const titles = {
+    new: "This category exists in the live product data but does not have saved category settings yet.",
+    current: "This category has saved settings and products currently mapped to it.",
+    outdated: "This category has saved settings but no products currently mapped to it."
+  };
+  return `<span class="category-lifecycle ${html(lifecycle)}" title="${html(titles[lifecycle] || titles.current)}">${html(labels[lifecycle] || "Current")}</span>`;
+}
+
+function renderCategoryCreatedBy(category = {}) {
+  const source = String(category.createdSource || "").toLowerCase();
+  const label = category.createdByLabel || (source === "system:true-value" ? "System - True Value" : (category.createdBy || "Manual"));
+  const tone = source === "system:true-value" ? "system" : "manual";
+  const title = tone === "system"
+    ? "This internal category was created from the TRUE VALUE vendor category source."
+    : "This category setting was created manually by a user or import.";
+  return `<span class="category-created-by ${tone}" title="${html(title)}">${html(label)}</span>`;
+}
+
+function renderCategoryCreatedDate(category = {}) {
+  const created = category.createdAt || "";
+  const title = created ? `Created ${dateLabel(created)}` : "No created date has been recorded for this category yet.";
+  return `<span class="category-created-date ${created ? "" : "missing"}" title="${html(title)}">${html(created ? dateLabel(created) : "Not recorded")}</span>`;
+}
+
+function renderCategoryDeleteButton(category = {}, label = "Delete") {
+  const blockers = Array.isArray(category.deleteBlockers) ? category.deleteBlockers : [];
+  const disabled = !category.canDelete;
+  const title = disabled
+    ? `Cannot delete: ${blockers.join("; ") || "category is still mapped"}`
+    : "Delete this saved category setting. This is only allowed when no products or source categories map to it.";
+  return `<button class="button danger compact-button" type="button" data-delete-category="${html(category.id)}" ${disabled ? "disabled" : ""} title="${html(title)}">${html(label)}</button>`;
+}
+
+function categorySampleKey(category = {}, scope = categoryScope) {
+  return `${scope || "main"}::${category.id || category.name || ""}`;
+}
+
+function categoryById(categoryId = "") {
+  return (categoryState.categories || []).find((category) => String(category.id || "") === String(categoryId || ""));
+}
+
+async function loadCategorySamples(categoryId) {
+  const category = categoryById(categoryId);
+  if (!category) return;
+  const key = categorySampleKey(category);
+  categorySampleState = { ...categorySampleState, [key]: { ...(categorySampleState[key] || {}), loading: true, error: "" } };
+  renderCategories();
+  try {
+    const params = new URLSearchParams({ scope: categoryScope, category: category.name || "", limit: "5" });
+    const result = await api(`/api/categories/samples?${params.toString()}`);
+    categorySampleState = { ...categorySampleState, [key]: { loading: false, loaded: true, ...result } };
+    renderCategories();
+  } catch (error) {
+    categorySampleState = { ...categorySampleState, [key]: { loading: false, loaded: true, error: error.message, items: [] } };
+    renderCategories();
+  }
+}
+
+function renderCategorySkuPreview(category = {}) {
+  const key = categorySampleKey(category);
+  const sample = categorySampleState[key] || {};
+  if (sample.loading) return `<div class="category-sku-preview loading">Loading sample SKUs...</div>`;
+  if (sample.error) return `<div class="category-sku-preview error">${html(sample.error)}</div>`;
+  if (!sample.loaded) return "";
+  const items = sample.items || [];
+  return `
+    <div class="category-sku-preview">
+      ${items.length ? items.map((item) => `
+        <a class="category-sku-chip" href="${html(categoryScope === "source" ? `/source-catalog/${encodeURIComponent(item.sku || "")}` : `/products/${encodeURIComponent(item.sku || "")}`)}" target="_blank" rel="noreferrer" title="${html(item.title || item.sku)}">
+          ${html(item.sku)}
+        </a>
+      `).join("") : `<span class="muted">No SKUs found for this category.</span>`}
+      ${Number(sample.total || 0) > items.length ? `<small>${Number(sample.total || 0).toLocaleString()} total</small>` : ""}
+    </div>
+  `;
+}
+
+function categoryViewSkusButton(category = {}, label = "View all SKUs for this category") {
+  const target = categoryScope === "source" ? "source" : "products";
+  const title = categoryScope === "source"
+    ? "Open Source Catalog filtered to this source category."
+    : "Open Products filtered to this category.";
+  return `<button class="category-view-skus-link" type="button" data-open-category-products="${html(category.id)}" data-category-target="${target}" title="${html(title)}">${html(label)}</button>`;
+}
+
+function openCategoryProducts(categoryId, target = "") {
+  const category = categoryById(categoryId);
+  if (!category) return;
+  clearCatalogSmartFilters();
+  const nextTab = target === "source" || categoryScope === "source" ? "source" : "products";
+  const value = category.name || "";
+  setSmartFilterValue("catalog", "category", value ? [value] : []);
+  const categorySelect = $("#catalog-filter-category");
+  if (categorySelect && value && !Array.from(categorySelect.options || []).some((option) => option.value === value)) {
+    categorySelect.add(new Option(value, value));
+    categorySelect.value = value;
+  }
+  if ($("#catalog-search")) $("#catalog-search").value = "";
+  sourceCatalogPage = 1;
+  productCatalogPage = 1;
+  inventoryCatalogPage = 1;
+  productCatalogState.loaded = false;
+  inventoryCatalogState.loaded = false;
+  sourceCatalogState.loaded = false;
+  selectedSourceSkus.clear();
+  selectedSourceAllFiltered = false;
+  selectedProductIds.clear();
+  selectedProductAllFiltered = false;
+  navigateTo({ view: "catalog", catalogTab: nextTab, title: nextTab === "source" ? "Source Catalog" : "Products" })
+    .then(() => renderCatalog())
+    .catch((error) => toast(error.message));
+}
+
+function renderCategoryFilters(categories = [], filtered = []) {
+  const channels = [
+    ["shopify", "Shopify"],
+    ["ebay", "eBay"],
+    ["temu", "Temu"],
+    ["tiktok", "TikTok"],
+    ["whatnot", "Whatnot"]
+  ];
+  const hasFilters = Object.values(categoryFilters || {}).some((value) => String(value || "").trim());
+  return `
+    <div class="category-filter-bar">
+      <label>Channel
+        <select data-category-filter="channel">
+          ${channels.map(([value, label]) => `<option value="${value}" ${categoryFilters.channel === value ? "selected" : ""}>${label}</option>`).join("")}
+        </select>
+      </label>
+      <label>Mapping
+        <select data-category-filter="mapping">
+          <option value="" ${!categoryFilters.mapping ? "selected" : ""}>Any mapping</option>
+          <option value="mapped" ${categoryFilters.mapping === "mapped" ? "selected" : ""}>Mapped</option>
+          <option value="missing" ${categoryFilters.mapping === "missing" ? "selected" : ""}>Missing</option>
+        </select>
+      </label>
+      <label>Review
+        <select data-category-filter="review">
+          <option value="" ${!categoryFilters.review ? "selected" : ""}>Any review state</option>
+          <option value="needs-review" ${categoryFilters.review === "needs-review" ? "selected" : ""}>Needs review / suggested</option>
+          <option value="clean" ${categoryFilters.review === "clean" ? "selected" : ""}>No review flag</option>
+        </select>
+      </label>
+      <label>Lifecycle
+        <select data-category-filter="lifecycle">
+          <option value="" ${!categoryFilters.lifecycle ? "selected" : ""}>Any lifecycle</option>
+          <option value="new" ${categoryFilters.lifecycle === "new" ? "selected" : ""}>New</option>
+          <option value="current" ${categoryFilters.lifecycle === "current" ? "selected" : ""}>Current</option>
+          <option value="outdated" ${categoryFilters.lifecycle === "outdated" ? "selected" : ""}>Outdated</option>
+        </select>
+      </label>
+      <label>Category / vendor / brand
+        <input type="search" value="${html(categoryFilters.supplier || "")}" placeholder="lawn mower, TRUE VALUE, Milwaukee..." data-category-filter="supplier" />
+      </label>
+      <label>Min products
+        <input type="number" min="0" step="1" value="${html(categoryFilters.minProducts || "")}" placeholder="0" data-category-filter="minProducts" />
+      </label>
+      <button class="button secondary compact-button" type="button" data-clear-category-filters ${hasFilters ? "" : "disabled"}>Clear filters</button>
+      <span class="category-filter-count">${Number(filtered.length).toLocaleString()} shown / ${Number(categories.length).toLocaleString()} loaded</span>
+    </div>
+  `;
+}
+
+function renderCategoryTable(categories, scopeLabel, allCategories = categories) {
+  const totalLoaded = allCategories.length || categories.length;
   return `
     <section class="category-table-shell">
       <div class="category-table-head">
         <div>
-          <strong>${Number(categoryState.total || categories.length).toLocaleString()} categories</strong>
-          <small>${html(categoryScope === "source" && categoryState.indexGeneratedAt ? `Indexed ${simpleDate(categoryState.indexGeneratedAt)}` : scopeLabel)}</small>
+          <strong>${Number(categories.length).toLocaleString()} categories</strong>
+          <small>${html(`${categoryScope === "source" && categoryState.indexGeneratedAt ? `Indexed ${simpleDate(categoryState.indexGeneratedAt)}` : scopeLabel}${totalLoaded !== categories.length ? ` · ${Number(totalLoaded).toLocaleString()} loaded` : ""}`)}</small>
         </div>
         <div class="category-table-actions">
           <div class="category-scope-tabs" role="tablist" aria-label="Category catalog source">
@@ -6789,19 +7967,25 @@ function renderCategoryTable(categories, scopeLabel) {
             <button type="button" class="${categoryScope === "source" ? "active" : ""}" data-category-scope="source">Source</button>
           </div>
           <button class="button secondary" type="button" data-open-category-export-modal>${withIcon("download", "Export categories...")}</button>
+          <button class="button secondary" type="button" data-rebuild-category-summary-index>${withIcon("refresh-cw", "Rebuild index")}</button>
           <button class="button secondary" type="button" data-learn-source-category-mappings="all">${withIcon("refresh-cw", "Learn source maps")}</button>
           <button class="button secondary" type="button" data-auto-map-ebay-categories>${withIcon("search", "Auto-map eBay")}</button>
         </div>
       </div>
+      ${renderCategoryFilters(allCategories, categories)}
       <div class="category-table-wrap catalog-table-wrap product-catalog-table-wrap">
         <table class="catalog-table product-catalog-table category-table regular-density">
           <thead>
             <tr>
               <th class="col-category">Category</th>
               <th class="col-status">Status</th>
+              <th class="col-status">Lifecycle</th>
+              <th class="col-status">Created by</th>
+              <th class="col-status">Created</th>
               <th class="col-count">Products</th>
               <th class="col-count">Active</th>
               <th class="col-count">In stock</th>
+              <th class="col-skus">SKU preview</th>
               <th class="col-channels">Channels</th>
               <th class="col-missing">Missing</th>
               <th class="col-actions">Action</th>
@@ -6817,12 +8001,22 @@ function renderCategoryTable(categories, scopeLabel) {
                   </button>
                 </td>
                 <td class="col-status">${renderCategoryStatus(category)}</td>
+                <td class="col-status">${renderCategoryLifecycle(category)}</td>
+                <td class="col-status">${renderCategoryCreatedBy(category)}</td>
+                <td class="col-status">${renderCategoryCreatedDate(category)}</td>
                 <td class="col-count">${Number(category.productCount || 0).toLocaleString()}</td>
                 <td class="col-count">${Number(category.activeProductCount || 0).toLocaleString()}</td>
                 <td class="col-count">${Number(category.stockProductCount || 0).toLocaleString()}</td>
+                <td class="col-skus">
+                  <div class="category-row-sku-tools">
+                    <button class="button secondary compact-button" type="button" data-load-category-samples="${html(category.id)}">Preview 5</button>
+                    ${categoryViewSkusButton(category)}
+                  </div>
+                  ${renderCategorySkuPreview(category)}
+                </td>
                 <td class="col-channels">${renderCategoryChannelPills(category)}</td>
                 <td class="col-missing"><span class="category-missing-count ${category.missingMappings?.length ? "needs-work" : "ready"}">${category.missingMappings?.length ? `${category.missingMappings.length} missing` : "Ready"}</span></td>
-                <td class="col-actions"><button class="button secondary compact-button" type="button" data-select-category="${category.id}">Open</button></td>
+                <td class="col-actions"><div class="category-row-actions"><button class="button secondary compact-button" type="button" data-select-category="${category.id}">Open</button>${renderCategoryDeleteButton(category)}</div></td>
               </tr>
             `).join("")}
           </tbody>
@@ -6844,9 +8038,18 @@ function renderCategoryDetail(selected) {
           <p class="muted">${categoryScope === "main" ? "Active product catalog category. Map this to sales channels before listing." : "Full source catalog category. Use this to compare supplier coverage and future product mapping."}</p>
         </div>
         <div class="category-detail-actions">
+          ${categoryViewSkusButton(selected)}
+          <button class="button secondary" type="button" data-load-category-samples="${html(selected.id)}">${withIcon("list", "Preview 5 SKUs")}</button>
           <button class="button secondary" type="button" data-open-category-export-modal>${withIcon("download", "Export categories...")}</button>
+          <button class="button secondary" type="button" data-auto-map-shopify-categories>${withIcon("search", "Auto-map Shopify")}</button>
           <button class="button secondary" type="button" data-auto-map-ebay-categories>${withIcon("search", "Auto-map eBay")}</button>
+          ${mappingStatus(selected, "shopify") === "mapped" ? `<a class="button shopify-link-button" href="${html(shopifyCategoryTargetUrl(selected))}" target="_blank" rel="noreferrer">${withIcon("external-link", "View collection on Shopify")}</a>` : ""}
+          ${mappingStatus(selected, "shopify") === "mapped" ? `<button class="button secondary" type="button" data-push-category-shopify-taxonomy="${html(selected.id)}">${withIcon("upload-cloud", "Push Shopify taxonomy")}</button>` : ""}
           ${categoryScope === "main" ? `<button class="button secondary" type="button" data-learn-source-category-mappings="${html(selected.id)}">${withIcon("refresh-cw", "Map source catalog")}</button>` : ""}
+          ${renderCategoryDeleteButton(selected)}
+          ${renderCategoryLifecycle(selected)}
+          ${renderCategoryCreatedBy(selected)}
+          ${renderCategoryCreatedDate(selected)}
           ${renderCategoryStatus(selected)}
         </div>
       </div>
@@ -6857,6 +8060,11 @@ function renderCategoryDetail(selected) {
         <span><small>Hazardous</small><strong>${Number(selected.hazardousProductCount || 0).toLocaleString()}</strong></span>
       </div>
       <div class="category-detail-grid">
+        <section class="category-settings-card category-sku-sample-card">
+          <h3>SKU Preview</h3>
+          <p class="muted">Sample SKUs currently mapped under this category.</p>
+          ${renderCategorySkuPreview(selected) || `<button class="button secondary compact-button" type="button" data-load-category-samples="${html(selected.id)}">Load 5 SKUs</button>`}
+        </section>
         <section class="category-settings-card">
           <h3>Category Settings</h3>
           <div class="category-map-grid">
@@ -6873,14 +8081,7 @@ function renderCategoryDetail(selected) {
           <div class="category-mini-list">${(selected.topBrands || []).slice(0, 8).map((brand) => `<span><strong>${html(brand.name)}</strong><small>${Number(brand.count || 0).toLocaleString()}</small></span>`).join("") || `<p class="muted">No brand data.</p>`}</div>
         </section>
       </div>
-      ${renderMarketplaceRequiredAttributes(selected)}
-      <div class="category-mapping-grid">
-        ${renderCategoryMappingFields(selected, "shopify", "Shopify")}
-        ${renderCategoryMappingFields(selected, "ebay", "eBay")}
-        ${renderCategoryMappingFields(selected, "whatnot", "Whatnot")}
-        ${renderCategoryMappingFields(selected, "temu", "Temu")}
-        ${renderCategoryMappingFields(selected, "tiktok", "TikTok Shop")}
-      </div>
+      ${renderCategoryChannelWorkspace(selected)}
     </section>
   `;
 }
@@ -6890,6 +8091,7 @@ function renderCategories() {
   if (!target) return;
   if (!productFieldOptions) loadProductFieldOptions().catch(() => {});
   const categories = categoryState.categories || [];
+  const visibleCategories = filteredCategoryRows(categories);
   const scopeLabel = categoryScope === "main" ? "Main catalog" : "Source catalog";
   const selected = categories.find((category) => category.id === selectedCategoryId) || null;
   if (categoryState.loading && !categories.length) {
@@ -6909,7 +8111,7 @@ function renderCategories() {
   }
   target.innerHTML = categories.length ? `
     ${renderCategoryCoverage()}
-    ${renderCategoryTable(categories, scopeLabel)}
+    ${renderCategoryTable(visibleCategories, scopeLabel, categories)}
   ` : `<div class="empty-state">No categories match this search.</div>`;
 }
 
@@ -6918,6 +8120,8 @@ async function updateCategoryField(input) {
   if (!categoryId) return;
   const body = {};
   body.scope = categoryScope;
+  body.createdBy = currentSystemUserLabel();
+  body.updatedBy = currentSystemUserLabel();
   if (input.dataset.categoryField) {
     body[input.dataset.categoryField] = input.dataset.categoryField === "requiredAttributes" ? input.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) : input.value;
   }
@@ -6932,7 +8136,7 @@ async function updateCategoryField(input) {
   categoryState = { ...result, query: categoryState.query, scope: categoryScope, loading: false };
   selectedCategoryId = categoryId;
   renderCategories();
-  toast("Category updated.");
+  showSavedUpdate("Category", input.dataset.categoryField || input.dataset.categoryDefault || input.dataset.mapField || "Settings");
 }
 
 async function saveCategoryMapping(button) {
@@ -6977,13 +8181,62 @@ async function saveCategoryMapping(button) {
   const result = await api(`/api/categories/${categoryId}`, {
     feedbackLabel: `Saving ${channel} category mapping...`,
     method: "PATCH",
-    body: JSON.stringify({ scope: categoryScope, channel, mapping, smartCollection })
+    body: JSON.stringify({ scope: categoryScope, channel, mapping, smartCollection, createdBy: currentSystemUserLabel(), updatedBy: currentSystemUserLabel() })
   });
   categoryState = { ...result, query: categoryState.query, scope: categoryScope, loading: false };
   selectedCategoryId = categoryId;
   categoryViewMode = "detail";
   renderCategories();
   toast(`${channel} category mapping saved.`);
+}
+
+async function pushCategoryShopifyTaxonomy(categoryId) {
+  const category = categoryById(categoryId);
+  if (!category) return;
+  if (!category.mappings?.shopify?.categoryId) {
+    toast("Map the Shopify taxonomy category before pushing.");
+    return;
+  }
+  const productCount = Number(category.productCount || 0);
+  if (!confirm(`Queue Shopify taxonomy push for ${productCount.toLocaleString()} SKU${productCount === 1 ? "" : "s"} in "${category.name}"?`)) return;
+  const result = await api("/api/shopify/taxonomy-push", {
+    method: "POST",
+    feedbackLabel: "Queueing Shopify taxonomy push...",
+    body: JSON.stringify({
+      apply: true,
+      dryRun: false,
+      filters: { category: category.name, channelStatus: "shopify-linked" },
+      limit: Math.max(productCount, 1),
+      pageSize: 2500,
+      updateDelayMs: 650
+    })
+  });
+  toast(result.message || "Shopify taxonomy push queued.");
+  navigateTo({ view: "jobs", title: "Jobs" }).catch(() => {});
+}
+
+async function deleteCategory(button) {
+  const categoryId = button.dataset.deleteCategory;
+  if (!categoryId) return;
+  const category = (categoryState.categories || []).find((row) => row.id === categoryId || row.categoryId === categoryId);
+  if (!category) return;
+  const blockers = Array.isArray(category.deleteBlockers) ? category.deleteBlockers : [];
+  if (!category.canDelete) {
+    toast(`Cannot delete ${category.name}: ${blockers.join("; ") || "category is still mapped"}.`);
+    return;
+  }
+  if (!confirm(`Delete saved category settings for "${category.name}"? This cannot be undone.`)) return;
+  const params = new URLSearchParams({ scope: categoryScope });
+  const result = await api(`/api/categories/${encodeURIComponent(categoryId)}?${params.toString()}`, {
+    method: "DELETE",
+    feedbackLabel: "Deleting category...",
+    body: JSON.stringify({ scope: categoryScope, category })
+  });
+  categoryState = { ...result, query: categoryState.query, scope: categoryScope, loading: false };
+  selectedCategoryId = null;
+  categoryViewMode = "table";
+  renderCategories();
+  toast(`Deleted category settings for ${category.name}.`);
 }
 
 async function applyCategoryMapToProducts(button) {
@@ -7153,6 +8406,65 @@ function renderAttributeGroupsPanel() {
         }).join("")}
       </div>
     </div>
+  `;
+}
+
+async function loadVendorCategoryMappingsPage() {
+  const query = $("#catalog-search")?.value.trim() || "";
+  vendorCategoryMappingState = { ...vendorCategoryMappingState, query, loading: true, loaded: false, error: "" };
+  renderVendorCategoryMappingsPage();
+  try {
+    const result = await api(`/api/vendor-category-mappings?limit=500&q=${encodeURIComponent(query)}`, { feedbackLabel: "Loading vendor category mappings..." });
+    vendorCategoryMappingState = {
+      supplier: "",
+      rows: result.rows || [],
+      mainCategories: result.mainCategories || [],
+      total: result.total || 0,
+      mappedCount: result.mappedCount || 0,
+      unmappedCount: result.unmappedCount || 0,
+      query,
+      loading: false,
+      loaded: true,
+      error: ""
+    };
+  } catch (error) {
+    vendorCategoryMappingState = { ...vendorCategoryMappingState, loading: false, loaded: true, error: error.message || String(error) };
+  }
+  if (catalogTab === "vendor-category-mappings") renderVendorCategoryMappingsPage();
+}
+
+function renderVendorCategoryMappingsPage() {
+  const target = $("#vendor-category-mappings-list");
+  if (!target) return;
+  const rows = vendorCategoryMappingState.rows || [];
+  target.innerHTML = `
+    <section class="category-command-bar">
+      <div class="category-command-top">
+        <div class="category-command-head">
+          <div>
+            <p class="eyebrow">Categories</p>
+            <h2>Vendor Category Mappings</h2>
+            <p class="muted">Map supplier category names to the main catalog category that future SKUs should use.</p>
+          </div>
+        </div>
+        <div class="category-actions">
+          <button class="button secondary" type="button" data-refresh-vendor-category-mappings="">${withIcon("refresh-cw", "Refresh")}</button>
+          <button class="button secondary" type="button" data-rebuild-category-summary-index>${withIcon("refresh-cw", "Rebuild index")}</button>
+        </div>
+      </div>
+      <div class="vendor-category-summary">
+        <span><small>Rows shown</small><strong>${vendorCategoryMappingState.loading ? "..." : countLabel(rows.length)}</strong></span>
+        <span><small>Mapped</small><strong>${vendorCategoryMappingState.loading ? "..." : countLabel(vendorCategoryMappingState.mappedCount || 0)}</strong></span>
+        <span><small>Unmapped</small><strong>${vendorCategoryMappingState.loading ? "..." : countLabel(vendorCategoryMappingState.unmappedCount || 0)}</strong></span>
+      </div>
+    </section>
+    ${vendorCategoryMappingState.error
+      ? `<div class="empty-state">Unable to load vendor category mappings: ${html(vendorCategoryMappingState.error)}</div>`
+      : vendorCategoryMappingState.loading
+        ? `<div class="empty-state">Loading vendor category mappings...</div>`
+        : vendorCategoryMappingState.loaded
+          ? renderVendorCategoryMappingRows(rows, vendorCategoryMappingState.mainCategories, "catalog")
+          : `<div class="empty-state">Vendor category mappings are loaded on demand. Click Refresh to load the mapping table.</div>`}
   `;
 }
 
@@ -7488,6 +8800,12 @@ function renderChangeValue(value) {
   return html(value);
 }
 
+function skuChangeCatalogStatus(row = {}) {
+  if (row.activeCatalog) return { label: "Main catalog", note: "Active product", tone: "success" };
+  if (row.productId) return { label: "Inactive product", note: "Not active catalog", tone: "warning" };
+  return { label: "Source only", note: "Not in Products", tone: "pending" };
+}
+
 function renderCatalogChanges() {
   const target = $("#catalog-changes-list");
   if (!target) return;
@@ -7629,6 +8947,7 @@ function renderCatalogChanges() {
               <tr>
                 <th class="col-sku">SKU</th>
                 <th class="col-supplier">Supplier</th>
+                <th class="col-catalog">Catalog</th>
                 <th class="col-field">Field</th>
                 <th class="col-before">Before</th>
                 <th class="col-after">After</th>
@@ -7639,10 +8958,13 @@ function renderCatalogChanges() {
               </tr>
             </thead>
             <tbody>
-              ${rows.map((row) => `
+              ${rows.map((row) => {
+                const catalogStatus = skuChangeCatalogStatus(row);
+                return `
                 <tr>
                   <td class="col-sku"><strong>${html(row.sku || "")}</strong><small>${html(row.title || "")}</small></td>
-                  <td class="col-supplier">${html(row.supplier || "")}${row.activeCatalog ? `<small><span class="pill success">Active Product</span></small>` : ""}</td>
+                  <td class="col-supplier">${html(row.supplier || "")}</td>
+                  <td class="col-catalog"><span class="pill ${catalogStatus.tone}">${html(catalogStatus.label)}</span><small>${html(catalogStatus.note)}</small></td>
                   <td class="col-field">${html(String(row.field || "").replace(/([A-Z])/g, " $1").trim())}</td>
                   <td class="col-before">${renderChangeValue(row.before)}</td>
                   <td class="col-after">${renderChangeValue(row.after)}</td>
@@ -7655,7 +8977,8 @@ function renderCatalogChanges() {
                     ${view === "opportunities" && !row.productId ? `<button class="button compact-button" type="button" data-promote-catalog-sku="${html(row.sku || "")}">Add</button>` : ""}
                   </td>
                 </tr>
-              `).join("")}
+              `;
+              }).join("")}
             </tbody>
           </table>
         </div>
@@ -7695,7 +9018,7 @@ function renderCatalog() {
   const catalogFilters = document.querySelector(".catalog-filters");
   const catalogSmartFilters = $("#catalog-smart-filters");
   const showCatalogFilters = ["products", "source", "inventory"].includes(catalogTab);
-  const showCatalogToolbar = ["categories", "reviews"].includes(catalogTab);
+  const showCatalogToolbar = ["categories", "reviews", "vendor-category-mappings"].includes(catalogTab);
   if (catalogToolbar) catalogToolbar.style.display = showCatalogToolbar ? "" : "none";
   if (catalogFilters) catalogFilters.style.display = showCatalogFilters ? "" : "none";
   if (catalogSmartFilters) catalogSmartFilters.style.display = showCatalogFilters ? "" : "none";
@@ -7705,6 +9028,8 @@ function renderCatalog() {
   const catalogChangesList = $("#catalog-changes-list");
   if (catalogChangesList) catalogChangesList.style.display = catalogTab === "changes" ? "block" : "none";
   $("#category-list").style.display = catalogTab === "categories" ? "block" : "none";
+  const vendorCategoryMappingsList = $("#vendor-category-mappings-list");
+  if (vendorCategoryMappingsList) vendorCategoryMappingsList.style.display = catalogTab === "vendor-category-mappings" ? "block" : "none";
   $("#attribute-list").style.display = catalogTab === "attributes" ? "block" : "none";
   $("#attribute-groups-list").style.display = catalogTab === "attribute-groups" ? "block" : "none";
   const catalogImportExportList = $("#import-export-list");
@@ -7725,6 +9050,10 @@ function renderCatalog() {
       if (!pendingCategoryOpenName) categoryViewMode = "table";
       loadCategories();
     }
+    return;
+  }
+  if (catalogTab === "vendor-category-mappings") {
+    renderVendorCategoryMappingsPage();
     return;
   }
   if (catalogTab === "attributes") {
@@ -8127,6 +9456,7 @@ async function loadProductFieldOptions() {
   try {
     const result = await api("/api/product-fields");
     productFieldOptions = result.fields || [];
+    if (result.systemFields) systemFieldRegistry = result.systemFields;
   } catch {
     productFieldOptions = [
       { key: "sku", label: "SKU" },
@@ -8142,6 +9472,18 @@ async function loadProductFieldOptions() {
   if (currentViewId === "import-export" || catalogTab === "import-export") renderImportExportMappings();
   if (catalogTab === "categories") renderCategories();
   return productFieldOptions;
+}
+
+async function loadSystemFieldRegistry() {
+  if (systemFieldRegistry) return systemFieldRegistry;
+  try {
+    const result = await api("/api/system-fields");
+    systemFieldRegistry = result.fields || [];
+  } catch (error) {
+    await loadProductFieldOptions();
+    systemFieldRegistry = systemFieldRegistry || productFieldOptions || [];
+  }
+  return systemFieldRegistry;
 }
 
 function mappingRowsText(template) {
@@ -8366,6 +9708,18 @@ function jobHasDownload(job = {}) {
   return Boolean(job.originalFilePath || jobOriginalArtifact(job)?.filePath);
 }
 
+function jobOriginalFileUrl(job = {}, options = {}) {
+  if (!job?.id) return "";
+  const suffix = options.inline ? "?inline=1" : "";
+  return `/api/import-jobs/${encodeURIComponent(job.id)}/original${suffix}`;
+}
+
+function jobArtifactFileUrl(job = {}, index = 0, options = {}) {
+  if (!job?.id) return "";
+  const suffix = options.inline ? "?inline=1" : "";
+  return `/api/import-jobs/${encodeURIComponent(job.id)}/artifacts/${encodeURIComponent(index)}${suffix}`;
+}
+
 function jobFileReadyLabel(job = {}) {
   if (jobHasDownload(job)) return String(job.direction || "").toLowerCase() === "export" ? "File ready" : "Original saved";
   if (jobIsDone(job)) return "No file attached";
@@ -8382,6 +9736,14 @@ function jobProgressPercent(job = {}) {
   return 0;
 }
 
+function importJobRowLabel(job = {}) {
+  const explicit = String(job.rowLabel || "").trim();
+  if (explicit) return explicit;
+  const text = `${job.operation || ""} ${job.workerTask || ""}`.toLowerCase();
+  if (text.includes("shopify") && text.includes("price") && text.includes("push")) return "variant SKUs";
+  return "rows";
+}
+
 function renderJobProgress(job = {}) {
   const status = jobStatusValue(job);
   const pct = jobProgressPercent(job);
@@ -8391,9 +9753,13 @@ function renderJobProgress(job = {}) {
   const phase = jobIsDone(job) ? "Complete" : jobPhaseLabel(job.phase || status);
   const showBar = jobIsActive(job) || pct > 0;
   if (!showBar) return "";
+  const rowLabel = importJobRowLabel(job);
+  const progressLabel = String(job.progressLabel || "").trim();
   const detail = total
-    ? `${(jobIsDone(job) && processed < total ? total : processed).toLocaleString()} / ${total.toLocaleString()} rows`
-    : "Rows pending";
+    ? (progressLabel && rowLabel !== "rows" && !processed
+      ? `${total.toLocaleString()} ${rowLabel} estimated`
+      : `${(jobIsDone(job) && processed < total ? total : processed).toLocaleString()} / ${total.toLocaleString()} ${rowLabel}`)
+    : `${rowLabel === "rows" ? "Rows" : rowLabel} pending`;
   return `
     <div class="job-progress ${jobIsDone(job) ? "complete" : ""}">
       <div class="job-progress-bar"><span style="width:${pct}%"></span></div>
@@ -8408,8 +9774,9 @@ function renderJobProgress(job = {}) {
 function renderImportJobMetrics(job = {}) {
   const metrics = [];
   const originalSize = fileSizeLabel(jobOriginalArtifact(job)?.byteSize);
+  const rowLabel = importJobRowLabel(job);
   if (jobIsDone(job) || (Number(job.processedRows || 0) && Number(job.totalRows || 0))) metrics.push(`${Math.round(jobProgressPercent(job))}%`);
-  if (Number(job.totalRows || 0)) metrics.push(`${Number(job.totalRows || 0).toLocaleString()} rows`);
+  if (Number(job.totalRows || 0)) metrics.push(`${Number(job.totalRows || 0).toLocaleString()} ${rowLabel}`);
   if (Number(job.changed || 0)) metrics.push(`${Number(job.changed || 0).toLocaleString()} changed`);
   if (Number(job.created || 0)) metrics.push(`${Number(job.created || 0).toLocaleString()} created`);
   if (Number(job.missingCount || 0)) metrics.push(`${Number(job.missingCount || 0).toLocaleString()} missing`);
@@ -8631,9 +9998,11 @@ function renderJobProfile(job = null) {
   const hasOriginal = jobHasDownload(job);
   const originalSize = fileSizeLabel(jobOriginalArtifact(job)?.byteSize);
   const downloadLabel = String(job.direction || "").toLowerCase() === "export" ? "Download file" : "Original file";
-  const hasErrors = Boolean((job.errors || []).length || job.errorFilePath || job.errorFileName);
+  const hasErrorFile = Boolean(job.errorFilePath || job.errorFileName);
   const channelName = channelApiHistoryChannelForJob(job);
   const canRetry = Boolean(job.workerTask) && !canStop;
+  const rowLabel = importJobRowLabel(job);
+  const artifacts = Array.isArray(job.artifacts) ? job.artifacts : [];
   const statRows = [
     ["Job ID", job.id || "n/a"],
     ["Type", job.direction || "import"],
@@ -8641,7 +10010,7 @@ function renderJobProfile(job = null) {
     ["Started", dateLabel(job.startedAt || job.createdAt)],
     ["Ended", job.finishedAt ? dateLabel(job.finishedAt) : "Running"],
     ["Original", job.originalFileName || job.fileName || "None"],
-    ["Rows", Number(job.totalRows || 0).toLocaleString()],
+    [rowLabel === "rows" ? "Rows" : rowLabel, Number(job.totalRows || 0).toLocaleString()],
     ["Processed", Number(jobIsDone(job) && Number(job.processedRows || 0) < Number(job.totalRows || 0) ? job.totalRows : job.processedRows || 0).toLocaleString()],
     ["Progress", `${Math.round(jobProgressPercent(job))}%`],
     ["ETA", jobIsDone(job) ? "Complete" : durationLabel(job.estimatedSecondsRemaining) || "n/a"],
@@ -8687,8 +10056,25 @@ function renderJobProfile(job = null) {
         ${statRows.map(([label, value]) => `<span><small>${html(label)}</small><strong>${html(value)}</strong></span>`).join("")}
       </div>
       <div class="job-profile-files">
-        ${hasOriginal ? `<a class="button secondary" href="/api/import-jobs/${encodeURIComponent(job.id)}/original">${withIcon("download", downloadLabel)}</a>` : `<button class="button secondary" type="button" disabled>${html(downloadLabel)}</button>`}
-        ${hasErrors ? `<a class="button secondary" href="/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv">${withIcon("download", "Errors CSV")}</a>` : `<button class="button secondary" type="button" disabled>Errors CSV</button>`}
+        ${hasOriginal ? `<a class="button secondary" href="${jobOriginalFileUrl(job, { inline: true })}" target="_blank" rel="noopener">${withIcon("external-link", "Open file")}</a>` : `<button class="button secondary" type="button" disabled>Open file</button>`}
+        ${hasOriginal ? `<a class="button secondary" href="${jobOriginalFileUrl(job)}">${withIcon("download", downloadLabel)}</a>` : `<button class="button secondary" type="button" disabled>${html(downloadLabel)}</button>`}
+        ${hasErrorFile ? `<a class="button secondary" href="/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv">${withIcon("download", "Errors CSV")}</a>` : `<button class="button secondary" type="button" disabled>Errors CSV</button>`}
+      </div>
+      <div class="job-artifact-list">
+        <strong>Files</strong>
+        ${artifacts.length ? artifacts.map((artifact, index) => `
+          <div class="job-artifact-row">
+            <span>
+              <small>${html(artifact.kind || "artifact")}</small>
+              <b>${html(artifact.fileName || `artifact-${index + 1}`)}</b>
+              <em>${html([fileSizeLabel(artifact.byteSize), artifact.rowCount ? `${Number(artifact.rowCount).toLocaleString()} rows` : ""].filter(Boolean).join(" / "))}</em>
+            </span>
+            <span class="job-artifact-actions">
+              <a class="button secondary" href="${jobArtifactFileUrl(job, index, { inline: true })}" target="_blank" rel="noopener">${withIcon("external-link", "Open")}</a>
+              <a class="button secondary" href="${jobArtifactFileUrl(job, index)}">${withIcon("download", "Download")}</a>
+            </span>
+          </div>
+        `).join("") : `<p class="muted">No additional files are attached to this job.</p>`}
       </div>
       ${job.message ? `<div class="job-profile-message"><strong>Status message</strong><p>${html(job.message)}</p></div>` : ""}
       ${job.details ? `<div class="job-profile-message"><strong>Details</strong><p>${html(job.details)}</p></div>` : ""}
@@ -8709,8 +10095,9 @@ function renderImportJobActions(job = {}) {
   if (canStop) actions.push(`<button type="button" data-job-stop="${html(job.id)}">Cancel job</button>`);
   if (job.workerTask && !canStop) actions.push(`<button type="button" data-job-retry="${html(job.id)}">Retry job</button>`);
   if (channelApiHistoryChannelForJob(job)) actions.push(`<button type="button" data-job-channel-api-history="${html(job.id)}">Open API history</button>`);
-  if (jobHasDownload(job)) actions.push(`<a href="/api/import-jobs/${encodeURIComponent(job.id)}/original">${String(job.direction || "").toLowerCase() === "export" ? "Download file" : "Original file"}</a>`);
-  if ((job.errors || []).length || job.errorFilePath || job.errorFileName) actions.push(`<a href="/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv">Errors CSV</a>`);
+  if (jobHasDownload(job)) actions.push(`<a href="${jobOriginalFileUrl(job, { inline: true })}" target="_blank" rel="noopener">Open file</a>`);
+  if (jobHasDownload(job)) actions.push(`<a href="${jobOriginalFileUrl(job)}">${String(job.direction || "").toLowerCase() === "export" ? "Download file" : "Original file"}</a>`);
+  if (job.errorFilePath || job.errorFileName) actions.push(`<a href="/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv">Errors CSV</a>`);
   return actions.length ? `<div class="import-job-actions">${actions.join('')}</div>` : '';
 }
 
@@ -8851,6 +10238,10 @@ function renderImportSectionBody(sectionId, templates = []) {
           <article class="import-action-row">
             <div><strong>Open Source Catalog</strong><small>Filter suppliers, select rows, export, or run source catalog actions.</small></div>
             <button class="button secondary" type="button" data-view="catalog" data-catalog-tab-link="source">${withIcon('search', 'Open source catalog')}</button>
+          </article>
+          <article class="import-action-row">
+            <div><strong>Refresh pricing & inventory</strong><small>Updates source catalog cost, Shopify price, stock, promos, and closeout pricing from the latest local product dump.</small></div>
+            <button class="button secondary" type="button" data-refresh-pricing-inventory>${withIcon('refresh-cw', 'Run refresh')}</button>
           </article>
         </div>
       </section>
@@ -9094,6 +10485,65 @@ function renderMappingDirectory(templates = []) {
   `;
 }
 
+function parseInventoryScheduleTimes(settings = {}) {
+  const times = String(settings.inventoryScheduleTimes || "03:00,13:00")
+    .split(/[,;\s]+/)
+    .map((time) => time.trim())
+    .filter(Boolean);
+  return [times[0] || "03:00", times[1] || "13:00"];
+}
+
+function renderJobsShopifyInventorySchedule() {
+  const channel = (state.connections || []).find((row) => String(row.name || "").toLowerCase() === "shopify");
+  if (!channel) return "";
+  const settings = channel.settings || {};
+  const [firstRun, secondRun] = parseInventoryScheduleTimes(settings);
+  const scheduleType = String(settings.inventoryScheduleType || "times");
+  const warehouse = (state.warehouses || []).find((row) => row.id === settings.shopifyInventoryWarehouseId) || {};
+  const locationId = settings.shopifyInventoryLocationId || warehouse.shopifyLocationId || "";
+  const scheduleSummary = settings.inventoryScheduleEnabled
+    ? (scheduleType === "interval" ? `Every ${Number(settings.inventoryScheduleEveryHours || 12)} hours` : `${firstRun} and ${secondRun}`)
+    : "Off";
+  return `
+    <div class="jobs-schedule-card">
+      <div class="jobs-schedule-head">
+        <div>
+          <strong>Shopify inventory schedule</strong>
+          <small>${html(settings.inventoryScheduleEnabled ? `Runs ${scheduleSummary}` : "Scheduled inventory updates are disabled.")}</small>
+        </div>
+        <button class="button secondary compact" type="button" data-select-channel="${html(channel.id)}">${withIcon("settings", "Open channel")}</button>
+      </div>
+      <div class="jobs-schedule-controls">
+        <label class="jobs-setting-toggle"><input type="checkbox" ${settings.inventoryScheduleEnabled ? "checked" : ""} data-channel-field="inventoryScheduleEnabled" data-channel-id="${channel.id}" /> <span>Enabled</span></label>
+        <label class="jobs-setting-select">Mode
+          <select data-channel-field="inventoryScheduleMode" data-channel-id="${channel.id}">
+            ${[["dry-run", "Dry run"], ["apply", "Apply"]].map(([value, label]) => `<option value="${value}" ${String(settings.inventoryScheduleMode || "dry-run") === value ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </label>
+        <label class="jobs-setting-select">Schedule
+          <select data-channel-field="inventoryScheduleType" data-channel-id="${channel.id}">
+            ${[["times", "Specific times"], ["interval", "Every X hours"]].map(([value, label]) => `<option value="${value}" ${scheduleType === value ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </label>
+        <label class="jobs-setting-select">First run
+          <input type="time" value="${html(firstRun)}" data-channel-field="inventoryScheduleTimes" data-channel-id="${channel.id}" data-channel-schedule-time-index="0" />
+        </label>
+        <label class="jobs-setting-select">Second run
+          <input type="time" value="${html(secondRun)}" data-channel-field="inventoryScheduleTimes" data-channel-id="${channel.id}" data-channel-schedule-time-index="1" />
+        </label>
+        <label class="jobs-setting-select">Every hours
+          <input type="number" min="1" max="24" value="${Number(settings.inventoryScheduleEveryHours || 12)}" data-channel-field="inventoryScheduleEveryHours" data-channel-id="${channel.id}" />
+        </label>
+      </div>
+      <div class="jobs-schedule-meta">
+        <span><small>Status</small><strong>${html(scheduleSummary)}</strong></span>
+        <span><small>Warehouse</small><strong>${html(warehouse.name || warehouse.code || "Not selected")}</strong></span>
+        <span><small>Shopify location</small><strong>${html(locationId || "Not mapped")}</strong></span>
+      </div>
+    </div>
+  `;
+}
+
 function renderJobsPage() {
   const target = $("#jobs-page");
   if (!target) return;
@@ -9174,8 +10624,9 @@ function renderJobsPage() {
           <label class="jobs-setting-toggle"><input type="checkbox" ${appSystemSettings().dataQualityWorkerEnabled !== false ? "checked" : ""} data-system-setting="dataQualityWorkerEnabled" /> <span>Quality scans on worker</span></label>
           <label class="jobs-setting-toggle"><input type="checkbox" ${appSystemSettings().backupIncludeSourceCatalog === true ? "checked" : ""} data-system-setting="backupIncludeSourceCatalog" /> <span>Include source catalog in backups</span></label>
           <label class="jobs-setting-toggle"><input type="checkbox" ${appSystemSettings().jobsRetentionAutoCleanupEnabled !== false ? "checked" : ""} data-system-setting="jobsRetentionAutoCleanupEnabled" /> <span>Auto-clean expired files</span></label>
-          <div class="jobs-retention-note"><strong>Files</strong><small>Export and error downloads are retained for 30 days.</small></div>
+          <div class="jobs-retention-note"><strong>Files</strong><small>Export and error downloads are retained for at least 60 days.</small></div>
         </div>
+        ${renderJobsShopifyInventorySchedule()}
         <div class="worker-health-card ${workerMode && !workerStatus.online ? "needs-attention" : ""}">
           <div>
             <strong>External worker</strong>
@@ -9196,12 +10647,21 @@ function renderJobsPage() {
           ${workerMode && !workerStatus.online ? `<code>npm run worker</code>` : ""}
         </div>
       </section>
+      <div class="jobs-channel-logs">
+        ${renderChannelApiHistory({ name: "Shopify" }, {
+          title: "Channel Logs",
+          description: "Shopify channel activity from the past 30 days, including inventory updates that are queued, running, completed, or failed."
+        })}
+      </div>
       <div class="jobs-workspace">
         ${renderImportQueuePanel({ full: true })}
         ${renderJobProfile(selectedJob)}
       </div>
     </div>
   `;
+  if (!channelApiLogState.loading && (channelApiLogState.channel !== "Shopify" || !channelApiLogState.loaded)) {
+    loadChannelApiLogs("Shopify").catch((error) => toast(error.message));
+  }
 }
 
 function renderMappingDetailPage(selected) {
@@ -9664,6 +11124,7 @@ function renderProductCatalogColumnTools(options = {}) {
           ${options.selectionInlineAction || ""}
         </div>
         <small>${html(options.resultMetaLabel || "")}</small>
+        ${options.metricLabel ? `<small class="catalog-status-metric">${html(options.metricLabel)}</small>` : ""}
       </div>
       <div class="alternate-actions">
         <button class="button secondary compact-button" type="button" data-load-product-alternates-page>${options.alternatesLabel || "Load alternates"}</button>
@@ -9932,6 +11393,10 @@ function renderProductsTable(items) {
     : "0";
   const resultMetaLabel = `${Number(filteredCount).toLocaleString()} filtered | ${pageRangeLabel} shown | Page ${productCatalogPage} of ${pageCount} | ${Number(PRODUCT_CATALOG_PAGE_SIZE).toLocaleString()} per page`;
   const allResultsLabel = `Select all ${Number(filteredCount).toLocaleString()} results`;
+  const activeShopifyFilters = smartFilterSelectedValues("catalog", "channelStatus");
+  const metricLabel = activeShopifyFilters.includes("shopify-live")
+    ? shopifyLiveCountText(inventoryFacetsState.facets || {}, state.inventory || [])
+    : "";
   const pageSelected = pageItems.length > 0 && pageItems.every((item) => selectedProductAllFiltered || selectedProductIds.has(item.id));
   const selectionInlineActions = [];
   if (pageSelected && !selectedProductAllFiltered && filteredCount > pageItems.length) {
@@ -9956,6 +11421,7 @@ function renderProductsTable(items) {
           ${renderProductCatalogColumnTools({
             selectionLabel,
             resultMetaLabel,
+            metricLabel,
             selectedCount,
             selectionInlineAction,
             allResultsLabel,
@@ -10139,7 +11605,10 @@ function sourceFieldCanonicalKey(key = "") {
     stock_status: "stockStatus",
     stock_updated_at: "stockUpdatedAt",
     min_quantity: "reorderPoint",
+    minimum_quantity: "reorderPoint",
     price: "price",
+    default_price: "defaultPrice",
+    default_supplier_price: "defaultSupplierPrice",
     list_price: "msrp",
     fob_price: "cost",
     cost: "cost",
@@ -10150,19 +11619,39 @@ function sourceFieldCanonicalKey(key = "") {
     tags: "tags",
     wildcardsearch: "wildcardSearch",
     uom: "uom",
-    uom_qty: "uomQty"
+    uom_qty: "uomQty",
+    add_tags: "addTags",
+    remove_tags: "removeTags",
+    bin_location: "binLocation",
+    bsc_reporting: "bscReporting",
+    bsc_reporting_updated_at: "bscReportingUpdatedAt",
+    cei_id: "ceiId",
+    contract_name: "contractName",
+    contract_short_description: "contractShortDescription",
+    default_lead_time: "defaultLeadTime",
+    default_supplier_sku: "defaultSupplierSku",
+    i_by_l: "inventoryByLocation",
+    key_features: "bulletPoints",
+    marcone_make: "marconeMake",
+    marcone_part: "marconePart",
+    master_sku: "masterSku",
+    max_quantity: "maxQuantity",
+    notes: "notes",
+    u_key: "uKey",
+    updated_by: "updatedBy",
+    weight: "itemWeight"
   }[normalized] || normalized.replace(/_([a-z0-9])/g, (_, char) => char.toUpperCase());
 }
 
 function sourceFieldCategory(key = "") {
   const normalized = normalizedSourceFieldKey(key);
-  if (/^(_id|id|sku|name|title|brand|manufacturer|mfr|mpn|upc|gtin|barcode|category|product_type|condition|active)$/.test(normalized)) return "Identity";
+  if (/^(_id|id|sku|master_sku|name|title|brand|manufacturer|mfr|mpn|upc|gtin|barcode|category|product_type|condition|active|cei_id|u_key|marcone_make|marcone_part)$/.test(normalized)) return "Identity";
   if (/(description|image|tag|feature|bullet|keyword|wildcard)/.test(normalized)) return "Content";
   if (/(price|cost|fob|msrp|list|varis|contract|managed|private)/.test(normalized)) return "Pricing";
-  if (/(stock|qty|quantity|min_quantity|lead|leadtime|clearance)/.test(normalized)) return "Inventory";
-  if (/(height|length|width|weight|dimension|uom|package|country_of_origin)/.test(normalized)) return "Shipping";
+  if (/(stock|qty|quantity|min_quantity|minimum_quantity|max_quantity|lead|leadtime|clearance|bin_location|i_by_l|bsc_reporting)/.test(normalized)) return "Inventory";
+  if (/(height|length|width|weight|dimension|uom|package|country_of_origin)$/.test(normalized)) return "Shipping";
   if (/(supplier|vendor|sds|hazard|unspsc|ctech|zoro)/.test(normalized)) return "Supplier";
-  if (/(created|updated|validated|uploaded|mailed|timestamp|checked|original|default_supplier|item_key)/.test(normalized)) return "System";
+  if (/(created|updated|validated|uploaded|mailed|timestamp|checked|original|default_supplier|item_key|updated_by|default_lead_time|notes)/.test(normalized)) return "System";
   return "Other";
 }
 
@@ -10174,7 +11663,7 @@ function sourceFieldChannelUsage(item = {}, key = "") {
   if ((shopifyTemplate?.mappings || []).some((row) => row.productField === canonical)) usage.add("Shopify");
   if (["title", "marketplaceTitle", "brand", "manufacturer", "mfrPartNumber", "barcode", "category", "supplier", "vendorSku", "shortDescription", "longDescription", "tags", "defaultImage", "images"].includes(canonical)) usage.add("Product core");
   if (["price", "cost", "msrp", "fobPrice"].includes(canonical) || /(price|cost|fob|msrp|varis)/.test(normalized)) usage.add("Pricing");
-  if (["stockQty", "stockStatus", "stockUpdatedAt", "reorderPoint"].includes(canonical) || /(stock|qty|quantity|min_quantity)/.test(normalized)) usage.add("Inventory");
+  if (["stockQty", "stockStatus", "stockUpdatedAt", "reorderPoint", "maxQuantity", "inventoryByLocation", "bscReporting"].includes(canonical) || /(stock|qty|quantity|min_quantity|minimum_quantity|max_quantity|bin_location|i_by_l|bsc_reporting)/.test(normalized)) usage.add("Inventory");
   if (["itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "countryOfOrigin", "uom", "uomQty"].includes(canonical)) usage.add("Shipping");
   if (/(zoro|varis)/.test(normalized)) usage.add("Zoro");
   const ebayAspectFields = new Set(["brand", "manufacturer", "mfrPartNumber", "barcode", "countryOfOrigin", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "uom", "uomQty", "color", "material", "size", "model", "features", "type"]);
@@ -10204,8 +11693,13 @@ function renderProductManagerFields(item) {
   const preferredOrder = [
     "_id",
     "sku",
+    "master_sku",
+    "cei-id",
+    "u-key",
     "active",
     "brand",
+    "marcone_make",
+    "marcone_part",
     "category",
     "created_at",
     "updated_at",
@@ -10213,6 +11707,11 @@ function renderProductManagerFields(item) {
     "images",
     "description",
     "short_description",
+    "contract_name",
+    "contract_short_description",
+    "key_features",
+    "add_tags",
+    "remove_tags",
     "hazardous",
     "item_height",
     "item_length",
@@ -10220,11 +11719,19 @@ function renderProductManagerFields(item) {
     "item_width",
     "list_price",
     "price",
+    "default_price",
+    "default_supplier_price",
     "fob_price",
     "manufacturer",
     "mfr_part_number",
     "min_quantity",
+    "minimum_quantity",
+    "max_quantity",
     "name",
+    "bin_location",
+    "i_by_l",
+    "bsc_reporting",
+    "bsc_reporting_updated_at",
     "package_height",
     "package_length",
     "package_weight",
@@ -10255,6 +11762,8 @@ function renderProductManagerFields(item) {
     "stock_updated_at",
     "original_image",
     "default_supplier",
+    "default_supplier_sku",
+    "default_lead_time",
     "last_prices_update_at",
     "last_prices_update_by",
     "lead_time",
@@ -10273,7 +11782,10 @@ function renderProductManagerFields(item) {
     "original",
     "vendor_descripton",
     "vendor_description",
-    "uploaded_by"
+    "uploaded_by",
+    "updated_by",
+    "notes",
+    "weight"
   ];
   const keys = [...preferredOrder.filter((key) => Object.prototype.hasOwnProperty.call(fields, key)), ...Object.keys(fields).filter((key) => !preferredOrder.includes(key)).sort()];
 
@@ -10633,10 +12145,12 @@ function productShopifyReadiness(item = {}) {
   const rows = productShopifyMappedRows(item);
   const linked = isShopifyLinked(item);
   const live = linked && String(item.shopifyStatus || "").toLowerCase() === "active" && item.shopifyPublished === true;
+  const unavailableDiscontinued = Boolean(item.toBeDiscontinued || item.closeoutEligible) && productSellableQty(item) <= 0;
   const requiredFields = ["Variant SKU", "Title", "Body HTML", "Product type", "Shopify taxonomy", "Vendor", "Price", "Inventory qty", "Images"];
   const missing = rows
     .filter((row) => requiredFields.includes(row.field) && !row.ok)
     .map((row) => row.field);
+  if (unavailableDiscontinued) missing.push("Discontinued with zero inventory");
   if (live) return { status: "live", label: "Shopify live", tone: "active", ready: true, live: true, linked, missing, rows };
   if (!missing.length) return { status: "ready", label: linked ? "Shopify linked" : "Shopify ready", tone: "ready", ready: true, live: false, linked, missing, rows };
   return { status: "not-ready", label: "Not ready", tone: "draft", ready: false, live: false, linked, missing, rows };
@@ -10645,13 +12159,13 @@ function productShopifyReadiness(item = {}) {
 function shopifyReadinessStatusCell(item = {}) {
   const readiness = productShopifyReadiness(item);
   const statusText = item.shopifyStatus ? `${item.shopifyStatus}${item.shopifyPublished === true ? " / Published" : item.shopifyPublished === false ? " / Not published" : ""}` : "";
-  const idText = item.shopifyId ? shopifyProductLink(item.shopifyId) : readiness.missing.slice(0, 2).join(", ") || "No Shopify GID";
+  const skuText = item.shopifyId ? shopifySkuLink(item) : readiness.missing.slice(0, 2).join(", ") || "No Shopify SKU";
   const sync = shopifySyncSourceMeta(item);
   return `
     <span class="status ${readiness.tone}">${html(readiness.label.replace(/^Shopify\s+/i, ""))}</span>
     ${sync.label ? `<span class="shopify-sync-badge ${sync.className}" title="${html(sync.title)}">${html(sync.label)}</span>` : ""}
     ${statusText ? `<small>${html(statusText)}</small>` : ""}
-    <small>${idText}</small>
+    <small>${skuText}</small>
   `;
 }
 
@@ -10673,6 +12187,7 @@ function compactShopifyStatusCell(item = {}) {
 
 function shopifySyncSourceMeta(item = {}) {
   const source = String(item.shopifySyncSource || "").trim().toLowerCase();
+  if (source === "shopify-api-sku-map") return { label: "API", className: "graphql", title: `Matched from live Shopify SKU map${item.shopifySyncedAt ? ` on ${dateLabel(item.shopifySyncedAt)}` : ""}` };
   if (source === "graphql") return { label: "GraphQL", className: "graphql", title: `Synced from Shopify API${item.shopifySyncedAt ? ` on ${dateLabel(item.shopifySyncedAt)}` : ""}` };
   if (source === "manual_upload") return { label: "CSV", className: "manual", title: `Updated from manual Shopify status upload${item.shopifySyncedAt ? ` on ${dateLabel(item.shopifySyncedAt)}` : ""}` };
   if (item.shopifyId) return { label: "Unsynced", className: "unknown", title: "Shopify ID exists, but sync source is not known yet." };
@@ -10988,9 +12503,103 @@ function sourceNumberValue(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
+function isClearanceItem(item = {}) {
+  const statusValues = [item.status, item.stockStatus].map((value) => String(value || "").trim().toLowerCase());
+  const indicatorValues = [item.itemClearanceIndicator, item.item_clearance_indicator].map((value) => String(value || "").trim().toLowerCase());
+  return statusValues.some((value) => ["clearance", "clearance item", "closeout"].includes(value))
+    || indicatorValues.some((value) => ["clearance", "clearance item", "closeout", "y", "yes", "true", "1"].includes(value));
+}
+
 function productUomQty(item = {}) {
   const qty = Number(sourceNumberValue(item.uomQty ?? item.uom_qty ?? item.minQuantity ?? item.min_quantity ?? item.quantityIncrements ?? item.quantity_increments ?? 1));
   return Number.isFinite(qty) && qty > 1 ? qty : 1;
+}
+
+function productSupplierTokens(item = {}) {
+  return [
+    item.supplierCode,
+    item.supplier_code,
+    item.raw?.supplierCode,
+    item.raw?.supplier_code,
+    item.supplier,
+    item.vendor,
+    item.defaultSupplier,
+    item.default_supplier,
+    item.raw?.supplier,
+    item.raw?.vendor,
+    item.raw?.defaultSupplier,
+    item.raw?.default_supplier
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+}
+
+function vendorProfileForProduct(item = {}) {
+  const vendors = Array.isArray(state?.vendors) ? state.vendors : [];
+  if (!vendors.length) return null;
+  const tokens = new Set(productSupplierTokens(item).map((value) => value.toLowerCase()).filter(Boolean));
+  if (!tokens.size) return null;
+  return vendors.find((vendor) => {
+    const vendorTokens = [
+      vendor.id,
+      vendor.vendor_id,
+      vendor.code,
+      vendor.vendorCode,
+      vendor.vendorNumber,
+      vendor.name
+    ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+    return vendorTokens.some((value) => tokens.has(value) || (value && [...tokens].some((token) => token.includes(value) || value.includes(token))));
+  }) || null;
+}
+
+function productPricingRules(item = {}) {
+  const vendor = vendorProfileForProduct(item);
+  const rules = vendor?.pricingRules && typeof vendor.pricingRules === "object" ? vendor.pricingRules : {};
+  const isEssendant = productSupplierTokens(item).some((value) => {
+    const text = value.toLowerCase();
+    return text === "uss" || text.includes("essendant");
+  });
+  return {
+    costBasis: rules.costBasis || (isEssendant ? "sell-unit" : "each-unit"),
+    enforceMinimumAllowedPrice: rules.enforceMinimumAllowedPrice !== false,
+    suspiciousPriceMultiplier: Number(rules.suspiciousPriceMultiplier || 5),
+    note: rules.note || ""
+  };
+}
+
+function productVariationRules(item = {}) {
+  const vendor = vendorProfileForProduct(item);
+  const rules = vendor?.variationRules && typeof vendor.variationRules === "object" ? vendor.variationRules : {};
+  const channelRules = vendor?.channelRules?.shopify && typeof vendor.channelRules.shopify === "object" ? vendor.channelRules.shopify : {};
+  const isEssendant = productSupplierTokens(item).some((value) => {
+    const text = value.toLowerCase();
+    return text === "uss" || text.includes("essendant");
+  });
+  const isTrueValue = productSupplierTokens(item).some((value) => {
+    const text = value.toLowerCase();
+    return text === "trv" || text.includes("true value");
+  });
+  return {
+    shopifyVariantMode: rules.shopifyVariantMode || channelRules.variantMode || (isEssendant ? "uom-only" : isTrueValue ? "each-and-uom" : "standard"),
+    allowShopifyVariations: rules.allowShopifyVariations ?? channelRules.allowVariations ?? (isEssendant ? false : true),
+    note: rules.note || channelRules.note || ""
+  };
+}
+
+function productUsesSellUnitPricing(item = {}) {
+  if (productPricingRules(item).costBasis === "sell-unit") return true;
+  return productSupplierTokens(item).some((value) => {
+    const text = value.toLowerCase();
+    return text === "uss" || text.includes("essendant");
+  });
+}
+
+function productRequiresUomOnlyVariants(item = {}) {
+  const rules = productVariationRules(item);
+  return rules.shopifyVariantMode === "uom-only" || rules.allowShopifyVariations === false;
+}
+
+function productRequiresEachAndUomVariants(item = {}) {
+  const rules = productVariationRules(item);
+  return rules.shopifyVariantMode === "each-and-uom" && rules.allowShopifyVariations !== false && productUomQty(item) > 1;
 }
 
 function productUomInfo(item = {}) {
@@ -11006,9 +12615,134 @@ function productUomInfo(item = {}) {
   };
 }
 
+function productEachUnitCost(item = {}) {
+  const cost = Number(sourceNumberValue(
+    item.cost
+    ?? item.sourceCost
+    ?? item.source_cost
+    ?? item.vendorCost
+    ?? item.vendor_cost
+    ?? item.wholesalePrice
+    ?? item.wholesale_price
+    ?? item.price
+    ?? item.websitePrice
+    ?? item.fobPrice
+    ?? item.fob_price
+    ?? 0
+  ));
+  if (productUsesSellUnitPricing(item)) {
+    const qty = productUomQty(item);
+    return qty > 1 && cost > 0 ? Math.round((cost / qty) * 10000) / 10000 : cost;
+  }
+  return cost;
+}
+
 function productSellUnitCost(item = {}) {
-  const unitCost = Number(sourceNumberValue(item.sourceCost ?? item.cost ?? item.fobPrice ?? item.fob_price ?? item.wholesalePrice ?? item.wholesale_price ?? item.price ?? 0));
+  if (productUsesSellUnitPricing(item)) {
+    const cost = Number(sourceNumberValue(
+      item.cost
+      ?? item.sourceCost
+      ?? item.source_cost
+      ?? item.vendorCost
+      ?? item.vendor_cost
+      ?? item.wholesalePrice
+      ?? item.wholesale_price
+      ?? item.price
+      ?? item.websitePrice
+      ?? item.fobPrice
+      ?? item.fob_price
+      ?? 0
+    ));
+    return cost > 0 ? cost : 0;
+  }
+  const unitCost = productEachUnitCost(item);
   return unitCost > 0 ? unitCost * productUomQty(item) : 0;
+}
+
+function productAvailableQty(item = {}) {
+  return Math.max(0, Number(sourceNumberValue(item.qty ?? item.stockQty ?? item.inventoryQty ?? item.shopifyInventoryQty ?? 0)) - Number(sourceNumberValue(item.reserved || 0)));
+}
+
+function productIsReplenishable(item = {}) {
+  if (item.replenishableUseVendorRules === true || item.raw?.replenishableUseVendorRules === true) return false;
+  const value = item.replenishable ?? item.isReplenishable ?? item.raw?.replenishable ?? item.raw?.isReplenishable;
+  return value === true || ["true", "yes", "y", "1"].includes(String(value || "").trim().toLowerCase());
+}
+
+function productUsesVendorReplenishableRules(item = {}) {
+  const value = item.replenishableUseVendorRules ?? item.raw?.replenishableUseVendorRules;
+  return value === true || ["true", "yes", "y", "1"].includes(String(value || "").trim().toLowerCase());
+}
+
+function productUsesVendorReplenishableQty(item = {}) {
+  const value = item.replenishableQtyUseVendorDefault ?? item.raw?.replenishableQtyUseVendorDefault;
+  return value === true || ["true", "yes", "y", "1"].includes(String(value || "").trim().toLowerCase());
+}
+
+function productReplenishableQty(item = {}) {
+  const vendor = vendorProfileForProduct(item);
+  const vendorRuleEnabled = vendor?.inventoryRules?.replenishableEnabled === true || vendor?.inventoryRules?.enabled === true;
+  const vendorQty = vendorRuleEnabled ? Number(sourceNumberValue(vendor?.inventoryRules?.replenishableQty ?? vendor?.replenishableQty ?? 0)) : 0;
+  if (productUsesVendorReplenishableRules(item)) {
+    if (!vendorRuleEnabled) return 0;
+    return Math.max(1, Math.floor(vendorQty > 0 ? vendorQty : 1));
+  }
+  if (!productIsReplenishable(item)) return 0;
+  if (productUsesVendorReplenishableQty(item)) {
+    if (!vendorRuleEnabled) return 0;
+    return Math.max(1, Math.floor(vendorQty > 0 ? vendorQty : 1));
+  }
+  const skuQty = Number(sourceNumberValue(item.replenishableQty ?? item.raw?.replenishableQty ?? 0));
+  if (skuQty > 0) return Math.max(1, Math.floor(skuQty));
+  return 0;
+}
+
+function productSellableQty(item = {}) {
+  const replenishableQty = productReplenishableQty(item);
+  return replenishableQty > 0 ? replenishableQty : productAvailableQty(item);
+}
+
+function shopifyVariantPriceBasis(item = {}, variant = {}) {
+  const eachCost = productEachUnitCost(item);
+  const qty = Math.max(1, Number(variant.uomQty || variant.packQty || productUomQty(item) || 1));
+  if (productUsesSellUnitPricing(item)) {
+    const sellQty = productUomQty(item);
+    if (qty === sellQty) return productSellUnitCost(item);
+    if (eachCost > 0) return Math.round(eachCost * qty * 10000) / 10000;
+  }
+  if (eachCost > 0) return Math.round(eachCost * qty * 10000) / 10000;
+  return Number(variant.unitCost || productSellUnitCost(item) || 0);
+}
+
+function shopifySingleUnitWebsitePrice(item = {}, settings = channelSettingsByName("Shopify")) {
+  const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(item);
+  if (vendorWebsitePrice > 0) return roundMarketplacePrice(vendorWebsitePrice, settings.roundingRule || "none");
+  const eachCost = productEachUnitCost(item);
+  const markupPercent = Number(settings.priceMarkupPercent || 0);
+  if (eachCost > 0 && markupPercent > 0) return roundMarketplacePrice(eachCost * (1 + markupPercent / 100), settings.roundingRule || "none");
+  return roundMarketplacePrice(productBaseSellPrice(item), settings.roundingRule || "none");
+}
+
+function shopifyUsableVendorWebsitePrice(item = {}) {
+  const vendorWebsitePrice = Number(sourceNumberValue(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price ?? 0));
+  if (!(vendorWebsitePrice > 0)) return 0;
+  const eachCost = productEachUnitCost(item);
+  const minimumAllowedPrice = Number(sourceNumberValue(item.minimumAllowedPrice ?? item.minimum_allowed_price ?? item.productManagerFields?.minimum_allowed_price ?? 0));
+  const floor = Math.max(eachCost || 0, minimumAllowedPrice || 0);
+  return floor > 0 && vendorWebsitePrice < floor ? 0 : vendorWebsitePrice;
+}
+
+function shopifyVariantWebsitePrice(item = {}, variant = {}, settings = channelSettingsByName("Shopify")) {
+  const qty = Math.max(1, Number(variant.uomQty || variant.packQty || productUomQty(item) || 1));
+  if (productUsesSellUnitPricing(item)) {
+    return suggestedChannelPrice({ ...item, sellUnitCost: shopifyVariantPriceBasis(item, variant), __shopifyVariantUomQty: qty }, "Shopify");
+  }
+  if (qty > 1) {
+    const singlePrice = shopifySingleUnitWebsitePrice(item, settings);
+    const discountMultiplier = 1 - (SHOPIFY_MULTIPACK_DISCOUNT_PERCENT / 100);
+    if (singlePrice > 0) return roundMarketplacePrice(singlePrice * qty * discountMultiplier, settings.roundingRule || "none");
+  }
+  return suggestedChannelPrice({ ...item, sellUnitCost: shopifyVariantPriceBasis(item, variant), __shopifyVariantUomQty: qty }, "Shopify");
 }
 
 function variantBaseSku(item = {}) {
@@ -11025,7 +12759,7 @@ function normalizeSystemVariant(variant = {}, parent = {}) {
   const uom = productUomInfo({ ...parent, uom: variant.uom || parent.uom, uomQty: variant.uomQty || variant.packQty || parent.uomQty });
   const parentSku = variantBaseSku(parent);
   const sku = String(variant.sku || (uom.isMultiUnit ? variantSkuFromBase(parentSku, `${uom.qty}PC`) : parentSku)).trim();
-  const available = Math.max(0, Number(parent.qty ?? parent.stockQty ?? 0) - Number(parent.reserved || 0));
+  const available = productSellableQty(parent);
   const key = String(variant.key || (uom.isMultiUnit ? `pack-${uom.qty}` : "each")).trim();
   return {
     id: String(variant.id || `${parentSku || "sku"}:${key}`),
@@ -11052,6 +12786,27 @@ function normalizeSystemVariant(variant = {}, parent = {}) {
 }
 
 function systemProductVariants(item = {}) {
+  if (productRequiresUomOnlyVariants(item)) return [normalizeSystemVariant({}, item)];
+  if (productRequiresEachAndUomVariants(item)) {
+    return [
+      normalizeSystemVariant({
+        key: "each",
+        optionName: "Purchase Unit",
+        optionValue: "Each",
+        uom: "EA",
+        uomQty: 1,
+        packQty: 1,
+        variantType: "each",
+        note: "Individual unit generated from vendor variation rules."
+      }, item),
+      normalizeSystemVariant({
+        key: `pack-${productUomQty(item)}`,
+        optionName: "Purchase Unit",
+        variantType: "sell-unit",
+        note: "Vendor UOM sell unit generated from vendor variation rules."
+      }, item)
+    ];
+  }
   const explicit = Array.isArray(item.systemVariants) ? item.systemVariants : [];
   const generated = normalizeSystemVariant({}, item);
   const manual = explicit.filter((variant) => variant.generated === false || String(variant.source || "").toLowerCase() === "manual").map((variant) => normalizeSystemVariant(variant, item));
@@ -11084,13 +12839,13 @@ function shopifyPurchaseVariants(item = {}) {
   if (Array.isArray(item.shopifyPurchaseVariants) && item.shopifyPurchaseVariants.length) return item.shopifyPurchaseVariants;
   const settings = channelSettingsByName("Shopify");
   return systemProductVariants(item).map((variant) => {
-    const unitCost = Number(variant.unitCost || productSellUnitCost(item));
-    const price = suggestedChannelPrice({ ...item, sellUnitCost: unitCost }, "Shopify");
+    const unitCost = shopifyVariantPriceBasis(item, variant);
+    const price = shopifyVariantWebsitePrice(item, variant, settings);
     return {
       ...variant,
       unitCost,
       price,
-      compareAtPrice: roundMarketplacePrice(price * 1.2, settings.roundingRule || "none"),
+      compareAtPrice: isClearanceItem(item) ? roundMarketplacePrice(price * 1.2, settings.roundingRule || "none") : "",
       note: variant.note || "Actual DataPlus system variant."
     };
   });
@@ -11128,40 +12883,74 @@ function ebaySuggestedPrice(item = {}) {
 function channelSettingsByName(name = "") {
   const key = String(name || "").toLowerCase();
   const connection = (state.connections || []).find((channel) => String(channel.name || "").toLowerCase() === key);
-  return {
-    priceMarkupPercent: 60,
+  const settings = {
+    priceMarkupPercent: key === "shopify" ? 35 : 60,
     minMarginPercent: 0,
     roundingRule: "none",
     ...(connection?.settings || {})
   };
+  if (key === "shopify") settings.priceMarkupPercent = 35;
+  return settings;
 }
 
 function suggestedChannelPrice(item = {}, channelName = "") {
   const settings = channelSettingsByName(channelName);
   const cost = productCostValue(item);
   const basePrice = productBaseSellPrice(item);
+  const vendorWebsitePrice = Number(sourceNumberValue(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price ?? 0));
+  const usableVendorWebsitePrice = shopifyUsableVendorWebsitePrice(item);
+  const isShopify = String(channelName || "").toLowerCase() === "shopify";
+  const shopifyVariantQty = Number(item.__shopifyVariantUomQty || productUomQty(item) || 1);
+  const allowVendorWebsitePrice = !isShopify || shopifyVariantQty <= 1;
   const markupPercent = Number(settings.priceMarkupPercent || 0);
   const marginPercentSetting = Number(settings.minMarginPercent || 0);
   const markupPrice = cost > 0 && markupPercent > 0 ? cost * (1 + markupPercent / 100) : 0;
+  if (isShopify) {
+    if (shopifyVariantQty > 1) {
+      const singlePrice = shopifySingleUnitWebsitePrice(item, settings);
+      const discountMultiplier = 1 - (SHOPIFY_MULTIPACK_DISCOUNT_PERCENT / 100);
+      if (singlePrice > 0) return roundMarketplacePrice(singlePrice * shopifyVariantQty * discountMultiplier, settings.roundingRule || "none");
+    }
+    if (allowVendorWebsitePrice && usableVendorWebsitePrice > 0) return roundMarketplacePrice(usableVendorWebsitePrice, settings.roundingRule || "none");
+    return roundMarketplacePrice(markupPrice || cost || basePrice, settings.roundingRule || "none");
+  }
   const marginPrice = cost > 0 && marginPercentSetting > 0 && marginPercentSetting < 100 ? cost / (1 - marginPercentSetting / 100) : 0;
   return roundMarketplacePrice(Math.max(markupPrice, marginPrice, basePrice, cost), settings.roundingRule || "none");
 }
 
 function pricingCalculationParts(item = {}, channelName = "Shopify") {
   const settings = channelSettingsByName(channelName);
+  const isShopify = String(channelName || "").toLowerCase() === "shopify";
   const cost = productCostValue(item);
   const listPrice = productBaseSellPrice(item);
+  const vendorWebsitePrice = Number(sourceNumberValue(item.vendorWebsitePrice ?? item.vendor_website_price ?? item.productManagerFields?.vendor_website_price ?? 0));
+  const usableVendorWebsitePrice = shopifyUsableVendorWebsitePrice(item);
+  const shopifyVariantQty = Number(item.__shopifyVariantUomQty || productUomQty(item) || 1);
+  const allowVendorWebsitePrice = !isShopify || shopifyVariantQty <= 1;
   const markupPercent = Number(settings.priceMarkupPercent || 0);
   const marginPercentSetting = Number(settings.minMarginPercent || 0);
   const markupPrice = cost > 0 && markupPercent > 0 ? cost * (1 + markupPercent / 100) : 0;
+  const shopifyMultipackPrice = isShopify && shopifyVariantQty > 1
+    ? shopifySingleUnitWebsitePrice(item, settings) * shopifyVariantQty * (1 - SHOPIFY_MULTIPACK_DISCOUNT_PERCENT / 100)
+    : 0;
   const marginPrice = cost > 0 && marginPercentSetting > 0 && marginPercentSetting < 100 ? cost / (1 - marginPercentSetting / 100) : 0;
-  const candidates = [
-    { label: `${markupPercent.toFixed(2)}% markup`, value: markupPrice },
-    { label: `${marginPercentSetting.toFixed(2)}% minimum margin`, value: marginPrice },
-    { label: "List price floor", value: listPrice },
-    { label: "Cost floor", value: cost }
-  ].filter((row) => row.value > 0);
-  const selected = candidates.reduce((best, row) => row.value > best.value ? row : best, { label: "No price rule", value: 0 });
+  const candidates = (isShopify
+    ? [
+        { label: `${SHOPIFY_MULTIPACK_DISCOUNT_PERCENT}% multipack discount`, value: shopifyVariantQty > 1 ? shopifyMultipackPrice : 0 },
+        { label: "Vendor website price (1 pc only)", value: allowVendorWebsitePrice ? usableVendorWebsitePrice : 0 },
+        { label: `${markupPercent.toFixed(2)}% Shopify markup`, value: markupPrice },
+        { label: "Cost fallback", value: cost },
+        { label: "List fallback", value: listPrice }
+      ]
+    : [
+        { label: `${markupPercent.toFixed(2)}% markup`, value: markupPrice },
+        { label: `${marginPercentSetting.toFixed(2)}% minimum margin`, value: marginPrice },
+        { label: "List price floor", value: listPrice },
+        { label: "Cost floor", value: cost }
+      ]).filter((row) => row.value > 0);
+  const selected = isShopify
+    ? (candidates[0] || { label: "No price rule", value: 0 })
+    : candidates.reduce((best, row) => row.value > best.value ? row : best, { label: "No price rule", value: 0 });
   return {
     settings,
     cost,
@@ -11186,33 +12975,68 @@ function renderCostField(item = {}) {
   const uom = productUomInfo(item);
   const unitCost = Number(item.sourceCost ?? item.cost ?? 0);
   const sellUnitCost = productCostValue(item);
+  const helper = uom.isMultiUnit ? `${money(unitCost)} each x ${uom.qty} = ${money(sellUnitCost)} per ${html(uom.display)}` : `${priceUpdateLabel(item)}`;
+  if (!productEditModeActive()) {
+    return renderPricingValueField("Cost", "cost", item.cost, { helper });
+  }
   return `
     <label class="product-cost-field">Cost
       <input type="number" step="0.01" value="${html(item.cost ?? "")}" data-product-field="cost" data-product-id="${item.id}" />
-      <small>${uom.isMultiUnit ? `${money(unitCost)} each x ${uom.qty} = ${money(sellUnitCost)} per ${html(uom.display)}` : `${priceUpdateLabel(item)}`}</small>
+      <small>${helper}</small>
     </label>
   `;
 }
 
-function renderPricingFeedback(item = {}) {
-  const website = pricingCalculationParts(item, "Shopify");
-  const listText = website.listPrice > 0 ? `List price is ${money(website.listPrice)} from the source catalog.` : "No source list price is available.";
+function renderPricingValueField(label, field, value, options = {}) {
+  const formatted = options.money === false ? html(value ?? "") : money(Number(value || 0));
   return `
-    <div class="pricing-feedback">
-      <div>
-        <strong>Website price calculation</strong>
-        <span>${productUomInfo(item).isMultiUnit ? `${html(productUomInfo(item).display)} sell-unit cost` : "Cost"} ${money(website.cost)} x ${(1 + website.markupPercent / 100).toFixed(2)} = ${money(website.markupPrice)} using the Shopify/website markup rule.</span>
-      </div>
-      <div>
-        <strong>Rule guardrails</strong>
-        <span>${listText} Channel suggestions use the highest eligible value from markup, minimum margin, list price, and cost.</span>
-      </div>
-      <div>
-        <strong>Cost freshness</strong>
-        <span>${priceUpdateLabel(item)}</span>
-      </div>
+    <article class="pricing-value-card ${options.tone ? `pricing-value-${html(options.tone)}` : ""}">
+      <span>${html(label)}</span>
+      <strong>${formatted}</strong>
+      ${options.helper ? `<small>${options.helper}</small>` : ""}
+    </article>
+  `;
+}
+
+function shopifyLivePriceComparison(item = {}) {
+  const systemPrice = Number(item.shopifySystemPrice ?? item.websitePrice ?? item.price ?? 0);
+  const livePrice = item.shopifyLivePrice === null || item.shopifyLivePrice === undefined || item.shopifyLivePrice === "" ? null : Number(item.shopifyLivePrice);
+  const delta = livePrice === null || !Number.isFinite(livePrice) ? null : Math.round((systemPrice - livePrice) * 100) / 100;
+  return {
+    systemPrice,
+    livePrice,
+    delta,
+    mismatch: livePrice !== null && Number.isFinite(livePrice) && Math.abs(delta) >= 0.01,
+    variantSku: item.shopifyLiveVariantSku || item.shopifyVariantSku || item.sku || "",
+    variantId: item.shopifyLiveVariantId || item.shopifyVariantId || ""
+  };
+}
+
+function renderShopifyLivePricePanel(item = {}) {
+  const comparison = shopifyLivePriceComparison(item);
+  const live = productShopifyReadiness(item).live === true;
+  const source = shopifySyncSourceMeta(item);
+  const liveText = comparison.livePrice === null ? "Not synced" : money(comparison.livePrice);
+  const deltaText = comparison.delta === null ? "No live price" : `${comparison.delta > 0 ? "+" : ""}${money(comparison.delta)}`;
+  const syncedText = item.shopifySyncedAt ? `Last Shopify sync: ${html(dateLabel(item.shopifySyncedAt))}` : "Last Shopify sync: Not recorded";
+  return `
+    <div class="shopify-price-compare ${comparison.mismatch ? "has-mismatch" : ""}">
+      <article>
+        <span>Shopify web price</span>
+        <strong>${liveText}</strong>
+        <small>${live ? "Live from Shopify" : "Not live on Shopify"}${comparison.variantSku ? ` / ${html(comparison.variantSku)}` : ""}${source.label ? ` / ${html(source.label)}` : ""}<br>${syncedText}</small>
+      </article>
+      <article>
+        <span>DataPlus price</span>
+        <strong>${money(comparison.systemPrice)}</strong>
+        <small>${comparison.delta === null ? "No live comparison" : `Difference ${deltaText}${comparison.mismatch ? " / Needs update" : " / Current"}`}</small>
+      </article>
     </div>
   `;
+}
+
+function renderPricingFeedback(item = {}) {
+  return renderShopifyLivePricePanel(item);
 }
 
 function renderShopifyPurchaseVariants(item = {}) {
@@ -11223,7 +13047,7 @@ function renderShopifyPurchaseVariants(item = {}) {
       <div class="product-section-title">${sectionIconTitle("git-branch", "DataPlus Variants")}<span>${variants.length} actual sell unit${variants.length === 1 ? "" : "s"}</span></div>
       <div class="catalog-table-wrap compact-availability">
         <table class="catalog-table">
-          <thead><tr><th>Variant</th><th>SKU</th><th>Source</th><th>Unit cost</th><th>Shopify price</th><th>Margin</th><th>Qty</th><th>Rule</th></tr></thead>
+          <thead><tr><th>Variant</th><th>SKU</th><th>Source</th><th>Unit cost</th><th>DataPlus price</th><th>Shopify live</th><th>Margin</th><th>Qty</th><th>Rule</th></tr></thead>
           <tbody>
             ${variants.map((variant) => {
               const profit = Number(variant.price || 0) - Number(variant.unitCost || 0);
@@ -11234,6 +13058,7 @@ function renderShopifyPurchaseVariants(item = {}) {
                   <td>${html(variant.source || "data-dump")}</td>
                   <td>${money(variant.unitCost || 0)}</td>
                   <td><strong>${money(variant.price || 0)}</strong></td>
+                  <td>${variant.shopifyLivePrice === null || variant.shopifyLivePrice === undefined ? `<span class="muted">Not synced</span>` : `<strong class="${Math.abs(Number(variant.price || 0) - Number(variant.shopifyLivePrice || 0)) >= 0.01 ? "price-warning-text" : ""}">${money(variant.shopifyLivePrice)}</strong>`}</td>
                   <td>${marginPercent(profit, Number(variant.price || 0)).toFixed(1)}%</td>
                   <td>${countLabel(variant.quantity || 0)}</td>
                   <td>${html(variant.note || "")}</td>
@@ -11512,7 +13337,10 @@ function ebayChannelSettings() {
 }
 
 function appSystemSettings() {
-  return state.systemSettings || {};
+  return {
+    trueValueSourceCategoryAsMainCategory: true,
+    ...(state.systemSettings || {})
+  };
 }
 
 function productEditModeActive() {
@@ -11719,7 +13547,11 @@ function renderEbayListingTab(item) {
 }
 
 function renderProductInventoryTab(item) {
-  const available = Number(item.qty || 0) - Number(item.reserved || 0);
+  const physicalAvailable = productAvailableQty(item);
+  const sellableAvailable = productSellableQty(item);
+  const replenishableQty = productReplenishableQty(item);
+  const usesVendorReplenishableRules = productUsesVendorReplenishableRules(item);
+  const usesVendorReplenishableQty = productUsesVendorReplenishableQty(item);
   const grossProfit = Number(item.price || 0) - productCostValue(item);
   const ledger = (state.inventoryLedger || []).filter((row) => row.productId === item.id || row.sku === item.sku).slice(0, 8);
   const warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
@@ -11736,7 +13568,8 @@ function renderProductInventoryTab(item) {
         <div class="summary-grid product-home-summary">
           <span><small>On hand</small><strong>${Number(item.qty || 0)}</strong></span>
           <span><small>Reserved</small><strong>${Number(item.reserved || 0)}</strong></span>
-          <span><small>Available</small><strong>${available}</strong></span>
+          <span><small>Available</small><strong>${physicalAvailable}</strong></span>
+          <span><small>Sellable</small><strong>${sellableAvailable}</strong></span>
           <span><small>Reorder point</small><strong>${Number(item.reorderPoint || 0)}</strong></span>
           <span><small>Supplier stock</small><strong>${Number(item.stockQty ?? item.qty ?? 0)}</strong></span>
           <span><small>Stock status</small><strong>${html(item.stockStatus || "Unknown")}</strong></span>
@@ -11785,11 +13618,30 @@ function renderProductInventoryTab(item) {
         </div>
       </section>
       <section class="product-panel">
+        <h3>Replenishable</h3>
+        <div class="product-field-stack compact-fields">
+          <label class="checkbox-row">
+            <input type="checkbox" ${usesVendorReplenishableRules ? "checked" : ""} data-product-field="replenishableUseVendorRules" data-product-id="${item.id}" />
+            Use vendor replenishable rule
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" ${productIsReplenishable(item) ? "checked" : ""} data-product-field="replenishable" data-product-id="${item.id}" ${usesVendorReplenishableRules ? "disabled" : ""} />
+            SKU replenishable
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" ${usesVendorReplenishableQty ? "checked" : ""} data-product-field="replenishableQtyUseVendorDefault" data-product-id="${item.id}" ${usesVendorReplenishableRules ? "disabled" : ""} />
+            Use vendor default qty
+          </label>
+          <label>SKU replenishable qty<input type="number" min="0" value="${html(item.replenishableQty ?? 0)}" data-product-field="replenishableQty" data-product-id="${item.id}" ${(usesVendorReplenishableRules || usesVendorReplenishableQty) ? "disabled" : ""} /></label>
+          <p class="muted">${replenishableQty > 0 ? `Shopify sellable qty will be ${replenishableQty}.` : "No replenishable override is active; normal stock will be used."}</p>
+        </div>
+      </section>
+      <section class="product-panel">
         <h3>Inventory Value</h3>
         <div class="summary-grid">
           <span><small>On-hand cost</small><strong>${money(Number(item.cost || 0) * Number(item.qty || 0))}</strong></span>
-          <span><small>Available sales</small><strong>${money(Number(item.price || 0) * available)}</strong></span>
-          <span><small>Gross profit</small><strong>${money(grossProfit * available)}</strong></span>
+          <span><small>Available sales</small><strong>${money(Number(item.price || 0) * sellableAvailable)}</strong></span>
+          <span><small>Gross profit</small><strong>${money(grossProfit * sellableAvailable)}</strong></span>
           <span><small>Vendor</small><strong>${html(item.vendor || item.supplier || "No vendor")}</strong></span>
         </div>
       </section>
@@ -11878,11 +13730,17 @@ function renderPricingTab(item, grossProfit, margin) {
     <div class="product-tab-grid">
       <section class="product-panel">
         <h3>Base Pricing</h3>
-        <div class="product-price-grid">
-          ${productFieldLabel("Website price", "price", item, { type: "number", step: "0.01" })}
+        <div class="product-price-grid pricing-field-grid">
+          ${productEditModeActive()
+            ? productFieldLabel("DataPlus price", "price", item, { type: "number", step: "0.01" })
+            : renderPricingValueField("DataPlus price", "price", item.price, { tone: "primary", helper: "Calculated Shopify rule price" })}
           ${renderCostField(item)}
-          ${productFieldLabel("List price", "listPrice", item, { type: "number", step: "0.01" })}
-          ${productFieldLabel("FOB", "fobPrice", item, { type: "number", step: "0.01" })}
+          ${productEditModeActive()
+            ? productFieldLabel("List/MSRP", "listPrice", item, { type: "number", step: "0.01" })
+            : renderPricingValueField("List/MSRP", "listPrice", item.listPrice, { tone: "muted", helper: "Compare-at/MSRP; only used for clearance" })}
+          ${productEditModeActive()
+            ? productFieldLabel("FOB", "fobPrice", item, { type: "number", step: "0.01" })
+            : renderPricingValueField("FOB", "fobPrice", item.fobPrice, { tone: "muted", helper: "Supplier landed/reference cost" })}
         </div>
         ${renderPricingFeedback(item)}
         <div class="product-margin-box"><small>Gross profit</small><strong>${money(grossProfit)}</strong><span>${margin.toFixed(1)}% margin</span></div>
@@ -12057,11 +13915,17 @@ function renderProductHomeTab(item, context) {
           </section>
           <section class="product-section-card product-section-teal">
             <div class="product-section-title">${sectionIconTitle("dollar-sign", "Pricing")}<span>${money(grossProfit)} profit</span></div>
-            <div class="product-row-fields">
-              ${productFieldLabel("Website price", "price", item, { type: "number", step: "0.01" })}
+            <div class="product-row-fields pricing-field-grid">
+              ${productEditModeActive()
+                ? productFieldLabel("DataPlus price", "price", item, { type: "number", step: "0.01" })
+                : renderPricingValueField("DataPlus price", "price", item.price, { tone: "primary", helper: "Calculated Shopify rule price" })}
               ${renderCostField(item)}
-              ${productFieldLabel("List price", "listPrice", item, { type: "number", step: "0.01" })}
-              ${productFieldLabel("FOB", "fobPrice", item, { type: "number", step: "0.01" })}
+              ${productEditModeActive()
+                ? productFieldLabel("List/MSRP", "listPrice", item, { type: "number", step: "0.01" })
+                : renderPricingValueField("List/MSRP", "listPrice", item.listPrice, { tone: "muted", helper: "Compare-at/MSRP; only used for clearance" })}
+              ${productEditModeActive()
+                ? productFieldLabel("FOB", "fobPrice", item, { type: "number", step: "0.01" })
+                : renderPricingValueField("FOB", "fobPrice", item.fobPrice, { tone: "muted", helper: "Supplier landed/reference cost" })}
             </div>
             ${renderPricingFeedback(item)}
             <div class="summary-grid product-home-summary pricing-summary">
@@ -12194,7 +14058,7 @@ async function saveProductImagesModal() {
   selectedProductGalleryImageById[result.item.id] = defaultImage;
   setState(result.state || { ...state, inventory: state.inventory.map((row) => row.id === result.item.id ? result.item : row), summary: result.summary });
   closeProductImagesModal();
-  toast("Product images updated.");
+  showUpdateFocusModal("Product images updated", "Product media changes were saved.");
 }
 
 function openProductBulletsModal(productId) {
@@ -12263,7 +14127,7 @@ async function saveProductBulletsModal() {
   selectedProductId = result.item.id;
   setState(result.state || { ...state, inventory: state.inventory.map((row) => row.id === result.item.id ? result.item : row), summary: result.summary });
   closeProductBulletsModal();
-  toast("Bullet points updated.");
+  showUpdateFocusModal("Bullet points updated", "Product bullet points were saved.");
 }
 
 function renderProductContentPage() {
@@ -12758,7 +14622,11 @@ function renderInventoryProductPage() {
     target.innerHTML = `<div class="empty-state">Select an inventory item to view details.</div>`;
     return;
   }
-  const available = Number(item.qty || 0) - Number(item.reserved || 0);
+  const available = productAvailableQty(item);
+  const sellableAvailable = productSellableQty(item);
+  const replenishableQty = productReplenishableQty(item);
+  const usesVendorReplenishableRules = productUsesVendorReplenishableRules(item);
+  const usesVendorReplenishableQty = productUsesVendorReplenishableQty(item);
   const grossProfit = Number(item.price || 0) - productCostValue(item);
   const ledger = (state.inventoryLedger || []).filter((row) => row.productId === item.id || row.sku === item.sku).slice(0, 12);
   const serialUnits = Array.isArray(item.serialUnits) ? item.serialUnits : [];
@@ -12773,8 +14641,8 @@ function renderInventoryProductPage() {
           <p class="muted">${html(item.title || item.marketplaceTitle || "Untitled product")}</p>
         </div>
         <div class="profit-pill">
-          <small>Available</small>
-          <strong>${available}</strong>
+          <small>Sellable</small>
+          <strong>${sellableAvailable}</strong>
         </div>
       </div>
       <div class="full-order-grid">
@@ -12784,6 +14652,7 @@ function renderInventoryProductPage() {
             <span><small>On hand</small><strong>${Number(item.qty || 0)}</strong></span>
             <span><small>Reserved</small><strong>${Number(item.reserved || 0)}</strong></span>
             <span><small>Available</small><strong>${available}</strong></span>
+            <span><small>Sellable</small><strong>${sellableAvailable}</strong></span>
             <span><small>Reorder point</small><strong>${Number(item.reorderPoint || 0)}</strong></span>
             <span><small>Vendor</small><strong>${html(item.vendor || "No vendor")}</strong></span>
             <span><small>Status</small><strong>${html(item.status || "Draft")}</strong></span>
@@ -12795,7 +14664,14 @@ function renderInventoryProductPage() {
         </section>
         <section class="full-card">
           <h3>Inventory Controls</h3>
-          <p class="muted">Stock is now managed by warehouse and location. Use the warehouse stock table to edit on hand, reserved, and reorder values.</p>
+          <div class="edit-stack">
+            <p class="muted">Stock is managed by warehouse and location. Replenishable controls only affect outbound sellable quantity.</p>
+            <label class="checkbox-row"><input type="checkbox" ${usesVendorReplenishableRules ? "checked" : ""} data-product-field="replenishableUseVendorRules" data-product-id="${item.id}" />Use vendor replenishable rule</label>
+            <label class="checkbox-row"><input type="checkbox" ${productIsReplenishable(item) ? "checked" : ""} data-product-field="replenishable" data-product-id="${item.id}" ${usesVendorReplenishableRules ? "disabled" : ""} />SKU replenishable</label>
+            <label class="checkbox-row"><input type="checkbox" ${usesVendorReplenishableQty ? "checked" : ""} data-product-field="replenishableQtyUseVendorDefault" data-product-id="${item.id}" ${usesVendorReplenishableRules ? "disabled" : ""} />Use vendor default qty</label>
+            <label>SKU replenishable qty<input type="number" min="0" value="${Number(item.replenishableQty || 0)}" data-product-field="replenishableQty" data-product-id="${item.id}" ${(usesVendorReplenishableRules || usesVendorReplenishableQty) ? "disabled" : ""} /></label>
+            <p class="muted">${replenishableQty > 0 ? `Marketplace sellable qty: ${replenishableQty}.` : "No replenishable override is active; normal stock will be used."}</p>
+          </div>
         </section>
         <section class="full-card">
           <h3>Costing</h3>
@@ -13269,13 +15145,18 @@ const KNOWLEDGE_HOW_TO = [
     ]
   },
   {
-    title: "Run product dump maintenance",
+    title: "Refresh the source catalog from the product dump",
     area: "Admin",
     steps: [
-      "Import the product BSON dump with the product dump script.",
-      "Rebuild the source catalog index after replacing the catalog file.",
-      "Import Shopify taxonomy when category references need updating.",
-      "Use Jobs and Catalog to review import results before promoting SKUs."
+      "Open Jobs and confirm Job runner is set to External worker for large imports.",
+      "Start the worker from the project folder with npm run worker if the worker health card is offline.",
+      "Queue the Source Catalog product dump import from the app. The normal full import streams products.bson.gz directly into PostgreSQL.",
+      "Watch the Product dump import job in Jobs. A healthy run shows streamed row progress and an online worker heartbeat.",
+      "The import updates vendor_feed_runs, vendor_catalog_items, vendor_catalog_snapshots, and product_change_events. These tables are the source for source catalog rows and SKU change tracking.",
+      "Use Refresh pricing & inventory when you only need latest cost, Shopify price, stock, promo, and closeout pricing instead of a full catalog refresh.",
+      "After a full import finishes, refresh source catalog facets or performance indexes if supplier filters, counts, or search feel stale.",
+      "Run Shopify or Matrixify exports after the dump import completes. The default worker processes one job at a time, so exports queued during the import wait their turn.",
+      "Use the direct product dump script only for diagnostics, limited samples, or intentional local artifact rebuilds."
     ]
   }
 ];
@@ -13987,6 +15868,215 @@ function renderReports() {
 
 }
 
+function filteredSystemFields() {
+  const fields = systemFieldRegistry || [];
+  const query = String(systemFieldFilters.query || "").trim().toLowerCase();
+  return fields.filter((field) => {
+    if (systemFieldFilters.group && field.group !== systemFieldFilters.group) return false;
+    if (systemFieldFilters.type && field.type !== systemFieldFilters.type) return false;
+    if (!query) return true;
+    return [
+      field.key,
+      field.label,
+      field.type,
+      field.group,
+      field.rule,
+      ...(field.dumpKeys || []),
+      ...(field.origins || []),
+      ...(field.templateUsage || [])
+    ].some((value) => String(value || "").toLowerCase().includes(query));
+  });
+}
+
+function systemFieldChipList(values = [], empty = "None") {
+  const list = (values || []).filter(Boolean);
+  if (!list.length) return `<span class="muted">${html(empty)}</span>`;
+  return `<div class="system-field-chip-list">${list.slice(0, 8).map((value) => `<span>${html(value)}</span>`).join("")}${list.length > 8 ? `<span>+${list.length - 8}</span>` : ""}</div>`;
+}
+
+function renderSystemFieldsSection() {
+  const allFields = systemFieldRegistry || [];
+  const fields = filteredSystemFields();
+  const groups = [...new Set(allFields.map((field) => field.group).filter(Boolean))].sort();
+  const types = [...new Set(allFields.map((field) => field.type).filter(Boolean))].sort();
+  return `
+    <section class="system-settings-card span-2 system-fields-card">
+      <div class="section-head compact-head">
+        <div>
+          <h3>System Fields</h3>
+          <p class="muted">Native DataPlus attributes and how incoming data-dump columns map into them. Use this as the crosswalk before adding new vendor data sources.</p>
+        </div>
+        <button class="button secondary compact-button" type="button" data-refresh-system-fields>${withIcon("refresh-cw", "Refresh")}</button>
+      </div>
+      <div class="system-fields-toolbar">
+        <input type="search" value="${html(systemFieldFilters.query || "")}" data-system-field-search placeholder="Search native field, dump column, template, or rule" />
+        <select data-system-field-group>
+          <option value="">All groups</option>
+          ${groups.map((group) => `<option value="${html(group)}" ${systemFieldFilters.group === group ? "selected" : ""}>${html(group)}</option>`).join("")}
+        </select>
+        <select data-system-field-type>
+          <option value="">All types</option>
+          ${types.map((type) => `<option value="${html(type)}" ${systemFieldFilters.type === type ? "selected" : ""}>${html(type)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="system-fields-summary">
+        <span><strong>${allFields.length.toLocaleString()}</strong><small>native fields</small></span>
+        <span><strong>${fields.length.toLocaleString()}</strong><small>visible</small></span>
+        <span><strong>${allFields.filter((field) => (field.dumpKeys || []).length).length.toLocaleString()}</strong><small>mapped from dump</small></span>
+        <span><strong>${allFields.filter((field) => (field.templateUsage || []).length).length.toLocaleString()}</strong><small>used by templates</small></span>
+      </div>
+      <div class="system-fields-table-wrap">
+        <table class="system-fields-table">
+          <thead>
+            <tr>
+              <th>Native attribute</th>
+              <th>Type</th>
+              <th>Group</th>
+              <th>Data dump columns</th>
+              <th>Shopify/export</th>
+              <th>Rule / notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${fields.map((field) => `
+              <tr>
+                <td><strong>${html(field.label || field.key)}</strong><small>${html(field.key)}</small></td>
+                <td><span class="pill">${html(field.type || "text")}</span></td>
+                <td>${html(field.group || "Other")}</td>
+                <td>${systemFieldChipList(field.dumpKeys, "Unmapped")}</td>
+                <td>
+                  ${field.shopifyMetafield ? `<strong>${html(field.shopifyMetafield)}</strong><small>${html(field.shopifyType || "")}</small>` : systemFieldChipList(field.templateUsage, "No template usage")}
+                </td>
+                <td>${field.rule ? html(field.rule) : `<span class="muted">${html((field.origins || []).join(", ") || "Native field")}</span>`}</td>
+              </tr>
+            `).join("") || `<tr><td colspan="6"><div class="empty-state compact">No system fields match this filter.</div></td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function renderSystemFieldsPage() {
+  const target = $("#system-fields-page");
+  if (!target) return;
+  if (!systemFieldRegistry) {
+    loadSystemFieldRegistry().then(() => {
+      if (currentViewId === "system-fields") renderSystemFieldsPage();
+    }).catch(() => {});
+  }
+  target.innerHTML = `
+    <div class="system-settings-page">
+      <section class="system-settings-hero">
+        <div>
+          <p class="eyebrow">System Settings</p>
+          <h2>System Fields</h2>
+          <p class="muted">Native DataPlus attributes, data-dump mappings, field types, Shopify usage, and import rules.</p>
+        </div>
+        <div class="button-row compact-buttons">
+          <button class="button secondary" type="button" data-refresh-system-fields>${withIcon("refresh-cw", "Refresh")}</button>
+        </div>
+      </section>
+      <div class="system-settings-grid">
+        ${renderSystemFieldsSection()}
+      </div>
+    </div>
+  `;
+}
+
+function renderSystemOperationsPage() {
+  const target = $("#system-operations-page");
+  if (!target) return;
+  const settings = appSystemSettings();
+  const editable = systemSettingsEditMode;
+  target.innerHTML = `
+    <div class="system-settings-page">
+      <section class="system-settings-hero">
+        <div>
+          <p class="eyebrow">System Settings</p>
+          <h2>Operations</h2>
+          <p class="muted">Background job mode, source import defaults, backups, safety controls, and scheduled Shopify inventory settings.</p>
+        </div>
+        <div class="button-row compact-buttons">
+          <button class="button ${editable ? "" : "secondary"}" type="button" data-toggle-system-settings-edit>${withIcon(editable ? "check" : "edit-3", editable ? "Done editing" : "Edit operations")}</button>
+          <button class="button secondary" type="button" data-system-backup>${withIcon("database-backup", "Backup now")}</button>
+        </div>
+      </section>
+      <div class="system-settings-grid">
+        <section class="system-settings-card">
+          <h3>Operations</h3>
+          <div class="settings-field-stack">
+            <label>Background jobs
+              <select data-system-setting="backgroundJobsMode" ${editable ? "" : "disabled"}>
+                <option value="inline" ${settings.backgroundJobsMode === "inline" ? "selected" : ""}>Inline</option>
+                <option value="worker" ${settings.backgroundJobsMode === "worker" ? "selected" : ""}>Worker</option>
+              </select>
+            </label>
+            <label>Default source import
+              <select data-system-setting="sourceCatalogDefaultImportMode" ${editable ? "" : "disabled"}>
+                <option value="new-and-update" ${settings.sourceCatalogDefaultImportMode === "new-and-update" ? "selected" : ""}>New and update</option>
+                <option value="new-only" ${settings.sourceCatalogDefaultImportMode === "new-only" ? "selected" : ""}>New only</option>
+                <option value="update-existing" ${settings.sourceCatalogDefaultImportMode === "update-existing" ? "selected" : ""}>Update existing</option>
+              </select>
+            </label>
+            <label>Backup retention days<input type="number" min="1" max="365" value="${Number(settings.backupRetentionDays || 30)}" data-system-setting="backupRetentionDays" ${editable ? "" : "disabled"} /></label>
+          </div>
+        </section>
+        <section class="system-settings-card">
+          <h3>Safety Defaults</h3>
+          <div class="settings-toggle-grid single-column">
+            ${[
+              ["autoLoadProductAlternates", "Auto-load product alternates"],
+              ["autoDataQualityScanAfterImports", "Run data-quality scans after imports"],
+              ["dataQualityWorkerEnabled", "Allow worker data-quality scans"],
+              ["trueValueSourceCategoryAsMainCategory", "Use True Value vendor category as main category"],
+              ["backupIncludeSourceCatalog", "Include source catalog in backups"],
+              ["jobsRetentionAutoCleanupEnabled", "Auto-clean old jobs"],
+              ["requireAdminConfirmationForDeletes", "Require admin confirmation for deletes"]
+            ].map(([field, label]) => `
+              <label><input type="checkbox" ${settings[field] ? "checked" : ""} data-system-setting="${field}" ${editable ? "" : "disabled"} /> ${label}</label>
+            `).join("")}
+          </div>
+        </section>
+        <section class="system-settings-card span-2">
+          <div class="section-head compact-head">
+            <div>
+              <h3>SKU Change Tracking</h3>
+              <p class="muted">Choose which source catalog fields should appear in SKU Changes by default. Turn on Include untracked fields on the SKU Changes page for audit review.</p>
+            </div>
+            <button class="button secondary compact-button" type="button" data-save-sku-change-tracked-fields ${editable ? "" : "disabled"}>${withIcon("save", "Save fields")}</button>
+          </div>
+          <div class="settings-toggle-grid sku-change-field-settings">
+            ${SKU_CHANGE_TRACKED_FIELD_OPTIONS.map(([field, label]) => `
+              <label><input type="checkbox" ${trackedSkuChangeFields.includes(field) ? "checked" : ""} data-sku-change-tracked-field="${html(field)}" ${editable ? "" : "disabled"} /> ${html(label)}</label>
+            `).join("")}
+          </div>
+        </section>
+        <section class="system-settings-card span-2">
+          <div class="section-head compact-head">
+            <div>
+              <h3>Shopify Daily Inventory</h3>
+              <p class="muted">Queues the existing Shopify inventory job once per day after the latest product dump is available.</p>
+            </div>
+          </div>
+          <div class="settings-field-stack">
+            <label class="checkbox-row"><input type="checkbox" ${settings.shopifyDailyInventoryUpdateEnabled ? "checked" : ""} data-system-setting="shopifyDailyInventoryUpdateEnabled" ${editable ? "" : "disabled"} /> Enable daily Shopify inventory job</label>
+            <label>Run time<input type="time" value="${html(settings.shopifyDailyInventoryUpdateTime || "06:00")}" data-system-setting="shopifyDailyInventoryUpdateTime" ${editable ? "" : "disabled"} /></label>
+            <label>Mode
+              <select data-system-setting="shopifyDailyInventoryUpdateMode" ${editable ? "" : "disabled"}>
+                <option value="dry-run" ${settings.shopifyDailyInventoryUpdateMode !== "apply" ? "selected" : ""}>Dry run only</option>
+                <option value="apply" ${settings.shopifyDailyInventoryUpdateMode === "apply" ? "selected" : ""}>Apply to Shopify</option>
+              </select>
+            </label>
+            <label class="checkbox-row"><input type="checkbox" ${settings.shopifyDailyInventoryRequireSuccessfulDump !== false ? "checked" : ""} data-system-setting="shopifyDailyInventoryRequireSuccessfulDump" ${editable ? "" : "disabled"} /> Only run after a successful product dump import</label>
+          </div>
+          <p class="muted">Apply mode still requires Shopify inventory push to be enabled under Channels and a mapped Shopify location.</p>
+        </section>
+      </div>
+    </div>
+  `;
+}
+
 function renderSystemSettingsPage() {
   const target = $("#system-settings-page");
   if (!target) return;
@@ -14018,9 +16108,9 @@ function renderSystemSettingsPage() {
     <div class="system-settings-page">
       <section class="system-settings-hero">
         <div>
-          <p class="eyebrow">Admin</p>
-          <h2>System Settings</h2>
-          <p class="muted">App-wide defaults, access profiles, background jobs, backups, and safety controls live here. Marketplace settings stay under Channels.</p>
+          <p class="eyebrow">System Settings</p>
+          <h2>User Profiles</h2>
+          <p class="muted">Manage users, permission roles, workspace preferences, and operational defaults.</p>
         </div>
         <div class="button-row compact-buttons">
           <button class="button ${editable ? "" : "secondary"}" type="button" data-toggle-system-settings-edit>${withIcon(editable ? "check" : "edit-3", editable ? "Done editing" : "Edit settings")}</button>
@@ -14078,74 +16168,6 @@ function renderSystemSettingsPage() {
           <div class="role-chip-list">
             ${roles.map((role) => `<span><strong>${html(role.name)}</strong><small>${html((role.permissions || []).join(", ") || "No permissions")}</small></span>`).join("")}
           </div>
-        </section>
-        <section class="system-settings-card">
-          <h3>Operations</h3>
-          <div class="settings-field-stack">
-            <label>Background jobs
-              <select data-system-setting="backgroundJobsMode" ${editable ? "" : "disabled"}>
-                <option value="inline" ${settings.backgroundJobsMode === "inline" ? "selected" : ""}>Inline</option>
-                <option value="worker" ${settings.backgroundJobsMode === "worker" ? "selected" : ""}>Worker</option>
-              </select>
-            </label>
-            <label>Default source import
-              <select data-system-setting="sourceCatalogDefaultImportMode" ${editable ? "" : "disabled"}>
-                <option value="new-and-update" ${settings.sourceCatalogDefaultImportMode === "new-and-update" ? "selected" : ""}>New and update</option>
-                <option value="new-only" ${settings.sourceCatalogDefaultImportMode === "new-only" ? "selected" : ""}>New only</option>
-                <option value="update-existing" ${settings.sourceCatalogDefaultImportMode === "update-existing" ? "selected" : ""}>Update existing</option>
-              </select>
-            </label>
-            <label>Backup retention days<input type="number" min="1" max="365" value="${Number(settings.backupRetentionDays || 30)}" data-system-setting="backupRetentionDays" ${editable ? "" : "disabled"} /></label>
-          </div>
-        </section>
-        <section class="system-settings-card span-2">
-          <h3>Safety Defaults</h3>
-          <div class="settings-toggle-grid">
-            ${[
-              ["autoLoadProductAlternates", "Auto-load product alternates"],
-              ["autoDataQualityScanAfterImports", "Run data-quality scans after imports"],
-              ["dataQualityWorkerEnabled", "Allow worker data-quality scans"],
-              ["backupIncludeSourceCatalog", "Include source catalog in backups"],
-              ["jobsRetentionAutoCleanupEnabled", "Auto-clean old jobs"],
-              ["requireAdminConfirmationForDeletes", "Require admin confirmation for deletes"]
-            ].map(([field, label]) => `
-              <label><input type="checkbox" ${settings[field] ? "checked" : ""} data-system-setting="${field}" ${editable ? "" : "disabled"} /> ${label}</label>
-            `).join("")}
-          </div>
-        </section>
-        <section class="system-settings-card span-2">
-          <div class="section-head compact-head">
-            <div>
-              <h3>SKU Change Tracking</h3>
-              <p class="muted">Choose which source catalog fields should appear in SKU Changes by default. Turn on Include untracked fields on the SKU Changes page for audit review.</p>
-            </div>
-            <button class="button secondary compact-button" type="button" data-save-sku-change-tracked-fields ${editable ? "" : "disabled"}>${withIcon("save", "Save fields")}</button>
-          </div>
-          <div class="settings-toggle-grid sku-change-field-settings">
-            ${SKU_CHANGE_TRACKED_FIELD_OPTIONS.map(([field, label]) => `
-              <label><input type="checkbox" ${trackedSkuChangeFields.includes(field) ? "checked" : ""} data-sku-change-tracked-field="${html(field)}" ${editable ? "" : "disabled"} /> ${html(label)}</label>
-            `).join("")}
-          </div>
-        </section>
-        <section class="system-settings-card span-2">
-          <div class="section-head compact-head">
-            <div>
-              <h3>Shopify Daily Inventory</h3>
-              <p class="muted">Queues the existing Shopify inventory job once per day after the latest product dump is available.</p>
-            </div>
-          </div>
-          <div class="settings-field-stack">
-            <label class="checkbox-row"><input type="checkbox" ${settings.shopifyDailyInventoryUpdateEnabled ? "checked" : ""} data-system-setting="shopifyDailyInventoryUpdateEnabled" ${editable ? "" : "disabled"} /> Enable daily Shopify inventory job</label>
-            <label>Run time<input type="time" value="${html(settings.shopifyDailyInventoryUpdateTime || "06:00")}" data-system-setting="shopifyDailyInventoryUpdateTime" ${editable ? "" : "disabled"} /></label>
-            <label>Mode
-              <select data-system-setting="shopifyDailyInventoryUpdateMode" ${editable ? "" : "disabled"}>
-                <option value="dry-run" ${settings.shopifyDailyInventoryUpdateMode !== "apply" ? "selected" : ""}>Dry run only</option>
-                <option value="apply" ${settings.shopifyDailyInventoryUpdateMode === "apply" ? "selected" : ""}>Apply to Shopify</option>
-              </select>
-            </label>
-            <label class="checkbox-row"><input type="checkbox" ${settings.shopifyDailyInventoryRequireSuccessfulDump !== false ? "checked" : ""} data-system-setting="shopifyDailyInventoryRequireSuccessfulDump" ${editable ? "" : "disabled"} /> Only run after a successful product dump import</label>
-          </div>
-          <p class="muted">Apply mode still requires Shopify inventory push to be enabled under Channels and a mapped Shopify location.</p>
         </section>
       </div>
     </div>
@@ -14268,7 +16290,7 @@ function applyChannelApiLogFiltersFromDom() {
   };
 }
 
-function renderChannelApiHistory(channel) {
+function renderChannelApiHistory(channel, options = {}) {
   const channelName = channel?.name || "";
   const isCurrent = channelApiLogState.channel === channelName;
   const logs = isCurrent ? channelApiLogState.logs || [] : [];
@@ -14277,12 +16299,14 @@ function renderChannelApiHistory(channel) {
   const error = isCurrent ? channelApiLogState.error : "";
   const filters = channelApiLogFilters();
   const transports = [...new Set(logs.map((log) => String(log.transport || "").trim()).filter(Boolean))].sort();
+  const title = options.title || "Channel Logs";
+  const description = options.description || `Safe log of ${channelName} API calls, scheduled work, and inventory updates from the past 30 days. Tokens and secrets are not stored.`;
   return `
     <section class="full-card span-2 channel-api-history">
       <div class="section-head channel-settings-head">
         <div>
-          <h3>API History</h3>
-          <p class="muted">Safe log of ${html(channelName)} API calls from the past 30 days. Tokens and secrets are not stored.</p>
+          <h3>${html(title)}</h3>
+          <p class="muted">${html(description)}</p>
         </div>
         <button class="button secondary" type="button" data-refresh-channel-api-logs="${html(channelName)}">${withIcon("refresh-cw", loading ? "Refreshing..." : "Refresh logs")}</button>
       </div>
@@ -14332,19 +16356,29 @@ function renderChannelApiHistory(channel) {
   `;
 }
 
+function renderChannelApiLogHost() {
+  if ($("#channel-full")?.classList.contains("active")) {
+    renderChannelProfile();
+    return;
+  }
+  if ($("#jobs-page")?.classList.contains("active") || currentViewId === "jobs") {
+    renderJobsPage();
+  }
+}
+
 async function loadChannelApiLogs(channelName, force = false) {
   if (!channelName) return;
   if (!force && channelApiLogState.channel === channelName && (channelApiLogState.loaded || channelApiLogState.loading)) return;
   const filters = channelApiLogState.channel === channelName ? channelApiLogState.filters : { q: "", status: "", transport: "" };
   channelApiLogState = { channel: channelName, logs: channelApiLogState.channel === channelName ? channelApiLogState.logs : [], loading: true, loaded: false, error: "", filters };
-  if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
+  renderChannelApiLogHost();
   try {
     const result = await api(`/api/channel-api-logs?channel=${encodeURIComponent(channelName)}&days=30&limit=250`, { feedbackLabel: "Loading API history..." });
     channelApiLogState = { channel: channelName, logs: result.logs || [], loading: false, loaded: true, error: "", filters };
   } catch (error) {
     channelApiLogState = { channel: channelName, logs: [], loading: false, loaded: true, error: error.message || "Unable to load API history.", filters };
   }
-  if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
+  renderChannelApiLogHost();
 }
 
 function renderShopifyMissingVariantsPanel() {
@@ -14437,6 +16471,209 @@ async function loadShopifyMissingVariants(options = {}) {
     shopifyMissingVariantState = { ...shopifyMissingVariantState, items: [], loading: false, loaded: true, error: error.message || "Unable to load missing variant matches." };
   }
   if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
+}
+
+function channelKey(name = "") {
+  const key = String(name || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+  if (key === "tiktokshop") return "tiktok";
+  return key;
+}
+
+function channelAttributeRowsForView() {
+  const filters = channelAttributeState.filters || {};
+  const query = String(filters.q || "").trim().toLowerCase();
+  return (channelAttributeState.rows || []).filter((row) => {
+    if (filters.category && String(row["Main Category"] || "") !== String(filters.category)) return false;
+    if (filters.requirement === "required" && row.Required !== "true") return false;
+    if (filters.requirement === "recommended" && row.Recommended !== "true") return false;
+    if (filters.requirement === "mapped" && !(row["Mapped Source Field"] || row["Fallback Value"])) return false;
+    if (filters.requirement === "unmapped" && (row["Mapped Source Field"] || row["Fallback Value"])) return false;
+    if (!query) return true;
+    return [
+      row["Main Category"],
+      row["Marketplace Category"],
+      row["Marketplace Category ID"],
+      row.Attribute,
+      row["Attribute Handle"],
+      row["Mapped Source Field"],
+      row["Fallback Value"]
+    ].some((value) => String(value || "").toLowerCase().includes(query));
+  });
+}
+
+function attributeAllowedValues(row = {}) {
+  const raw = String(row["Allowed Values"] || "").trim();
+  if (!raw) return [];
+  return raw.split(/\s*[|,;]\s*/).map((value) => value.trim()).filter(Boolean).slice(0, 100);
+}
+
+function renderChannelAttributeFallbackControl(row = {}, index = 0) {
+  const value = row["Fallback Value"] || "";
+  const values = attributeAllowedValues(row);
+  if (values.length >= 2 && values.length <= 60) {
+    return `
+      <select data-channel-attribute-fallback="${index}">
+        <option value="" ${value ? "" : "selected"}>No fallback</option>
+        ${values.map((option) => `<option value="${html(option)}" ${String(value) === String(option) ? "selected" : ""}>${html(option)}</option>`).join("")}
+      </select>
+    `;
+  }
+  return `<input value="${html(value)}" placeholder="Custom fallback" data-channel-attribute-fallback="${index}" />`;
+}
+
+function renderChannelAttributeMappingsPanel(channel = {}) {
+  const channelName = channelKey(channel.name);
+  const hasLoadedChannel = channelAttributeState.channel === channelName && channelAttributeState.loaded;
+  const rows = channelAttributeRowsForView();
+  const categories = [...new Set((channelAttributeState.rows || []).map((row) => row["Main Category"]).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
+  const filters = channelAttributeState.filters || {};
+  const loading = channelAttributeState.loading;
+  return `
+    <section class="full-card span-2 channel-attribute-settings-card">
+      <div class="section-head channel-settings-head">
+        <div>
+          <h3>Attribute Mappings</h3>
+          <p class="muted">${html(channelLabel(channelName))} category attributes mapped to native DataPlus fields or channel-specific fallback values.</p>
+        </div>
+        <button class="button secondary" type="button" data-refresh-channel-attribute-mappings="${html(channel.name || "")}">${withIcon("refresh-cw", loading ? "Loading..." : hasLoadedChannel ? "Refresh" : "Load mappings")}</button>
+      </div>
+      ${!hasLoadedChannel && !loading ? `<div class="empty-state compact">Attribute mappings are loaded only when you request them. Click Load mappings to review ${html(channelLabel(channelName))} fields.</div>` : ""}
+      <div class="channel-attribute-filter-bar">
+        <label>Category
+          <select data-channel-attribute-filter="category">
+            <option value="" ${filters.category ? "" : "selected"}>All categories</option>
+            ${categories.map((category) => `<option value="${html(category)}" ${filters.category === category ? "selected" : ""}>${html(category)}</option>`).join("")}
+          </select>
+        </label>
+        <label>Attribute type
+          <select data-channel-attribute-filter="requirement">
+            ${[
+              ["all", "All attributes"],
+              ["required", "Required only"],
+              ["recommended", "Recommended"],
+              ["mapped", "Mapped"],
+              ["unmapped", "Unmapped"]
+            ].map(([value, label]) => `<option value="${value}" ${String(filters.requirement || "all") === value ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </label>
+        <label class="channel-attribute-search">Search
+          <input type="search" value="${html(filters.q || "")}" placeholder="Search field title, category, mapped source" data-channel-attribute-search />
+        </label>
+      </div>
+      <div class="channel-attribute-summary">
+        <span><small>Total</small><strong>${Number(channelAttributeState.total || 0).toLocaleString()}</strong></span>
+        <span><small>Required</small><strong>${Number(channelAttributeState.requiredCount || 0).toLocaleString()}</strong></span>
+        <span><small>Mapped</small><strong>${Number(channelAttributeState.mappedCount || 0).toLocaleString()}</strong></span>
+        <span><small>Visible</small><strong>${Number(rows.length || 0).toLocaleString()}</strong></span>
+      </div>
+      ${channelAttributeState.error ? `<div class="notice warning">${html(channelAttributeState.error)}</div>` : ""}
+      <div class="channel-attribute-table-wrap">
+        <table class="channel-attribute-table">
+          <thead>
+            <tr>
+              <th>Field title</th>
+              <th>Field type</th>
+              <th>Constraint</th>
+              <th>DataPlus field</th>
+              <th>Custom value</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${loading && !channelAttributeState.rows.length ? `<tr><td colspan="6"><div class="empty-state compact">Loading ${html(channelLabel(channelName))} attributes...</div></td></tr>` : rows.length ? rows.slice(0, 300).map((row) => {
+              const rowIndex = channelAttributeState.rows.indexOf(row);
+              const selected = row["Mapped Source Field"] || suggestedSourceFieldForAttribute({ id: row["Attribute ID"], name: row.Attribute, handle: row["Attribute Handle"] });
+              return `
+                <tr class="${row.Required === "true" ? "required" : ""}">
+                  <td>
+                    <strong>${html(row.Attribute || "")}${row.Required === "true" ? ` <em>*</em>` : ""}</strong>
+                    <small>${html([row["Main Category"], row["Marketplace Category"] || row["Marketplace Category ID"], row["Attribute Handle"]].filter(Boolean).join(" / "))}</small>
+                  </td>
+                  <td>${html(row["Value Mode"] || row["Field Type"] || "value")}</td>
+                  <td>${html(row["Data Constraint"] || row["Allowed Values"] || "") || `<span class="muted">None</span>`}</td>
+                  <td>
+                    <select data-channel-attribute-source="${rowIndex}">
+                      ${renderCanonicalSourceOptions(selected)}
+                    </select>
+                    ${!row["Mapped Source Field"] && selected ? `<small class="muted">Suggested</small>` : ""}
+                  </td>
+                  <td>${renderChannelAttributeFallbackControl(row, rowIndex)}</td>
+                  <td>
+                    <button class="button secondary compact-button" type="button" data-save-channel-attribute-mapping="${rowIndex}">${withIcon("save", "Save")}</button>
+                  </td>
+                </tr>
+              `;
+            }).join("") : `<tr><td colspan="6"><div class="empty-state compact">${channelAttributeState.loaded ? "No attributes match this filter." : "No marketplace attributes loaded for this channel yet."}</div></td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      ${rows.length > 300 ? `<p class="muted channel-attribute-foot">Showing first 300 matching attributes. Search or filter by category to narrow the list.</p>` : ""}
+    </section>
+  `;
+}
+
+async function loadChannelAttributeMappings(channelName = "", force = false) {
+  const channel = channelKey(channelName);
+  if (!channel) return;
+  if (!force && channelAttributeState.channel === channel && (channelAttributeState.loaded || channelAttributeState.loading)) return;
+  channelAttributeState = {
+    ...channelAttributeState,
+    channel,
+    rows: channelAttributeState.channel === channel ? channelAttributeState.rows : [],
+    loading: true,
+    loaded: false,
+    error: ""
+  };
+  if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
+  try {
+    const result = await api(`/api/categories/attributes?channel=${encodeURIComponent(channel)}`, { feedbackLabel: `Loading ${channelLabel(channel)} attribute mappings...` });
+    channelAttributeState = {
+      ...channelAttributeState,
+      channel,
+      rows: result.rows || [],
+      total: Number(result.total || 0),
+      mappedCount: Number(result.mappedCount || 0),
+      requiredCount: Number(result.requiredCount || 0),
+      loading: false,
+      loaded: true,
+      error: ""
+    };
+  } catch (error) {
+    channelAttributeState = { ...channelAttributeState, channel, rows: [], total: 0, mappedCount: 0, requiredCount: 0, loading: false, loaded: true, error: error.message || "Unable to load attribute mappings." };
+  }
+  if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
+}
+
+async function saveChannelAttributeMapping(index) {
+  const row = channelAttributeState.rows[Number(index)];
+  if (!row) return;
+  const categoryId = row["Category ID"];
+  if (!categoryId) throw new Error("Category ID is missing for this attribute row.");
+  const sourceField = document.querySelector(`[data-channel-attribute-source="${Number(index)}"]`)?.value || "";
+  const fallbackValue = document.querySelector(`[data-channel-attribute-fallback="${Number(index)}"]`)?.value?.trim?.() || "";
+  const body = {
+    channel: row.Marketplace,
+    mainCategory: row["Main Category"] || "",
+    attributeId: row["Attribute ID"] || "",
+    attributeName: row.Attribute || "",
+    attributeHandle: row["Attribute Handle"] || "",
+    required: row.Required === "true",
+    recommended: row.Recommended === "true",
+    sourceField,
+    fallbackValue,
+    enabled: true
+  };
+  const result = await api(`/api/categories/${encodeURIComponent(categoryId)}/attribute-mapping`, {
+    feedbackLabel: "Saving channel attribute mapping...",
+    method: "POST",
+    body: JSON.stringify(body)
+  });
+  row["Mapped Source Field"] = sourceField;
+  row["Fallback Value"] = fallbackValue;
+  row["Mapping Enabled"] = "true";
+  channelAttributeState.mappedCount = (channelAttributeState.rows || []).filter((item) => item["Mapped Source Field"] || item["Fallback Value"]).length;
+  renderChannelProfile();
+  toast(result?.queued ? "Attribute mapping saved. Background propagation queued." : "Attribute mapping saved.");
 }
 
 function renderChannelProfile() {
@@ -14571,6 +16808,7 @@ function renderChannelProfile() {
   ` : "";
   const shopifyInventoryWarehouse = (state.warehouses || []).find((warehouse) => warehouse.id === settings.shopifyInventoryWarehouseId) || {};
   const shopifyInventoryLocationId = settings.shopifyInventoryLocationId || shopifyInventoryWarehouse.shopifyLocationId || "";
+  const shopifyInventoryScheduleTimes = String(settings.inventoryScheduleTimes || "03:00,13:00").split(/[,;\s]+/).filter(Boolean);
   const shopifyWarehouseOptions = (state.warehouses || []).map((warehouse) => {
     const mapped = warehouse.shopifyLocationId ? ` / ${warehouse.shopifyLocationName || warehouse.shopifyLocationId}` : " / no Shopify location";
     return `<option value="${html(warehouse.id)}" ${settings.shopifyInventoryWarehouseId === warehouse.id ? "selected" : ""}>${html(`${warehouse.name || warehouse.code || "Warehouse"}${mapped}`)}</option>`;
@@ -14581,13 +16819,6 @@ function renderChannelProfile() {
             <div>
               <h3>Shopify Admin API</h3>
               <p class="muted">Settings for status sync, Matrixify exports, smart collections, and Shopify API actions.</p>
-            </div>
-            <div class="button-row compact-buttons">
-              <button class="button secondary" type="button" data-sync-shopify-status-all>${withIcon("refresh-cw", "Sync Shopify status")}</button>
-              <button class="button secondary" type="button" data-shopify-inventory-update="dry-run">${withIcon("clipboard-list", "Inventory dry run")}</button>
-              <button class="button" type="button" data-shopify-inventory-update="apply">${withIcon("warehouse", "Update inventory")}</button>
-              <button class="button secondary" type="button" data-sync-shopify-closeouts>${withIcon("store", "Sync Closeouts")}</button>
-              <button class="button secondary" type="button" data-open-shopify-status-import>${withIcon("upload", "Import status CSV")}</button>
             </div>
           </div>
           <div class="channel-settings-layout">
@@ -14640,14 +16871,30 @@ function renderChannelProfile() {
                     ${shopifyWarehouseOptions}
                   </select></label>
                   <label>Fallback Shopify location GID<input value="${html(settings.shopifyInventoryLocationId || "")}" data-channel-field="shopifyInventoryLocationId" data-channel-id="${channel.id}" placeholder="gid://shopify/Location/108943900976" /></label>
+                  <label>Schedule type<select data-channel-field="inventoryScheduleType" data-channel-id="${channel.id}">
+                    ${[["times", "Specific times"], ["interval", "Every X hours"]].map(([value, label]) => `<option value="${value}" ${String(settings.inventoryScheduleType || "times") === value ? "selected" : ""}>${label}</option>`).join("")}
+                  </select></label>
+                  <label>Run mode<select data-channel-field="inventoryScheduleMode" data-channel-id="${channel.id}">
+                    ${[["dry-run", "Dry run only"], ["apply", "Apply to Shopify"]].map(([value, label]) => `<option value="${value}" ${String(settings.inventoryScheduleMode || "dry-run") === value ? "selected" : ""}>${label}</option>`).join("")}
+                  </select></label>
+                  <label>First run<input type="time" value="${html(shopifyInventoryScheduleTimes[0] || "03:00")}" data-channel-field="inventoryScheduleTimes" data-channel-id="${channel.id}" data-channel-schedule-time-index="0" /></label>
+                  <label>Second run<input type="time" value="${html(shopifyInventoryScheduleTimes[1] || "13:00")}" data-channel-field="inventoryScheduleTimes" data-channel-id="${channel.id}" data-channel-schedule-time-index="1" /></label>
+                  <label>Every hours<input type="number" min="1" max="24" value="${Number(settings.inventoryScheduleEveryHours || 12)}" data-channel-field="inventoryScheduleEveryHours" data-channel-id="${channel.id}" /></label>
                 </div>
-                <p class="muted">Live updates require the inventory push toggle and a mapped Shopify location. Dry runs can still be used to preview differences.</p>
+                <div class="channel-toggle-grid ebay-toggle-grid">
+                  ${[
+                    ["inventoryScheduleEnabled", "Enable scheduled inventory updates"],
+                    ["inventoryScheduleRequireSuccessfulDump", "Only run after a successful product dump"]
+                  ].map(([field, label]) => `<label><input type="checkbox" ${settings[field] ? "checked" : ""} data-channel-field="${field}" data-channel-id="${channel.id}" /> ${label}</label>`).join("")}
+                </div>
+                <p class="muted">Live updates require the inventory push toggle and a mapped Shopify location. Scheduled runs use the worker and are recorded in Jobs and channel logs.</p>
               </div>
             </div>
             <aside class="channel-settings-aside">
               <div class="channel-sync-panel">
                 <strong>Configuration Status</strong>
                 <p class="muted">${channel.shopifyConfig?.configured ? "Shopify Admin API is ready." : "Shopify Admin API is not fully configured."}</p>
+                <button class="button secondary compact-button" type="button" data-refresh-shopify-token>${withIcon("refresh-cw", "Request new token")}</button>
               </div>
               <div class="channel-stat-strip">
                 <span><small>Store</small><strong>${html(channel.shopifyConfig?.shop || "Missing")}</strong></span>
@@ -14656,52 +16903,71 @@ function renderChannelProfile() {
                 <span><small>Client auth</small><strong>${channel.shopifyConfig?.hasClientCredentials ? "Set" : "Not set"}</strong></span>
                 <span><small>Inventory push</small><strong>${settings.shopifyInventoryPushEnabled ? "Enabled" : "Disabled"}</strong></span>
                 <span><small>Inventory target</small><strong>${html(shopifyInventoryLocationId || "Not mapped")}</strong></span>
+                <span><small>Inventory schedule</small><strong>${settings.inventoryScheduleEnabled ? html(settings.inventoryScheduleTimes || `Every ${Number(settings.inventoryScheduleEveryHours || 12)}h`) : "Off"}</strong></span>
               </div>
             </aside>
           </div>
         </section>
   ` : "";
   const shopifyMissingVariantsPanel = isShopify ? renderShopifyMissingVariantsPanel() : "";
-  target.innerHTML = `
-    <div class="full-order">
-      <div class="full-order-head">
-        <button class="text-button" data-view-jump="connections">Back to channels</button>
-        <div>
-          <p class="eyebrow">Marketplace Channel</p>
-          <h2>${html(channel.name)}</h2>
-          <p class="muted">${channel.connected ? "Connected" : "Not connected"} / ${html(channel.status || "inactive")}</p>
-        </div>
-        <div class="profit-pill">
-          <small>Shadow SKUs</small>
-          <strong>${channelShadows.length}</strong>
-        </div>
-      </div>
-      <div class="full-order-grid">
-        <section class="full-card span-2">
+  const channelTabs = [
+    { key: "overview", label: "Overview" },
+    { key: "settings", label: "Setup" },
+    { key: "actions", label: "Actions" },
+    { key: "rules", label: "Rules" },
+    { key: "mappings", label: "Mappings" },
+    ...(isShopify ? [{ key: "variants", label: "Variants" }] : []),
+    { key: "skus", label: "SKUs" },
+    { key: "logs", label: "Logs" }
+  ];
+  if (!channelTabs.some((tab) => tab.key === selectedChannelProfileTab)) selectedChannelProfileTab = "overview";
+  const activeChannelTab = channelTabs.find((tab) => tab.key === selectedChannelProfileTab) || channelTabs[0];
+  const channelDefaultsEditable = selectedChannelDefaultsEditMode;
+  const channelDefaultsDisabled = channelDefaultsEditable ? "" : "disabled";
+  const shopifyShippingProfiles = Array.isArray(settings.shopifyShippingProfiles) ? settings.shopifyShippingProfiles : [];
+  const currentShippingProfile = String(settings.defaultShippingProfile || "");
+  const shippingProfileOptions = [
+    ...shopifyShippingProfiles.map((profile) => {
+      const value = profile.name || profile.id || "";
+      const label = `${profile.name || profile.id || "Shipping profile"}${profile.default ? " (Default)" : ""}`;
+      return `<option value="${html(value)}" ${currentShippingProfile === value || currentShippingProfile === profile.id ? "selected" : ""}>${html(label)}</option>`;
+    }),
+    currentShippingProfile && !shopifyShippingProfiles.some((profile) => currentShippingProfile === profile.name || currentShippingProfile === profile.id)
+      ? `<option value="${html(currentShippingProfile)}" selected>${html(currentShippingProfile)}</option>`
+      : "",
+    !currentShippingProfile ? `<option value="" selected>Select profile</option>` : ""
+  ].filter(Boolean).join("");
+  const channelOverviewPanel = `
+        <section class="full-card channel-branding-card">
           <h3>Branding</h3>
-          <div class="brand-logo-editor">
+          <div class="brand-logo-editor channel-logo-editor">
             ${channel.logoDataUrl || channel.logoUrl
               ? `<img class="brand-logo-large" src="${html(channel.logoDataUrl || channel.logoUrl)}" alt="${html(channel.name)} logo" />`
               : `<div class="brand-logo-large brand-logo-placeholder">${html(String(channel.name || "?").slice(0, 1).toUpperCase())}</div>`}
             <label class="file-button">Upload channel logo<input type="file" accept="image/*" data-channel-logo-upload="${channel.id}" /></label>
           </div>
         </section>
-        <section class="full-card span-2">
-          <h3>Channel Defaults</h3>
+        <section class="full-card channel-defaults-card">
+          <div class="channel-card-title-row">
+            <h3>Channel Defaults</h3>
+            <button class="button secondary compact-button" type="button" data-toggle-channel-defaults-edit>${channelDefaultsEditable ? "Done" : "Edit"}</button>
+          </div>
           <div class="form-grid">
-            <label>Default shadow status<select data-channel-field="defaultShadowStatus" data-channel-id="${channel.id}">
+            <label>Default shadow status<select data-channel-field="defaultShadowStatus" data-channel-id="${channel.id}" ${channelDefaultsDisabled}>
               ${["Draft", "Active", "Paused"].map((status) => `<option ${settings.defaultShadowStatus === status ? "selected" : ""}>${status}</option>`).join("")}
             </select></label>
-            <label>Default handling days<input type="number" min="0" value="${Number(settings.defaultHandlingTimeDays || 0)}" data-channel-field="defaultHandlingTimeDays" data-channel-id="${channel.id}" /></label>
-            <label>Default safety qty<input type="number" min="0" value="${Number(settings.defaultSafetyQty || 0)}" data-channel-field="defaultSafetyQty" data-channel-id="${channel.id}" /></label>
-            <label>Default max sellable qty<input type="number" min="0" value="${Number(settings.defaultMaxSellableQty || 0)}" data-channel-field="defaultMaxSellableQty" data-channel-id="${channel.id}" /></label>
-            <label>Default shipping profile<input value="${html(settings.defaultShippingProfile || "")}" data-channel-field="defaultShippingProfile" data-channel-id="${channel.id}" /></label>
-            <label>Default shipping service<input value="${html(settings.defaultShippingService || "")}" data-channel-field="defaultShippingService" data-channel-id="${channel.id}" /></label>
+            <label>Default handling days<input type="number" min="0" value="${Number(settings.defaultHandlingTimeDays || 0)}" data-channel-field="defaultHandlingTimeDays" data-channel-id="${channel.id}" ${channelDefaultsDisabled} /></label>
+            <label>Default safety qty<input type="number" min="0" value="${Number(settings.defaultSafetyQty || 0)}" data-channel-field="defaultSafetyQty" data-channel-id="${channel.id}" ${channelDefaultsDisabled} /></label>
+            <label>Default max sellable qty<input type="number" min="0" value="${Number(settings.defaultMaxSellableQty || 0)}" data-channel-field="defaultMaxSellableQty" data-channel-id="${channel.id}" ${channelDefaultsDisabled} /></label>
+            <label>Default shipping profile<select data-channel-field="defaultShippingProfile" data-channel-id="${channel.id}" ${channelDefaultsDisabled}>
+              ${shippingProfileOptions || `<option value="${html(currentShippingProfile)}" selected>${html(currentShippingProfile || "Standard")}</option>`}
+            </select></label>
+            <label>Default shipping service<input value="${html(settings.defaultShippingService || "")}" data-channel-field="defaultShippingService" data-channel-id="${channel.id}" ${channelDefaultsDisabled} /></label>
           </div>
+          ${isShopify ? `<p class="muted channel-defaults-note">${shopifyShippingProfiles.length ? `${Number(shopifyShippingProfiles.length).toLocaleString()} Shopify shipping profile${shopifyShippingProfiles.length === 1 ? "" : "s"} imported${settings.shopifyShippingProfilesSyncedAt ? ` on ${dateLabel(settings.shopifyShippingProfilesSyncedAt)}` : ""}.` : "Use Actions > Import shipping profiles to load Shopify profiles into this dropdown."}</p>` : ""}
         </section>
-        ${ebaySettingsPanel}
-        ${shopifySettingsPanel}
-        ${shopifyMissingVariantsPanel}
+  `;
+  const channelRulesPanel = `
         <section class="full-card span-2">
           <h3>Automation Settings</h3>
           <div class="channel-toggle-grid">
@@ -14728,6 +16994,8 @@ function renderChannelProfile() {
             </select></label>
           </div>
         </section>
+  `;
+  const channelSkusPanel = `
         <section class="full-card span-2">
           <h3>Channel Shadow SKUs</h3>
           <div class="table-wrap compact-table">
@@ -14748,14 +17016,68 @@ function renderChannelProfile() {
             </table>
           </div>
         </section>
-        ${renderChannelApiHistory(channel)}
-      </div>
+  `;
+  const channelActionsPanel = `
+        <section class="full-card span-2">
+          <div class="section-head channel-settings-head">
+            <div>
+              <h3>Channel Actions</h3>
+              <p class="muted">Run syncs, dry runs, imports, pushes, and product creation from the floating Actions menu.</p>
+            </div>
+          </div>
+          <div class="empty-state compact">Open the Actions button in the top-right corner to run ${html(channel.name || "channel")} workflows.</div>
+        </section>
+  `;
+  const channelTabContent = ({
+    overview: channelOverviewPanel,
+    settings: ebaySettingsPanel || shopifySettingsPanel || `<section class="full-card span-2"><h3>Settings</h3><p class="muted">No channel-specific settings are configured for this channel yet.</p></section>`,
+    actions: channelActionsPanel,
+    rules: channelRulesPanel,
+    mappings: renderChannelAttributeMappingsPanel(channel),
+    variants: isShopify ? shopifyMissingVariantsPanel : "",
+    skus: channelSkusPanel,
+    logs: renderChannelApiHistory(channel)
+  })[selectedChannelProfileTab] || channelOverviewPanel;
+  target.innerHTML = `
+    <div class="settings-shell channel-settings-shell">
+      <aside class="settings-sidebar">
+        <div class="settings-sidebar-brand">
+          ${channel.logoDataUrl || channel.logoUrl
+            ? `<img src="${html(channel.logoDataUrl || channel.logoUrl)}" alt="${html(channel.name)} logo" />`
+            : `<span>${html(String(channel.name || "?").slice(0, 1).toUpperCase())}</span>`}
+          <div>
+            <strong>${html(channel.name)}</strong>
+            <small>${channel.connected ? "Connected" : "Not connected"} / ${html(channel.status || "inactive")}</small>
+          </div>
+        </div>
+        <div class="settings-sidebar-search">${withIcon("search", "Search settings")}</div>
+        <nav class="settings-sidebar-nav" aria-label="Channel settings">
+          ${channelTabs.map((tab) => `<button type="button" class="${selectedChannelProfileTab === tab.key ? "active" : ""}" data-channel-profile-tab="${tab.key}">${html(tab.label)}</button>`).join("")}
+        </nav>
+        <button class="text-button settings-sidebar-back" type="button" data-view-jump="connections">Back to channels</button>
+      </aside>
+      <main class="settings-main">
+        <header class="settings-main-head">
+          <div>
+            <p class="eyebrow">Marketplace Channel</p>
+            <h2>${html(activeChannelTab.label)}</h2>
+            <p class="muted">${html(channel.name)} settings / ${Number(channelShadows.length).toLocaleString()} shadow SKU${channelShadows.length === 1 ? "" : "s"}</p>
+          </div>
+          <div class="settings-head-stat">
+            <small>Shadow SKUs</small>
+            <strong>${Number(channelShadows.length).toLocaleString()}</strong>
+          </div>
+        </header>
+        <div class="settings-content-grid">
+          ${channelTabContent}
+        </div>
+      </main>
     </div>
   `;
-  if (!channelApiLogState.loading && (channelApiLogState.channel !== channel.name || !channelApiLogState.loaded)) {
+  if (selectedChannelProfileTab === "logs" && !channelApiLogState.loading && (channelApiLogState.channel !== channel.name || !channelApiLogState.loaded)) {
     loadChannelApiLogs(channel.name).catch((error) => toast(error.message));
   }
-  if (isShopify && !shopifyMissingVariantState.loading && !shopifyMissingVariantState.loaded) {
+  if (selectedChannelProfileTab === "variants" && isShopify && !shopifyMissingVariantState.loading && !shopifyMissingVariantState.loaded) {
     loadShopifyMissingVariants().catch((error) => toast(error.message));
   }
 }
@@ -14911,7 +17233,7 @@ async function confirmOrder(id) {
   const result = await api(`/api/orders/${id}/confirm`, { method: "POST" });
   selectedOrderId = id;
   setState(result.state);
-  toast("Order confirmed and inventory updated.");
+  showUpdateFocusModal("Order confirmed", "Inventory was updated for this order.");
 }
 
 async function runOrderAction(id, action) {
@@ -15592,13 +17914,62 @@ async function updateVendorField(input) {
   const vendor = state.vendors.find((row) => row.id === input.dataset.vendorId);
   if (!vendor) return;
   const field = input.dataset.vendorField;
-  const numericFields = new Set(["leadTimeDays", "moq", "rating"]);
-  const booleanFields = new Set(["submissionSettings.apiEnabled", "submissionSettings.ftpEnabled", "submissionSettings.emailEnabled", "submissionSettings.attachCsv", "submissionSettings.attachPdf"]);
+  const numericFields = new Set(["leadTimeDays", "moq", "rating", "pricingRules.suspiciousPriceMultiplier", "inventoryRules.replenishableQty"]);
+  const booleanFields = new Set(["submissionSettings.apiEnabled", "submissionSettings.ftpEnabled", "submissionSettings.emailEnabled", "submissionSettings.attachCsv", "submissionSettings.attachPdf", "channelRules.shopify.allowVariations", "pricingRules.enforceMinimumAllowedPrice", "variationRules.allowShopifyVariations", "inventoryRules.replenishableEnabled"]);
   let value = numericFields.has(field) ? Number(input.value) : input.value;
   if (booleanFields.has(field)) value = input.checked;
   const result = await api(`/api/vendors/${vendor.id}`, { method: "PATCH", body: JSON.stringify({ [field]: value }) });
   setState(result.state);
-  toast("Vendor updated.");
+  showSavedUpdate("Vendor", field);
+}
+
+function setVendorRuleDirty(dirty = true) {
+  vendorRulesDraftDirty = Boolean(dirty);
+  const node = document.querySelector("[data-vendor-rule-save-status]");
+  if (node && selectedVendorRulesEditMode) {
+    node.textContent = vendorRulesDraftDirty ? "Unsaved changes" : "Editing";
+    node.classList.toggle("dirty", vendorRulesDraftDirty);
+  }
+}
+
+async function saveVendorRulesPanel() {
+  const vendor = state.vendors.find((row) => row.id === selectedVendorId);
+  if (!vendor) return;
+  const fields = Array.from(document.querySelectorAll("[data-vendor-rule-edit-field][data-vendor-field]"));
+  if (!fields.length) {
+    selectedVendorRulesEditMode = false;
+    vendorRulesDraftDirty = false;
+    render();
+    return;
+  }
+  const numericFields = new Set(["pricingRules.suspiciousPriceMultiplier", "inventoryRules.replenishableQty"]);
+  const booleanFields = new Set(["submissionSettings.apiEnabled", "submissionSettings.ftpEnabled", "submissionSettings.emailEnabled", "submissionSettings.attachCsv", "submissionSettings.attachPdf", "channelRules.shopify.allowVariations", "pricingRules.enforceMinimumAllowedPrice", "variationRules.allowShopifyVariations", "inventoryRules.replenishableEnabled"]);
+  const payload = {};
+  for (const input of fields) {
+    const field = input.dataset.vendorField;
+    if (!field) continue;
+    let value = input.value;
+    if (numericFields.has(field)) value = Number(input.value || 0);
+    if (booleanFields.has(field)) value = input.checked;
+    payload[field] = value;
+  }
+  const result = await api(`/api/vendors/${vendor.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+  setState(result.state);
+  selectedVendorRulesEditMode = false;
+  vendorRulesDraftDirty = false;
+  render();
+  renderTopbarActions();
+  showSavedUpdate("Vendor rules", selectedVendorRuleTab);
+}
+
+function queueVendorFieldSave(input) {
+  if (!input?.dataset?.vendorField || !input?.dataset?.vendorId) return;
+  const key = `${input.dataset.vendorId}:${input.dataset.vendorField}`;
+  queueVendorFieldSave.timers = queueVendorFieldSave.timers || {};
+  window.clearTimeout(queueVendorFieldSave.timers[key]);
+  queueVendorFieldSave.timers[key] = window.setTimeout(() => {
+    updateVendorField(input).catch((error) => toast(error.message));
+  }, 650);
 }
 
 async function updateBrandField(input) {
@@ -15609,7 +17980,7 @@ async function updateBrandField(input) {
     body: JSON.stringify({ [input.dataset.brandField]: input.value })
   });
   setState(result.state);
-  toast("Brand updated.");
+  showSavedUpdate("Brand", input.dataset.brandField);
 }
 
 async function createBrand() {
@@ -15921,7 +18292,7 @@ async function updateBrandVendor(input) {
     body: JSON.stringify({ vendorIds: Array.from(vendorIds) })
   });
   setState(result.state);
-  toast("Brand vendor map updated.");
+  showUpdateFocusModal("Brand vendor map updated", "The vendor assignment was saved.");
 }
 
 async function updateVendorBrand(input) {
@@ -15935,7 +18306,7 @@ async function updateVendorBrand(input) {
     body: JSON.stringify({ vendorIds: Array.from(vendorIds) })
   });
   setState(result.state);
-  toast("Vendor brand map updated.");
+  showUpdateFocusModal("Vendor brand map updated", "The brand assignment was saved.");
 }
 
 async function updatePoField(input) {
@@ -15947,7 +18318,7 @@ async function updatePoField(input) {
   });
   selectedPoId = po.id;
   setState(result.state);
-  toast("PO updated.");
+  showSavedUpdate("PO", input.dataset.poField);
 }
 
 async function updateWarehouseField(input) {
@@ -15960,7 +18331,7 @@ async function updateWarehouseField(input) {
   setState(result.state);
   if (purchasingTab === "warehouses") renderPurchaseOrders();
   if (currentViewId === "warehouse-full") renderWarehouseProfile();
-  toast("Warehouse updated.");
+  showSavedUpdate("Warehouse", input.dataset.warehouseField);
 }
 
 async function updateWarehouseStatus(id, status) {
@@ -16027,7 +18398,7 @@ async function updateWarehouseBinField(input) {
   selectedWarehouseId = warehouseId;
   setState(result.state);
   if (currentViewId === "warehouse-full") renderWarehouseProfile();
-  toast("Warehouse location updated.");
+  showSavedUpdate("Warehouse location", input.dataset.warehouseBinField);
 }
 
 async function submitPurchaseOrder(id, method) {
@@ -16396,7 +18767,7 @@ async function updateCustomerField(input) {
   const result = await api(`/api/customers/${customer.id}`, { method: "PATCH", body: JSON.stringify({ [field]: value }) });
   selectedCustomerId = customer.id;
   setState(result.state);
-  toast("Customer updated.");
+  showSavedUpdate("Customer", field);
 }
 
 async function addCustomerAddress(id, type) {
@@ -16438,7 +18809,7 @@ async function updateInventory(input) {
   item.reorderPoint = result.item.reorderPoint;
   state.summary = result.summary;
   render();
-  toast("Inventory updated.");
+  showSavedUpdate("Inventory", input.dataset.inventoryField);
 }
 
 async function updateWarehouseStockField(input) {
@@ -16454,15 +18825,15 @@ async function updateWarehouseStockField(input) {
   Object.assign(item, result.item);
   state.summary = result.summary;
   render();
-  toast("Warehouse stock updated.");
+  showSavedUpdate("Warehouse stock", field);
 }
 
 async function updateProductField(input) {
   const item = state.inventory.find((row) => row.id === input.dataset.productId);
   if (!item) return;
   const field = input.dataset.productField;
-  const numericFields = new Set(["qty", "reserved", "reorderPoint", "price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice"]);
-  const booleanFields = new Set(["hazardous", "active", "brandLocked"]);
+  const numericFields = new Set(["qty", "reserved", "reorderPoint", "price", "websitePrice", "cost", "sourceCost", "listPrice", "msrp", "weightOz", "lengthIn", "widthIn", "heightIn", "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength", "packageWeight", "packageWidth", "dimensionalWeight", "stockQty", "replenishableQty", "fobPrice", "zoroPrice", "zoroMinimumQty", "varisContractPrice", "varisListPrice", "varisOdManagedPrice", "varisNonOdManagedPrice", "varisOdPrivatePrice", "varisNonOdPrivatePrice", "defaultPrice", "defaultSupplierPrice", "maxQuantity", "minimumQuantity", "weight"]);
+  const booleanFields = new Set(["hazardous", "active", "brandLocked", "replenishable", "replenishableUseVendorRules", "replenishableQtyUseVendorDefault"]);
   let value = input.value;
   if (numericFields.has(field)) value = Number(input.value);
   if (booleanFields.has(field)) value = input.type === "checkbox" ? input.checked : input.value === "true";
@@ -16481,7 +18852,7 @@ async function updateProductField(input) {
   Object.assign(item, result.item);
   state.summary = result.summary;
   render();
-  toast("Product updated.");
+  showSavedUpdate("Product", field);
 }
 
 async function updateShadowField(input) {
@@ -16501,7 +18872,7 @@ async function updateShadowField(input) {
   selectedProductId = result.item.id;
   setState(result.state);
   mergeInventoryItem(result.item);
-  toast("Shadow SKU updated.");
+  showSavedUpdate("Shadow SKU", field);
 }
 
 async function updateShadowAttribute(input) {
@@ -16517,7 +18888,7 @@ async function updateShadowAttribute(input) {
   selectedShadowId = result.shadow.id;
   setState(result.state);
   mergeInventoryItem(result.item);
-  toast("Marketplace attribute updated.");
+  showSavedUpdate("Marketplace attribute", input.dataset.shadowAttribute);
 }
 
 async function updateShadowOverride(input) {
@@ -16533,7 +18904,7 @@ async function updateShadowOverride(input) {
   selectedShadowId = result.shadow.id;
   setState(result.state);
   mergeInventoryItem(result.item);
-  toast("Content override updated.");
+  showUpdateFocusModal("Content override updated", "The marketplace override was saved.");
 }
 
 async function syncShadow(productId, shadowId) {
@@ -16567,7 +18938,7 @@ async function updateMarketplaceTemplate(input) {
     body: JSON.stringify({ [field]: value })
   });
   setState(result.state);
-  toast("Marketplace template updated.");
+  showSavedUpdate("Marketplace template", field);
 }
 
 async function createExportMapping() {
@@ -16618,7 +18989,7 @@ async function updateExportMapping(input) {
   activeExportMappingPageId = result.template.id;
   mergeExportMappingsState(result);
   renderImportExportMappings();
-  toast("Mapping updated.");
+  showSavedUpdate("Mapping", field);
 }
 
 async function saveExportMappingRows(templateId, mappings) {
@@ -16630,7 +19001,7 @@ async function saveExportMappingRows(templateId, mappings) {
   activeExportMappingPageId = result.template.id;
   mergeExportMappingsState(result);
   renderImportExportMappings();
-  toast("Mapping columns updated.");
+  showUpdateFocusModal("Mapping columns updated", "The export mapping columns were saved.");
 }
 
 function markMappingDraftDirty() {
@@ -16953,14 +19324,19 @@ async function updateChannelField(input) {
   const field = input.dataset.channelField;
   let value = input.value;
   if (input.type === "checkbox") value = input.checked;
-  if (["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit"].includes(field)) value = Number(input.value || 0);
+  if (input.dataset.channelScheduleTimeIndex !== undefined) {
+    const times = String(channel.settings?.inventoryScheduleTimes || "03:00,13:00").split(/[,;\s]+/).filter(Boolean);
+    times[Number(input.dataset.channelScheduleTimeIndex || 0)] = input.value || "";
+    value = times.filter(Boolean).join(",");
+  }
+  if (["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "inventoryScheduleEveryHours"].includes(field)) value = Number(input.value || 0);
   const result = await api(`/api/channels/${channel.id}`, {
     method: "PATCH",
     body: JSON.stringify({ [field]: value })
   });
   selectedChannelId = result.channel.id;
   setState(result.state);
-  toast("Channel settings updated.");
+  showSavedUpdate("Channel settings", field);
 }
 
 async function syncEbayAccountSettings(channelId) {
@@ -17001,8 +19377,9 @@ async function updateSystemSetting(input) {
     if (currentViewId === "catalog") renderCatalog();
   }
   renderCatalog();
-  renderSystemSettingsPage();
-  toast("System setting updated.");
+  if (currentViewId === "system-operations") renderSystemOperationsPage();
+  else renderSystemSettingsPage();
+  showSavedUpdate("System setting", field);
 }
 
 async function saveSkuChangeTrackedFields() {
@@ -17017,7 +19394,8 @@ async function saveSkuChangeTrackedFields() {
   });
   if (result.systemSettings) state.systemSettings = result.systemSettings;
   catalogChangeState.loaded = false;
-  renderSystemSettingsPage();
+  if (currentViewId === "system-operations") renderSystemOperationsPage();
+  else renderSystemSettingsPage();
   if (catalogTab === "changes") loadCatalogChanges(true, 1).catch((error) => toast(error.message));
   toast("SKU change tracked fields saved.");
 }
@@ -17091,7 +19469,7 @@ async function uploadChannelLogo(input) {
   });
   selectedChannelId = result.channel.id;
   setState(result.state);
-  toast("Channel logo updated.");
+  showUpdateFocusModal("Channel logo updated", "The channel logo was saved.");
 }
 
 async function runTemplateAction(id, action) {
@@ -17112,7 +19490,7 @@ async function updateOrderMoney(input) {
   const result = await api(`/api/orders/${order.id}`, { method: "PATCH", body: JSON.stringify({ [field]: Number(input.value) }) });
   selectedOrderId = order.id;
   setState(result.state);
-  toast("Order P&L updated.");
+  showSavedUpdate("Order P&L", field);
 }
 
 async function importInventory(file) {
@@ -17663,6 +20041,7 @@ function productExportDraftMappings() {
 
 async function openProductExportModal(mode = "custom") {
   await loadProductFieldOptions();
+  await loadExportMappingsOnly(true);
   const exportMappings = state.exportMappings || [];
   productExportModalState = {
     ...productExportModalState,
@@ -18187,6 +20566,105 @@ async function syncAllShopifyStatuses() {
   toast(result.queued ? (result.message || "Shopify status sync queued in Jobs.") : (result.message || `Shopify status sync complete: ${Number(result.synced || 0).toLocaleString()} checked.`));
 }
 
+async function syncShopifySkuMap() {
+  const result = await api("/api/shopify/sku-map-sync", {
+    method: "POST",
+    feedbackLabel: "Queueing Shopify SKU map sync...",
+    body: JSON.stringify({})
+  });
+  if (result.state) setState(result.state);
+  render();
+  loadChannelApiLogs("Shopify", true).catch(() => {});
+  toast(queuedJobToast(result, "Shopify SKU map sync queued in Jobs."));
+}
+
+async function syncShopifyShippingProfiles() {
+  const result = await api("/api/shopify/shipping-profiles/sync", {
+    method: "POST",
+    feedbackLabel: "Importing Shopify shipping profiles...",
+    body: JSON.stringify({})
+  });
+  if (result.state) setState(result.state);
+  if (result.channel) selectedChannelId = result.channel.id || selectedChannelId;
+  selectedChannelDefaultsEditMode = true;
+  render();
+  loadChannelApiLogs("Shopify", true).catch(() => {});
+  showSavedUpdate("Shopify shipping profiles", `${Number(result.profiles?.length || 0).toLocaleString()} profile${Number(result.profiles?.length || 0) === 1 ? "" : "s"} imported`);
+}
+
+async function refreshShopifyToken() {
+  const result = await api("/api/shopify/token-refresh", {
+    method: "POST",
+    feedbackLabel: "Requesting Shopify token...",
+    body: JSON.stringify({})
+  });
+  loadChannelApiLogs("Shopify", true).catch(() => {});
+  const scopeText = result.hasReadShipping ? "read_shipping is active." : "read_shipping is still missing.";
+  toast(`${result.message || "Shopify token refreshed."} ${scopeText}`);
+}
+
+async function queueShopifyPricePush(mode = "dry-run") {
+  const apply = mode === "apply";
+  if (apply && !window.confirm("Push DataPlus Shopify prices to live Shopify variants? Run Price dry run first if you have not reviewed the report.")) return;
+  const result = await api("/api/shopify/variant-price-push", {
+    method: "POST",
+    feedbackLabel: apply ? "Queueing Shopify price push..." : "Queueing Shopify price dry run...",
+    body: JSON.stringify({
+      apply,
+      dryRun: !apply
+    })
+  });
+  if (result.state) setState(result.state);
+  if (result.job) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+  }
+  render();
+  loadChannelApiLogs("Shopify", true).catch(() => {});
+  toast(queuedJobToast(result, apply ? "Shopify price push queued in Jobs." : "Shopify price dry run queued in Jobs."));
+}
+
+async function queueShopifyProductCreate(mode = "dry-run") {
+  const apply = mode === "apply";
+  if (apply && !window.confirm("Create new products in live Shopify from DataPlus ready/not-on-Shopify products? Run Create dry run first if you have not reviewed the report.")) return;
+  const result = await api("/api/shopify/product-create", {
+    method: "POST",
+    feedbackLabel: apply ? "Queueing Shopify product creation..." : "Queueing Shopify create dry run...",
+    body: JSON.stringify({
+      apply,
+      dryRun: !apply,
+      limit: 100
+    })
+  });
+  if (result.state) setState(result.state);
+  if (result.job) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+  }
+  render();
+  loadChannelApiLogs("Shopify", true).catch(() => {});
+  toast(queuedJobToast(result, apply ? "Shopify product creation queued in Jobs." : "Shopify create dry run queued in Jobs."));
+}
+
+async function queueShopifyExistingLink(mode = "dry-run") {
+  const apply = mode === "apply";
+  if (apply && !window.confirm("Backfill DataPlus parent SKUs from existing live Shopify variant SKUs? This does not create Shopify products.")) return;
+  const result = await api("/api/shopify/link-existing-variants", {
+    method: "POST",
+    feedbackLabel: apply ? "Queueing Shopify existing-link backfill..." : "Queueing Shopify existing-link dry run...",
+    body: JSON.stringify({
+      apply,
+      dryRun: !apply,
+      limit: 50000
+    })
+  });
+  if (result.state) setState(result.state);
+  if (result.job) {
+    state.importJobs = [result.job, ...(state.importJobs || []).filter((job) => job.id !== result.job.id)];
+  }
+  render();
+  loadChannelApiLogs("Shopify", true).catch(() => {});
+  toast(queuedJobToast(result, apply ? "Shopify existing-link backfill queued in Jobs." : "Shopify existing-link dry run queued in Jobs."));
+}
+
 async function queueShopifyInventoryUpdate(mode = "apply") {
   const apply = mode !== "dry-run";
   const shopifyChannel = (state.connections || []).find((channel) => String(channel.name || "").toLowerCase() === "shopify");
@@ -18290,6 +20768,33 @@ function runCategoryExportModal() {
   runCategoryExport(type, channel).catch((error) => toast(error.message));
 }
 
+document.addEventListener("click", (event) => {
+  const editRulesButton = event.target.closest("[data-toggle-vendor-rules-edit]");
+  const saveRulesButton = event.target.closest("[data-save-vendor-rules]");
+  const cancelRulesButton = event.target.closest("[data-cancel-vendor-rules-edit]");
+  if (!editRulesButton && !saveRulesButton && !cancelRulesButton) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (editRulesButton) {
+    selectedVendorProfileTab = "rules";
+    selectedVendorRulesEditMode = true;
+    vendorRulesDraftDirty = false;
+    renderVendorProfile();
+    renderTopbarActions();
+    toast("Vendor rules unlocked.");
+    return;
+  }
+  if (saveRulesButton) {
+    saveVendorRulesPanel().catch((error) => toast(error.message));
+    return;
+  }
+  selectedVendorRulesEditMode = false;
+  vendorRulesDraftDirty = false;
+  renderVendorProfile();
+  renderTopbarActions();
+  toast("Vendor rule edits canceled.");
+}, true);
+
 document.addEventListener("click", async (event) => {
   const viewButton = event.target.closest("[data-view]");
   const jumpButton = event.target.closest("[data-view-jump]");
@@ -18300,6 +20805,10 @@ document.addEventListener("click", async (event) => {
   const productButton = event.target.closest("[data-select-product]");
   const renameProductSkuButton = event.target.closest("[data-rename-product-sku]");
   const productWorkspaceTabButton = event.target.closest("[data-product-workspace-tab]");
+  const vendorProfileTabButton = event.target.closest("[data-vendor-profile-tab]");
+  const vendorRuleTabButton = event.target.closest("[data-vendor-rule-tab]");
+  const channelProfileTabButton = event.target.closest("[data-channel-profile-tab]");
+  const toggleChannelDefaultsEditButton = event.target.closest("[data-toggle-channel-defaults-edit]");
   const ebayListingActionButton = event.target.closest("[data-ebay-listing-action]");
   const useEbaySuggestedPriceButton = event.target.closest("[data-use-ebay-suggested-price]");
   const useEbayCalculatedQtyButton = event.target.closest("[data-use-ebay-calculated-qty]");
@@ -18312,6 +20821,12 @@ document.addEventListener("click", async (event) => {
   const categoryButton = event.target.closest("[data-select-category]");
   const backCategoriesButton = event.target.closest("[data-back-categories]");
   const categoryScopeButton = event.target.closest("[data-category-scope]");
+  const clearCategoryFiltersButton = event.target.closest("[data-clear-category-filters]");
+  const categorySamplesButton = event.target.closest("[data-load-category-samples]");
+  const openCategoryProductsButton = event.target.closest("[data-open-category-products]");
+  const categoryChannelTabButton = event.target.closest("[data-category-channel-tab]");
+  const shopifyCategoryTabButton = event.target.closest("[data-shopify-category-tab]");
+  const deleteCategoryButton = event.target.closest("[data-delete-category]");
   const syncCategoryAttributesButton = event.target.closest("[data-sync-category-attributes]");
   const saveCategoryMapButton = event.target.closest("[data-save-category-map]");
   const applyCategoryMapToProductsButton = event.target.closest("[data-apply-category-map-to-products]");
@@ -18368,6 +20883,7 @@ document.addEventListener("click", async (event) => {
   const buildSourceSearchIndexButton = event.target.closest("[data-build-source-search-index]");
   const buildSourcePerformanceIndexesButton = event.target.closest("[data-build-source-performance-indexes]");
   const refreshSourceFacetsButton = event.target.closest("[data-refresh-source-facets]");
+  const refreshPricingInventoryButton = event.target.closest("[data-refresh-pricing-inventory]");
   const openSourceCatalogSkuButton = event.target.closest("[data-open-source-catalog-sku]");
   const closeSourceCatalogDetailButton = event.target.closest("[data-close-source-catalog-detail]");
   const promoteCatalogButton = event.target.closest("[data-promote-catalog-sku]");
@@ -18376,7 +20892,15 @@ document.addEventListener("click", async (event) => {
   const applyShopifyTaxonomyButton = event.target.closest("[data-apply-shopify-taxonomy]");
   const applyEbayTaxonomyButton = event.target.closest("[data-apply-ebay-taxonomy]");
   const runEbayTaxonomySearchButton = event.target.closest("[data-run-ebay-taxonomy-search]");
+  const autoMapShopifyCategoriesButton = event.target.closest("[data-auto-map-shopify-categories]");
   const autoMapEbayCategoriesButton = event.target.closest("[data-auto-map-ebay-categories]");
+  const pushCategoryShopifyTaxonomyButton = event.target.closest("[data-push-category-shopify-taxonomy]");
+  const rebuildCategorySummaryIndexButton = event.target.closest("[data-rebuild-category-summary-index]");
+  const saveVendorCategoryMappingButton = event.target.closest("[data-save-vendor-category-mapping]");
+  const addVendorCategoryMainButton = event.target.closest("[data-add-vendor-category-main]");
+  const selectVendorMainCategoryButton = event.target.closest("[data-select-vendor-main-category]");
+  const searchVendorTaxonomyButton = event.target.closest("[data-search-vendor-taxonomy]");
+  const refreshVendorCategoryMappingsButton = event.target.closest("[data-refresh-vendor-category-mappings]");
   const reviewActionButton = event.target.closest("[data-review-action]");
   const reviewBulkActionButton = event.target.closest("[data-review-bulk-action]");
   const reviewOpenProductButton = event.target.closest("[data-review-open-product]");
@@ -18400,6 +20924,7 @@ document.addEventListener("click", async (event) => {
   const refreshImportJobsButton = event.target.closest("[data-refresh-import-jobs]");
   const cleanupImportJobsButton = event.target.closest("[data-cleanup-import-jobs]");
   const systemBackupButton = event.target.closest("[data-system-backup]");
+  const refreshSystemFieldsButton = event.target.closest("[data-refresh-system-fields]");
   const selectImportJobButton = event.target.closest("[data-select-import-job]");
   const stopJobButton = event.target.closest("[data-job-stop]");
   const retryJobButton = event.target.closest("[data-job-retry]");
@@ -18436,13 +20961,21 @@ document.addEventListener("click", async (event) => {
   const dataQualityClearButton = event.target.closest("[data-data-quality-clear]");
   const dataQualityScanButton = event.target.closest("[data-data-quality-scan]");
   const syncShopifyCloseoutsButton = event.target.closest("[data-sync-shopify-closeouts]");
+  const syncShopifySkuMapButton = event.target.closest("[data-sync-shopify-sku-map]");
+  const refreshShopifyTokenButton = event.target.closest("[data-refresh-shopify-token]");
+  const syncShopifyShippingProfilesButton = event.target.closest("[data-sync-shopify-shipping-profiles]");
   const syncShopifyStatusAllButton = event.target.closest("[data-sync-shopify-status-all]");
+  const shopifyExistingLinkButton = event.target.closest("[data-shopify-existing-link]");
+  const shopifyProductCreateButton = event.target.closest("[data-shopify-product-create]");
+  const shopifyPricePushButton = event.target.closest("[data-shopify-price-push]");
   const shopifyInventoryUpdateButton = event.target.closest("[data-shopify-inventory-update]");
   const refreshShopifyMissingVariantsButton = event.target.closest("[data-refresh-shopify-missing-variants]");
   const searchShopifyMissingVariantsButton = event.target.closest("[data-search-shopify-missing-variants]");
   const clearShopifyMissingVariantsButton = event.target.closest("[data-clear-shopify-missing-variants]");
   const shopifyMissingVariantPageButton = event.target.closest("[data-shopify-missing-variant-page]");
   const refreshChannelApiLogsButton = event.target.closest("[data-refresh-channel-api-logs]");
+  const refreshChannelAttributeMappingsButton = event.target.closest("[data-refresh-channel-attribute-mappings]");
+  const saveChannelAttributeMappingButton = event.target.closest("[data-save-channel-attribute-mapping]");
   const channelApiLogSearchButton = event.target.closest("[data-channel-api-log-search]");
   const channelApiLogClearButton = event.target.closest("[data-channel-api-log-clear]");
   const openApiLogJobButton = event.target.closest("[data-open-api-log-job]");
@@ -18587,6 +21120,10 @@ document.addEventListener("click", async (event) => {
   const saveProductBulletsButton = event.target.closest("[data-save-product-bullets]");
   const backfillSourceDataButton = event.target.closest("[data-backfill-source-data]");
   const toggleProductEditButton = event.target.closest("[data-toggle-product-edit]");
+  const toggleVendorOverviewEditButton = event.target.closest("[data-toggle-vendor-overview-edit]");
+  const toggleVendorRulesEditButton = event.target.closest("[data-toggle-vendor-rules-edit]");
+  const saveVendorRulesButton = event.target.closest("[data-save-vendor-rules]");
+  const cancelVendorRulesEditButton = event.target.closest("[data-cancel-vendor-rules-edit]");
   const toggleSystemSettingsEditButton = event.target.closest("[data-toggle-system-settings-edit]");
   const addSystemUserButton = event.target.closest("[data-add-system-user]");
   const removeSystemUserButton = event.target.closest("[data-remove-system-user]");
@@ -18688,8 +21225,26 @@ document.addEventListener("click", async (event) => {
   }
   if (toggleSystemSettingsEditButton) {
     systemSettingsEditMode = !systemSettingsEditMode;
-    renderSystemSettingsPage();
+    if (currentViewId === "system-operations") renderSystemOperationsPage();
+    else renderSystemSettingsPage();
     renderTopbarActions();
+    return;
+  }
+  if (channelProfileTabButton) {
+    selectedChannelProfileTab = channelProfileTabButton.dataset.channelProfileTab || "overview";
+    if (selectedChannelProfileTab === "mappings") {
+      const channel = (state.connections || []).find((row) => row.id === selectedChannelId);
+      const channelName = channelKey(channel?.name);
+      if (channelName && channelAttributeState.channel !== channelName) {
+        channelAttributeState = { ...channelAttributeState, channel: channelName, rows: [], total: 0, mappedCount: 0, requiredCount: 0, loading: false, loaded: false, error: "" };
+      }
+    }
+    renderChannelProfile();
+    return;
+  }
+  if (toggleChannelDefaultsEditButton) {
+    selectedChannelDefaultsEditMode = !selectedChannelDefaultsEditMode;
+    renderChannelProfile();
     return;
   }
   if (addSystemUserButton) {
@@ -18712,6 +21267,8 @@ document.addEventListener("click", async (event) => {
   if (categoryButton) {
     selectedCategoryId = categoryButton.dataset.selectCategory;
     categoryViewMode = "detail";
+    categoryChannelTab = "shopify";
+    shopifyCategoryTab = "category";
     shopifyTaxonomyState = { categoryId: selectedCategoryId, query: "", results: [], total: 0, version: "", loading: false };
     ebayTaxonomyState = { categoryId: selectedCategoryId, query: "", results: [], total: 0, version: "", loading: false };
     renderCategories();
@@ -18732,6 +21289,35 @@ document.addEventListener("click", async (event) => {
     ebayTaxonomyState = { categoryId: null, query: "", results: [], total: 0, version: "", loading: false };
     categoryRequestId += 1;
     loadCategories();
+    return;
+  }
+  if (clearCategoryFiltersButton) {
+    categoryFilters = { channel: "shopify", mapping: "", review: "", lifecycle: "", supplier: "", minProducts: "" };
+    selectedCategoryId = null;
+    categoryViewMode = "table";
+    renderCategories();
+    return;
+  }
+  if (categorySamplesButton) {
+    loadCategorySamples(categorySamplesButton.dataset.loadCategorySamples).catch((error) => toast(error.message));
+    return;
+  }
+  if (openCategoryProductsButton) {
+    openCategoryProducts(openCategoryProductsButton.dataset.openCategoryProducts, openCategoryProductsButton.dataset.categoryTarget);
+    return;
+  }
+  if (categoryChannelTabButton) {
+    categoryChannelTab = categoryChannelTabButton.dataset.categoryChannelTab || "shopify";
+    renderCategories();
+    return;
+  }
+  if (shopifyCategoryTabButton) {
+    shopifyCategoryTab = shopifyCategoryTabButton.dataset.shopifyCategoryTab || "category";
+    renderCategories();
+    return;
+  }
+  if (deleteCategoryButton) {
+    deleteCategory(deleteCategoryButton).catch((error) => toast(error.message));
     return;
   }
   if (syncCategoryAttributesButton) {
@@ -18809,8 +21395,107 @@ document.addEventListener("click", async (event) => {
     applyEbayTaxonomyCategory(applyEbayTaxonomyButton).catch((error) => toast(error.message));
     return;
   }
+  if (autoMapShopifyCategoriesButton) {
+    autoMapShopifyCategories().catch((error) => toast(error.message));
+    return;
+  }
   if (autoMapEbayCategoriesButton) {
     autoMapEbayCategories().catch((error) => toast(error.message));
+    return;
+  }
+  if (pushCategoryShopifyTaxonomyButton) {
+    pushCategoryShopifyTaxonomy(pushCategoryShopifyTaxonomyButton.dataset.pushCategoryShopifyTaxonomy).catch((error) => toast(error.message));
+    return;
+  }
+  if (refreshVendorCategoryMappingsButton) {
+    const supplier = refreshVendorCategoryMappingsButton.dataset.refreshVendorCategoryMappings || "";
+    if (supplier) {
+      const vendor = (state.vendors || []).find((item) => vendorCategoryMappingSupplier(item) === supplier) || { name: supplier };
+      loadVendorProfileCategoryMappings(vendor).catch((error) => toast(error.message));
+    } else {
+      vendorCategoryMappingState = { ...vendorCategoryMappingState, loaded: false };
+      loadVendorCategoryMappingsPage().catch((error) => toast(error.message));
+    }
+    return;
+  }
+  if (selectVendorMainCategoryButton) {
+    selectVendorMainCategoryOption(selectVendorMainCategoryButton);
+    return;
+  }
+  if (searchVendorTaxonomyButton) {
+    searchVendorTaxonomyFallback(searchVendorTaxonomyButton).catch((error) => toast(error.message));
+    return;
+  }
+  if (saveVendorCategoryMappingButton) {
+    const context = saveVendorCategoryMappingButton.dataset.context || "catalog";
+    const row = saveVendorCategoryMappingButton.closest("tr");
+    const mainCategory = row?.querySelector("[data-vendor-category-main]")?.value.trim() || "";
+    if (!mainCategory) {
+      toast("Choose a main category before saving.");
+      return;
+    }
+    api("/api/vendor-category-mappings", {
+      method: "POST",
+      feedbackLabel: "Saving vendor category mapping...",
+      body: JSON.stringify({
+        supplier: saveVendorCategoryMappingButton.dataset.supplier || "",
+        vendorCategory: saveVendorCategoryMappingButton.dataset.vendorCategory || "",
+        mainCategory,
+        sampleSku: saveVendorCategoryMappingButton.dataset.sampleSku || "",
+        matchCount: Number(saveVendorCategoryMappingButton.dataset.matchCount || 0)
+      })
+    }).then((result) => {
+      state.vendorCategoryMappings = result.vendorCategoryMappings || state.vendorCategoryMappings || {};
+      if (context === "vendor-profile") {
+        const vendor = (state.vendors || []).find((item) => vendorCategoryMappingSupplier(item) === (saveVendorCategoryMappingButton.dataset.supplier || "")) || { name: saveVendorCategoryMappingButton.dataset.supplier || "" };
+        vendorProfileCategoryMappingState = { ...vendorProfileCategoryMappingState, loaded: false };
+        loadVendorProfileCategoryMappings(vendor).catch((error) => toast(error.message));
+      } else {
+        vendorCategoryMappingState = { ...vendorCategoryMappingState, loaded: false };
+        loadVendorCategoryMappingsPage().catch((error) => toast(error.message));
+      }
+      toast("Vendor category mapping saved.");
+    }).catch((error) => toast(error.message));
+    return;
+  }
+  if (addVendorCategoryMainButton) {
+    const context = addVendorCategoryMainButton.dataset.context || "catalog";
+    const vendorCategory = addVendorCategoryMainButton.dataset.vendorCategory || "";
+    if (!vendorCategory) {
+      toast("Vendor category is required.");
+      return;
+    }
+    api("/api/vendor-category-mappings", {
+      method: "POST",
+      feedbackLabel: "Adding main category...",
+      body: JSON.stringify({
+        supplier: addVendorCategoryMainButton.dataset.supplier || "",
+        vendorCategory,
+        mainCategory: vendorCategory,
+        addAsMainCategory: true,
+        sampleSku: addVendorCategoryMainButton.dataset.sampleSku || "",
+        matchCount: Number(addVendorCategoryMainButton.dataset.matchCount || 0)
+      })
+    }).then((result) => {
+      state.vendorCategoryMappings = result.vendorCategoryMappings || state.vendorCategoryMappings || {};
+      state.categorySettings = result.categorySettings || state.categorySettings || [];
+      state.categorySettingsLoaded = true;
+      categoryState = { ...categoryState, categories: [] };
+      if (context === "vendor-profile") {
+        const vendor = (state.vendors || []).find((item) => vendorCategoryMappingSupplier(item) === (addVendorCategoryMainButton.dataset.supplier || "")) || { name: addVendorCategoryMainButton.dataset.supplier || "" };
+        vendorProfileCategoryMappingState = { ...vendorProfileCategoryMappingState, loaded: false };
+        loadVendorProfileCategoryMappings(vendor).catch((error) => toast(error.message));
+      } else {
+        vendorCategoryMappingState = { ...vendorCategoryMappingState, loaded: false };
+        loadVendorCategoryMappingsPage().catch((error) => toast(error.message));
+      }
+      const mapped = Number(result.productsMapped || 0);
+      toast(`Main category added and ${countLabel(mapped)} SKU${mapped === 1 ? "" : "s"} mapped.`);
+    }).catch((error) => toast(error.message));
+    return;
+  }
+  if (rebuildCategorySummaryIndexButton) {
+    rebuildCategorySummaryIndex().catch((error) => toast(error.message));
     return;
   }
   if (reviewActionButton) {
@@ -18828,6 +21513,56 @@ document.addEventListener("click", async (event) => {
   if (productWorkspaceTabButton) {
     selectedProductWorkspaceTab = productWorkspaceTabButton.dataset.productWorkspaceTab || "home";
     renderProductContentPage();
+    return;
+  }
+  if (toggleVendorOverviewEditButton) {
+    selectedVendorOverviewEditMode = !selectedVendorOverviewEditMode;
+    selectedVendorProfileTab = "overview";
+    renderVendorProfile();
+    renderTopbarActions();
+    toast(selectedVendorOverviewEditMode ? "Vendor overview unlocked." : "Vendor overview locked.");
+    return;
+  }
+  if (toggleVendorRulesEditButton) {
+    selectedVendorProfileTab = "rules";
+    selectedVendorRulesEditMode = true;
+    vendorRulesDraftDirty = false;
+    renderVendorProfile();
+    renderTopbarActions();
+    toast("Vendor rules unlocked.");
+    return;
+  }
+  if (saveVendorRulesButton) {
+    saveVendorRulesPanel().catch((error) => toast(error.message));
+    return;
+  }
+  if (cancelVendorRulesEditButton) {
+    selectedVendorRulesEditMode = false;
+    vendorRulesDraftDirty = false;
+    renderVendorProfile();
+    renderTopbarActions();
+    toast("Vendor rule edits canceled.");
+    return;
+  }
+  if (vendorProfileTabButton) {
+    if (selectedVendorRulesEditMode && vendorRulesDraftDirty) {
+      toast("Save or cancel vendor rule changes first.");
+      return;
+    }
+    selectedVendorProfileTab = vendorProfileTabButton.dataset.vendorProfileTab || "overview";
+    if (selectedVendorProfileTab !== "rules") selectedVendorRulesEditMode = false;
+    renderVendorProfile();
+    renderTopbarActions();
+    return;
+  }
+  if (vendorRuleTabButton) {
+    if (selectedVendorRulesEditMode && vendorRulesDraftDirty) {
+      toast("Save or cancel vendor rule changes first.");
+      return;
+    }
+    selectedVendorRuleTab = vendorRuleTabButton.dataset.vendorRuleTab || "pricing";
+    renderVendorProfile();
+    renderTopbarActions();
     return;
   }
   if (ebayListingActionButton) {
@@ -18972,6 +21707,14 @@ document.addEventListener("click", async (event) => {
   }
   if (refreshImportJobsButton) {
     refreshImportJobs().catch((error) => toast(error.message));
+    return;
+  }
+  if (refreshSystemFieldsButton) {
+    systemFieldRegistry = null;
+    await loadSystemFieldRegistry();
+    if (currentViewId === "system-fields") renderSystemFieldsPage();
+    else renderSystemSettingsPage();
+    toast("System fields refreshed.");
     return;
   }
   if (systemBackupButton) {
@@ -19146,6 +21889,36 @@ document.addEventListener("click", async (event) => {
     syncAllShopifyStatuses().catch((error) => toast(error.message));
     return;
   }
+  if (syncShopifySkuMapButton) {
+    closeActionMenus();
+    syncShopifySkuMap().catch((error) => toast(error.message));
+    return;
+  }
+  if (refreshShopifyTokenButton) {
+    closeActionMenus();
+    refreshShopifyToken().catch((error) => toast(error.message));
+    return;
+  }
+  if (syncShopifyShippingProfilesButton) {
+    closeActionMenus();
+    syncShopifyShippingProfiles().catch((error) => toast(error.message));
+    return;
+  }
+  if (shopifyExistingLinkButton) {
+    closeActionMenus();
+    queueShopifyExistingLink(shopifyExistingLinkButton.dataset.shopifyExistingLink || "dry-run").catch((error) => toast(error.message));
+    return;
+  }
+  if (shopifyProductCreateButton) {
+    closeActionMenus();
+    queueShopifyProductCreate(shopifyProductCreateButton.dataset.shopifyProductCreate || "dry-run").catch((error) => toast(error.message));
+    return;
+  }
+  if (shopifyPricePushButton) {
+    closeActionMenus();
+    queueShopifyPricePush(shopifyPricePushButton.dataset.shopifyPricePush || "dry-run").catch((error) => toast(error.message));
+    return;
+  }
   if (shopifyInventoryUpdateButton) {
     closeActionMenus();
     queueShopifyInventoryUpdate(shopifyInventoryUpdateButton.dataset.shopifyInventoryUpdate || "apply").catch((error) => toast(error.message));
@@ -19171,14 +21944,22 @@ document.addEventListener("click", async (event) => {
     loadChannelApiLogs(refreshChannelApiLogsButton.dataset.refreshChannelApiLogs, true).catch((error) => toast(error.message));
     return;
   }
+  if (refreshChannelAttributeMappingsButton) {
+    loadChannelAttributeMappings(refreshChannelAttributeMappingsButton.dataset.refreshChannelAttributeMappings, true).catch((error) => toast(error.message));
+    return;
+  }
+  if (saveChannelAttributeMappingButton) {
+    saveChannelAttributeMapping(saveChannelAttributeMappingButton.dataset.saveChannelAttributeMapping).catch((error) => toast(error.message));
+    return;
+  }
   if (channelApiLogSearchButton) {
     applyChannelApiLogFiltersFromDom();
-    renderChannelProfile();
+    renderChannelApiLogHost();
     return;
   }
   if (channelApiLogClearButton) {
     channelApiLogState.filters = { q: "", status: "", transport: "" };
-    renderChannelProfile();
+    renderChannelApiLogHost();
     return;
   }
   if (openApiLogJobButton) {
@@ -19817,6 +22598,10 @@ document.addEventListener("click", async (event) => {
     refreshSourceFacets();
     return;
   }
+  if (refreshPricingInventoryButton) {
+    refreshPricingInventory();
+    return;
+  }
   if (openSourceCatalogSkuButton) {
     const sourceSku = openSourceCatalogSkuButton.dataset.openSourceCatalogSku || "";
     closeActionMenus();
@@ -20346,6 +23131,22 @@ $("#order-filter-clear").addEventListener("click", () => {
 $("#draft-search")?.addEventListener("input", () => runWithSearchFeedback(renderDrafts, "Searching drafts..."));
 $("#return-search")?.addEventListener("input", () => runWithSearchFeedback(renderReturnsManagement, "Searching returns..."));
 document.addEventListener("input", (event) => {
+  const categoryFilterInput = event.target.closest("input[data-category-filter]");
+  if (categoryFilterInput) {
+    const field = categoryFilterInput.dataset.categoryFilter || "";
+    categoryFilters = { ...categoryFilters, [field]: categoryFilterInput.value };
+    selectedCategoryId = null;
+    categoryViewMode = "table";
+    renderCategories();
+    setTimeout(() => {
+      const input = document.querySelector(`input[data-category-filter="${field}"]`);
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    }, 0);
+    return;
+  }
   const smartSearch = event.target.closest("[data-smart-search]");
   if (smartSearch) {
     const scope = smartSearch.dataset.smartSearch || "";
@@ -20406,12 +23207,47 @@ document.addEventListener("input", (event) => {
     }, 0);
     return;
   }
+  const systemFieldSearch = event.target.closest("[data-system-field-search]");
+  if (systemFieldSearch) {
+    systemFieldFilters.query = systemFieldSearch.value;
+    renderSystemFieldsPage();
+    setTimeout(() => {
+      const input = document.querySelector("[data-system-field-search]");
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    }, 0);
+    return;
+  }
+  const channelAttributeSearch = event.target.closest("[data-channel-attribute-search]");
+  if (channelAttributeSearch) {
+    channelAttributeState.filters = { ...(channelAttributeState.filters || {}), q: channelAttributeSearch.value };
+    renderChannelProfile();
+    setTimeout(() => {
+      const input = document.querySelector("[data-channel-attribute-search]");
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    }, 0);
+    return;
+  }
   const jobsSearch = event.target.closest("#jobs-search");
   if (!jobsSearch) return;
   jobsFilter.query = jobsSearch.value;
   runWithSearchFeedback(renderJobsPage, "Searching jobs...");
 });
 document.addEventListener("change", (event) => {
+  const categoryFilter = event.target.closest("[data-category-filter]");
+  if (categoryFilter) {
+    const field = categoryFilter.dataset.categoryFilter || "";
+    categoryFilters = { ...categoryFilters, [field]: categoryFilter.value };
+    selectedCategoryId = null;
+    categoryViewMode = "table";
+    renderCategories();
+    return;
+  }
   const smartDraftField = event.target.closest("[data-smart-draft-field]");
   if (smartDraftField) {
     const scope = smartDraftField.dataset.smartDraftField || "";
@@ -20473,6 +23309,23 @@ document.addEventListener("change", (event) => {
     loadDataQualityProducts().catch((error) => toast(error.message));
     return;
   }
+  const systemFieldGroup = event.target.closest("[data-system-field-group]");
+  const systemFieldType = event.target.closest("[data-system-field-type]");
+  if (systemFieldGroup || systemFieldType) {
+    if (systemFieldGroup) systemFieldFilters.group = systemFieldGroup.value;
+    if (systemFieldType) systemFieldFilters.type = systemFieldType.value;
+    renderSystemFieldsPage();
+    return;
+  }
+  const channelAttributeFilter = event.target.closest("[data-channel-attribute-filter]");
+  if (channelAttributeFilter) {
+    const field = channelAttributeFilter.dataset.channelAttributeFilter || "";
+    if (field) {
+      channelAttributeState.filters = { ...(channelAttributeState.filters || {}), [field]: channelAttributeFilter.value };
+      renderChannelProfile();
+    }
+    return;
+  }
   const section = event.target.closest("#jobs-filter-section");
   const status = event.target.closest("#jobs-filter-status");
   const direction = event.target.closest("#jobs-filter-direction");
@@ -20481,7 +23334,7 @@ document.addEventListener("change", (event) => {
   const channelApiLogFilter = event.target.closest("[data-channel-api-log-filter]");
   if (channelApiLogFilter) {
     applyChannelApiLogFiltersFromDom();
-    renderChannelProfile();
+    renderChannelApiLogHost();
     return;
   }
   if (!section && !status && !direction && !channel && !endpoint) return;
@@ -20749,6 +23602,25 @@ document.addEventListener("input", (event) => {
     masterCategoryMapModal = { ...masterCategoryMapModal, query: masterCategoryEbaySearch.value };
     return;
   }
+  const vendorCategoryMainInput = event.target.closest("[data-vendor-category-main]");
+  if (vendorCategoryMainInput) {
+    showVendorCategorySuggestions(vendorCategoryMainInput);
+    return;
+  }
+  const vendorCategoryOptionFilter = event.target.closest("[data-vendor-category-option-filter]");
+  if (vendorCategoryOptionFilter) {
+    const context = vendorCategoryOptionFilter.dataset.vendorCategoryOptionFilter || "catalog";
+    vendorCategoryOptionFilters = { ...vendorCategoryOptionFilters, [context]: vendorCategoryOptionFilter.value };
+    document.querySelectorAll(`[data-vendor-category-context="${CSS.escape(context)}"]`).forEach((input) => {
+      if (!input.value.trim()) {
+        const rowIndex = input.dataset.rowIndex || "";
+        const row = document.querySelector(`[data-vendor-category-suggestion-context="${CSS.escape(context)}"][data-row-index="${CSS.escape(rowIndex)}"]`);
+        const panel = row?.querySelector("[data-vendor-category-suggestions]");
+        if (panel && row && !row.hidden) panel.innerHTML = renderVendorCategorySuggestionButtons(context, vendorCategoryOptionFilter.value, rowIndex);
+      }
+    });
+    return;
+  }
   const draftField = event.target.closest("[data-draft-line-field]");
   if (draftField) {
     const id = draftField.dataset.lineId;
@@ -20848,7 +23720,49 @@ document.addEventListener("change", (event) => {
     return;
   }
 });
+
+document.addEventListener("focusin", (event) => {
+  const vendorCategoryMainInput = event.target.closest("[data-vendor-category-main]");
+  if (vendorCategoryMainInput) {
+    showVendorCategorySuggestions(vendorCategoryMainInput);
+    return;
+  }
+  if (!event.target.closest(".vendor-category-combobox") && !event.target.closest("[data-vendor-category-suggestion-row]")) hideVendorCategorySuggestions();
+});
+
+document.addEventListener("pointerdown", (event) => {
+  const mappingInput = event.target.closest("[data-vendor-category-main]");
+  if (mappingInput) {
+    showVendorCategorySuggestions(mappingInput);
+    return;
+  }
+  const optionButton = event.target.closest("[data-select-vendor-main-category]");
+  if (optionButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    selectVendorMainCategoryOption(optionButton);
+    return;
+  }
+  const taxonomyButton = event.target.closest("[data-search-vendor-taxonomy]");
+  if (taxonomyButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    searchVendorTaxonomyFallback(taxonomyButton).catch((error) => toast(error.message));
+    return;
+  }
+  if (
+    !event.target.closest("[data-vendor-category-main]") &&
+    !event.target.closest("[data-vendor-category-suggestion-row]") &&
+    !event.target.closest("[data-vendor-category-option-filter]")
+  ) {
+    hideVendorCategorySuggestions();
+  }
+}, true);
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && document.querySelector("[data-vendor-category-suggestion-row]:not([hidden])")) {
+    hideVendorCategorySuggestions();
+    return;
+  }
   const smartSearch = event.target.closest("[data-smart-search]");
   if (smartSearch && event.key === "Enter") {
     event.preventDefault();
@@ -20892,7 +23806,25 @@ document.addEventListener("keydown", (event) => {
     const nextInput = inputs[currentIndex + 1] || $(`[data-receive-line="${Number(rowIndex) + 1}"]`);
     if (nextInput) nextInput.focus();
   }
+  const vendorFieldInput = event.target.closest("[data-vendor-field]");
+  if (vendorFieldInput?.matches("[data-vendor-rule-edit-field]") && event.key === "Enter") {
+    event.preventDefault();
+    saveVendorRulesPanel().catch((error) => toast(error.message));
+    return;
+  }
+  if (vendorFieldInput && event.key === "Enter" && ["inventoryRules.replenishableQty", "inventoryRules.note"].includes(vendorFieldInput.dataset.vendorField || "")) {
+    event.preventDefault();
+    updateVendorField(vendorFieldInput).catch((error) => toast(error.message));
+  }
 });
+
+document.addEventListener("wheel", (event) => {
+  const scroller = event.target.closest(".subnav, .product-workspace-tabs, .order-queue-tabs, .product-workspace-chips, .product-editor-actions");
+  if (!scroller || scroller.scrollWidth <= scroller.clientWidth || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+  event.preventDefault();
+  scroller.scrollLeft += event.deltaY;
+}, { passive: false });
+
 $("#shadow-marketplace")?.addEventListener("change", (event) => {
   const parentSku = $("#shadow-parent-sku")?.value || "";
   const shadowInput = $("#shadow-sku");
@@ -21004,7 +23936,13 @@ document.addEventListener("change", (event) => {
   if (systemSettingInput) updateSystemSetting(systemSettingInput).catch((error) => toast(error.message));
   if (categoryInput) updateCategoryField(categoryInput).catch((error) => toast(error.message));
 if (orderMoneyInput) updateOrderMoney(orderMoneyInput);
-  if (vendorField) updateVendorField(vendorField);
+  if (vendorField) {
+    if (vendorField.matches("[data-vendor-rule-edit-field]")) {
+      setVendorRuleDirty(true);
+    } else {
+      updateVendorField(vendorField);
+    }
+  }
   if (customerField) updateCustomerField(customerField);
   if (brandField) updateBrandField(brandField);
   if (brandVendor) updateBrandVendor(brandVendor);
@@ -21016,6 +23954,14 @@ if (orderMoneyInput) updateOrderMoney(orderMoneyInput);
 });
 
 document.addEventListener("input", (event) => {
+  const vendorFieldInput = event.target.closest("[data-vendor-field]");
+  if (vendorFieldInput?.matches("[data-vendor-rule-edit-field]")) {
+    setVendorRuleDirty(true);
+    return;
+  }
+  if (vendorFieldInput && ["inventoryRules.replenishableQty", "inventoryRules.note"].includes(vendorFieldInput.dataset.vendorField || "")) {
+    queueVendorFieldSave(vendorFieldInput);
+  }
   const productExportColumnSearch = event.target.closest("[data-product-export-column-search]");
   if (productExportColumnSearch) {
     productExportModalState.columnSearch = productExportColumnSearch.value;

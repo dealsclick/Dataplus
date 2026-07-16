@@ -38,6 +38,10 @@ function numberValue(value, fallback = 0) {
   return Number.isFinite(numeric) ? numeric : fallback;
 }
 
+function booleanValue(value) {
+  return value === true || ["true", "yes", "y", "1"].includes(String(value ?? "").trim().toLowerCase());
+}
+
 function textValue(value = "") {
   return String(value ?? "").trim();
 }
@@ -82,9 +86,12 @@ function parseShopifyPackVariantSku(sku = "", bases = []) {
 
 function expectedVariantQuantities(item = {}, options = {}) {
   const baseSku = baseSkuCandidates(item)[0] || "";
+  const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
+    ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
+    : 0;
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = Math.max(0, stock - reserved);
+  const availableEach = replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved);
   const uomQty = productUomQty(item);
   if (!baseSku) return [];
   if (uomQty <= 1) return [{ sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }];
@@ -97,9 +104,12 @@ function expectedVariantQuantities(item = {}, options = {}) {
 
 function expectedVariantQuantitiesForShopify(item = {}, variants = [], options = {}) {
   const bases = baseSkuCandidates(item);
+  const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
+    ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
+    : 0;
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = Math.max(0, stock - reserved);
+  const availableEach = replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved);
   const bySku = new Map((variants || []).map((variant) => [textValue(variant.sku).toLowerCase(), variant]));
   const expected = expectedVariantQuantities(item, options);
   const matchedExpected = expected.filter((row) => bySku.has(textValue(row.sku).toLowerCase()));
@@ -380,6 +390,10 @@ async function loadLinkedProducts(limit) {
         p.mfr_part_number,
         coalesce(vci.qty, p.qty, 0) as source_qty,
         coalesce(p.raw->>'reserved', '0') as reserved,
+        coalesce(p.raw->>'replenishableUseVendorRules', 'false') as replenishable_use_vendor_rules,
+        coalesce(p.raw->>'replenishable', 'false') as replenishable,
+        coalesce(p.raw->>'replenishableQtyUseVendorDefault', 'false') as replenishable_qty_use_vendor_default,
+        coalesce(p.raw->>'replenishableQty', '0') as replenishable_qty,
         coalesce(vci.uom, p.uom, p.raw->>'uom', '') as uom,
         coalesce(vci.uom_qty::text, p.uom_qty::text, p.raw->>'uomQty', p.raw->>'uom_qty', '1') as uom_qty,
         coalesce(sps.shopify_id, p.raw->>'shopifyId', '') as shopify_id,

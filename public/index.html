@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DataPlus</title>
-    <link rel="stylesheet" href="/styles.css?v=saved-filter-views-20260612-25" />
+    <link rel="stylesheet" href="/styles.css?v=channel-logs-20260715-1" />
   </head>
   <body>
     <div id="global-save-progress" class="global-save-progress" aria-hidden="true"><span></span></div>
@@ -12,12 +12,13 @@
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark">D+</span>
-        <div>
+        <div class="brand-main">
           <strong>DataPlus</strong>
-          <small>Marketplace Ops</small>
+          <div class="brand-actions" aria-label="Menu display controls">
+            <button id="sidebar-collapse-toggle" class="menu-expand sidebar-collapse-toggle" aria-label="Collapse menu to icons" title="Collapse menu to icons" data-toggle-sidebar-collapse></button>
+            <button id="menu-expand-toggle" class="menu-expand" aria-label="Expand all menu groups" title="Expand all menu groups" data-toggle-menu-groups></button>
+          </div>
         </div>
-        <button id="sidebar-collapse-toggle" class="menu-expand sidebar-collapse-toggle" aria-label="Collapse menu to icons" title="Collapse menu to icons" data-toggle-sidebar-collapse></button>
-        <button id="menu-expand-toggle" class="menu-expand" aria-label="Expand all menu groups" title="Expand all menu groups" data-toggle-menu-groups></button>
       </div>
       <nav aria-label="Primary">
         <span class="nav-section-label">Home</span>
@@ -62,8 +63,15 @@
         <button class="nav-item" data-view="reports" data-icon="bar-chart-3">Reports</button>
         <button class="nav-item" data-view="knowledge" data-icon="book-open">Knowledge Base</button>
         <span class="nav-section-label">Admin</span>
-        <button class="nav-item" data-view="connections" data-icon="radio">Channels</button>
-        <button class="nav-item" data-view="system-settings" data-icon="settings">System Settings</button>
+        <div class="nav-group" data-nav-group="system-settings">
+          <button class="nav-item nav-parent" data-view="system-settings" data-icon="settings">System Settings</button>
+          <div class="nav-children">
+            <button class="nav-child" data-view="connections" data-icon="radio">Channels</button>
+            <button class="nav-child" data-view="system-settings" data-icon="users">User Profiles</button>
+            <button class="nav-child" data-view="system-operations" data-icon="settings">Operations</button>
+            <button class="nav-child" data-view="system-fields" data-icon="list-check">System Fields</button>
+          </div>
+        </div>
       </nav>
     </aside>
 
@@ -281,6 +289,7 @@
           <button class="subnav-item" data-catalog-tab="reviews" data-icon="clipboard-check">Import Review</button>
           <button class="subnav-item" data-catalog-tab="changes" data-icon="activity">SKU Changes</button>
           <button class="subnav-item" data-catalog-tab="categories" data-icon="tags">Categories</button>
+          <button class="subnav-item" data-catalog-tab="vendor-category-mappings" data-icon="tags">Vendor Category Mappings</button>
           <button class="subnav-item" data-catalog-tab="attributes" data-icon="list-check">Attributes</button>
           <button class="subnav-item" data-catalog-tab="attribute-groups" data-icon="network">Groups</button>
           <button class="subnav-item" data-catalog-tab="inventory" data-icon="warehouse">Inventory</button>
@@ -343,6 +352,7 @@
         <div id="import-review-list" class="catalog-list"></div>
         <div id="catalog-changes-list" class="catalog-list"></div>
         <div id="category-list" class="catalog-list"></div>
+        <div id="vendor-category-mappings-list" class="catalog-list"></div>
         <div id="attribute-list" class="catalog-list"></div>
         <div id="attribute-groups-list" class="catalog-list"></div>
         <div id="inventory-list" class="catalog-list"></div>
@@ -455,6 +465,14 @@
 
       <section id="system-settings" class="view">
         <div id="system-settings-page"></div>
+      </section>
+
+      <section id="system-operations" class="view">
+        <div id="system-operations-page"></div>
+      </section>
+
+      <section id="system-fields" class="view">
+        <div id="system-fields-page"></div>
       </section>
 
       <section id="channel-full" class="view">
@@ -1329,6 +1347,6 @@
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/checklist@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/embed@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/@editorjs/image@latest"></script>
-    <script src="/app.js?v=saved-filter-views-20260612-25"></script>
+    <script src="/app.js?v=channel-logs-20260715-1"></script>
   </body>
 </html>
