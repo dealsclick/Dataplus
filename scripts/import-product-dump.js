@@ -99,6 +99,8 @@ function parseArgs(argv) {
     inspect: false,
     inventory: false,
     postgresOnly: false,
+    currentOnly: false,
+    leanRaw: false,
     snapshotOnly: false,
     jobId: "",
     limit: 0
@@ -116,6 +118,10 @@ function parseArgs(argv) {
       options.inventory = true;
     } else if (arg === "--postgres-only") {
       options.postgresOnly = true;
+    } else if (arg === "--current-only") {
+      options.currentOnly = true;
+    } else if (arg === "--lean-raw") {
+      options.leanRaw = true;
     } else if (arg === "--snapshot-only") {
       options.snapshotOnly = true;
     } else if (arg === "--job-id") {
@@ -1082,7 +1088,9 @@ async function importCatalogStore(dumpPath, options) {
   const flushVendorCatalogBatch = async () => {
     if (options.dryRun || !vendorCatalogBatch.length) return;
     const result = await upsertVendorCatalogItemsFromProducts(importId, vendorCatalogBatch.splice(0), {
-      source: "product_dump"
+      source: "product_dump",
+      currentOnly: options.currentOnly,
+      leanRaw: options.leanRaw
     });
     stats.sqlChanges = (stats.sqlChanges || 0) + Number(result.changes || 0);
   };

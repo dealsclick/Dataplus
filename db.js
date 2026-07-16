@@ -1207,7 +1207,19 @@ function vendorCatalogIdFor(item = {}) {
   return nullableString(item.supplierCode || item.supplier || item.vendor || item.defaultSupplier)?.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "unknown-vendor";
 }
 
-function vendorCatalogRecordFromProduct(item = {}, feedRunId = "") {
+function leanVendorCatalogRaw(item = {}) {
+  return {
+    sku: nullableString(item.sku || item.externalId),
+    supplier: nullableString(item.supplier || item.vendor || item.defaultSupplier),
+    supplierCode: nullableString(item.supplierCode),
+    vendorSku: nullableString(item.vendorSku),
+    productDumpUpdatedAt: nullableString(item.productDumpUpdatedAt),
+    itemKey: nullableString(item.itemKey),
+    uploadedBy: nullableString(item.uploadedBy)
+  };
+}
+
+function vendorCatalogRecordFromProduct(item = {}, feedRunId = "", options = {}) {
   const sourceSku = nullableString(item.sku || item.externalId);
   if (!sourceSku) return null;
   return {
@@ -1232,7 +1244,7 @@ function vendorCatalogRecordFromProduct(item = {}, feedRunId = "") {
     uom_qty: nullableNumber(item.uomQty ?? item.uom_qty),
     to_be_discontinued: Boolean(boolOrNull(item.toBeDiscontinued ?? item.closeoutEligible ?? item.discontinued)),
     default_image: nullableString(item.defaultImage || (Array.isArray(item.images) ? item.images[0] : "")),
-    raw: item
+    raw: options.leanRaw ? leanVendorCatalogRaw(item) : item
   };
 }
 
@@ -1472,7 +1484,7 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
   if (!client) return { enabled: false, items: 0, changes: 0 };
   await initRelationalSchema();
   const sourceProducts = Array.isArray(products) ? products : [];
-  const records = sourceProducts.map((item) => vendorCatalogRecordFromProduct(item, feedRunId)).filter(Boolean);
+  const records = sourceProducts.map((item) => vendorCatalogRecordFromProduct(item, feedRunId, options)).filter(Boolean);
   const commercialRecords = sourceProducts.map((item) => productDumpCommercialRecordFromProduct(item)).filter(Boolean);
   const systemRecords = sourceProducts.map((item) => productDumpSystemRecordFromProduct(item)).filter(Boolean);
   if (!records.length) return { enabled: true, items: 0, changes: 0 };
@@ -1483,87 +1495,89 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
     const batch = records.slice(i, i + batchSize);
     await client.query("begin");
     try {
-      await client.query(`
-        insert into vendor_catalog_snapshots (
-          feed_run_id, vendor_id, source_sku, cost, price, list_price, qty,
-          stock_status, to_be_discontinued, raw
-        )
-        select feed_run_id, vendor_id, source_sku, cost, price, list_price, qty,
-          stock_status, to_be_discontinued, raw
-        from jsonb_to_recordset($1::jsonb) as x(
-          feed_run_id text, vendor_id text, source_sku text, cost numeric, price numeric,
-          list_price numeric, qty numeric, stock_status text, to_be_discontinued boolean, raw jsonb
-        )
-        on conflict (feed_run_id, vendor_id, source_sku) do update set
-          cost = excluded.cost,
-          price = excluded.price,
-          list_price = excluded.list_price,
-          qty = excluded.qty,
-          stock_status = excluded.stock_status,
-          to_be_discontinued = excluded.to_be_discontinued,
-          raw = excluded.raw
-      `, [JSON.stringify(batch)]);
-      const changeResult = await client.query(`
-        with incoming as (
-          select *
+      if (!options.currentOnly) {
+        await client.query(`
+          insert into vendor_catalog_snapshots (
+            feed_run_id, vendor_id, source_sku, cost, price, list_price, qty,
+            stock_status, to_be_discontinued, raw
+          )
+          select feed_run_id, vendor_id, source_sku, cost, price, list_price, qty,
+            stock_status, to_be_discontinued, raw
           from jsonb_to_recordset($1::jsonb) as x(
-            feed_run_id text, vendor_id text, source_sku text, internal_sku text, vendor_sku text,
-            title text, brand text, manufacturer text, mfr_part_number text, barcode text,
-            category text, source_category text, cost numeric, price numeric, list_price numeric,
-            qty numeric, stock_status text, uom text, uom_qty numeric, to_be_discontinued boolean,
-            default_image text, raw jsonb
+            feed_run_id text, vendor_id text, source_sku text, cost numeric, price numeric,
+            list_price numeric, qty numeric, stock_status text, to_be_discontinued boolean, raw jsonb
           )
-        ),
-        changed as (
+          on conflict (feed_run_id, vendor_id, source_sku) do update set
+            cost = excluded.cost,
+            price = excluded.price,
+            list_price = excluded.list_price,
+            qty = excluded.qty,
+            stock_status = excluded.stock_status,
+            to_be_discontinued = excluded.to_be_discontinued,
+            raw = excluded.raw
+        `, [JSON.stringify(batch)]);
+        const changeResult = await client.query(`
+          with incoming as (
+            select *
+            from jsonb_to_recordset($1::jsonb) as x(
+              feed_run_id text, vendor_id text, source_sku text, internal_sku text, vendor_sku text,
+              title text, brand text, manufacturer text, mfr_part_number text, barcode text,
+              category text, source_category text, cost numeric, price numeric, list_price numeric,
+              qty numeric, stock_status text, uom text, uom_qty numeric, to_be_discontinued boolean,
+              default_image text, raw jsonb
+            )
+          ),
+          changed as (
+            select
+              incoming.feed_run_id,
+              incoming.source_sku,
+              field.field_name,
+              field.old_value,
+              field.new_value,
+              incoming.vendor_id,
+              incoming.vendor_sku,
+              incoming.raw
+            from incoming
+            join vendor_catalog_items current
+              on current.vendor_id = incoming.vendor_id
+             and lower(current.source_sku) = lower(incoming.source_sku)
+            cross join lateral (
+              values
+                ('cost', current.cost::text, incoming.cost::text),
+                ('price', current.price::text, incoming.price::text),
+                ('list_price', current.list_price::text, incoming.list_price::text),
+                ('qty', current.qty::text, incoming.qty::text),
+                ('stock_status', current.stock_status, incoming.stock_status),
+                ('uom', current.uom, incoming.uom),
+                ('uom_qty', current.uom_qty::text, incoming.uom_qty::text),
+                ('to_be_discontinued', current.to_be_discontinued::text, incoming.to_be_discontinued::text),
+                ('title', current.title, incoming.title),
+                ('brand', current.brand, incoming.brand),
+                ('mfr_part_number', current.mfr_part_number, incoming.mfr_part_number),
+                ('vendor_sku', current.vendor_sku, incoming.vendor_sku),
+                ('category', current.category, incoming.category),
+                ('default_image', current.default_image, incoming.default_image)
+            ) as field(field_name, old_value, new_value)
+            where coalesce(field.old_value, '') is distinct from coalesce(field.new_value, '')
+          )
+          insert into product_change_events (sku, field_name, old_value, new_value, source, job_id, raw)
           select
-            incoming.feed_run_id,
-            incoming.source_sku,
-            field.field_name,
-            field.old_value,
-            field.new_value,
-            incoming.vendor_id,
-            incoming.vendor_sku,
-            incoming.raw
-          from incoming
-          join vendor_catalog_items current
-            on current.vendor_id = incoming.vendor_id
-           and lower(current.source_sku) = lower(incoming.source_sku)
-          cross join lateral (
-            values
-              ('cost', current.cost::text, incoming.cost::text),
-              ('price', current.price::text, incoming.price::text),
-              ('list_price', current.list_price::text, incoming.list_price::text),
-              ('qty', current.qty::text, incoming.qty::text),
-              ('stock_status', current.stock_status, incoming.stock_status),
-              ('uom', current.uom, incoming.uom),
-              ('uom_qty', current.uom_qty::text, incoming.uom_qty::text),
-              ('to_be_discontinued', current.to_be_discontinued::text, incoming.to_be_discontinued::text),
-              ('title', current.title, incoming.title),
-              ('brand', current.brand, incoming.brand),
-              ('mfr_part_number', current.mfr_part_number, incoming.mfr_part_number),
-              ('vendor_sku', current.vendor_sku, incoming.vendor_sku),
-              ('category', current.category, incoming.category),
-              ('default_image', current.default_image, incoming.default_image)
-          ) as field(field_name, old_value, new_value)
-          where coalesce(field.old_value, '') is distinct from coalesce(field.new_value, '')
-        )
-        insert into product_change_events (sku, field_name, old_value, new_value, source, job_id, raw)
-        select
-          source_sku,
-          field_name,
-          old_value,
-          new_value,
-          $2,
-          feed_run_id,
-          jsonb_build_object(
-            'vendorId', vendor_id,
-            'vendorSku', vendor_sku,
-            'feedRunId', feed_run_id,
-            'raw', raw
-          )
-        from changed
-      `, [JSON.stringify(batch), source]);
-      changes += changeResult.rowCount || 0;
+            source_sku,
+            field_name,
+            old_value,
+            new_value,
+            $2,
+            feed_run_id,
+            jsonb_build_object(
+              'vendorId', vendor_id,
+              'vendorSku', vendor_sku,
+              'feedRunId', feed_run_id,
+              'raw', raw
+            )
+          from changed
+        `, [JSON.stringify(batch), source]);
+        changes += changeResult.rowCount || 0;
+      }
       await client.query(`
         insert into vendor_catalog_items (
           vendor_id, source_sku, internal_sku, vendor_sku, title, brand, manufacturer,
