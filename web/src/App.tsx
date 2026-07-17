@@ -426,17 +426,19 @@ function App() {
   async function refreshData({ quiet = false } = {}) {
     if (!quiet) setLoading(true)
     try {
-      const [nextState, jobResponse] = await Promise.all([
-        api<LiteState>("/api/state?lite=1"),
-        api<ImportJobsResponse>("/api/import-jobs"),
-      ])
+      const nextState = await api<LiteState>("/api/state?lite=1")
       setState(nextState)
+    } catch (error) {
+      if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to load DataPlus.")
+    } finally {
+      setLoading(false)
+    }
+    try {
+      const jobResponse = await api<ImportJobsResponse>("/api/import-jobs")
       setJobs(jobResponse.importJobs || [])
       setWorkerStatus(jobResponse.workerStatus || {})
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load DataPlus.")
-    } finally {
-      setLoading(false)
+      if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to load job history.")
     }
   }
 
