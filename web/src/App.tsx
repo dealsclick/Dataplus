@@ -299,6 +299,14 @@ type ProductItem = CatalogItem & {
   shadowSkuCount?: number
   shopifyVariantCount?: number
   ebayListing?: { status?: string; offerId?: string; listingId?: string }
+  shortDescription?: string
+  longDescription?: string
+  condition?: string
+  countryOfOrigin?: string
+  images?: Array<string | { url?: string; src?: string }>
+  aliases?: Array<{ sku?: string; aliasSku?: string; active?: boolean }>
+  warehouseStock?: Array<{ warehouseName?: string; warehouse?: string; qty?: number; reserved?: number; available?: number }>
+  recentChanges?: Array<{ field?: string; previousValue?: string; nextValue?: string; updatedAt?: string; createdAt?: string }>
 }
 
 type CatalogResponse = {
@@ -2088,7 +2096,7 @@ function ProductDetailSheet({
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-3xl">
+      <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-5xl">
         <SheetHeader className="border-b pr-12">
           <div className="flex items-start gap-3">
             <div className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-md border bg-muted">
@@ -2136,8 +2144,11 @@ function ProductDetailSheet({
             <Tabs value={detailTab} onValueChange={setDetailTab}>
               <TabsList className="w-full justify-start overflow-x-auto">
                 <TabsTrigger value="overview">Overview</TabsTrigger>
+                <TabsTrigger value="content">Content</TabsTrigger>
+                <TabsTrigger value="identifiers">Identifiers</TabsTrigger>
                 <TabsTrigger value="commerce">Commerce</TabsTrigger>
                 <TabsTrigger value="shipping">Shipping</TabsTrigger>
+                <TabsTrigger value="media">Media</TabsTrigger>
                 <TabsTrigger value="replenishable">Replenishable</TabsTrigger>
                 <TabsTrigger value="shopify">Shopify</TabsTrigger>
                 <TabsTrigger value="alternates">Alternates</TabsTrigger>
@@ -2154,6 +2165,17 @@ function ProductDetailSheet({
                 <div className="grid gap-1.5"><Label>Main category</Label><Input disabled={!editing} value={String(draft.mainCategory ?? "")} onChange={(event) => setDraftValue("mainCategory", event.target.value)} /></div>
                 <div className="grid grid-cols-2 gap-3 text-sm"><Detail label="Source category" value={product.sourceCategory || "-"} /><Detail label="Vendor category" value={product.vendorCategory || "-"} /></div>
                 {product.tags?.length ? <div className="flex flex-wrap gap-1">{product.tags.slice(0, 12).map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div> : null}
+              </TabsContent>
+
+              <TabsContent value="content" className="grid gap-4 pt-3">
+                <div className="grid gap-1.5"><Label>Short description</Label><div className="min-h-20 whitespace-pre-wrap rounded-md border bg-muted/30 p-3 text-sm">{product.shortDescription || "No short description."}</div></div>
+                <div className="grid gap-1.5"><Label>Full description</Label><div className="max-h-80 overflow-y-auto whitespace-pre-wrap rounded-md border bg-muted/30 p-3 text-sm leading-6">{product.longDescription || "No full description."}</div></div>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><Detail label="Condition" value={product.condition || "New"} /><Detail label="Country of origin" value={product.countryOfOrigin || "-"} /><Detail label="Tags" value={numberLabel(product.tags?.length)} /><Detail label="Last updated" value={product.updatedAt ? new Date(product.updatedAt).toLocaleString() : "-"} /></div>
+              </TabsContent>
+
+              <TabsContent value="identifiers" className="grid gap-4 pt-3">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><Detail label="Internal SKU" value={product.sku || "-"} /><Detail label="Vendor SKU" value={product.vendorSku || "-"} /><Detail label="Manufacturer" value={product.manufacturer || "-"} /><Detail label="Mfr part number" value={product.mfrPartNumber || "-"} /><Detail label="Barcode / UPC" value={product.barcode || "-"} /><Detail label="Supplier" value={product.supplier || product.vendor || "-"} /><Detail label="UOM" value={product.uomDisplay || product.uomName || product.uom || "Each"} /><Detail label="Status" value={product.status || (product.active === false ? "Inactive" : "Active")} /></div>
+                <div className="grid gap-2"><Label>SKU aliases</Label>{product.aliases?.length ? <div className="flex flex-wrap gap-2">{product.aliases.map((alias, index) => <Badge key={`${alias.aliasSku || alias.sku}-${index}`} variant={alias.active === false ? "outline" : "secondary"}>{alias.aliasSku || alias.sku || "Alias"}{alias.active === false ? " (inactive)" : ""}</Badge>)}</div> : <p className="rounded-md border p-3 text-sm text-muted-foreground">No aliases recorded.</p>}</div>
               </TabsContent>
 
               <TabsContent value="commerce" className="grid gap-4 pt-3">
@@ -2174,6 +2196,12 @@ function ProductDetailSheet({
                 <Alert><Truck className="size-4" /><AlertTitle>{product.shippingMethod || "Needs measurements"}</AlertTitle><AlertDescription>{product.shippingClassReason || "Enter package measurements to classify shipping."}{product.dimensionalWeight ? ` Dimensional weight: ${numberLabel(product.dimensionalWeight)} lb.` : ""}</AlertDescription></Alert>
                 <div className="grid gap-3"><p className="text-sm font-medium">Item measurements</p><MeasurementInputs prefix="item" draft={draft} disabled={!editing} onChange={setDraftValue} /></div>
                 <div className="grid gap-3"><p className="text-sm font-medium">Package measurements</p><MeasurementInputs prefix="package" draft={draft} disabled={!editing} onChange={setDraftValue} /></div>
+              </TabsContent>
+
+              <TabsContent value="media" className="grid gap-4 pt-3">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{(product.images || []).map((image, index) => { const src = typeof image === "string" ? image : image.url || image.src || ""; return src ? <a key={`${src}-${index}`} href={src} target="_blank" rel="noreferrer" className="aspect-square overflow-hidden rounded-md border bg-muted"><img src={src} alt={`${product.sku} ${index + 1}`} className="size-full object-contain" /></a> : null })}</div>
+                {!(product.images || []).length && <p className="rounded-md border p-4 text-sm text-muted-foreground">No product images are available.</p>}
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><Detail label="Image count" value={numberLabel(product.imageCount)} /><Detail label="Default image" value={product.defaultImage ? "Available" : "Missing"} /><Detail label="Alternates" value={numberLabel(product.alternateVendorCount)} /><Detail label="Shadow SKUs" value={numberLabel(product.shadowSkuCount)} /></div>
               </TabsContent>
 
               <TabsContent value="replenishable" className="grid gap-4 pt-3">
