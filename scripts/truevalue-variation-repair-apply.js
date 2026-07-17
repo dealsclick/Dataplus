@@ -46,6 +46,7 @@ function bool(value) {
 }
 
 function money(value) {
+  if (value === null || value === undefined || text(value) === "") return "";
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed.toFixed(2) : "";
 }
