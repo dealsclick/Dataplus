@@ -9497,7 +9497,7 @@ function serveStatic(req, res) {
     const publicFallback = !legacyRequest && publicFilePath.startsWith(PUBLIC_DIR) && fs.existsSync(publicFilePath) && !fs.statSync(publicFilePath).isDirectory();
     if (publicFallback) {
       filePath = publicFilePath;
-    } else if (req.method === "GET" && acceptsHtml && !hasExtension && !url.pathname.startsWith("/api/")) {
+    } else if ((req.method === "GET" || req.method === "HEAD") && acceptsHtml && !hasExtension && !url.pathname.startsWith("/api/")) {
       filePath = legacyRequest || !hasWebBuild
         ? path.join(PUBLIC_DIR, "index.html")
         : path.join(WEB_DIST_DIR, "index.html");
@@ -9520,6 +9520,7 @@ function serveStatic(req, res) {
       "Content-Type": contentType,
       "Cache-Control": "no-store, max-age=0"
     });
+  if (req.method === "HEAD") return res.end();
   fs.createReadStream(filePath).pipe(res);
 }
 
