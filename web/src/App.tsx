@@ -67,7 +67,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
-type AppView = "overview" | "jobs" | "channels" | "catalog" | "vendors" | "settings"
+type AppView = "overview" | "jobs" | "channels" | "catalog" | "product-detail" | "vendors" | "settings"
 
 type ImportJob = {
   id: string
@@ -353,6 +353,7 @@ const viewPaths: Record<AppView, string> = {
   jobs: "/jobs",
   channels: "/channels",
   catalog: "/products",
+  "product-detail": "/products",
   vendors: "/vendors",
   settings: "/settings",
 }
@@ -361,6 +362,7 @@ function viewFromPath(pathname = "/"): AppView {
   const path = pathname.replace(/\/+$/, "") || "/"
   if (path.startsWith("/jobs")) return "jobs"
   if (path.startsWith("/channels")) return "channels"
+  if (path.startsWith("/products/")) return "product-detail"
   if (path.startsWith("/products") || path.startsWith("/catalog")) return "catalog"
   if (path.startsWith("/vendors")) return "vendors"
   if (path.startsWith("/settings")) return "settings"
@@ -469,7 +471,7 @@ function FloatingActions({
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => onNavigate("jobs")}><Activity className="size-4" /> View jobs</DropdownMenuItem>
     </>
-    if (view === "catalog") return <>
+    if (view === "catalog" || view === "product-detail") return <>
       <DropdownMenuItem onClick={() => window.open("/api/catalog/changes.csv", "_blank", "noreferrer")}><FileDown className="size-4" /> Export SKU changes</DropdownMenuItem>
       <DropdownMenuItem onClick={() => window.open("/api/catalog/closeouts.csv", "_blank", "noreferrer")}><FileDown className="size-4" /> Export closeouts</DropdownMenuItem>
       <DropdownMenuItem onClick={() => onRunShopifyAction({ path: "/api/shopify/status-sync-all", body: { limit: shopifyStatusLimit }, successMessage: "Shopify status sync queued." })}><RotateCcw className="size-4" /> Sync Shopify status</DropdownMenuItem>
@@ -823,6 +825,7 @@ function App() {
                   />
                 )}
                 {view === "catalog" && <CatalogPage />}
+                {view === "product-detail" && <StandaloneProductPage />}
                 {view === "vendors" && (
                   <VendorsPage
                     vendors={state.vendors || []}
@@ -1952,10 +1955,12 @@ function ProductDetailSheet({
   sourceItem,
   open,
   onOpenChange,
+  standalone = false,
 }: {
   sourceItem: CatalogItem | null
   open: boolean
   onOpenChange: (open: boolean) => void
+  standalone?: boolean
 }) {
   const [product, setProduct] = useState<ProductItem | null>(null)
   const [loading, setLoading] = useState(false)
@@ -2093,10 +2098,15 @@ function ProductDetailSheet({
   const sku = product?.sku || sourceItem?.sku || ""
   const usingVendorRules = Boolean(draft.replenishableUseVendorRules)
   const usingVendorQty = Boolean(draft.replenishableQtyUseVendorDefault)
+  const openStandalone = () => {
+    if (!sku) return
+    window.history.pushState({}, "", `/products/${encodeURIComponent(sku)}`)
+    window.dispatchEvent(new PopStateEvent("popstate"))
+    onOpenChange(false)
+  }
 
-  return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-5xl">
+  const content = (
+    <>
         <SheetHeader className="border-b pr-12">
           <div className="flex items-start gap-3">
             <div className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-md border bg-muted">
@@ -2106,6 +2116,7 @@ function ProductDetailSheet({
               <SheetTitle className="truncate">{sku || "Product"}</SheetTitle>
               <SheetDescription className="line-clamp-2">{product?.title || sourceItem?.title || "Source catalog product"}</SheetDescription>
             </div>
+            {!standalone && <Button size="sm" variant="outline" className="ml-auto shrink-0" onClick={openStandalone}><ExternalLink className="size-4" /> Open page</Button>}
           </div>
         </SheetHeader>
 
@@ -2238,9 +2249,21 @@ function ProductDetailSheet({
           </div>
         )}
         {product && editing && <SheetFooter className="border-t"><Button onClick={save} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save SKU settings</Button></SheetFooter>}
-      </SheetContent>
-    </Sheet>
+    </>
   )
+
+  if (standalone) return <div className="mx-auto max-w-7xl">{content}</div>
+  return <Sheet open={open} onOpenChange={onOpenChange}><SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-5xl">{content}</SheetContent></Sheet>
+}
+
+function StandaloneProductPage() {
+  const sku = decodeURIComponent(window.location.pathname.replace(/^\/products\//, "").split("/")[0] || "")
+  const returnToCatalog = () => {
+    window.history.pushState({}, "", "/products")
+    window.dispatchEvent(new PopStateEvent("popstate"))
+  }
+  if (!sku) return <Alert><AlertCircle className="size-4" /><AlertTitle>Product not found</AlertTitle><AlertDescription>The product URL is missing a SKU.</AlertDescription></Alert>
+  return <div className="grid gap-4"><Button variant="outline" className="w-fit" onClick={returnToCatalog}>Back to Products</Button><ProductDetailSheet sourceItem={{ sku }} open standalone onOpenChange={(nextOpen) => { if (!nextOpen) returnToCatalog() }} /></div>
 }
 
 function MeasurementInputs({ prefix, draft, disabled, onChange }: { prefix: "item" | "package"; draft: Record<string, string | number | boolean>; disabled: boolean; onChange: (key: string, value: string) => void }) {
