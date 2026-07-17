@@ -4922,6 +4922,11 @@ async function listProducts(options = {}) {
     params.push(brandValues);
     where.push(`lower(coalesce(brand, '')) = any($${params.length})`);
   }
+  const manufacturerValues = splitFilterValues(filters.manufacturer).map((value) => value.toLowerCase());
+  if (manufacturerValues.length) {
+    params.push(manufacturerValues);
+    where.push(`lower(coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName', '')) = any($${params.length})`);
+  }
   const categoryValues = splitFilterValues(filters.category).map((value) => value.toLowerCase());
   if (categoryValues.length) {
     params.push(categoryValues);
@@ -5214,9 +5219,10 @@ async function productFacets() {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
-  const [suppliers, brands, categories, shopifyStatuses, ebayStatuses, shopifyLiveCounts] = await Promise.all([
+  const [suppliers, brands, manufacturers, categories, shopifyStatuses, ebayStatuses, shopifyLiveCounts] = await Promise.all([
     client.query("select supplier as value, count(*)::int as count from products where coalesce(supplier, '') <> '' group by supplier order by supplier limit 500"),
     client.query("select brand as value, count(*)::int as count from products where coalesce(brand, '') <> '' group by brand order by brand limit 1000"),
+    client.query("select coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName') as value, count(*)::int as count from products where coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName', '') <> '' group by 1 order by 1 limit 1000"),
     client.query("select category as value, count(*)::int as count from products where coalesce(category, '') <> '' group by category order by category limit 2000"),
     client.query(`
       select value
@@ -5250,6 +5256,7 @@ async function productFacets() {
   return {
     suppliers: suppliers.rows.map((row) => row.value),
     brands: brands.rows.map((row) => row.value),
+    manufacturers: manufacturers.rows.map((row) => row.value),
     categories: categories.rows.map((row) => row.value),
     stockStatuses: [],
     shopifyStatuses: shopifyStatuses.rows.map((row) => row.value),

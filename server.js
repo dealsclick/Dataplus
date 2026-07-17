@@ -55,6 +55,7 @@ const BACKGROUND_EXPORT_PAGE_SIZE = 100;
 const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(60, Number(process.env.IMPORT_JOB_FILE_RETENTION_DAYS || 60) || 60);
 const IMPORT_JOB_HISTORY_LIMIT = Math.max(1000, Math.min(5000, Number(process.env.IMPORT_JOB_HISTORY_LIMIT || 1000) || 1000));
 const REDIS_CATALOG_CACHE_TTL_SECONDS = Math.max(15, Math.min(600, Number(process.env.REDIS_CATALOG_CACHE_TTL_SECONDS || 90) || 90));
+const REDIS_PRODUCTS_CACHE_TTL_SECONDS = Math.max(15, Math.min(300, Number(process.env.REDIS_PRODUCTS_CACHE_TTL_SECONDS || 45) || 45));
 const SERVER_STARTED_AT = new Date();
 const activeJobProgress = new Map();
 const activeJobRecords = new Map();
@@ -16618,6 +16619,7 @@ function catalogFilterParams(searchParams) {
     toBeDiscontinued: searchParams.get("toBeDiscontinued") || searchParams.get("discontinued") || "",
     verifiedBrand: searchParams.get("verifiedBrand") || "",
     brand: searchParams.get("brand") || "",
+    manufacturer: searchParams.get("manufacturer") || "",
     category: searchParams.get("category") || ""
   };
 }
@@ -19205,7 +19207,7 @@ async function handleApi(req, res) {
       const facets = await postgres.productFacets();
       if (facets) return sendJson(res, 200, { facets });
       return sendJson(res, 200, {
-        facets: { suppliers: [], stockStatuses: [], shopifyStatuses: [], ebayStatuses: [], brands: [], categories: [], shopifyLiveProducts: 0, shopifyLiveVariants: 0 },
+        facets: { suppliers: [], stockStatuses: [], shopifyStatuses: [], ebayStatuses: [], brands: [], manufacturers: [], categories: [], shopifyLiveProducts: 0, shopifyLiveVariants: 0 },
         storage: "postgres"
       });
     }
@@ -19356,6 +19358,10 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/inventory") {
     if (postgres.isPostgresEnabled()) {
+      const cacheQuery = url.searchParams.toString();
+      const cacheKey = `dataplus:products:v1:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const cached = await redisCache.getJson(cacheKey);
+      if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const result = await postgres.listProducts({
         q: url.searchParams.get("q") || "",
         page: url.searchParams.get("page") || 1,
@@ -19367,14 +19373,16 @@ async function handleApi(req, res) {
         const sourceEnrichmentMap = readProductSourceEnrichmentSync();
         const sourceFallbackMap = await sourceCatalogExportFallbackMap(result.inventory || []);
         const systemSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
-        return sendJson(res, 200, {
+        const payload = {
           inventory: (result.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, sourceFallbackMap, systemSettings })),
           inventoryLoaded: true,
           total: result.total,
           page: result.page,
           limit: result.limit,
           storage: "postgres"
-        });
+        };
+        await redisCache.setJson(cacheKey, payload, REDIS_PRODUCTS_CACHE_TTL_SECONDS);
+        return sendJson(res, 200, payload);
       }
       return sendJson(res, 500, { error: "Postgres catalog query did not return a result." });
     }
