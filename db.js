@@ -68,7 +68,11 @@ async function initRelationalSchema() {
   const client = getPool();
   if (!client) return false;
   if (relationalSchemaReady) return true;
-  await client.query(`
+  // The web process and worker start together; serialize shared DDL to avoid startup deadlocks.
+  await client.query("select pg_advisory_lock($1)", [8249317]);
+  try {
+    if (relationalSchemaReady) return true;
+    await client.query(`
     create table if not exists schema_migrations (
       name text primary key,
       applied_at timestamptz not null default now()
@@ -605,13 +609,16 @@ async function initRelationalSchema() {
     create index if not exists product_quality_rows_shopify_live_idx on product_quality_rows (shopify_live);
     create index if not exists product_quality_rows_discontinued_idx on product_quality_rows (to_be_discontinued);
     create index if not exists product_quality_rows_issue_types_idx on product_quality_rows using gin (issue_types);
-  `);
-  await client.query(
-    "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
-    ["2026-05-26-core-catalog-ops"]
-  );
-  relationalSchemaReady = true;
-  return true;
+    `);
+    await client.query(
+      "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
+      ["2026-05-26-core-catalog-ops"]
+    );
+    relationalSchemaReady = true;
+    return true;
+  } finally {
+    await client.query("select pg_advisory_unlock($1)", [8249317]);
+  }
 }
 
 async function databaseHealth() {
