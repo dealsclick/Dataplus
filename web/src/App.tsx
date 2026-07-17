@@ -24,6 +24,8 @@ import {
   Store,
   Truck,
   Warehouse,
+  Pencil,
+  Save,
 } from "lucide-react"
 import { Toaster, toast } from "sonner"
 
@@ -50,6 +52,7 @@ import {
 } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
@@ -239,6 +242,52 @@ type CatalogItem = {
   toBeDiscontinued?: boolean
   alternateVendorCount?: number
   defaultImage?: string
+}
+
+type ProductItem = CatalogItem & {
+  marketplaceTitle?: string
+  category?: string
+  vendorCategory?: string
+  vendor?: string
+  barcode?: string
+  manufacturer?: string
+  mfrPartNumber?: string
+  vendorSku?: string
+  uom?: string
+  uomName?: string
+  uomQty?: string | number
+  uomDisplay?: string
+  isMultiUnit?: boolean
+  qty?: number
+  reserved?: number
+  sellUnitCost?: number
+  listPrice?: number
+  msrp?: number
+  itemLength?: number
+  itemWidth?: number
+  itemHeight?: number
+  itemWeight?: number
+  packageLength?: number
+  packageWidth?: number
+  packageHeight?: number
+  packageWeight?: number
+  dimensionalWeight?: number
+  shippingClass?: string
+  shippingMethod?: string
+  shippingClassReason?: string
+  shopifyId?: string
+  shopifyVariantId?: string
+  shopifyStatus?: string
+  shopifyPublished?: boolean
+  shopifyLivePrice?: number
+  shopifyLiveInventoryQuantity?: number
+  shopifyOnlineStoreUrl?: string
+  replenishable?: boolean
+  replenishableUseVendorRules?: boolean
+  replenishableQtyUseVendorDefault?: boolean
+  replenishableQty?: number
+  effectiveReplenishableQty?: number
+  tags?: string[]
 }
 
 type CatalogResponse = {
@@ -1669,12 +1718,235 @@ function ActionTile({
   )
 }
 
+const productEditableNumberFields = new Set([
+  "websitePrice", "cost", "qty", "itemLength", "itemWidth", "itemHeight", "itemWeight",
+  "packageLength", "packageWidth", "packageHeight", "packageWeight", "replenishableQty",
+])
+
+function ProductDetailSheet({
+  sourceItem,
+  open,
+  onOpenChange,
+}: {
+  sourceItem: CatalogItem | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
+  const [product, setProduct] = useState<ProductItem | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<Record<string, string | number | boolean>>({})
+
+  const initializeDraft = (item: ProductItem) => {
+    setDraft({
+      mainCategory: item.mainCategory || item.category || "",
+      websitePrice: item.websitePrice || item.price || 0,
+      qty: item.qty || item.stockQty || 0,
+      itemLength: item.itemLength || 0,
+      itemWidth: item.itemWidth || 0,
+      itemHeight: item.itemHeight || 0,
+      itemWeight: item.itemWeight || 0,
+      packageLength: item.packageLength || 0,
+      packageWidth: item.packageWidth || 0,
+      packageHeight: item.packageHeight || 0,
+      packageWeight: item.packageWeight || 0,
+      replenishableUseVendorRules: Boolean(item.replenishableUseVendorRules),
+      replenishable: Boolean(item.replenishable),
+      replenishableQtyUseVendorDefault: Boolean(item.replenishableQtyUseVendorDefault),
+      replenishableQty: item.replenishableQty || 0,
+    })
+  }
+
+  useEffect(() => {
+    if (!open || !sourceItem?.sku) return
+    let cancelled = false
+    setLoading(true)
+    setProduct(null)
+    setEditing(false)
+    api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(sourceItem.sku)}`)
+      .then((result) => {
+        if (cancelled) return
+        setProduct(result.item)
+        initializeDraft(result.item)
+      })
+      .catch(() => {
+        if (!cancelled) setProduct(null)
+      })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [open, sourceItem?.sku])
+
+  async function promote() {
+    if (!sourceItem?.sku) return
+    setSaving(true)
+    try {
+      const result = await api<{ item: ProductItem }>("/api/catalog/promote", {
+        method: "POST",
+        body: JSON.stringify({ sku: sourceItem.sku }),
+      })
+      setProduct(result.item)
+      initializeDraft(result.item)
+      toast.success("Added to the main catalog. You can now configure this SKU.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to add SKU to the main catalog.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function save() {
+    if (!product?.sku) return
+    setSaving(true)
+    try {
+      const patch: Record<string, unknown> = {}
+      for (const [key, value] of Object.entries(draft)) {
+        patch[key] = productEditableNumberFields.has(key) ? Number(value || 0) : value
+      }
+      const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.sku)}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      })
+      setProduct(result.item)
+      initializeDraft(result.item)
+      setEditing(false)
+      toast.success("SKU settings saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save SKU settings.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const setDraftValue = (key: string, value: string | number | boolean) => setDraft((current) => ({ ...current, [key]: value }))
+  const sku = product?.sku || sourceItem?.sku || ""
+  const usingVendorRules = Boolean(draft.replenishableUseVendorRules)
+  const usingVendorQty = Boolean(draft.replenishableQtyUseVendorDefault)
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-3xl">
+        <SheetHeader className="border-b pr-12">
+          <div className="flex items-start gap-3">
+            <div className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-md border bg-muted">
+              {sourceItem?.defaultImage ? <img src={sourceItem.defaultImage} alt="" className="max-h-full max-w-full object-contain" /> : <Boxes className="size-5 text-muted-foreground" />}
+            </div>
+            <div className="min-w-0">
+              <SheetTitle className="truncate">{sku || "Product"}</SheetTitle>
+              <SheetDescription className="line-clamp-2">{product?.title || sourceItem?.title || "Source catalog product"}</SheetDescription>
+            </div>
+          </div>
+        </SheetHeader>
+
+        {loading && <div className="grid gap-3 p-4"><Skeleton className="h-20" /><Skeleton className="h-52" /><Skeleton className="h-52" /></div>}
+
+        {!loading && !product && (
+          <div className="grid gap-4 p-4">
+            <Alert>
+              <Database className="size-4" />
+              <AlertTitle>Source catalog product</AlertTitle>
+              <AlertDescription>This SKU is in the supplier data dump but has not been added to the main catalog yet. Add it once to enable SKU rules, inventory, and Shopify controls.</AlertDescription>
+            </Alert>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <Detail label="Supplier" value={sourceItem?.supplier || "Unknown"} />
+              <Detail label="Category" value={sourceItem?.mainCategory || sourceItem?.sourceCategory || "Uncategorized"} />
+              <Detail label="Cost" value={moneyLabel(sourceItem?.cost)} />
+              <Detail label="Source stock" value={numberLabel(sourceItem?.stockQty)} />
+            </div>
+            <Button onClick={promote} disabled={saving}>{saving && <Loader2 className="size-4 animate-spin" />} Add to main catalog</Button>
+          </div>
+        )}
+
+        {!loading && product && (
+          <div className="grid gap-5 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap gap-2">
+                <Badge variant={product.active === false ? "outline" : "default"}>{product.active === false ? "Inactive" : "Active"}</Badge>
+                <Badge variant={product.categoryVerified ? "default" : "outline"}>{product.categoryVerified ? "Category verified" : "Category needs review"}</Badge>
+                {product.toBeDiscontinued && <Badge variant="destructive">Discontinued</Badge>}
+              </div>
+              <Button size="sm" variant={editing ? "outline" : "default"} onClick={() => { setEditing((current) => !current); if (!editing) initializeDraft(product) }}>
+                <Pencil className="size-4" /> {editing ? "Cancel edit" : "Edit SKU"}
+              </Button>
+            </div>
+
+            <Tabs defaultValue="overview">
+              <TabsList className="w-full justify-start overflow-x-auto">
+                <TabsTrigger value="overview">Overview</TabsTrigger>
+                <TabsTrigger value="commerce">Commerce</TabsTrigger>
+                <TabsTrigger value="shipping">Shipping</TabsTrigger>
+                <TabsTrigger value="replenishable">Replenishable</TabsTrigger>
+              </TabsList>
+              <TabsContent value="overview" className="grid gap-4 pt-3">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                  <Detail label="Supplier" value={product.supplier || product.vendor || "Unknown"} />
+                  <Detail label="Brand" value={product.brand || "No brand"} />
+                  <Detail label="UOM" value={product.uomDisplay || product.uomName || product.uom || "Each"} />
+                  <Detail label="Vendor SKU" value={product.vendorSku || "-"} />
+                  <Detail label="Barcode" value={product.barcode || "-"} />
+                  <Detail label="Shopify" value={product.shopifyStatus || "Not linked"} />
+                </div>
+                <div className="grid gap-1.5"><Label>Main category</Label><Input disabled={!editing} value={String(draft.mainCategory ?? "")} onChange={(event) => setDraftValue("mainCategory", event.target.value)} /></div>
+                <div className="grid grid-cols-2 gap-3 text-sm"><Detail label="Source category" value={product.sourceCategory || "-"} /><Detail label="Vendor category" value={product.vendorCategory || "-"} /></div>
+                {product.tags?.length ? <div className="flex flex-wrap gap-1">{product.tags.slice(0, 12).map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div> : null}
+              </TabsContent>
+
+              <TabsContent value="commerce" className="grid gap-4 pt-3">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <Detail label="Cost" value={moneyLabel(product.cost)} />
+                  <Detail label="Sell-unit cost" value={moneyLabel(product.sellUnitCost)} />
+                  <Detail label="On-hand" value={numberLabel(product.qty)} />
+                  <Detail label="Reserved" value={numberLabel(product.reserved)} />
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="grid gap-1.5"><Label>Website price</Label><Input disabled={!editing} type="number" min="0" step="0.01" value={String(draft.websitePrice ?? 0)} onChange={(event) => setDraftValue("websitePrice", event.target.value)} /></div>
+                  <div className="grid gap-1.5"><Label>On-hand quantity</Label><Input disabled={!editing} type="number" min="0" value={String(draft.qty ?? 0)} onChange={(event) => setDraftValue("qty", event.target.value)} /></div>
+                </div>
+                <Alert><ShoppingBag className="size-4" /><AlertTitle>Shopify state</AlertTitle><AlertDescription>{product.shopifyPublished ? "Published" : "Not published"}{product.shopifyLivePrice ? ` · Live price ${moneyLabel(product.shopifyLivePrice)}` : ""}{product.shopifyLiveInventoryQuantity !== undefined ? ` · Live inventory ${numberLabel(product.shopifyLiveInventoryQuantity)}` : ""}</AlertDescription></Alert>
+              </TabsContent>
+
+              <TabsContent value="shipping" className="grid gap-4 pt-3">
+                <Alert><Truck className="size-4" /><AlertTitle>{product.shippingMethod || "Needs measurements"}</AlertTitle><AlertDescription>{product.shippingClassReason || "Enter package measurements to classify shipping."}{product.dimensionalWeight ? ` Dimensional weight: ${numberLabel(product.dimensionalWeight)} lb.` : ""}</AlertDescription></Alert>
+                <div className="grid gap-3"><p className="text-sm font-medium">Item measurements</p><MeasurementInputs prefix="item" draft={draft} disabled={!editing} onChange={setDraftValue} /></div>
+                <div className="grid gap-3"><p className="text-sm font-medium">Package measurements</p><MeasurementInputs prefix="package" draft={draft} disabled={!editing} onChange={setDraftValue} /></div>
+              </TabsContent>
+
+              <TabsContent value="replenishable" className="grid gap-4 pt-3">
+                <Alert><Warehouse className="size-4" /><AlertTitle>Sellable inventory override</AlertTitle><AlertDescription>{product.effectiveReplenishableQty ? `Shopify uses ${numberLabel(product.effectiveReplenishableQty)} sellable units through Staten Island.` : "Normal warehouse stock is used for Shopify inventory."}</AlertDescription></Alert>
+                <div className="grid gap-3 rounded-md border p-3">
+                  <ToggleRow label="Use vendor replenishable rule" description="Vendor setting controls this SKU's enabled state and quantity." checked={usingVendorRules} disabled={!editing} onCheckedChange={(checked) => setDraftValue("replenishableUseVendorRules", checked)} />
+                  <Separator />
+                  <ToggleRow label="SKU replenishable" description="Keep this SKU sellable even when supplier stock is unavailable." checked={Boolean(draft.replenishable)} disabled={!editing || usingVendorRules} onCheckedChange={(checked) => setDraftValue("replenishable", checked)} />
+                  <Separator />
+                  <ToggleRow label="Use vendor default quantity" description="Use the replenishable quantity saved on the vendor profile." checked={usingVendorQty} disabled={!editing || usingVendorRules} onCheckedChange={(checked) => setDraftValue("replenishableQtyUseVendorDefault", checked)} />
+                  <div className="grid gap-1.5"><Label>SKU replenishable quantity</Label><Input disabled={!editing || usingVendorRules || usingVendorQty} type="number" min="0" value={String(draft.replenishableQty ?? 0)} onChange={(event) => setDraftValue("replenishableQty", event.target.value)} /></div>
+                </div>
+              </TabsContent>
+            </Tabs>
+          </div>
+        )}
+        {product && editing && <SheetFooter className="border-t"><Button onClick={save} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save SKU settings</Button></SheetFooter>}
+      </SheetContent>
+    </Sheet>
+  )
+}
+
+function MeasurementInputs({ prefix, draft, disabled, onChange }: { prefix: "item" | "package"; draft: Record<string, string | number | boolean>; disabled: boolean; onChange: (key: string, value: string) => void }) {
+  const fields = [["Length", `${prefix}Length`], ["Width", `${prefix}Width`], ["Height", `${prefix}Height`], ["Weight", `${prefix}Weight`]]
+  return <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{fields.map(([label, key]) => <div key={key} className="grid gap-1.5"><Label>{label}{label === "Weight" ? " (lb)" : " (in)"}</Label><Input disabled={disabled} type="number" min="0" step="0.001" value={String(draft[key] ?? 0)} onChange={(event) => onChange(key, event.target.value)} /></div>)}</div>
+}
+
+function ToggleRow({ label, description, checked, disabled, onCheckedChange }: { label: string; description: string; checked: boolean; disabled: boolean; onCheckedChange: (checked: boolean) => void }) {
+  return <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-medium">{label}</p><p className="text-xs text-muted-foreground">{description}</p></div><Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} /></div>
+}
+
 function CatalogPage() {
   const [query, setQuery] = useState("")
   const [pageSize, setPageSize] = useState(25)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(false)
   const [response, setResponse] = useState<CatalogResponse>({})
+  const [selectedItem, setSelectedItem] = useState<CatalogItem | null>(null)
 
   async function loadCatalog(nextPage = page) {
     setLoading(true)
@@ -1786,7 +2058,8 @@ function CatalogPage() {
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        <DropdownMenuItem onClick={() => window.open(`/legacy/products?sku=${encodeURIComponent(item.sku || "")}`, "_blank")}>Open product detail</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setSelectedItem(item)}>Open product</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => window.open(`/legacy/products?sku=${encodeURIComponent(item.sku || "")}`, "_blank")}>Open legacy product</DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </TableCell>
@@ -1806,6 +2079,7 @@ function CatalogPage() {
           <Button variant="outline" disabled={page >= totalPages || loading} onClick={() => loadCatalog(Math.min(totalPages, page + 1))}>Next</Button>
         </div>
       </div>
+      <ProductDetailSheet sourceItem={selectedItem} open={Boolean(selectedItem)} onOpenChange={(nextOpen) => { if (!nextOpen) setSelectedItem(null) }} />
     </div>
   )
 }

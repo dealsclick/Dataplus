@@ -13491,6 +13491,7 @@ function publicInventoryItem(item = {}, context = {}) {
   const pricedItem = { ...item, cost, sourceCost: cost };
   const sellUnitCost = productSellUnitCost(pricedItem, rulesDb);
   const uomInfo = productUomInfo(item);
+  const shippingClassification = productShippingClassification(item);
   const listPrice = isClearanceItem(item) ? Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0)) : 0;
   const websitePrice = shopifyVariantWebsitePrice(pricedItem, systemProductVariants(pricedItem, rulesDb)[0] || {}, SHOPIFY_PRICE_MARKUP_PERCENT, rulesDb);
   const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
@@ -13560,6 +13561,11 @@ function publicInventoryItem(item = {}, context = {}) {
     qty: Number(item.qty || 0),
     stockQty: Number(item.stockQty || 0),
     reserved: Number(item.reserved || 0),
+    replenishable: productIsReplenishable(item),
+    replenishableUseVendorRules: productUsesVendorReplenishableRules(item),
+    replenishableQtyUseVendorDefault: productUsesVendorReplenishableQty(item),
+    replenishableQty: Number(sourceNumberValue(item.replenishableQty ?? item.raw?.replenishableQty ?? 0)),
+    effectiveReplenishableQty: productReplenishableQty(item, rulesDb),
     price: websitePrice,
     websitePrice,
     cost,
@@ -13576,6 +13582,10 @@ function publicInventoryItem(item = {}, context = {}) {
     packageLength: Number(item.packageLength || 0),
     packageWeight: Number(item.packageWeight || 0),
     packageWidth: Number(item.packageWidth || 0),
+    shippingClass: shippingClassification.shippingClass,
+    shippingMethod: shippingClassification.shippingMethod,
+    shippingClassReason: shippingClassification.shippingClassReason,
+    dimensionalWeight: shippingClassification.dimensionalWeight,
     countryOfOrigin: item.countryOfOrigin || "",
     defaultImage: item.defaultImage,
     images: Array.isArray(item.images) ? item.images.slice(0, 4) : [],
