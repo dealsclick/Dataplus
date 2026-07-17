@@ -434,7 +434,7 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
         lastJobId: result.job?.id || "",
         lastMode: apply ? "apply" : "dry-run",
         lastDumpJobId: latestDump?.id || "",
-        lastDumpFinishedAt,
+        lastDumpFinishedAt: latestDumpFinishedAt,
         lastSkipReason: result.duplicate ? "An inventory job is already active for this schedule." : "",
         lastError: ""
       };
