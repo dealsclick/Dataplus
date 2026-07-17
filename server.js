@@ -19434,6 +19434,9 @@ async function handleApi(req, res) {
         page: url.searchParams.get("page") || 1,
         limit: url.searchParams.get("limit") || 100000,
         fastPage,
+        includeTotal: ["1", "true", "yes"].includes(String(url.searchParams.get("includeTotal") || "").toLowerCase()),
+        sort: url.searchParams.get("sort") || "",
+        sortDirection: url.searchParams.get("sortDirection") || "asc",
         filters: catalogFilterParams(url.searchParams)
       });
       if (result) {
@@ -24811,6 +24814,7 @@ async function handleApi(req, res) {
       }
     }
     if (touched.length) await postgres.upsertProductsFromState(touched);
+    await redisCache.deleteByPrefix("dataplus:products:");
     return sendJson(res, 200, { launched, skipped, failed, results, state: await postgresLiteState() });
   }
 

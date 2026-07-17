@@ -4877,6 +4877,9 @@ async function listProducts(options = {}) {
   const page = Math.max(1, Number(options.page || 1));
   const offset = (page - 1) * limit;
   const fastPage = Boolean(options.fastPage);
+  const includeTotal = Boolean(options.includeTotal);
+  const sortKey = String(options.sort || "").trim();
+  const sortDirection = String(options.sortDirection || "asc").toLowerCase() === "desc" ? "desc" : "asc";
   const params = [];
   const where = [];
   const filters = options.filters || {};
@@ -5198,13 +5201,26 @@ async function listProducts(options = {}) {
     for (const clause of channelClauses) where.push(`(${clause})`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
-  const countResult = fastPage ? null : await client.query(`select count(*)::int as total from products ${whereSql}`, params);
+  const sortableColumns = {
+    sku: "sku",
+    title: "title",
+    stock: "coalesce(qty, 0)",
+    price: "coalesce(price, 0)",
+    brand: "brand",
+    category: "category",
+    manufacturer: "manufacturer",
+    vendorSku: "vendor_sku",
+    status: "status",
+    updated: "updated_at"
+  };
+  const orderBy = sortableColumns[sortKey] || "sku";
+  const countResult = fastPage && !includeTotal ? null : await client.query(`select count(*)::int as total from products ${whereSql}`, params);
   params.push(fastPage ? limit + 1 : limit, offset);
   const result = await client.query(`
     select *
     from products
     ${whereSql}
-    order by sku
+    order by ${orderBy} ${sortDirection}, sku asc
     limit $${params.length - 1} offset $${params.length}
   `, params);
   const hasMore = fastPage && result.rows.length > limit;
