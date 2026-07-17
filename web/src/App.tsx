@@ -1963,7 +1963,11 @@ function CatalogPage() {
   }
 
   useEffect(() => {
-    loadCatalog(1)
+    if (query.trim()) loadCatalog(1)
+    else {
+      setResponse({})
+      setPage(1)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageSize])
 
@@ -2006,7 +2010,9 @@ function CatalogPage() {
             </div>
           </div>
           <CardDescription>
-            {numberLabel(total)} matched. Source: {response.database || response.manifest?.source || "catalog"} {response.partial ? "/ partial search" : ""}
+            {query.trim()
+              ? `${numberLabel(total)} matched. Source: ${response.database || response.manifest?.source || "catalog"} ${response.partial ? "/ partial search" : ""}`
+              : "Enter a SKU, title, brand, supplier, or category to search the source catalog."}
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
@@ -2066,7 +2072,7 @@ function CatalogPage() {
                 </TableRow>
               ))}
               {!rows.length && (
-                <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No products found.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">{query.trim() ? "No products found." : "Search the source catalog to load products."}</TableCell></TableRow>
               )}
             </TableBody>
           </Table>
