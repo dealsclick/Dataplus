@@ -2685,14 +2685,6 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
                 <Button onClick={save}>Save changes</Button>
               </>
             ) : <Button onClick={() => setEditing(true)}>Edit</Button>}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild><Button variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => setEditing(true)}>Edit profile</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => window.open(`/legacy/vendors/${encodeURIComponent(vendor.id)}`, "_blank")}>Open legacy vendor</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => window.open(`/legacy/vendors/${encodeURIComponent(vendor.id)}?tab=categories`, "_blank")}>Category mappings</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
           </div>
         </CardHeader>
       </Card>
