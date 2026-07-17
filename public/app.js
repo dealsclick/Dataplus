@@ -219,6 +219,7 @@ let menuGroupsExpanded = localStorage.getItem("dataplus-menu-groups-expanded") =
 let sidebarCollapsed = localStorage.getItem("dataplus-sidebar-collapsed") === "true";
 let themeMode = localStorage.getItem("dataplus-theme") || "dark";
 let jobsFilter = { query: "", section: "", status: "", direction: "", channel: "", endpoint: "" };
+let jobsWorkspaceTab = "queue";
 let selectedImportJobId = null;
 let channelApiLogState = { channel: "", logs: [], loading: false, loaded: false, error: "", filters: { q: "", status: "", transport: "" } };
 let shopifyMissingVariantState = { items: [], report: null, total: 0, page: 1, limit: 50, q: "", loading: false, loaded: false, error: "" };
@@ -10630,6 +10631,7 @@ function renderJobsPage() {
   const totalJobs = importJobRows().length;
   const warnings = importJobRows().filter((job) => ["warning", "failed"].includes(String(job.status || "").toLowerCase())).length;
   const savedFiles = importJobRows().filter(jobHasDownload).length;
+  const visibleLogs = channelApiLogState.channel === "Shopify" ? (channelApiLogState.logs || []).length : 0;
   const workerStatus = state.workerStatus && typeof state.workerStatus === "object" && !Array.isArray(state.workerStatus) ? state.workerStatus : {};
   const settings = appSystemSettings();
   const workerMode = settings.backgroundJobsMode === "worker";
@@ -10720,19 +10722,34 @@ function renderJobsPage() {
           ${workerMode && !workerStatus.online ? `<code>npm run worker</code>` : ""}
         </div>
       </section>
-      <div class="jobs-channel-logs">
-        ${renderChannelApiHistory({ name: "Shopify" }, {
-          title: "Channel Logs",
-          description: "Shopify channel activity from the past 30 days, including inventory updates that are queued, running, completed, or failed."
-        })}
-      </div>
-      <div class="jobs-workspace">
-        ${renderImportQueuePanel({ full: true })}
-        ${renderJobProfile(selectedJob)}
-      </div>
+      <section class="jobs-tab-shell">
+        <div class="jobs-tab-bar">
+          <button class="${jobsWorkspaceTab === "queue" ? "active" : ""}" type="button" data-jobs-workspace-tab="queue">
+            <span>Queue</span>
+            <small>${Number(jobs.length || 0).toLocaleString()} visible</small>
+          </button>
+          <button class="${jobsWorkspaceTab === "logs" ? "active" : ""}" type="button" data-jobs-workspace-tab="logs">
+            <span>Channel Logs</span>
+            <small>${channelApiLogState.loading ? "Loading" : `${Number(visibleLogs || 0).toLocaleString()} loaded`}</small>
+          </button>
+        </div>
+        ${jobsWorkspaceTab === "logs" ? `
+          <div class="jobs-channel-logs">
+            ${renderChannelApiHistory({ name: "Shopify" }, {
+              title: "Channel Logs",
+              description: "Shopify channel activity from the past 30 days, including inventory updates that are queued, running, completed, or failed."
+            })}
+          </div>
+        ` : `
+          <div class="jobs-workspace">
+            ${renderImportQueuePanel({ full: true })}
+            ${renderJobProfile(selectedJob)}
+          </div>
+        `}
+      </section>
     </div>
   `;
-  if (!channelApiLogState.loading && (channelApiLogState.channel !== "Shopify" || !channelApiLogState.loaded)) {
+  if (jobsWorkspaceTab === "logs" && !channelApiLogState.loading && (channelApiLogState.channel !== "Shopify" || !channelApiLogState.loaded)) {
     loadChannelApiLogs("Shopify").catch((error) => toast(error.message));
   }
 }
@@ -20999,6 +21016,7 @@ document.addEventListener("click", async (event) => {
   const refreshImportJobsButton = event.target.closest("[data-refresh-import-jobs]");
   const cleanupImportJobsButton = event.target.closest("[data-cleanup-import-jobs]");
   const systemBackupButton = event.target.closest("[data-system-backup]");
+  const jobsWorkspaceTabButton = event.target.closest("[data-jobs-workspace-tab]");
   const refreshSystemFieldsButton = event.target.closest("[data-refresh-system-fields]");
   const selectImportJobButton = event.target.closest("[data-select-import-job]");
   const stopJobButton = event.target.closest("[data-job-stop]");
@@ -21805,6 +21823,11 @@ document.addEventListener("click", async (event) => {
     renderJobsPage();
     renderTopbarActions();
     toast(result.message || "Postgres backup queued.");
+    return;
+  }
+  if (jobsWorkspaceTabButton) {
+    jobsWorkspaceTab = jobsWorkspaceTabButton.dataset.jobsWorkspaceTab || "queue";
+    renderJobsPage();
     return;
   }
   if (cleanupImportJobsButton) {
