@@ -3705,17 +3705,19 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
     workerPayload
   });
   if (duplicate) {
-    appendChannelApiLog({
-      channel: "Shopify",
-      transport: "Job",
-      method: "QUEUE",
-      path: "shopify-inventory-update",
-      operation: apply ? "Inventory update already queued" : "Inventory dry run already queued",
-      statusCode: 202,
-      ok: true,
-      jobId: duplicate.id,
-      message: `${duplicate.operation || operation} is already ${String(duplicate.status || "queued").toLowerCase()}${inventoryTarget.warehouse?.name ? ` for ${inventoryTarget.warehouse.name}` : ""}.`
-    });
+    if (!options.scheduled) {
+      appendChannelApiLog({
+        channel: "Shopify",
+        transport: "Job",
+        method: "QUEUE",
+        path: "shopify-inventory-update",
+        operation: apply ? "Inventory update already queued" : "Inventory dry run already queued",
+        statusCode: 202,
+        ok: true,
+        jobId: duplicate.id,
+        message: `${duplicate.operation || operation} is already ${String(duplicate.status || "queued").toLowerCase()}${inventoryTarget.warehouse?.name ? ` for ${inventoryTarget.warehouse.name}` : ""}.`
+      });
+    }
     return { duplicate, job: duplicate, workerPayload, inventoryTarget };
   }
   const schedulePrefix = options.scheduled ? "Scheduled " : "";

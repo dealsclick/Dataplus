@@ -175,27 +175,12 @@ function requestJson(options, payload = null) {
 }
 
 async function shopifyAccessToken() {
-  if (process.env.SHOPIFY_ADMIN_ACCESS_TOKEN) return process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
   const shop = process.env.SHOPIFY_STORE_DOMAIN;
   const clientId = process.env.SHOPIFY_CLIENT_ID;
   const clientSecret = process.env.SHOPIFY_CLIENT_SECRET;
-  if (!shop || !clientId || !clientSecret) throw new Error("Shopify credentials are not configured.");
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: clientId,
-    client_secret: clientSecret
-  }).toString();
-  const data = await requestJson({
-    hostname: shop,
-    path: "/admin/oauth/access_token",
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "Content-Length": Buffer.byteLength(body)
-    }
-  }, null, body);
-  if (!data.access_token) throw new Error("Shopify token response did not include access_token.");
-  return data.access_token;
+  if (shop && clientId && clientSecret) return shopifyToken();
+  if (process.env.SHOPIFY_ADMIN_ACCESS_TOKEN) return process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+  throw new Error("Shopify credentials are not configured.");
 }
 
 function requestJsonRaw(options, body = "") {
@@ -231,11 +216,14 @@ function requestJsonRaw(options, body = "") {
 }
 
 async function shopifyToken() {
-  if (process.env.SHOPIFY_ADMIN_ACCESS_TOKEN) return process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
   const shop = process.env.SHOPIFY_STORE_DOMAIN;
   const clientId = process.env.SHOPIFY_CLIENT_ID;
   const clientSecret = process.env.SHOPIFY_CLIENT_SECRET;
-  if (!shop || !clientId || !clientSecret) throw new Error("Shopify credentials are not configured.");
+  if (!shop) throw new Error("SHOPIFY_STORE_DOMAIN is not configured.");
+  if (!clientId || !clientSecret) {
+    if (process.env.SHOPIFY_ADMIN_ACCESS_TOKEN) return process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+    throw new Error("Shopify credentials are not configured.");
+  }
   const body = new URLSearchParams({
     grant_type: "client_credentials",
     client_id: clientId,

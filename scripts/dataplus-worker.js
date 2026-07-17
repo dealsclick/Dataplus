@@ -428,18 +428,18 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
         channelName: channel.name || "",
         time: dueSlot,
         lastCheckedAt: new Date(nowMs).toISOString(),
-        lastQueuedAt: new Date(nowMs).toISOString(),
-        lastQueuedDate: today,
+        lastQueuedAt: result.duplicate ? (previous.lastQueuedAt || "") : new Date(nowMs).toISOString(),
+        lastQueuedDate: result.duplicate ? (previous.lastQueuedDate || today) : today,
         lastRunDate: today,
         lastJobId: result.job?.id || "",
         lastMode: apply ? "apply" : "dry-run",
         lastDumpJobId: latestDump?.id || "",
         lastDumpFinishedAt,
-        lastSkipReason: "",
+        lastSkipReason: result.duplicate ? "An inventory job is already active for this schedule." : "",
         lastError: ""
       };
-      queued = true;
-      console.log(`[${WORKER_ID}] queued scheduled ${channel.name || "channel"} inventory ${apply ? "update" : "dry run"} for ${dueSlot} (${result.job?.id || "duplicate"})`);
+      queued = !result.duplicate || queued;
+      console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled ${channel.name || "channel"} inventory ${apply ? "update" : "dry run"} for ${dueSlot} (${result.job?.id || "duplicate"})`);
     } catch (error) {
       scheduleState[scheduleId] = {
         ...previous,
@@ -447,6 +447,9 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
         channelName: channel.name || "",
         time: dueSlot,
         lastCheckedAt: new Date(nowMs).toISOString(),
+        lastRunDate: today,
+        lastAttemptedAt: new Date(nowMs).toISOString(),
+        lastAttemptedDate: today,
         lastError: error.message || "Unable to queue scheduled inventory update."
       };
       console.error(`[${WORKER_ID}] scheduled ${channel.name || "channel"} inventory check failed:`, error.message || error);
