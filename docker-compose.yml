@@ -1,4 +1,17 @@
 services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: dataplus-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   postgres:
     image: postgres:18
     container_name: dataplus-postgres
@@ -27,6 +40,7 @@ services:
       DATAPLUS_DOCKER: "1"
       TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "4173:4173"
     volumes:
@@ -43,6 +57,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
 
   worker:
     build:
@@ -56,6 +72,7 @@ services:
       DATAPLUS_BACKGROUND_JOBS_MODE: "worker"
       TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
+      REDIS_URL: redis://redis:6379/0
     command: ["npm", "run", "worker"]
     volumes:
       - ./data:/app/data
@@ -81,3 +98,4 @@ services:
 
 volumes:
   postgres-data:
+  redis-data:

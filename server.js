@@ -8,6 +8,7 @@ const readline = require("readline");
 const zlib = require("zlib");
 const postgres = require("./db");
 const { createDataQualityEngine } = require("./lib/data-quality");
+const redisCache = require("./lib/redis-cache");
 
 const PORT = process.env.PORT || 4173;
 const ROOT = __dirname;
@@ -53,6 +54,7 @@ const ENV_FILE = path.join(ROOT, ".env");
 const BACKGROUND_EXPORT_PAGE_SIZE = 100;
 const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(60, Number(process.env.IMPORT_JOB_FILE_RETENTION_DAYS || 60) || 60);
 const IMPORT_JOB_HISTORY_LIMIT = Math.max(1000, Math.min(5000, Number(process.env.IMPORT_JOB_HISTORY_LIMIT || 1000) || 1000));
+const REDIS_CATALOG_CACHE_TTL_SECONDS = Math.max(15, Math.min(600, Number(process.env.REDIS_CATALOG_CACHE_TTL_SECONDS || 90) || 90));
 const SERVER_STARTED_AT = new Date();
 const activeJobProgress = new Map();
 const activeJobRecords = new Map();
@@ -17684,6 +17686,12 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sor
     manifest: readCatalogManifest(),
     vendorIndex: supplierIndexedFilter ? vendorIndex : undefined
   };
+  const cacheLatestPage = sort === "latest" && !q && !filtered && pageNumber <= 200;
+  const cacheKey = cacheLatestPage ? `dataplus:catalog:latest:v1:${pageNumber}:${pageSize}` : "";
+  if (cacheKey) {
+    const cached = await redisCache.getJson(cacheKey);
+    if (cached) return { ...cached, cached: true };
+  }
   if (postgres.isPostgresEnabled()) {
     try {
       const pgResult = await postgres.listVendorCatalogItems({ query, page: pageNumber, limit: pageSize, filters: catalogFiltersWithIndexedSupplierKeys(filters), sort });
@@ -17703,6 +17711,7 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sor
         result.manifest = { ...(result.manifest || {}), productCount: result.totalMatches, source: "postgres:vendor_catalog_items" };
         result.indexed = true;
         result.database = "postgres";
+        if (cacheKey) await redisCache.setJson(cacheKey, result, REDIS_CATALOG_CACHE_TTL_SECONDS);
         return result;
       }
     } catch (error) {
@@ -22154,6 +22163,10 @@ async function handleApi(req, res) {
       db: catalogDb
     });
     return sendJson(res, 200, result);
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/system/cache/status") {
+    return sendJson(res, 200, { redis: redisCache.status(), catalogLatestPageTtlSeconds: REDIS_CATALOG_CACHE_TTL_SECONDS });
   }
 
   if (req.method === "GET" && url.pathname === "/api/catalog/facets") {
