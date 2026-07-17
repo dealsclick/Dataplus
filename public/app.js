@@ -223,6 +223,7 @@ let jobsWorkspaceTab = "overview";
 let jobsPagination = { queuePage: 1, queuePageSize: 10, logsPage: 1, logsPageSize: 10 };
 let selectedImportJobId = null;
 let channelApiLogState = { channel: "", logs: [], loading: false, loaded: false, error: "", filters: { q: "", status: "", transport: "" } };
+let shopifyAuthCheckState = { loading: false, checkedAt: "", ok: null, message: "", result: null };
 let shopifyMissingVariantState = { items: [], report: null, total: 0, page: 1, limit: 50, q: "", loading: false, loaded: false, error: "" };
 let systemSettingsEditMode = false;
 let applyingRoute = false;
@@ -16964,6 +16965,73 @@ async function saveChannelAttributeMapping(index) {
   toast(result?.queued ? "Attribute mapping saved. Background propagation queued." : "Attribute mapping saved.");
 }
 
+function shopifyAuthFailures() {
+  return importJobRows().filter((job) => {
+    if (channelNameForJob(job).toLowerCase() !== "shopify") return false;
+    const status = String(job.status || "").toLowerCase();
+    if (!["failed", "warning", "stopped"].includes(status)) return false;
+    return jobApiReason(job).toLowerCase() === "authorization" || /api key|access token|unauthorized|oauth|permission|access denied/i.test(`${job.message || ""} ${(job.errors || []).join(" ")}`);
+  });
+}
+
+function renderShopifyAuthHealthPanel(channel = {}) {
+  const config = channel.shopifyConfig || {};
+  const failures = shopifyAuthFailures();
+  const check = shopifyAuthCheckState || {};
+  const checkResult = check.result || {};
+  const ok = check.ok === true;
+  const failed = check.ok === false;
+  const tone = failed || failures.length ? "danger" : ok ? "success" : config.configured ? "warning" : "danger";
+  const title = failed || failures.length
+    ? "Shopify connection needs attention"
+    : ok
+      ? "Shopify connection is working"
+      : config.configured
+        ? "Shopify connection is configured"
+        : "Shopify connection is not configured";
+  const message = failed
+    ? check.message
+    : failures.length
+      ? `${failures.length.toLocaleString()} recent Shopify job${failures.length === 1 ? "" : "s"} failed because of authorization or permission issues.`
+      : ok
+        ? check.message || "The Admin API accepted the current credentials."
+        : config.configured
+          ? "Run Check connection to verify the token before the next inventory update."
+          : "Add Shopify store domain and Admin API credentials, then check the connection.";
+  const shopSlug = String(config.shop || "").replace(".myshopify.com", "");
+  const adminUrl = shopSlug ? `https://admin.shopify.com/store/${encodeURIComponent(shopSlug)}/settings/apps/development` : "https://admin.shopify.com/";
+  return `
+    <div class="shopify-auth-health ${tone}">
+      <div class="shopify-auth-health-head">
+        <div>
+          <p class="eyebrow">Connection Health</p>
+          <h3>${html(title)}</h3>
+          <p>${html(message || "")}</p>
+        </div>
+        <span class="status ${tone === "danger" ? "canceled" : tone === "success" ? "active" : "hold"}">${tone === "danger" ? "Fix needed" : tone === "success" ? "Working" : "Check"}</span>
+      </div>
+      <div class="shopify-auth-actions">
+        <button class="button" type="button" data-check-shopify-auth>${withIcon("refresh-cw", check.loading ? "Checking..." : "Check connection")}</button>
+        <button class="button secondary" type="button" data-refresh-shopify-token>${withIcon("refresh-cw", "Request new token")}</button>
+        <a class="button secondary" href="${html(adminUrl)}" target="_blank" rel="noopener">${withIcon("external-link", "Open Shopify app settings")}</a>
+        ${failures.length ? `<button class="button secondary" type="button" data-job-api-channel="shopify" data-job-api-endpoint="">View failed jobs</button>` : ""}
+      </div>
+      <div class="shopify-auth-grid">
+        <span><small>Store</small><strong>${html(config.shop || checkResult.shop?.myshopifyDomain || "Missing")}</strong></span>
+        <span><small>API version</small><strong>${html(config.apiVersion || "2026-04")}</strong></span>
+        <span><small>Token source</small><strong>${html(checkResult.tokenSource || (config.hasClientCredentials ? "Client credentials" : config.hasAccessToken ? "Env admin token" : "Missing"))}</strong></span>
+        <span><small>Client credentials</small><strong>${config.hasClientCredentials ? "Set" : "Not set"}</strong></span>
+        <span><small>Env access token</small><strong>${config.hasAccessToken ? "Set" : "Not set"}</strong></span>
+        <span><small>read_shipping</small><strong>${checkResult.hasReadShipping ? "Active" : check.checkedAt ? "Missing" : "Unchecked"}</strong></span>
+        <span><small>Last checked</small><strong>${check.checkedAt ? html(dateLabel(check.checkedAt)) : "Never"}</strong></span>
+        <span><small>Auth failures</small><strong>${failures.length.toLocaleString()}</strong></span>
+      </div>
+      ${checkResult.scope ? `<p class="muted shopify-auth-scopes">Scopes: ${html(checkResult.scope)}</p>` : ""}
+      ${failed ? `<div class="notice warning">${html(check.message || "Shopify auth check failed.")}</div>` : ""}
+    </div>
+  `;
+}
+
 function renderChannelProfile() {
   const channel = (state.connections || []).find((row) => row.id === selectedChannelId);
   const target = $("#channel-profile-page");
@@ -17111,6 +17179,7 @@ function renderChannelProfile() {
           </div>
           <div class="channel-settings-layout">
             <div class="channel-settings-main">
+              ${renderShopifyAuthHealthPanel(channel)}
               <div class="channel-settings-group">
                 <div class="channel-settings-group-head">
                   <strong>Connection</strong>
@@ -17180,9 +17249,8 @@ function renderChannelProfile() {
             </div>
             <aside class="channel-settings-aside">
               <div class="channel-sync-panel">
-                <strong>Configuration Status</strong>
-                <p class="muted">${channel.shopifyConfig?.configured ? "Shopify Admin API is ready." : "Shopify Admin API is not fully configured."}</p>
-                <button class="button secondary compact-button" type="button" data-refresh-shopify-token>${withIcon("refresh-cw", "Request new token")}</button>
+                <strong>What this fixes</strong>
+                <p class="muted">Use Check connection after changing Shopify credentials. If it fails, open Shopify app settings and confirm the app is installed with the required Admin API scopes.</p>
               </div>
               <div class="channel-stat-strip">
                 <span><small>Store</small><strong>${html(channel.shopifyConfig?.shop || "Missing")}</strong></span>
@@ -20886,9 +20954,48 @@ async function refreshShopifyToken() {
     feedbackLabel: "Requesting Shopify token...",
     body: JSON.stringify({})
   });
+  shopifyAuthCheckState = {
+    loading: false,
+    checkedAt: new Date().toISOString(),
+    ok: true,
+    message: result.message || "Shopify token refreshed.",
+    result
+  };
   loadChannelApiLogs("Shopify", true).catch(() => {});
   const scopeText = result.hasReadShipping ? "read_shipping is active." : "read_shipping is still missing.";
+  if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
   toast(`${result.message || "Shopify token refreshed."} ${scopeText}`);
+}
+
+async function checkShopifyAuth() {
+  shopifyAuthCheckState = { ...shopifyAuthCheckState, loading: true, message: "Checking Shopify connection..." };
+  if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
+  try {
+    const result = await api("/api/shopify/auth-check", {
+      method: "POST",
+      feedbackLabel: "Checking Shopify connection...",
+      body: JSON.stringify({})
+    });
+    shopifyAuthCheckState = {
+      loading: false,
+      checkedAt: new Date().toISOString(),
+      ok: true,
+      message: result.message || "Shopify Admin API connection is working.",
+      result
+    };
+    toast(shopifyAuthCheckState.message);
+  } catch (error) {
+    shopifyAuthCheckState = {
+      loading: false,
+      checkedAt: new Date().toISOString(),
+      ok: false,
+      message: error.message || "Shopify connection check failed.",
+      result: null
+    };
+    toast(shopifyAuthCheckState.message);
+  }
+  loadChannelApiLogs("Shopify", true).catch(() => {});
+  if ($("#channel-full")?.classList.contains("active")) renderChannelProfile();
 }
 
 async function queueShopifyPricePush(mode = "dry-run") {
@@ -21252,6 +21359,7 @@ document.addEventListener("click", async (event) => {
   const dataQualityScanButton = event.target.closest("[data-data-quality-scan]");
   const syncShopifyCloseoutsButton = event.target.closest("[data-sync-shopify-closeouts]");
   const syncShopifySkuMapButton = event.target.closest("[data-sync-shopify-sku-map]");
+  const checkShopifyAuthButton = event.target.closest("[data-check-shopify-auth]");
   const refreshShopifyTokenButton = event.target.closest("[data-refresh-shopify-token]");
   const syncShopifyShippingProfilesButton = event.target.closest("[data-sync-shopify-shipping-profiles]");
   const syncShopifyStatusAllButton = event.target.closest("[data-sync-shopify-status-all]");
@@ -22204,6 +22312,11 @@ document.addEventListener("click", async (event) => {
   if (refreshShopifyTokenButton) {
     closeActionMenus();
     refreshShopifyToken().catch((error) => toast(error.message));
+    return;
+  }
+  if (checkShopifyAuthButton) {
+    closeActionMenus();
+    checkShopifyAuth();
     return;
   }
   if (syncShopifyShippingProfilesButton) {

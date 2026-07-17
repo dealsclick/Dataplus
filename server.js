@@ -24177,6 +24177,30 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/shopify/auth-check") {
+    const tokenState = await refreshShopifyAdminAccessToken({ operation: "Check Shopify auth" });
+    const shop = await shopifyGraphqlRequestAuto(`
+      query DataPlusShopifyAuthCheck {
+        shop {
+          name
+          myshopifyDomain
+        }
+      }
+    `, {}, { operation: "Check Shopify auth" });
+    const scopes = tokenState.scopes || [];
+    return sendJson(res, 200, {
+      ok: true,
+      tokenSource: tokenState.tokenSource || "",
+      hasToken: Boolean(tokenState.hasToken),
+      scope: tokenState.scope || "",
+      scopes,
+      expiresAt: tokenState.expiresAt || "",
+      hasReadShipping: scopes.includes("read_shipping"),
+      shop: shop.shop || {},
+      message: "Shopify Admin API connection is working."
+    });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/shopify/embed-diagnostics") {
     const config = shopifyAdminConfig();
     const appUrl = configuredShopifyAppUrl() || "http://localhost:4173";
