@@ -56,6 +56,7 @@ const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(60, Number(process.env.IMPORT_JO
 const IMPORT_JOB_HISTORY_LIMIT = Math.max(1000, Math.min(5000, Number(process.env.IMPORT_JOB_HISTORY_LIMIT || 1000) || 1000));
 const REDIS_CATALOG_CACHE_TTL_SECONDS = Math.max(15, Math.min(600, Number(process.env.REDIS_CATALOG_CACHE_TTL_SECONDS || 90) || 90));
 const REDIS_PRODUCTS_CACHE_TTL_SECONDS = Math.max(15, Math.min(300, Number(process.env.REDIS_PRODUCTS_CACHE_TTL_SECONDS || 45) || 45));
+const REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS = Math.max(60, Math.min(3600, Number(process.env.REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS || 900) || 900));
 const SERVER_STARTED_AT = new Date();
 const activeJobProgress = new Map();
 const activeJobRecords = new Map();
@@ -19204,8 +19205,15 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/inventory/facets") {
     if (postgres.isPostgresEnabled()) {
+      const cacheKey = "dataplus:products:facets:v1";
+      const cached = await redisCache.getJson(cacheKey);
+      if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const facets = await postgres.productFacets();
-      if (facets) return sendJson(res, 200, { facets });
+      if (facets) {
+        const payload = { facets };
+        await redisCache.setJson(cacheKey, payload, REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS);
+        return sendJson(res, 200, payload);
+      }
       return sendJson(res, 200, {
         facets: { suppliers: [], stockStatuses: [], shopifyStatuses: [], ebayStatuses: [], brands: [], manufacturers: [], categories: [], shopifyLiveProducts: 0, shopifyLiveVariants: 0 },
         storage: "postgres"
