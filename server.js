@@ -19304,10 +19304,14 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts.length === 3) {
     if (postgres.isPostgresEnabled()) {
+      const cacheKey = `dataplus:product-detail:v1:${crypto.createHash("sha1").update(String(parts[2]).toLowerCase()).digest("hex")}`;
+      const cached = await redisCache.getJson(cacheKey);
+      if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const pgItem = await postgres.readProductByKey(parts[2]);
       if (pgItem) {
-        const sourceFallbackMap = await sourceCatalogExportFallbackMap([pgItem]);
-        return sendJson(res, 200, { item: publicInventoryItem(pgItem, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync(), sourceFallbackMap }) });
+        const payload = { item: publicInventoryItem(pgItem, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) };
+        await redisCache.setJson(cacheKey, payload, 120);
+        return sendJson(res, 200, payload);
       }
       return notFound(res);
     }
@@ -19359,6 +19363,8 @@ async function handleApi(req, res) {
       });
     }
     await postgres.upsertProductsFromState([item]);
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
     if (qtyBefore !== qtyAfter || reservedBefore !== reservedAfter || replenishableFieldsChanged) {
       await postgres.upsertInventoryLevelsFromProducts([item]);
     }
@@ -19410,6 +19416,8 @@ async function handleApi(req, res) {
       });
     }
     await postgres.upsertProductsFromState([item]);
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
     await postgres.upsertInventoryLevelsFromProducts([item]);
     await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
     const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
@@ -24167,6 +24175,7 @@ async function handleApi(req, res) {
       const result = await postgres.deleteProductsByIds(ids);
       publicStateJsonCache = null;
       await redisCache.deleteByPrefix("dataplus:products:");
+      await redisCache.deleteByPrefix("dataplus:product-detail:");
       return sendJson(res, 200, { changed: result.deleted || 0, state: await postgresLiteState() });
     }
     const statusByAction = {
@@ -24186,6 +24195,7 @@ async function handleApi(req, res) {
     if (products?.length) await postgres.upsertProductsFromState(products);
     publicStateJsonCache = null;
     await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
     return sendJson(res, 200, { changed: products?.length || 0, allFiltered, limited: allFiltered && allFilteredTotal > ids.length, state: await postgresLiteState() });
   }
 
@@ -24815,6 +24825,7 @@ async function handleApi(req, res) {
     }
     if (touched.length) await postgres.upsertProductsFromState(touched);
     await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
     return sendJson(res, 200, { launched, skipped, failed, results, state: await postgresLiteState() });
   }
 
