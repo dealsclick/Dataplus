@@ -12220,6 +12220,89 @@ tbody tr:hover td {
   white-space: normal;
 }
 
+.data-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-solid) 82%, transparent);
+  color: var(--muted);
+  padding: 6px 8px;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.data-pager + .import-job-table-wrap,
+.data-pager + .api-log-list,
+.import-job-table-wrap + .data-pager,
+.api-log-list + .data-pager {
+  margin-top: 8px;
+}
+
+.data-pager label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.data-pager select {
+  min-height: 26px;
+  width: auto;
+  min-width: 64px;
+  padding: 3px 22px 3px 7px;
+  font-size: 0.72rem;
+}
+
+.pager-buttons {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.pager-buttons button,
+.pager-gap {
+  min-width: 28px;
+  min-height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-solid);
+  color: var(--ink);
+  padding: 3px 7px;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.pager-buttons button {
+  cursor: pointer;
+}
+
+.pager-buttons button:hover,
+.pager-buttons button.active {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel-solid));
+  color: var(--ink);
+}
+
+.pager-buttons button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pager-gap {
+  display: inline-grid;
+  place-items: center;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
 .jobs-page {
   display: grid;
   gap: 12px;

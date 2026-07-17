@@ -220,6 +220,7 @@ let sidebarCollapsed = localStorage.getItem("dataplus-sidebar-collapsed") === "t
 let themeMode = localStorage.getItem("dataplus-theme") || "dark";
 let jobsFilter = { query: "", section: "", status: "", direction: "", channel: "", endpoint: "" };
 let jobsWorkspaceTab = "queue";
+let jobsPagination = { queuePage: 1, queuePageSize: 10, logsPage: 1, logsPageSize: 10 };
 let selectedImportJobId = null;
 let channelApiLogState = { channel: "", logs: [], loading: false, loaded: false, error: "", filters: { q: "", status: "", transport: "" } };
 let shopifyMissingVariantState = { items: [], report: null, total: 0, page: 1, limit: 50, q: "", loading: false, loaded: false, error: "" };
@@ -10114,10 +10115,54 @@ function renderImportJobActions(job = {}) {
   `;
 }
 
+function pageWindow(currentPage = 1, totalPages = 1) {
+  const total = Math.max(1, Number(totalPages || 1));
+  const current = Math.max(1, Math.min(total, Number(currentPage || 1)));
+  const pages = new Set([1, total, current, current - 1, current + 1, current + 10]);
+  if (current <= 3) [2, 3, 4].forEach((page) => pages.add(page));
+  return [...pages].filter((page) => page >= 1 && page <= total).sort((a, b) => a - b);
+}
+
+function renderDataPager({ id = "", total = 0, page = 1, pageSize = 10, label = "rows" } = {}) {
+  const safePageSize = Math.max(1, Number(pageSize || 10));
+  const totalRows = Math.max(0, Number(total || 0));
+  const totalPages = Math.max(1, Math.ceil(totalRows / safePageSize));
+  const currentPage = Math.max(1, Math.min(totalPages, Number(page || 1)));
+  const start = totalRows ? ((currentPage - 1) * safePageSize) + 1 : 0;
+  const end = Math.min(totalRows, currentPage * safePageSize);
+  const pages = pageWindow(currentPage, totalPages);
+  return `
+    <div class="data-pager" data-pager="${html(id)}">
+      <label>Show
+        <select data-page-size="${html(id)}">
+          ${[10, 25, 50, 100].map((size) => `<option value="${size}" ${safePageSize === size ? "selected" : ""}>${size}</option>`).join("")}
+        </select>
+      </label>
+      <span>${start.toLocaleString()}-${end.toLocaleString()} of ${totalRows.toLocaleString()} ${html(label)}</span>
+      <div class="pager-buttons">
+        <button type="button" data-page="${html(id)}" data-page-value="${currentPage - 1}" ${currentPage <= 1 ? "disabled" : ""}>Prev</button>
+        ${pages.map((page, index) => {
+          const previous = pages[index - 1];
+          const gap = previous && page - previous > 1 ? `<span class="pager-gap">...</span>` : "";
+          const jumpLabel = page === currentPage + 10 ? `+10` : page;
+          return `${gap}<button type="button" class="${page === currentPage ? "active" : ""}" data-page="${html(id)}" data-page-value="${page}">${jumpLabel}</button>`;
+        }).join("")}
+        <button type="button" data-page="${html(id)}" data-page-value="${currentPage + 1}" ${currentPage >= totalPages ? "disabled" : ""}>Next</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderImportJobTable({ full = false } = {}) {
   const filteredJobs = filteredImportJobs({ useJobsFilters: full && currentViewId === "jobs" });
   if (!filteredJobs.length) return `<div class="empty-state compact">No jobs match the current filters.</div>`;
+  const pageSize = Number(jobsPagination.queuePageSize || 10);
+  const totalPages = Math.max(1, Math.ceil(filteredJobs.length / pageSize));
+  const page = Math.max(1, Math.min(totalPages, Number(jobsPagination.queuePage || 1)));
+  jobsPagination.queuePage = page;
+  const pagedJobs = filteredJobs.slice((page - 1) * pageSize, page * pageSize);
   return `
+    ${renderDataPager({ id: "queue", total: filteredJobs.length, page, pageSize, label: "jobs" })}
     <div class="import-job-table-wrap">
       <table class="import-job-table">
         <thead>
@@ -10134,7 +10179,7 @@ function renderImportJobTable({ full = false } = {}) {
           </tr>
         </thead>
         <tbody>
-          ${filteredJobs.map((job) => {
+          ${pagedJobs.map((job) => {
             const isSelected = selectedImportJobId === job.id;
             const rowLabel = importJobRowLabel(job);
             const processed = Number(jobIsDone(job) && Number(job.processedRows || 0) < Number(job.totalRows || 0) ? job.totalRows : job.processedRows || 0);
@@ -10168,6 +10213,7 @@ function renderImportJobTable({ full = false } = {}) {
         </tbody>
       </table>
     </div>
+    ${renderDataPager({ id: "queue", total: filteredJobs.length, page, pageSize, label: "jobs" })}
   `;
 }
 
@@ -10737,7 +10783,8 @@ function renderJobsPage() {
           <div class="jobs-channel-logs">
             ${renderChannelApiHistory({ name: "Shopify" }, {
               title: "Channel Logs",
-              description: "Shopify channel activity from the past 30 days, including inventory updates that are queued, running, completed, or failed."
+              description: "Shopify channel activity from the past 30 days, including inventory updates that are queued, running, completed, or failed.",
+              paginate: true
             })}
           </div>
         ` : `
@@ -16387,6 +16434,12 @@ function renderChannelApiHistory(channel, options = {}) {
   const isCurrent = channelApiLogState.channel === channelName;
   const logs = isCurrent ? channelApiLogState.logs || [] : [];
   const filteredLogs = filteredChannelApiLogs(logs);
+  const usePager = options.paginate === true;
+  const pageSize = Number(jobsPagination.logsPageSize || 10);
+  const totalPages = Math.max(1, Math.ceil(filteredLogs.length / pageSize));
+  const page = Math.max(1, Math.min(totalPages, Number(jobsPagination.logsPage || 1)));
+  if (usePager) jobsPagination.logsPage = page;
+  const visibleLogs = usePager ? filteredLogs.slice((page - 1) * pageSize, page * pageSize) : filteredLogs.slice(0, 80);
   const loading = isCurrent && channelApiLogState.loading;
   const error = isCurrent ? channelApiLogState.error : "";
   const filters = channelApiLogFilters();
@@ -16428,9 +16481,10 @@ function renderChannelApiHistory(channel, options = {}) {
         <button class="button secondary" type="button" data-channel-api-log-clear>Clear</button>
       </div>
       <p class="muted api-log-count">${filteredLogs.length.toLocaleString()} shown / ${logs.length.toLocaleString()} loaded</p>
+      ${usePager ? renderDataPager({ id: "logs", total: filteredLogs.length, page, pageSize, label: "logs" }) : ""}
       ${error ? `<div class="notice warning">${html(error)}</div>` : ""}
       <div class="api-log-list">
-        ${loading && !logs.length ? `<div class="empty-state compact">Loading API history...</div>` : filteredLogs.length ? filteredLogs.slice(0, 80).map((log) => `
+        ${loading && !logs.length ? `<div class="empty-state compact">Loading API history...</div>` : filteredLogs.length ? visibleLogs.map((log) => `
           <article class="api-log-row ${channelApiLogStatusClass(log)}">
             <div>
               <strong>${html(log.operation || log.path || "API call")}</strong>
@@ -16444,6 +16498,7 @@ function renderChannelApiHistory(channel, options = {}) {
           </article>
         `).join("") : `<div class="empty-state compact">${logs.length ? "No API calls match these filters." : "No API calls logged in the last 30 days yet."}</div>`}
       </div>
+      ${usePager ? renderDataPager({ id: "logs", total: filteredLogs.length, page, pageSize, label: "logs" }) : ""}
     </section>
   `;
 }
@@ -21017,6 +21072,7 @@ document.addEventListener("click", async (event) => {
   const cleanupImportJobsButton = event.target.closest("[data-cleanup-import-jobs]");
   const systemBackupButton = event.target.closest("[data-system-backup]");
   const jobsWorkspaceTabButton = event.target.closest("[data-jobs-workspace-tab]");
+  const pagerButton = event.target.closest("[data-page]");
   const refreshSystemFieldsButton = event.target.closest("[data-refresh-system-fields]");
   const selectImportJobButton = event.target.closest("[data-select-import-job]");
   const stopJobButton = event.target.closest("[data-job-stop]");
@@ -21460,6 +21516,7 @@ document.addEventListener("click", async (event) => {
   }
   if (clearJobFiltersButton) {
     jobsFilter = { query: "", section: "", status: "", direction: "", channel: "", endpoint: "" };
+    jobsPagination.queuePage = 1;
     renderJobsPage();
     return;
   }
@@ -21830,6 +21887,14 @@ document.addEventListener("click", async (event) => {
     renderJobsPage();
     return;
   }
+  if (pagerButton && !pagerButton.disabled) {
+    const id = pagerButton.dataset.page || "";
+    const nextPage = Math.max(1, Number(pagerButton.dataset.pageValue || 1));
+    if (id === "queue") jobsPagination.queuePage = nextPage;
+    if (id === "logs") jobsPagination.logsPage = nextPage;
+    if (currentViewId === "jobs") renderJobsPage();
+    return;
+  }
   if (cleanupImportJobsButton) {
     cleanupImportJobs().catch((error) => toast(error.message));
     return;
@@ -22051,11 +22116,13 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (channelApiLogSearchButton) {
+    jobsPagination.logsPage = 1;
     applyChannelApiLogFiltersFromDom();
     renderChannelApiLogHost();
     return;
   }
   if (channelApiLogClearButton) {
+    jobsPagination.logsPage = 1;
     channelApiLogState.filters = { q: "", status: "", transport: "" };
     renderChannelApiLogHost();
     return;
@@ -23334,6 +23401,7 @@ document.addEventListener("input", (event) => {
   const jobsSearch = event.target.closest("#jobs-search");
   if (!jobsSearch) return;
   jobsFilter.query = jobsSearch.value;
+  jobsPagination.queuePage = 1;
   runWithSearchFeedback(renderJobsPage, "Searching jobs...");
 });
 document.addEventListener("change", (event) => {
@@ -23430,12 +23498,29 @@ document.addEventListener("change", (event) => {
   const channel = event.target.closest("#jobs-filter-channel");
   const endpoint = event.target.closest("#jobs-filter-endpoint");
   const channelApiLogFilter = event.target.closest("[data-channel-api-log-filter]");
+  const pageSizeSelect = event.target.closest("[data-page-size]");
   if (channelApiLogFilter) {
+    jobsPagination.logsPage = 1;
     applyChannelApiLogFiltersFromDom();
     renderChannelApiLogHost();
     return;
   }
+  if (pageSizeSelect) {
+    const id = pageSizeSelect.dataset.pageSize || "";
+    const size = Math.max(10, Number(pageSizeSelect.value || 10));
+    if (id === "queue") {
+      jobsPagination.queuePageSize = size;
+      jobsPagination.queuePage = 1;
+    }
+    if (id === "logs") {
+      jobsPagination.logsPageSize = size;
+      jobsPagination.logsPage = 1;
+    }
+    if (currentViewId === "jobs") renderJobsPage();
+    return;
+  }
   if (!section && !status && !direction && !channel && !endpoint) return;
+  jobsPagination.queuePage = 1;
   if (section) jobsFilter.section = section.value;
   if (status) jobsFilter.status = status.value;
   if (direction) jobsFilter.direction = direction.value;
