@@ -419,6 +419,82 @@ function jobCategory(job: ImportJob) {
   return job.category || job.section || "Operations"
 }
 
+function FloatingActions({
+  view,
+  shopify,
+  onNavigate,
+  onRefresh,
+  onCheckShopify,
+  onRefreshShopifyToken,
+  onRunShopifyAction,
+  onCleanupJobs,
+}: {
+  view: AppView
+  shopify?: ChannelConnection
+  onNavigate: (view: AppView) => void
+  onRefresh: () => void
+  onCheckShopify: () => void
+  onRefreshShopifyToken: () => void
+  onRunShopifyAction: (options: { path: string; body?: Record<string, unknown>; confirmMessage?: string; successMessage?: string }) => void
+  onCleanupJobs: () => void
+}) {
+  const openLegacy = (path = "/legacy") => window.open(path, "_blank", "noreferrer")
+  const shopifyStatusLimit = Number(shopify?.settings?.shopifyStatusSyncLimit || 100) || 100
+
+  const items = (() => {
+    if (view === "jobs") return <>
+      <DropdownMenuItem onClick={onRefresh}><RefreshCw className="size-4" /> Refresh jobs</DropdownMenuItem>
+      <DropdownMenuItem onClick={onCleanupJobs}><RotateCcw className="size-4" /> Clean stale jobs</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => onNavigate("channels")}><Store className="size-4" /> Open channel logs</DropdownMenuItem>
+    </>
+    if (view === "channels") return <>
+      <DropdownMenuItem onClick={onCheckShopify}><ShieldCheck className="size-4" /> Check Shopify connection</DropdownMenuItem>
+      <DropdownMenuItem onClick={onRefreshShopifyToken}><RefreshCw className="size-4" /> Request new Shopify token</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => onRunShopifyAction({ path: "/api/shopify/sku-map-sync", successMessage: "Shopify SKU map sync queued." })}><RotateCcw className="size-4" /> Sync Shopify SKU map</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => onRunShopifyAction({ path: "/api/shopify/status-sync-all", body: { limit: shopifyStatusLimit }, successMessage: "Shopify status sync queued." })}><RotateCcw className="size-4" /> Sync Shopify status</DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onClick={() => onNavigate("jobs")}><Activity className="size-4" /> View jobs</DropdownMenuItem>
+    </>
+    if (view === "catalog") return <>
+      <DropdownMenuItem onClick={() => window.open("/api/catalog/changes.csv", "_blank", "noreferrer")}><FileDown className="size-4" /> Export SKU changes</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => window.open("/api/catalog/closeouts.csv", "_blank", "noreferrer")}><FileDown className="size-4" /> Export closeouts</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => onRunShopifyAction({ path: "/api/shopify/status-sync-all", body: { limit: shopifyStatusLimit }, successMessage: "Shopify status sync queued." })}><RotateCcw className="size-4" /> Sync Shopify status</DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onClick={() => openLegacy("/legacy/catalog")}><ExternalLink className="size-4" /> Open legacy catalog tools</DropdownMenuItem>
+    </>
+    if (view === "vendors") return <>
+      <DropdownMenuItem onClick={() => onNavigate("catalog")}><Boxes className="size-4" /> Open catalog</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openLegacy("/legacy/vendors")}><ExternalLink className="size-4" /> Open legacy vendor tools</DropdownMenuItem>
+    </>
+    if (view === "settings") return <>
+      <DropdownMenuItem onClick={onRefresh}><RefreshCw className="size-4" /> Refresh settings</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => onNavigate("channels")}><Store className="size-4" /> Open channels</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openLegacy()}><ExternalLink className="size-4" /> Open advanced settings</DropdownMenuItem>
+    </>
+    return <>
+      <DropdownMenuItem onClick={() => onNavigate("catalog")}><Boxes className="size-4" /> Open catalog</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => onNavigate("jobs")}><Activity className="size-4" /> Open jobs</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => onNavigate("channels")}><Store className="size-4" /> Open channels</DropdownMenuItem>
+      <DropdownMenuItem onClick={onRefresh}><RefreshCw className="size-4" /> Refresh workspace</DropdownMenuItem>
+    </>
+  })()
+
+  return (
+    <div className="fixed right-5 bottom-5 z-40">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button size="icon" className="size-12 rounded-full shadow-lg" aria-label="Open page actions" title="Actions">
+            <MoreHorizontal className="size-5" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="top" align="end" className="w-64">
+          {items}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  )
+}
+
 function App() {
   const [view, setView] = useState<AppView>(() => viewFromPath(window.location.pathname))
   const [state, setState] = useState<LiteState>({})
@@ -678,22 +754,6 @@ function App() {
                 <Badge variant={workerStatus.online ? "default" : "secondary"}>
                   {workerStatus.online ? "Worker online" : "Worker idle"}
                 </Badge>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button size="sm"><MoreHorizontal className="size-4" /> Actions</Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onClick={() => refreshData()}><RefreshCw className="size-4" /> Refresh workspace</DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => navigateTo("jobs")}><Activity className="size-4" /> Open jobs</DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => navigateTo("channels")}><Store className="size-4" /> Open channels</DropdownMenuItem>
-                    {shopify && <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={checkShopifyConnection}><ShieldCheck className="size-4" /> Check Shopify connection</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => runShopifyAction({ path: "/api/shopify/sku-map-sync", successMessage: "Shopify SKU map sync queued." })}><RefreshCw className="size-4" /> Sync Shopify SKU map</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => runShopifyAction({ path: "/api/shopify/status-sync-all", body: { limit: Number(shopify.settings?.shopifyStatusSyncLimit || 100) || 100 }, successMessage: "Shopify status sync queued." })}><RotateCcw className="size-4" /> Sync Shopify status</DropdownMenuItem>
-                    </>}
-                  </DropdownMenuContent>
-                </DropdownMenu>
                 <Button variant="outline" size="sm" onClick={() => refreshData()}>
                   <RefreshCw className="size-4" />
                   Refresh
@@ -766,6 +826,16 @@ function App() {
             )}
           </div>
         </main>
+        <FloatingActions
+          view={view}
+          shopify={shopify}
+          onNavigate={navigateTo}
+          onRefresh={() => refreshData()}
+          onCheckShopify={checkShopifyConnection}
+          onRefreshShopifyToken={refreshShopifyToken}
+          onRunShopifyAction={runShopifyAction}
+          onCleanupJobs={() => mutateJob("/api/import-jobs/cleanup", "Jobs cleaned.")}
+        />
       </div>
       <Toaster richColors closeButton />
     </TooltipProvider>
