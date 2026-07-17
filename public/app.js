@@ -1667,21 +1667,22 @@ function mergeInventoryItem(item = {}) {
 
 function setState(nextState) {
   const previousState = state || {};
+  const safeNextState = nextState && typeof nextState === "object" && !Array.isArray(nextState) ? nextState : {};
   const preserveInventoryPage = Array.isArray(nextState?.inventory)
     && nextState.inventory.length === 0
     && nextState.inventoryLoaded === false
     && Array.isArray(previousState.inventory)
     && previousState.inventory.length > 0;
   state = {
-    ...nextState,
-    inventory: preserveInventoryPage ? previousState.inventory : (nextState?.inventory || []),
+    ...safeNextState,
+    inventory: preserveInventoryPage ? previousState.inventory : (safeNextState.inventory || []),
     inventoryLoaded: preserveInventoryPage ? previousState.inventoryLoaded : nextState?.inventoryLoaded,
-    importJobs: Array.isArray(nextState?.importJobs) && nextState.importJobs.length
-      ? nextState.importJobs
-      : (Array.isArray(previousState.importJobs) ? previousState.importJobs : nextState?.importJobs || []),
-    workerStatus: nextState?.workerStatus && Object.keys(nextState.workerStatus || {}).length
-      ? nextState.workerStatus
-      : (previousState.workerStatus || nextState?.workerStatus || {})
+    importJobs: Array.isArray(safeNextState.importJobs) && safeNextState.importJobs.length
+      ? safeNextState.importJobs
+      : (Array.isArray(previousState.importJobs) ? previousState.importJobs : safeNextState.importJobs || []),
+    workerStatus: safeNextState.workerStatus && typeof safeNextState.workerStatus === "object" && !Array.isArray(safeNextState.workerStatus) && Object.keys(safeNextState.workerStatus || {}).length
+      ? safeNextState.workerStatus
+      : (previousState.workerStatus || {})
   };
   applyTablePreferencesFromState();
   productDetailCache = {};
@@ -10547,6 +10548,7 @@ function renderJobsShopifyInventorySchedule() {
 function renderJobsPage() {
   const target = $("#jobs-page");
   if (!target) return;
+  if (!state) state = {};
   const sections = importJobFilterOptions("section");
   const statuses = importJobFilterOptions("status");
   const directions = importJobFilterOptions("direction");
@@ -10558,8 +10560,9 @@ function renderJobsPage() {
   const totalJobs = importJobRows().length;
   const warnings = importJobRows().filter((job) => ["warning", "failed"].includes(String(job.status || "").toLowerCase())).length;
   const savedFiles = importJobRows().filter(jobHasDownload).length;
-  const workerStatus = state.workerStatus || {};
-  const workerMode = appSystemSettings().backgroundJobsMode === "worker";
+  const workerStatus = state.workerStatus && typeof state.workerStatus === "object" && !Array.isArray(state.workerStatus) ? state.workerStatus : {};
+  const settings = appSystemSettings();
+  const workerMode = settings.backgroundJobsMode === "worker";
   const workerLabel = workerMode ? (workerStatus.online ? "Online" : "Offline") : "Inline";
   const workerTone = workerMode ? (workerStatus.online ? "success" : "warning") : "muted";
   const workerSeen = workerStatus.lastSeenAt ? `${dateLabel(workerStatus.lastSeenAt)} (${Number(workerStatus.ageSeconds || 0)}s ago)` : "No heartbeat yet";
@@ -10616,14 +10619,14 @@ function renderJobsPage() {
         <div class="jobs-settings-card">
           <label class="jobs-setting-select">Job runner
             <select data-system-setting="backgroundJobsMode">
-              <option value="inline" ${appSystemSettings().backgroundJobsMode !== "worker" ? "selected" : ""}>Inline server</option>
-              <option value="worker" ${appSystemSettings().backgroundJobsMode === "worker" ? "selected" : ""}>External worker</option>
+              <option value="inline" ${settings.backgroundJobsMode !== "worker" ? "selected" : ""}>Inline server</option>
+              <option value="worker" ${settings.backgroundJobsMode === "worker" ? "selected" : ""}>External worker</option>
             </select>
           </label>
-          <label class="jobs-setting-toggle"><input type="checkbox" ${appSystemSettings().autoDataQualityScanAfterImports !== false ? "checked" : ""} data-system-setting="autoDataQualityScanAfterImports" /> <span>Auto-scan after imports</span></label>
-          <label class="jobs-setting-toggle"><input type="checkbox" ${appSystemSettings().dataQualityWorkerEnabled !== false ? "checked" : ""} data-system-setting="dataQualityWorkerEnabled" /> <span>Quality scans on worker</span></label>
-          <label class="jobs-setting-toggle"><input type="checkbox" ${appSystemSettings().backupIncludeSourceCatalog === true ? "checked" : ""} data-system-setting="backupIncludeSourceCatalog" /> <span>Include source catalog in backups</span></label>
-          <label class="jobs-setting-toggle"><input type="checkbox" ${appSystemSettings().jobsRetentionAutoCleanupEnabled !== false ? "checked" : ""} data-system-setting="jobsRetentionAutoCleanupEnabled" /> <span>Auto-clean expired files</span></label>
+          <label class="jobs-setting-toggle"><input type="checkbox" ${settings.autoDataQualityScanAfterImports !== false ? "checked" : ""} data-system-setting="autoDataQualityScanAfterImports" /> <span>Auto-scan after imports</span></label>
+          <label class="jobs-setting-toggle"><input type="checkbox" ${settings.dataQualityWorkerEnabled !== false ? "checked" : ""} data-system-setting="dataQualityWorkerEnabled" /> <span>Quality scans on worker</span></label>
+          <label class="jobs-setting-toggle"><input type="checkbox" ${settings.backupIncludeSourceCatalog === true ? "checked" : ""} data-system-setting="backupIncludeSourceCatalog" /> <span>Include source catalog in backups</span></label>
+          <label class="jobs-setting-toggle"><input type="checkbox" ${settings.jobsRetentionAutoCleanupEnabled !== false ? "checked" : ""} data-system-setting="jobsRetentionAutoCleanupEnabled" /> <span>Auto-clean expired files</span></label>
           <div class="jobs-retention-note"><strong>Files</strong><small>Export and error downloads are retained for at least 60 days.</small></div>
         </div>
         ${renderJobsShopifyInventorySchedule()}
@@ -10763,8 +10766,9 @@ function renderImportExportMappings() {
 async function refreshImportJobs({ silent = false } = {}) {
   if (currentViewId === "jobs" && !silent) renderJobsLoadingPage("Refreshing jobs and worker status...");
   const result = await api('/api/import-jobs', { feedbackLabel: silent ? "Checking jobs..." : undefined });
+  if (!state) state = {};
   state.importJobs = result.importJobs || [];
-  state.workerStatus = result.workerStatus || state.workerStatus || {};
+  state.workerStatus = result.workerStatus && typeof result.workerStatus === "object" ? result.workerStatus : state.workerStatus || {};
   if (currentViewId === 'jobs') renderJobsPage();
   else if (!silent && currentViewId === "import-export") renderImportExportMappings();
   renderTopbarActions();
@@ -10802,7 +10806,7 @@ async function pollImportJobs() {
   if (!response.ok) return;
   const result = await response.json();
   state.importJobs = result.importJobs || state.importJobs || [];
-  state.workerStatus = result.workerStatus || state.workerStatus || {};
+  state.workerStatus = result.workerStatus && typeof result.workerStatus === "object" ? result.workerStatus : state.workerStatus || {};
   if (currentViewId === "jobs") renderJobsPage();
   renderTopbarActions();
 }
@@ -13337,9 +13341,10 @@ function ebayChannelSettings() {
 }
 
 function appSystemSettings() {
+  const settings = state?.systemSettings && typeof state.systemSettings === "object" && !Array.isArray(state.systemSettings) ? state.systemSettings : {};
   return {
     trueValueSourceCategoryAsMainCategory: true,
-    ...(state.systemSettings || {})
+    ...settings
   };
 }
 

@@ -4114,6 +4114,7 @@ async function writeUserTablePreferenceStore(userId, tableId, preference = {}) {
 }
 
 async function readWorkerStatus(settings = readSystemSettingsStore({})) {
+  settings = settings && typeof settings === "object" && !Array.isArray(settings) ? settings : {};
   const docs = postgres.isPostgresEnabled() ? await postgres.readStateDocuments().catch(() => ({})) : {};
   const heartbeat = docs?.workerHeartbeat && typeof docs.workerHeartbeat === "object" ? docs.workerHeartbeat : {};
   const lastSeenAt = heartbeat.lastSeenAt || "";
