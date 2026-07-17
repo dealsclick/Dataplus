@@ -219,7 +219,7 @@ let menuGroupsExpanded = localStorage.getItem("dataplus-menu-groups-expanded") =
 let sidebarCollapsed = localStorage.getItem("dataplus-sidebar-collapsed") === "true";
 let themeMode = localStorage.getItem("dataplus-theme") || "dark";
 let jobsFilter = { query: "", section: "", status: "", direction: "", channel: "", endpoint: "" };
-let jobsWorkspaceTab = "queue";
+let jobsWorkspaceTab = "overview";
 let jobsPagination = { queuePage: 1, queuePageSize: 10, logsPage: 1, logsPageSize: 10 };
 let selectedImportJobId = null;
 let channelApiLogState = { channel: "", logs: [], loading: false, loaded: false, error: "", filters: { q: "", status: "", transport: "" } };
@@ -10227,8 +10227,8 @@ function renderImportQueuePanel({ full = false } = {}) {
     <section class="import-queue-panel ${full ? 'full' : ''}">
       <div class="section-head import-queue-head">
         <div>
-          <p class="eyebrow">Queue</p>
-          <h3>${full ? 'Import Queue & History' : 'Queue & History'}</h3>
+          <p class="eyebrow">${full ? "Job History" : "Queue"}</p>
+          <h3>${full ? 'Job History' : 'Queue & History'}</h3>
           <p class="muted">${runningCount ? `${runningCount} running / ` : ''}${failedCount ? `${failedCount} failed / ` : ''}${jobs.length} total jobs</p>
         </div>
         <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon('refresh-cw', 'Refresh')}</button>
@@ -10528,6 +10528,37 @@ function renderJobsApiIssueGroups(groups = []) {
   `;
 }
 
+function renderJobsFilterPanel({ sections = [], statuses = [], directions = [], apiChannels = [], apiEndpoints = [] } = {}) {
+  return `
+    <div class="jobs-filter-card">
+      <div class="jobs-filter-bar">
+        <input id="jobs-search" type="search" placeholder="Search jobs, files, endpoints, messages" value="${html(jobsFilter.query || "")}" />
+        <select id="jobs-filter-section">
+          <option value="">All categories</option>
+          ${sections.map((section) => `<option value="${html(section.toLowerCase())}" ${jobsFilter.section === section.toLowerCase() ? "selected" : ""}>${html(section)}</option>`).join("")}
+        </select>
+        <select id="jobs-filter-status">
+          <option value="">All statuses</option>
+          ${statuses.map((status) => `<option value="${html(status.toLowerCase())}" ${jobsFilter.status === status.toLowerCase() ? "selected" : ""}>${html(importJobStatusLabel(status))}</option>`).join("")}
+        </select>
+        <select id="jobs-filter-direction">
+          <option value="">All types</option>
+          ${directions.map((direction) => `<option value="${html(direction.toLowerCase())}" ${jobsFilter.direction === direction.toLowerCase() ? "selected" : ""}>${html(direction)}</option>`).join("")}
+        </select>
+        <select id="jobs-filter-channel">
+          <option value="">All API channels</option>
+          ${apiChannels.map((channel) => `<option value="${html(channel.toLowerCase())}" ${jobsFilter.channel === channel.toLowerCase() ? "selected" : ""}>${html(channel)}</option>`).join("")}
+        </select>
+        <select id="jobs-filter-endpoint">
+          <option value="">All API endpoints</option>
+          ${apiEndpoints.map((endpoint) => `<option value="${html(endpoint.toLowerCase())}" ${jobsFilter.endpoint === endpoint.toLowerCase() ? "selected" : ""}>${html(endpoint)}</option>`).join("")}
+        </select>
+        <button class="button secondary" type="button" data-clear-job-filters>Clear</button>
+      </div>
+    </div>
+  `;
+}
+
 function exportMappingFormatType(template = {}) {
   return String(template.formatType || template.exportFormat || "normal").trim().toLowerCase() || "normal";
 }
@@ -10662,6 +10693,150 @@ function renderJobsShopifyInventorySchedule() {
   `;
 }
 
+function renderJobsSettingsPanel({ settings = {} } = {}) {
+  return `
+    <section class="jobs-settings-card">
+      <label class="jobs-setting-select">Background processor
+        <select data-system-setting="backgroundJobsMode">
+          <option value="inline" ${settings.backgroundJobsMode !== "worker" ? "selected" : ""}>Inline server</option>
+          <option value="worker" ${settings.backgroundJobsMode === "worker" ? "selected" : ""}>Background worker</option>
+        </select>
+      </label>
+      <label class="jobs-setting-toggle"><input type="checkbox" ${settings.autoDataQualityScanAfterImports !== false ? "checked" : ""} data-system-setting="autoDataQualityScanAfterImports" /> <span>Auto-scan after imports</span></label>
+      <label class="jobs-setting-toggle"><input type="checkbox" ${settings.dataQualityWorkerEnabled !== false ? "checked" : ""} data-system-setting="dataQualityWorkerEnabled" /> <span>Quality scans on worker</span></label>
+      <label class="jobs-setting-toggle"><input type="checkbox" ${settings.backupIncludeSourceCatalog === true ? "checked" : ""} data-system-setting="backupIncludeSourceCatalog" /> <span>Include source catalog in backups</span></label>
+      <label class="jobs-setting-toggle"><input type="checkbox" ${settings.jobsRetentionAutoCleanupEnabled !== false ? "checked" : ""} data-system-setting="jobsRetentionAutoCleanupEnabled" /> <span>Auto-clean expired files</span></label>
+      <div class="jobs-retention-note"><strong>Files</strong><small>Export and error downloads are retained for at least 60 days.</small></div>
+    </section>
+  `;
+}
+
+function renderWorkerHealthPanel({ workerMode = false, workerStatus = {}, workerSeen = "" } = {}) {
+  return `
+    <section class="worker-health-card ${workerMode && !workerStatus.online ? "needs-attention" : ""}">
+      <div>
+        <strong>Background processor</strong>
+        <small>${workerMode ? html(workerStatus.online ? "Ready to run background tasks." : "Worker mode is on, but no active heartbeat is visible.") : "Inline server mode is active."}</small>
+      </div>
+      <div>
+        <small>Processor ID</small>
+        <code>${html(workerStatus.workerId || "n/a")}</code>
+      </div>
+      <div>
+        <small>Last heartbeat</small>
+        <span>${html(workerSeen)}</span>
+      </div>
+      <div>
+        <small>Current task</small>
+        <span>${html(workerStatus.currentTask || workerStatus.status || "idle")}</span>
+      </div>
+      ${workerMode && !workerStatus.online ? `<code>npm run worker</code>` : ""}
+    </section>
+  `;
+}
+
+function jobPlainReason(job = {}) {
+  const text = `${job.message || ""} ${(job.errors || []).join(" ")}`.toLowerCase();
+  if (text.includes("api key") || text.includes("access token") || text.includes("unauthorized") || text.includes("oauth")) return "Shopify connection needs attention";
+  if (text.includes("timeout") || text.includes("remote service")) return "Remote service did not respond";
+  if (text.includes("missing") || text.includes("not found")) return "Missing data or mapping";
+  if (String(job.status || "").toLowerCase() === "stopped") return "Stopped while the worker restarted";
+  if (String(job.status || "").toLowerCase() === "failed") return "Job failed";
+  return job.message || importJobStatusLabel(job.status);
+}
+
+function renderJobsOverview({ jobs = [], totalJobs = 0, warnings = 0, savedFiles = 0, workerMode = false, workerStatus = {}, workerLabel = "", workerTone = "", scheduleMarkup = "", apiGroups = [] } = {}) {
+  const allJobs = importJobRows();
+  const activeJobs = allJobs.filter(jobIsActive);
+  const failedJobs = allJobs.filter((job) => String(job.status || "").toLowerCase() === "failed");
+  const stoppedJobs = allJobs.filter((job) => String(job.status || "").toLowerCase() === "stopped");
+  const reviewJobs = [...failedJobs, ...stoppedJobs].slice(0, 5);
+  const statusTone = failedJobs.length ? "danger" : activeJobs.length ? "warning" : "success";
+  const statusLabel = failedJobs.length ? "Needs attention" : activeJobs.length ? "Running work" : "Healthy";
+  const primaryMessage = failedJobs.length
+    ? `${failedJobs.length.toLocaleString()} failed jobs need review. Start with the newest failure below.`
+    : activeJobs.length
+      ? `${activeJobs.length.toLocaleString()} jobs are currently running or queued.`
+      : "No active job problems found.";
+  return `
+    <div class="jobs-overview">
+      <section class="jobs-status-banner ${statusTone}">
+        <div>
+          <p class="eyebrow">Current status</p>
+          <h3>${html(statusLabel)}</h3>
+          <p>${html(primaryMessage)}</p>
+        </div>
+        <div class="jobs-status-actions">
+          <button class="button secondary" type="button" data-jobs-workspace-tab="queue">${withIcon("list-check", "Open job history")}</button>
+          ${failedJobs.length ? `<button class="button" type="button" data-job-api-channel="Shopify" data-job-api-endpoint="">Review failures</button>` : ""}
+        </div>
+      </section>
+      <div class="jobs-overview-grid">
+        <article>
+          <small>Running now</small>
+          <strong>${activeJobs.length.toLocaleString()}</strong>
+          <span>Queued or in progress</span>
+        </article>
+        <article>
+          <small>Needs attention</small>
+          <strong>${warnings.toLocaleString()}</strong>
+          <span>Failed or warning jobs</span>
+        </article>
+        <article>
+          <small>Files ready</small>
+          <strong>${savedFiles.toLocaleString()}</strong>
+          <span>Exports and error files</span>
+        </article>
+        <article>
+          <small>Processor</small>
+          <strong><span class="status ${workerTone}">${html(workerLabel)}</span></strong>
+          <span>${workerMode ? "Background worker mode" : "Inline server mode"}</span>
+        </article>
+      </div>
+      <section class="jobs-explain-card">
+        <div>
+          <h3>What am I looking at?</h3>
+          <p>Jobs are background tasks such as Shopify inventory updates, imports, exports, backups, and cleanup. The overview shows what needs action first; detailed history lives under Job History.</p>
+        </div>
+        <div>
+          <h3>Most important next action</h3>
+          <p>${html(failedJobs.length ? jobPlainReason(failedJobs[0]) : activeJobs.length ? "Let the current queued work finish, then review any failures." : "No immediate action needed.")}</p>
+        </div>
+      </section>
+      ${reviewJobs.length ? `
+        <section class="jobs-attention-list">
+          <div class="section-head">
+            <div>
+              <h3>Needs Attention</h3>
+              <p class="muted">Newest jobs that may need a human fix.</p>
+            </div>
+            <button class="button secondary" type="button" data-jobs-workspace-tab="queue">View all jobs</button>
+          </div>
+          ${reviewJobs.map((job) => `
+            <article class="jobs-attention-row">
+              <span class="status ${importJobStatusClass(job.status)}">${html(importJobStatusLabel(job.status))}</span>
+              <div>
+                <strong>${html(job.operation || "Job")}</strong>
+                <small>${html(jobPlainReason(job))}</small>
+              </div>
+              <time>${html(dateLabel(job.startedAt || job.createdAt))}</time>
+              <button class="button secondary compact" type="button" data-select-import-job="${html(job.id)}" data-jobs-workspace-tab="queue">Open</button>
+            </article>
+          `).join("")}
+        </section>
+      ` : ""}
+      ${apiGroups.length ? `
+        <section class="jobs-overview-api">
+          ${renderJobsApiIssueGroups(apiGroups)}
+        </section>
+      ` : ""}
+      <section class="jobs-overview-schedule">
+        ${scheduleMarkup}
+      </section>
+    </div>
+  `;
+}
+
 function renderJobsPage() {
   const target = $("#jobs-page");
   if (!target) return;
@@ -10675,7 +10850,7 @@ function renderJobsPage() {
   const jobs = filteredImportJobs({ useJobsFilters: true });
   const selectedJob = selectedImportJob(jobs);
   const totalJobs = importJobRows().length;
-  const warnings = importJobRows().filter((job) => ["warning", "failed"].includes(String(job.status || "").toLowerCase())).length;
+  const warnings = importJobRows().filter((job) => ["warning", "failed", "stopped"].includes(String(job.status || "").toLowerCase())).length;
   const savedFiles = importJobRows().filter(jobHasDownload).length;
   const visibleLogs = channelApiLogState.channel === "Shopify" ? (channelApiLogState.logs || []).length : 0;
   const workerStatus = state.workerStatus && typeof state.workerStatus === "object" && !Array.isArray(state.workerStatus) ? state.workerStatus : {};
@@ -10684,6 +10859,7 @@ function renderJobsPage() {
   const workerLabel = workerMode ? (workerStatus.online ? "Online" : "Offline") : "Inline";
   const workerTone = workerMode ? (workerStatus.online ? "success" : "warning") : "muted";
   const workerSeen = workerStatus.lastSeenAt ? `${dateLabel(workerStatus.lastSeenAt)} (${Number(workerStatus.ageSeconds || 0)}s ago)` : "No heartbeat yet";
+  const scheduleMarkup = renderJobsShopifyInventorySchedule();
   target.innerHTML = `
     <div class="jobs-page">
       <section class="jobs-command-bar">
@@ -10696,101 +10872,65 @@ function renderJobsPage() {
             </div>
           </div>
           <div class="jobs-actions">
-            <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon("refresh-cw", "Refresh jobs")}</button>
-            <button class="button secondary" type="button" data-cleanup-import-jobs>${withIcon("sparkles", "Clean stale")}</button>
+            <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon("refresh-cw", "Refresh")}</button>
+            <button class="button secondary" type="button" data-cleanup-import-jobs>${withIcon("sparkles", "Clean old jobs")}</button>
             <button class="button secondary" type="button" data-system-backup>${withIcon("database-backup", "Backup Postgres")}</button>
           </div>
           <div class="jobs-quick-stats">
             <span><small>Total</small><strong>${Number(totalJobs || 0).toLocaleString()}</strong></span>
-            <span><small>Review</small><strong>${Number(warnings || 0).toLocaleString()}</strong></span>
+            <span><small>Needs attention</small><strong>${Number(warnings || 0).toLocaleString()}</strong></span>
             <span><small>Files</small><strong>${Number(savedFiles || 0).toLocaleString()}</strong></span>
-            <span><small>Worker</small><strong><span class="status ${workerTone}">${html(workerLabel)}</span></strong></span>
+            <span><small>Processor</small><strong><span class="status ${workerTone}">${html(workerLabel)}</span></strong></span>
           </div>
-        </div>
-        <div class="jobs-filter-card">
-          <div class="jobs-filter-bar">
-            <input id="jobs-search" type="search" placeholder="Search jobs, files, endpoints, messages" value="${html(jobsFilter.query || "")}" />
-            <select id="jobs-filter-section">
-              <option value="">All categories</option>
-              ${sections.map((section) => `<option value="${html(section.toLowerCase())}" ${jobsFilter.section === section.toLowerCase() ? "selected" : ""}>${html(section)}</option>`).join("")}
-            </select>
-            <select id="jobs-filter-status">
-              <option value="">All statuses</option>
-              ${statuses.map((status) => `<option value="${html(status.toLowerCase())}" ${jobsFilter.status === status.toLowerCase() ? "selected" : ""}>${html(importJobStatusLabel(status))}</option>`).join("")}
-            </select>
-            <select id="jobs-filter-direction">
-              <option value="">All types</option>
-              ${directions.map((direction) => `<option value="${html(direction.toLowerCase())}" ${jobsFilter.direction === direction.toLowerCase() ? "selected" : ""}>${html(direction)}</option>`).join("")}
-            </select>
-            <select id="jobs-filter-channel">
-              <option value="">All API channels</option>
-              ${apiChannels.map((channel) => `<option value="${html(channel.toLowerCase())}" ${jobsFilter.channel === channel.toLowerCase() ? "selected" : ""}>${html(channel)}</option>`).join("")}
-            </select>
-            <select id="jobs-filter-endpoint">
-              <option value="">All API endpoints</option>
-              ${apiEndpoints.map((endpoint) => `<option value="${html(endpoint.toLowerCase())}" ${jobsFilter.endpoint === endpoint.toLowerCase() ? "selected" : ""}>${html(endpoint)}</option>`).join("")}
-            </select>
-            <button class="button secondary" type="button" data-clear-job-filters>Clear</button>
-          </div>
-          ${renderJobsApiIssueGroups(apiGroups)}
-        </div>
-        <div class="jobs-settings-card">
-          <label class="jobs-setting-select">Job runner
-            <select data-system-setting="backgroundJobsMode">
-              <option value="inline" ${settings.backgroundJobsMode !== "worker" ? "selected" : ""}>Inline server</option>
-              <option value="worker" ${settings.backgroundJobsMode === "worker" ? "selected" : ""}>External worker</option>
-            </select>
-          </label>
-          <label class="jobs-setting-toggle"><input type="checkbox" ${settings.autoDataQualityScanAfterImports !== false ? "checked" : ""} data-system-setting="autoDataQualityScanAfterImports" /> <span>Auto-scan after imports</span></label>
-          <label class="jobs-setting-toggle"><input type="checkbox" ${settings.dataQualityWorkerEnabled !== false ? "checked" : ""} data-system-setting="dataQualityWorkerEnabled" /> <span>Quality scans on worker</span></label>
-          <label class="jobs-setting-toggle"><input type="checkbox" ${settings.backupIncludeSourceCatalog === true ? "checked" : ""} data-system-setting="backupIncludeSourceCatalog" /> <span>Include source catalog in backups</span></label>
-          <label class="jobs-setting-toggle"><input type="checkbox" ${settings.jobsRetentionAutoCleanupEnabled !== false ? "checked" : ""} data-system-setting="jobsRetentionAutoCleanupEnabled" /> <span>Auto-clean expired files</span></label>
-          <div class="jobs-retention-note"><strong>Files</strong><small>Export and error downloads are retained for at least 60 days.</small></div>
-        </div>
-        ${renderJobsShopifyInventorySchedule()}
-        <div class="worker-health-card ${workerMode && !workerStatus.online ? "needs-attention" : ""}">
-          <div>
-            <strong>External worker</strong>
-            <small>${workerMode ? html(workerStatus.online ? "Ready to claim queued jobs." : "Worker mode is on, but no active heartbeat is visible.") : "Inline server mode is active."}</small>
-          </div>
-          <div>
-            <small>Worker ID</small>
-            <code>${html(workerStatus.workerId || "n/a")}</code>
-          </div>
-          <div>
-            <small>Last heartbeat</small>
-            <span>${html(workerSeen)}</span>
-          </div>
-          <div>
-            <small>Current task</small>
-            <span>${html(workerStatus.currentTask || workerStatus.status || "idle")}</span>
-          </div>
-          ${workerMode && !workerStatus.online ? `<code>npm run worker</code>` : ""}
         </div>
       </section>
       <section class="jobs-tab-shell">
         <div class="jobs-tab-bar">
+          <button class="${jobsWorkspaceTab === "overview" ? "active" : ""}" type="button" data-jobs-workspace-tab="overview">
+            <span>Overview</span>
+            <small>${warnings ? `${warnings.toLocaleString()} review` : "Healthy"}</small>
+          </button>
           <button class="${jobsWorkspaceTab === "queue" ? "active" : ""}" type="button" data-jobs-workspace-tab="queue">
-            <span>Queue</span>
+            <span>Job History</span>
             <small>${Number(jobs.length || 0).toLocaleString()} visible</small>
           </button>
           <button class="${jobsWorkspaceTab === "logs" ? "active" : ""}" type="button" data-jobs-workspace-tab="logs">
-            <span>Channel Logs</span>
+            <span>Shopify Activity</span>
             <small>${channelApiLogState.loading ? "Loading" : `${Number(visibleLogs || 0).toLocaleString()} loaded`}</small>
           </button>
+          <button class="${jobsWorkspaceTab === "schedules" ? "active" : ""}" type="button" data-jobs-workspace-tab="schedules">
+            <span>Schedules</span>
+            <small>Inventory</small>
+          </button>
+          <button class="${jobsWorkspaceTab === "health" ? "active" : ""}" type="button" data-jobs-workspace-tab="health">
+            <span>System Health</span>
+            <small>${html(workerLabel)}</small>
+          </button>
         </div>
-        ${jobsWorkspaceTab === "logs" ? `
+        ${jobsWorkspaceTab === "overview" ? renderJobsOverview({ jobs, totalJobs, warnings, savedFiles, workerMode, workerStatus, workerLabel, workerTone, scheduleMarkup, apiGroups }) : jobsWorkspaceTab === "logs" ? `
           <div class="jobs-channel-logs">
             ${renderChannelApiHistory({ name: "Shopify" }, {
-              title: "Channel Logs",
+              title: "Shopify Activity Log",
               description: "Shopify channel activity from the past 30 days, including inventory updates that are queued, running, completed, or failed.",
               paginate: true
             })}
           </div>
+        ` : jobsWorkspaceTab === "schedules" ? `
+          <div class="jobs-tab-content">
+            ${scheduleMarkup}
+          </div>
+        ` : jobsWorkspaceTab === "health" ? `
+          <div class="jobs-tab-content">
+            ${renderJobsSettingsPanel({ settings })}
+            ${renderWorkerHealthPanel({ workerMode, workerStatus, workerSeen })}
+          </div>
         ` : `
-          <div class="jobs-workspace">
-            ${renderImportQueuePanel({ full: true })}
-            ${renderJobProfile(selectedJob)}
+          <div class="jobs-tab-content">
+            ${renderJobsFilterPanel({ sections, statuses, directions, apiChannels, apiEndpoints })}
+            <div class="jobs-workspace">
+              ${renderImportQueuePanel({ full: true })}
+              ${renderJobProfile(selectedJob)}
+            </div>
           </div>
         `}
       </section>
@@ -21528,6 +21668,8 @@ document.addEventListener("click", async (event) => {
       channel: jobApiFilterButton.dataset.jobApiChannel || "",
       endpoint: jobApiFilterButton.dataset.jobApiEndpoint || ""
     };
+    jobsWorkspaceTab = "queue";
+    jobsPagination.queuePage = 1;
     renderJobsPage();
     return;
   }
@@ -21884,6 +22026,7 @@ document.addEventListener("click", async (event) => {
   }
   if (jobsWorkspaceTabButton) {
     jobsWorkspaceTab = jobsWorkspaceTabButton.dataset.jobsWorkspaceTab || "queue";
+    if (jobsWorkspaceTabButton.dataset.selectImportJob) selectedImportJobId = jobsWorkspaceTabButton.dataset.selectImportJob;
     renderJobsPage();
     return;
   }

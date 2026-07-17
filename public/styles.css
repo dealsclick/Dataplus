@@ -12612,6 +12612,197 @@ tbody tr:hover td {
   align-items: start;
 }
 
+.jobs-tab-content,
+.jobs-overview {
+  display: grid;
+  gap: 12px;
+}
+
+.jobs-status-banner {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-solid);
+  padding: 14px;
+}
+
+.jobs-status-banner.success {
+  border-color: color-mix(in srgb, var(--success) 32%, var(--line));
+  background: color-mix(in srgb, var(--success) 5%, var(--panel-solid));
+}
+
+.jobs-status-banner.warning {
+  border-color: color-mix(in srgb, var(--warning) 34%, var(--line));
+  background: color-mix(in srgb, var(--warning) 7%, var(--panel-solid));
+}
+
+.jobs-status-banner.danger {
+  border-color: color-mix(in srgb, var(--danger) 34%, var(--line));
+  background: color-mix(in srgb, var(--danger) 6%, var(--panel-solid));
+}
+
+.jobs-status-banner h3,
+.jobs-status-banner p {
+  margin: 0;
+}
+
+.jobs-status-banner h3 {
+  font-size: 1.05rem;
+}
+
+.jobs-status-banner p:not(.eyebrow) {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.jobs-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.jobs-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.jobs-overview-grid article,
+.jobs-explain-card,
+.jobs-attention-list {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-solid);
+  box-shadow: var(--shadow-soft);
+}
+
+.jobs-overview-grid article {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+}
+
+.jobs-overview-grid small,
+.jobs-overview-grid span {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.jobs-overview-grid small {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+}
+
+.jobs-overview-grid strong {
+  color: var(--ink);
+  font-size: 1.08rem;
+}
+
+.jobs-overview-grid span {
+  font-size: 0.72rem;
+}
+
+.jobs-explain-card {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+
+.jobs-explain-card h3,
+.jobs-explain-card p {
+  margin: 0;
+}
+
+.jobs-explain-card h3 {
+  font-size: 0.86rem;
+}
+
+.jobs-explain-card p {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.jobs-attention-list {
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+}
+
+.jobs-attention-list .section-head {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.jobs-attention-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) 120px auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.jobs-attention-row:last-child {
+  border-bottom: 0;
+}
+
+.jobs-attention-row div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.jobs-attention-row strong,
+.jobs-attention-row small,
+.jobs-attention-row time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jobs-attention-row small,
+.jobs-attention-row time {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.jobs-overview-schedule .jobs-schedule-card {
+  box-shadow: var(--shadow-soft);
+}
+
+.jobs-overview-api .jobs-api-groups {
+  margin-top: 0;
+  border-top: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-solid);
+  box-shadow: var(--shadow-soft);
+  padding: 10px;
+}
+
+.status.success {
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+  color: var(--success);
+}
+
+.status.warning {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning);
+}
+
+.status.muted {
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+  color: var(--muted);
+}
+
 .jobs-tab-shell {
   display: grid;
   gap: 10px;
@@ -13288,6 +13479,17 @@ tbody tr:hover td {
 
   .jobs-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .jobs-status-banner,
+  .jobs-overview-grid,
+  .jobs-explain-card,
+  .jobs-attention-row {
+    grid-template-columns: 1fr;
+  }
+
+  .jobs-status-actions {
+    justify-content: flex-start;
   }
 
   .job-profile-panel {
