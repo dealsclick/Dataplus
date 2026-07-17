@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { Pool } = require("pg");
 const dataplus = require("../server");
+const postgres = require("../db");
 
 const ROOT = path.join(__dirname, "..");
 const ENV_FILE = path.join(ROOT, ".env");
@@ -376,7 +377,10 @@ async function main() {
       }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    if (apply && Object.keys(statusPatch).length) dataplus.mergeShopifyStatusMapSync(statusPatch);
+    if (apply && Object.keys(statusPatch).length) {
+      dataplus.mergeShopifyStatusMapSync(statusPatch);
+      await postgres.upsertShopifyStatusMap(statusPatch);
+    }
 
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
