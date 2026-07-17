@@ -18093,12 +18093,18 @@ async function runSourceCatalogImportWorkerJob(job = {}, body = {}) {
   });
   progress({ phase: "source_rows_ready", processedRows: 0, totalRows: impact.importable, message: `${impact.importable.toLocaleString()} source rows ready to import.` });
   const result = await promoteSourceCatalogRows({ sourceRows: impact.sourceRows || [], skus: impact.skus || [], progress, isCanceled: () => false });
+  let analyzeResult = { tables: [] };
+  try {
+    analyzeResult = await postgres.analyzeCatalogTables({ products: true });
+  } catch (error) {
+    analyzeResult = { tables: [], error: error.message || "Planner statistics refresh failed." };
+  }
   const status = impact.limited ? "warning" : "success";
   const message = `Imported ${result.changed.toLocaleString()} source product${result.changed === 1 ? "" : "s"} into Products (${result.created.toLocaleString()} new, ${result.updated.toLocaleString()} updated).`;
   finishImportJob(job, {
     status,
     message,
-    details: [job.details, impact.limited ? "Only the first 25,000 filtered matches were imported." : ""].filter(Boolean).join(" "),
+    details: [job.details, impact.limited ? "Only the first 25,000 filtered matches were imported." : "", analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
     totalRows: result.requested,
     processedRows: result.changed,
     changed: result.changed,
@@ -18159,12 +18165,18 @@ function startSourceCatalogImportJob(jobId, body = {}) {
       });
       progress({ phase: "source_rows_ready", processedRows: 0, totalRows: impact.importable, message: `${impact.importable.toLocaleString()} source rows ready to import.` });
       const result = await promoteSourceCatalogRows({ sourceRows: impact.sourceRows || [], skus: impact.skus || [], progress, isCanceled });
+      let analyzeResult = { tables: [] };
+      try {
+        analyzeResult = await postgres.analyzeCatalogTables({ products: true });
+      } catch (error) {
+        analyzeResult = { tables: [], error: error.message || "Planner statistics refresh failed." };
+      }
       const status = impact.limited ? "warning" : "success";
       const message = `Imported ${result.changed.toLocaleString()} source product${result.changed === 1 ? "" : "s"} into Products (${result.created.toLocaleString()} new, ${result.updated.toLocaleString()} updated).`;
       finishImportJob(job, {
         status,
         message,
-        details: [job.details, impact.limited ? "Only the first 25,000 filtered matches were imported." : ""].filter(Boolean).join(" "),
+        details: [job.details, impact.limited ? "Only the first 25,000 filtered matches were imported." : "", analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
         totalRows: result.requested,
         processedRows: result.changed,
         changed: result.changed,

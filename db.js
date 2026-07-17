@@ -5919,12 +5919,24 @@ async function closePool() {
   relationalSchemaReady = false;
 }
 
+async function analyzeCatalogTables(options = {}) {
+  const client = getPool();
+  if (!client) return { enabled: false, tables: [] };
+  await initRelationalSchema();
+  const tables = [];
+  if (options.vendorCatalog) tables.push("vendor_catalog_items");
+  if (options.products) tables.push("products");
+  for (const table of tables) await client.query(`analyze ${table}`);
+  return { enabled: true, tables, analyzedAt: new Date().toISOString() };
+}
+
 module.exports = {
   closePool,
   databaseHealth,
   getDatabaseUrl,
   initDatabase,
   initRelationalSchema,
+  analyzeCatalogTables,
   cleanupLegacyMigratedVendorOffers,
   deleteProductsByIds,
   createVendorFeedRun,

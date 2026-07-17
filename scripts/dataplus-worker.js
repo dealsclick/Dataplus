@@ -1042,11 +1042,24 @@ async function runProductDumpImportJob(job) {
   const finalProcessedRows = summaryMatch ? Number(summaryMatch[1]) + Number(summaryMatch[2]) : current.processedRows;
   const finalChanged = summaryMatch ? Number(summaryMatch[1]) : current.changed;
   const finalMissing = summaryMatch ? Number(summaryMatch[2]) : current.missingCount;
+  let analyzeResult = { tables: [] };
+  if (payload.postgresOnly !== false && postgres.isPostgresEnabled()) {
+    current = await persistJob(current, {
+      status: "running",
+      phase: "refreshing_query_statistics",
+      message: "Refreshing PostgreSQL planner statistics for the source catalog..."
+    });
+    try {
+      analyzeResult = await postgres.analyzeCatalogTables({ vendorCatalog: true });
+    } catch (error) {
+      analyzeResult = { tables: [], error: error.message || "Planner statistics refresh failed." };
+    }
+  }
   return persistJob(current, {
     status: "success",
     phase: "complete",
     message: "Product dump import finished.",
-    details: outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "),
+    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
     totalRows: finalProcessedRows || current.totalRows || 0,
     processedRows: finalProcessedRows || current.processedRows || 0,
     changed: finalChanged || current.changed || 0,
