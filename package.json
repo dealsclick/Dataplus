@@ -12,7 +12,8 @@
     "import:shopify-taxonomy": "node scripts/import-shopify-taxonomy.js",
     "catalog:index": "node scripts/build-source-catalog-index.js",
     "catalog:rehydrate-products": "node scripts/rehydrate-products-from-catalog.js",
-    "shopify:truevalue-variation-dry-run": "node scripts/truevalue-variation-repair-dry-run.js"
+    "shopify:truevalue-variation-dry-run": "node scripts/truevalue-variation-repair-dry-run.js",
+    "shopify:truevalue-variation-repair": "node scripts/truevalue-variation-repair-apply.js"
   },
   "engines": {
     "node": ">=20"

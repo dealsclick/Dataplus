@@ -28657,7 +28657,11 @@ module.exports = {
   IMPORT_JOB_FILE_DIR,
   mappedExportFilename,
   mappedProductsCsvPostgresFileAsync,
+  mergeShopifyStatusMapSync,
   normalizeDb,
+  normalizeShopifyProductGid,
+  normalizeShopifyStatus,
+  normalizeShopifyVariantGid,
   queueShopifyInventoryUpdateJob,
   readDbFast,
   readExportMappingsApiStore,
@@ -28677,7 +28681,9 @@ module.exports = {
   runShopifyStatusSyncWorkerJob,
   runSourceCatalogImportWorkerJob,
   safeImportFileName,
+  shopifyGraphqlRequestAuto,
   shopifyPurchaseVariants,
+  shopifyStatusPayloadFromCreatedVariant,
   systemProductVariants,
   startServer
 };
