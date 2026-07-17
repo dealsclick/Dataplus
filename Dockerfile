@@ -9,7 +9,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 COPY web/package*.json ./web/
-RUN cd web && npm ci
+RUN cd web && npm ci --include=dev
 
 COPY server.js db.js ./
 COPY lib ./lib
