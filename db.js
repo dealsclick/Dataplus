@@ -4876,6 +4876,7 @@ async function listProducts(options = {}) {
   const limit = Math.max(1, Math.min(100000, Number(options.limit || 100000)));
   const page = Math.max(1, Number(options.page || 1));
   const offset = (page - 1) * limit;
+  const fastPage = Boolean(options.fastPage);
   const params = [];
   const where = [];
   const filters = options.filters || {};
@@ -5197,8 +5198,8 @@ async function listProducts(options = {}) {
     for (const clause of channelClauses) where.push(`(${clause})`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
-  const countResult = await client.query(`select count(*)::int as total from products ${whereSql}`, params);
-  params.push(limit, offset);
+  const countResult = fastPage ? null : await client.query(`select count(*)::int as total from products ${whereSql}`, params);
+  params.push(fastPage ? limit + 1 : limit, offset);
   const result = await client.query(`
     select *
     from products
@@ -5206,12 +5207,14 @@ async function listProducts(options = {}) {
     order by sku
     limit $${params.length - 1} offset $${params.length}
   `, params);
-  const inventory = await hydrateProductsWithShopifyStatuses(result.rows.map(productRowToState));
+  const hasMore = fastPage && result.rows.length > limit;
+  const inventory = await hydrateProductsWithShopifyStatuses(result.rows.slice(0, limit).map(productRowToState));
   return {
     inventory,
-    total: countResult.rows[0]?.total || 0,
+    total: countResult?.rows[0]?.total || 0,
     page,
-    limit
+    limit,
+    hasMore
   };
 }
 

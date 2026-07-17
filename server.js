@@ -19374,6 +19374,7 @@ async function handleApi(req, res) {
         q: url.searchParams.get("q") || "",
         page: url.searchParams.get("page") || 1,
         limit: url.searchParams.get("limit") || 100000,
+        fastPage: ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase()),
         filters: catalogFilterParams(url.searchParams)
       });
       if (result) {
@@ -19387,6 +19388,7 @@ async function handleApi(req, res) {
           total: result.total,
           page: result.page,
           limit: result.limit,
+          hasMore: Boolean(result.hasMore),
           storage: "postgres"
         };
         await redisCache.setJson(cacheKey, payload, REDIS_PRODUCTS_CACHE_TTL_SECONDS);
