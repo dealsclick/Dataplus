@@ -279,6 +279,25 @@ const navItems: Array<{ id: AppView; label: string; icon: React.ComponentType<{ 
   { id: "settings", label: "Settings", icon: Settings },
 ]
 
+const viewPaths: Record<AppView, string> = {
+  overview: "/",
+  jobs: "/jobs",
+  channels: "/channels",
+  catalog: "/products",
+  vendors: "/vendors",
+  settings: "/settings",
+}
+
+function viewFromPath(pathname = "/"): AppView {
+  const path = pathname.replace(/\/+$/, "") || "/"
+  if (path.startsWith("/jobs")) return "jobs"
+  if (path.startsWith("/channels")) return "channels"
+  if (path.startsWith("/products") || path.startsWith("/catalog")) return "catalog"
+  if (path.startsWith("/vendors")) return "vendors"
+  if (path.startsWith("/settings")) return "settings"
+  return "overview"
+}
+
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -346,7 +365,7 @@ function jobCategory(job: ImportJob) {
 }
 
 function App() {
-  const [view, setView] = useState<AppView>("overview")
+  const [view, setView] = useState<AppView>(() => viewFromPath(window.location.pathname))
   const [state, setState] = useState<LiteState>({})
   const [jobs, setJobs] = useState<ImportJob[]>([])
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({})
@@ -369,6 +388,14 @@ function App() {
       toast.error(error instanceof Error ? error.message : "Unable to load DataPlus.")
     } finally {
       setLoading(false)
+    }
+  }
+
+  function navigateTo(nextView: AppView) {
+    setView(nextView)
+    const nextPath = viewPaths[nextView]
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState({}, "", nextPath)
     }
   }
 
@@ -400,6 +427,33 @@ function App() {
       toast.success(result.message || "Shopify token refreshed.")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to refresh Shopify token.")
+    }
+  }
+
+  async function runShopifyAction({
+    path,
+    body = {},
+    confirmMessage = "",
+    successMessage = "Shopify job queued.",
+  }: {
+    path: string
+    body?: Record<string, unknown>
+    confirmMessage?: string
+    successMessage?: string
+  }) {
+    if (confirmMessage && !window.confirm(confirmMessage)) return
+    try {
+      const result = await api<{ job?: ImportJob; importJobs?: ImportJob[]; state?: LiteState; message?: string }>(path, {
+        method: "POST",
+        body: JSON.stringify(body),
+      })
+      if (result.state) setState((current) => ({ ...current, ...result.state }))
+      if (result.importJobs) setJobs(result.importJobs)
+      else if (result.job) setJobs((current) => [result.job as ImportJob, ...current.filter((job) => job.id !== result.job?.id)])
+      toast.success(result.message || successMessage)
+      refreshData({ quiet: true })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue Shopify job.")
     }
   }
 
@@ -477,6 +531,12 @@ function App() {
     return () => window.clearInterval(timer)
   }, [])
 
+  useEffect(() => {
+    const onPopState = () => setView(viewFromPath(window.location.pathname))
+    window.addEventListener("popstate", onPopState)
+    return () => window.removeEventListener("popstate", onPopState)
+  }, [])
+
   const shopify = useMemo(
     () => (state.connections || []).find((connection) => connection.name?.toLowerCase() === "shopify"),
     [state.connections],
@@ -507,7 +567,7 @@ function App() {
                   key={item.id}
                   variant={view === item.id ? "secondary" : "ghost"}
                   className="justify-start"
-                  onClick={() => setView(item.id)}
+                  onClick={() => navigateTo(item.id)}
                 >
                   <Icon className="size-4" />
                   {item.label}
@@ -555,8 +615,8 @@ function App() {
                     attentionJobs={attentionJobs}
                     shopify={shopify}
                     vendors={state.vendors || []}
-                    onOpenJobs={() => setView("jobs")}
-                    onOpenShopify={() => setView("channels")}
+                    onOpenJobs={() => navigateTo("jobs")}
+                    onOpenShopify={() => navigateTo("channels")}
                   />
                 )}
                 {view === "jobs" && (
@@ -580,6 +640,8 @@ function App() {
                     onCheckShopify={checkShopifyConnection}
                     onRefreshShopifyToken={refreshShopifyToken}
                     onSaveChannel={saveChannel}
+                    onRunShopifyAction={runShopifyAction}
+                    onRefreshData={() => refreshData({ quiet: true })}
                   />
                 )}
                 {view === "catalog" && <CatalogPage />}
@@ -1035,6 +1097,8 @@ function ChannelsPage({
   onCheckShopify,
   onRefreshShopifyToken,
   onSaveChannel,
+  onRunShopifyAction,
+  onRefreshData,
 }: {
   channels: ChannelConnection[]
   jobs: ImportJob[]
@@ -1043,6 +1107,8 @@ function ChannelsPage({
   onCheckShopify: () => void
   onRefreshShopifyToken: () => void
   onSaveChannel: (id: string, patch: Record<string, unknown>) => Promise<void>
+  onRunShopifyAction: (options: { path: string; body?: Record<string, unknown>; confirmMessage?: string; successMessage?: string }) => Promise<void>
+  onRefreshData: () => void
 }) {
   const [selectedId, setSelectedId] = useState("")
   const selectedChannel = channels.find((channel) => channel.id === selectedId) || channels.find((channel) => channel.name?.toLowerCase() === "shopify") || channels[0]
@@ -1092,6 +1158,8 @@ function ChannelsPage({
             onCheckShopify={onCheckShopify}
             onRefreshShopifyToken={onRefreshShopifyToken}
             onSave={onSaveChannel}
+            onRunShopifyAction={onRunShopifyAction}
+            onRefreshData={onRefreshData}
           />
         ) : (
           <Card><CardContent className="p-6 text-muted-foreground">No channels found.</CardContent></Card>
@@ -1109,6 +1177,8 @@ function ChannelDetail({
   onCheckShopify,
   onRefreshShopifyToken,
   onSave,
+  onRunShopifyAction,
+  onRefreshData,
 }: {
   channel: ChannelConnection
   jobs: ImportJob[]
@@ -1117,6 +1187,8 @@ function ChannelDetail({
   onCheckShopify: () => void
   onRefreshShopifyToken: () => void
   onSave: (id: string, patch: Record<string, unknown>) => Promise<void>
+  onRunShopifyAction: (options: { path: string; body?: Record<string, unknown>; confirmMessage?: string; successMessage?: string }) => Promise<void>
+  onRefreshData: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
@@ -1146,9 +1218,100 @@ function ChannelDetail({
         { method: "POST", body: JSON.stringify({}) },
       )
       toast.success(result.message || "Shipping profiles imported.")
+      onRefreshData()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to import Shopify shipping profiles.")
     }
+  }
+
+  function queueShopifyAction(kind: string, apply = false) {
+    const inventoryLocationId = String(settings.shopifyInventoryLocationId || "")
+    const inventoryWarehouseId = String(settings.shopifyInventoryWarehouseId || "")
+    const actionMap: Record<string, { path: string; body: Record<string, unknown>; confirmMessage?: string; successMessage: string }> = {
+      status: {
+        path: "/api/shopify/status-sync-all",
+        body: { limit: Number(settings.shopifyStatusSyncLimit || 100) || 100 },
+        successMessage: "Shopify status sync queued.",
+      },
+      skuMap: {
+        path: "/api/shopify/sku-map-sync",
+        body: {},
+        successMessage: "Shopify SKU map sync queued.",
+      },
+      inventoryDryRun: {
+        path: "/api/shopify/inventory-update",
+        body: { apply: false, dryRun: true, warehouseId: inventoryWarehouseId, locationId: inventoryLocationId },
+        successMessage: "Shopify inventory dry run queued.",
+      },
+      inventoryApply: {
+        path: "/api/shopify/inventory-update",
+        body: { apply: true, dryRun: false, warehouseId: inventoryWarehouseId, locationId: inventoryLocationId },
+        confirmMessage: "Push inventory updates to live Shopify now? This should only be used after the dry run looks good.",
+        successMessage: "Shopify inventory update queued.",
+      },
+      priceDryRun: {
+        path: "/api/shopify/variant-price-push",
+        body: { apply: false, dryRun: true },
+        successMessage: "Shopify price dry run queued.",
+      },
+      priceApply: {
+        path: "/api/shopify/variant-price-push",
+        body: { apply: true, dryRun: false },
+        confirmMessage: "Push DataPlus prices to live Shopify variants now? Run a price dry run first if you have not reviewed it.",
+        successMessage: "Shopify price push queued.",
+      },
+      createDryRun: {
+        path: "/api/shopify/product-create",
+        body: { apply: false, dryRun: true, limit: 100 },
+        successMessage: "Shopify product create dry run queued.",
+      },
+      createApply: {
+        path: "/api/shopify/product-create",
+        body: { apply: true, dryRun: false, limit: 100 },
+        confirmMessage: "Create new live Shopify products now? This should only be used after reviewing a create dry run.",
+        successMessage: "Shopify product creation queued.",
+      },
+      linkDryRun: {
+        path: "/api/shopify/link-existing-variants",
+        body: { apply: false, dryRun: true, limit: 50000 },
+        successMessage: "Shopify existing-link dry run queued.",
+      },
+      linkApply: {
+        path: "/api/shopify/link-existing-variants",
+        body: { apply: true, dryRun: false, limit: 50000 },
+        confirmMessage: "Backfill DataPlus links from existing Shopify variants now? This will update DataPlus mappings.",
+        successMessage: "Shopify existing-link backfill queued.",
+      },
+      collectionsDryRun: {
+        path: "/api/shopify/product-type-collections-sync",
+        body: { apply: false, dryRun: true },
+        successMessage: "Shopify product type and collections dry run queued.",
+      },
+      collectionsApply: {
+        path: "/api/shopify/product-type-collections-sync",
+        body: { apply: true, dryRun: false },
+        confirmMessage: "Push product type and smart collection updates to live Shopify now?",
+        successMessage: "Shopify product type and collections sync queued.",
+      },
+      taxonomyDryRun: {
+        path: "/api/shopify/taxonomy-push",
+        body: { apply: false, dryRun: true },
+        successMessage: "Shopify taxonomy dry run queued.",
+      },
+      taxonomyApply: {
+        path: "/api/shopify/taxonomy-push",
+        body: { apply: true, dryRun: false },
+        confirmMessage: "Push Shopify taxonomy updates to live products now?",
+        successMessage: "Shopify taxonomy push queued.",
+      },
+    }
+    const action = actionMap[kind]
+    if (!action) return
+    if (apply && kind === "inventoryApply" && !settings.shopifyInventoryPushEnabled) {
+      toast.error("Enable DataPlus inventory push before applying inventory updates.")
+      return
+    }
+    onRunShopifyAction(action)
   }
 
   return (
@@ -1285,18 +1448,99 @@ function ChannelDetail({
         </TabsContent>
 
         <TabsContent value="actions">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Channel actions</CardTitle>
-              <CardDescription>Operational tasks moved out of setup so settings stay readable.</CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-wrap gap-2">
-              {isShopify && <Button onClick={onCheckShopify}>Check connection</Button>}
-              {isShopify && <Button variant="outline" onClick={onRefreshShopifyToken}>Request new token</Button>}
-              {isShopify && <Button variant="outline" onClick={syncShippingProfiles}>Import shipping profiles</Button>}
-              {isShopify && <Button variant="outline" onClick={() => window.open("/legacy/channels", "_blank")}>Open advanced Shopify actions</Button>}
-            </CardContent>
-          </Card>
+          {isShopify ? (
+            <div className="grid gap-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Connection and setup actions</CardTitle>
+                  <CardDescription>These do not change products. Use them to verify credentials and import Shopify setup data.</CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-wrap gap-2">
+                  <Button onClick={onCheckShopify}>Check connection</Button>
+                  <Button variant="outline" onClick={onRefreshShopifyToken}>Request new token</Button>
+                  <Button variant="outline" onClick={syncShippingProfiles}>Import shipping profiles</Button>
+                  <Button variant="outline" onClick={() => queueShopifyAction("skuMap")}>Sync SKU map</Button>
+                  <Button variant="outline" onClick={() => queueShopifyAction("status")}>Sync Shopify status</Button>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Product launch and linking</CardTitle>
+                  <CardDescription>Run dry runs first. Live actions ask for confirmation before queueing.</CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <ActionTile
+                    title="Create products"
+                    description="Create missing ready products in Shopify."
+                    dryRunLabel="Create dry run"
+                    applyLabel="Create live"
+                    onDryRun={() => queueShopifyAction("createDryRun")}
+                    onApply={() => queueShopifyAction("createApply", true)}
+                  />
+                  <ActionTile
+                    title="Link existing"
+                    description="Match live Shopify variants back to DataPlus SKUs."
+                    dryRunLabel="Link dry run"
+                    applyLabel="Link live"
+                    onDryRun={() => queueShopifyAction("linkDryRun")}
+                    onApply={() => queueShopifyAction("linkApply", true)}
+                  />
+                  <ActionTile
+                    title="Product types"
+                    description="Update product type and collection assignments."
+                    dryRunLabel="Types dry run"
+                    applyLabel="Push types"
+                    onDryRun={() => queueShopifyAction("collectionsDryRun")}
+                    onApply={() => queueShopifyAction("collectionsApply", true)}
+                  />
+                  <ActionTile
+                    title="Taxonomy"
+                    description="Push mapped Shopify/Google taxonomy values."
+                    dryRunLabel="Taxonomy dry run"
+                    applyLabel="Push taxonomy"
+                    onDryRun={() => queueShopifyAction("taxonomyDryRun")}
+                    onApply={() => queueShopifyAction("taxonomyApply", true)}
+                  />
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Pricing and inventory</CardTitle>
+                  <CardDescription>Live pricing and inventory affect checkout. Review dry runs before applying.</CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-3 md:grid-cols-2">
+                  <ActionTile
+                    title="Variant prices"
+                    description="Push DataPlus-calculated prices to linked Shopify variants."
+                    dryRunLabel="Price dry run"
+                    applyLabel="Push prices"
+                    onDryRun={() => queueShopifyAction("priceDryRun")}
+                    onApply={() => queueShopifyAction("priceApply", true)}
+                  />
+                  <ActionTile
+                    title="Inventory"
+                    description="Push DataPlus warehouse availability to Shopify inventory levels."
+                    dryRunLabel="Inventory dry run"
+                    applyLabel="Update inventory"
+                    onDryRun={() => queueShopifyAction("inventoryDryRun")}
+                    onApply={() => queueShopifyAction("inventoryApply", true)}
+                  />
+                </CardContent>
+              </Card>
+            </div>
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Channel actions</CardTitle>
+                <CardDescription>Advanced actions for this channel are still available in the legacy workspace.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button variant="outline" onClick={() => window.open("/legacy/channels", "_blank")}>Open advanced channel actions</Button>
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
 
         <TabsContent value="rules">
@@ -1392,6 +1636,35 @@ function ChannelLogo({ channel }: { channel: ChannelConnection }) {
   return (
     <div className="grid size-16 place-items-center overflow-hidden rounded-lg border bg-muted">
       {src ? <img src={src} alt="" className="max-h-full max-w-full object-contain p-2" /> : <ShoppingBag className="size-7 text-muted-foreground" />}
+    </div>
+  )
+}
+
+function ActionTile({
+  title,
+  description,
+  dryRunLabel,
+  applyLabel,
+  onDryRun,
+  onApply,
+}: {
+  title: string
+  description: string
+  dryRunLabel: string
+  applyLabel: string
+  onDryRun: () => void
+  onApply: () => void
+}) {
+  return (
+    <div className="grid gap-3 rounded-md border bg-background p-3">
+      <div>
+        <p className="font-semibold">{title}</p>
+        <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="outline" onClick={onDryRun}>{dryRunLabel}</Button>
+        <Button size="sm" onClick={onApply}>{applyLabel}</Button>
+      </div>
     </div>
   )
 }
