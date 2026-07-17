@@ -25,6 +25,7 @@ services:
     environment:
       PORT: "4173"
       DATAPLUS_DOCKER: "1"
+      TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
     ports:
       - "4173:4173"
@@ -53,6 +54,7 @@ services:
     environment:
       DATAPLUS_DOCKER: "1"
       DATAPLUS_BACKGROUND_JOBS_MODE: "worker"
+      TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
     command: ["npm", "run", "worker"]
     volumes:
