@@ -888,6 +888,7 @@ const STATE_DOCUMENT_KEYS = [
   "attributeGroups",
   "shopifySettings",
   "ebaySettings",
+  "channelInventorySchedules",
   "workerHeartbeat"
 ];
 
