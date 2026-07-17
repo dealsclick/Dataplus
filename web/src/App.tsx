@@ -1777,6 +1777,10 @@ function ProductDetailSheet({
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, string | number | boolean>>({})
   const [shopifyJob, setShopifyJob] = useState<ImportJob | null>(null)
+  const [detailTab, setDetailTab] = useState("overview")
+  const [alternates, setAlternates] = useState<CatalogItem[]>([])
+  const [loadingAlternates, setLoadingAlternates] = useState(false)
+  const [alternatesLoadedFor, setAlternatesLoadedFor] = useState("")
 
   const initializeDraft = (item: ProductItem) => {
     setDraft({
@@ -1804,6 +1808,9 @@ function ProductDetailSheet({
     setLoading(true)
     setProduct(null)
     setEditing(false)
+    setDetailTab("overview")
+    setAlternates([])
+    setAlternatesLoadedFor("")
     api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(sourceItem.sku)}`)
       .then((result) => {
         if (cancelled) return
@@ -1816,6 +1823,18 @@ function ProductDetailSheet({
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [open, sourceItem?.sku])
+
+  useEffect(() => {
+    const alternateSku = product?.sku || ""
+    if (detailTab !== "alternates" || !alternateSku || alternatesLoadedFor === alternateSku || loadingAlternates) return
+    let cancelled = false
+    setLoadingAlternates(true)
+    api<{ alternates?: Record<string, CatalogItem[]> }>(`/api/catalog/alternates?sku=${encodeURIComponent(alternateSku)}`)
+      .then((result) => { if (!cancelled) { setAlternates(result.alternates?.[alternateSku.toLowerCase()] || []); setAlternatesLoadedFor(alternateSku) } })
+      .catch((error) => { if (!cancelled) toast.error(error instanceof Error ? error.message : "Unable to load alternate offers.") })
+      .finally(() => { if (!cancelled) setLoadingAlternates(false) })
+    return () => { cancelled = true }
+  }, [alternatesLoadedFor, detailTab, loadingAlternates, product?.sku])
 
   async function promote() {
     if (!sourceItem?.sku) return
@@ -1936,13 +1955,14 @@ function ProductDetailSheet({
               </Button>
             </div>
 
-            <Tabs defaultValue="overview">
+            <Tabs value={detailTab} onValueChange={setDetailTab}>
               <TabsList className="w-full justify-start overflow-x-auto">
                 <TabsTrigger value="overview">Overview</TabsTrigger>
                 <TabsTrigger value="commerce">Commerce</TabsTrigger>
                 <TabsTrigger value="shipping">Shipping</TabsTrigger>
                 <TabsTrigger value="replenishable">Replenishable</TabsTrigger>
                 <TabsTrigger value="shopify">Shopify</TabsTrigger>
+                <TabsTrigger value="alternates">Alternates</TabsTrigger>
               </TabsList>
               <TabsContent value="overview" className="grid gap-4 pt-3">
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -2000,6 +2020,13 @@ function ProductDetailSheet({
                   <ActionTile title="Product" description={product.shopifyId ? "This SKU is already linked to Shopify." : "Create this SKU in Shopify using its mapped category and current rules."} dryRunLabel="Review create" applyLabel={product.shopifyId ? "Already linked" : "Create product"} applyDisabled={product.toBeDiscontinued || Boolean(product.shopifyId)} onDryRun={() => queueShopifyAction("/api/shopify/product-create", false, "Product create review")} onApply={() => queueShopifyAction("/api/shopify/product-create", true, "Product create")} />
                 </div>
                 {shopifyJob && <Card><CardContent className="grid gap-1 p-3"><div className="flex items-center justify-between gap-3"><p className="font-medium">{shopifyJob.operation || "Shopify job"}</p><Badge variant={jobStatusTone(shopifyJob.status)}>{shopifyJob.status || "queued"}</Badge></div><p className="text-xs text-muted-foreground">{shopifyJob.message || shopifyJob.id}</p><Button size="sm" variant="outline" className="mt-2 w-fit" asChild><a href={`/jobs`} onClick={() => onOpenChange(false)}>Open Jobs</a></Button></CardContent></Card>}
+              </TabsContent>
+
+              <TabsContent value="alternates" className="grid gap-4 pt-3">
+                <Alert><Boxes className="size-4" /><AlertTitle>Supplier offers</AlertTitle><AlertDescription>Offers are loaded only when this tab is opened, keeping the product screen fast.</AlertDescription></Alert>
+                {loadingAlternates && <div className="grid gap-2"><Skeleton className="h-12" /><Skeleton className="h-12" /></div>}
+                {!loadingAlternates && alternates.length === 0 && <p className="rounded-md border p-4 text-sm text-muted-foreground">No alternate supplier offers are available for this SKU.</p>}
+                {!loadingAlternates && alternates.length > 0 && <div className="overflow-hidden rounded-md border"><Table><TableHeader><TableRow><TableHead>Supplier</TableHead><TableHead>Vendor SKU</TableHead><TableHead>Stock</TableHead><TableHead>Cost</TableHead><TableHead>Category</TableHead></TableRow></TableHeader><TableBody>{alternates.map((alternate, index) => <TableRow key={`${alternate.supplier}-${alternate.sku}-${index}`}><TableCell>{alternate.supplier || "Unknown"}</TableCell><TableCell>{alternate.sku || "-"}</TableCell><TableCell>{numberLabel(alternate.stockQty)}</TableCell><TableCell>{moneyLabel(alternate.cost)}</TableCell><TableCell className="max-w-72"><p className="line-clamp-2">{alternate.mainCategory || alternate.sourceCategory || "-"}</p></TableCell></TableRow>)}</TableBody></Table></div>}
               </TabsContent>
             </Tabs>
           </div>
