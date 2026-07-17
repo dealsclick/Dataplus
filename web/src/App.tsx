@@ -1517,24 +1517,6 @@ function ChannelDetail({
             ) : (
               <Button onClick={() => setEditing(true)}>Edit</Button>
             )}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild><Button variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                {isShopify && <DropdownMenuItem onClick={onCheckShopify}>Check connection</DropdownMenuItem>}
-                {isShopify && <DropdownMenuItem onClick={onRefreshShopifyToken}>Request new token</DropdownMenuItem>}
-                {isShopify && <DropdownMenuItem onClick={syncShippingProfiles}>Import shipping profiles</DropdownMenuItem>}
-                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("skuMap")}>Sync SKU map</DropdownMenuItem>}
-                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("status")}>Sync Shopify status</DropdownMenuItem>}
-                {isShopify && <DropdownMenuItem onClick={() => onRunShopifyAction({ path: "/api/shopify/collections/closeouts", successMessage: "Shopify Closeouts collection synced." })}>Sync Closeouts collection</DropdownMenuItem>}
-                <DropdownMenuSeparator />
-                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("linkDryRun")}>Link existing dry run</DropdownMenuItem>}
-                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("createDryRun")}>Create products dry run</DropdownMenuItem>}
-                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("priceDryRun")}>Price push dry run</DropdownMenuItem>}
-                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("inventoryDryRun")}>Inventory update dry run</DropdownMenuItem>}
-                {isShopify && <DropdownMenuSeparator />}
-                <DropdownMenuItem onClick={() => window.open(`/legacy/channels/${encodeURIComponent(channel.id)}`, "_blank")}>Open legacy channel</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
           </div>
         </CardHeader>
       </Card>
