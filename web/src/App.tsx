@@ -2060,6 +2060,7 @@ function CatalogPage() {
     setLoading(true)
     try {
       const params = new URLSearchParams({ q: query, page: String(nextPage), limit: String(pageSize) })
+      if (!query.trim()) params.set("sort", "latest")
       const result = await api<CatalogResponse>(`/api/catalog/products?${params}`)
       setResponse(result)
       setPage(nextPage)
@@ -2071,11 +2072,7 @@ function CatalogPage() {
   }
 
   useEffect(() => {
-    if (query.trim()) loadCatalog(1)
-    else {
-      setResponse({})
-      setPage(1)
-    }
+    loadCatalog(1)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageSize])
 
@@ -2114,7 +2111,7 @@ function CatalogPage() {
       <PageHeader
         eyebrow="Catalog"
         title="Products"
-        description="Fast paged source catalog view with compact product, price, stock, and category columns."
+        description="Latest source SKUs first, with compact product, price, stock, and category columns."
         action={<Button asChild variant="outline"><a href="/legacy/products" target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Advanced table</a></Button>}
       />
       <Card>
@@ -2146,7 +2143,7 @@ function CatalogPage() {
           <CardDescription>
             {query.trim()
               ? `${numberLabel(total)} matched. Source: ${response.database || response.manifest?.source || "catalog"} ${response.partial ? "/ partial search" : ""}`
-              : "Enter a SKU, title, brand, supplier, or category to search the source catalog."}
+              : `${numberLabel(total)} newest source SKUs. Search SKU, title, brand, supplier, or category to narrow the list.`}
           </CardDescription>
           {!!selectedSkus.size && <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/40 p-2"><p className="text-sm font-medium">{numberLabel(selectedSkus.size)} selected</p><div className="flex gap-2"><Button size="sm" variant="ghost" onClick={() => setSelectedSkus(new Set())}>Clear</Button><Button size="sm" onClick={promoteSelected} disabled={promoting}>{promoting && <Loader2 className="size-4 animate-spin" />} Add to main catalog</Button></div></div>}
         </CardHeader>
@@ -2209,7 +2206,7 @@ function CatalogPage() {
                 </TableRow>
               ))}
               {!rows.length && (
-                <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">{query.trim() ? "No products found." : "Search the source catalog to load products."}</TableCell></TableRow>
+                <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">{query.trim() ? "No products found." : "No recently added source SKUs found."}</TableCell></TableRow>
               )}
             </TableBody>
           </Table>

@@ -265,6 +265,7 @@ async function initRelationalSchema() {
     create index if not exists vendor_catalog_items_category_idx on vendor_catalog_items (category);
     create index if not exists vendor_catalog_items_discontinued_idx on vendor_catalog_items (to_be_discontinued);
     create index if not exists vendor_catalog_items_qty_idx on vendor_catalog_items (qty);
+    create index if not exists vendor_catalog_items_latest_idx on vendor_catalog_items (created_at desc, vendor_id, source_sku);
     create table if not exists product_dump_commercial_fields (
       vendor_id text not null,
       source_sku text not null,
@@ -2003,6 +2004,7 @@ async function listVendorCatalogItems(options = {}) {
   const page = Math.max(1, Number(options.page || 1));
   const offset = (page - 1) * limit;
   const exactQ = nullableString(options.q || options.query)?.toLowerCase();
+  const newestFirst = options.sort === "latest" || options.sort === "newest";
   const filters = await vendorCatalogFiltersWithSupplierKeys(client, options.filters || {});
   const hasUserFilters = Object.values(filters).some((value) => nullableString(value));
   if (exactQ && /^[a-z0-9_-]{5,}$/i.test(exactQ) && !hasUserFilters) {
@@ -2036,7 +2038,7 @@ async function listVendorCatalogItems(options = {}) {
     select *
     from vendor_catalog_items
     ${whereSql}
-    order by source_sku
+    order by ${newestFirst ? "created_at desc, vendor_id, source_sku" : "source_sku"}
     limit $${listParams.length - 1} offset $${listParams.length}
   `, listParams);
   let total = 0;

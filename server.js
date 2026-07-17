@@ -17657,7 +17657,7 @@ async function annotateCatalogAlternateCounts(items = [], db = {}) {
   });
 }
 
-async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, db = {} } = {}) {
+async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sort = "", db = {} } = {}) {
   const pageNumber = Math.max(1, Number(page || 1));
   const pageSize = Math.min(100, Math.max(1, Number(limit || 50)));
   const offset = (pageNumber - 1) * pageSize;
@@ -17686,7 +17686,7 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, db 
   };
   if (postgres.isPostgresEnabled()) {
     try {
-      const pgResult = await postgres.listVendorCatalogItems({ query, page: pageNumber, limit: pageSize, filters: catalogFiltersWithIndexedSupplierKeys(filters) });
+      const pgResult = await postgres.listVendorCatalogItems({ query, page: pageNumber, limit: pageSize, filters: catalogFiltersWithIndexedSupplierKeys(filters), sort });
       if (pgResult) {
         const overrides = sourceCatalogOverrideMap(db);
         const vendorMappings = vendorCategoryMappingMap(db);
@@ -22149,6 +22149,7 @@ async function handleApi(req, res) {
       query: url.searchParams.get("q") || "",
       page: url.searchParams.get("page") || 1,
       limit: url.searchParams.get("limit") || 50,
+      sort: url.searchParams.get("sort") || "",
       filters: catalogFilterParams(url.searchParams),
       db: catalogDb
     });
@@ -24816,6 +24817,7 @@ async function handleApi(req, res) {
       query: url.searchParams.get("q") || "",
       page: url.searchParams.get("page") || 1,
       limit: url.searchParams.get("limit") || 50,
+      sort: url.searchParams.get("sort") || "",
       filters: catalogFilterParams(url.searchParams),
       db
     });
