@@ -17659,7 +17659,7 @@ async function annotateCatalogAlternateCounts(items = [], db = {}) {
   });
 }
 
-async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sort = "", db = {} } = {}) {
+async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sort = "", cursor = "", db = {} } = {}) {
   const pageNumber = Math.max(1, Number(page || 1));
   const pageSize = Math.min(100, Math.max(1, Number(limit || 50)));
   const offset = (pageNumber - 1) * pageSize;
@@ -17687,14 +17687,15 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sor
     vendorIndex: supplierIndexedFilter ? vendorIndex : undefined
   };
   const cacheLatestPage = sort === "latest" && !q && !filtered && pageNumber <= 200;
-  const cacheKey = cacheLatestPage ? `dataplus:catalog:latest:v1:${pageNumber}:${pageSize}` : "";
+  const cacheCursor = cursor ? crypto.createHash("sha1").update(String(cursor)).digest("hex").slice(0, 16) : "first";
+  const cacheKey = cacheLatestPage ? `dataplus:catalog:latest:v2:${cacheCursor}:${pageSize}` : "";
   if (cacheKey) {
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return { ...cached, cached: true };
   }
   if (postgres.isPostgresEnabled()) {
     try {
-      const pgResult = await postgres.listVendorCatalogItems({ query, page: pageNumber, limit: pageSize, filters: catalogFiltersWithIndexedSupplierKeys(filters), sort });
+      const pgResult = await postgres.listVendorCatalogItems({ query, page: pageNumber, limit: pageSize, filters: catalogFiltersWithIndexedSupplierKeys(filters), sort, cursor });
       if (pgResult) {
         const overrides = sourceCatalogOverrideMap(db);
         const vendorMappings = vendorCategoryMappingMap(db);
@@ -17711,6 +17712,7 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sor
         result.manifest = { ...(result.manifest || {}), productCount: result.totalMatches, source: "postgres:vendor_catalog_items" };
         result.indexed = true;
         result.database = "postgres";
+        result.nextCursor = pgResult.nextCursor || "";
         if (cacheKey) await redisCache.setJson(cacheKey, result, REDIS_CATALOG_CACHE_TTL_SECONDS);
         return result;
       }
@@ -22171,6 +22173,7 @@ async function handleApi(req, res) {
       page: url.searchParams.get("page") || 1,
       limit: url.searchParams.get("limit") || 50,
       sort: url.searchParams.get("sort") || "",
+      cursor: url.searchParams.get("cursor") || "",
       filters: catalogFilterParams(url.searchParams),
       db: catalogDb
     });
@@ -24843,6 +24846,7 @@ async function handleApi(req, res) {
       page: url.searchParams.get("page") || 1,
       limit: url.searchParams.get("limit") || 50,
       sort: url.searchParams.get("sort") || "",
+      cursor: url.searchParams.get("cursor") || "",
       filters: catalogFilterParams(url.searchParams),
       db
     });

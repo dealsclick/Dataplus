@@ -1070,7 +1070,7 @@ async function readAllProducts(options = {}) {
   const limit = Math.max(1, Math.min(5000000, Number(options.limit || 5000000)));
   const offset = Math.max(0, Number(options.offset || 0));
   const result = await client.query(`
-    select *
+    select *, created_at::text as catalog_cursor_created_at
     from products
     order by sku
     limit $1 offset $2
@@ -2005,6 +2005,15 @@ async function listVendorCatalogItems(options = {}) {
   const offset = (page - 1) * limit;
   const exactQ = nullableString(options.q || options.query)?.toLowerCase();
   const newestFirst = options.sort === "latest" || options.sort === "newest";
+  let latestCursor = null;
+  if (newestFirst && options.cursor) {
+    try {
+      const parsed = JSON.parse(Buffer.from(String(options.cursor), "base64url").toString("utf8"));
+      if (parsed?.createdAt && parsed?.vendorId && parsed?.sourceSku) latestCursor = parsed;
+    } catch {
+      // Invalid cursors are treated as a fresh first page.
+    }
+  }
   const filters = await vendorCatalogFiltersWithSupplierKeys(client, options.filters || {});
   const hasUserFilters = Object.values(filters).some((value) => nullableString(value));
   if (exactQ && /^[a-z0-9_-]{5,}$/i.test(exactQ) && !hasUserFilters) {
@@ -2030,9 +2039,16 @@ async function listVendorCatalogItems(options = {}) {
     };
   }
   const textSearchReady = (await client.query("select to_regclass('vendor_catalog_items_search_trgm_idx') is not null as ready")).rows[0]?.ready;
-  const { params, whereSql } = vendorCatalogWhere({ ...options, filters, textSearchReady });
+  const vendorCatalogQuery = vendorCatalogWhere({ ...options, filters, textSearchReady });
+  const params = [...vendorCatalogQuery.params];
+  let whereSql = vendorCatalogQuery.whereSql;
+  if (latestCursor) {
+    params.push(latestCursor.createdAt, latestCursor.vendorId, latestCursor.sourceSku);
+    const cursorWhere = `(created_at < $${params.length - 2}::timestamptz or (created_at = $${params.length - 2}::timestamptz and (vendor_id > $${params.length - 1} or (vendor_id = $${params.length - 1} and source_sku > $${params.length}))))`;
+    whereSql = whereSql ? `${whereSql} and ${cursorWhere}` : `where ${cursorWhere}`;
+  }
   const q = nullableString(options.q || options.query);
-  const useFastWindow = Boolean(q);
+  const useFastWindow = Boolean(q) || newestFirst;
   const listParams = [...params, useFastWindow ? limit + 1 : limit, offset];
   const result = await client.query(`
     select *
@@ -2049,8 +2065,8 @@ async function listVendorCatalogItems(options = {}) {
     total = offset + rows.length + (hasMore ? 1 : 0);
   } else {
     const hasFilters = whereSql.trim() !== "";
-    if (hasFilters) {
-      const countResult = await client.query(`select count(*)::int as total from vendor_catalog_items ${whereSql}`, params);
+    if (hasFilters && !latestCursor) {
+      const countResult = await client.query(`select count(*)::int as total from vendor_catalog_items ${whereSql}`, vendorCatalogQuery.params);
       total = countResult.rows[0]?.total || 0;
     } else {
       const estimate = await client.query("select greatest(reltuples::bigint, 0)::bigint as total from pg_class where oid = 'vendor_catalog_items'::regclass");
@@ -2061,7 +2077,14 @@ async function listVendorCatalogItems(options = {}) {
     items: rows.map(vendorCatalogRowToState),
     total,
     page,
-    limit
+    limit,
+    nextCursor: newestFirst && rows.length && result.rows.length > limit
+      ? Buffer.from(JSON.stringify({
+        createdAt: rows[rows.length - 1].catalog_cursor_created_at || rows[rows.length - 1].created_at?.toISOString?.() || rows[rows.length - 1].created_at,
+        vendorId: rows[rows.length - 1].vendor_id,
+        sourceSku: rows[rows.length - 1].source_sku
+      })).toString("base64url")
+      : ""
   };
 }
 

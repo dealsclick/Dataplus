@@ -299,6 +299,7 @@ type CatalogResponse = {
   page?: number
   limit?: number
   totalMatches?: number
+  nextCursor?: string
   hasMore?: boolean
   scanned?: number
   partial?: boolean
@@ -2055,12 +2056,16 @@ function CatalogPage() {
   const [selectedItem, setSelectedItem] = useState<CatalogItem | null>(null)
   const [selectedSkus, setSelectedSkus] = useState<Set<string>>(new Set())
   const [promoting, setPromoting] = useState(false)
+  const [latestCursorStack, setLatestCursorStack] = useState<string[]>([""])
 
-  async function loadCatalog(nextPage = page) {
+  async function loadCatalog(nextPage = page, cursor = "") {
     setLoading(true)
     try {
       const params = new URLSearchParams({ q: query, page: String(nextPage), limit: String(pageSize) })
-      if (!query.trim()) params.set("sort", "latest")
+      if (!query.trim()) {
+        params.set("sort", "latest")
+        if (cursor) params.set("cursor", cursor)
+      }
       const result = await api<CatalogResponse>(`/api/catalog/products?${params}`)
       setResponse(result)
       setPage(nextPage)
@@ -2072,6 +2077,7 @@ function CatalogPage() {
   }
 
   useEffect(() => {
+    setLatestCursorStack([""])
     loadCatalog(1)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageSize])
@@ -2079,6 +2085,7 @@ function CatalogPage() {
   const rows = response.items || []
   const total = Number(response.totalMatches || rows.length || 0)
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const latestMode = !query.trim()
   const pageSkus = rows.map((item) => item.sku || "").filter(Boolean)
   const pageSelected = pageSkus.length > 0 && pageSkus.every((sku) => selectedSkus.has(sku))
 
@@ -2128,7 +2135,7 @@ function CatalogPage() {
               />
             </div>
             <div className="flex items-center gap-2">
-              <Button onClick={() => loadCatalog(1)} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button>
+              <Button onClick={() => { setLatestCursorStack([""]); loadCatalog(1) }} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button>
               <Select value={String(pageSize)} onValueChange={(value) => setPageSize(Number(value))}>
                 <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -2213,10 +2220,22 @@ function CatalogPage() {
         </CardContent>
       </Card>
       <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">Page {page} of {totalPages}</p>
+        <p className="text-sm text-muted-foreground">{latestMode ? `Page ${page}` : `Page ${page} of ${totalPages}`}</p>
         <div className="flex gap-2">
-          <Button variant="outline" disabled={page <= 1 || loading} onClick={() => loadCatalog(Math.max(1, page - 1))}>Previous</Button>
-          <Button variant="outline" disabled={page >= totalPages || loading} onClick={() => loadCatalog(Math.min(totalPages, page + 1))}>Next</Button>
+          <Button variant="outline" disabled={page <= 1 || loading} onClick={() => {
+            const previousCursor = latestMode ? (latestCursorStack[page - 2] || "") : ""
+            if (latestMode) setLatestCursorStack((current) => current.slice(0, Math.max(1, page - 1)))
+            loadCatalog(Math.max(1, page - 1), previousCursor)
+          }}>Previous</Button>
+          <Button variant="outline" disabled={loading || (latestMode ? !response.nextCursor : page >= totalPages)} onClick={() => {
+            if (latestMode) {
+              const nextCursor = response.nextCursor || ""
+              setLatestCursorStack((current) => [...current.slice(0, page), nextCursor])
+              loadCatalog(page + 1, nextCursor)
+              return
+            }
+            loadCatalog(Math.min(totalPages, page + 1))
+          }}>Next</Button>
         </div>
       </div>
       <ProductDetailSheet sourceItem={selectedItem} open={Boolean(selectedItem)} onOpenChange={(nextOpen) => { if (!nextOpen) setSelectedItem(null) }} />
