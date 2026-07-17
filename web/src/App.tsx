@@ -2047,7 +2047,132 @@ function ToggleRow({ label, description, checked, disabled, onCheckedChange }: {
   return <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-medium">{label}</p><p className="text-xs text-muted-foreground">{description}</p></div><Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} /></div>
 }
 
+type CatalogWorkspaceTab = "products" | "source" | "review" | "changes" | "categories" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "readiness"
+
+const catalogWorkspaceTabs: Array<{ id: CatalogWorkspaceTab; label: string }> = [
+  { id: "products", label: "Products" },
+  { id: "source", label: "Source Catalog" },
+  { id: "review", label: "Import Review" },
+  { id: "changes", label: "SKU Changes" },
+  { id: "categories", label: "Categories" },
+  { id: "mappings", label: "Vendor Mappings" },
+  { id: "attributes", label: "Attributes" },
+  { id: "groups", label: "Groups" },
+  { id: "inventory", label: "Inventory" },
+  { id: "templates", label: "Templates" },
+  { id: "readiness", label: "Readiness" },
+]
+
+function catalogWorkspaceTabFromPath() {
+  const path = window.location.pathname.toLowerCase()
+  if (path.startsWith("/source-catalog") || path === "/source") return "source"
+  if (path.startsWith("/import-review")) return "review"
+  if (path.startsWith("/sku-changes")) return "changes"
+  if (path.startsWith("/categories")) return "categories"
+  if (path.startsWith("/vendor-category-mappings")) return "mappings"
+  if (path.startsWith("/attributes")) return "attributes"
+  if (path.startsWith("/groups")) return "groups"
+  if (path.startsWith("/inventory")) return "inventory"
+  if (path.startsWith("/templates")) return "templates"
+  if (path.startsWith("/readiness")) return "readiness"
+  return "products"
+}
+
+function catalogCellValue(value: unknown) {
+  if (value === undefined || value === null || value === "") return "-"
+  if (typeof value === "boolean") return value ? "Yes" : "No"
+  if (typeof value === "number") return Number.isFinite(value) ? value.toLocaleString() : "-"
+  if (Array.isArray(value)) return value.slice(0, 3).join(", ") || "-"
+  if (typeof value === "object") return "Configured"
+  return String(value)
+}
+
+function CatalogRecordsTable({ rows, columns, empty }: { rows: Array<Record<string, unknown>>; columns: Array<[string, string]>; empty: string }) {
+  if (!rows.length) return <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">{empty}</div>
+  return <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow>{columns.map(([key, label]) => <TableHead key={key}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{rows.map((row, index) => <TableRow key={String(row.id || row.sku || row.categoryId || row.vendorCategory || index)}>{columns.map(([key]) => <TableCell key={key} className="max-w-80"><span className="block truncate" title={catalogCellValue(row[key])}>{catalogCellValue(row[key])}</span></TableCell>)}</TableRow>)}</TableBody></Table></div>
+}
+
+const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
+  review: { endpoint: "/api/data-quality/products?limit=100", title: "Import Review", description: "Review products that need attention before they move through catalog and channel workflows.", rows: "rows", columns: [["sku", "SKU"], ["title", "Product"], ["issues", "Issues"], ["status", "Status"], ["updatedAt", "Updated"]] },
+  changes: { endpoint: "/api/catalog/changes?limit=100", title: "SKU Changes", description: "Recent source changes detected across cost, inventory, status, and catalog data.", rows: "rows", columns: [["sku", "SKU"], ["field", "Field"], ["previousValue", "Previous"], ["nextValue", "Current"], ["createdAt", "Detected"]] },
+  categories: { endpoint: "/api/categories?scope=main", title: "Categories", description: "Main category structure built from True Value and approved catalog mappings.", rows: "categories", columns: [["name", "Category"], ["productCount", "Products"], ["status", "Status"], ["updatedAt", "Updated"]] },
+  mappings: { endpoint: "/api/vendor-category-mappings?limit=100", title: "Vendor Category Mappings", description: "Supplier categories mapped into the main catalog. Unmapped rows stay visible for review.", rows: "rows", columns: [["supplier", "Supplier"], ["vendorCategory", "Vendor category"], ["mainCategory", "Main category"], ["matchCount", "SKUs"], ["mapped", "Mapped"]] },
+  attributes: { endpoint: "/api/categories/attributes", title: "Attributes", description: "Marketplace attribute requirements and the source fields that fulfill them.", rows: "rows", columns: [["Category", "Category"], ["Channel", "Channel"], ["Attribute", "Attribute"], ["Mapped Source Field", "Source field"], ["Required", "Required"]] },
+  groups: { endpoint: "/api/categories/attribute-groups", title: "Attribute Groups", description: "Reusable attribute groups that keep category requirements consistent.", rows: "groups", columns: [["label", "Group"], ["aliases", "Aliases"], ["updatedAt", "Updated"]] },
+  readiness: { endpoint: "/api/data-quality/products?limit=100", title: "Readiness", description: "Product readiness queue for missing content, dimensions, category, or marketplace requirements.", rows: "rows", columns: [["sku", "SKU"], ["title", "Product"], ["issues", "Missing or invalid"], ["channel", "Channel"], ["status", "Status"]] },
+}
+
+function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates"> }) {
+  const config = catalogResourceConfig[tab]
+  const [rows, setRows] = useState<Array<Record<string, unknown>>>([])
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+
+  async function load(force = false) {
+    force ? setRefreshing(true) : setLoading(true)
+    try {
+      const result = await api<Record<string, unknown>>(config.endpoint)
+      const values = result[config.rows]
+      setRows(Array.isArray(values) ? values as Array<Record<string, unknown>> : [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `Unable to load ${config.title.toLowerCase()}.`)
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }
+
+  useEffect(() => { load() }, [tab])
+
+  const rebuildCategories = async () => {
+    try {
+      await api("/api/categories/summary-index/rebuild", { method: "POST", body: JSON.stringify({ scope: "both" }) })
+      toast.success("Category summary index rebuilt.")
+      load(true)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to rebuild category index.") }
+  }
+
+  return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title={config.title} description={config.description} action={<div className="flex gap-2">{tab === "categories" && <Button variant="outline" onClick={rebuildCategories}>Rebuild index</Button>}<Button variant="outline" onClick={() => load(true)} disabled={refreshing}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} /><Card><CardHeader className="border-b"><CardTitle className="text-sm">{numberLabel(rows.length)} loaded</CardTitle><CardDescription>{tab === "mappings" ? "Use the vendor profile to edit individual mapping rules and add missing main categories." : "Data loads only when this tab is opened."}</CardDescription></CardHeader><CardContent className="p-4">{loading ? <div className="grid gap-2"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <CatalogRecordsTable rows={rows} columns={config.columns} empty={`No ${config.title.toLowerCase()} records are available.`} />}</CardContent></Card></div>
+}
+
+function MainCatalogPage({ inventoryOnly = false }: { inventoryOnly?: boolean }) {
+  const [query, setQuery] = useState("")
+  const [rows, setRows] = useState<ProductItem[]>([])
+  const [loading, setLoading] = useState(false)
+  const [selected, setSelected] = useState<CatalogItem | null>(null)
+
+  async function load() {
+    setLoading(true)
+    try {
+      const params = new URLSearchParams({ q: query, page: "1", limit: "100" })
+      const result = await api<{ inventory?: ProductItem[] }>(`/api/inventory?${params}`)
+      setRows(result.inventory || [])
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load main catalog products.") } finally { setLoading(false) }
+  }
+
+  useEffect(() => { load() }, [])
+  const title = inventoryOnly ? "Inventory" : "Products"
+  const description = inventoryOnly ? "Main catalog stock, replenishable overrides, and channel inventory state." : "Products already promoted into the main catalog and ready for SKU-level management."
+  return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title={title} description={description} action={<Button variant="outline" onClick={load} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button>} /><Card><CardHeader className="border-b"><div className="flex flex-wrap gap-2"><div className="relative"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="w-[380px] max-w-[70vw] pl-8" placeholder="Search main catalog" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") load() }} /></div><Button onClick={load} disabled={loading}>Search</Button></div></CardHeader><CardContent className="p-4">{loading ? <div className="grid gap-2"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Product</TableHead><TableHead>Supplier</TableHead><TableHead>Category</TableHead><TableHead>Stock</TableHead><TableHead>Price</TableHead><TableHead>Shopify</TableHead><TableHead /></TableRow></TableHeader><TableBody>{rows.map((item) => <TableRow key={item.sku}><TableCell className="font-medium">{item.sku}</TableCell><TableCell className="max-w-80"><p className="truncate">{item.title || "Untitled"}</p></TableCell><TableCell>{item.supplier || item.vendor || "-"}</TableCell><TableCell className="max-w-64"><p className="truncate">{item.mainCategory || item.category || "Uncategorized"}</p></TableCell><TableCell>{numberLabel(item.qty ?? item.stockQty)}</TableCell><TableCell>{moneyLabel(item.websitePrice ?? item.price)}</TableCell><TableCell><Badge variant={item.shopifyId ? "default" : "outline"}>{item.shopifyId ? (item.shopifyPublished ? "Live" : "Linked") : "Not linked"}</Badge></TableCell><TableCell><Button size="icon" variant="ghost" onClick={() => setSelected(item)} title="Open SKU"><MoreHorizontal className="size-4" /></Button></TableCell></TableRow>)}{!rows.length && <TableRow><TableCell colSpan={8} className="py-10 text-center text-muted-foreground">No main catalog products found.</TableCell></TableRow>}</TableBody></Table></div>}</CardContent></Card><ProductDetailSheet sourceItem={selected} open={Boolean(selected)} onOpenChange={(open) => { if (!open) setSelected(null) }} /></div>
+}
+
+function CatalogTemplatesPage() {
+  const templates = [["SKU category import", "/api/categories/templates/sku-categories.csv", "Assign main categories to specific SKUs."], ["Category mapping import", "/api/categories/templates/category-mapping.csv", "Map category structures to sales channels."], ["SKU changes export", "/api/catalog/changes.csv", "Export tracked source catalog changes."], ["Closeouts export", "/api/catalog/closeouts.csv", "Review supplier closeout and discontinued SKUs."]]
+  return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title="Templates" description="Download structured templates for category maintenance and catalog review." /><div className="grid gap-3 sm:grid-cols-2">{templates.map(([title, href, description]) => <Card key={href}><CardHeader><CardTitle className="text-sm">{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader><CardContent><Button variant="outline" size="sm" asChild><a href={href}><FileDown className="size-4" /> Download CSV</a></Button></CardContent></Card>)}</div></div>
+}
+
 function CatalogPage() {
+  const [tab, setTab] = useState<CatalogWorkspaceTab>(catalogWorkspaceTabFromPath)
+  const selectTab = (next: string) => {
+    const selected = next as CatalogWorkspaceTab
+    setTab(selected)
+    const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", source: "/source-catalog", review: "/import-review", changes: "/sku-changes", categories: "/categories", mappings: "/vendor-category-mappings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
+    window.history.replaceState({}, "", paths[selected])
+  }
+  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <MainCatalogPage />}{tab === "source" && <SourceCatalogPage />}{tab === "inventory" && <MainCatalogPage inventoryOnly />}{tab === "templates" && <CatalogTemplatesPage />}{(["review", "changes", "categories", "mappings", "attributes", "groups", "readiness"] as CatalogWorkspaceTab[]).includes(tab) && <CatalogResourcePage tab={tab as Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates">} />}</div>
+}
+
+function SourceCatalogPage() {
   const [query, setQuery] = useState("")
   const [pageSize, setPageSize] = useState(25)
   const [page, setPage] = useState(1)
