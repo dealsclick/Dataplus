@@ -33,6 +33,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -2025,6 +2026,8 @@ function CatalogPage() {
   const [loading, setLoading] = useState(false)
   const [response, setResponse] = useState<CatalogResponse>({})
   const [selectedItem, setSelectedItem] = useState<CatalogItem | null>(null)
+  const [selectedSkus, setSelectedSkus] = useState<Set<string>>(new Set())
+  const [promoting, setPromoting] = useState(false)
 
   async function loadCatalog(nextPage = page) {
     setLoading(true)
@@ -2052,6 +2055,32 @@ function CatalogPage() {
   const rows = response.items || []
   const total = Number(response.totalMatches || rows.length || 0)
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const pageSkus = rows.map((item) => item.sku || "").filter(Boolean)
+  const pageSelected = pageSkus.length > 0 && pageSkus.every((sku) => selectedSkus.has(sku))
+
+  function toggleSku(sku: string, checked: boolean) {
+    setSelectedSkus((current) => {
+      const next = new Set(current)
+      if (checked) next.add(sku)
+      else next.delete(sku)
+      return next
+    })
+  }
+
+  async function promoteSelected() {
+    const skus = [...selectedSkus]
+    if (!skus.length) return
+    setPromoting(true)
+    try {
+      const result = await api<{ changed?: number }>("/api/catalog/promote-bulk", { method: "POST", body: JSON.stringify({ skus }) })
+      toast.success(`${numberLabel(result.changed || skus.length)} SKU${(result.changed || skus.length) === 1 ? "" : "s"} added to the main catalog.`)
+      setSelectedSkus(new Set())
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to add selected SKUs to the main catalog.")
+    } finally {
+      setPromoting(false)
+    }
+  }
 
   return (
     <div className="grid gap-5">
@@ -2092,11 +2121,13 @@ function CatalogPage() {
               ? `${numberLabel(total)} matched. Source: ${response.database || response.manifest?.source || "catalog"} ${response.partial ? "/ partial search" : ""}`
               : "Enter a SKU, title, brand, supplier, or category to search the source catalog."}
           </CardDescription>
+          {!!selectedSkus.size && <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/40 p-2"><p className="text-sm font-medium">{numberLabel(selectedSkus.size)} selected</p><div className="flex gap-2"><Button size="sm" variant="ghost" onClick={() => setSelectedSkus(new Set())}>Clear</Button><Button size="sm" onClick={promoteSelected} disabled={promoting}>{promoting && <Loader2 className="size-4 animate-spin" />} Add to main catalog</Button></div></div>}
         </CardHeader>
         <CardContent className="p-0">
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-10"><Checkbox aria-label="Select page" checked={pageSelected} onCheckedChange={(checked) => { const next = new Set(selectedSkus); for (const sku of pageSkus) { if (checked) next.add(sku); else next.delete(sku) } setSelectedSkus(next) }} /></TableHead>
                 <TableHead>Product</TableHead>
                 <TableHead>Supplier</TableHead>
                 <TableHead>Category</TableHead>
@@ -2110,6 +2141,7 @@ function CatalogPage() {
             <TableBody>
               {rows.map((item) => (
                 <TableRow key={item.id || item.sku}>
+                  <TableCell><Checkbox aria-label={`Select ${item.sku}`} checked={Boolean(item.sku && selectedSkus.has(item.sku))} onCheckedChange={(checked) => item.sku && toggleSku(item.sku, checked === true)} /></TableCell>
                   <TableCell>
                     <div className="flex items-center gap-3">
                       <div className="grid size-10 place-items-center overflow-hidden rounded-md border bg-muted">
@@ -2150,7 +2182,7 @@ function CatalogPage() {
                 </TableRow>
               ))}
               {!rows.length && (
-                <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">{query.trim() ? "No products found." : "Search the source catalog to load products."}</TableCell></TableRow>
+                <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">{query.trim() ? "No products found." : "Search the source catalog to load products."}</TableCell></TableRow>
               )}
             </TableBody>
           </Table>
