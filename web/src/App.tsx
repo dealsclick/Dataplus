@@ -1732,6 +1732,7 @@ function ActionTile({
   applyLabel,
   onDryRun,
   onApply,
+  applyDisabled = false,
 }: {
   title: string
   description: string
@@ -1739,6 +1740,7 @@ function ActionTile({
   applyLabel: string
   onDryRun: () => void
   onApply: () => void
+  applyDisabled?: boolean
 }) {
   return (
     <div className="grid gap-3 rounded-md border bg-background p-3">
@@ -1748,7 +1750,7 @@ function ActionTile({
       </div>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="outline" onClick={onDryRun}>{dryRunLabel}</Button>
-        <Button size="sm" onClick={onApply}>{applyLabel}</Button>
+        <Button size="sm" onClick={onApply} disabled={applyDisabled}>{applyLabel}</Button>
       </div>
     </div>
   )
@@ -1773,6 +1775,7 @@ function ProductDetailSheet({
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, string | number | boolean>>({})
+  const [shopifyJob, setShopifyJob] = useState<ImportJob | null>(null)
 
   const initializeDraft = (item: ProductItem) => {
     setDraft({
@@ -1854,6 +1857,32 @@ function ProductDetailSheet({
     }
   }
 
+  async function queueShopifyAction(path: string, apply: boolean, label: string) {
+    if (!product?.sku) return
+    if (apply && product.toBeDiscontinued) {
+      toast.error("Discontinued SKUs cannot be sent to Shopify.")
+      return
+    }
+    if (apply && path.includes("product-create") && product.shopifyId) {
+      toast.error("This SKU is already linked to Shopify. Use the price or inventory workflow instead.")
+      return
+    }
+    if (apply && !window.confirm(`${label} for ${product.sku}? This queues a live Shopify update.`)) return
+    setSaving(true)
+    try {
+      const result = await api<{ job?: ImportJob; message?: string }>(path, {
+        method: "POST",
+        body: JSON.stringify({ skus: [product.sku], dryRun: !apply, apply }),
+      })
+      setShopifyJob(result.job || null)
+      toast.success(result.message || `${label} queued.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `Unable to queue ${label.toLowerCase()}.`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const setDraftValue = (key: string, value: string | number | boolean) => setDraft((current) => ({ ...current, [key]: value }))
   const sku = product?.sku || sourceItem?.sku || ""
   const usingVendorRules = Boolean(draft.replenishableUseVendorRules)
@@ -1912,6 +1941,7 @@ function ProductDetailSheet({
                 <TabsTrigger value="commerce">Commerce</TabsTrigger>
                 <TabsTrigger value="shipping">Shipping</TabsTrigger>
                 <TabsTrigger value="replenishable">Replenishable</TabsTrigger>
+                <TabsTrigger value="shopify">Shopify</TabsTrigger>
               </TabsList>
               <TabsContent value="overview" className="grid gap-4 pt-3">
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -1957,6 +1987,18 @@ function ProductDetailSheet({
                   <ToggleRow label="Use vendor default quantity" description="Use the replenishable quantity saved on the vendor profile." checked={usingVendorQty} disabled={!editing || usingVendorRules} onCheckedChange={(checked) => setDraftValue("replenishableQtyUseVendorDefault", checked)} />
                   <div className="grid gap-1.5"><Label>SKU replenishable quantity</Label><Input disabled={!editing || usingVendorRules || usingVendorQty} type="number" min="0" value={String(draft.replenishableQty ?? 0)} onChange={(event) => setDraftValue("replenishableQty", event.target.value)} /></div>
                 </div>
+              </TabsContent>
+
+              <TabsContent value="shopify" className="grid gap-4 pt-3">
+                <Alert><ShoppingBag className="size-4" /><AlertTitle>SKU-level Shopify actions</AlertTitle><AlertDescription>Every action is limited to {product.sku}. Dry runs create a review job without changing Shopify.</AlertDescription></Alert>
+                {product.toBeDiscontinued ? (
+                  <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Discontinued SKU</AlertTitle><AlertDescription>Product creation is blocked for discontinued products. Price review remains available for audit purposes.</AlertDescription></Alert>
+                ) : null}
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <ActionTile title="Price" description={`System price ${moneyLabel(product.websitePrice)}. Review or send this SKU only.`} dryRunLabel="Review price" applyLabel="Push price" applyDisabled={product.toBeDiscontinued} onDryRun={() => queueShopifyAction("/api/shopify/variant-price-push", false, "Price review")} onApply={() => queueShopifyAction("/api/shopify/variant-price-push", true, "Price push")} />
+                  <ActionTile title="Product" description={product.shopifyId ? "This SKU is already linked to Shopify." : "Create this SKU in Shopify using its mapped category and current rules."} dryRunLabel="Review create" applyLabel={product.shopifyId ? "Already linked" : "Create product"} applyDisabled={product.toBeDiscontinued || Boolean(product.shopifyId)} onDryRun={() => queueShopifyAction("/api/shopify/product-create", false, "Product create review")} onApply={() => queueShopifyAction("/api/shopify/product-create", true, "Product create")} />
+                </div>
+                {shopifyJob && <Card><CardContent className="grid gap-1 p-3"><div className="flex items-center justify-between gap-3"><p className="font-medium">{shopifyJob.operation || "Shopify job"}</p><Badge variant={jobStatusTone(shopifyJob.status)}>{shopifyJob.status || "queued"}</Badge></div><p className="text-xs text-muted-foreground">{shopifyJob.message || shopifyJob.id}</p><Button size="sm" variant="outline" className="mt-2 w-fit" asChild><a href={`/jobs`} onClick={() => onOpenChange(false)}>Open Jobs</a></Button></CardContent></Card>}
               </TabsContent>
             </Tabs>
           </div>
