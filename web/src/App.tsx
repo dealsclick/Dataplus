@@ -2113,8 +2113,7 @@ function ProductDetailSheet({
               {sourceItem?.defaultImage ? <img src={sourceItem.defaultImage} alt="" className="max-h-full max-w-full object-contain" /> : <Boxes className="size-5 text-muted-foreground" />}
             </div>
             <div className="min-w-0">
-              <SheetTitle className="truncate">{sku || "Product"}</SheetTitle>
-              <SheetDescription className="line-clamp-2">{product?.title || sourceItem?.title || "Source catalog product"}</SheetDescription>
+              {standalone ? <><h2 className="truncate text-lg font-semibold">{sku || "Product"}</h2><p className="line-clamp-2 text-sm text-muted-foreground">{product?.title || sourceItem?.title || "Source catalog product"}</p></> : <><SheetTitle className="truncate">{sku || "Product"}</SheetTitle><SheetDescription className="line-clamp-2">{product?.title || sourceItem?.title || "Source catalog product"}</SheetDescription></>}
             </div>
             {!standalone && <Button size="sm" variant="outline" className="ml-auto shrink-0" onClick={openStandalone}><ExternalLink className="size-4" /> Open page</Button>}
           </div>
@@ -2575,6 +2574,36 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0 }: { totalSkuCount?: number
   const cellCount = 3 + columns.filter(([key]) => visible[key]).length
 
   useEffect(() => { if (autoAlternates && rows.length) loadAlternates() }, [autoAlternates, rows])
+  useEffect(() => {
+    const skuButtons = document.querySelectorAll<HTMLButtonElement>("button.truncate.text-left.font-semibold.hover\\:underline")
+    skuButtons.forEach((button) => {
+      const sku = button.textContent?.trim()
+      const container = button.parentElement
+      if (!sku || !container) return
+      container.classList.add("group")
+      button.onclick = (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        window.history.pushState({}, "", `/products/${encodeURIComponent(sku)}`)
+        window.dispatchEvent(new PopStateEvent("popstate"))
+      }
+      let quickView = container.querySelector<HTMLButtonElement>("[data-product-quick-view]")
+      if (!quickView) {
+        quickView = document.createElement("button")
+        quickView.type = "button"
+        quickView.dataset.productQuickView = "true"
+        quickView.className = "ml-1 hidden rounded border px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted group-hover:inline-flex"
+        quickView.textContent = "View"
+        quickView.title = "Quick view"
+        container.appendChild(quickView)
+      }
+      quickView.onclick = (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        setSelected(rows.find((item) => item.sku === sku) || null)
+      }
+    })
+  }, [compact, rows])
 
   return <div className="grid gap-5">
     <PageHeader eyebrow="Catalog" title="Products" description="Approved SKUs for Shopify and connected channels. Fast paged results with legacy table controls restored." />
