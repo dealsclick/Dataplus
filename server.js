@@ -19370,17 +19370,20 @@ async function handleApi(req, res) {
       const cacheKey = `dataplus:products:v1:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
+      const fastPage = ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase());
       const result = await postgres.listProducts({
         q: url.searchParams.get("q") || "",
         page: url.searchParams.get("page") || 1,
         limit: url.searchParams.get("limit") || 100000,
-        fastPage: ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase()),
+        fastPage,
         filters: catalogFilterParams(url.searchParams)
       });
       if (result) {
         const shopifyStatusMap = readShopifyStatusMapSync();
         const sourceEnrichmentMap = readProductSourceEnrichmentSync();
-        const sourceFallbackMap = await sourceCatalogExportFallbackMap(result.inventory || []);
+        // The compact Products grid uses catalog fields already stored on the product row.
+        // Source fallback enrichment remains available in the SKU detail and export workflows.
+        const sourceFallbackMap = fastPage ? new Map() : await sourceCatalogExportFallbackMap(result.inventory || []);
         const systemSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
         const payload = {
           inventory: (result.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, sourceFallbackMap, systemSettings })),
