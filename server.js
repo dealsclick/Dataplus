@@ -21248,23 +21248,27 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/import-jobs" && postgres.isPostgresEnabled()) {
-    const db = await readDbFast({ skipInventory: true });
-    db.importJobs = await mergedImportJobsAsync(db);
-    if (markInterruptedActiveJobs(db)) {
-      for (const job of db.importJobs) upsertImportJobStore(job);
-    }
-    await maybeQueueScheduledJobsRetentionCleanup(db).catch((error) => {
-      console.error("Unable to queue scheduled Jobs retention cleanup", error.message || error);
+    const page = await postgres.readOperationJobsPage({
+      page: url.searchParams.get("page") || 1,
+      limit: url.searchParams.get("limit") || 25,
+      status: url.searchParams.get("status") || "",
+      query: url.searchParams.get("q") || ""
     });
-    db.importJobs = await mergedImportJobsAsync(db);
-    await backfillMissingExportManifests(db.importJobs).catch((error) => {
-      console.error("Unable to backfill export manifests", error.message || error);
-    });
-    db.importJobs = await mergedImportJobsAsync(db);
     return sendJson(res, 200, {
-      importJobs: clientImportJobs(applyActiveJobProgress(db.importJobs)),
-      workerStatus: await readWorkerStatus(readSystemSettingsStore(db.systemSettings || {}))
+      importJobs: clientImportJobs(applyActiveJobProgress(page.jobs)),
+      total: page.total,
+      page: page.page,
+      limit: page.limit,
+      workerStatus: await readWorkerStatus(readSystemSettingsStore(dbCache.data?.systemSettings || {}))
     });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const job = await postgres.readOperationJob(parts[2]);
+    if (!job) return notFound(res);
+    const active = activeJobRecords.get(job.id);
+    const merged = active ? { ...job, ...active, artifacts: active.artifacts?.length ? active.artifacts : job.artifacts } : job;
+    return sendJson(res, 200, { job: clientImportJob(applyActiveJobProgress([merged])[0]) });
   }
 
   if (req.method === "POST" && url.pathname === "/api/import-jobs/cleanup" && postgres.isPostgresEnabled()) {

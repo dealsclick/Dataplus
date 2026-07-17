@@ -220,6 +220,9 @@ type LiteState = {
 type ImportJobsResponse = {
   importJobs?: ImportJob[]
   workerStatus?: WorkerStatus
+  total?: number
+  page?: number
+  limit?: number
 }
 
 type CatalogItem = {
@@ -418,10 +421,42 @@ function App() {
   const [state, setState] = useState<LiteState>({})
   const [jobs, setJobs] = useState<ImportJob[]>([])
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({})
+  const [jobPageMeta, setJobPageMeta] = useState({ page: 1, limit: 10, total: 0, status: "all", query: "" })
   const [loading, setLoading] = useState(true)
   const [checkingShopify, setCheckingShopify] = useState(false)
   const [shopifyAuth, setShopifyAuth] = useState<ShopifyAuthCheck | null>(null)
   const [selectedJobId, setSelectedJobId] = useState<string>("")
+
+  async function loadJobs(next: Partial<typeof jobPageMeta> = {}, quiet = false) {
+    const request = { ...jobPageMeta, ...next }
+    const params = new URLSearchParams({ page: String(request.page), limit: String(request.limit) })
+    if (request.status !== "all") params.set("status", request.status)
+    if (request.query.trim()) params.set("q", request.query.trim())
+    try {
+      const jobResponse = await api<ImportJobsResponse>(`/api/import-jobs?${params}`)
+      setJobs(jobResponse.importJobs || [])
+      setWorkerStatus(jobResponse.workerStatus || {})
+      setJobPageMeta({
+        ...request,
+        page: Number(jobResponse.page || request.page),
+        limit: Number(jobResponse.limit || request.limit),
+        total: Number(jobResponse.total || 0),
+      })
+    } catch (error) {
+      if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to load job history.")
+    }
+  }
+
+  async function loadJobDetail(job: ImportJob) {
+    try {
+      const result = await api<{ job: ImportJob }>(`/api/import-jobs/${encodeURIComponent(job.id)}`)
+      setJobs((current) => current.map((row) => row.id === result.job.id ? result.job : row))
+      setSelectedJobId(result.job.id)
+    } catch (error) {
+      setSelectedJobId(job.id)
+      toast.error(error instanceof Error ? error.message : "Unable to load job detail.")
+    }
+  }
 
   async function refreshData({ quiet = false } = {}) {
     if (!quiet) setLoading(true)
@@ -433,13 +468,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-    try {
-      const jobResponse = await api<ImportJobsResponse>("/api/import-jobs")
-      setJobs(jobResponse.importJobs || [])
-      setWorkerStatus(jobResponse.workerStatus || {})
-    } catch (error) {
-      if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to load job history.")
-    }
+    void loadJobs({}, quiet)
   }
 
   function navigateTo(nextView: AppView) {
@@ -674,8 +703,12 @@ function App() {
                   <JobsPage
                     jobs={jobs}
                     workerStatus={workerStatus}
+                    totalJobs={jobPageMeta.total}
+                    page={jobPageMeta.page}
+                    pageSize={jobPageMeta.limit}
                     selectedJob={selectedJob}
-                    onSelectJob={(job) => setSelectedJobId(job.id)}
+                    onSelectJob={loadJobDetail}
+                    onLoadJobs={(next) => loadJobs(next)}
                     onStopJob={(job) => mutateJob(`/api/import-jobs/${encodeURIComponent(job.id)}/stop`, "Job stopped.")}
                     onRetryJob={(job) => mutateJob(`/api/import-jobs/${encodeURIComponent(job.id)}/retry`, "Retry queued.")}
                     onCleanup={() => mutateJob("/api/import-jobs/cleanup", "Jobs cleaned.")}
@@ -843,8 +876,12 @@ function MetricCard({
 function JobsPage({
   jobs,
   workerStatus,
+  totalJobs,
+  page,
+  pageSize,
   selectedJob,
   onSelectJob,
+  onLoadJobs,
   onStopJob,
   onRetryJob,
   onCleanup,
@@ -852,29 +889,25 @@ function JobsPage({
 }: {
   jobs: ImportJob[]
   workerStatus: WorkerStatus
+  totalJobs: number
+  page: number
+  pageSize: number
   selectedJob?: ImportJob
   onSelectJob: (job: ImportJob) => void
+  onLoadJobs: (next: { page?: number; limit?: number; status?: string; query?: string }) => void
   onStopJob: (job: ImportJob) => void
   onRetryJob: (job: ImportJob) => void
   onCleanup: () => void
   onRefresh: () => void
 }) {
-  const [pageSize, setPageSize] = useState(10)
-  const [page, setPage] = useState(1)
   const [query, setQuery] = useState("")
   const [status, setStatus] = useState("all")
   const [tab, setTab] = useState("queue")
 
-  const filteredJobs = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return jobs
-      .filter((job) => tab === "logs" ? String(job.direction || job.type || "").toLowerCase().includes("api") || /shopify|ebay|api/i.test(`${job.operation || ""} ${job.fileName || ""}`) : true)
-      .filter((job) => status === "all" || String(job.status || "").toLowerCase() === status)
-      .filter((job) => !q || `${job.operation || ""} ${job.fileName || ""} ${job.message || ""} ${job.id}`.toLowerCase().includes(q))
-  }, [jobs, query, status, tab])
-
-  const visibleJobs = filteredJobs.slice((page - 1) * pageSize, page * pageSize)
-  const totalPages = Math.max(1, Math.ceil(filteredJobs.length / pageSize))
+  const visibleJobs = tab === "logs"
+    ? jobs.filter((job) => String(job.direction || job.type || "").toLowerCase().includes("api") || /shopify|ebay|api/i.test(`${job.operation || ""} ${job.fileName || ""}`))
+    : jobs
+  const totalPages = Math.max(1, Math.ceil(totalJobs / pageSize))
   const issueGroups = useMemo(() => {
     const groups = new Map<string, number>()
     for (const job of jobs.filter(isAttentionJob)) {
@@ -899,7 +932,7 @@ function JobsPage({
       />
 
       <div className="grid gap-3 lg:grid-cols-4">
-        <MetricCard label="Visible jobs" value={filteredJobs.length} icon={History} />
+        <MetricCard label="Jobs found" value={totalJobs} icon={History} />
         <MetricCard label="Needs review" value={jobs.filter(isAttentionJob).length} icon={AlertCircle} />
         <MetricCard label="Active" value={jobs.filter(isActiveJob).length} icon={Play} />
         <Card>
@@ -930,7 +963,7 @@ function JobsPage({
         </Card>
       )}
 
-      <Tabs value={tab} onValueChange={(value) => { setTab(value); setPage(1) }}>
+      <Tabs value={tab} onValueChange={(value) => { setTab(value); onLoadJobs({ page: 1 }) }}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <TabsList>
             <TabsTrigger value="queue">Queue and history</TabsTrigger>
@@ -939,9 +972,10 @@ function JobsPage({
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative">
               <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
-              <Input className="w-72 pl-8" placeholder="Search jobs, files, messages" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1) }} />
+              <Input className="w-72 pl-8" placeholder="Search jobs, files, messages" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onLoadJobs({ page: 1, query, status }) }} />
             </div>
-            <Select value={status} onValueChange={(value) => { setStatus(value); setPage(1) }}>
+            <Button size="sm" variant="outline" onClick={() => onLoadJobs({ page: 1, query, status })}>Search</Button>
+            <Select value={status} onValueChange={(value) => { setStatus(value); onLoadJobs({ page: 1, query, status: value }) }}>
               <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All statuses</SelectItem>
@@ -963,7 +997,7 @@ function JobsPage({
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <CardTitle className="text-base">{tab === "logs" ? "Channel Logs" : "Import Queue and History"}</CardTitle>
-                    <CardDescription>{(page - 1) * pageSize + 1}-{Math.min(page * pageSize, filteredJobs.length)} of {numberLabel(filteredJobs.length)} jobs</CardDescription>
+                    <CardDescription>{totalJobs ? `${(page - 1) * pageSize + 1}-${Math.min(page * pageSize, totalJobs)} of ${numberLabel(totalJobs)} jobs` : "No jobs found"}</CardDescription>
                   </div>
                   <div className="flex gap-1">
                     {[10, 25, 50, 100].map((size) => (
@@ -971,7 +1005,7 @@ function JobsPage({
                         key={size}
                         size="sm"
                         variant={pageSize === size ? "default" : "outline"}
-                        onClick={() => { setPageSize(size); setPage(1) }}
+                        onClick={() => onLoadJobs({ page: 1, limit: size, query, status })}
                       >
                         {size}
                       </Button>
@@ -1032,8 +1066,8 @@ function JobsPage({
           <div className="mt-4 flex items-center justify-between">
             <p className="text-sm text-muted-foreground">Page {page} of {totalPages}</p>
             <div className="flex gap-2">
-              <Button variant="outline" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</Button>
-              <Button variant="outline" disabled={page >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</Button>
+              <Button variant="outline" disabled={page <= 1} onClick={() => onLoadJobs({ page: Math.max(1, page - 1), query, status })}>Previous</Button>
+              <Button variant="outline" disabled={page >= totalPages} onClick={() => onLoadJobs({ page: Math.min(totalPages, page + 1), query, status })}>Next</Button>
             </div>
           </div>
         </TabsContent>

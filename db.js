@@ -503,6 +503,7 @@ async function initRelationalSchema() {
     );
     create index if not exists operations_jobs_status_idx on operations_jobs (status, updated_at desc);
     create index if not exists operations_jobs_category_idx on operations_jobs (category, updated_at desc);
+    create index if not exists operations_jobs_updated_idx on operations_jobs (updated_at desc);
 
     create table if not exists operation_artifacts (
       artifact_id text primary key,
@@ -4048,20 +4049,8 @@ async function upsertOperationJob(job = {}) {
   return true;
 }
 
-async function readOperationJobs(limit = 250) {
-  const client = getPool();
-  if (!client) return [];
-  await initRelationalSchema();
-  const result = await client.query(`
-    select
-      job_id, job_type, category, status, name, message, total_rows, processed_rows,
-      changed_rows, missing_rows, progress, eta_seconds, source, output_path,
-      error_path, created_at, started_at, ended_at, updated_at, raw
-    from operations_jobs
-    order by coalesce(created_at, updated_at) desc, updated_at desc
-    limit $1
-  `, [Math.max(1, Math.min(5000, Number(limit || 250)))]);
-  const jobs = result.rows.map((row) => ({
+function operationJobFromRow(row = {}) {
+  return {
     ...(row.raw || {}),
     id: row.job_id,
     type: row.job_type || row.raw?.type || "",
@@ -4084,46 +4073,116 @@ async function readOperationJobs(limit = 250) {
     workerClaimedAt: row.raw?.workerClaimedAt || "",
     workerLastSeenAt: row.raw?.workerLastSeenAt || (row.raw?.workerId ? row.updated_at?.toISOString?.() || "" : ""),
     workerHealth: row.raw?.workerHealth || "",
+    errorCount: Number(row.error_count || row.raw?.errorCount || (Array.isArray(row.raw?.errors) ? row.raw.errors.length : 0)),
     createdAt: row.created_at?.toISOString?.() || row.raw?.createdAt || "",
     startedAt: row.started_at?.toISOString?.() || row.raw?.startedAt || "",
     finishedAt: row.ended_at?.toISOString?.() || row.raw?.finishedAt || "",
     updatedAt: row.updated_at?.toISOString?.() || row.raw?.updatedAt || ""
-  }));
+  };
+}
+
+async function hydrateOperationJobArtifacts(client, jobs = []) {
   const ids = jobs.map((job) => job.id).filter(Boolean);
-  if (ids.length) {
-    const artifacts = await client.query(`
-      select job_id, artifact_kind, file_name, file_path, content_type, row_count, byte_size, raw
-      from operation_artifacts
-      where job_id = any($1::text[])
-      order by created_at desc
-    `, [ids]);
-    const byJob = new Map();
-    for (const row of artifacts.rows) byJob.set(row.job_id, [...(byJob.get(row.job_id) || []), row]);
-    for (const job of jobs) {
-      const rows = byJob.get(job.id) || [];
-      job.artifacts = rows.map((row) => ({
-        kind: row.artifact_kind,
-        fileName: row.file_name || "",
-        filePath: row.file_path || "",
-        contentType: row.content_type || "",
-        rowCount: row.row_count,
-        byteSize: row.byte_size,
-        ...(row.raw?.artifact || {})
-      }));
-      const original = rows.find((row) => row.artifact_kind === "original");
-      const errors = rows.find((row) => row.artifact_kind === "errors");
-      if (original) {
-        job.originalFileName = job.originalFileName || original.file_name || "";
-        job.originalFilePath = job.originalFilePath || original.file_path || "";
-        job.filePath = job.filePath || original.file_path || "";
-      }
-      if (errors) {
-        job.errorFileName = job.errorFileName || errors.file_name || "";
-        job.errorFilePath = job.errorFilePath || errors.file_path || "";
-      }
+  if (!ids.length) return jobs;
+  const artifacts = await client.query(`
+    select job_id, artifact_kind, file_name, file_path, content_type, row_count, byte_size, raw
+    from operation_artifacts
+    where job_id = any($1::text[])
+    order by created_at desc
+  `, [ids]);
+  const byJob = new Map();
+  for (const row of artifacts.rows) byJob.set(row.job_id, [...(byJob.get(row.job_id) || []), row]);
+  for (const job of jobs) {
+    const rows = byJob.get(job.id) || [];
+    job.artifacts = rows.map((row) => ({
+      kind: row.artifact_kind,
+      fileName: row.file_name || "",
+      filePath: row.file_path || "",
+      contentType: row.content_type || "",
+      rowCount: row.row_count,
+      byteSize: row.byte_size,
+      ...(row.raw?.artifact || {})
+    }));
+    const original = rows.find((row) => row.artifact_kind === "original");
+    const errors = rows.find((row) => row.artifact_kind === "errors");
+    if (original) {
+      job.originalFileName = job.originalFileName || original.file_name || "";
+      job.originalFilePath = job.originalFilePath || original.file_path || "";
+      job.filePath = job.filePath || original.file_path || "";
+    }
+    if (errors) {
+      job.errorFileName = job.errorFileName || errors.file_name || "";
+      job.errorFilePath = job.errorFilePath || errors.file_path || "";
     }
   }
   return jobs;
+}
+
+async function readOperationJobsPage(options = {}) {
+  const client = getPool();
+  if (!client) return { jobs: [], total: 0, page: 1, limit: 10 };
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(100, Number(options.limit || 10)));
+  const page = Math.max(1, Number(options.page || 1));
+  const conditions = [];
+  const values = [];
+  if (options.status && options.status !== "all") {
+    values.push(String(options.status).toLowerCase());
+    conditions.push(`lower(status) = $${values.length}`);
+  }
+  if (String(options.query || "").trim()) {
+    values.push(`%${String(options.query).trim()}%`);
+    conditions.push(`(job_id ilike $${values.length} or name ilike $${values.length} or message ilike $${values.length} or source ilike $${values.length})`);
+  }
+  const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+  const countResult = await client.query(`select count(*)::int as total from operations_jobs ${where}`, values);
+  values.push(limit, (page - 1) * limit);
+  const result = await client.query(`
+    select
+      job_id, job_type, category, status, name, message, total_rows, processed_rows,
+      changed_rows, missing_rows, progress, eta_seconds, source, output_path,
+      error_path, created_at, started_at, ended_at, updated_at,
+      raw - 'errors' - 'details' - 'workerPayload' - 'artifacts' as raw,
+      case when jsonb_typeof(raw -> 'errors') = 'array' then jsonb_array_length(raw -> 'errors') else 0 end as error_count
+    from operations_jobs
+    ${where}
+    order by updated_at desc
+    limit $${values.length - 1} offset $${values.length}
+  `, values);
+  return { jobs: result.rows.map(operationJobFromRow), total: Number(countResult.rows[0]?.total || 0), page, limit };
+}
+
+async function readOperationJob(jobId = "") {
+  const client = getPool();
+  if (!client || !jobId) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select job_id, job_type, category, status, name, message, total_rows, processed_rows,
+      changed_rows, missing_rows, progress, eta_seconds, source, output_path,
+      error_path, created_at, started_at, ended_at, updated_at, raw
+    from operations_jobs
+    where job_id = $1
+  `, [String(jobId)]);
+  const job = result.rows[0] ? operationJobFromRow(result.rows[0]) : null;
+  if (job) await hydrateOperationJobArtifacts(client, [job]);
+  return job;
+}
+
+async function readOperationJobs(limit = 250) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    select
+      job_id, job_type, category, status, name, message, total_rows, processed_rows,
+      changed_rows, missing_rows, progress, eta_seconds, source, output_path,
+      error_path, created_at, started_at, ended_at, updated_at, raw
+    from operations_jobs
+    order by coalesce(created_at, updated_at) desc, updated_at desc
+    limit $1
+  `, [Math.max(1, Math.min(5000, Number(limit || 250)))]);
+  const jobs = result.rows.map(operationJobFromRow);
+  return hydrateOperationJobArtifacts(client, jobs);
 }
 
 async function deleteOperationArtifactsForJob(jobId = "") {
@@ -5870,6 +5929,8 @@ module.exports = {
   readVendorCatalogItemsBySkus,
   sourceCatalogSearchIndexStatus,
   readOperationJobs,
+  readOperationJobsPage,
+  readOperationJob,
   deleteOperationArtifactsForJob,
   readStateDocuments,
   claimQueuedOperationJob,
