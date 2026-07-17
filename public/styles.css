@@ -12061,6 +12061,7 @@ tbody tr:hover td {
 }
 
 .import-job-actions {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -12084,6 +12085,139 @@ tbody tr:hover td {
 .import-job-actions button {
   border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
   color: var(--danger);
+}
+
+.import-job-actions .compact-kebab {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-color: var(--line);
+  border-radius: 8px;
+  background: var(--panel-solid);
+  color: var(--ink);
+}
+
+.import-job-action-popover {
+  top: 32px;
+  right: 0;
+  min-width: 168px;
+}
+
+.import-job-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-solid);
+}
+
+.import-job-table {
+  width: 100%;
+  min-width: 1080px;
+  border-collapse: separate;
+  border-spacing: 0;
+  color: var(--ink);
+  font-size: 0.76rem;
+}
+
+.import-job-table th,
+.import-job-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 6px 8px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.import-job-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: color-mix(in srgb, var(--panel-solid) 92%, var(--accent-soft));
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.import-job-table tbody tr:hover {
+  background: color-mix(in srgb, var(--accent) 4%, var(--panel-solid));
+}
+
+.import-job-table tbody tr.selected {
+  background: color-mix(in srgb, var(--accent) 6%, var(--panel-solid));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.import-job-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.job-name-cell {
+  min-width: 250px;
+  max-width: 390px;
+}
+
+.job-name-cell strong,
+.job-name-cell small,
+.job-name-cell code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-name-cell strong {
+  font-size: 0.8rem;
+}
+
+.job-name-cell small,
+.job-name-cell code {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.job-progress-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 116px;
+}
+
+.mini-progress {
+  display: inline-block;
+  width: 82px;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.mini-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.job-progress-cell small {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 900;
+}
+
+.actions-col {
+  width: 58px;
+  text-align: right;
+}
+
+.job-message-row td {
+  padding-top: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  white-space: normal;
 }
 
 .jobs-page {

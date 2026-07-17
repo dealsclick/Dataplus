@@ -10093,13 +10093,81 @@ function renderJobProfile(job = null) {
 function renderImportJobActions(job = {}) {
   const actions = [];
   const canStop = ["queued", "running"].includes(String(job.status || "").toLowerCase());
-  if (canStop) actions.push(`<button type="button" data-job-stop="${html(job.id)}">Cancel job</button>`);
+  const safeJobId = String(job.id || "unknown-job").replace(/[^a-zA-Z0-9_-]/g, "-");
+  const menuId = `job-actions-${html(safeJobId)}`;
+  if (currentViewId === "jobs") actions.push(`<button type="button" data-select-import-job="${html(job.id)}">View details</button>`);
+  if (canStop) actions.push(`<button type="button" data-job-stop="${html(job.id)}">Stop job</button>`);
   if (job.workerTask && !canStop) actions.push(`<button type="button" data-job-retry="${html(job.id)}">Retry job</button>`);
-  if (channelApiHistoryChannelForJob(job)) actions.push(`<button type="button" data-job-channel-api-history="${html(job.id)}">Open API history</button>`);
+  if (channelApiHistoryChannelForJob(job)) actions.push(`<button type="button" data-job-channel-api-history="${html(job.id)}">View channel log</button>`);
   if (jobHasDownload(job)) actions.push(`<a href="${jobOriginalFileUrl(job, { inline: true })}" target="_blank" rel="noopener">Open file</a>`);
   if (jobHasDownload(job)) actions.push(`<a href="${jobOriginalFileUrl(job)}">${String(job.direction || "").toLowerCase() === "export" ? "Download file" : "Original file"}</a>`);
   if (job.errorFilePath || job.errorFileName) actions.push(`<a href="/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv">Errors CSV</a>`);
-  return actions.length ? `<div class="import-job-actions">${actions.join('')}</div>` : '';
+  if (!actions.length) return "";
+  return `
+    <div class="import-job-actions">
+      <button class="icon-button compact-kebab" type="button" data-action-menu="${menuId}" aria-label="Open job actions">...</button>
+      <div class="action-popover import-job-action-popover" data-menu-for="${menuId}">
+        ${actions.join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderImportJobTable({ full = false } = {}) {
+  const filteredJobs = filteredImportJobs({ useJobsFilters: full && currentViewId === "jobs" });
+  if (!filteredJobs.length) return `<div class="empty-state compact">No jobs match the current filters.</div>`;
+  return `
+    <div class="import-job-table-wrap">
+      <table class="import-job-table">
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Job</th>
+            <th>Category</th>
+            <th>Progress</th>
+            <th>Rows</th>
+            <th>Started</th>
+            <th>Ended</th>
+            <th>Worker</th>
+            <th class="actions-col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${filteredJobs.map((job) => {
+            const isSelected = selectedImportJobId === job.id;
+            const rowLabel = importJobRowLabel(job);
+            const processed = Number(jobIsDone(job) && Number(job.processedRows || 0) < Number(job.totalRows || 0) ? job.totalRows : job.processedRows || 0);
+            const total = Number(job.totalRows || 0);
+            const progress = Math.round(jobProgressPercent(job));
+            const jobMeta = [job.fileName, jobApiEndpoint(job)].filter(Boolean).join(" / ");
+            return `
+              <tr class="${isSelected ? "selected" : ""}" data-select-import-job="${html(job.id)}">
+                <td><span class="status ${importJobStatusClass(job.status)}">${html(importJobStatusLabel(job.status))}</span></td>
+                <td class="job-name-cell">
+                  <strong>${html(job.operation || "Import")}</strong>
+                  <small>${html(jobMeta || job.message || "System job")}</small>
+                  <code>${html(String(job.id || "").slice(0, 8) || "no-id")}</code>
+                </td>
+                <td>${html([job.section, job.direction].filter(Boolean).join(" / ") || "System")}</td>
+                <td>
+                  <div class="job-progress-cell">
+                    <div class="mini-progress"><span style="width:${Math.max(0, Math.min(100, progress))}%"></span></div>
+                    <small>${progress}%</small>
+                  </div>
+                </td>
+                <td>${html(`${processed.toLocaleString()}${total ? ` / ${total.toLocaleString()}` : ""} ${rowLabel}`)}</td>
+                <td>${html(dateLabel(job.startedAt || job.createdAt))}</td>
+                <td>${job.finishedAt ? html(dateLabel(job.finishedAt)) : "Running"}</td>
+                <td>${html(job.workerId || (job.workerTask ? "Queued worker" : "n/a"))}</td>
+                <td class="actions-col" data-row-actions>${renderImportJobActions(job)}</td>
+              </tr>
+              ${job.message ? `<tr class="job-message-row ${isSelected ? "selected" : ""}"><td></td><td colspan="8">${html(job.message)}</td></tr>` : ""}
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 function renderImportQueuePanel({ full = false } = {}) {
@@ -10118,29 +10186,31 @@ function renderImportQueuePanel({ full = false } = {}) {
         </div>
         <button class="button secondary" type="button" data-refresh-import-jobs>${withIcon('refresh-cw', 'Refresh')}</button>
       </div>
-      <div class="import-job-list">
-        ${visibleJobs.map((job) => `
-          <article class="import-job-row ${selectedImportJobId === job.id ? 'selected' : ''}" data-select-import-job="${html(job.id)}">
-            <div class="import-job-main">
-              <span class="status ${importJobStatusClass(job.status)}">${html(importJobStatusLabel(job.status))}</span>
-              <div class="import-job-title">
-                <strong>${html(job.operation || 'Import')}</strong>
-                <small>${html([job.section, job.fileName].filter(Boolean).join(' / ') || 'System job')}</small>
-                <code class="job-id-code">${html(job.id || "no-job-id")}</code>
+      ${full ? renderImportJobTable({ full }) : `
+        <div class="import-job-list">
+          ${visibleJobs.map((job) => `
+            <article class="import-job-row ${selectedImportJobId === job.id ? 'selected' : ''}" data-select-import-job="${html(job.id)}">
+              <div class="import-job-main">
+                <span class="status ${importJobStatusClass(job.status)}">${html(importJobStatusLabel(job.status))}</span>
+                <div class="import-job-title">
+                  <strong>${html(job.operation || 'Import')}</strong>
+                  <small>${html([job.section, job.fileName].filter(Boolean).join(' / ') || 'System job')}</small>
+                  <code class="job-id-code">${html(job.id || "no-job-id")}</code>
+                </div>
               </div>
-            </div>
-            <div class="import-job-meta">
-              <span>${html(renderImportJobMetrics(job))}</span>
-              <span>${html(dateLabel(job.startedAt || job.createdAt))}</span>
-              <span>${job.finishedAt ? html(dateLabel(job.finishedAt)) : 'Running'}</span>
-            </div>
-            ${renderJobProgress(job)}
-            ${renderImportJobActions(job)}
-            ${job.message ? `<p class="import-job-message">${html(job.message)}</p>` : ''}
-            ${(job.errors || []).length ? `<details class="import-job-errors"><summary>View details</summary><div>${(job.errors || []).slice(0, 30).map((error) => `<span>${html(error)}</span>`).join('')}</div></details>` : ''}
-          </article>
-        `).join('') || `<div class="empty-state compact">No imports have been recorded yet.</div>`}
-      </div>
+              <div class="import-job-meta">
+                <span>${html(renderImportJobMetrics(job))}</span>
+                <span>${html(dateLabel(job.startedAt || job.createdAt))}</span>
+                <span>${job.finishedAt ? html(dateLabel(job.finishedAt)) : 'Running'}</span>
+              </div>
+              ${renderJobProgress(job)}
+              ${renderImportJobActions(job)}
+              ${job.message ? `<p class="import-job-message">${html(job.message)}</p>` : ''}
+              ${(job.errors || []).length ? `<details class="import-job-errors"><summary>View details</summary><div>${(job.errors || []).slice(0, 30).map((error) => `<span>${html(error)}</span>`).join('')}</div></details>` : ''}
+            </article>
+          `).join('') || `<div class="empty-state compact">No imports have been recorded yet.</div>`}
+        </div>
+      `}
     </section>
   `;
 }
