@@ -19367,7 +19367,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/inventory") {
     if (postgres.isPostgresEnabled()) {
       const cacheQuery = url.searchParams.toString();
-      const cacheKey = `dataplus:products:v1:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const cacheKey = `dataplus:products:v2:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const fastPage = ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase());
