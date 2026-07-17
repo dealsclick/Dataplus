@@ -13634,6 +13634,7 @@ function publicInventoryListItem(item = {}, context = {}) {
   const pricedItem = { ...item, cost, sourceCost: cost };
   const sellUnitCost = productSellUnitCost(pricedItem, rulesDb);
   const uomInfo = productUomInfo(item);
+  const shippingClassification = productShippingClassification(item);
   const listPrice = isClearanceItem(item) ? Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0)) : 0;
   const websitePrice = websitePriceFromRule(item, sellUnitCost || cost, SHOPIFY_PRICE_MARKUP_PERCENT, {}, rulesDb);
   const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
@@ -13656,6 +13657,7 @@ function publicInventoryListItem(item = {}, context = {}) {
     categoryVerified: item.categoryVerified,
     mainCategorySource: item.mainCategorySource || "",
     sourceCategory: item.sourceCategory,
+    vendorCategory: item.vendorCategory || item.sourceCategory || "",
     supplier: item.supplier,
     vendor: item.vendor,
     hazardous: Boolean(item.hazardous),
@@ -13700,9 +13702,15 @@ function publicInventoryListItem(item = {}, context = {}) {
     packageHeight: Number(item.packageHeight || item.package_height || 0),
     packageLength: Number(item.packageLength || item.package_length || 0),
     packageWidth: Number(item.packageWidth || item.package_width || 0),
+    shippingClass: shippingClassification.shippingClass,
+    shippingMethod: shippingClassification.shippingMethod,
+    shippingClassReason: shippingClassification.shippingClassReason,
+    dimensionalWeight: shippingClassification.dimensionalWeight,
     defaultImage: item.defaultImage || "",
     originalImage: item.originalImage || "",
     imageCount: images.length || (item.defaultImage ? 1 : 0),
+    alternateVendorCount: Number(item.alternateVendorCount || 0),
+    updatedAt: item.updatedAt || item.productDumpUpdatedAt || "",
     ebayListing: publicEbayListing(item.ebayListing),
     aliasCount: Array.isArray(item.aliases) ? item.aliases.filter((alias) => alias.active !== false).length : 0,
     shadowSkuCount: Array.isArray(item.shadowSkus) ? item.shadowSkus.length : 0
@@ -24137,12 +24145,25 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/inventory/bulk" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map((id) => String(id || "").trim()).filter(Boolean))];
+    const allFiltered = body.allFiltered === true || String(body.allFiltered || "").toLowerCase() === "true";
+    let ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map((id) => String(id || "").trim()).filter(Boolean))];
+    let allFilteredTotal = 0;
+    if (allFiltered) {
+      const matches = await postgres.listProducts({
+        q: String(body.query || ""),
+        page: 1,
+        limit: 25000,
+        filters: body.filters && typeof body.filters === "object" ? body.filters : {}
+      });
+      allFilteredTotal = Number(matches?.total || 0);
+      ids = (matches?.inventory || []).map((item) => String(item.id || item.sku || "").trim()).filter(Boolean);
+    }
     if (!ids.length) return sendJson(res, 400, { error: "Select at least one product." });
     const action = String(body.action || "");
     if (action === "delete") {
       const result = await postgres.deleteProductsByIds(ids);
       publicStateJsonCache = null;
+      await redisCache.deleteByPrefix("dataplus:products:");
       return sendJson(res, 200, { changed: result.deleted || 0, state: await postgresLiteState() });
     }
     const statusByAction = {
@@ -24161,7 +24182,8 @@ async function handleApi(req, res) {
     }
     if (products?.length) await postgres.upsertProductsFromState(products);
     publicStateJsonCache = null;
-    return sendJson(res, 200, { changed: products?.length || 0, state: await postgresLiteState() });
+    await redisCache.deleteByPrefix("dataplus:products:");
+    return sendJson(res, 200, { changed: products?.length || 0, allFiltered, limited: allFiltered && allFilteredTotal > ids.length, state: await postgresLiteState() });
   }
 
   if (req.method === "POST" && url.pathname === "/api/import/inventory" && postgres.isPostgresEnabled()) {
