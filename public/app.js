@@ -16268,6 +16268,7 @@ function renderSystemOperationsPage() {
   if (!target) return;
   const settings = appSystemSettings();
   const editable = systemSettingsEditMode;
+  const trackedSkuChangeFields = skuChangeTrackedFields();
   target.innerHTML = `
     <div class="system-settings-page">
       <section class="system-settings-hero">
