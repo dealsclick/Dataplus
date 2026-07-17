@@ -18629,11 +18629,28 @@ function shopifyGraphqlRequestWithToken(query, variables = {}, accessToken = "",
         }
         if (response.statusCode < 200 || response.statusCode >= 300) {
           appendChannelApiLog({ channel: "Shopify", transport: "GraphQL", method: "POST", path: requestPath, operation: options.operation || operation, statusCode: response.statusCode, ok: false, durationMs: Date.now() - startedAt, message: text, requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
-          return reject(new Error(`Shopify API error (${response.statusCode}): ${text}`));
+          const error = new Error(`Shopify API error (${response.statusCode}): ${text}`);
+          error.statusCode = response.statusCode;
+          error.retryAfter = Number(response.headers["retry-after"] || 0) || 0;
+          return reject(error);
         }
         if (Array.isArray(data.errors) && data.errors.length) {
-          appendChannelApiLog({ channel: "Shopify", transport: "GraphQL", method: "POST", path: requestPath, operation: options.operation || operation, statusCode: response.statusCode, ok: false, durationMs: Date.now() - startedAt, message: data.errors.map((error) => error.message || JSON.stringify(error)).join("; "), requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
-          return reject(new Error(`Shopify GraphQL error: ${data.errors.map((error) => error.message || JSON.stringify(error)).join("; ")}`));
+          const message = data.errors.map((error) => error.message || JSON.stringify(error)).join("; ");
+          appendChannelApiLog({ channel: "Shopify", transport: "GraphQL", method: "POST", path: requestPath, operation: options.operation || operation, statusCode: response.statusCode, ok: false, durationMs: Date.now() - startedAt, message, requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
+          const error = new Error(`Shopify GraphQL error: ${message}`);
+          error.statusCode = response.statusCode;
+          error.responseText = text;
+          const throttled = data.errors.some((item) => String(item?.extensions?.code || "").toUpperCase() === "THROTTLED" || /throttl|rate limit/i.test(String(item?.message || "")));
+          if (throttled) {
+            const throttle = data.extensions?.cost?.throttleStatus || {};
+            const requested = Number(data.extensions?.cost?.requestedQueryCost || 0);
+            const available = Number(throttle.currentlyAvailable || 0);
+            const restoreRate = Number(throttle.restoreRate || 0);
+            error.statusCode = 429;
+            error.retryAfter = restoreRate > 0 && requested > available ? Math.ceil((requested - available) / restoreRate) + 1 : 2;
+            error.shopifyThrottle = true;
+          }
+          return reject(error);
         }
         appendChannelApiLog({ channel: "Shopify", transport: "GraphQL", method: "POST", path: requestPath, operation: options.operation || operation, statusCode: response.statusCode, ok: true, durationMs: Date.now() - startedAt, message: "OK", requestId: response.headers["x-request-id"] || "", jobId: options.jobId || "" });
         resolve(data.data || {});
@@ -18750,18 +18767,27 @@ async function refreshShopifyAdminAccessToken(options = {}) {
 }
 
 async function shopifyRestRequestAuto(method, resourcePath, body = null, options = {}) {
-  const token = await shopifyAdminAccessToken(options);
-  const maxAttempts = options.retryOnThrottle ? Math.max(1, Math.min(10, Number(options.maxThrottleAttempts || 8) || 8)) : 1;
+  let token = await shopifyAdminAccessToken(options);
+  const maxAttempts = options.retryOnThrottle !== false ? Math.max(1, Math.min(10, Number(options.maxThrottleAttempts || 8) || 8)) : 1;
   let attempt = 0;
+  let refreshedToken = false;
   while (attempt < maxAttempts) {
     attempt += 1;
     try {
       return await shopifyRestRequestWithToken(method, resourcePath, body, token, options);
     } catch (error) {
+      if (!refreshedToken && [401, 403].includes(Number(error.statusCode || 0)) && shopifyAdminConfig().clientId && shopifyAdminConfig().clientSecret) {
+        refreshedToken = true;
+        appendChannelApiLog({ channel: "Shopify", transport: "REST", method, path: resourcePath, operation: options.operation || resourcePath, statusCode: Number(error.statusCode), ok: false, durationMs: 0, message: "Access token was rejected; refreshing client credentials and retrying once.", jobId: options.jobId || "" });
+        await refreshShopifyAdminAccessToken({ ...options, operation: `Refresh token after ${options.operation || resourcePath}` });
+        token = await shopifyAdminAccessToken(options);
+        continue;
+      }
       if (error.statusCode !== 429 || attempt >= maxAttempts) throw error;
       const retryAfterSeconds = Math.max(1, Number(error.retryAfter || 0) || 0);
       const fallbackSeconds = Math.min(120, Math.max(8, attempt * attempt * 3));
       const waitSeconds = retryAfterSeconds || fallbackSeconds;
+      appendChannelApiLog({ channel: "Shopify", transport: "REST", method, path: resourcePath, operation: options.operation || resourcePath, statusCode: 429, ok: false, durationMs: 0, message: `Rate limited; retrying in ${waitSeconds}s (attempt ${attempt} of ${maxAttempts}).`, jobId: options.jobId || "" });
       if (typeof options.onThrottle === "function") {
         await options.onThrottle({ attempt, maxAttempts, waitSeconds, error });
       }
@@ -18772,8 +18798,32 @@ async function shopifyRestRequestAuto(method, resourcePath, body = null, options
 }
 
 async function shopifyGraphqlRequestAuto(query, variables = {}, options = {}) {
-  const token = await shopifyAdminAccessToken(options);
-  return shopifyGraphqlRequestWithToken(query, variables, token, options);
+  let token = await shopifyAdminAccessToken(options);
+  const maxAttempts = options.retryOnThrottle !== false ? Math.max(1, Math.min(10, Number(options.maxThrottleAttempts || 8) || 8)) : 1;
+  let attempt = 0;
+  let refreshedToken = false;
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    try {
+      return await shopifyGraphqlRequestWithToken(query, variables, token, options);
+    } catch (error) {
+      if (!refreshedToken && [401, 403].includes(Number(error.statusCode || 0)) && shopifyAdminConfig().clientId && shopifyAdminConfig().clientSecret) {
+        refreshedToken = true;
+        appendChannelApiLog({ channel: "Shopify", transport: "GraphQL", method: "POST", path: "/graphql.json", operation: options.operation || shopifyGraphqlOperationName(query), statusCode: Number(error.statusCode), ok: false, durationMs: 0, message: "Access token was rejected; refreshing client credentials and retrying once.", jobId: options.jobId || "" });
+        await refreshShopifyAdminAccessToken({ ...options, operation: `Refresh token after ${options.operation || shopifyGraphqlOperationName(query)}` });
+        token = await shopifyAdminAccessToken(options);
+        continue;
+      }
+      if (Number(error.statusCode || 0) !== 429 || attempt >= maxAttempts) throw error;
+      const retryAfterSeconds = Math.max(1, Number(error.retryAfter || 0) || 0);
+      const fallbackSeconds = Math.min(120, Math.max(2, attempt * attempt * 2));
+      const waitSeconds = retryAfterSeconds || fallbackSeconds;
+      appendChannelApiLog({ channel: "Shopify", transport: "GraphQL", method: "POST", path: "/graphql.json", operation: options.operation || shopifyGraphqlOperationName(query), statusCode: 429, ok: false, durationMs: 0, message: `Rate limited; retrying in ${waitSeconds}s (attempt ${attempt} of ${maxAttempts}).`, jobId: options.jobId || "" });
+      if (typeof options.onThrottle === "function") await options.onThrottle({ attempt, maxAttempts, waitSeconds, error });
+      await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+    }
+  }
+  throw new Error("Shopify GraphQL request failed after throttle retries.");
 }
 
 function shopifyRestRequestWithToken(method, resourcePath, body = null, accessToken = "", options = {}) {
