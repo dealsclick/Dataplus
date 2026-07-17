@@ -1,21 +1,27 @@
 import { useEffect, useMemo, useState } from "react"
 import {
   Activity,
+  AlertCircle,
   Boxes,
   CheckCircle2,
   Database,
   ExternalLink,
+  FileDown,
   FileWarning,
   History,
   Home,
   Loader2,
   MoreHorizontal,
   PackageSearch,
+  Play,
   RefreshCw,
+  RotateCcw,
+  Search,
   Settings,
   ShieldCheck,
   ShoppingBag,
-  SlidersHorizontal,
+  Square,
+  Store,
   Truck,
   Warehouse,
 } from "lucide-react"
@@ -29,11 +35,22 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Table,
@@ -43,24 +60,32 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
-type AppView = "overview" | "jobs" | "shopify" | "catalog" | "settings"
+type AppView = "overview" | "jobs" | "channels" | "catalog" | "vendors" | "settings"
 
 type ImportJob = {
   id: string
   section?: string
+  category?: string
   operation?: string
   direction?: string
+  type?: string
   status?: string
   fileName?: string
+  originalFileName?: string
+  errorFileName?: string
+  manifestFileName?: string
   message?: string
+  details?: string
   errors?: string[]
   totalRows?: number
   processedRows?: number
   progressPercent?: number
   changed?: number
   missingCount?: number
+  created?: number
   startedAt?: string
   createdAt?: string
   finishedAt?: string
@@ -78,12 +103,52 @@ type WorkerStatus = {
   ageSeconds?: number
 }
 
+type ChannelSettings = {
+  defaultShadowStatus?: string
+  defaultHandlingTimeDays?: number
+  defaultSafetyQty?: number
+  defaultMaxSellableQty?: number
+  defaultShippingProfile?: string
+  defaultShippingService?: string
+  priceUpdateEnabled?: boolean
+  inventoryUpdateEnabled?: boolean
+  orderDownloadEnabled?: boolean
+  trackingUpdateEnabled?: boolean
+  autoCreateShadow?: boolean
+  priceMarkupPercent?: number
+  minMarginPercent?: number
+  shopifyDefaultStatus?: string
+  shopifyInventoryPolicy?: string
+  shopifyFulfillmentService?: string
+  shopifySyncStatusEnabled?: boolean
+  shopifyAutoSyncStatus?: boolean
+  shopifyStatusSyncLimit?: number
+  shopifyPublishScope?: string
+  shopifyCloseoutsEnabled?: boolean
+  shopifyInventoryPushEnabled?: boolean
+  shopifyInventoryWarehouseId?: string
+  shopifyInventoryLocationId?: string
+  inventoryScheduleEnabled?: boolean
+  inventoryScheduleMode?: string
+  inventoryScheduleType?: string
+  inventoryScheduleTimes?: string
+  inventoryScheduleEveryHours?: number
+  inventoryScheduleRequireSuccessfulDump?: boolean
+  shopifyShippingProfiles?: Array<{ id?: string; name?: string; default?: boolean }>
+  shopifyShippingProfilesSyncedAt?: string
+  [key: string]: unknown
+}
+
 type ChannelConnection = {
   id: string
   name: string
   connected?: boolean
   status?: string
-  settings?: Record<string, unknown>
+  notes?: string
+  logoUrl?: string
+  logoDataUrl?: string
+  externalAccount?: string
+  settings?: ChannelSettings
   shopifyConfig?: {
     shop?: string
     apiVersion?: string
@@ -93,14 +158,100 @@ type ChannelConnection = {
   }
 }
 
+type Vendor = {
+  id: string
+  name: string
+  code?: string
+  status?: string
+  type?: string
+  contactName?: string
+  email?: string
+  phone?: string
+  website?: string
+  paymentTerms?: string
+  leadTimeDays?: number
+  moq?: number
+  address?: {
+    line1?: string
+    line2?: string
+    city?: string
+    state?: string
+    postalCode?: string
+    country?: string
+  }
+  notes?: string
+  rating?: number
+  openPOs?: number
+  totalPOs?: number
+  totalSpend?: number
+  catalogStats?: Record<string, number>
+  pricingRules?: Record<string, unknown>
+  variationRules?: Record<string, unknown>
+  inventoryRules?: Record<string, unknown>
+  channelRules?: Record<string, unknown>
+}
+
+type SystemSettings = {
+  backgroundJobsMode?: string
+  autoDataQualityScanAfterImports?: boolean
+  dataQualityWorkerEnabled?: boolean
+  backupIncludeSourceCatalog?: boolean
+  backupRetentionDays?: number
+  jobsRetentionDays?: number
+  jobsRetentionAutoCleanupEnabled?: boolean
+  trueValueSourceCategoryAsMainCategory?: boolean
+  requireAdminConfirmationForDeletes?: boolean
+  shopifyDailyInventoryUpdateEnabled?: boolean
+  shopifyDailyInventoryUpdateTime?: string
+  shopifyDailyInventoryUpdateMode?: string
+  [key: string]: unknown
+}
+
 type LiteState = {
   connections?: ChannelConnection[]
+  vendors?: Vendor[]
   warehouses?: Array<Record<string, unknown>>
+  systemSettings?: SystemSettings
 }
 
 type ImportJobsResponse = {
   importJobs?: ImportJob[]
   workerStatus?: WorkerStatus
+}
+
+type CatalogItem = {
+  id?: string
+  sku?: string
+  title?: string
+  brand?: string
+  supplier?: string
+  supplierCode?: string
+  mainCategory?: string
+  sourceCategory?: string
+  categoryVerified?: boolean
+  stockQty?: number
+  stockStatus?: string
+  cost?: number
+  websitePrice?: number
+  price?: number
+  active?: boolean
+  inProducts?: boolean
+  toBeDiscontinued?: boolean
+  alternateVendorCount?: number
+  defaultImage?: string
+}
+
+type CatalogResponse = {
+  items?: CatalogItem[]
+  page?: number
+  limit?: number
+  totalMatches?: number
+  hasMore?: boolean
+  scanned?: number
+  partial?: boolean
+  indexed?: boolean
+  database?: string
+  manifest?: { productCount?: number; source?: string; updatedAt?: string }
 }
 
 type ShopifyAuthCheck = {
@@ -122,8 +273,9 @@ type ShopifyAuthCheck = {
 const navItems: Array<{ id: AppView; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "overview", label: "Overview", icon: Home },
   { id: "jobs", label: "Jobs", icon: History },
-  { id: "shopify", label: "Shopify", icon: ShoppingBag },
+  { id: "channels", label: "Channels", icon: Store },
   { id: "catalog", label: "Catalog", icon: PackageSearch },
+  { id: "vendors", label: "Vendors", icon: Warehouse },
   { id: "settings", label: "Settings", icon: Settings },
 ]
 
@@ -141,16 +293,22 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 function dateLabel(value?: string) {
   if (!value) return "Never"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "Never"
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
-  }).format(new Date(value))
+  }).format(date)
 }
 
-function numberLabel(value?: number) {
+function numberLabel(value?: number | string) {
   return Number(value || 0).toLocaleString()
+}
+
+function moneyLabel(value?: number | string) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(value || 0))
 }
 
 function jobStatusTone(status?: string) {
@@ -162,7 +320,7 @@ function jobStatusTone(status?: string) {
 }
 
 function jobProgress(job: ImportJob) {
-  if (["success", "warning"].includes(String(job.status || "").toLowerCase())) return 100
+  if (["success", "done", "ok", "warning"].includes(String(job.status || "").toLowerCase())) return 100
   if (Number(job.progressPercent || 0) > 0) return Math.max(0, Math.min(100, Number(job.progressPercent)))
   if (Number(job.totalRows || 0) > 0) {
     return Math.round((Number(job.processedRows || 0) / Number(job.totalRows || 1)) * 100)
@@ -170,13 +328,21 @@ function jobProgress(job: ImportJob) {
   return 0
 }
 
-function isShopifyInventoryJob(job: ImportJob) {
-  return `${job.operation || ""} ${job.fileName || ""} ${job.workerTask || ""}`.toLowerCase().includes("shopify")
-    && `${job.operation || ""} ${job.fileName || ""} ${job.workerTask || ""}`.toLowerCase().includes("inventory")
+function isActiveJob(job: ImportJob) {
+  return ["queued", "running"].includes(String(job.status || "").toLowerCase())
 }
 
 function isAttentionJob(job: ImportJob) {
   return ["failed", "warning", "stopped"].includes(String(job.status || "").toLowerCase())
+}
+
+function isShopifyInventoryJob(job: ImportJob) {
+  const haystack = `${job.operation || ""} ${job.fileName || ""} ${job.workerTask || ""}`.toLowerCase()
+  return haystack.includes("shopify") && haystack.includes("inventory")
+}
+
+function jobCategory(job: ImportJob) {
+  return job.category || job.section || "Operations"
 }
 
 function App() {
@@ -237,6 +403,74 @@ function App() {
     }
   }
 
+  async function mutateJob(path: string, success: string) {
+    try {
+      const result = await api<ImportJobsResponse>(path, { method: "POST", body: JSON.stringify({}) })
+      setJobs(result.importJobs || jobs)
+      toast.success(success)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Job action failed.")
+    }
+  }
+
+  async function saveChannel(channelId: string, patch: Record<string, unknown>) {
+    try {
+      const result = await api<{ channel: ChannelConnection; state?: LiteState }>(`/api/channels/${encodeURIComponent(channelId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      })
+      setState((current) => ({
+        ...current,
+        ...(result.state || {}),
+        connections: (result.state?.connections || current.connections || []).map((channel) => (
+          channel.id === channelId ? result.channel : channel
+        )),
+      }))
+      toast.success("Channel settings saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save channel settings.")
+      throw error
+    }
+  }
+
+  async function saveVendor(vendorId: string, patch: Record<string, unknown>) {
+    try {
+      const result = await api<{ vendor: Vendor; state?: LiteState }>(`/api/vendors/${encodeURIComponent(vendorId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      })
+      setState((current) => ({
+        ...current,
+        ...(result.state || {}),
+        vendors: (result.state?.vendors || current.vendors || []).map((vendor) => (
+          vendor.id === vendorId ? result.vendor : vendor
+        )),
+      }))
+      toast.success("Vendor settings saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save vendor settings.")
+      throw error
+    }
+  }
+
+  async function saveSystemSettings(patch: Record<string, unknown>) {
+    try {
+      const result = await api<{ state?: LiteState; systemSettings?: SystemSettings }>("/api/system-settings", {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      })
+      setState((current) => ({
+        ...current,
+        ...(result.state || {}),
+        systemSettings: result.systemSettings || result.state?.systemSettings || { ...current.systemSettings, ...patch },
+      }))
+      toast.success("System settings saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save system settings.")
+      throw error
+    }
+  }
+
   useEffect(() => {
     refreshData()
     const timer = window.setInterval(() => refreshData({ quiet: true }), 60_000)
@@ -247,7 +481,7 @@ function App() {
     () => (state.connections || []).find((connection) => connection.name?.toLowerCase() === "shopify"),
     [state.connections],
   )
-  const activeJobs = jobs.filter((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()))
+  const activeJobs = jobs.filter(isActiveJob)
   const attentionJobs = jobs.filter(isAttentionJob)
   const shopifyInventoryJobs = jobs.filter(isShopifyInventoryJob)
   const selectedJob = jobs.find((job) => job.id === selectedJobId) || attentionJobs[0] || jobs[0]
@@ -295,7 +529,7 @@ function App() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Local MVP</p>
-                <h1 className="text-xl font-semibold tracking-tight">DataPlus React Console</h1>
+                <h1 className="text-xl font-semibold tracking-tight">DataPlus Console</h1>
               </div>
               <div className="flex items-center gap-2">
                 <Badge variant={workerStatus.online ? "default" : "secondary"}>
@@ -320,32 +554,48 @@ function App() {
                     activeJobs={activeJobs}
                     attentionJobs={attentionJobs}
                     shopify={shopify}
-                    shopifyAuth={shopifyAuth}
+                    vendors={state.vendors || []}
                     onOpenJobs={() => setView("jobs")}
-                    onOpenShopify={() => setView("shopify")}
+                    onOpenShopify={() => setView("channels")}
                   />
                 )}
                 {view === "jobs" && (
                   <JobsPage
                     jobs={jobs}
-                    attentionJobs={attentionJobs}
+                    workerStatus={workerStatus}
                     selectedJob={selectedJob}
                     onSelectJob={(job) => setSelectedJobId(job.id)}
-                    onOpenLegacy={(job) => window.open(`/legacy/jobs?job=${encodeURIComponent(job.id)}`, "_blank")}
+                    onStopJob={(job) => mutateJob(`/api/import-jobs/${encodeURIComponent(job.id)}/stop`, "Job stopped.")}
+                    onRetryJob={(job) => mutateJob(`/api/import-jobs/${encodeURIComponent(job.id)}/retry`, "Retry queued.")}
+                    onCleanup={() => mutateJob("/api/import-jobs/cleanup", "Jobs cleaned.")}
+                    onRefresh={() => refreshData()}
                   />
                 )}
-                {view === "shopify" && (
-                  <ShopifyPage
-                    shopify={shopify}
+                {view === "channels" && (
+                  <ChannelsPage
+                    channels={state.connections || []}
                     jobs={shopifyInventoryJobs}
                     auth={shopifyAuth}
                     checking={checkingShopify}
-                    onCheck={checkShopifyConnection}
-                    onRefreshToken={refreshShopifyToken}
+                    onCheckShopify={checkShopifyConnection}
+                    onRefreshShopifyToken={refreshShopifyToken}
+                    onSaveChannel={saveChannel}
                   />
                 )}
-                {view === "catalog" && <MigrationPlaceholder title="Catalog" oldPath="/legacy/products" icon={Boxes} />}
-                {view === "settings" && <SettingsPage />}
+                {view === "catalog" && <CatalogPage />}
+                {view === "vendors" && (
+                  <VendorsPage
+                    vendors={state.vendors || []}
+                    onSaveVendor={saveVendor}
+                  />
+                )}
+                {view === "settings" && (
+                  <SettingsPage
+                    settings={state.systemSettings || {}}
+                    workerStatus={workerStatus}
+                    onSaveSettings={saveSystemSettings}
+                  />
+                )}
               </>
             )}
           </div>
@@ -376,7 +626,7 @@ function OverviewPage({
   activeJobs,
   attentionJobs,
   shopify,
-  shopifyAuth,
+  vendors,
   onOpenJobs,
   onOpenShopify,
 }: {
@@ -384,11 +634,12 @@ function OverviewPage({
   activeJobs: ImportJob[]
   attentionJobs: ImportJob[]
   shopify?: ChannelConnection
-  shopifyAuth: ShopifyAuthCheck | null
+  vendors: Vendor[]
   onOpenJobs: () => void
   onOpenShopify: () => void
 }) {
   const failedJobs = attentionJobs.filter((job) => String(job.status).toLowerCase() === "failed")
+  const activeVendors = vendors.filter((vendor) => String(vendor.status || "active").toLowerCase() === "active")
   return (
     <div className="grid gap-5">
       <Alert variant={failedJobs.length ? "destructive" : "default"}>
@@ -404,7 +655,7 @@ function OverviewPage({
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="Total jobs" value={jobs.length} icon={History} />
         <MetricCard label="Running now" value={activeJobs.length} icon={Activity} />
-        <MetricCard label="Needs attention" value={attentionJobs.length} icon={FileWarning} />
+        <MetricCard label="Active vendors" value={activeVendors.length} icon={Warehouse} />
         <MetricCard label="Shopify" value={shopify?.shopifyConfig?.configured ? "Connected" : "Review"} icon={ShoppingBag} />
       </div>
 
@@ -412,12 +663,12 @@ function OverviewPage({
         <Card>
           <CardHeader className="flex flex-row items-start justify-between gap-3">
             <div>
-              <CardTitle>What to do next</CardTitle>
-              <CardDescription>Plain-English priorities from the current system state.</CardDescription>
+              <CardTitle>Priority queue</CardTitle>
+              <CardDescription>Background work that needs a human decision.</CardDescription>
             </div>
             <Button onClick={onOpenJobs}>Open jobs</Button>
           </CardHeader>
-          <CardContent className="grid gap-3">
+          <CardContent className="grid gap-2">
             {attentionJobs.slice(0, 5).map((job) => (
               <div key={job.id} className="grid gap-1 rounded-md border p-3">
                 <div className="flex items-center justify-between gap-3">
@@ -434,20 +685,16 @@ function OverviewPage({
         <Card>
           <CardHeader>
             <CardTitle>Shopify connection</CardTitle>
-            <CardDescription>Admin API health for inventory and product updates.</CardDescription>
+            <CardDescription>Admin API readiness for catalog, inventory, and price pushes.</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4">
-            <div className="flex items-center gap-2">
-              {shopifyAuth?.ok ? <CheckCircle2 className="size-5 text-emerald-600" /> : <ShieldCheck className="size-5 text-muted-foreground" />}
-              <div>
-                <p className="text-sm font-semibold">{shopifyAuth?.message || "Connection has not been checked in React yet."}</p>
-                <p className="text-xs text-muted-foreground">
-                  Store: {shopify?.shopifyConfig?.shop || shopifyAuth?.shop?.myshopifyDomain || "Missing"}
-                </p>
-              </div>
+            <div className="grid gap-2 text-sm">
+              <Detail label="Store" value={shopify?.shopifyConfig?.shop || "Missing"} />
+              <Detail label="API version" value={shopify?.shopifyConfig?.apiVersion || "2026-04"} />
+              <Detail label="Credentials" value={shopify?.shopifyConfig?.hasClientCredentials ? "Client auth set" : "Needs auth"} />
             </div>
             <Button variant="outline" onClick={onOpenShopify}>
-              Open Shopify setup
+              Open channel settings
             </Button>
           </CardContent>
         </Card>
@@ -482,114 +729,239 @@ function MetricCard({
 
 function JobsPage({
   jobs,
-  attentionJobs,
+  workerStatus,
   selectedJob,
   onSelectJob,
-  onOpenLegacy,
+  onStopJob,
+  onRetryJob,
+  onCleanup,
+  onRefresh,
 }: {
   jobs: ImportJob[]
-  attentionJobs: ImportJob[]
+  workerStatus: WorkerStatus
   selectedJob?: ImportJob
   onSelectJob: (job: ImportJob) => void
-  onOpenLegacy: (job: ImportJob) => void
+  onStopJob: (job: ImportJob) => void
+  onRetryJob: (job: ImportJob) => void
+  onCleanup: () => void
+  onRefresh: () => void
 }) {
   const [pageSize, setPageSize] = useState(10)
   const [page, setPage] = useState(1)
-  const visibleJobs = jobs.slice((page - 1) * pageSize, page * pageSize)
-  const totalPages = Math.max(1, Math.ceil(jobs.length / pageSize))
+  const [query, setQuery] = useState("")
+  const [status, setStatus] = useState("all")
+  const [tab, setTab] = useState("queue")
+
+  const filteredJobs = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return jobs
+      .filter((job) => tab === "logs" ? String(job.direction || job.type || "").toLowerCase().includes("api") || /shopify|ebay|api/i.test(`${job.operation || ""} ${job.fileName || ""}`) : true)
+      .filter((job) => status === "all" || String(job.status || "").toLowerCase() === status)
+      .filter((job) => !q || `${job.operation || ""} ${job.fileName || ""} ${job.message || ""} ${job.id}`.toLowerCase().includes(q))
+  }, [jobs, query, status, tab])
+
+  const visibleJobs = filteredJobs.slice((page - 1) * pageSize, page * pageSize)
+  const totalPages = Math.max(1, Math.ceil(filteredJobs.length / pageSize))
+  const issueGroups = useMemo(() => {
+    const groups = new Map<string, number>()
+    for (const job of jobs.filter(isAttentionJob)) {
+      const key = `${jobCategory(job)} / ${job.operation || "Job"}`
+      groups.set(key, (groups.get(key) || 0) + 1)
+    }
+    return [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
+  }, [jobs])
 
   return (
     <div className="grid gap-5">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Job History</h2>
-          <p className="text-sm text-muted-foreground">
-            {numberLabel(jobs.length)} jobs, {numberLabel(attentionJobs.length)} need attention.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {[10, 25, 50, 100].map((size) => (
-            <Button
-              key={size}
-              size="sm"
-              variant={pageSize === size ? "default" : "outline"}
-              onClick={() => {
-                setPageSize(size)
-                setPage(1)
-              }}
-            >
-              {size}
-            </Button>
-          ))}
-        </div>
-      </div>
+      <PageHeader
+        eyebrow="Operations"
+        title="Jobs"
+        description="Queue, history, API logs, artifacts, and worker health in one compact table."
+        action={(
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={onCleanup}>Clean stale</Button>
+            <Button onClick={onRefresh}><RefreshCw className="size-4" /> Refresh</Button>
+          </div>
+        )}
+      />
 
-      <div className="grid gap-4 xl:grid-cols-[1fr_360px]">
+      <div className="grid gap-3 lg:grid-cols-4">
+        <MetricCard label="Visible jobs" value={filteredJobs.length} icon={History} />
+        <MetricCard label="Needs review" value={jobs.filter(isAttentionJob).length} icon={AlertCircle} />
+        <MetricCard label="Active" value={jobs.filter(isActiveJob).length} icon={Play} />
         <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Job</TableHead>
-                  <TableHead>Progress</TableHead>
-                  <TableHead>Rows</TableHead>
-                  <TableHead>Started</TableHead>
-                  <TableHead>Worker</TableHead>
-                  <TableHead className="w-12"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {visibleJobs.map((job) => (
-                  <TableRow key={job.id} className="cursor-pointer" onClick={() => onSelectJob(job)}>
-                    <TableCell><Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge></TableCell>
-                    <TableCell>
-                      <p className="font-medium">{job.operation || "Job"}</p>
-                      <p className="line-clamp-1 text-xs text-muted-foreground">{job.fileName || job.message || job.id}</p>
-                    </TableCell>
-                    <TableCell className="min-w-36">
-                      <div className="flex items-center gap-2">
-                        <Progress value={jobProgress(job)} className="h-1.5" />
-                        <span className="w-10 text-xs text-muted-foreground">{jobProgress(job)}%</span>
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground">{dateLabel(job.startedAt || job.createdAt)}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground">{job.workerId || job.workerTask || "n/a"}</TableCell>
-                    <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon" onClick={(event) => event.stopPropagation()}>
-                            <MoreHorizontal className="size-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => onOpenLegacy(job)}>Open in old UI</DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+          <CardContent className="p-4">
+            <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Worker</p>
+            <div className="mt-2 flex items-center gap-2">
+              <Badge variant={workerStatus.online ? "default" : "secondary"}>{workerStatus.online ? "online" : "idle"}</Badge>
+              <span className="truncate text-sm text-muted-foreground">{workerStatus.currentTask || workerStatus.workerId || "No task"}</span>
+            </div>
           </CardContent>
         </Card>
-
-        <JobDetail job={selectedJob} />
       </div>
 
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">Page {page} of {totalPages}</p>
-        <div className="flex gap-2">
-          <Button variant="outline" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</Button>
-          <Button variant="outline" disabled={page >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</Button>
+      {!!issueGroups.length && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">API issues grouped by workflow</CardTitle>
+            <CardDescription>Use these to see if repeated jobs are duplicates or a recurring API problem.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            {issueGroups.map(([name, count]) => (
+              <Badge key={name} variant="outline" className="gap-2 rounded-md px-3 py-2">
+                <span className="max-w-64 truncate">{name}</span>
+                <span>{count}</span>
+              </Badge>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      <Tabs value={tab} onValueChange={(value) => { setTab(value); setPage(1) }}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <TabsList>
+            <TabsTrigger value="queue">Queue and history</TabsTrigger>
+            <TabsTrigger value="logs">Channel logs</TabsTrigger>
+          </TabsList>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
+              <Input className="w-72 pl-8" placeholder="Search jobs, files, messages" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1) }} />
+            </div>
+            <Select value={status} onValueChange={(value) => { setStatus(value); setPage(1) }}>
+              <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All statuses</SelectItem>
+                <SelectItem value="running">Running</SelectItem>
+                <SelectItem value="queued">Queued</SelectItem>
+                <SelectItem value="failed">Failed</SelectItem>
+                <SelectItem value="stopped">Stopped</SelectItem>
+                <SelectItem value="success">Success</SelectItem>
+                <SelectItem value="warning">Warning</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
-      </div>
+
+        <TabsContent value={tab} className="mt-4">
+          <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
+            <Card>
+              <CardHeader className="border-b py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <CardTitle className="text-base">{tab === "logs" ? "Channel Logs" : "Import Queue and History"}</CardTitle>
+                    <CardDescription>{(page - 1) * pageSize + 1}-{Math.min(page * pageSize, filteredJobs.length)} of {numberLabel(filteredJobs.length)} jobs</CardDescription>
+                  </div>
+                  <div className="flex gap-1">
+                    {[10, 25, 50, 100].map((size) => (
+                      <Button
+                        key={size}
+                        size="sm"
+                        variant={pageSize === size ? "default" : "outline"}
+                        onClick={() => { setPageSize(size); setPage(1) }}
+                      >
+                        {size}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Job</TableHead>
+                      <TableHead>Category</TableHead>
+                      <TableHead>Progress</TableHead>
+                      <TableHead>Rows</TableHead>
+                      <TableHead>Started</TableHead>
+                      <TableHead>Worker</TableHead>
+                      <TableHead className="w-12"></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {visibleJobs.map((job) => (
+                      <TableRow key={job.id} className="cursor-pointer" onClick={() => onSelectJob(job)}>
+                        <TableCell><Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge></TableCell>
+                        <TableCell className="max-w-[360px]">
+                          <p className="truncate font-medium">{job.operation || "Job"}</p>
+                          <p className="truncate text-xs text-muted-foreground">{job.fileName || job.message || job.id}</p>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">{jobCategory(job)}</TableCell>
+                        <TableCell className="min-w-36">
+                          <div className="flex items-center gap-2">
+                            <Progress value={jobProgress(job)} className="h-1.5" />
+                            <span className="w-10 text-xs text-muted-foreground">{jobProgress(job)}%</span>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</TableCell>
+                        <TableCell className="text-sm text-muted-foreground">{dateLabel(job.startedAt || job.createdAt)}</TableCell>
+                        <TableCell className="max-w-40 truncate text-sm text-muted-foreground">{job.workerId || job.workerTask || "n/a"}</TableCell>
+                        <TableCell>
+                          <JobActionMenu job={job} onStop={onStopJob} onRetry={onRetryJob} />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {!visibleJobs.length && (
+                      <TableRow>
+                        <TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No jobs match these filters.</TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+
+            <JobDetail job={selectedJob} onRetry={onRetryJob} onStop={onStopJob} />
+          </div>
+
+          <div className="mt-4 flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">Page {page} of {totalPages}</p>
+            <div className="flex gap-2">
+              <Button variant="outline" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</Button>
+              <Button variant="outline" disabled={page >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</Button>
+            </div>
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }
 
-function JobDetail({ job }: { job?: ImportJob }) {
+function JobActionMenu({ job, onStop, onRetry }: { job: ImportJob; onStop: (job: ImportJob) => void; onRetry: (job: ImportJob) => void }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon" onClick={(event) => event.stopPropagation()}>
+          <MoreHorizontal className="size-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onClick={() => window.open(`/legacy/jobs?job=${encodeURIComponent(job.id)}`, "_blank")}>Open full detail</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onRetry(job)} disabled={!job.workerTask || isActiveJob(job)}>
+          <RotateCcw className="size-4" />
+          Retry
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onStop(job)} disabled={!isActiveJob(job)}>
+          <Square className="size-4" />
+          Stop job
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={() => window.open(`/api/import-jobs/${encodeURIComponent(job.id)}/original?inline=1`, "_blank")}>
+          <FileDown className="size-4" />
+          Original file
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => window.open(`/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv?inline=1`, "_blank")}>
+          <FileDown className="size-4" />
+          Errors CSV
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+function JobDetail({ job, onRetry, onStop }: { job?: ImportJob; onRetry: (job: ImportJob) => void; onStop: (job: ImportJob) => void }) {
   if (!job) {
     return (
       <Card>
@@ -599,19 +971,38 @@ function JobDetail({ job }: { job?: ImportJob }) {
   }
 
   return (
-    <Card>
+    <Card className="xl:sticky xl:top-20">
       <CardHeader>
-        <CardTitle>{job.operation || "Job detail"}</CardTitle>
-        <CardDescription>{job.id}</CardDescription>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle>{job.operation || "Job detail"}</CardTitle>
+            <CardDescription className="break-all">{job.id}</CardDescription>
+          </div>
+          <Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge>
+        </div>
       </CardHeader>
       <CardContent className="grid gap-4 text-sm">
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" onClick={() => onRetry(job)} disabled={!job.workerTask || isActiveJob(job)}>
+            <RotateCcw className="size-4" /> Retry
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => onStop(job)} disabled={!isActiveJob(job)}>
+            <Square className="size-4" /> Stop
+          </Button>
+          <Button size="sm" variant="outline" asChild>
+            <a href={`/legacy/jobs?job=${encodeURIComponent(job.id)}`} target="_blank" rel="noreferrer">Full detail</a>
+          </Button>
+        </div>
+        <Progress value={jobProgress(job)} />
         <div className="grid grid-cols-2 gap-2">
-          <Detail label="Status" value={job.status || "done"} />
-          <Detail label="Type" value={job.direction || "sync"} />
+          <Detail label="Category" value={jobCategory(job)} />
+          <Detail label="Type" value={job.direction || job.type || "sync"} />
           <Detail label="Started" value={dateLabel(job.startedAt || job.createdAt)} />
           <Detail label="Finished" value={dateLabel(job.finishedAt)} />
           <Detail label="Rows" value={numberLabel(job.totalRows)} />
           <Detail label="Processed" value={numberLabel(job.processedRows)} />
+          <Detail label="Changed" value={numberLabel(job.changed)} />
+          <Detail label="Missing" value={numberLabel(job.missingCount)} />
         </div>
         {job.message && (
           <div className="rounded-md border bg-muted/45 p-3">
@@ -619,10 +1010,16 @@ function JobDetail({ job }: { job?: ImportJob }) {
             <p className="mt-1 text-muted-foreground">{job.message}</p>
           </div>
         )}
+        {job.details && (
+          <div className="rounded-md border bg-muted/45 p-3">
+            <p className="font-medium">Details</p>
+            <p className="mt-1 line-clamp-6 text-muted-foreground">{job.details}</p>
+          </div>
+        )}
         {!!job.errors?.length && (
           <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3">
             <p className="font-medium text-destructive">Error preview</p>
-            <p className="mt-1 text-muted-foreground">{job.errors[0]}</p>
+            <p className="mt-1 line-clamp-5 text-muted-foreground">{job.errors[0]}</p>
           </div>
         )}
       </CardContent>
@@ -630,156 +1027,904 @@ function JobDetail({ job }: { job?: ImportJob }) {
   )
 }
 
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border p-2">
-      <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{label}</p>
-      <p className="truncate font-medium">{value}</p>
-    </div>
-  )
-}
-
-function ShopifyPage({
-  shopify,
+function ChannelsPage({
+  channels,
   jobs,
   auth,
   checking,
-  onCheck,
-  onRefreshToken,
+  onCheckShopify,
+  onRefreshShopifyToken,
+  onSaveChannel,
 }: {
-  shopify?: ChannelConnection
+  channels: ChannelConnection[]
   jobs: ImportJob[]
   auth: ShopifyAuthCheck | null
   checking: boolean
-  onCheck: () => void
-  onRefreshToken: () => void
+  onCheckShopify: () => void
+  onRefreshShopifyToken: () => void
+  onSaveChannel: (id: string, patch: Record<string, unknown>) => Promise<void>
 }) {
-  const authFailures = jobs.filter(isAttentionJob)
+  const [selectedId, setSelectedId] = useState("")
+  const selectedChannel = channels.find((channel) => channel.id === selectedId) || channels.find((channel) => channel.name?.toLowerCase() === "shopify") || channels[0]
+
+  useEffect(() => {
+    if (!selectedId && selectedChannel?.id) setSelectedId(selectedChannel.id)
+  }, [selectedChannel?.id, selectedId])
+
   return (
     <div className="grid gap-5">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Shopify Setup</h2>
-        <p className="text-sm text-muted-foreground">Connection health, inventory job status, and migration-safe actions.</p>
+      <PageHeader
+        eyebrow="Marketplace"
+        title="Channel Settings"
+        description="Compact tabs for connection health, defaults, schedules, mappings, and channel logs."
+        action={(
+          <Button asChild variant="outline">
+            <a href="/legacy/channels" target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Legacy channels</a>
+          </Button>
+        )}
+      />
+      <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Channels</CardTitle>
+            <CardDescription>Select a marketplace to configure.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2">
+            {channels.map((channel) => (
+              <Button
+                key={channel.id}
+                variant={selectedChannel?.id === channel.id ? "secondary" : "ghost"}
+                className="justify-between"
+                onClick={() => setSelectedId(channel.id)}
+              >
+                <span>{channel.name}</span>
+                <Badge variant={channel.connected ? "default" : "outline"}>{channel.status || (channel.connected ? "active" : "draft")}</Badge>
+              </Button>
+            ))}
+          </CardContent>
+        </Card>
+        {selectedChannel ? (
+          <ChannelDetail
+            channel={selectedChannel}
+            jobs={jobs}
+            auth={auth}
+            checking={checking}
+            onCheckShopify={onCheckShopify}
+            onRefreshShopifyToken={onRefreshShopifyToken}
+            onSave={onSaveChannel}
+          />
+        ) : (
+          <Card><CardContent className="p-6 text-muted-foreground">No channels found.</CardContent></Card>
+        )}
       </div>
-
-      <Card className={auth?.ok ? "border-emerald-300" : authFailures.length ? "border-destructive/40" : ""}>
-        <CardHeader className="flex flex-row items-start justify-between gap-4">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              {auth?.ok ? <CheckCircle2 className="size-5 text-emerald-600" /> : <ShieldCheck className="size-5" />}
-              Connection Health
-            </CardTitle>
-            <CardDescription>
-              {auth?.message || "Check whether the current Admin API credentials can create a token and call Shopify."}
-            </CardDescription>
-          </div>
-          <Badge variant={auth?.ok ? "default" : authFailures.length ? "destructive" : "secondary"}>
-            {auth?.ok ? "Working" : authFailures.length ? "Review" : "Unchecked"}
-          </Badge>
-        </CardHeader>
-        <CardContent className="grid gap-4">
-          <div className="flex flex-wrap gap-2">
-            <Button onClick={onCheck} disabled={checking}>
-              {checking ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-              Check connection
-            </Button>
-            <Button variant="outline" onClick={onRefreshToken}>Request new token</Button>
-            <Button asChild variant="outline">
-              <a href={`https://admin.shopify.com/store/${encodeURIComponent((shopify?.shopifyConfig?.shop || "").replace(".myshopify.com", ""))}/settings/apps/development`} target="_blank" rel="noreferrer">
-                <ExternalLink className="size-4" />
-                Shopify app settings
-              </a>
-            </Button>
-          </div>
-          <div className="grid gap-3 md:grid-cols-4">
-            <Detail label="Store" value={shopify?.shopifyConfig?.shop || auth?.shop?.myshopifyDomain || "Missing"} />
-            <Detail label="API version" value={shopify?.shopifyConfig?.apiVersion || "2026-04"} />
-            <Detail label="Token source" value={auth?.tokenSource || (shopify?.shopifyConfig?.hasClientCredentials ? "Client credentials" : "Unknown")} />
-            <Detail label="read_shipping" value={auth?.hasReadShipping ? "Active" : auth ? "Missing" : "Unchecked"} />
-          </div>
-          {auth?.scope && <p className="text-xs text-muted-foreground">Scopes: {auth.scope}</p>}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Recent Shopify inventory jobs</CardTitle>
-          <CardDescription>Use this to separate old failed jobs from current connection status.</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-2">
-          {jobs.slice(0, 8).map((job) => (
-            <div key={job.id} className="grid gap-1 rounded-md border p-3">
-              <div className="flex items-center justify-between gap-3">
-                <p className="font-medium">{job.operation || "Shopify job"}</p>
-                <Badge variant={jobStatusTone(job.status)}>{job.status}</Badge>
-              </div>
-              <p className="line-clamp-2 text-xs text-muted-foreground">{job.message || job.fileName}</p>
-            </div>
-          ))}
-          {!jobs.length && <p className="text-sm text-muted-foreground">No Shopify inventory jobs found.</p>}
-        </CardContent>
-      </Card>
     </div>
   )
 }
 
-function SettingsPage() {
+function ChannelDetail({
+  channel,
+  jobs,
+  auth,
+  checking,
+  onCheckShopify,
+  onRefreshShopifyToken,
+  onSave,
+}: {
+  channel: ChannelConnection
+  jobs: ImportJob[]
+  auth: ShopifyAuthCheck | null
+  checking: boolean
+  onCheckShopify: () => void
+  onRefreshShopifyToken: () => void
+  onSave: (id: string, patch: Record<string, unknown>) => Promise<void>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<Record<string, unknown>>({})
+  const isShopify = channel.name?.toLowerCase() === "shopify"
+  const settings = { ...(channel.settings || {}), ...draft }
+  const shippingProfiles = Array.isArray(channel.settings?.shopifyShippingProfiles) ? channel.settings.shopifyShippingProfiles : []
+
+  useEffect(() => {
+    setDraft({})
+    setEditing(false)
+  }, [channel.id])
+
+  function update(field: string, value: unknown) {
+    setDraft((current) => ({ ...current, [field]: value }))
+  }
+
+  async function save() {
+    await onSave(channel.id, draft)
+    setDraft({})
+    setEditing(false)
+  }
+
+  async function syncShippingProfiles() {
+    try {
+      const result = await api<{ channel: ChannelConnection; message?: string }>(
+        "/api/shopify/shipping-profiles/sync",
+        { method: "POST", body: JSON.stringify({}) },
+      )
+      toast.success(result.message || "Shipping profiles imported.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to import Shopify shipping profiles.")
+    }
+  }
+
   return (
-    <div className="grid gap-5">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Settings</h2>
-        <p className="text-sm text-muted-foreground">The React settings surface will use compact tabs and annotated settings sections.</p>
-      </div>
-      <Tabs defaultValue="operations">
-        <TabsList>
-          <TabsTrigger value="operations">Operations</TabsTrigger>
-          <TabsTrigger value="channels">Channels</TabsTrigger>
-          <TabsTrigger value="users">Users</TabsTrigger>
+    <div className="grid gap-4">
+      <Card>
+        <CardHeader className="flex flex-row items-start justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <ChannelLogo channel={channel} />
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Marketplace channel</p>
+              <CardTitle>{channel.name}</CardTitle>
+              <CardDescription>{channel.connected ? "Connected" : "Not connected"} / {channel.status || "draft"}</CardDescription>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            {editing ? (
+              <>
+                <Button variant="outline" onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
+                <Button onClick={save}>Save changes</Button>
+              </>
+            ) : (
+              <Button onClick={() => setEditing(true)}>Edit</Button>
+            )}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild><Button variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {isShopify && <DropdownMenuItem onClick={onCheckShopify}>Check connection</DropdownMenuItem>}
+                {isShopify && <DropdownMenuItem onClick={onRefreshShopifyToken}>Request new token</DropdownMenuItem>}
+                {isShopify && <DropdownMenuItem onClick={syncShippingProfiles}>Import shipping profiles</DropdownMenuItem>}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => window.open(`/legacy/channels/${encodeURIComponent(channel.id)}`, "_blank")}>Open legacy channel</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </CardHeader>
+      </Card>
+
+      <Tabs defaultValue="overview">
+        <TabsList className="flex flex-wrap">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="setup">Setup</TabsTrigger>
+          <TabsTrigger value="actions">Actions</TabsTrigger>
+          <TabsTrigger value="rules">Rules</TabsTrigger>
+          <TabsTrigger value="mappings">Mappings</TabsTrigger>
+          <TabsTrigger value="variants">Variants</TabsTrigger>
+          <TabsTrigger value="skus">SKUs</TabsTrigger>
+          <TabsTrigger value="logs">Logs</TabsTrigger>
         </TabsList>
-        <TabsContent value="operations">
-          <MigrationPlaceholder title="Operations Settings" oldPath="/legacy/settings/operations" icon={SlidersHorizontal} />
+        <TabsContent value="overview" className="grid gap-4">
+          {isShopify && (
+            <Card className={auth?.ok ? "border-emerald-300" : ""}>
+              <CardHeader className="flex flex-row items-start justify-between gap-4">
+                <div>
+                  <CardTitle className="flex items-center gap-2">
+                    {auth?.ok ? <CheckCircle2 className="size-5 text-emerald-600" /> : <ShieldCheck className="size-5" />}
+                    Shopify connection health
+                  </CardTitle>
+                  <CardDescription>{auth?.message || "Run a connection check before major Shopify jobs."}</CardDescription>
+                </div>
+                <Button onClick={onCheckShopify} disabled={checking}>
+                  {checking ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                  Check connection
+                </Button>
+              </CardHeader>
+              <CardContent className="grid gap-3 md:grid-cols-4">
+                <Detail label="Store" value={channel.shopifyConfig?.shop || auth?.shop?.myshopifyDomain || "Missing"} />
+                <Detail label="API version" value={channel.shopifyConfig?.apiVersion || "2026-04"} />
+                <Detail label="Token source" value={auth?.tokenSource || "Configured"} />
+                <Detail label="read_shipping" value={auth?.hasReadShipping ? "Active" : auth ? "Missing" : "Unchecked"} />
+              </CardContent>
+            </Card>
+          )}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Channel defaults</CardTitle>
+              <CardDescription>These values are used when new SKUs are prepared for this channel.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3 md:grid-cols-3">
+              <Detail label="Shadow status" value={String(settings.defaultShadowStatus || "Draft")} />
+              <Detail label="Handling days" value={String(settings.defaultHandlingTimeDays ?? 0)} />
+              <Detail label="Safety qty" value={String(settings.defaultSafetyQty ?? 0)} />
+              <Detail label="Max sellable qty" value={String(settings.defaultMaxSellableQty ?? 0)} />
+              <Detail label="Shipping profile" value={String(settings.defaultShippingProfile || "Standard")} />
+              <Detail label="Shipping service" value={String(settings.defaultShippingService || "Marketplace Standard")} />
+            </CardContent>
+          </Card>
         </TabsContent>
-        <TabsContent value="channels">
-          <MigrationPlaceholder title="Channel Settings" oldPath="/legacy/channels" icon={Truck} />
+
+        <TabsContent value="setup">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Editable setup</CardTitle>
+              <CardDescription>Click Edit above before changing values. Dark/disabled fields are locked.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <Field label="Default shadow status">
+                <Select disabled={!editing} value={String(settings.defaultShadowStatus || "Draft")} onValueChange={(value) => update("defaultShadowStatus", value)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Draft">Draft</SelectItem>
+                    <SelectItem value="Active">Active</SelectItem>
+                    <SelectItem value="Archived">Archived</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="Default handling days">
+                <Input disabled={!editing} type="number" value={String(settings.defaultHandlingTimeDays ?? 0)} onChange={(event) => update("defaultHandlingTimeDays", Number(event.target.value || 0))} />
+              </Field>
+              <Field label="Default safety qty">
+                <Input disabled={!editing} type="number" value={String(settings.defaultSafetyQty ?? 0)} onChange={(event) => update("defaultSafetyQty", Number(event.target.value || 0))} />
+              </Field>
+              <Field label="Default max sellable qty">
+                <Input disabled={!editing} type="number" value={String(settings.defaultMaxSellableQty ?? 0)} onChange={(event) => update("defaultMaxSellableQty", Number(event.target.value || 0))} />
+              </Field>
+              <Field label="Default shipping profile">
+                {shippingProfiles.length ? (
+                  <Select disabled={!editing} value={String(settings.defaultShippingProfile || "")} onValueChange={(value) => update("defaultShippingProfile", value)}>
+                    <SelectTrigger><SelectValue placeholder="Select profile" /></SelectTrigger>
+                    <SelectContent>
+                      {shippingProfiles.map((profile) => (
+                        <SelectItem key={profile.id || profile.name} value={profile.name || profile.id || ""}>{profile.name || profile.id}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input disabled={!editing} value={String(settings.defaultShippingProfile || "")} onChange={(event) => update("defaultShippingProfile", event.target.value)} />
+                )}
+              </Field>
+              <Field label="Default shipping service">
+                <Input disabled={!editing} value={String(settings.defaultShippingService || "")} onChange={(event) => update("defaultShippingService", event.target.value)} />
+              </Field>
+            </CardContent>
+          </Card>
         </TabsContent>
-        <TabsContent value="users">
-          <MigrationPlaceholder title="User Profiles" oldPath="/legacy/settings" icon={Warehouse} />
+
+        <TabsContent value="actions">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Channel actions</CardTitle>
+              <CardDescription>Operational tasks moved out of setup so settings stay readable.</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-2">
+              {isShopify && <Button onClick={onCheckShopify}>Check connection</Button>}
+              {isShopify && <Button variant="outline" onClick={onRefreshShopifyToken}>Request new token</Button>}
+              {isShopify && <Button variant="outline" onClick={syncShippingProfiles}>Import shipping profiles</Button>}
+              {isShopify && <Button variant="outline" onClick={() => window.open("/legacy/channels", "_blank")}>Open advanced Shopify actions</Button>}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="rules">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Pricing and inventory rules</CardTitle>
+              <CardDescription>Rules that background pushes use by default.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <Field label="Price markup percent">
+                <Input disabled={!editing} type="number" value={String(settings.priceMarkupPercent ?? 0)} onChange={(event) => update("priceMarkupPercent", Number(event.target.value || 0))} />
+              </Field>
+              <Field label="Minimum margin percent">
+                <Input disabled={!editing} type="number" value={String(settings.minMarginPercent ?? 0)} onChange={(event) => update("minMarginPercent", Number(event.target.value || 0))} />
+              </Field>
+              <Field label="Inventory schedule times">
+                <Input disabled={!editing} value={String(settings.inventoryScheduleTimes || "03:00,13:00")} onChange={(event) => update("inventoryScheduleTimes", event.target.value)} />
+              </Field>
+              <ToggleField label="Inventory push" checked={Boolean(settings.shopifyInventoryPushEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyInventoryPushEnabled", value)} />
+              <ToggleField label="Scheduled inventory updates" checked={Boolean(settings.inventoryScheduleEnabled)} disabled={!editing} onCheckedChange={(value) => update("inventoryScheduleEnabled", value)} />
+              <ToggleField label="Require successful dump" checked={Boolean(settings.inventoryScheduleRequireSuccessfulDump)} disabled={!editing} onCheckedChange={(value) => update("inventoryScheduleRequireSuccessfulDump", value)} />
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="mappings">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Mappings</CardTitle>
+              <CardDescription>Category and attribute mappings remain available without auto-loading the heavy legacy grid.</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-2">
+              <Button asChild variant="outline"><a href="/legacy/categories" target="_blank" rel="noreferrer">Category mappings</a></Button>
+              <Button asChild variant="outline"><a href="/legacy/vendors" target="_blank" rel="noreferrer">Vendor category mappings</a></Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="variants">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Variant rules</CardTitle>
+              <CardDescription>Channel-level rules are paired with vendor rules before product pushes.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3 md:grid-cols-3">
+              <Detail label="Inventory policy" value={String(settings.shopifyInventoryPolicy || "deny")} />
+              <Detail label="Fulfillment service" value={String(settings.shopifyFulfillmentService || "manual")} />
+              <Detail label="Publish scope" value={String(settings.shopifyPublishScope || "global")} />
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="skus">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">SKU tools</CardTitle>
+              <CardDescription>Use legacy advanced grids for per-SKU review until the React catalog detail screen is migrated.</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-2">
+              <Button asChild variant="outline"><a href="/legacy/products" target="_blank" rel="noreferrer">Open product table</a></Button>
+              <Button asChild variant="outline"><a href="/legacy/channels" target="_blank" rel="noreferrer">Open SKU channel tools</a></Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="logs">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Recent channel logs</CardTitle>
+              <CardDescription>Shopify inventory and API jobs connected to this channel.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-2">
+              {jobs.slice(0, 10).map((job) => (
+                <div key={job.id} className="grid gap-1 rounded-md border p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-medium">{job.operation || "Shopify job"}</p>
+                    <Badge variant={jobStatusTone(job.status)}>{job.status}</Badge>
+                  </div>
+                  <p className="line-clamp-2 text-xs text-muted-foreground">{job.message || job.fileName}</p>
+                </div>
+              ))}
+              {!jobs.length && <p className="text-sm text-muted-foreground">No Shopify inventory jobs found.</p>}
+            </CardContent>
+          </Card>
         </TabsContent>
       </Tabs>
     </div>
   )
 }
 
-function MigrationPlaceholder({
-  title,
-  oldPath,
-  icon: Icon,
+function ChannelLogo({ channel }: { channel: ChannelConnection }) {
+  const src = channel.logoDataUrl || channel.logoUrl
+  return (
+    <div className="grid size-16 place-items-center overflow-hidden rounded-lg border bg-muted">
+      {src ? <img src={src} alt="" className="max-h-full max-w-full object-contain p-2" /> : <ShoppingBag className="size-7 text-muted-foreground" />}
+    </div>
+  )
+}
+
+function CatalogPage() {
+  const [query, setQuery] = useState("")
+  const [pageSize, setPageSize] = useState(25)
+  const [page, setPage] = useState(1)
+  const [loading, setLoading] = useState(false)
+  const [response, setResponse] = useState<CatalogResponse>({})
+
+  async function loadCatalog(nextPage = page) {
+    setLoading(true)
+    try {
+      const params = new URLSearchParams({ q: query, page: String(nextPage), limit: String(pageSize) })
+      const result = await api<CatalogResponse>(`/api/catalog/products?${params}`)
+      setResponse(result)
+      setPage(nextPage)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load catalog products.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadCatalog(1)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageSize])
+
+  const rows = response.items || []
+  const total = Number(response.totalMatches || rows.length || 0)
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+
+  return (
+    <div className="grid gap-5">
+      <PageHeader
+        eyebrow="Catalog"
+        title="Products"
+        description="Fast paged source catalog view with compact product, price, stock, and category columns."
+        action={<Button asChild variant="outline"><a href="/legacy/products" target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Advanced table</a></Button>}
+      />
+      <Card>
+        <CardHeader className="border-b">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="relative">
+              <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
+              <Input
+                className="w-[420px] max-w-[75vw] pl-8"
+                placeholder="Search SKU, title, brand, supplier, category"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") loadCatalog(1) }}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <Button onClick={() => loadCatalog(1)} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button>
+              <Select value={String(pageSize)} onValueChange={(value) => setPageSize(Number(value))}>
+                <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="10">10 rows</SelectItem>
+                  <SelectItem value="25">25 rows</SelectItem>
+                  <SelectItem value="50">50 rows</SelectItem>
+                  <SelectItem value="100">100 rows</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <CardDescription>
+            {numberLabel(total)} matched. Source: {response.database || response.manifest?.source || "catalog"} {response.partial ? "/ partial search" : ""}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Product</TableHead>
+                <TableHead>Supplier</TableHead>
+                <TableHead>Category</TableHead>
+                <TableHead>Stock</TableHead>
+                <TableHead>Cost</TableHead>
+                <TableHead>Price</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="w-12"></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((item) => (
+                <TableRow key={item.id || item.sku}>
+                  <TableCell>
+                    <div className="flex items-center gap-3">
+                      <div className="grid size-10 place-items-center overflow-hidden rounded-md border bg-muted">
+                        {item.defaultImage ? <img src={item.defaultImage} alt="" className="max-h-full max-w-full object-contain" /> : <Boxes className="size-4 text-muted-foreground" />}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="truncate font-semibold">{item.sku}</p>
+                        <p className="line-clamp-1 text-xs text-muted-foreground">{item.title}</p>
+                      </div>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <p className="font-medium">{item.supplier || item.supplierCode || "Unknown"}</p>
+                    <p className="text-xs text-muted-foreground">{item.brand || "No brand"}</p>
+                  </TableCell>
+                  <TableCell className="max-w-[320px]">
+                    <p className="line-clamp-2 text-sm">{item.mainCategory || item.sourceCategory || "Uncategorized"}</p>
+                    <Badge variant={item.categoryVerified ? "default" : "outline"}>{item.categoryVerified ? "Verified" : "Needs map"}</Badge>
+                  </TableCell>
+                  <TableCell>{numberLabel(item.stockQty)}</TableCell>
+                  <TableCell>{moneyLabel(item.cost)}</TableCell>
+                  <TableCell>{moneyLabel(item.websitePrice || item.price)}</TableCell>
+                  <TableCell>
+                    <div className="flex flex-col gap-1">
+                      <Badge variant={item.active === false ? "outline" : "default"}>{item.active === false ? "Inactive" : "Active"}</Badge>
+                      {item.toBeDiscontinued && <Badge variant="destructive">Discontinued</Badge>}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => window.open(`/legacy/products?sku=${encodeURIComponent(item.sku || "")}`, "_blank")}>Open product detail</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {!rows.length && (
+                <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No products found.</TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-muted-foreground">Page {page} of {totalPages}</p>
+        <div className="flex gap-2">
+          <Button variant="outline" disabled={page <= 1 || loading} onClick={() => loadCatalog(Math.max(1, page - 1))}>Previous</Button>
+          <Button variant="outline" disabled={page >= totalPages || loading} onClick={() => loadCatalog(Math.min(totalPages, page + 1))}>Next</Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendor: (id: string, patch: Record<string, unknown>) => Promise<void> }) {
+  const [query, setQuery] = useState("")
+  const [selectedId, setSelectedId] = useState("")
+  const filtered = vendors.filter((vendor) => `${vendor.name} ${vendor.code || ""} ${vendor.email || ""}`.toLowerCase().includes(query.toLowerCase()))
+  const selected = vendors.find((vendor) => vendor.id === selectedId) || filtered[0] || vendors[0]
+
+  useEffect(() => {
+    if (!selectedId && selected?.id) setSelectedId(selected.id)
+  }, [selected?.id, selectedId])
+
+  return (
+    <div className="grid gap-5">
+      <PageHeader
+        eyebrow="Suppliers"
+        title="Vendor Settings"
+        description="Contacts, payment terms, pricing rules, variation rules, replenishable inventory, and category mapping entry points."
+        action={<Button asChild variant="outline"><a href="/legacy/vendors" target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Advanced vendors</a></Button>}
+      />
+      <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Vendors</CardTitle>
+            <div className="relative">
+              <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
+              <Input className="pl-8" placeholder="Search vendors" value={query} onChange={(event) => setQuery(event.target.value)} />
+            </div>
+          </CardHeader>
+          <CardContent className="grid max-h-[680px] gap-2 overflow-auto">
+            {filtered.map((vendor) => (
+              <Button
+                key={vendor.id}
+                variant={selected?.id === vendor.id ? "secondary" : "ghost"}
+                className="h-auto justify-between gap-3 py-3"
+                onClick={() => setSelectedId(vendor.id)}
+              >
+                <span className="min-w-0 text-left">
+                  <span className="block truncate font-medium">{vendor.name}</span>
+                  <span className="block text-xs text-muted-foreground">{vendor.code || vendor.type || "Supplier"}</span>
+                </span>
+                <Badge variant={String(vendor.status || "active").toLowerCase() === "active" ? "default" : "outline"}>{vendor.status || "active"}</Badge>
+              </Button>
+            ))}
+          </CardContent>
+        </Card>
+        {selected ? <VendorDetail vendor={selected} onSave={onSaveVendor} /> : <Card><CardContent className="p-6 text-muted-foreground">No vendors found.</CardContent></Card>}
+      </div>
+    </div>
+  )
+}
+
+function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string, patch: Record<string, unknown>) => Promise<void> }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<Record<string, unknown>>({})
+  const value = (field: string, fallback = "") => String(draft[field] ?? (vendor as unknown as Record<string, unknown>)[field] ?? fallback)
+  const addressValue = (field: string, fallback = "") => String(draft[`address.${field}`] ?? vendor.address?.[field as keyof NonNullable<Vendor["address"]>] ?? fallback)
+
+  useEffect(() => {
+    setEditing(false)
+    setDraft({})
+  }, [vendor.id])
+
+  function update(field: string, next: unknown) {
+    setDraft((current) => ({ ...current, [field]: next }))
+  }
+
+  function updateAddress(field: string, next: unknown) {
+    setDraft((current) => ({ ...current, [`address.${field}`]: next }))
+  }
+
+  async function save() {
+    await onSave(vendor.id, draft)
+    setDraft({})
+    setEditing(false)
+  }
+
+  const inventoryRules = vendor.inventoryRules || {}
+  const pricingRules = vendor.pricingRules || {}
+  const variationRules = vendor.variationRules || {}
+
+  return (
+    <div className="grid gap-4">
+      <Card>
+        <CardHeader className="flex flex-row items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Vendor profile</p>
+            <CardTitle>{vendor.name}</CardTitle>
+            <CardDescription>{vendor.code || vendor.type || "Supplier"} / {vendor.status || "active"}</CardDescription>
+          </div>
+          <div className="flex gap-2">
+            {editing ? (
+              <>
+                <Button variant="outline" onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
+                <Button onClick={save}>Save changes</Button>
+              </>
+            ) : <Button onClick={() => setEditing(true)}>Edit</Button>}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild><Button variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => setEditing(true)}>Edit profile</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => window.open(`/legacy/vendors/${encodeURIComponent(vendor.id)}`, "_blank")}>Open legacy vendor</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => window.open(`/legacy/vendors/${encodeURIComponent(vendor.id)}?tab=categories`, "_blank")}>Category mappings</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </CardHeader>
+      </Card>
+
+      <Tabs defaultValue="summary">
+        <TabsList className="flex flex-wrap">
+          <TabsTrigger value="summary">Summary</TabsTrigger>
+          <TabsTrigger value="contact">Contact</TabsTrigger>
+          <TabsTrigger value="rules">Rules</TabsTrigger>
+          <TabsTrigger value="inventory">Inventory</TabsTrigger>
+          <TabsTrigger value="categories">Categories</TabsTrigger>
+        </TabsList>
+        <TabsContent value="summary" className="grid gap-4">
+          <div className="grid gap-3 md:grid-cols-4">
+            <MetricCard label="Open POs" value={vendor.openPOs || 0} icon={FileWarning} />
+            <MetricCard label="Total POs" value={vendor.totalPOs || 0} icon={History} />
+            <MetricCard label="Total spend" value={moneyLabel(vendor.totalSpend || 0)} icon={Database} />
+            <MetricCard label="Lead time" value={`${vendor.leadTimeDays || 0} days`} icon={Truck} />
+          </div>
+          <Card>
+            <CardHeader><CardTitle className="text-base">Notes</CardTitle></CardHeader>
+            <CardContent>
+              <Textarea disabled={!editing} value={value("notes")} onChange={(event) => update("notes", event.target.value)} />
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="contact">
+          <Card>
+            <CardHeader><CardTitle className="text-base">Primary contact and address</CardTitle></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2">
+              <Field label="Vendor name"><Input disabled={!editing} value={value("name")} onChange={(event) => update("name", event.target.value)} /></Field>
+              <Field label="Payment terms">
+                <Select disabled={!editing} value={value("paymentTerms", "TBD")} onValueChange={(next) => update("paymentTerms", next)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="TBD">TBD</SelectItem>
+                    <SelectItem value="Due on receipt">Due on receipt</SelectItem>
+                    <SelectItem value="Net 15">Net 15</SelectItem>
+                    <SelectItem value="Net 30">Net 30</SelectItem>
+                    <SelectItem value="Net 45">Net 45</SelectItem>
+                    <SelectItem value="Net 60">Net 60</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="POC"><Input disabled={!editing} value={value("contactName")} onChange={(event) => update("contactName", event.target.value)} /></Field>
+              <Field label="Email"><Input disabled={!editing} value={value("email")} onChange={(event) => update("email", event.target.value)} /></Field>
+              <Field label="Phone"><Input disabled={!editing} value={value("phone")} onChange={(event) => update("phone", event.target.value)} /></Field>
+              <Field label="Website"><Input disabled={!editing} value={value("website")} onChange={(event) => update("website", event.target.value)} /></Field>
+              <Field label="Address line 1"><Input disabled={!editing} value={addressValue("line1")} onChange={(event) => updateAddress("line1", event.target.value)} /></Field>
+              <Field label="Address line 2"><Input disabled={!editing} value={addressValue("line2")} onChange={(event) => updateAddress("line2", event.target.value)} /></Field>
+              <Field label="City"><Input disabled={!editing} value={addressValue("city")} onChange={(event) => updateAddress("city", event.target.value)} /></Field>
+              <Field label="State"><Input disabled={!editing} value={addressValue("state")} onChange={(event) => updateAddress("state", event.target.value)} /></Field>
+              <Field label="Postal code"><Input disabled={!editing} value={addressValue("postalCode")} onChange={(event) => updateAddress("postalCode", event.target.value)} /></Field>
+              <Field label="Country"><Input disabled={!editing} value={addressValue("country", "US")} onChange={(event) => updateAddress("country", event.target.value)} /></Field>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="rules">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Pricing and variation rules</CardTitle>
+              <CardDescription>Saved at vendor level so imports and Shopify pushes can reuse the rules.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <Detail label="Cost basis" value={String(pricingRules.costBasis || "standard")} />
+              <Detail label="Min allowed price" value={String(pricingRules.enforceMinimumAllowedPrice ?? true)} />
+              <Detail label="Variant mode" value={String(variationRules.shopifyVariantMode || "standard")} />
+              <Detail label="Allow variations" value={String(variationRules.allowShopifyVariations ?? true)} />
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="inventory">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Replenishable inventory</CardTitle>
+              <CardDescription>Vendor defaults. SKU-level overrides still decide whether a product follows these defaults.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-3">
+              <Detail label="Enabled" value={String(inventoryRules.replenishableEnabled ?? false)} />
+              <Detail label="Default qty" value={String(inventoryRules.replenishableQty ?? 0)} />
+              <Detail label="Warehouse" value="Staten Island" />
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="categories">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Vendor category mappings</CardTitle>
+              <CardDescription>Heavy mapping data loads only when opened in the mapping workspace.</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-2">
+              <Button asChild variant="outline"><a href={`/legacy/vendors/${encodeURIComponent(vendor.id)}?tab=categories`} target="_blank" rel="noreferrer">Open mapping workspace</a></Button>
+              <Button asChild variant="outline"><a href="/legacy/categories" target="_blank" rel="noreferrer">Main categories</a></Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  )
+}
+
+function SettingsPage({
+  settings,
+  workerStatus,
+  onSaveSettings,
 }: {
+  settings: SystemSettings
+  workerStatus: WorkerStatus
+  onSaveSettings: (patch: Record<string, unknown>) => Promise<void>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<Record<string, unknown>>({})
+  const value = (field: string) => draft[field] ?? settings[field]
+  const boolValue = (field: string) => Boolean(value(field))
+
+  function update(field: string, next: unknown) {
+    setDraft((current) => ({ ...current, [field]: next }))
+  }
+
+  async function save() {
+    await onSaveSettings(draft)
+    setDraft({})
+    setEditing(false)
+  }
+
+  return (
+    <div className="grid gap-5">
+      <PageHeader
+        eyebrow="Admin"
+        title="System Settings"
+        description="Operations, workers, backups, retention, and safety rules in compact editable tabs."
+        action={editing ? (
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
+            <Button onClick={save}>Save changes</Button>
+          </div>
+        ) : <Button onClick={() => setEditing(true)}>Edit</Button>}
+      />
+
+      <Tabs defaultValue="operations">
+        <TabsList className="flex flex-wrap">
+          <TabsTrigger value="operations">Operations</TabsTrigger>
+          <TabsTrigger value="worker">Worker</TabsTrigger>
+          <TabsTrigger value="backups">Backups</TabsTrigger>
+          <TabsTrigger value="catalog">Catalog</TabsTrigger>
+          <TabsTrigger value="users">Users</TabsTrigger>
+        </TabsList>
+        <TabsContent value="operations">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Operations</CardTitle>
+              <CardDescription>Controls background work and job history behavior.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <Field label="Background jobs mode">
+                <Select disabled={!editing} value={String(value("backgroundJobsMode") || "inline")} onValueChange={(next) => update("backgroundJobsMode", next)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inline">Inline</SelectItem>
+                    <SelectItem value="worker">External worker</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <ToggleField label="Auto quality scan after imports" checked={boolValue("autoDataQualityScanAfterImports")} disabled={!editing} onCheckedChange={(next) => update("autoDataQualityScanAfterImports", next)} />
+              <ToggleField label="Clean expired job files" checked={boolValue("jobsRetentionAutoCleanupEnabled")} disabled={!editing} onCheckedChange={(next) => update("jobsRetentionAutoCleanupEnabled", next)} />
+              <Field label="Jobs retention days">
+                <Input disabled={!editing} type="number" value={String(value("jobsRetentionDays") || 60)} onChange={(event) => update("jobsRetentionDays", Number(event.target.value || 0))} />
+              </Field>
+              <ToggleField label="Admin confirmation for deletes" checked={boolValue("requireAdminConfirmationForDeletes")} disabled={!editing} onCheckedChange={(next) => update("requireAdminConfirmationForDeletes", next)} />
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="worker">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Worker health</CardTitle>
+              <CardDescription>Current external worker state.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3 md:grid-cols-4">
+              <Detail label="Status" value={workerStatus.online ? "online" : "offline"} />
+              <Detail label="Worker ID" value={workerStatus.workerId || "n/a"} />
+              <Detail label="Current task" value={workerStatus.currentTask || "idle"} />
+              <Detail label="Last seen" value={dateLabel(workerStatus.lastSeenAt)} />
+              <ToggleField label="Quality scans on worker" checked={boolValue("dataQualityWorkerEnabled")} disabled={!editing} onCheckedChange={(next) => update("dataQualityWorkerEnabled", next)} />
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="backups">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Backups and retention</CardTitle>
+              <CardDescription>Retention should stay long enough for job review and file downloads.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-3">
+              <ToggleField label="Include source catalog" checked={boolValue("backupIncludeSourceCatalog")} disabled={!editing} onCheckedChange={(next) => update("backupIncludeSourceCatalog", next)} />
+              <Field label="Backup retention days"><Input disabled={!editing} type="number" value={String(value("backupRetentionDays") || 30)} onChange={(event) => update("backupRetentionDays", Number(event.target.value || 0))} /></Field>
+              <Button variant="outline" onClick={() => api("/api/system/backup", { method: "POST", body: JSON.stringify({}) }).then(() => toast.success("Backup queued.")).catch((error) => toast.error(error.message))}>Run backup</Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="catalog">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Catalog behavior</CardTitle>
+              <CardDescription>True Value source categories can seed the main category list.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2">
+              <ToggleField label="True Value source category as main category" checked={boolValue("trueValueSourceCategoryAsMainCategory")} disabled={!editing} onCheckedChange={(next) => update("trueValueSourceCategoryAsMainCategory", next)} />
+              <Button variant="outline" onClick={() => api("/api/categories/summary-index/rebuild", { method: "POST", body: JSON.stringify({ scope: "both" }) }).then(() => toast.success("Category summary index rebuild queued/completed.")).catch((error) => toast.error(error.message))}>Rebuild category index</Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="users">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Users and permissions</CardTitle>
+              <CardDescription>Advanced user management is still available in the legacy screen while this tab is migrated.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button asChild variant="outline"><a href="/legacy/settings" target="_blank" rel="noreferrer">Open legacy user settings</a></Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  )
+}
+
+function PageHeader({
+  eyebrow,
+  title,
+  description,
+  action,
+}: {
+  eyebrow: string
   title: string
-  oldPath: string
-  icon: React.ComponentType<{ className?: string }>
+  description: string
+  action?: React.ReactNode
 }) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Icon className="size-5" />
-          {title}
-        </CardTitle>
-        <CardDescription>This screen is queued for React/shadcn migration.</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-wrap items-center justify-between gap-3">
-        <p className="max-w-2xl text-sm text-muted-foreground">
-          The existing workflow is still available while we migrate the screen with shadcn components.
-        </p>
-        <Button asChild variant="outline">
-          <a href={oldPath} target="_blank" rel="noreferrer">
-            <ExternalLink className="size-4" />
-            Open old screen
-          </a>
-        </Button>
-      </CardContent>
-    </Card>
+    <div className="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{eyebrow}</p>
+        <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
+        <p className="text-sm text-muted-foreground">{description}</p>
+      </div>
+      {action}
+    </div>
+  )
+}
+
+function Detail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border bg-background p-2">
+      <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="truncate font-medium">{value}</p>
+    </div>
+  )
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="grid gap-1.5">
+      <Label className="text-xs font-bold text-muted-foreground">{label}</Label>
+      {children}
+    </div>
+  )
+}
+
+function ToggleField({
+  label,
+  checked,
+  disabled,
+  onCheckedChange,
+}: {
+  label: string
+  checked: boolean
+  disabled?: boolean
+  onCheckedChange: (value: boolean) => void
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 rounded-md border bg-background p-3">
+      <Label className="text-sm font-medium">{label}</Label>
+      <Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
+    </div>
   )
 }
 
