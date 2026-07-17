@@ -22201,6 +22201,16 @@ async function handleApi(req, res) {
     return sendJson(res, 200, result);
   }
 
+  if (req.method === "GET" && url.pathname === "/api/catalog/workspace-summary") {
+    const cacheKey = "dataplus:catalog:workspace-summary:v1";
+    const cached = await redisCache.getJson(cacheKey);
+    if (cached) return sendJson(res, 200, { ...cached, cached: true });
+    const counts = postgres.isPostgresEnabled() ? await postgres.catalogWorkspaceCounts() : null;
+    const payload = { counts: counts || {} };
+    await redisCache.setJson(cacheKey, payload, 300);
+    return sendJson(res, 200, payload);
+  }
+
   if (req.method === "GET" && url.pathname === "/api/system/cache/status") {
     return sendJson(res, 200, { redis: redisCache.status(), catalogLatestPageTtlSeconds: REDIS_CATALOG_CACHE_TTL_SECONDS });
   }

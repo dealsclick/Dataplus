@@ -5438,6 +5438,31 @@ async function countProducts(options = {}) {
   return result?.total || 0;
 }
 
+async function catalogWorkspaceCounts() {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select relname, greatest(reltuples::bigint, 0)::bigint as total
+    from pg_class
+    where oid = any(array[
+      'products'::regclass,
+      'vendor_catalog_items'::regclass,
+      'product_quality_rows'::regclass,
+      'product_change_events'::regclass
+    ])
+  `);
+  const totals = Object.fromEntries(result.rows.map((row) => [row.relname, Number(row.total || 0)]));
+  return {
+    products: totals.products || 0,
+    source: totals.vendor_catalog_items || 0,
+    inventory: totals.products || 0,
+    review: totals.product_quality_rows || 0,
+    readiness: totals.product_quality_rows || 0,
+    changes: totals.product_change_events || 0
+  };
+}
+
 async function countShopifyVariantStatuses(options = {}) {
   const client = getPool();
   if (!client) return 0;
@@ -6008,6 +6033,7 @@ module.exports = {
   readAllProducts,
   listShopifyLinkedProducts,
   countProducts,
+  catalogWorkspaceCounts,
   listCategoryProductSamples,
   readCategorySummaryIndex,
   replaceCategorySummaryIndex,

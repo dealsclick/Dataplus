@@ -2208,13 +2208,19 @@ function CatalogTemplatesPage() {
 
 function CatalogPage() {
   const [tab, setTab] = useState<CatalogWorkspaceTab>(catalogWorkspaceTabFromPath)
+  const [workspaceCounts, setWorkspaceCounts] = useState<Record<string, number>>({})
+  useEffect(() => {
+    api<{ counts?: Record<string, number> }>("/api/catalog/workspace-summary")
+      .then((result) => setWorkspaceCounts(result.counts || {}))
+      .catch(() => {})
+  }, [])
   const selectTab = (next: string) => {
     const selected = next as CatalogWorkspaceTab
     setTab(selected)
     const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", source: "/source-catalog", review: "/import-review", changes: "/sku-changes", categories: "/categories", mappings: "/vendor-category-mappings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
     window.history.replaceState({}, "", paths[selected])
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <MainCatalogPage />}{tab === "source" && <SourceCatalogPage />}{tab === "inventory" && <MainCatalogPage inventoryOnly />}{tab === "templates" && <CatalogTemplatesPage />}{(["review", "changes", "categories", "mappings", "attributes", "groups", "readiness"] as CatalogWorkspaceTab[]).includes(tab) && <CatalogResourcePage tab={tab as Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates">} />}</div>
+  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => { const count = workspaceCounts[item.id]; return <TabsTrigger key={item.id} value={item.id} className="gap-1.5 text-xs">{item.label}{count ? <span className="text-[10px] text-muted-foreground">{numberLabel(count)}</span> : null}</TabsTrigger> })}</TabsList></div></Tabs>{tab === "products" && <MainCatalogPage />}{tab === "source" && <SourceCatalogPage />}{tab === "inventory" && <MainCatalogPage inventoryOnly />}{tab === "templates" && <CatalogTemplatesPage />}{(["review", "changes", "categories", "mappings", "attributes", "groups", "readiness"] as CatalogWorkspaceTab[]).includes(tab) && <CatalogResourcePage tab={tab as Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates">} />}</div>
 }
 
 function SourceCatalogPage() {
