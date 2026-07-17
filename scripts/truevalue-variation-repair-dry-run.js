@@ -142,7 +142,10 @@ async function main() {
       )
       select
         tv.*,
-        coalesce(jsonb_agg(jsonb_build_object(
+        coalesce(status_matches.statuses, '[]'::jsonb) as statuses
+      from tv
+      left join lateral (
+        select jsonb_agg(jsonb_build_object(
           'status_sku', sps.sku,
           'shopify_id', sps.shopify_id,
           'shopify_variant_id', sps.shopify_variant_id,
@@ -150,14 +153,13 @@ async function main() {
           'shopify_status', sps.shopify_status,
           'shopify_published', sps.shopify_published,
           'status_payload', sps.status_payload
-        )) filter (where sps.sku is not null), '[]'::jsonb) as statuses
-      from tv
-      left join shopify_product_statuses sps
-        on lower(sps.sku) in (
+        )) as statuses
+        from shopify_product_statuses sps
+        where lower(sps.sku) in (
           lower(tv.sku),
           lower(tv.sku || '-' || floor(tv.computed_uom_qty)::text || 'PC')
         )
-      group by tv.product_id, tv.computed_uom_qty
+      ) status_matches on true
       order by tv.sku
     `);
 
