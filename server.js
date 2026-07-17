@@ -58,6 +58,7 @@ const activeJobProgress = new Map();
 const activeJobRecords = new Map();
 let dbCache = { mtimeMs: 0, data: null };
 let publicStateJsonCache = null;
+let operationalSummaryCache = { value: null, refreshedAt: 0, pending: null };
 let shopifyAccessTokenCache = { token: "", expiresAt: 0, scope: "" };
 let shopifyStatusMapCache = { mtimeMs: 0, data: null };
 let productSourceEnrichmentCache = { mtimeMs: 0, data: null };
@@ -13744,26 +13745,32 @@ function publicState(db, options = {}) {
 
 async function withOperationalSummary(db) {
   if (!postgres.isPostgresEnabled()) return db;
-  try {
-    const summary = await postgres.readOperationalSummary();
-    if (!summary) return db;
-    return {
-      ...db,
-      __summaryOverride: {
-        ...summary,
-        sources: (db.connections || []).map((connection) => ({
-          id: connection.id,
-          name: connection.name,
-          connected: Boolean(connection.connected),
-          status: connection.status || "",
-          lastSync: connection.lastSync || null
-        }))
-      }
-    };
-  } catch (error) {
-    console.warn("Unable to load Postgres operational summary:", error.message || error);
-    return db;
+  const now = Date.now();
+  if (!operationalSummaryCache.pending && now - operationalSummaryCache.refreshedAt > 60_000) {
+    operationalSummaryCache.pending = postgres.readOperationalSummary()
+      .then((summary) => {
+        if (summary) {
+          operationalSummaryCache.value = summary;
+          operationalSummaryCache.refreshedAt = Date.now();
+        }
+      })
+      .catch((error) => console.warn("Unable to refresh Postgres operational summary:", error.message || error))
+      .finally(() => { operationalSummaryCache.pending = null; });
   }
+  if (!operationalSummaryCache.value) return db;
+  return {
+    ...db,
+    __summaryOverride: {
+      ...operationalSummaryCache.value,
+      sources: (db.connections || []).map((connection) => ({
+        id: connection.id,
+        name: connection.name,
+        connected: Boolean(connection.connected),
+        status: connection.status || "",
+        lastSync: connection.lastSync || null
+      }))
+    }
+  };
 }
 
 function publicStateJson(db, options = {}) {
