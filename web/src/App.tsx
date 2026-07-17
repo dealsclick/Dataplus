@@ -140,6 +140,7 @@ type ChannelSettings = {
   inventoryScheduleRequireSuccessfulDump?: boolean
   shopifyShippingProfiles?: Array<{ id?: string; name?: string; default?: boolean }>
   shopifyShippingProfilesSyncedAt?: string
+  roundingRule?: string
   [key: string]: unknown
 }
 
@@ -677,6 +678,22 @@ function App() {
                 <Badge variant={workerStatus.online ? "default" : "secondary"}>
                   {workerStatus.online ? "Worker online" : "Worker idle"}
                 </Badge>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button size="sm"><MoreHorizontal className="size-4" /> Actions</Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={() => refreshData()}><RefreshCw className="size-4" /> Refresh workspace</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => navigateTo("jobs")}><Activity className="size-4" /> Open jobs</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => navigateTo("channels")}><Store className="size-4" /> Open channels</DropdownMenuItem>
+                    {shopify && <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={checkShopifyConnection}><ShieldCheck className="size-4" /> Check Shopify connection</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => runShopifyAction({ path: "/api/shopify/sku-map-sync", successMessage: "Shopify SKU map sync queued." })}><RefreshCw className="size-4" /> Sync Shopify SKU map</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => runShopifyAction({ path: "/api/shopify/status-sync-all", body: { limit: Number(shopify.settings?.shopifyStatusSyncLimit || 100) || 100 }, successMessage: "Shopify status sync queued." })}><RotateCcw className="size-4" /> Sync Shopify status</DropdownMenuItem>
+                    </>}
+                  </DropdownMenuContent>
+                </DropdownMenu>
                 <Button variant="outline" size="sm" onClick={() => refreshData()}>
                   <RefreshCw className="size-4" />
                   Refresh
@@ -720,6 +737,7 @@ function App() {
                 {view === "channels" && (
                   <ChannelsPage
                     channels={state.connections || []}
+                    warehouses={state.warehouses || []}
                     jobs={shopifyInventoryJobs}
                     auth={shopifyAuth}
                     checking={checkingShopify}
@@ -1178,6 +1196,7 @@ function JobDetail({ job, onRetry, onStop }: { job?: ImportJob; onRetry: (job: I
 
 function ChannelsPage({
   channels,
+  warehouses,
   jobs,
   auth,
   checking,
@@ -1188,6 +1207,7 @@ function ChannelsPage({
   onRefreshData,
 }: {
   channels: ChannelConnection[]
+  warehouses: Array<Record<string, unknown>>
   jobs: ImportJob[]
   auth: ShopifyAuthCheck | null
   checking: boolean
@@ -1239,6 +1259,7 @@ function ChannelsPage({
         {selectedChannel ? (
           <ChannelDetail
             channel={selectedChannel}
+            warehouses={warehouses}
             jobs={jobs}
             auth={auth}
             checking={checking}
@@ -1258,6 +1279,7 @@ function ChannelsPage({
 
 function ChannelDetail({
   channel,
+  warehouses,
   jobs,
   auth,
   checking,
@@ -1268,6 +1290,7 @@ function ChannelDetail({
   onRefreshData,
 }: {
   channel: ChannelConnection
+  warehouses: Array<Record<string, unknown>>
   jobs: ImportJob[]
   auth: ShopifyAuthCheck | null
   checking: boolean
@@ -1282,6 +1305,8 @@ function ChannelDetail({
   const isShopify = channel.name?.toLowerCase() === "shopify"
   const settings = { ...(channel.settings || {}), ...draft }
   const shippingProfiles = Array.isArray(channel.settings?.shopifyShippingProfiles) ? channel.settings.shopifyShippingProfiles : []
+  const scheduleTimes = String(settings.inventoryScheduleTimes || "03:00,13:00").split(/[,;\s]+/).filter(Boolean)
+  const selectedWarehouseId = String(settings.shopifyInventoryWarehouseId || "")
 
   useEffect(() => {
     setDraft({})
@@ -1428,7 +1453,15 @@ function ChannelDetail({
                 {isShopify && <DropdownMenuItem onClick={onCheckShopify}>Check connection</DropdownMenuItem>}
                 {isShopify && <DropdownMenuItem onClick={onRefreshShopifyToken}>Request new token</DropdownMenuItem>}
                 {isShopify && <DropdownMenuItem onClick={syncShippingProfiles}>Import shipping profiles</DropdownMenuItem>}
+                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("skuMap")}>Sync SKU map</DropdownMenuItem>}
+                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("status")}>Sync Shopify status</DropdownMenuItem>}
+                {isShopify && <DropdownMenuItem onClick={() => onRunShopifyAction({ path: "/api/shopify/collections/closeouts", successMessage: "Shopify Closeouts collection synced." })}>Sync Closeouts collection</DropdownMenuItem>}
                 <DropdownMenuSeparator />
+                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("linkDryRun")}>Link existing dry run</DropdownMenuItem>}
+                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("createDryRun")}>Create products dry run</DropdownMenuItem>}
+                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("priceDryRun")}>Price push dry run</DropdownMenuItem>}
+                {isShopify && <DropdownMenuItem onClick={() => queueShopifyAction("inventoryDryRun")}>Inventory update dry run</DropdownMenuItem>}
+                {isShopify && <DropdownMenuSeparator />}
                 <DropdownMenuItem onClick={() => window.open(`/legacy/channels/${encodeURIComponent(channel.id)}`, "_blank")}>Open legacy channel</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -1530,6 +1563,43 @@ function ChannelDetail({
               <Field label="Default shipping service">
                 <Input disabled={!editing} value={String(settings.defaultShippingService || "")} onChange={(event) => update("defaultShippingService", event.target.value)} />
               </Field>
+              {isShopify && <>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify Admin API</p></div>
+                <Field label="Store domain">
+                  <Input disabled={!editing} value={String(settings.shopifyStoreDomain || channel.shopifyConfig?.shop || "")} placeholder="store.myshopify.com" onChange={(event) => update("shopifyStoreDomain", event.target.value)} />
+                </Field>
+                <Field label="Admin API version">
+                  <Input disabled={!editing} value={String(settings.shopifyAdminApiVersion || channel.shopifyConfig?.apiVersion || "2026-04")} onChange={(event) => update("shopifyAdminApiVersion", event.target.value)} />
+                </Field>
+                <Field label="Status sync limit">
+                  <Input disabled={!editing} min="1" max="500" type="number" value={String(settings.shopifyStatusSyncLimit ?? 100)} onChange={(event) => update("shopifyStatusSyncLimit", Number(event.target.value || 100))} />
+                </Field>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify product defaults</p></div>
+                <Field label="Default product status">
+                  <Select disabled={!editing} value={String(settings.shopifyDefaultStatus || "draft")} onValueChange={(value) => update("shopifyDefaultStatus", value)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="draft">Draft</SelectItem><SelectItem value="active">Active</SelectItem><SelectItem value="archived">Archived</SelectItem></SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Inventory policy">
+                  <Select disabled={!editing} value={String(settings.shopifyInventoryPolicy || "deny")} onValueChange={(value) => update("shopifyInventoryPolicy", value)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="deny">Deny oversell</SelectItem><SelectItem value="continue">Continue selling</SelectItem></SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Fulfillment service">
+                  <Input disabled={!editing} value={String(settings.shopifyFulfillmentService || "manual")} onChange={(event) => update("shopifyFulfillmentService", event.target.value)} />
+                </Field>
+                <Field label="Publish scope">
+                  <Select disabled={!editing} value={String(settings.shopifyPublishScope || "global")} onValueChange={(value) => update("shopifyPublishScope", value)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="global">Global</SelectItem><SelectItem value="web">Web</SelectItem></SelectContent>
+                  </Select>
+                </Field>
+                <ToggleField label="Enable Shopify status sync" checked={Boolean(settings.shopifySyncStatusEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifySyncStatusEnabled", value)} />
+                <ToggleField label="Auto-sync after API actions" checked={Boolean(settings.shopifyAutoSyncStatus)} disabled={!editing} onCheckedChange={(value) => update("shopifyAutoSyncStatus", value)} />
+                <ToggleField label="Manage Closeouts collection" checked={Boolean(settings.shopifyCloseoutsEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyCloseoutsEnabled", value)} />
+              </>}
             </CardContent>
           </Card>
         </TabsContent>
@@ -1643,12 +1713,61 @@ function ChannelDetail({
               <Field label="Minimum margin percent">
                 <Input disabled={!editing} type="number" value={String(settings.minMarginPercent ?? 0)} onChange={(event) => update("minMarginPercent", Number(event.target.value || 0))} />
               </Field>
-              <Field label="Inventory schedule times">
-                <Input disabled={!editing} value={String(settings.inventoryScheduleTimes || "03:00,13:00")} onChange={(event) => update("inventoryScheduleTimes", event.target.value)} />
+              <Field label="Rounding rule">
+                <Select disabled={!editing} value={String(settings.roundingRule || "none")} onValueChange={(value) => update("roundingRule", value)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="none">No rounding</SelectItem><SelectItem value="nearest .99">Nearest .99</SelectItem><SelectItem value="nearest .95">Nearest .95</SelectItem><SelectItem value="round up">Round up</SelectItem></SelectContent>
+                </Select>
               </Field>
-              <ToggleField label="Inventory push" checked={Boolean(settings.shopifyInventoryPushEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyInventoryPushEnabled", value)} />
-              <ToggleField label="Scheduled inventory updates" checked={Boolean(settings.inventoryScheduleEnabled)} disabled={!editing} onCheckedChange={(value) => update("inventoryScheduleEnabled", value)} />
-              <ToggleField label="Require successful dump" checked={Boolean(settings.inventoryScheduleRequireSuccessfulDump)} disabled={!editing} onCheckedChange={(value) => update("inventoryScheduleRequireSuccessfulDump", value)} />
+              <ToggleField label="Price updates" checked={Boolean(settings.priceUpdateEnabled)} disabled={!editing} onCheckedChange={(value) => update("priceUpdateEnabled", value)} />
+              <ToggleField label="Inventory updates" checked={Boolean(settings.inventoryUpdateEnabled)} disabled={!editing} onCheckedChange={(value) => update("inventoryUpdateEnabled", value)} />
+              <ToggleField label="Order downloads" checked={Boolean(settings.orderDownloadEnabled)} disabled={!editing} onCheckedChange={(value) => update("orderDownloadEnabled", value)} />
+              <ToggleField label="Tracking updates" checked={Boolean(settings.trackingUpdateEnabled)} disabled={!editing} onCheckedChange={(value) => update("trackingUpdateEnabled", value)} />
+              <ToggleField label="Auto-create shadows" checked={Boolean(settings.autoCreateShadow)} disabled={!editing} onCheckedChange={(value) => update("autoCreateShadow", value)} />
+              {isShopify && <>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify inventory push</p></div>
+                <Field label="DataPlus warehouse">
+                  <Select disabled={!editing} value={selectedWarehouseId || "none"} onValueChange={(value) => update("shopifyInventoryWarehouseId", value === "none" ? "" : value)}>
+                    <SelectTrigger><SelectValue placeholder="Select warehouse" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Select mapped warehouse</SelectItem>
+                      {warehouses.map((warehouse) => {
+                        const id = String(warehouse.id || "")
+                        const name = String(warehouse.name || warehouse.code || "Warehouse")
+                        const location = String(warehouse.shopifyLocationName || warehouse.shopifyLocationId || "no Shopify location")
+                        return id ? <SelectItem key={id} value={id}>{name} / {location}</SelectItem> : null
+                      })}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Fallback Shopify location GID">
+                  <Input disabled={!editing} value={String(settings.shopifyInventoryLocationId || "")} placeholder="gid://shopify/Location/..." onChange={(event) => update("shopifyInventoryLocationId", event.target.value)} />
+                </Field>
+                <Field label="Schedule type">
+                  <Select disabled={!editing} value={String(settings.inventoryScheduleType || "times")} onValueChange={(value) => update("inventoryScheduleType", value)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="times">Specific times</SelectItem><SelectItem value="interval">Every X hours</SelectItem></SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Run mode">
+                  <Select disabled={!editing} value={String(settings.inventoryScheduleMode || "dry-run")} onValueChange={(value) => update("inventoryScheduleMode", value)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="dry-run">Dry run only</SelectItem><SelectItem value="apply">Apply to Shopify</SelectItem></SelectContent>
+                  </Select>
+                </Field>
+                <Field label="First run">
+                  <Input disabled={!editing} type="time" value={scheduleTimes[0] || "03:00"} onChange={(event) => update("inventoryScheduleTimes", [event.target.value, scheduleTimes[1] || "13:00"].join(","))} />
+                </Field>
+                <Field label="Second run">
+                  <Input disabled={!editing} type="time" value={scheduleTimes[1] || "13:00"} onChange={(event) => update("inventoryScheduleTimes", [scheduleTimes[0] || "03:00", event.target.value].join(","))} />
+                </Field>
+                <Field label="Every hours">
+                  <Input disabled={!editing} type="number" min="1" max="24" value={String(settings.inventoryScheduleEveryHours ?? 12)} onChange={(event) => update("inventoryScheduleEveryHours", Number(event.target.value || 12))} />
+                </Field>
+                <ToggleField label="Enable DataPlus inventory push" checked={Boolean(settings.shopifyInventoryPushEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyInventoryPushEnabled", value)} />
+                <ToggleField label="Scheduled inventory updates" checked={Boolean(settings.inventoryScheduleEnabled)} disabled={!editing} onCheckedChange={(value) => update("inventoryScheduleEnabled", value)} />
+                <ToggleField label="Require successful product dump" checked={Boolean(settings.inventoryScheduleRequireSuccessfulDump)} disabled={!editing} onCheckedChange={(value) => update("inventoryScheduleRequireSuccessfulDump", value)} />
+              </>}
             </CardContent>
           </Card>
         </TabsContent>
