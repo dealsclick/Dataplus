@@ -12,6 +12,7 @@ const { createDataQualityEngine } = require("./lib/data-quality");
 const PORT = process.env.PORT || 4173;
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
+const WEB_DIST_DIR = path.join(ROOT, "web", "dist");
 const DATA_DIR = path.join(ROOT, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
@@ -9477,15 +9478,29 @@ function csvRecordsToText(records = []) {
 
 function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const requested = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
-  let filePath = path.normalize(path.join(PUBLIC_DIR, requested));
-
-  if (!filePath.startsWith(PUBLIC_DIR)) return notFound(res);
+  const legacyRequest = url.pathname === "/legacy" || url.pathname.startsWith("/legacy/");
+  const requestedPath = legacyRequest
+    ? (url.pathname === "/legacy" ? "/index.html" : decodeURIComponent(url.pathname.replace(/^\/legacy/, "") || "/index.html"))
+    : (url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname));
   const acceptsHtml = String(req.headers.accept || "").includes("text/html");
-  const hasExtension = Boolean(path.extname(filePath));
+  const hasExtension = Boolean(path.extname(requestedPath));
+  const publicFilePath = path.normalize(path.join(PUBLIC_DIR, requestedPath));
+  const webFilePath = path.normalize(path.join(WEB_DIST_DIR, requestedPath));
+  const hasWebBuild = fs.existsSync(path.join(WEB_DIST_DIR, "index.html"));
+  let filePath = legacyRequest ? publicFilePath : (hasWebBuild ? webFilePath : publicFilePath);
+
+  if (legacyRequest && !filePath.startsWith(PUBLIC_DIR)) return notFound(res);
+  if (!legacyRequest && hasWebBuild && !filePath.startsWith(WEB_DIST_DIR)) return notFound(res);
+  if (!legacyRequest && !hasWebBuild && !filePath.startsWith(PUBLIC_DIR)) return notFound(res);
+
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    if (req.method === "GET" && acceptsHtml && !hasExtension && !url.pathname.startsWith("/api/")) {
-      filePath = path.join(PUBLIC_DIR, "index.html");
+    const publicFallback = !legacyRequest && publicFilePath.startsWith(PUBLIC_DIR) && fs.existsSync(publicFilePath) && !fs.statSync(publicFilePath).isDirectory();
+    if (publicFallback) {
+      filePath = publicFilePath;
+    } else if (req.method === "GET" && acceptsHtml && !hasExtension && !url.pathname.startsWith("/api/")) {
+      filePath = legacyRequest || !hasWebBuild
+        ? path.join(PUBLIC_DIR, "index.html")
+        : path.join(WEB_DIST_DIR, "index.html");
     } else {
       return notFound(res);
     }

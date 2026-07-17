@@ -1731,7 +1731,7 @@ function setState(nextState) {
 }
 
 function normalizeAppPath(pathname = "") {
-  const normalized = `/${String(pathname || "/").replace(/^\/+/, "").replace(/\/+$/, "")}`;
+  const normalized = `/${String(pathname || "/").replace(/^\/+/, "").replace(/\/+$/, "")}`.replace(/^\/legacy(?=\/|$)/i, "") || "/";
   return normalized === "/" ? "/" : normalized.toLowerCase();
 }
 

@@ -7,6 +7,8 @@
     "start": "node server.js",
     "worker": "node scripts/dataplus-worker.js",
     "worker:once": "node -e \"process.env.DATAPLUS_WORKER_ONCE='1'; require('./scripts/dataplus-worker')\"",
+    "web:build": "npm --prefix web run build",
+    "web:dev": "npm --prefix web run dev",
     "db:migrate": "node scripts/migrate-json-to-postgres.js",
     "import:product-dump": "node scripts/import-product-dump.js",
     "import:shopify-taxonomy": "node scripts/import-shopify-taxonomy.js",
