@@ -16873,6 +16873,7 @@ function productMatchesCatalogFilters(product = {}, filters = {}) {
   if (!catalogFilterMatches(filters.toBeDiscontinued, String(Boolean(product.toBeDiscontinued || product.closeoutEligible)))) return false;
   if (!catalogFilterMatches(filters.verifiedBrand, String(Boolean(verifiedBrandForHandle(product))))) return false;
   if (!catalogFilterMatches(filters.brand, product.brand || "", formatBrandName)) return false;
+  if (!catalogFilterMatches(filters.manufacturer, product.manufacturer || "")) return false;
   if (!catalogFilterMatches(filters.category, product.category || "", formatCategoryName)) return false;
   return true;
 }
@@ -17787,7 +17788,7 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sor
   const filtered = hasCatalogFilters(filters);
   const selectedSuppliers = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim()).filter(Boolean);
   const supplierIndexedFilter = selectedSuppliers.length >= 1 && !q;
-  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.category].every((value) => !value);
+  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.manufacturer, filters.category].every((value) => !value);
   const vendorIndex = supplierIndexedFilter ? readCatalogVendorIndex() : null;
   const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
   const supplierTotal = supplierOnlyFilter
@@ -23341,6 +23342,17 @@ async function handleApi(req, res) {
     };
     const patch = statusByAction[action];
     if (!patch) return sendJson(res, 400, { error: "Unsupported source catalog action." });
+    if (allFiltered) {
+      const impact = await sourceCatalogImportImpact({
+        skus,
+        allFiltered: true,
+        query: body.query || "",
+        filters: body.filters || {},
+        limit: Math.max(1, Math.min(25000, Number(body.limit || 25000)))
+      });
+      skus = [...new Set((impact.sourceRows || []).map((row) => String(row.sku || "").trim()).filter(Boolean))];
+    }
+    if (!skus.length) return sendJson(res, 200, { changed: 0, message: "No source catalog products matched this action." });
     const db = normalizeDb(await readDbFast({ skipInventory: true }));
     const overrides = sourceCatalogOverrideMap(db);
     const now = new Date().toISOString();

@@ -256,6 +256,8 @@ type CatalogItem = {
   sku?: string
   title?: string
   brand?: string
+  manufacturer?: string
+  vendorSku?: string
   supplier?: string
   supplierCode?: string
   mainCategory?: string
@@ -270,6 +272,7 @@ type CatalogItem = {
   status?: string
   inProducts?: boolean
   toBeDiscontinued?: boolean
+  hazardous?: boolean
   alternateVendorCount?: number
   defaultImage?: string
 }
@@ -386,7 +389,29 @@ type CatalogResponse = {
   partial?: boolean
   indexed?: boolean
   database?: string
-  manifest?: { productCount?: number; source?: string; updatedAt?: string }
+  manifest?: { productCount?: number; source?: string; updatedAt?: string; importedAt?: string }
+}
+
+type SourceCatalogFilters = {
+  suppliers: string[]
+  productMembership: string
+  stockStatus: string
+  hasStock: string
+  stockQtyOperator: string
+  stockQty: string
+  hazardous: string
+  toBeDiscontinued: string
+  active: string
+  brand: string
+  category: string
+  manufacturer: string
+}
+
+type SourceCatalogFacets = {
+  suppliers?: string[]
+  stockStatuses?: string[]
+  brands?: string[]
+  categories?: string[]
 }
 
 type ShopifyAuthCheck = {
@@ -3284,48 +3309,103 @@ function CatalogPage() {
 }
 
 function SourceCatalogPage() {
-  const [query, setQuery] = useState("")
-  const [pageSize, setPageSize] = useState(25)
+  const paramsAtLoad = new URLSearchParams(window.location.search)
+  const defaultFilters: SourceCatalogFilters = {
+    suppliers: paramsAtLoad.get("suppliers")?.split("|").filter(Boolean) || [], productMembership: paramsAtLoad.get("productMembership") || "", stockStatus: paramsAtLoad.get("stockStatus") || "", hasStock: paramsAtLoad.get("hasStock") || "", stockQtyOperator: paramsAtLoad.get("stockQtyOperator") || "", stockQty: paramsAtLoad.get("stockQty") || "", hazardous: paramsAtLoad.get("hazardous") || "", toBeDiscontinued: paramsAtLoad.get("toBeDiscontinued") || "", active: paramsAtLoad.get("active") || "", brand: paramsAtLoad.get("brand") || "", category: paramsAtLoad.get("category") || "", manufacturer: paramsAtLoad.get("manufacturer") || "",
+  }
+  const [query, setQuery] = useState(paramsAtLoad.get("q") || "")
+  const [pageSize, setPageSize] = useState(Number(paramsAtLoad.get("limit") || 25))
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(false)
   const [response, setResponse] = useState<CatalogResponse>({})
+  const [filters, setFilters] = useState<SourceCatalogFilters>(defaultFilters)
+  const [filterDraft, setFilterDraft] = useState<SourceCatalogFilters>(defaultFilters)
+  const [filterOpen, setFilterOpen] = useState(false)
+  const [facets, setFacets] = useState<SourceCatalogFacets>({})
+  const [facetsLoading, setFacetsLoading] = useState(false)
+  const [supplierSearch, setSupplierSearch] = useState("")
   const [selectedItem, setSelectedItem] = useState<CatalogItem | null>(null)
   const [selectedSkus, setSelectedSkus] = useState<Set<string>>(new Set())
-  const [promoting, setPromoting] = useState(false)
+  const [allFiltered, setAllFiltered] = useState(false)
   const [latestCursorStack, setLatestCursorStack] = useState<string[]>([""])
+  const [promotionOpen, setPromotionOpen] = useState(false)
+  const [promotionScope, setPromotionScope] = useState<"selected" | "filtered">("selected")
+  const [promotionImpact, setPromotionImpact] = useState<{ matched?: number; importable?: number; newProducts?: number; existing?: number; limited?: boolean } | null>(null)
+  const [promotionLoading, setPromotionLoading] = useState(false)
+  const [importMode, setImportMode] = useState("new-and-update")
+  const [maintenanceOpen, setMaintenanceOpen] = useState(false)
+  const [maintenanceLoading, setMaintenanceLoading] = useState(false)
 
-  async function loadCatalog(nextPage = page, cursor = "") {
+  const filterCount = Object.values(filters).reduce((count, value) => count + (Array.isArray(value) ? value.length : value ? 1 : 0), 0)
+  const filterPayload = useMemo(() => ({ ...filters, suppliers: filters.suppliers.join("|") }), [filters])
+  const rows = response.items || []
+  const total = Number(response.totalMatches || rows.length || 0)
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const latestMode = !query.trim() && !filterCount
+  const pageSkus = rows.map((item) => item.sku || "").filter(Boolean)
+  const pageSelected = pageSkus.length > 0 && (allFiltered || pageSkus.every((sku) => selectedSkus.has(sku)))
+  const selectedCount = allFiltered ? total : selectedSkus.size
+
+  function updateUrl(nextQuery = query, nextFilters = filters, nextLimit = pageSize) {
+    const next = new URLSearchParams()
+    if (nextQuery.trim()) next.set("q", nextQuery.trim())
+    if (nextLimit !== 25) next.set("limit", String(nextLimit))
+    for (const [key, value] of Object.entries(nextFilters)) {
+      const text = Array.isArray(value) ? value.join("|") : value
+      if (text) next.set(key, text)
+    }
+    const suffix = next.toString()
+    window.history.replaceState({}, "", `/source-catalog${suffix ? `?${suffix}` : ""}`)
+  }
+
+  async function loadCatalog(nextPage = page, cursor = "", nextQuery = query, nextFilters = filters, nextLimit = pageSize) {
     setLoading(true)
     try {
-      const params = new URLSearchParams({ q: query, page: String(nextPage), limit: String(pageSize) })
-      if (!query.trim()) {
-        params.set("sort", "latest")
-        if (cursor) params.set("cursor", cursor)
+      const next = new URLSearchParams({ q: nextQuery, page: String(nextPage), limit: String(nextLimit) })
+      for (const [key, value] of Object.entries(nextFilters)) {
+        const text = Array.isArray(value) ? value.join("|") : value
+        if (text) next.set(key, text)
       }
-      const result = await api<CatalogResponse>(`/api/catalog/products?${params}`)
+      if (!nextQuery.trim() && !Object.values(nextFilters).some((value) => Array.isArray(value) ? value.length : value)) {
+        next.set("sort", "latest")
+        if (cursor) next.set("cursor", cursor)
+      }
+      const result = await api<CatalogResponse>(`/api/catalog/products?${next}`)
       setResponse(result)
       setPage(nextPage)
+      updateUrl(nextQuery, nextFilters, nextLimit)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load catalog products.")
+      toast.error(error instanceof Error ? error.message : "Unable to load source catalog products.")
     } finally {
       setLoading(false)
     }
   }
 
+  async function loadFacets() {
+    if (facetsLoading || Object.keys(facets).length) return
+    setFacetsLoading(true)
+    try {
+      const result = await api<SourceCatalogFacets>("/api/catalog/facets")
+      setFacets(result)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load source filter values.")
+    } finally {
+      setFacetsLoading(false)
+    }
+  }
+
   useEffect(() => {
     setLatestCursorStack([""])
-    loadCatalog(1)
+    setSelectedSkus(new Set())
+    setAllFiltered(false)
+    void loadCatalog(1, "", query, filters, pageSize)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageSize])
 
-  const rows = response.items || []
-  const total = Number(response.totalMatches || rows.length || 0)
-  const totalPages = Math.max(1, Math.ceil(total / pageSize))
-  const latestMode = !query.trim()
-  const pageSkus = rows.map((item) => item.sku || "").filter(Boolean)
-  const pageSelected = pageSkus.length > 0 && pageSkus.every((sku) => selectedSkus.has(sku))
+  useEffect(() => { if (filterOpen) void loadFacets() }, [filterOpen])
 
   function toggleSku(sku: string, checked: boolean) {
+    setAllFiltered(false)
     setSelectedSkus((current) => {
       const next = new Set(current)
       if (checked) next.add(sku)
@@ -3334,149 +3414,106 @@ function SourceCatalogPage() {
     })
   }
 
-  async function promoteSelected() {
+  function applyFilters() {
+    setFilters(filterDraft)
+    setLatestCursorStack([""])
+    setSelectedSkus(new Set())
+    setAllFiltered(false)
+    setFilterOpen(false)
+    void loadCatalog(1, "", query, filterDraft)
+  }
+
+  function clearFilters() {
+    const next = { ...defaultFilters, suppliers: [] }
+    setFilters(next)
+    setFilterDraft(next)
+    setLatestCursorStack([""])
+    setSelectedSkus(new Set())
+    setAllFiltered(false)
+    void loadCatalog(1, "", query, next)
+  }
+
+  async function openPromotion(scope: "selected" | "filtered") {
     const skus = [...selectedSkus]
-    if (!skus.length) return
-    setPromoting(true)
+    if (scope === "selected" && !skus.length) return
+    setPromotionScope(scope)
+    setPromotionOpen(true)
+    setPromotionLoading(true)
     try {
-      const result = await api<{ changed?: number }>("/api/catalog/promote-bulk", { method: "POST", body: JSON.stringify({ skus }) })
-      toast.success(`${numberLabel(result.changed || skus.length)} SKU${(result.changed || skus.length) === 1 ? "" : "s"} added to the main catalog.`)
-      setSelectedSkus(new Set())
+      const result = await api<{ matched?: number; importable?: number; newProducts?: number; existing?: number; limited?: boolean }>("/api/catalog/import-impact", { method: "POST", body: JSON.stringify({ skus, allFiltered: scope === "filtered", query, filters: filterPayload, importMode }) })
+      setPromotionImpact(result)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to add selected SKUs to the main catalog.")
+      toast.error(error instanceof Error ? error.message : "Unable to calculate source catalog import impact.")
+      setPromotionOpen(false)
     } finally {
-      setPromoting(false)
+      setPromotionLoading(false)
     }
   }
 
-  return (
-    <div className="grid gap-5">
-      <PageHeader
-        eyebrow="Catalog"
-        title="Products"
-        description="Latest source SKUs first, with compact product, price, stock, and category columns."
-        action={<Button asChild variant="outline"><a href="/legacy/products" target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Advanced table</a></Button>}
-      />
-      <Card>
-        <CardHeader className="border-b">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="relative">
-              <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
-              <Input
-                className="w-[420px] max-w-[75vw] pl-8"
-                placeholder="Search SKU, title, brand, supplier, category"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={(event) => { if (event.key === "Enter") loadCatalog(1) }}
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <Button onClick={() => { setLatestCursorStack([""]); loadCatalog(1) }} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button>
-              <Select value={String(pageSize)} onValueChange={(value) => setPageSize(Number(value))}>
-                <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="10">10 rows</SelectItem>
-                  <SelectItem value="25">25 rows</SelectItem>
-                  <SelectItem value="50">50 rows</SelectItem>
-                  <SelectItem value="100">100 rows</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <CardDescription>
-            {query.trim()
-              ? `${numberLabel(total)} matched. Source: ${response.database || response.manifest?.source || "catalog"} ${response.partial ? "/ partial search" : ""}`
-              : `${numberLabel(total)} newest source SKUs. Search SKU, title, brand, supplier, or category to narrow the list.`}
-          </CardDescription>
-          {!!selectedSkus.size && <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/40 p-2"><p className="text-sm font-medium">{numberLabel(selectedSkus.size)} selected</p><div className="flex gap-2"><Button size="sm" variant="ghost" onClick={() => setSelectedSkus(new Set())}>Clear</Button><Button size="sm" onClick={promoteSelected} disabled={promoting}>{promoting && <Loader2 className="size-4 animate-spin" />} Add to main catalog</Button></div></div>}
-        </CardHeader>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-10"><Checkbox aria-label="Select page" checked={pageSelected} onCheckedChange={(checked) => { const next = new Set(selectedSkus); for (const sku of pageSkus) { if (checked) next.add(sku); else next.delete(sku) } setSelectedSkus(next) }} /></TableHead>
-                <TableHead>Product</TableHead>
-                <TableHead>Supplier</TableHead>
-                <TableHead>Category</TableHead>
-                <TableHead>Stock</TableHead>
-                <TableHead>Cost</TableHead>
-                <TableHead>Price</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="w-12"></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((item) => (
-                <TableRow key={item.id || item.sku}>
-                  <TableCell><Checkbox aria-label={`Select ${item.sku}`} checked={Boolean(item.sku && selectedSkus.has(item.sku))} onCheckedChange={(checked) => item.sku && toggleSku(item.sku, checked === true)} /></TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-3">
-                      <div className="grid size-10 place-items-center overflow-hidden rounded-md border bg-muted">
-                        {item.defaultImage ? <img src={item.defaultImage} alt="" className="max-h-full max-w-full object-contain" /> : <Boxes className="size-4 text-muted-foreground" />}
-                      </div>
-                      <div className="min-w-0">
-                        <p className="truncate font-semibold">{item.sku}</p>
-                        <p className="line-clamp-1 text-xs text-muted-foreground">{item.title}</p>
-                      </div>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <p className="font-medium">{item.supplier || item.supplierCode || "Unknown"}</p>
-                    <p className="text-xs text-muted-foreground">{item.brand || "No brand"}</p>
-                  </TableCell>
-                  <TableCell className="max-w-[320px]">
-                    <p className="line-clamp-2 text-sm">{item.mainCategory || item.sourceCategory || "Uncategorized"}</p>
-                    <Badge variant={item.categoryVerified ? "default" : "outline"}>{item.categoryVerified ? "Verified" : "Needs map"}</Badge>
-                  </TableCell>
-                  <TableCell>{numberLabel(item.stockQty)}</TableCell>
-                  <TableCell>{moneyLabel(item.cost)}</TableCell>
-                  <TableCell>{moneyLabel(item.websitePrice || item.price)}</TableCell>
-                  <TableCell>
-                    <div className="flex flex-col gap-1">
-                      <Badge variant={item.active === false ? "outline" : "default"}>{item.active === false ? "Inactive" : "Active"}</Badge>
-                      {item.toBeDiscontinued && <Badge variant="destructive">Discontinued</Badge>}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem onClick={() => setSelectedItem(item)}>Open product</DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => window.open(`/legacy/products?sku=${encodeURIComponent(item.sku || "")}`, "_blank")}>Open legacy product</DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </TableCell>
-                </TableRow>
-              ))}
-              {!rows.length && (
-                <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">{query.trim() ? "No products found." : "No recently added source SKUs found."}</TableCell></TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">{latestMode ? `Page ${page}` : `Page ${page} of ${totalPages}`}</p>
-        <div className="flex gap-2">
-          <Button variant="outline" disabled={page <= 1 || loading} onClick={() => {
-            const previousCursor = latestMode ? (latestCursorStack[page - 2] || "") : ""
-            if (latestMode) setLatestCursorStack((current) => current.slice(0, Math.max(1, page - 1)))
-            loadCatalog(Math.max(1, page - 1), previousCursor)
-          }}>Previous</Button>
-          <Button variant="outline" disabled={loading || (latestMode ? !response.nextCursor : page >= totalPages)} onClick={() => {
-            if (latestMode) {
-              const nextCursor = response.nextCursor || ""
-              setLatestCursorStack((current) => [...current.slice(0, page), nextCursor])
-              loadCatalog(page + 1, nextCursor)
-              return
-            }
-            loadCatalog(Math.min(totalPages, page + 1))
-          }}>Next</Button>
-        </div>
-      </div>
-      <ProductDetailSheet sourceItem={selectedItem} open={Boolean(selectedItem)} onOpenChange={(nextOpen) => { if (!nextOpen) setSelectedItem(null) }} />
-    </div>
-  )
+  async function promote() {
+    setPromotionLoading(true)
+    try {
+      const result = await api<{ job?: ImportJob; message?: string }>("/api/catalog/bulk", { method: "POST", body: JSON.stringify({ action: "add-active", skus: [...selectedSkus], allFiltered: promotionScope === "filtered", query, filters: filterPayload, importMode }) })
+      toast.success(result.message || "Source catalog import queued.")
+      setPromotionOpen(false)
+      setSelectedSkus(new Set())
+      setAllFiltered(false)
+      if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 500)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue the source catalog import.")
+    } finally {
+      setPromotionLoading(false)
+    }
+  }
+
+  async function runBulk(action: "set-active" | "set-inactive" | "set-discontinued" | "delete", scope: "selected" | "filtered" = "selected") {
+    if (scope === "selected" && !selectedSkus.size) return
+    const label = action === "delete" ? "hide" : action.replace("set-", "mark ")
+    const count = scope === "filtered" ? total : selectedSkus.size
+    if (!window.confirm(`${label.charAt(0).toUpperCase()}${label.slice(1)} ${numberLabel(count)} source SKU${count === 1 ? "" : "s"}?`)) return
+    try {
+      const result = await api<{ changed?: number }>("/api/catalog/bulk", { method: "POST", body: JSON.stringify({ action, skus: [...selectedSkus], allFiltered: scope === "filtered", query, filters: filterPayload }) })
+      toast.success(`${numberLabel(result.changed || 0)} source SKU${Number(result.changed || 0) === 1 ? "" : "s"} updated.`)
+      setSelectedSkus(new Set())
+      setAllFiltered(false)
+      void loadCatalog(1)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to update source catalog records.")
+    }
+  }
+
+  async function runMaintenance(path: string, label: string) {
+    setMaintenanceLoading(true)
+    try {
+      const result = await api<{ job?: ImportJob; message?: string }>(path, { method: "POST", body: JSON.stringify({}) })
+      toast.success(result.message || `${label} queued.`)
+      if (result.job?.id) setMaintenanceOpen(false)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `Unable to start ${label.toLowerCase()}.`)
+    } finally {
+      setMaintenanceLoading(false)
+    }
+  }
+
+  const suppliers = (facets.suppliers || []).filter((supplier) => supplier.toLowerCase().includes(supplierSearch.toLowerCase())).slice(0, 250)
+
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Catalog" title="Source Catalog" description="Supplier feed records. Filter and review here before intentionally promoting a SKU into the approved catalog." action={<div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => setMaintenanceOpen(true)}><Settings className="size-4" /> Maintenance</Button><Button variant="outline" size="sm" onClick={() => { setFilterDraft(filters); setFilterOpen(true) }}><Search className="size-4" /> Filters{filterCount ? ` (${filterCount})` : ""}</Button></div>} />
+    <Card>
+      <CardHeader className="gap-3 border-b">
+        <div className="flex flex-wrap items-center justify-between gap-3"><div className="relative"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="w-[420px] max-w-[72vw] pl-8" placeholder="Search SKU, title, brand, supplier, category" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { setLatestCursorStack([""]); void loadCatalog(1) } }} /></div><div className="flex items-center gap-2"><Button size="sm" onClick={() => { setLatestCursorStack([""]); void loadCatalog(1) }} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button><Select value={String(pageSize)} onValueChange={(value) => setPageSize(Number(value))}><SelectTrigger className="w-28"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="10">10 rows</SelectItem><SelectItem value="25">25 rows</SelectItem><SelectItem value="50">50 rows</SelectItem><SelectItem value="100">100 rows</SelectItem></SelectContent></Select></div></div>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{numberLabel(total)} matched</span><span>Source: {response.database || response.manifest?.source || "catalog"}</span>{response.manifest?.importedAt && <span>Imported {dateLabel(response.manifest.importedAt)}</span>}{response.partial && <Badge variant="outline">Partial search</Badge>}{filterCount ? <><Badge variant="secondary">{filterCount} active filter{filterCount === 1 ? "" : "s"}</Badge><Button variant="ghost" size="sm" onClick={clearFilters}>Clear filters</Button></> : null}</div>
+        {selectedCount ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2"><p className="text-sm font-medium">{allFiltered ? `${numberLabel(total)} filtered source SKUs selected` : `${numberLabel(selectedSkus.size)} source SKU${selectedSkus.size === 1 ? "" : "s"} selected`}</p><div className="flex flex-wrap gap-2"><Button size="sm" variant="ghost" onClick={() => { setSelectedSkus(new Set()); setAllFiltered(false) }}>Clear</Button><Button size="sm" onClick={() => void openPromotion(allFiltered ? "filtered" : "selected")}>Add to main catalog</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline">Update status</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => void runBulk("set-active", allFiltered ? "filtered" : "selected")}>Set active</DropdownMenuItem><DropdownMenuItem onClick={() => void runBulk("set-inactive", allFiltered ? "filtered" : "selected")}>Set inactive</DropdownMenuItem><DropdownMenuItem onClick={() => void runBulk("set-discontinued", allFiltered ? "filtered" : "selected")}>Mark discontinued</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onClick={() => void runBulk("delete", allFiltered ? "filtered" : "selected")}>Hide from source catalog</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div> : null}
+      </CardHeader>
+      <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select page" checked={pageSelected} onCheckedChange={(checked) => { if (checked) { setSelectedSkus(new Set(pageSkus)); setAllFiltered(false) } else { setSelectedSkus(new Set()); setAllFiltered(false) } }} /></TableHead><TableHead>Source product</TableHead><TableHead>Supplier</TableHead><TableHead>Manufacturer</TableHead><TableHead>Category</TableHead><TableHead>Stock</TableHead><TableHead>Cost</TableHead><TableHead>Price</TableHead><TableHead>Status</TableHead><TableHead className="w-12" /></TableRow></TableHeader><TableBody>{loading ? <TableRow><TableCell colSpan={10} className="py-12 text-center"><Loader2 className="mx-auto size-5 animate-spin text-muted-foreground" /></TableCell></TableRow> : rows.map((item) => <TableRow key={`${item.supplier || ""}-${item.id || item.sku}`}><TableCell><Checkbox aria-label={`Select ${item.sku}`} checked={allFiltered || Boolean(item.sku && selectedSkus.has(item.sku))} onCheckedChange={(checked) => item.sku && toggleSku(item.sku, checked === true)} /></TableCell><TableCell><button className="flex min-w-64 items-center gap-3 text-left" onClick={() => setSelectedItem(item)}><div className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md border bg-muted">{item.defaultImage ? <img src={item.defaultImage} alt="" className="max-h-full max-w-full object-contain" /> : <Boxes className="size-4 text-muted-foreground" />}</div><div className="min-w-0"><p className="truncate font-semibold hover:underline">{item.sku}</p><p className="line-clamp-1 text-xs text-muted-foreground">{item.title || "Untitled product"}</p>{item.inProducts && <Badge variant="secondary" className="mt-1">In products</Badge>}</div></button></TableCell><TableCell><p className="font-medium">{item.supplier || item.supplierCode || "Unknown"}</p><p className="text-xs text-muted-foreground">{item.brand || "No brand"}</p></TableCell><TableCell className="max-w-44"><p className="truncate">{item.manufacturer || item.vendorSku || "-"}</p></TableCell><TableCell className="max-w-72"><p className="line-clamp-2 text-sm">{item.mainCategory || item.sourceCategory || "Uncategorized"}</p><Badge variant={item.categoryVerified ? "default" : "outline"}>{item.categoryVerified ? "Mapped" : "Needs map"}</Badge></TableCell><TableCell><p className="font-medium">{numberLabel(item.stockQty)}</p><p className="text-xs text-muted-foreground">{item.stockStatus || "-"}</p></TableCell><TableCell>{moneyLabel(item.cost)}</TableCell><TableCell>{moneyLabel(item.websitePrice || item.price)}</TableCell><TableCell><div className="flex flex-col gap-1"><Badge variant={item.active === false ? "outline" : "default"}>{item.active === false ? "Inactive" : "Active"}</Badge>{item.toBeDiscontinued && <Badge variant="destructive">Discontinued</Badge>}</div></TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" title="Source SKU actions"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => setSelectedItem(item)}>View source details</DropdownMenuItem><DropdownMenuItem onClick={() => { if (item.sku) { setSelectedSkus(new Set([item.sku])); void openPromotion("selected") } }}>Add to main catalog</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => { if (item.sku) { setSelectedSkus(new Set([item.sku])); void runBulk("set-active") } }}>Set active</DropdownMenuItem><DropdownMenuItem onClick={() => { if (item.sku) { setSelectedSkus(new Set([item.sku])); void runBulk("set-inactive") } }}>Set inactive</DropdownMenuItem><DropdownMenuItem onClick={() => { if (item.sku) { setSelectedSkus(new Set([item.sku])); void runBulk("set-discontinued") } }}>Mark discontinued</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onClick={() => { if (item.sku) { setSelectedSkus(new Set([item.sku])); void runBulk("delete") } }}>Hide from source catalog</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow>)}{!loading && !rows.length && <TableRow><TableCell colSpan={10} className="h-28 text-center text-muted-foreground">No source products match these filters.</TableCell></TableRow>}</TableBody></Table></div></CardContent>
+    </Card>
+    {pageSelected && !allFiltered && total > rows.length && <div className="flex justify-center"><Button size="sm" variant="outline" onClick={() => setAllFiltered(true)}>Select all {numberLabel(total)} filtered source SKUs</Button></div>}
+    <div className="flex items-center justify-between"><p className="text-sm text-muted-foreground">{latestMode ? `Page ${page}${response.hasMore ? " / more available" : ""}` : `Page ${page} of ${totalPages}`}</p><div className="flex gap-2"><Button variant="outline" disabled={page <= 1 || loading} onClick={() => { const previousCursor = latestMode ? (latestCursorStack[page - 2] || "") : ""; if (latestMode) setLatestCursorStack((current) => current.slice(0, Math.max(1, page - 1))); void loadCatalog(Math.max(1, page - 1), previousCursor) }}>Previous</Button><Button variant="outline" disabled={loading || (latestMode ? !response.nextCursor : page >= totalPages)} onClick={() => { if (latestMode) { const nextCursor = response.nextCursor || ""; setLatestCursorStack((current) => [...current.slice(0, page), nextCursor]); void loadCatalog(page + 1, nextCursor); return } void loadCatalog(Math.min(totalPages, page + 1)) }}>Next</Button></div></div>
+    <Sheet open={filterOpen} onOpenChange={setFilterOpen}><SheetContent side="right" className="w-full overflow-y-auto sm:max-w-xl"><SheetHeader><SheetTitle>Source catalog filters</SheetTitle><SheetDescription>Filter values load only when this panel opens, keeping the catalog fast.</SheetDescription></SheetHeader>{facetsLoading ? <div className="grid gap-3 py-6"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div> : <div className="grid gap-5 py-6"><div className="grid gap-2"><Label>Supplier</Label><Input value={supplierSearch} onChange={(event) => setSupplierSearch(event.target.value)} placeholder="Find a supplier" /><div className="max-h-52 overflow-y-auto rounded-md border">{suppliers.map((supplier) => <label key={supplier} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted"><Checkbox checked={filterDraft.suppliers.includes(supplier)} onCheckedChange={() => setFilterDraft((current) => ({ ...current, suppliers: current.suppliers.includes(supplier) ? current.suppliers.filter((item) => item !== supplier) : [...current.suppliers, supplier] }))} />{supplier}</label>)}{!suppliers.length && <p className="p-3 text-sm text-muted-foreground">No suppliers match.</p>}</div></div><div className="grid gap-3 sm:grid-cols-2"><Field label="Catalog membership"><Select value={filterDraft.productMembership || "all"} onValueChange={(value) => setFilterDraft((current) => ({ ...current, productMembership: value === "all" ? "" : value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All source SKUs</SelectItem><SelectItem value="in-products">Already in Products</SelectItem><SelectItem value="not-in-products">Source only</SelectItem></SelectContent></Select></Field><Field label="Stock"><Select value={filterDraft.hasStock || "all"} onValueChange={(value) => setFilterDraft((current) => ({ ...current, hasStock: value === "all" ? "" : value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any stock</SelectItem><SelectItem value="true">In stock</SelectItem><SelectItem value="false">Out of stock</SelectItem></SelectContent></Select></Field><Field label="Lifecycle"><Select value={filterDraft.toBeDiscontinued || "all"} onValueChange={(value) => setFilterDraft((current) => ({ ...current, toBeDiscontinued: value === "all" ? "" : value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any lifecycle</SelectItem><SelectItem value="false">Current</SelectItem><SelectItem value="true">Discontinued / closeout</SelectItem></SelectContent></Select></Field><Field label="Record status"><Select value={filterDraft.active || "all"} onValueChange={(value) => setFilterDraft((current) => ({ ...current, active: value === "all" ? "" : value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any status</SelectItem><SelectItem value="true">Active</SelectItem><SelectItem value="false">Inactive</SelectItem></SelectContent></Select></Field><Field label="Hazardous"><Select value={filterDraft.hazardous || "all"} onValueChange={(value) => setFilterDraft((current) => ({ ...current, hazardous: value === "all" ? "" : value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any compliance state</SelectItem><SelectItem value="true">Hazardous</SelectItem><SelectItem value="false">Not hazardous</SelectItem></SelectContent></Select></Field><Field label="Stock status"><Select value={filterDraft.stockStatus || "all"} onValueChange={(value) => setFilterDraft((current) => ({ ...current, stockStatus: value === "all" ? "" : value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any stock status</SelectItem>{(facets.stockStatuses || []).map((status) => <SelectItem key={status} value={status}>{status}</SelectItem>)}</SelectContent></Select></Field></div><div className="grid gap-3 rounded-md border p-3 sm:grid-cols-[1fr_110px]"><Field label="Stock quantity"><Select value={filterDraft.stockQtyOperator || "all"} onValueChange={(value) => setFilterDraft((current) => ({ ...current, stockQtyOperator: value === "all" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Operator" /></SelectTrigger><SelectContent><SelectItem value="all">Any quantity</SelectItem><SelectItem value="gt">Greater than</SelectItem><SelectItem value="gte">At least</SelectItem><SelectItem value="lt">Less than</SelectItem><SelectItem value="lte">At most</SelectItem><SelectItem value="empty">Missing</SelectItem></SelectContent></Select></Field><Field label="Value"><Input type="number" value={filterDraft.stockQty} disabled={!filterDraft.stockQtyOperator || ["empty", "notEmpty"].includes(filterDraft.stockQtyOperator)} onChange={(event) => setFilterDraft((current) => ({ ...current, stockQty: event.target.value }))} /></Field></div><div className="grid gap-3"><Field label="Brand"><Select value={filterDraft.brand || "all"} onValueChange={(value) => setFilterDraft((current) => ({ ...current, brand: value === "all" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Any brand" /></SelectTrigger><SelectContent><SelectItem value="all">Any brand</SelectItem>{(facets.brands || []).map((brand) => <SelectItem key={brand} value={brand}>{brand}</SelectItem>)}</SelectContent></Select></Field><Field label="Category"><Select value={filterDraft.category || "all"} onValueChange={(value) => setFilterDraft((current) => ({ ...current, category: value === "all" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Any category" /></SelectTrigger><SelectContent><SelectItem value="all">Any category</SelectItem>{(facets.categories || []).map((category) => <SelectItem key={category} value={category}>{category}</SelectItem>)}</SelectContent></Select></Field><Field label="Manufacturer"><Input value={filterDraft.manufacturer} placeholder="Exact manufacturer" onChange={(event) => setFilterDraft((current) => ({ ...current, manufacturer: event.target.value }))} /></Field></div></div>}<SheetFooter><Button variant="outline" onClick={() => { const next = { ...defaultFilters, suppliers: [] }; setFilterDraft(next); setFilters(next) }}>Reset</Button><Button onClick={applyFilters} disabled={facetsLoading}>Apply filters</Button></SheetFooter></SheetContent></Sheet>
+    <Sheet open={maintenanceOpen} onOpenChange={setMaintenanceOpen}><SheetContent side="right" className="w-full sm:max-w-md"><SheetHeader><SheetTitle>Source catalog maintenance</SheetTitle><SheetDescription>These operations run in the background. Their progress and artifacts stay in Jobs.</SheetDescription></SheetHeader><div className="grid gap-3 py-6"><Button variant="outline" className="h-auto justify-start whitespace-normal p-4 text-left" disabled={maintenanceLoading} onClick={() => void runMaintenance("/api/catalog/source-search-index/build", "Keyword search index")}><div><p className="font-medium">Build keyword search index</p><p className="mt-1 text-xs text-muted-foreground">Enables broad text search across the full source feed.</p></div></Button><Button variant="outline" className="h-auto justify-start whitespace-normal p-4 text-left" disabled={maintenanceLoading} onClick={() => void runMaintenance("/api/catalog/performance-indexes/build", "Performance index build")}><div><p className="font-medium">Tune filter speed</p><p className="mt-1 text-xs text-muted-foreground">Builds PostgreSQL indexes for supplier, status, category, stock, and lifecycle filters.</p></div></Button><Button variant="outline" className="h-auto justify-start whitespace-normal p-4 text-left" disabled={maintenanceLoading} onClick={() => void runMaintenance("/api/catalog/facets/refresh", "Facet refresh")}><div><p className="font-medium">Refresh filter values</p><p className="mt-1 text-xs text-muted-foreground">Recounts supplier, brand, category, and stock-status options.</p></div></Button><Button variant="outline" className="h-auto justify-start whitespace-normal p-4 text-left" disabled={maintenanceLoading} onClick={() => void runMaintenance("/api/source-catalog/pricing-inventory/refresh", "Pricing and inventory refresh")}><div><p className="font-medium">Refresh pricing and inventory</p><p className="mt-1 text-xs text-muted-foreground">Imports cost, price, stock, promotions, and closeout changes from the product dump.</p></div></Button></div></SheetContent></Sheet>
+    <Dialog open={promotionOpen} onOpenChange={setPromotionOpen}><DialogContent><DialogHeader><DialogTitle>Add source SKUs to Products</DialogTitle><DialogDescription>This queues a tracked import. The source records remain intact and the job will record every change.</DialogDescription></DialogHeader>{promotionLoading ? <div className="grid place-items-center py-10"><Loader2 className="size-6 animate-spin" /></div> : <div className="grid gap-4"><div className="grid gap-3 sm:grid-cols-3"><Detail label="Matched" value={numberLabel(promotionImpact?.matched)} /><Detail label="New" value={numberLabel(promotionImpact?.newProducts)} /><Detail label="Existing" value={numberLabel(promotionImpact?.existing)} /></div>{promotionImpact?.limited && <Alert><AlertCircle className="size-4" /><AlertTitle>Import limit applies</AlertTitle><AlertDescription>Large all-filtered imports are capped at 25,000 source records per job.</AlertDescription></Alert>}<Field label="Import mode"><Select value={importMode} onValueChange={setImportMode}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="new-and-update">New + update existing</SelectItem><SelectItem value="new-only">New only</SelectItem><SelectItem value="update-existing">Update existing only</SelectItem></SelectContent></Select></Field></div>}<DialogFooter><Button variant="outline" onClick={() => setPromotionOpen(false)}>Cancel</Button><Button onClick={() => void promote()} disabled={promotionLoading || !promotionImpact?.importable}>{promotionLoading && <Loader2 className="size-4 animate-spin" />} Queue import</Button></DialogFooter></DialogContent></Dialog>
+    <ProductDetailSheet sourceItem={selectedItem} open={Boolean(selectedItem)} onOpenChange={(nextOpen) => { if (!nextOpen) setSelectedItem(null) }} />
+  </div>
 }
 
 function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendor: (id: string, patch: Record<string, unknown>) => Promise<void> }) {

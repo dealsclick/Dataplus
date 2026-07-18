@@ -1925,6 +1925,11 @@ function vendorCatalogWhere(options = {}) {
     params.push(brand.toLowerCase());
     where.push(`lower(coalesce(brand, '')) = $${params.length}`);
   }
+  const manufacturer = nullableString(filters.manufacturer);
+  if (manufacturer) {
+    params.push(manufacturer.toLowerCase());
+    where.push(`lower(coalesce(manufacturer, '')) = $${params.length}`);
+  }
   const category = nullableString(filters.category);
   if (category) {
     params.push(category.toLowerCase());
