@@ -2623,6 +2623,7 @@ type CategoryProfile = {
   canDelete?: boolean
   deleteBlockers?: string[]
   topVendors?: Array<{ name?: string; count?: number }>
+  topBrands?: Array<{ name?: string; count?: number }>
   createdByLabel?: string
   createdAt?: string
   updatedAt?: string
@@ -2742,14 +2743,17 @@ function CategoryRequirementsDataTable({ channel, attributes, mappings, onChange
   return <div className="rounded-md border"><div className="flex flex-wrap items-center justify-between gap-3 border-b p-3"><div><p className="text-sm font-medium capitalize">{channel} requirements</p><p className="text-xs text-muted-foreground">{numberLabel(attributes.length)} taxonomy fields. Values are saved only when you save this channel.</p></div><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="h-9 w-56 pl-9" value={globalFilter} onChange={(event) => setGlobalFilter(event.target.value)} placeholder="Filter requirements" /></div></div><div className="overflow-x-auto"><Table><TableHeader>{table.getHeaderGroups().map((group) => <TableRow key={group.id}>{group.headers.map((header) => <TableHead key={header.id}>{header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}</TableHead>)}</TableRow>)}</TableHeader><TableBody>{table.getRowModel().rows.map((row) => <TableRow key={row.id}>{row.getVisibleCells().map((cell) => <TableCell key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</TableCell>)}</TableRow>)}{!table.getRowModel().rows.length && <TableRow><TableCell colSpan={4} className="py-8 text-center text-sm text-muted-foreground">No requirements match this filter.</TableCell></TableRow>}</TableBody></Table></div></div>
 }
 
-function CategoriesWorkspace({ categoryId = "", standalone = false }: { categoryId?: string; standalone?: boolean }) {
+function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope = "main" }: { categoryId?: string; standalone?: boolean; initialScope?: "main" | "source" }) {
   const [categories, setCategories] = useState<CategoryProfile[]>([])
   const [selectedId, setSelectedId] = useState(categoryId)
   const [profile, setProfile] = useState<CategoryProfile | null>(null)
+  const [categoryScope, setCategoryScope] = useState<"main" | "source">(initialScope)
   const [query, setQuery] = useState("")
   const [channelFilter, setChannelFilter] = useState("shopify")
   const [mappingFilter, setMappingFilter] = useState("")
+  const [reviewFilter, setReviewFilter] = useState("")
   const [lifecycleFilter, setLifecycleFilter] = useState("")
+  const [minimumProducts, setMinimumProducts] = useState("")
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
@@ -2767,10 +2771,15 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
       const mapped = Boolean(row.mappings?.[channelFilter]?.categoryId)
       if (mappingFilter === "mapped" && !mapped) return false
       if (mappingFilter === "missing" && mapped) return false
+      const reviewText = `${row.status} ${row.mappings?.shopify?.status} ${row.mappings?.shopify?.notes} ${row.notes}`.toLowerCase()
+      const needsReview = reviewText.includes("review")
+      if (reviewFilter === "needs-review" && !needsReview) return false
+      if (reviewFilter === "clean" && needsReview) return false
       if (lifecycleFilter && row.lifecycle !== lifecycleFilter) return false
-      return !value || `${row.name} ${row.status} ${row.owner} ${(row.topVendors || []).map((vendor) => vendor.name).join(" ")}`.toLowerCase().includes(value)
+      if (Number(minimumProducts || 0) > Number(row.productCount || 0)) return false
+      return !value || `${row.id} ${row.name} ${row.status} ${row.owner} ${Object.values(row.mappings || {}).map((mapping) => mapping.categoryPath).join(" ")} ${(row.topVendors || []).map((vendor) => vendor.name).join(" ")} ${(row.topBrands || []).map((brand) => brand.name).join(" ")}`.toLowerCase().includes(value)
     })
-  }, [categories, query, channelFilter, mappingFilter, lifecycleFilter])
+  }, [categories, query, channelFilter, mappingFilter, reviewFilter, lifecycleFilter, minimumProducts])
 
   function applyCategories(rows: CategoryProfile[], nextId = categoryId || selectedId) {
     const normalizedRows = rows.map((row) => ({ ...row, missingMappings: categoryMissingCount(row.missingMappings) }))
@@ -2783,7 +2792,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
   async function load() {
     setLoading(true)
     try {
-      const result = await api<{ categories?: CategoryProfile[] }>("/api/categories?scope=main")
+      const result = await api<{ categories?: CategoryProfile[] }>(`/api/categories?scope=${categoryScope}`)
       applyCategories(result.categories || [])
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load categories.")
@@ -2792,7 +2801,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
     }
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [categoryScope])
 
   useEffect(() => { if (categoryId) setSelectedId(categoryId) }, [categoryId])
 
@@ -2815,9 +2824,9 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
     if (!profile?.id && !profile?.categoryId) return
     setSaving(true)
     try {
-      const result = await api<{ categories?: CategoryProfile[] }>(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}?scope=main`, {
+      const result = await api<{ categories?: CategoryProfile[] }>(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}?scope=${categoryScope}`, {
         method: "PATCH",
-        body: JSON.stringify({ scope: "main", updatedBy: "Luis", ...update }),
+        body: JSON.stringify({ scope: categoryScope, updatedBy: "Luis", ...update }),
       })
       applyCategories(result.categories || [], profile.id || profile.categoryId)
       toast.success("Category saved.")
@@ -2842,9 +2851,9 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
     if (!profile?.id && !profile?.categoryId) return
     setSaving(true)
     try {
-      const result = await api<{ categories?: CategoryProfile[] }>(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}/attributes/sync?scope=main`, {
+      const result = await api<{ categories?: CategoryProfile[] }>(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}/attributes/sync?scope=${categoryScope}`, {
         method: "POST",
-        body: JSON.stringify({ scope: "main", updatedBy: "Luis" }),
+        body: JSON.stringify({ scope: categoryScope, updatedBy: "Luis" }),
       })
       applyCategories(result.categories || [], profile.id || profile.categoryId)
       toast.success("Marketplace requirements synchronized.")
@@ -2858,7 +2867,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
   async function rebuildIndex() {
     setRebuilding(true)
     try {
-      await api("/api/categories/summary-index/rebuild", { method: "POST", body: JSON.stringify({ scope: "main" }) })
+      await api("/api/categories/summary-index/rebuild", { method: "POST", body: JSON.stringify({ scope: categoryScope }) })
       await load()
       toast.success("Main category index rebuilt.")
     } catch (error) {
@@ -2885,7 +2894,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
   async function deleteProfile() {
     if (!profile || !profile.canDelete || !window.confirm(`Delete the saved profile for ${profile.name}?`)) return
     try {
-      await api(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}?scope=main`, { method: "DELETE", body: JSON.stringify({ scope: "main" }) })
+      await api(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}?scope=${categoryScope}`, { method: "DELETE", body: JSON.stringify({ scope: categoryScope }) })
       toast.success("Category profile deleted.")
       await load()
     } catch (error) {
@@ -2909,9 +2918,10 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
   }, [standalone, profile])
 
   if (!standalone) {
-    const clearFilters = () => { setQuery(""); setMappingFilter(""); setLifecycleFilter(""); setChannelFilter("shopify") }
+    const clearFilters = () => { setQuery(""); setMappingFilter(""); setReviewFilter(""); setLifecycleFilter(""); setMinimumProducts(""); setChannelFilter("shopify") }
     return <div className="grid gap-5">
-      <PageHeader eyebrow="Catalog" title="Categories" description="Main catalog categories, their lifecycle, product coverage, and channel mapping health." action={<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" asChild><a href="/api/categories/export/master-category-mapping.csv"><FileDown className="size-4" /> Export categories</a></Button><Button variant="outline" size="sm" onClick={rebuildIndex} disabled={rebuilding}>{rebuilding ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Rebuild index</Button></div>} />
+      <PageHeader eyebrow="Catalog" title="Categories" description={categoryScope === "main" ? "Main catalog categories, their lifecycle, product coverage, and channel mapping health." : "Supplier source categories. Review this scope before adding new main categories."} action={<div className="flex flex-wrap gap-2"><div className="flex rounded-md border p-0.5"><Button size="sm" variant={categoryScope === "main" ? "secondary" : "ghost"} onClick={() => setCategoryScope("main")}>Main</Button><Button size="sm" variant={categoryScope === "source" ? "secondary" : "ghost"} onClick={() => setCategoryScope("source")}>Source</Button></div><Button variant="outline" size="sm" asChild><a href="/api/categories/export/master-category-mapping.csv"><FileDown className="size-4" /> Export categories</a></Button><Button variant="outline" size="sm" onClick={rebuildIndex} disabled={rebuilding}>{rebuilding ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Rebuild index</Button></div>} />
+      <Card><CardContent className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-[170px_190px_minmax(180px,1fr)_auto]"><div className="grid gap-1"><Label className="text-xs">Review</Label><Select value={reviewFilter || "all"} onValueChange={(value) => setReviewFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any review state</SelectItem><SelectItem value="needs-review">Needs review</SelectItem><SelectItem value="clean">No review flag</SelectItem></SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">Minimum products</Label><Input type="number" min="0" value={minimumProducts} onChange={(event) => setMinimumProducts(event.target.value)} placeholder="0" /></div><div className="flex items-end"><p className="text-xs text-muted-foreground">Search also matches Shopify and eBay paths, top vendors, and top brands.</p></div><div className="flex items-end"><Button variant="ghost" size="sm" onClick={() => { setReviewFilter(""); setMinimumProducts("") }} disabled={!reviewFilter && !minimumProducts}>Clear extra filters</Button></div></CardContent></Card>
       <Card><CardHeader className="gap-4 border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Main category table</CardTitle><CardDescription>{numberLabel(visibleCategories.length)} shown / {numberLabel(categories.length)} loaded. Open a row for channel mappings and category rules.</CardDescription></div><Badge variant="outline">Main catalog</Badge></div><div className="grid gap-2 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_160px_160px_160px_auto]"><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Category, vendor, or brand" /></div><Select value={channelFilter} onValueChange={setChannelFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="shopify">Shopify</SelectItem><SelectItem value="ebay">eBay</SelectItem><SelectItem value="temu">Temu</SelectItem><SelectItem value="tiktok">TikTok</SelectItem><SelectItem value="whatnot">Whatnot</SelectItem></SelectContent></Select><Select value={mappingFilter || "all"} onValueChange={(value) => setMappingFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue placeholder="Any mapping" /></SelectTrigger><SelectContent><SelectItem value="all">Any mapping</SelectItem><SelectItem value="mapped">Mapped</SelectItem><SelectItem value="missing">Missing</SelectItem></SelectContent></Select><Select value={lifecycleFilter || "all"} onValueChange={(value) => setLifecycleFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue placeholder="Any lifecycle" /></SelectTrigger><SelectContent><SelectItem value="all">Any lifecycle</SelectItem><SelectItem value="new">New</SelectItem><SelectItem value="current">Current</SelectItem><SelectItem value="outdated">Outdated</SelectItem></SelectContent></Select><Button variant="ghost" size="sm" onClick={clearFilters} disabled={!query && !mappingFilter && !lifecycleFilter && channelFilter === "shopify"}>Clear</Button></div></CardHeader><CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Category</TableHead><TableHead>Status</TableHead><TableHead>Lifecycle</TableHead><TableHead>Created by</TableHead><TableHead>Created</TableHead><TableHead className="text-right">Products</TableHead><TableHead className="text-right">Active</TableHead><TableHead className="text-right">In stock</TableHead><TableHead>Channels</TableHead><TableHead>Missing</TableHead><TableHead /></TableRow></TableHeader><TableBody>{visibleCategories.slice(0, 500).map((category) => { const id = category.id || category.categoryId || ""; const channels = ["shopify", "ebay", "temu", "tiktok", "whatnot"].filter((channel) => category.mappings?.[channel]?.categoryId); return <TableRow key={id}><TableCell className="min-w-72"><a className="font-medium hover:underline" href={`/categories/${encodeURIComponent(id)}`}>{category.name}</a><p className="mt-1 truncate text-xs text-muted-foreground">{(category.topVendors || []).slice(0, 2).map((vendor) => vendor.name).filter(Boolean).join(" / ") || "No vendor data"}</p></TableCell><TableCell><Badge variant={category.status === "approved" || category.status === "mapped" ? "default" : "outline"}>{category.status?.replace(/_/g, " ") || "needs review"}</Badge></TableCell><TableCell><Badge variant="outline">{category.lifecycle || "current"}</Badge></TableCell><TableCell className="whitespace-nowrap text-sm">{category.createdByLabel || "Manual"}</TableCell><TableCell className="whitespace-nowrap text-sm text-muted-foreground">{dateLabel(category.createdAt)}</TableCell><TableCell className="text-right">{numberLabel(category.productCount)}</TableCell><TableCell className="text-right">{numberLabel(category.activeProductCount)}</TableCell><TableCell className="text-right">{numberLabel(category.stockProductCount)}</TableCell><TableCell><div className="flex min-w-36 flex-wrap gap-1">{channels.length ? channels.map((channel) => <Badge key={channel} variant="secondary" className="text-[10px]">{channel}</Badge>) : <span className="text-xs text-muted-foreground">None</span>}</div></TableCell><TableCell><Badge variant={Number(category.missingMappings || 0) ? "destructive" : "outline"}>{Number(category.missingMappings || 0) ? `${numberLabel(category.missingMappings)} missing` : "Ready"}</Badge></TableCell><TableCell><Button asChild size="sm" variant="outline"><a href={`/categories/${encodeURIComponent(id)}`}>Open</a></Button></TableCell></TableRow>})}{!visibleCategories.length && <TableRow><TableCell colSpan={11} className="py-10 text-center text-sm text-muted-foreground">No categories match these filters.</TableCell></TableRow>}</TableBody></Table>{visibleCategories.length > 500 && <p className="border-t px-4 py-3 text-xs text-muted-foreground">Showing the first 500 matching categories. Use the filters to narrow results.</p>}</div>}</CardContent></Card>
     </div>
   }
@@ -2936,7 +2946,8 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
 
 function StandaloneCategoryPage() {
   const categoryId = decodeURIComponent(window.location.pathname.split("/").filter(Boolean).pop() || "")
-  return <CategoriesWorkspace categoryId={categoryId} standalone />
+  const scope = new URLSearchParams(window.location.search).get("scope") === "source" ? "source" : "main"
+  return <CategoriesWorkspace categoryId={categoryId} initialScope={scope} standalone />
 }
 
 const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates" | "categories">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
