@@ -13575,7 +13575,13 @@ function publicInventoryItem(item = {}, context = {}) {
   const uomInfo = productUomInfo(item);
   const shippingClassification = productShippingClassification(item);
   const listPrice = isClearanceItem(item) ? Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0)) : 0;
-  const websitePrice = shopifyVariantWebsitePrice(pricedItem, systemProductVariants(pricedItem, rulesDb)[0] || {}, SHOPIFY_PRICE_MARKUP_PERCENT, rulesDb);
+  const primaryVariant = systemProductVariants(pricedItem, rulesDb)[0] || {};
+  const pricingRules = productPricingRules(pricedItem, rulesDb);
+  const primarySellUnitCost = shopifyVariantPriceBasis(pricedItem, primaryVariant, rulesDb) || sellUnitCost || cost;
+  const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(pricedItem, rulesDb);
+  const minimumAllowedPrice = Number(sourceNumberValue(item.minimumAllowedPrice ?? item.minimum_allowed_price ?? item.productManagerFields?.minimum_allowed_price ?? 0));
+  const markedUpPrice = pricedFromCost(primarySellUnitCost, SHOPIFY_PRICE_MARKUP_PERCENT);
+  const websitePrice = shopifyVariantWebsitePrice(pricedItem, primaryVariant, SHOPIFY_PRICE_MARKUP_PERCENT, rulesDb);
   const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
   return {
     id: item.id,
@@ -13663,6 +13669,21 @@ function publicInventoryItem(item = {}, context = {}) {
     cost,
     sourceCost: cost,
     sellUnitCost,
+    pricingCalculation: {
+      costBasis: pricingRules.costBasis,
+      sellUnit: primaryVariant.uomDisplay || uomInfo.display,
+      sourceCost: cost,
+      sellUnitCost,
+      primarySellUnitCost,
+      markupPercent: SHOPIFY_PRICE_MARKUP_PERCENT,
+      markedUpPrice,
+      vendorWebsitePrice,
+      minimumAllowedPrice,
+      minimumAllowedPriceEnforced: pricingRules.enforceMinimumAllowedPrice,
+      priceSource: vendorWebsitePrice > 0 ? "vendor-website-price" : minimumAllowedPrice > markedUpPrice && pricingRules.enforceMinimumAllowedPrice ? "minimum-allowed-price" : "cost-markup",
+      finalPrice: websitePrice,
+      ruleNote: pricingRules.note || ""
+    },
     listPrice,
     msrp: listPrice,
     fobPrice: Number(item.fobPrice || 0),
