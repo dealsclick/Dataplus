@@ -68,6 +68,9 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
@@ -409,6 +412,20 @@ const navItems: Array<{ id: AppView; label: string; icon: React.ComponentType<{ 
   { id: "catalog", label: "Catalog", icon: PackageSearch },
   { id: "vendors", label: "Vendors", icon: Warehouse },
   { id: "settings", label: "Settings", icon: Settings },
+]
+
+const catalogSidebarItems: Array<{ label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { label: "Products", path: "/products", icon: Boxes },
+  { label: "Source Catalog", path: "/source-catalog", icon: Database },
+  { label: "Import Review", path: "/import-review", icon: FileWarning },
+  { label: "SKU Changes", path: "/sku-changes", icon: Activity },
+  { label: "Categories", path: "/categories", icon: PackageSearch },
+  { label: "Vendor Mappings", path: "/vendor-category-mappings", icon: Warehouse },
+  { label: "Attributes", path: "/attributes", icon: CheckCircle2 },
+  { label: "Attribute Groups", path: "/groups", icon: Boxes },
+  { label: "Inventory", path: "/inventory", icon: Warehouse },
+  { label: "Templates", path: "/templates", icon: Square },
+  { label: "Readiness", path: "/readiness", icon: ShieldCheck },
 ]
 
 const viewPaths: Record<AppView, string> = {
@@ -825,7 +842,15 @@ function App() {
                 <SidebarMenu>
                   {navItems.map((item) => {
                     const Icon = item.icon
-                    return <SidebarMenuItem key={item.id}><SidebarMenuButton isActive={view === item.id} tooltip={item.label} onClick={() => navigateTo(item.id)}><Icon /><span>{item.label}</span></SidebarMenuButton></SidebarMenuItem>
+                    const catalogActive = item.id === "catalog" && (view === "catalog" || view === "product-detail" || view === "category-detail")
+                    return <SidebarMenuItem key={item.id}>
+                      <SidebarMenuButton isActive={view === item.id || catalogActive} tooltip={item.label} onClick={() => navigateTo(item.id)}><Icon /><span>{item.label}</span></SidebarMenuButton>
+                      {item.id === "catalog" && catalogActive && <SidebarMenuSub>{catalogSidebarItems.map((child) => {
+                        const ChildIcon = child.icon
+                        const active = child.path === "/categories" ? window.location.pathname === "/categories" || window.location.pathname.startsWith("/categories/") : window.location.pathname === child.path
+                        return <SidebarMenuSubItem key={child.path}><SidebarMenuSubButton asChild isActive={active}><a href={child.path}><ChildIcon /><span>{child.label}</span></a></SidebarMenuSubButton></SidebarMenuSubItem>
+                      })}</SidebarMenuSub>}
+                    </SidebarMenuItem>
                   })}
                 </SidebarMenu>
               </SidebarGroupContent>
