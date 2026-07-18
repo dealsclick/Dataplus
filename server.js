@@ -13604,7 +13604,7 @@ function publicInventoryItem(item = {}, context = {}) {
     dimensionalWeight: shippingClassification.dimensionalWeight,
     countryOfOrigin: item.countryOfOrigin || "",
     defaultImage: item.defaultImage,
-    images: Array.isArray(item.images) ? item.images.slice(0, 4) : [],
+    images: Array.isArray(item.images) ? item.images : [],
     ebayListing: publicEbayListing(item.ebayListing),
     productManagerFields: item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {},
     original: item.original || null,
@@ -19331,6 +19331,17 @@ async function handleApi(req, res) {
     if (!item) return notFound(res);
     const sourceFallbackMap = await sourceCatalogExportFallbackMap([item]);
     return sendJson(res, 200, { item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync(), sourceFallbackMap }) });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "ledger" && postgres.isPostgresEnabled()) {
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const ledger = await postgres.readStateField("inventoryLedger") || [];
+    const key = String(item.id || item.sku || parts[2]).toLowerCase();
+    const rows = ledger.filter((row) => String(row.productId || row.sku || "").toLowerCase() === key || String(row.sku || "").toLowerCase() === String(item.sku || "").toLowerCase())
+      .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")))
+      .slice(0, 100);
+    return sendJson(res, 200, { rows });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
