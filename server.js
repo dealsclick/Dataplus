@@ -751,6 +751,8 @@ const DEFAULT_CHANNEL_SETTINGS = {
   inventoryScheduleTimes: "03:00,13:00",
   inventoryScheduleEveryHours: 12,
   inventoryScheduleRequireSuccessfulDump: false,
+  shopifySkuMapScheduleEnabled: true,
+  shopifySkuMapScheduleTime: "02:00",
   shopifyShippingProfiles: [],
   shopifyShippingProfilesSyncedAt: ""
 };
@@ -3588,13 +3590,14 @@ function normalizeChannel(channel = {}) {
   for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
-  for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump"]) {
+  for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   settings.inventoryScheduleMode = String(settings.inventoryScheduleMode || "dry-run").toLowerCase() === "apply" ? "apply" : "dry-run";
   settings.inventoryScheduleType = String(settings.inventoryScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.inventoryScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.inventoryScheduleEveryHours || 12) || 12));
   settings.inventoryScheduleTimes = normalizeChannelScheduleTimes(settings.inventoryScheduleTimes || DEFAULT_CHANNEL_SETTINGS.inventoryScheduleTimes);
+  settings.shopifySkuMapScheduleTime = normalizeChannelScheduleTimes(settings.shopifySkuMapScheduleTime || DEFAULT_CHANNEL_SETTINGS.shopifySkuMapScheduleTime).split(",")[0];
   settings.shopifyShippingProfiles = normalizeShopifyShippingProfiles(settings.shopifyShippingProfiles);
   settings.shopifyShippingProfilesSyncedAt = String(settings.shopifyShippingProfilesSyncedAt || "");
   return {
@@ -3757,6 +3760,77 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
     message: `${job.message} Location ${inventoryTarget.locationId || "not mapped"}; batch ${batchSize}; product batch ${productBatchSize};${limit ? ` limit ${limit};` : ""} pack mode ${packMode}.`
   });
   return { job, workerPayload, inventoryTarget };
+}
+
+async function queueShopifySkuMapSyncJob(db, body = {}, options = {}) {
+  const limit = Math.max(0, Math.min(500000, Number(body.limit || 0) || 0));
+  const pageSize = Math.max(1, Math.min(250, Number(body.pageSize || 250) || 250));
+  const channel = findChannelByName(db, "Shopify");
+  if (!channel) {
+    const error = new Error("Shopify channel was not found.");
+    error.statusCode = 404;
+    throw error;
+  }
+  const workerPayload = {
+    limit,
+    pageSize,
+    scheduled: options.scheduled === true,
+    scheduleKey: options.scheduleKey || ""
+  };
+  const operation = options.operation || "Shopify SKU pair audit";
+  const duplicate = await findActiveDuplicateImportJob(db, {
+    section: "Products",
+    operation,
+    direction: "sync",
+    fileName: "shopify-sku-map-sync.json",
+    workerTask: "shopify-sku-map-sync",
+    workerPayload
+  });
+  if (duplicate) return { duplicate: true, job: duplicate, workerPayload };
+
+  const job = createImportJob(db, {
+    section: "Products",
+    operation,
+    direction: "sync",
+    status: "queued",
+    fileName: "shopify-sku-map-sync.json",
+    totalRows: limit || pageSize,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "shopify-sku-map-sync",
+    workerPayload: shouldRunJobsInline() ? {} : workerPayload,
+    message: limit
+      ? `Shopify SKU pair audit queued for up to ${limit.toLocaleString()} variant${limit === 1 ? "" : "s"}.`
+      : "Shopify SKU pair audit queued for the full Shopify variant catalog."
+  });
+  upsertImportJobStore(job);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  appendChannelApiLog({
+    channel: "Shopify",
+    transport: "Job",
+    method: "QUEUE",
+    path: "shopify-sku-map-sync",
+    operation: "SKU product and variant pair audit queued",
+    statusCode: 202,
+    ok: true,
+    jobId: job.id,
+    message: `${job.message} Each matched SKU records both its Shopify product ID and Shopify variant ID.`
+  });
+  if (shouldRunJobsInline()) {
+    setTimeout(() => runShopifySkuMapSyncWorkerJob(job, workerPayload).catch((error) => {
+      finishImportJob(job, {
+        status: "failed",
+        message: error.message || "Shopify SKU pair audit failed.",
+        errors: [error.message || "Shopify SKU pair audit failed."],
+        missingCount: 1,
+        phase: "failed",
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+    }), 250);
+  }
+  return { duplicate: false, job, workerPayload };
 }
 
 function applyChannelDefaultsToShadow(db, shadow, marketplace) {
@@ -11640,6 +11714,7 @@ async function runShopifySkuMapSyncWorkerJob(job = {}, attrs = {}) {
   });
   let processed = 0;
   let matched = 0;
+  let paired = 0;
   let duplicateSkus = 0;
   let blankSkus = 0;
   let after = null;
@@ -11683,6 +11758,7 @@ async function runShopifySkuMapSyncWorkerJob(job = {}, attrs = {}) {
         seen.add(skuKey);
         patch[skuKey] = payload;
         matched += 1;
+        if (payload.shopifyId && payload.shopifyVariantId) paired += 1;
       }
       if (Object.keys(patch).length) mergeShopifyStatusMapSync(patch);
       await persistProgress(page.hasNextPage && (!maxVariants || processed < maxVariants));
@@ -11696,7 +11772,7 @@ async function runShopifySkuMapSyncWorkerJob(job = {}, attrs = {}) {
   }
   finishImportJob(job, {
     status: errors.length ? "warning" : "success",
-    message: `Shopify SKU map synced ${matched.toLocaleString()} variant SKU${matched === 1 ? "" : "s"} from ${processed.toLocaleString()} Shopify variant${processed === 1 ? "" : "s"}${blankSkus ? `; ${blankSkus.toLocaleString()} blank SKU${blankSkus === 1 ? "" : "s"}` : ""}${duplicateSkus ? `; ${duplicateSkus.toLocaleString()} duplicate SKU${duplicateSkus === 1 ? "" : "s"} skipped` : ""}${errors.length ? `; ${errors.length.toLocaleString()} API issue${errors.length === 1 ? "" : "s"}` : ""}.`,
+      message: `Shopify SKU pair audit synced ${matched.toLocaleString()} variant SKU${matched === 1 ? "" : "s"} from ${processed.toLocaleString()} Shopify variant${processed === 1 ? "" : "s"}; ${paired.toLocaleString()} include both the Shopify product and variant ID${blankSkus ? `; ${blankSkus.toLocaleString()} blank SKU${blankSkus === 1 ? "" : "s"}` : ""}${duplicateSkus ? `; ${duplicateSkus.toLocaleString()} duplicate SKU${duplicateSkus === 1 ? "" : "s"} skipped` : ""}${errors.length ? `; ${errors.length.toLocaleString()} API issue${errors.length === 1 ? "" : "s"}` : ""}.`,
     totalRows: processed,
     processedRows: processed,
     changed: matched,
@@ -24311,40 +24387,9 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/shopify/sku-map-sync" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const limit = Math.max(0, Math.min(500000, Number(body.limit || 0) || 0));
-    const pageSize = Math.max(1, Math.min(250, Number(body.pageSize || 250) || 250));
     const db = await readDbFast({ skipInventory: true });
-    const job = createImportJob(db, {
-      section: "Products",
-      operation: "Shopify SKU map sync",
-      direction: "sync",
-      status: "queued",
-      fileName: "shopify-sku-map-sync.json",
-      totalRows: limit || pageSize,
-      processedRows: 0,
-      progressPercent: 0,
-      phase: "queued",
-      workerTask: shouldRunJobsInline() ? "" : "shopify-sku-map-sync",
-      workerPayload: shouldRunJobsInline() ? {} : { limit, pageSize },
-      message: limit
-        ? `Shopify SKU map sync queued for up to ${limit.toLocaleString()} variant${limit === 1 ? "" : "s"}.`
-        : "Shopify SKU map sync queued for the full Shopify variant catalog."
-    });
-    upsertImportJobStore(job);
-    if (shouldRunJobsInline()) {
-      setTimeout(() => runShopifySkuMapSyncWorkerJob(job, { limit, pageSize }).catch((error) => {
-        finishImportJob(job, {
-          status: "failed",
-          message: error.message || "Shopify SKU map sync failed.",
-          errors: [error.message || "Shopify SKU map sync failed."],
-          missingCount: 1,
-          phase: "failed",
-          estimatedSecondsRemaining: 0
-        });
-        upsertImportJobStore(job);
-      }), 250);
-    }
-    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+    const result = await queueShopifySkuMapSyncJob(db, body, { operation: "Shopify SKU pair audit" });
+    return sendJson(res, 202, { queued: !result.duplicate, duplicate: result.duplicate, job: normalizeImportJob(result.job), state: await postgresLiteState({ importJobs: [result.job] }), message: result.job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/shopify/shipping-profiles/sync") {
@@ -28898,6 +28943,7 @@ module.exports = {
   normalizeShopifyStatus,
   normalizeShopifyVariantGid,
   queueShopifyInventoryUpdateJob,
+  queueShopifySkuMapSyncJob,
   readDbFast,
   readExportMappingsApiStore,
   readSystemSettingsStore,

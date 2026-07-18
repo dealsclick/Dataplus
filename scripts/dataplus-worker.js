@@ -56,6 +56,7 @@ const SUPPORTED_TASKS = [
 ];
 let lastHeartbeatAt = 0;
 let lastScheduleCheckAt = 0;
+let lastSkuMapScheduleCheckAt = 0;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -456,6 +457,70 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
     }
   }
   await postgres.writeStateDocuments({ channelInventorySchedules: scheduleState });
+  return queued;
+}
+
+async function checkScheduledShopifySkuPairAudit(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastSkuMapScheduleCheckAt < 60000) return false;
+  lastSkuMapScheduleCheckAt = nowMs;
+  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const channels = Array.isArray(stateDb.connections) ? stateDb.connections : [];
+  const scheduledChannels = channels.filter((channel) => (
+    String(channel.name || "").toLowerCase() === "shopify"
+    && (channel.settings?.shopifySkuMapScheduleEnabled === true || String(channel.settings?.shopifySkuMapScheduleEnabled).toLowerCase() === "true")
+  ));
+  if (!scheduledChannels.length) return false;
+  const now = new Date(nowMs);
+  const today = localDateKey(now);
+  const scheduleState = docs.channelSkuMapSchedules && typeof docs.channelSkuMapSchedules === "object" ? docs.channelSkuMapSchedules : {};
+  let queued = false;
+  for (const channel of scheduledChannels) {
+    const settings = channel.settings || {};
+    const dueSlot = scheduleTimeValues(settings.shopifySkuMapScheduleTime || "02:00")
+      .filter((time) => minutesSinceMidnight(now) >= scheduledMinutes(time))
+      .pop() || "";
+    if (!dueSlot) continue;
+    const scheduleId = `${channel.id || channel.name || "shopify"}:${today}:${dueSlot}`;
+    const previous = scheduleState[scheduleId] || {};
+    if (previous.lastRunDate === today || previous.lastQueuedDate === today) continue;
+    try {
+      const result = await dataplus.queueShopifySkuMapSyncJob(stateDb, {}, {
+        scheduled: true,
+        scheduleKey: scheduleId,
+        operation: "Scheduled Shopify SKU pair audit"
+      });
+      scheduleState[scheduleId] = {
+        ...previous,
+        channelId: channel.id || "",
+        channelName: channel.name || "Shopify",
+        time: dueSlot,
+        lastCheckedAt: new Date(nowMs).toISOString(),
+        lastQueuedAt: result.duplicate ? (previous.lastQueuedAt || "") : new Date(nowMs).toISOString(),
+        lastQueuedDate: result.duplicate ? (previous.lastQueuedDate || today) : today,
+        lastRunDate: today,
+        lastJobId: result.job?.id || "",
+        lastSkipReason: result.duplicate ? "A Shopify SKU pair audit is already active." : "",
+        lastError: ""
+      };
+      queued = !result.duplicate || queued;
+      console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled Shopify SKU pair audit for ${dueSlot} (${result.job?.id || "duplicate"})`);
+    } catch (error) {
+      scheduleState[scheduleId] = {
+        ...previous,
+        channelId: channel.id || "",
+        channelName: channel.name || "Shopify",
+        time: dueSlot,
+        lastCheckedAt: new Date(nowMs).toISOString(),
+        lastRunDate: today,
+        lastAttemptedAt: new Date(nowMs).toISOString(),
+        lastError: error.message || "Unable to queue scheduled Shopify SKU pair audit."
+      };
+      console.error(`[${WORKER_ID}] scheduled Shopify SKU pair audit failed:`, error.message || error);
+    }
+  }
+  await postgres.writeStateDocuments({ channelSkuMapSchedules: scheduleState });
   return queued;
 }
 
@@ -1109,6 +1174,7 @@ async function runJob(job) {
 async function tick() {
   await writeHeartbeat("idle");
   await checkScheduledShopifyInventoryUpdate();
+  await checkScheduledShopifySkuPairAudit();
   const job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS });
   if (!job) return false;
   await writeHeartbeat("running", job, true);
