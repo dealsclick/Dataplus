@@ -240,6 +240,23 @@ type LiteState = {
   vendors?: Vendor[]
   warehouses?: Array<Record<string, unknown>>
   systemSettings?: SystemSettings
+  catalogImportReviews?: CatalogImportReview[]
+}
+
+type CatalogImportReview = {
+  id: string
+  sku?: string
+  productId?: string
+  field?: string
+  label?: string
+  currentValue?: unknown
+  incomingValue?: unknown
+  source?: string
+  details?: string
+  externalUrl?: string
+  status?: "pending" | "accepted" | "rejected" | string
+  updatedAt?: string
+  decidedAt?: string
 }
 
 type ImportJobsResponse = {
@@ -2975,8 +2992,7 @@ function StandaloneCategoryPage() {
   return <CategoriesWorkspace categoryId={categoryId} initialScope={scope} standalone />
 }
 
-const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates" | "categories">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
-  review: { endpoint: "/api/data-quality/products?limit=100", title: "Import Review", description: "Review products that need attention before they move through catalog and channel workflows.", rows: "rows", columns: [["sku", "SKU"], ["title", "Product"], ["issues", "Issues"], ["status", "Status"], ["updatedAt", "Updated"]] },
+const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "inventory" | "templates" | "categories">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
   changes: { endpoint: "/api/catalog/changes?limit=100", title: "SKU Changes", description: "Recent source changes detected across cost, inventory, status, and catalog data.", rows: "rows", columns: [["sku", "SKU"], ["field", "Field"], ["previousValue", "Previous"], ["nextValue", "Current"], ["createdAt", "Detected"]] },
   mappings: { endpoint: "/api/vendor-category-mappings?limit=100", title: "Vendor Category Mappings", description: "Supplier categories mapped into the main catalog. Unmapped rows stay visible for review.", rows: "rows", columns: [["supplier", "Supplier"], ["vendorCategory", "Vendor category"], ["mainCategory", "Main category"], ["matchCount", "SKUs"], ["mapped", "Mapped"]] },
   attributes: { endpoint: "/api/categories/attributes", title: "Attributes", description: "Marketplace attribute requirements and the source fields that fulfill them.", rows: "rows", columns: [["Category", "Category"], ["Channel", "Channel"], ["Attribute", "Attribute"], ["Mapped Source Field", "Source field"], ["Required", "Required"]] },
@@ -2984,7 +3000,7 @@ const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "s
   readiness: { endpoint: "/api/data-quality/products?limit=100", title: "Readiness", description: "Product readiness queue for missing content, dimensions, category, or marketplace requirements.", rows: "rows", columns: [["sku", "SKU"], ["title", "Product"], ["issues", "Missing or invalid"], ["channel", "Channel"], ["status", "Status"]] },
 }
 
-function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates" | "categories"> }) {
+function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "inventory" | "templates" | "categories"> }) {
   const config = catalogResourceConfig[tab]
   const [rows, setRows] = useState<Array<Record<string, unknown>>>([])
   const [loading, setLoading] = useState(true)
@@ -3007,6 +3023,63 @@ function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "produ
   useEffect(() => { load() }, [tab])
 
   return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title={config.title} description={config.description} action={<div className="flex gap-2"><Button variant="outline" onClick={() => load(true)} disabled={refreshing}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} /><Card><CardHeader className="border-b"><CardTitle className="text-sm">{numberLabel(rows.length)} loaded</CardTitle><CardDescription>{tab === "mappings" ? "Use the vendor profile to edit individual mapping rules and add missing main categories." : "Data loads only when this tab is opened."}</CardDescription></CardHeader><CardContent className="p-4">{loading ? <div className="grid gap-2"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <CatalogRecordsTable rows={rows} columns={config.columns} empty={`No ${config.title.toLowerCase()} records are available.`} />}</CardContent></Card></div>
+}
+
+function ImportReviewPage() {
+  const [reviews, setReviews] = useState<CatalogImportReview[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [query, setQuery] = useState("")
+  const [fieldFilter, setFieldFilter] = useState("all")
+
+  async function load() {
+    setLoading(true)
+    try {
+      const state = await api<LiteState>("/api/state?lite=1")
+      setReviews(state.catalogImportReviews || [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load protected import changes.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void load() }, [])
+
+  const pending = reviews.filter((review) => review.status === "pending")
+  const decided = reviews.filter((review) => review.status !== "pending").slice(0, 50)
+  const fields = [...new Set(pending.map((review) => review.label || review.field || "Unknown"))].sort()
+  const filtered = pending.filter((review) => {
+    const haystack = [review.sku, review.field, review.label, review.currentValue, review.incomingValue, review.source].join(" ").toLowerCase()
+    return (!query.trim() || haystack.includes(query.trim().toLowerCase())) && (fieldFilter === "all" || (review.label || review.field || "Unknown") === fieldFilter)
+  })
+  const productCount = new Set(pending.map((review) => review.sku).filter(Boolean)).size
+  const fieldCounts = pending.reduce<Record<string, number>>((result, review) => { const field = review.label || review.field || "Unknown"; result[field] = (result[field] || 0) + 1; return result }, {})
+  const topField = Object.entries(fieldCounts).sort(([, left], [, right]) => right - left)[0]?.[0] || "None"
+
+  async function decide(ids: string[], action: "accept" | "reject") {
+    if (!ids.length) return
+    const verb = action === "accept" ? "Accept" : "Reject"
+    if (!window.confirm(`${verb} ${numberLabel(ids.length)} protected catalog change${ids.length === 1 ? "" : "s"}?`)) return
+    setBusy(true)
+    try {
+      if (ids.length === 1) await api(`/api/catalog-import-reviews/${encodeURIComponent(ids[0])}/${action}`, { method: "POST", body: JSON.stringify({}) })
+      else await api("/api/catalog-import-reviews/bulk", { method: "POST", body: JSON.stringify({ action, ids }) })
+      toast.success(`${numberLabel(ids.length)} change${ids.length === 1 ? "" : "s"} ${action === "accept" ? "accepted" : "rejected"}.`)
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `Unable to ${action} protected changes.`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Catalog" title="Import Review" description="Protected source changes wait here until you accept or reject the incoming value." action={<div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void decide(pending.map((review) => review.id), "reject")} disabled={!pending.length || busy}>Reject all pending</Button><Button size="sm" onClick={() => void decide(pending.map((review) => review.id), "accept")} disabled={!pending.length || busy}>{busy && <Loader2 className="size-4 animate-spin" />} Accept all pending</Button></div>} />
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Pending changes" value={numberLabel(pending.length)} /><Detail label="Products affected" value={numberLabel(productCount)} /><Detail label="Most changed field" value={topField} /><Detail label="Recent decisions" value={numberLabel(decided.length)} /></div>
+    <Card><CardHeader className="gap-4 border-b"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle className="text-sm">Pending protected changes</CardTitle><CardDescription>Accept writes the incoming value to the approved product. Reject preserves the current catalog value.</CardDescription></div><Button size="sm" variant="outline" onClick={() => void load()} disabled={loading || busy}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div><div className="grid gap-2 md:grid-cols-[minmax(220px,1fr)_220px]"><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search SKU, field, source, or value" /></div><Select value={fieldFilter} onValueChange={setFieldFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All changed fields</SelectItem>{fields.map((field) => <SelectItem key={field} value={field}>{field} ({fieldCounts[field]})</SelectItem>)}</SelectContent></Select></div></CardHeader><CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Field</TableHead><TableHead>Current DataPlus value</TableHead><TableHead>Incoming dump value</TableHead><TableHead>Source</TableHead><TableHead>Updated</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>{filtered.slice(0, 300).map((review) => { const unmappedEbay = review.field === "ebayCatalogMatch" && !review.productId; return <TableRow key={review.id}><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(review.sku || "")}`}>{review.sku || "Unknown SKU"}</a></TableCell><TableCell className="font-medium">{review.label || review.field || "Unknown"}</TableCell><TableCell className="max-w-64"><p className="line-clamp-2">{String(review.currentValue ?? "-")}</p>{review.details && <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{review.details}</p>}</TableCell><TableCell className="max-w-64"><p className="line-clamp-2">{String(review.incomingValue ?? "-")}</p>{review.externalUrl && <a className="mt-1 inline-block text-xs text-primary hover:underline" href={review.externalUrl} target="_blank" rel="noreferrer">Open source listing</a>}</TableCell><TableCell>{review.source || "Product dump"}</TableCell><TableCell className="whitespace-nowrap text-sm text-muted-foreground">{dateLabel(review.updatedAt)}</TableCell><TableCell><div className="flex justify-end gap-2"><Button size="sm" variant="outline" disabled={busy} onClick={() => void decide([review.id], "reject")}>Reject</Button><Button size="sm" disabled={busy || unmappedEbay} onClick={() => void decide([review.id], "accept")}>{unmappedEbay ? "Needs mapping" : "Accept"}</Button></div></TableCell></TableRow>})}{!filtered.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No pending protected changes match these filters.</TableCell></TableRow>}</TableBody></Table></div>}</CardContent></Card>
+    {decided.length ? <Card><CardHeader className="border-b"><CardTitle className="text-sm">Recent decisions</CardTitle><CardDescription>Last 50 accepted or rejected import changes.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Field</TableHead><TableHead>Decision</TableHead><TableHead>Incoming value</TableHead><TableHead>Decided</TableHead></TableRow></TableHeader><TableBody>{decided.map((review) => <TableRow key={review.id}><TableCell>{review.sku || "-"}</TableCell><TableCell>{review.label || review.field || "-"}</TableCell><TableCell><Badge variant={review.status === "accepted" ? "default" : "secondary"}>{review.status || "resolved"}</Badge></TableCell><TableCell className="max-w-80 truncate">{String(review.incomingValue ?? "-")}</TableCell><TableCell>{dateLabel(review.decidedAt)}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card> : null}
+  </div>
 }
 
 function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { inventoryOnly?: boolean; totalSkuCount?: number }) {
@@ -3305,7 +3378,7 @@ function CatalogPage() {
     const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", source: "/source-catalog", review: "/import-review", changes: "/sku-changes", categories: "/categories", mappings: "/vendor-category-mappings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
     window.history.replaceState({}, "", paths[selected])
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} />}{tab === "source" && <SourceCatalogPage />}{tab === "inventory" && <MainCatalogPage inventoryOnly totalSkuCount={workspaceCounts.inventory} />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{(["review", "changes", "mappings", "attributes", "groups", "readiness"] as CatalogWorkspaceTab[]).includes(tab) && <CatalogResourcePage tab={tab as Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates" | "categories">} />}</div>
+  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} />}{tab === "source" && <SourceCatalogPage />}{tab === "review" && <ImportReviewPage />}{tab === "inventory" && <MainCatalogPage inventoryOnly totalSkuCount={workspaceCounts.inventory} />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{(["changes", "mappings", "attributes", "groups", "readiness"] as CatalogWorkspaceTab[]).includes(tab) && <CatalogResourcePage tab={tab as Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "inventory" | "templates" | "categories">} />}</div>
 }
 
 function SourceCatalogPage() {
