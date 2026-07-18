@@ -26678,6 +26678,16 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const item = db.inventory.find((row) => row.id === parts[2]);
     if (!item) return notFound(res);
+    const requestedMainCategory = body.mainCategory === undefined ? "" : formatCategoryName(body.mainCategory);
+    if (body.mainCategory !== undefined) {
+      if (!requestedMainCategory) return sendJson(res, 400, { error: "Choose a main category from the category index." });
+      const categoryData = await publicCategoriesFast(requestedMainCategory, "main");
+      const knownCategory = (categoryData.categories || []).find((category) => formatCategoryName(category.name || "").toLowerCase() === requestedMainCategory.toLowerCase());
+      if (!knownCategory) return sendJson(res, 400, { error: `\"${requestedMainCategory}\" is not an approved main category. Choose an existing category or add it through Category Mappings first.` });
+      body.mainCategory = knownCategory.name;
+      body.category = knownCategory.name;
+      body.categoryVerified = true;
+    }
     const qtyBefore = Number(item.qty || 0);
     const reservedBefore = Number(item.reserved || 0);
     applyInventoryPatch(item, body);
