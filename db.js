@@ -4178,7 +4178,9 @@ async function readOperationJobsPage(options = {}) {
       case when jsonb_typeof(raw -> 'errors') = 'array' then jsonb_array_length(raw -> 'errors') else 0 end as error_count
     from operations_jobs
     ${where}
-    order by updated_at desc
+    order by
+      case lower(status) when 'running' then 0 when 'queued' then 1 else 2 end,
+      updated_at desc
     limit $${values.length - 1} offset $${values.length}
   `, values);
   return { jobs: result.rows.map(operationJobFromRow), total: Number(countResult.rows[0]?.total || 0), page, limit };

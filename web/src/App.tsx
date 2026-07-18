@@ -224,6 +224,7 @@ type LiteState = {
 
 type ImportJobsResponse = {
   importJobs?: ImportJob[]
+  activeJobs?: ImportJob[]
   workerStatus?: WorkerStatus
   total?: number
   page?: number
@@ -557,6 +558,7 @@ function App() {
   const [view, setView] = useState<AppView>(() => viewFromPath(window.location.pathname))
   const [state, setState] = useState<LiteState>({})
   const [jobs, setJobs] = useState<ImportJob[]>([])
+  const [activeJobs, setActiveJobs] = useState<ImportJob[]>([])
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({})
   const [jobPageMeta, setJobPageMeta] = useState({ page: 1, limit: 10, total: 0, status: "all", query: "" })
   const [loading, setLoading] = useState(true)
@@ -572,6 +574,7 @@ function App() {
     try {
       const jobResponse = await api<ImportJobsResponse>(`/api/import-jobs?${params}`)
       setJobs(jobResponse.importJobs || [])
+      setActiveJobs(jobResponse.activeJobs || (jobResponse.importJobs || []).filter(isActiveJob))
       setWorkerStatus(jobResponse.workerStatus || {})
       setJobPageMeta({
         ...request,
@@ -587,7 +590,8 @@ function App() {
   async function loadJobDetail(job: ImportJob) {
     try {
       const result = await api<{ job: ImportJob }>(`/api/import-jobs/${encodeURIComponent(job.id)}`)
-      setJobs((current) => current.map((row) => row.id === result.job.id ? result.job : row))
+      setJobs((current) => current.some((row) => row.id === result.job.id) ? current.map((row) => row.id === result.job.id ? result.job : row) : [result.job, ...current])
+      if (isActiveJob(result.job)) setActiveJobs((current) => [result.job, ...current.filter((row) => row.id !== result.job.id)])
       setSelectedJobId(result.job.id)
     } catch (error) {
       setSelectedJobId(job.id)
@@ -678,7 +682,9 @@ function App() {
     try {
       const result = await api<ImportJobsResponse>(path, { method: "POST", body: JSON.stringify({}) })
       setJobs(result.importJobs || jobs)
+      setActiveJobs(result.activeJobs || (result.importJobs || jobs).filter(isActiveJob))
       toast.success(success)
+      void loadJobs({}, true)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Job action failed.")
     }
@@ -758,7 +764,6 @@ function App() {
     () => (state.connections || []).find((connection) => connection.name?.toLowerCase() === "shopify"),
     [state.connections],
   )
-  const activeJobs = jobs.filter(isActiveJob)
   const attentionJobs = jobs.filter(isAttentionJob)
   const shopifyInventoryJobs = jobs.filter(isShopifyInventoryJob)
   const selectedJob = jobs.find((job) => job.id === selectedJobId) || attentionJobs[0] || jobs[0]
@@ -839,6 +844,7 @@ function App() {
                 {view === "jobs" && (
                   <JobsPage
                     jobs={jobs}
+                    activeJobs={activeJobs}
                     workerStatus={workerStatus}
                     totalJobs={jobPageMeta.total}
                     page={jobPageMeta.page}
@@ -1024,6 +1030,7 @@ function MetricCard({
 
 function JobsPage({
   jobs,
+  activeJobs,
   workerStatus,
   totalJobs,
   page,
@@ -1037,6 +1044,7 @@ function JobsPage({
   onRefresh,
 }: {
   jobs: ImportJob[]
+  activeJobs: ImportJob[]
   workerStatus: WorkerStatus
   totalJobs: number
   page: number
@@ -1083,7 +1091,7 @@ function JobsPage({
       <div className="grid gap-3 lg:grid-cols-4">
         <MetricCard label="Jobs found" value={totalJobs} icon={History} />
         <MetricCard label="Needs review" value={jobs.filter(isAttentionJob).length} icon={AlertCircle} />
-        <MetricCard label="Active" value={jobs.filter(isActiveJob).length} icon={Play} />
+        <MetricCard label="Active" value={activeJobs.length} icon={Play} />
         <Card>
           <CardContent className="p-4">
             <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Worker</p>
@@ -1094,6 +1102,21 @@ function JobsPage({
           </CardContent>
         </Card>
       </div>
+
+      <Card className={activeJobs.length ? "border-primary/30" : ""}>
+        <CardHeader className="border-b py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">Live activity</CardTitle>
+              <CardDescription>{activeJobs.length ? "Jobs currently queued or running. This section stays visible regardless of history filters." : "No jobs are queued or running."}</CardDescription>
+            </div>
+            <Badge variant={activeJobs.length ? "default" : "outline"}>{activeJobs.length} active</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {activeJobs.length ? <div className="divide-y">{activeJobs.map((job) => <button key={job.id} type="button" className="grid w-full grid-cols-[auto_minmax(0,1fr)_minmax(160px,260px)_auto] items-center gap-3 px-4 py-3 text-left hover:bg-muted/45" onClick={() => onSelectJob(job)}><Badge variant={jobStatusTone(job.status)}>{job.status || "running"}</Badge><div className="min-w-0"><p className="truncate text-sm font-medium">{job.operation || "Job"}</p><p className="truncate text-xs text-muted-foreground">{job.message || job.workerTask || job.id}</p></div><div className="hidden min-w-0 items-center gap-2 sm:flex"><Progress value={jobProgress(job)} className="h-1.5" /><span className="w-10 text-right text-xs text-muted-foreground">{jobProgress(job)}%</span></div><span className="text-xs text-muted-foreground">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</span></button>)}</div> : <div className="px-6 py-5 text-sm text-muted-foreground">New jobs will appear here the moment they are queued.</div>}
+        </CardContent>
+      </Card>
 
       {!!issueGroups.length && (
         <Card>

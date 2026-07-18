@@ -21465,8 +21465,11 @@ async function handleApi(req, res) {
       status: url.searchParams.get("status") || "",
       query: url.searchParams.get("q") || ""
     });
+    const activeJobs = (await postgres.readOperationJobs(250))
+      .filter((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()));
     return sendJson(res, 200, {
       importJobs: clientImportJobs(applyActiveJobProgress(page.jobs)),
+      activeJobs: clientImportJobs(applyActiveJobProgress(activeJobs)),
       total: page.total,
       page: page.page,
       limit: page.limit,
