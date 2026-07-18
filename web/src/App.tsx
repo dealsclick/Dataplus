@@ -2614,7 +2614,7 @@ type CategoryProfile = {
   stockProductCount?: number
   sourceMappingCount?: number
   mappingCount?: number
-  missingMappings?: string[] | number
+  missingMappings?: number
   status?: string
   owner?: string
   notes?: string
@@ -2710,7 +2710,7 @@ function categoryProfileFrom(row: CategoryProfile): CategoryProfile {
   }
 }
 
-function categoryMissingCount(value?: string[] | number) {
+function categoryMissingCount(value?: unknown) {
   return Array.isArray(value) ? value.length : Number(value || 0)
 }
 
