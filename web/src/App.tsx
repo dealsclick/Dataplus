@@ -2614,7 +2614,7 @@ type CategoryProfile = {
   stockProductCount?: number
   sourceMappingCount?: number
   mappingCount?: number
-  missingMappings?: number
+  missingMappings?: string[] | number
   status?: string
   owner?: string
   notes?: string
@@ -2622,6 +2622,7 @@ type CategoryProfile = {
   savedExists?: boolean
   canDelete?: boolean
   deleteBlockers?: string[]
+  topVendors?: Array<{ name?: string; count?: number }>
   createdByLabel?: string
   createdAt?: string
   updatedAt?: string
@@ -2709,6 +2710,10 @@ function categoryProfileFrom(row: CategoryProfile): CategoryProfile {
   }
 }
 
+function categoryMissingCount(value?: string[] | number) {
+  return Array.isArray(value) ? value.length : Number(value || 0)
+}
+
 type CategoryRequirementRow = CategoryAttribute & { channel: string }
 
 function CategoryRequirementsDataTable({ channel, attributes, mappings, onChange }: { channel: string; attributes: CategoryAttribute[]; mappings: CategoryAttribute[]; onChange: (next: CategoryAttribute[]) => void }) {
@@ -2742,6 +2747,9 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
   const [selectedId, setSelectedId] = useState(categoryId)
   const [profile, setProfile] = useState<CategoryProfile | null>(null)
   const [query, setQuery] = useState("")
+  const [channelFilter, setChannelFilter] = useState("shopify")
+  const [mappingFilter, setMappingFilter] = useState("")
+  const [lifecycleFilter, setLifecycleFilter] = useState("")
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
@@ -2755,13 +2763,19 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
   const selected = useMemo(() => categories.find((row) => (row.id || row.categoryId) === selectedId) || null, [categories, selectedId])
   const visibleCategories = useMemo(() => {
     const value = query.trim().toLowerCase()
-    if (!value) return categories
-    return categories.filter((row) => `${row.name} ${row.status} ${row.owner}`.toLowerCase().includes(value))
-  }, [categories, query])
+    return categories.filter((row) => {
+      const mapped = Boolean(row.mappings?.[channelFilter]?.categoryId)
+      if (mappingFilter === "mapped" && !mapped) return false
+      if (mappingFilter === "missing" && mapped) return false
+      if (lifecycleFilter && row.lifecycle !== lifecycleFilter) return false
+      return !value || `${row.name} ${row.status} ${row.owner} ${(row.topVendors || []).map((vendor) => vendor.name).join(" ")}`.toLowerCase().includes(value)
+    })
+  }, [categories, query, channelFilter, mappingFilter, lifecycleFilter])
 
   function applyCategories(rows: CategoryProfile[], nextId = categoryId || selectedId) {
-    setCategories(rows)
-    const next = rows.find((row) => (row.id || row.categoryId) === nextId) || (!categoryId ? rows[0] : null)
+    const normalizedRows = rows.map((row) => ({ ...row, missingMappings: categoryMissingCount(row.missingMappings) }))
+    setCategories(normalizedRows)
+    const next = normalizedRows.find((row) => (row.id || row.categoryId) === nextId) || (!categoryId ? normalizedRows[0] : null)
     setSelectedId(next?.id || next?.categoryId || "")
     setProfile(next ? categoryProfileFrom(next) : null)
   }
@@ -2893,6 +2907,14 @@ function CategoriesWorkspace({ categoryId = "", standalone = false }: { category
     window.addEventListener("dataplus:category-action", handleAction)
     return () => window.removeEventListener("dataplus:category-action", handleAction)
   }, [standalone, profile])
+
+  if (!standalone) {
+    const clearFilters = () => { setQuery(""); setMappingFilter(""); setLifecycleFilter(""); setChannelFilter("shopify") }
+    return <div className="grid gap-5">
+      <PageHeader eyebrow="Catalog" title="Categories" description="Main catalog categories, their lifecycle, product coverage, and channel mapping health." action={<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" asChild><a href="/api/categories/export/master-category-mapping.csv"><FileDown className="size-4" /> Export categories</a></Button><Button variant="outline" size="sm" onClick={rebuildIndex} disabled={rebuilding}>{rebuilding ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Rebuild index</Button></div>} />
+      <Card><CardHeader className="gap-4 border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Main category table</CardTitle><CardDescription>{numberLabel(visibleCategories.length)} shown / {numberLabel(categories.length)} loaded. Open a row for channel mappings and category rules.</CardDescription></div><Badge variant="outline">Main catalog</Badge></div><div className="grid gap-2 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_160px_160px_160px_auto]"><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Category, vendor, or brand" /></div><Select value={channelFilter} onValueChange={setChannelFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="shopify">Shopify</SelectItem><SelectItem value="ebay">eBay</SelectItem><SelectItem value="temu">Temu</SelectItem><SelectItem value="tiktok">TikTok</SelectItem><SelectItem value="whatnot">Whatnot</SelectItem></SelectContent></Select><Select value={mappingFilter || "all"} onValueChange={(value) => setMappingFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue placeholder="Any mapping" /></SelectTrigger><SelectContent><SelectItem value="all">Any mapping</SelectItem><SelectItem value="mapped">Mapped</SelectItem><SelectItem value="missing">Missing</SelectItem></SelectContent></Select><Select value={lifecycleFilter || "all"} onValueChange={(value) => setLifecycleFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue placeholder="Any lifecycle" /></SelectTrigger><SelectContent><SelectItem value="all">Any lifecycle</SelectItem><SelectItem value="new">New</SelectItem><SelectItem value="current">Current</SelectItem><SelectItem value="outdated">Outdated</SelectItem></SelectContent></Select><Button variant="ghost" size="sm" onClick={clearFilters} disabled={!query && !mappingFilter && !lifecycleFilter && channelFilter === "shopify"}>Clear</Button></div></CardHeader><CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Category</TableHead><TableHead>Status</TableHead><TableHead>Lifecycle</TableHead><TableHead>Created by</TableHead><TableHead>Created</TableHead><TableHead className="text-right">Products</TableHead><TableHead className="text-right">Active</TableHead><TableHead className="text-right">In stock</TableHead><TableHead>Channels</TableHead><TableHead>Missing</TableHead><TableHead /></TableRow></TableHeader><TableBody>{visibleCategories.slice(0, 500).map((category) => { const id = category.id || category.categoryId || ""; const channels = ["shopify", "ebay", "temu", "tiktok", "whatnot"].filter((channel) => category.mappings?.[channel]?.categoryId); return <TableRow key={id}><TableCell className="min-w-72"><a className="font-medium hover:underline" href={`/categories/${encodeURIComponent(id)}`}>{category.name}</a><p className="mt-1 truncate text-xs text-muted-foreground">{(category.topVendors || []).slice(0, 2).map((vendor) => vendor.name).filter(Boolean).join(" / ") || "No vendor data"}</p></TableCell><TableCell><Badge variant={category.status === "approved" || category.status === "mapped" ? "default" : "outline"}>{category.status?.replace(/_/g, " ") || "needs review"}</Badge></TableCell><TableCell><Badge variant="outline">{category.lifecycle || "current"}</Badge></TableCell><TableCell className="whitespace-nowrap text-sm">{category.createdByLabel || "Manual"}</TableCell><TableCell className="whitespace-nowrap text-sm text-muted-foreground">{dateLabel(category.createdAt)}</TableCell><TableCell className="text-right">{numberLabel(category.productCount)}</TableCell><TableCell className="text-right">{numberLabel(category.activeProductCount)}</TableCell><TableCell className="text-right">{numberLabel(category.stockProductCount)}</TableCell><TableCell><div className="flex min-w-36 flex-wrap gap-1">{channels.length ? channels.map((channel) => <Badge key={channel} variant="secondary" className="text-[10px]">{channel}</Badge>) : <span className="text-xs text-muted-foreground">None</span>}</div></TableCell><TableCell><Badge variant={Number(category.missingMappings || 0) ? "destructive" : "outline"}>{Number(category.missingMappings || 0) ? `${numberLabel(category.missingMappings)} missing` : "Ready"}</Badge></TableCell><TableCell><Button asChild size="sm" variant="outline"><a href={`/categories/${encodeURIComponent(id)}`}>Open</a></Button></TableCell></TableRow>})}{!visibleCategories.length && <TableRow><TableCell colSpan={11} className="py-10 text-center text-sm text-muted-foreground">No categories match these filters.</TableCell></TableRow>}</TableBody></Table>{visibleCategories.length > 500 && <p className="border-t px-4 py-3 text-xs text-muted-foreground">Showing the first 500 matching categories. Use the filters to narrow results.</p>}</div>}</CardContent></Card>
+    </div>
+  }
 
   return <div className="grid gap-5">
     <PageHeader eyebrow={standalone ? "Catalog / Categories" : "Catalog"} title={standalone ? (profile?.name || "Category") : "Categories"} description={standalone ? "Dedicated category profile for channel taxonomy, data requirements, defaults, and collection behavior." : "The authoritative product type, channel taxonomy, requirement, collection, and default-rule profile for every approved main category."} action={standalone ? <Button variant="outline" size="sm" asChild><a href="/categories">Back to categories</a></Button> : <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" asChild><a href="/api/categories/export/matrixify-smart-collections.csv"><FileDown className="size-4" /> Collections CSV</a></Button><Button variant="outline" size="sm" asChild><a href="/api/categories/export/master-category-mapping.csv"><FileDown className="size-4" /> Mappings CSV</a></Button><Button variant="outline" size="sm" onClick={rebuildIndex} disabled={rebuilding}>{rebuilding ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Rebuild index</Button></div>} />
