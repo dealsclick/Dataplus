@@ -131,3 +131,9 @@
     @apply font-sans;
     }
 }
+
+/* The standalone product workspace owns its action bar and identity header. */
+.product-workspace > :nth-child(2),
+.product-workspace > :nth-child(3) {
+  display: none;
+}
