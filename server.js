@@ -9487,7 +9487,8 @@ function serveStatic(req, res) {
   const requestedPath = legacyRequest
     ? (url.pathname === "/legacy" ? "/index.html" : decodeURIComponent(url.pathname.replace(/^\/legacy/, "") || "/index.html"))
     : (url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname));
-  const acceptsHtml = String(req.headers.accept || "").includes("text/html");
+  const acceptsHtml = String(req.headers.accept || "").includes("text/html")
+    || (req.method === "HEAD" && !url.pathname.startsWith("/api/"));
   const hasExtension = Boolean(path.extname(requestedPath));
   const publicFilePath = path.normalize(path.join(PUBLIC_DIR, requestedPath));
   const webFilePath = path.normalize(path.join(WEB_DIST_DIR, requestedPath));
