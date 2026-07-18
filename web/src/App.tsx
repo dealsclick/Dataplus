@@ -56,6 +56,21 @@ import {
 } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarInset,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+} from "@/components/ui/sidebar"
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -795,48 +810,43 @@ function App() {
 
   return (
     <TooltipProvider>
-      <div className="min-h-svh bg-muted/35 text-foreground">
-        <aside className="fixed inset-y-0 left-0 z-20 hidden w-64 border-r bg-background/95 px-4 py-5 shadow-sm backdrop-blur md:block">
-          <div className="mb-8 flex items-center gap-3">
-            <div className="grid size-10 place-items-center rounded-lg bg-primary text-primary-foreground">
-              <Database className="size-5" />
+      <SidebarProvider defaultOpen>
+        <Sidebar collapsible="icon" variant="sidebar">
+          <SidebarHeader className="p-3">
+            <div className="flex items-center gap-3 rounded-md px-2 py-2">
+              <div className="grid size-8 place-items-center rounded-md bg-primary text-primary-foreground"><Database className="size-4" /></div>
+              <div className="min-w-0 group-data-[collapsible=icon]:hidden"><p className="truncate text-sm font-semibold leading-none">DataPlus</p><p className="mt-1 text-xs text-muted-foreground">Operations console</p></div>
             </div>
-            <div>
-              <p className="text-sm font-semibold leading-none">DataPlus</p>
-              <p className="text-xs text-muted-foreground">Operations console</p>
-            </div>
-          </div>
-          <nav className="grid gap-1">
-            {navItems.map((item) => {
-              const Icon = item.icon
-              return (
-                <Button
-                  key={item.id}
-                  variant={view === item.id ? "secondary" : "ghost"}
-                  className="justify-start"
-                  onClick={() => navigateTo(item.id)}
-                >
-                  <Icon className="size-4" />
-                  {item.label}
-                </Button>
-              )
-            })}
-          </nav>
-          <Separator className="my-5" />
-          <Button asChild variant="outline" className="w-full justify-start">
-            <a href="/legacy" target="_blank" rel="noreferrer">
-              <ExternalLink className="size-4" />
-              Old UI fallback
-            </a>
-          </Button>
-        </aside>
+          </SidebarHeader>
+          <SidebarContent>
+            <SidebarGroup>
+              <SidebarGroupLabel>Workspace</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {navItems.map((item) => {
+                    const Icon = item.icon
+                    return <SidebarMenuItem key={item.id}><SidebarMenuButton isActive={view === item.id} tooltip={item.label} onClick={() => navigateTo(item.id)}><Icon /><span>{item.label}</span></SidebarMenuButton></SidebarMenuItem>
+                  })}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          </SidebarContent>
+          <SidebarFooter className="p-3">
+            <SidebarMenu>
+              <SidebarMenuItem><SidebarMenuButton tooltip="Old UI fallback" asChild><a href="/legacy" target="_blank" rel="noreferrer"><ExternalLink /><span>Old UI fallback</span></a></SidebarMenuButton></SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarFooter>
+        </Sidebar>
 
-        <main className="md:pl-64">
+        <SidebarInset className="min-w-0 bg-muted/35 text-foreground">
           <header className="sticky top-0 z-10 border-b bg-background/85 px-5 py-3 backdrop-blur">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Local MVP</p>
-                <h1 className="text-xl font-semibold tracking-tight">DataPlus Console</h1>
+              <div className="flex items-center gap-2">
+                <SidebarTrigger className="size-8" />
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Local MVP</p>
+                  <h1 className="text-xl font-semibold tracking-tight">DataPlus Console</h1>
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 <Badge variant={workerStatus.online ? "default" : "secondary"}>
@@ -916,7 +926,7 @@ function App() {
               </>
             )}
           </div>
-        </main>
+        </SidebarInset>
         <FloatingActions
           view={view}
           shopify={shopify}
@@ -927,7 +937,7 @@ function App() {
           onRunShopifyAction={runShopifyAction}
           onCleanupJobs={() => mutateJob("/api/import-jobs/cleanup", "Jobs cleaned.")}
         />
-      </div>
+      </SidebarProvider>
       <Toaster richColors closeButton />
     </TooltipProvider>
   )
