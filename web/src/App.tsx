@@ -26,6 +26,7 @@ import {
   Warehouse,
   Pencil,
   Save,
+  Trash2,
 } from "lucide-react"
 import { Toaster, toast } from "sonner"
 
@@ -2525,6 +2526,90 @@ function ToggleRow({ label, description, checked, disabled, onCheckedChange }: {
 
 type CatalogWorkspaceTab = "products" | "source" | "review" | "changes" | "categories" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "readiness"
 
+type CategoryAttribute = {
+  id?: string
+  attributeId?: string
+  attributeName?: string
+  name?: string
+  handle?: string
+  description?: string
+  required?: boolean
+  recommended?: boolean
+  sourceField?: string
+  fallbackValue?: string
+  transform?: string
+  enabled?: boolean
+  notes?: string
+}
+
+type CategoryChannelMapping = {
+  id?: string
+  name?: string
+  fullName?: string
+  handle?: string
+  categoryId?: string
+  categoryPath?: string
+  categoryHandle?: string
+  collectionHandle?: string
+  taxonomyVersion?: string
+  status?: string
+  notes?: string
+  googleCategory?: { id?: string; fullName?: string; breadcrumb?: string } | null
+  attributes?: CategoryAttribute[]
+  attributeMappings?: CategoryAttribute[]
+}
+
+type CategoryProfile = {
+  id?: string
+  categoryId?: string
+  name?: string
+  productCount?: number
+  activeProductCount?: number
+  stockProductCount?: number
+  sourceMappingCount?: number
+  mappingCount?: number
+  missingMappings?: number
+  status?: string
+  owner?: string
+  notes?: string
+  lifecycle?: string
+  savedExists?: boolean
+  canDelete?: boolean
+  deleteBlockers?: string[]
+  createdByLabel?: string
+  createdAt?: string
+  updatedAt?: string
+  updatedBy?: string
+  mappings?: Record<string, CategoryChannelMapping>
+  smartCollection?: {
+    enabled?: boolean
+    productType?: string
+    handle?: string
+    title?: string
+    bodyHtml?: string
+    sortOrder?: string
+    templateSuffix?: string
+    published?: boolean
+    publishedScope?: string
+    mustMatch?: string
+    ruleProductColumn?: string
+    ruleRelation?: string
+    imageSrc?: string
+    imageAltText?: string
+    titleTag?: string
+    descriptionTag?: string
+  }
+  defaults?: {
+    condition?: string
+    countryOfOrigin?: string
+    hazardousAllowed?: boolean
+    packageWeightRequired?: boolean
+    shippingProfile?: string
+    returnPolicy?: string
+  }
+  requiredAttributes?: string[]
+}
+
 const catalogWorkspaceTabs: Array<{ id: CatalogWorkspaceTab; label: string }> = [
   { id: "products", label: "Products" },
   { id: "source", label: "Source Catalog" },
@@ -2533,7 +2618,7 @@ const catalogWorkspaceTabs: Array<{ id: CatalogWorkspaceTab; label: string }> = 
   { id: "categories", label: "Categories" },
   { id: "mappings", label: "Vendor Mappings" },
   { id: "attributes", label: "Attributes" },
-  { id: "groups", label: "Groups" },
+  { id: "groups", label: "Attribute Groups" },
   { id: "inventory", label: "Inventory" },
   { id: "templates", label: "Templates" },
   { id: "readiness", label: "Readiness" },
@@ -2568,17 +2653,188 @@ function CatalogRecordsTable({ rows, columns, empty }: { rows: Array<Record<stri
   return <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow>{columns.map(([key, label]) => <TableHead key={key}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{rows.map((row, index) => <TableRow key={String(row.id || row.sku || row.categoryId || row.vendorCategory || index)}>{columns.map(([key]) => <TableCell key={key} className="max-w-80"><span className="block truncate" title={catalogCellValue(row[key])}>{catalogCellValue(row[key])}</span></TableCell>)}</TableRow>)}</TableBody></Table></div>
 }
 
-const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
+function categoryProfileFrom(row: CategoryProfile): CategoryProfile {
+  return {
+    ...row,
+    mappings: { ...(row.mappings || {}) },
+    smartCollection: { ...(row.smartCollection || {}) },
+    defaults: { ...(row.defaults || {}) },
+    requiredAttributes: [...(row.requiredAttributes || [])],
+  }
+}
+
+function CategoriesWorkspace() {
+  const [categories, setCategories] = useState<CategoryProfile[]>([])
+  const [selectedId, setSelectedId] = useState("")
+  const [profile, setProfile] = useState<CategoryProfile | null>(null)
+  const [query, setQuery] = useState("")
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [rebuilding, setRebuilding] = useState(false)
+  const [profileTab, setProfileTab] = useState("overview")
+  const [shopifyQuery, setShopifyQuery] = useState("")
+  const [shopifyResults, setShopifyResults] = useState<CategoryChannelMapping[]>([])
+  const [ebayQuery, setEbayQuery] = useState("")
+  const [ebayResults, setEbayResults] = useState<CategoryChannelMapping[]>([])
+  const [taxonomyLoading, setTaxonomyLoading] = useState<"shopify" | "ebay" | "">("")
+
+  const selected = useMemo(() => categories.find((row) => (row.id || row.categoryId) === selectedId) || null, [categories, selectedId])
+  const visibleCategories = useMemo(() => {
+    const value = query.trim().toLowerCase()
+    if (!value) return categories
+    return categories.filter((row) => `${row.name} ${row.status} ${row.owner}`.toLowerCase().includes(value))
+  }, [categories, query])
+
+  function applyCategories(rows: CategoryProfile[], nextId = selectedId) {
+    setCategories(rows)
+    const next = rows.find((row) => (row.id || row.categoryId) === nextId) || rows[0] || null
+    setSelectedId(next?.id || next?.categoryId || "")
+    setProfile(next ? categoryProfileFrom(next) : null)
+  }
+
+  async function load() {
+    setLoading(true)
+    try {
+      const result = await api<{ categories?: CategoryProfile[] }>("/api/categories?scope=main")
+      applyCategories(result.categories || [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load categories.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [])
+
+  useEffect(() => {
+    if (selected) setProfile(categoryProfileFrom(selected))
+  }, [selectedId])
+
+  function updateProfile(update: Partial<CategoryProfile>) {
+    setProfile((current) => current ? { ...current, ...update } : current)
+  }
+
+  function updateMapping(channel: string, update: Partial<CategoryChannelMapping>) {
+    setProfile((current) => current ? {
+      ...current,
+      mappings: { ...(current.mappings || {}), [channel]: { ...(current.mappings?.[channel] || {}), ...update } },
+    } : current)
+  }
+
+  async function save(update: Record<string, unknown> = {}) {
+    if (!profile?.id && !profile?.categoryId) return
+    setSaving(true)
+    try {
+      const result = await api<{ categories?: CategoryProfile[] }>(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}?scope=main`, {
+        method: "PATCH",
+        body: JSON.stringify({ scope: "main", updatedBy: "Luis", ...update }),
+      })
+      applyCategories(result.categories || [], profile.id || profile.categoryId)
+      toast.success("Category saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save category.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function saveOverview() {
+    if (!profile) return
+    await save({ status: profile.status, owner: profile.owner, notes: profile.notes })
+  }
+
+  async function saveChannel(channel: "shopify" | "ebay") {
+    if (!profile) return
+    await save({ channel, mapping: profile.mappings?.[channel] || {}, smartCollection: channel === "shopify" ? profile.smartCollection : undefined })
+  }
+
+  async function syncAttributes() {
+    if (!profile?.id && !profile?.categoryId) return
+    setSaving(true)
+    try {
+      const result = await api<{ categories?: CategoryProfile[] }>(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}/attributes/sync?scope=main`, {
+        method: "POST",
+        body: JSON.stringify({ scope: "main", updatedBy: "Luis" }),
+      })
+      applyCategories(result.categories || [], profile.id || profile.categoryId)
+      toast.success("Marketplace requirements synchronized.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to synchronize requirements.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function rebuildIndex() {
+    setRebuilding(true)
+    try {
+      await api("/api/categories/summary-index/rebuild", { method: "POST", body: JSON.stringify({ scope: "main" }) })
+      await load()
+      toast.success("Main category index rebuilt.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to rebuild the category index.")
+    } finally {
+      setRebuilding(false)
+    }
+  }
+
+  async function searchTaxonomy(channel: "shopify" | "ebay") {
+    const value = channel === "shopify" ? shopifyQuery : ebayQuery
+    if (!value.trim()) return
+    setTaxonomyLoading(channel)
+    try {
+      const result = await api<{ categories?: CategoryChannelMapping[] }>(`/api/channel-taxonomies/${channel}/categories?q=${encodeURIComponent(value)}&limit=12`)
+      channel === "shopify" ? setShopifyResults(result.categories || []) : setEbayResults(result.categories || [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `Unable to search ${channel} taxonomy.`)
+    } finally {
+      setTaxonomyLoading("")
+    }
+  }
+
+  async function deleteProfile() {
+    if (!profile || !profile.canDelete || !window.confirm(`Delete the saved profile for ${profile.name}?`)) return
+    try {
+      await api(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}?scope=main`, { method: "DELETE", body: JSON.stringify({ scope: "main" }) })
+      toast.success("Category profile deleted.")
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to delete category profile.")
+    }
+  }
+
+  const mapping = (channel: string) => profile?.mappings?.[channel] || {}
+  const mappedChannels = ["shopify", "ebay", "temu", "tiktok", "whatnot"].filter((channel) => Boolean(profile?.mappings?.[channel]?.categoryId))
+  const required = [...(profile?.requiredAttributes || []), ...[...mapping("shopify").attributes || [], ...mapping("ebay").attributes || []].filter((attribute) => attribute.required).map((attribute) => attribute.name || attribute.id || "")].filter(Boolean)
+
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Catalog" title="Categories" description="The authoritative product type, channel taxonomy, requirement, collection, and default-rule profile for every approved main category." action={<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" asChild><a href="/api/categories/export/matrixify-smart-collections.csv"><FileDown className="size-4" /> Collections CSV</a></Button><Button variant="outline" size="sm" asChild><a href="/api/categories/export/master-category-mapping.csv"><FileDown className="size-4" /> Mappings CSV</a></Button><Button variant="outline" size="sm" onClick={rebuildIndex} disabled={rebuilding}>{rebuilding ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Rebuild index</Button></div>} />
+    <div className="grid gap-5 xl:grid-cols-[minmax(280px,0.72fr)_minmax(0,1.8fr)]">
+      <Card className="h-fit xl:sticky xl:top-4"><CardHeader className="gap-3 border-b pb-4"><div><CardTitle className="text-sm">Main category index</CardTitle><CardDescription>{numberLabel(categories.length)} categories. Search changes the list only; it never changes catalog data.</CardDescription></div><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" placeholder="Search categories" value={query} onChange={(event) => setQuery(event.target.value)} /></div></CardHeader><CardContent className="max-h-[calc(100vh-20rem)] overflow-y-auto p-2">{loading ? <div className="grid gap-2 p-2"><Skeleton className="h-16" /><Skeleton className="h-16" /><Skeleton className="h-16" /></div> : visibleCategories.map((category) => { const id = category.id || category.categoryId || ""; const active = id === selectedId; return <button key={id} onClick={() => setSelectedId(id)} className={`grid w-full gap-1 rounded-md px-3 py-3 text-left transition-colors ${active ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}><div className="flex items-start justify-between gap-2"><span className="line-clamp-2 text-sm font-medium">{category.name}</span><Badge variant={active ? "secondary" : "outline"} className="shrink-0 text-[10px]">{numberLabel(category.productCount)}</Badge></div><div className={`flex items-center gap-2 text-xs ${active ? "text-primary-foreground/75" : "text-muted-foreground"}`}><span>{category.status?.replace(/_/g, " ")}</span><span>{numberLabel(category.mappingCount)} channel maps</span></div></button>})}{!loading && !visibleCategories.length && <p className="p-6 text-center text-sm text-muted-foreground">No categories match this search.</p>}</CardContent></Card>
+      <Card>{!profile ? <CardContent className="p-10 text-center text-sm text-muted-foreground">Select a main category to manage its product type profile.</CardContent> : <><CardHeader className="gap-4 border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Badge>{profile.status?.replace(/_/g, " ") || "Needs review"}</Badge>{profile.lifecycle && <Badge variant="outline">{profile.lifecycle}</Badge>}<Badge variant="outline">{numberLabel(profile.productCount)} products</Badge></div><CardTitle className="text-lg">{profile.name}</CardTitle><CardDescription className="mt-1">Main category and product type authority. Products inherit this profile, then each channel receives its mapped taxonomy and requirements.</CardDescription></div><Button size="sm" onClick={saveOverview} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save category</Button></div><div className="grid gap-2 sm:grid-cols-3"><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">Active products</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.activeProductCount)}</p></div><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">In stock</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.stockProductCount)}</p></div><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">Vendor paths mapped</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.sourceMappingCount)}</p></div></div></CardHeader>
+        <CardContent className="p-0"><Tabs value={profileTab} onValueChange={setProfileTab}><div className="overflow-x-auto border-b px-4"><TabsList className="h-12 min-w-max bg-transparent p-0"><TabsTrigger value="overview" className="text-xs">Overview</TabsTrigger><TabsTrigger value="shopify" className="text-xs">Shopify</TabsTrigger><TabsTrigger value="ebay" className="text-xs">eBay</TabsTrigger><TabsTrigger value="attributes" className="text-xs">Attributes</TabsTrigger><TabsTrigger value="defaults" className="text-xs">Defaults</TabsTrigger><TabsTrigger value="collection" className="text-xs">Collection</TabsTrigger><TabsTrigger value="lifecycle" className="text-xs">Lifecycle</TabsTrigger></TabsList></div>
+          <TabsContent value="overview" className="m-0 p-5"><div className="grid gap-5 lg:grid-cols-2"><section className="grid gap-4"><div className="grid gap-2"><Label>Status</Label><Select value={profile.status || "needs_review"} onValueChange={(value) => updateProfile({ status: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="needs_review">Needs review</SelectItem><SelectItem value="mapped">Mapped</SelectItem><SelectItem value="approved">Approved</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></div><div className="grid gap-2"><Label>Category owner</Label><Input value={profile.owner || ""} onChange={(event) => updateProfile({ owner: event.target.value })} placeholder="Responsible team member" /></div><div className="grid gap-2"><Label>Internal notes</Label><Textarea value={profile.notes || ""} onChange={(event) => updateProfile({ notes: event.target.value })} placeholder="Why this category is configured this way" /></div></section><section className="grid content-start gap-4 rounded-md border p-4"><div><p className="text-sm font-medium">Product type model</p><p className="mt-1 text-xs text-muted-foreground">This main category is the product type. There is no second editable product-type list to drift from the catalog hierarchy.</p></div><div className="rounded-md bg-muted/50 p-3"><p className="text-xs text-muted-foreground">Shopify product type</p><p className="mt-1 text-sm font-medium">{profile.smartCollection?.productType || profile.name}</p></div><div><p className="mb-2 text-xs text-muted-foreground">Mapped channels</p><div className="flex flex-wrap gap-2">{mappedChannels.length ? mappedChannels.map((channel) => <Badge key={channel} variant="outline">{channel}</Badge>) : <span className="text-sm text-muted-foreground">No channel taxonomies mapped yet.</span>}</div></div><div><p className="mb-2 text-xs text-muted-foreground">Required marketplace attributes</p><div className="flex flex-wrap gap-2">{required.length ? required.slice(0, 10).map((name) => <Badge key={name} variant="secondary">{name}</Badge>) : <span className="text-sm text-muted-foreground">Requirements will appear after mapping and synchronization.</span>}</div></div></section></div></TabsContent>
+          <TabsContent value="shopify" className="m-0 p-5"><div className="grid gap-5"><section className="rounded-md border p-4"><div className="mb-3"><p className="text-sm font-medium">Shopify taxonomy</p><p className="text-xs text-muted-foreground">Map the canonical Shopify product category. It controls Shopify category attributes; it does not replace the main category.</p></div><div className="flex gap-2"><Input value={shopifyQuery} onChange={(event) => setShopifyQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") searchTaxonomy("shopify") }} placeholder={`Search Shopify taxonomy for ${profile.name}`} /><Button variant="outline" onClick={() => searchTaxonomy("shopify")} disabled={taxonomyLoading === "shopify"}>{taxonomyLoading === "shopify" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button></div>{mapping("shopify").categoryId && <div className="mt-3 rounded-md border bg-muted/30 p-3"><p className="text-xs text-muted-foreground">Selected Shopify category</p><p className="mt-1 text-sm font-medium">{mapping("shopify").categoryPath || mapping("shopify").categoryId}</p><p className="mt-1 text-xs text-muted-foreground">ID: {mapping("shopify").categoryId}{mapping("shopify").taxonomyVersion ? ` | Taxonomy ${mapping("shopify").taxonomyVersion}` : ""}</p></div>}{shopifyResults.length > 0 && <div className="mt-3 max-h-64 overflow-y-auto rounded-md border">{shopifyResults.map((result) => { const categoryId = result.categoryId || result.id || ""; const categoryPath = result.categoryPath || result.fullName || result.name || categoryId; return <button key={categoryId} onClick={() => { updateMapping("shopify", { categoryId, categoryPath, categoryHandle: result.categoryHandle || result.handle || "", taxonomyVersion: result.taxonomyVersion || "", googleCategory: result.googleCategory || null, attributes: result.attributes || [] }); setShopifyResults([]) }} className="block w-full border-b px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted"><p className="font-medium">{categoryPath}</p><p className="text-xs text-muted-foreground">{categoryId}</p></button>})}</div>}</section><section className="grid gap-4 lg:grid-cols-2"><div className="grid gap-2"><Label>Collection handle</Label><Input value={mapping("shopify").collectionHandle || ""} onChange={(event) => updateMapping("shopify", { collectionHandle: event.target.value })} placeholder="Collection handle" /></div><div className="grid gap-2"><Label>Google taxonomy reference</Label><Input value={mapping("shopify").googleCategory?.breadcrumb || mapping("shopify").googleCategory?.fullName || ""} onChange={(event) => updateMapping("shopify", { googleCategory: { ...(mapping("shopify").googleCategory || {}), breadcrumb: event.target.value, fullName: event.target.value } })} placeholder="Optional Google product category" /></div></section><div className="flex justify-end"><Button onClick={() => saveChannel("shopify")} disabled={saving}><Save className="size-4" /> Save Shopify mapping</Button></div></div></TabsContent>
+          <TabsContent value="ebay" className="m-0 p-5"><div className="grid gap-5"><section className="rounded-md border p-4"><div className="mb-3"><p className="text-sm font-medium">eBay taxonomy</p><p className="text-xs text-muted-foreground">Map an eBay category when this product type will be published to eBay. Required item specifics become available in Attributes.</p></div><div className="flex gap-2"><Input value={ebayQuery} onChange={(event) => setEbayQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") searchTaxonomy("ebay") }} placeholder={`Search eBay taxonomy for ${profile.name}`} /><Button variant="outline" onClick={() => searchTaxonomy("ebay")} disabled={taxonomyLoading === "ebay"}>{taxonomyLoading === "ebay" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button></div>{mapping("ebay").categoryId && <div className="mt-3 rounded-md border bg-muted/30 p-3"><p className="text-xs text-muted-foreground">Selected eBay category</p><p className="mt-1 text-sm font-medium">{mapping("ebay").categoryPath || mapping("ebay").categoryId}</p><p className="mt-1 text-xs text-muted-foreground">ID: {mapping("ebay").categoryId}</p></div>}{ebayResults.length > 0 && <div className="mt-3 max-h-64 overflow-y-auto rounded-md border">{ebayResults.map((result) => { const categoryId = result.categoryId || result.id || ""; const categoryPath = result.categoryPath || result.fullName || result.name || categoryId; return <button key={categoryId} onClick={() => { updateMapping("ebay", { categoryId, categoryPath, taxonomyVersion: result.taxonomyVersion || "" }); setEbayResults([]) }} className="block w-full border-b px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted"><p className="font-medium">{categoryPath}</p><p className="text-xs text-muted-foreground">{categoryId}</p></button>})}</div>}</section><div className="flex justify-end"><Button onClick={() => saveChannel("ebay")} disabled={saving}><Save className="size-4" /> Save eBay mapping</Button></div></div></TabsContent>
+          <TabsContent value="attributes" className="m-0 p-5"><div className="grid gap-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-medium">Marketplace requirements and source mapping</p><p className="text-xs text-muted-foreground">Synchronize mapped channel requirements, then define where each value comes from before products are exported.</p></div><Button variant="outline" size="sm" onClick={syncAttributes} disabled={saving}><RefreshCw className="size-4" /> Sync requirements</Button></div>{["shopify", "ebay"].map((channel) => { const attributes = mapping(channel).attributes || []; const mappings = mapping(channel).attributeMappings || []; return <section key={channel} className="rounded-md border"><div className="flex items-center justify-between border-b px-4 py-3"><div><p className="text-sm font-medium capitalize">{channel}</p><p className="text-xs text-muted-foreground">{numberLabel(attributes.length)} requirements discovered</p></div><Badge variant="outline">{mapping(channel).categoryId ? "Mapped" : "Not mapped"}</Badge></div>{!mapping(channel).categoryId ? <p className="p-4 text-sm text-muted-foreground">Map the {channel} taxonomy first.</p> : !attributes.length ? <p className="p-4 text-sm text-muted-foreground">No synchronized requirements yet. Use Sync requirements after the category is saved.</p> : <div className="divide-y">{attributes.map((attribute) => { const existing = mappings.find((row) => (row.attributeId || row.id) === (attribute.id || attribute.name)); return <div key={attribute.id || attribute.name} className="grid gap-3 p-4 lg:grid-cols-[minmax(180px,0.8fr)_minmax(180px,1fr)_minmax(160px,0.8fr)]"><div><p className="text-sm font-medium">{attribute.name}</p><p className="text-xs text-muted-foreground">{attribute.required ? "Required" : attribute.recommended ? "Recommended" : "Optional"}{attribute.description ? ` | ${attribute.description}` : ""}</p></div><Input defaultValue={existing?.sourceField || ""} placeholder="Source field, e.g. brand" onBlur={(event) => { const next = [...mappings.filter((row) => (row.attributeId || row.id) !== (attribute.id || attribute.name)), { ...attribute, ...existing, attributeId: attribute.id || attribute.name, attributeName: attribute.name, sourceField: event.target.value, enabled: true }]; updateMapping(channel, { attributeMappings: next }) }} /><Input defaultValue={existing?.fallbackValue || ""} placeholder="Fallback value" onBlur={(event) => { const currentMappings = mapping(channel).attributeMappings || []; const next = [...currentMappings.filter((row) => (row.attributeId || row.id) !== (attribute.id || attribute.name)), { ...attribute, ...existing, attributeId: attribute.id || attribute.name, attributeName: attribute.name, fallbackValue: event.target.value, enabled: true }]; updateMapping(channel, { attributeMappings: next }) }} /></div>})}</div>}</section>})}<div className="flex justify-end gap-2"><Button variant="outline" onClick={() => saveChannel("ebay")} disabled={saving}>Save eBay attributes</Button><Button onClick={() => saveChannel("shopify")} disabled={saving}>Save Shopify attributes</Button></div></div></TabsContent>
+          <TabsContent value="defaults" className="m-0 p-5"><div className="grid gap-5 lg:grid-cols-2"><div className="grid gap-2"><Label>Default condition</Label><Select value={profile.defaults?.condition || "New"} onValueChange={(value) => updateProfile({ defaults: { ...profile.defaults, condition: value } })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="New">New</SelectItem><SelectItem value="Used">Used</SelectItem><SelectItem value="Refurbished">Refurbished</SelectItem></SelectContent></Select></div><div className="grid gap-2"><Label>Country of origin</Label><Input value={profile.defaults?.countryOfOrigin || ""} onChange={(event) => updateProfile({ defaults: { ...profile.defaults, countryOfOrigin: event.target.value } })} placeholder="e.g. US" /></div><div className="grid gap-2"><Label>Default shipping profile</Label><Input value={profile.defaults?.shippingProfile || ""} onChange={(event) => updateProfile({ defaults: { ...profile.defaults, shippingProfile: event.target.value } })} placeholder="Used if a product has no override" /></div><div className="grid gap-2"><Label>Default return policy</Label><Input value={profile.defaults?.returnPolicy || ""} onChange={(event) => updateProfile({ defaults: { ...profile.defaults, returnPolicy: event.target.value } })} placeholder="Used if a product has no override" /></div><div className="flex items-start justify-between rounded-md border p-4"><div><p className="text-sm font-medium">Hazardous items allowed</p><p className="text-xs text-muted-foreground">Allows products in this category to carry hazardous flags.</p></div><Switch checked={Boolean(profile.defaults?.hazardousAllowed)} onCheckedChange={(checked) => updateProfile({ defaults: { ...profile.defaults, hazardousAllowed: checked } })} /></div><div className="flex items-start justify-between rounded-md border p-4"><div><p className="text-sm font-medium">Package weight required</p><p className="text-xs text-muted-foreground">Keeps products from passing readiness without shipping weight.</p></div><Switch checked={profile.defaults?.packageWeightRequired !== false} onCheckedChange={(checked) => updateProfile({ defaults: { ...profile.defaults, packageWeightRequired: checked } })} /></div></div><div className="flex justify-end"><Button onClick={() => save({ defaults: profile.defaults || {} })} disabled={saving}><Save className="size-4" /> Save defaults</Button></div></TabsContent>
+          <TabsContent value="collection" className="m-0 p-5"><div className="grid gap-5"><div className="flex items-start justify-between rounded-md border p-4"><div><p className="text-sm font-medium">Smart collection profile</p><p className="text-xs text-muted-foreground">Used for export and collection automation. It is a channel behavior attached to this main category.</p></div><Switch checked={Boolean(profile.smartCollection?.enabled)} onCheckedChange={(checked) => updateProfile({ smartCollection: { ...profile.smartCollection, enabled: checked } })} /></div><div className="grid gap-4 lg:grid-cols-2"><div className="grid gap-2"><Label>Shopify product type</Label><Input value={profile.smartCollection?.productType || profile.name || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, productType: event.target.value } })} /></div><div className="grid gap-2"><Label>Collection title</Label><Input value={profile.smartCollection?.title || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, title: event.target.value } })} placeholder={profile.name} /></div><div className="grid gap-2"><Label>Collection handle</Label><Input value={profile.smartCollection?.handle || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, handle: event.target.value } })} placeholder="Generated when left empty" /></div><div className="grid gap-2"><Label>Sort order</Label><Input value={profile.smartCollection?.sortOrder || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, sortOrder: event.target.value } })} placeholder="Best Selling" /></div><div className="grid gap-2"><Label>SEO title</Label><Input value={profile.smartCollection?.titleTag || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, titleTag: event.target.value } })} /></div><div className="grid gap-2"><Label>SEO description</Label><Input value={profile.smartCollection?.descriptionTag || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, descriptionTag: event.target.value } })} /></div></div><div className="grid gap-2"><Label>Collection description</Label><Textarea value={profile.smartCollection?.bodyHtml || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, bodyHtml: event.target.value } })} /></div><div className="flex justify-end"><Button onClick={() => save({ smartCollection: profile.smartCollection || {} })} disabled={saving}><Save className="size-4" /> Save collection profile</Button></div></div></TabsContent>
+          <TabsContent value="lifecycle" className="m-0 p-5"><div className="grid gap-5"><section className="rounded-md border p-4"><div className="flex items-start gap-3"><History className="mt-0.5 size-4 text-muted-foreground" /><div><p className="text-sm font-medium">Profile history</p><p className="mt-1 text-xs text-muted-foreground">Created by {profile.createdByLabel || "System"} on {dateLabel(profile.createdAt)}. Last saved by {profile.updatedBy || "System"} on {dateLabel(profile.updatedAt)}.</p></div></div></section><section className="rounded-md border border-destructive/30 p-4"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm font-medium">Delete saved category profile</p><p className="mt-1 text-xs text-muted-foreground">This removes only saved category settings. Categories with products or vendor mappings stay protected.</p>{profile.deleteBlockers?.length ? <ul className="mt-3 list-disc pl-4 text-xs text-muted-foreground">{profile.deleteBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul> : null}</div><Button variant="destructive" size="sm" disabled={!profile.canDelete} onClick={deleteProfile}><Trash2 className="size-4" /> Delete profile</Button></div></section></div></TabsContent>
+        </Tabs></CardContent></>}</Card>
+    </div>
+  </div>
+}
+
+const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates" | "categories">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
   review: { endpoint: "/api/data-quality/products?limit=100", title: "Import Review", description: "Review products that need attention before they move through catalog and channel workflows.", rows: "rows", columns: [["sku", "SKU"], ["title", "Product"], ["issues", "Issues"], ["status", "Status"], ["updatedAt", "Updated"]] },
   changes: { endpoint: "/api/catalog/changes?limit=100", title: "SKU Changes", description: "Recent source changes detected across cost, inventory, status, and catalog data.", rows: "rows", columns: [["sku", "SKU"], ["field", "Field"], ["previousValue", "Previous"], ["nextValue", "Current"], ["createdAt", "Detected"]] },
-  categories: { endpoint: "/api/categories?scope=main", title: "Categories", description: "Main category structure built from True Value and approved catalog mappings.", rows: "categories", columns: [["name", "Category"], ["productCount", "Products"], ["status", "Status"], ["updatedAt", "Updated"]] },
   mappings: { endpoint: "/api/vendor-category-mappings?limit=100", title: "Vendor Category Mappings", description: "Supplier categories mapped into the main catalog. Unmapped rows stay visible for review.", rows: "rows", columns: [["supplier", "Supplier"], ["vendorCategory", "Vendor category"], ["mainCategory", "Main category"], ["matchCount", "SKUs"], ["mapped", "Mapped"]] },
   attributes: { endpoint: "/api/categories/attributes", title: "Attributes", description: "Marketplace attribute requirements and the source fields that fulfill them.", rows: "rows", columns: [["Category", "Category"], ["Channel", "Channel"], ["Attribute", "Attribute"], ["Mapped Source Field", "Source field"], ["Required", "Required"]] },
   groups: { endpoint: "/api/categories/attribute-groups", title: "Attribute Groups", description: "Reusable attribute groups that keep category requirements consistent.", rows: "groups", columns: [["label", "Group"], ["aliases", "Aliases"], ["updatedAt", "Updated"]] },
   readiness: { endpoint: "/api/data-quality/products?limit=100", title: "Readiness", description: "Product readiness queue for missing content, dimensions, category, or marketplace requirements.", rows: "rows", columns: [["sku", "SKU"], ["title", "Product"], ["issues", "Missing or invalid"], ["channel", "Channel"], ["status", "Status"]] },
 }
 
-function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates"> }) {
+function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates" | "categories"> }) {
   const config = catalogResourceConfig[tab]
   const [rows, setRows] = useState<Array<Record<string, unknown>>>([])
   const [loading, setLoading] = useState(true)
@@ -2600,15 +2856,7 @@ function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "produ
 
   useEffect(() => { load() }, [tab])
 
-  const rebuildCategories = async () => {
-    try {
-      await api("/api/categories/summary-index/rebuild", { method: "POST", body: JSON.stringify({ scope: "both" }) })
-      toast.success("Category summary index rebuilt.")
-      load(true)
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to rebuild category index.") }
-  }
-
-  return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title={config.title} description={config.description} action={<div className="flex gap-2">{tab === "categories" && <Button variant="outline" onClick={rebuildCategories}>Rebuild index</Button>}<Button variant="outline" onClick={() => load(true)} disabled={refreshing}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} /><Card><CardHeader className="border-b"><CardTitle className="text-sm">{numberLabel(rows.length)} loaded</CardTitle><CardDescription>{tab === "mappings" ? "Use the vendor profile to edit individual mapping rules and add missing main categories." : "Data loads only when this tab is opened."}</CardDescription></CardHeader><CardContent className="p-4">{loading ? <div className="grid gap-2"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <CatalogRecordsTable rows={rows} columns={config.columns} empty={`No ${config.title.toLowerCase()} records are available.`} />}</CardContent></Card></div>
+  return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title={config.title} description={config.description} action={<div className="flex gap-2"><Button variant="outline" onClick={() => load(true)} disabled={refreshing}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} /><Card><CardHeader className="border-b"><CardTitle className="text-sm">{numberLabel(rows.length)} loaded</CardTitle><CardDescription>{tab === "mappings" ? "Use the vendor profile to edit individual mapping rules and add missing main categories." : "Data loads only when this tab is opened."}</CardDescription></CardHeader><CardContent className="p-4">{loading ? <div className="grid gap-2"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <CatalogRecordsTable rows={rows} columns={config.columns} empty={`No ${config.title.toLowerCase()} records are available.`} />}</CardContent></Card></div>
 }
 
 function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { inventoryOnly?: boolean; totalSkuCount?: number }) {
@@ -2907,7 +3155,7 @@ function CatalogPage() {
     const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", source: "/source-catalog", review: "/import-review", changes: "/sku-changes", categories: "/categories", mappings: "/vendor-category-mappings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
     window.history.replaceState({}, "", paths[selected])
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} />}{tab === "source" && <SourceCatalogPage />}{tab === "inventory" && <MainCatalogPage inventoryOnly totalSkuCount={workspaceCounts.inventory} />}{tab === "templates" && <CatalogTemplatesPage />}{(["review", "changes", "categories", "mappings", "attributes", "groups", "readiness"] as CatalogWorkspaceTab[]).includes(tab) && <CatalogResourcePage tab={tab as Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates">} />}</div>
+  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} />}{tab === "source" && <SourceCatalogPage />}{tab === "inventory" && <MainCatalogPage inventoryOnly totalSkuCount={workspaceCounts.inventory} />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{(["review", "changes", "mappings", "attributes", "groups", "readiness"] as CatalogWorkspaceTab[]).includes(tab) && <CatalogResourcePage tab={tab as Exclude<CatalogWorkspaceTab, "products" | "source" | "inventory" | "templates" | "categories">} />}</div>
 }
 
 function SourceCatalogPage() {
