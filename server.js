@@ -22072,7 +22072,9 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/categories/attributes") {
     const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
     if (postgres.isPostgresEnabled()) db.__mainCategoryRows = await postgres.listCategoryProductStats();
-    const rows = marketplaceCategoryAttributeRows(db, { channel: url.searchParams.get("channel") || "" });
+    const categoryId = String(url.searchParams.get("categoryId") || "").trim();
+    const rows = marketplaceCategoryAttributeRows(db, { channel: url.searchParams.get("channel") || "" })
+      .filter((row) => !categoryId || String(row["Category ID"] || "") === categoryId);
     return sendJson(res, 200, {
       rows,
       total: rows.length,
