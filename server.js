@@ -13762,6 +13762,9 @@ function publicInventoryListItem(item = {}, context = {}) {
   const websitePrice = websitePriceFromRule(item, sellUnitCost || cost, SHOPIFY_PRICE_MARKUP_PERCENT, {}, rulesDb);
   const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
   const images = Array.isArray(item.images) ? item.images : [];
+  const warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
+  const onHand = Number(item.qty || 0);
+  const reserved = Number(item.reserved || 0);
   return {
     id: item.id,
     sku: item.sku,
@@ -13808,9 +13811,24 @@ function publicInventoryListItem(item = {}, context = {}) {
     uomDisplay: uomInfo.display,
     isMultiUnit: uomInfo.isMultiUnit,
     systemVariants: systemProductVariants(pricedItem, rulesDb),
-    qty: Number(item.qty || 0),
+    qty: onHand,
     stockQty: Number(item.stockQty || 0),
-    reserved: Number(item.reserved || 0),
+    reserved,
+    available: onHand - reserved,
+    reorderPoint: Number(item.reorderPoint || 0),
+    replenishable: productIsReplenishable(item),
+    replenishableUseVendorRules: productUsesVendorReplenishableRules(item),
+    effectiveReplenishableQty: productReplenishableQty(item, rulesDb),
+    warehouseCount: warehouseStock.length,
+    warehouseStock: warehouseStock.map((row) => ({
+      warehouseId: row.warehouseId || "",
+      warehouseName: row.warehouseName || row.warehouseId || "Unassigned",
+      locationBin: row.locationBin || "",
+      qty: Number(row.qty || 0),
+      reserved: Number(row.reserved || 0),
+      available: Number(row.available ?? (Number(row.qty || 0) - Number(row.reserved || 0))),
+      updatedAt: row.updatedAt || ""
+    })),
     price: websitePrice,
     websitePrice,
     cost,
@@ -16752,7 +16770,11 @@ function catalogFilterParams(searchParams) {
     verifiedBrand: searchParams.get("verifiedBrand") || "",
     brand: searchParams.get("brand") || "",
     manufacturer: searchParams.get("manufacturer") || "",
-    category: searchParams.get("category") || ""
+    category: searchParams.get("category") || "",
+    inventoryAvailability: searchParams.get("inventoryAvailability") || "",
+    lowStock: searchParams.get("lowStock") || "",
+    replenishable: searchParams.get("replenishable") || "",
+    warehouse: searchParams.get("warehouse") || ""
   };
 }
 
@@ -19565,6 +19587,67 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "transfers" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const fromWarehouse = (db.warehouses || []).find((row) => row.id === body.fromWarehouseId);
+    const toWarehouse = (db.warehouses || []).find((row) => row.id === body.toWarehouseId);
+    const qty = Number(body.qty || 0);
+    if (!fromWarehouse || !toWarehouse) return sendJson(res, 400, { error: "Both warehouses are required." });
+    if (fromWarehouse.id === toWarehouse.id) return sendJson(res, 400, { error: "Choose different source and destination warehouses." });
+    if (!(qty > 0)) return sendJson(res, 400, { error: "Transfer quantity must be greater than zero." });
+    const fromRow = ensureInventoryWarehouseStock(item, fromWarehouse);
+    const toRow = ensureInventoryWarehouseStock(item, toWarehouse);
+    const available = Number(fromRow.qty || 0) - Number(fromRow.reserved || 0);
+    if (available < qty) return sendJson(res, 400, { error: `Only ${available} available in ${fromWarehouse.name}.` });
+    const fromBefore = Number(fromRow.qty || 0);
+    const toBefore = Number(toRow.qty || 0);
+    fromRow.qty = Math.max(0, fromBefore - qty);
+    toRow.qty = toBefore + qty;
+    if (body.toLocationBin !== undefined) toRow.locationBin = String(body.toLocationBin || "").trim();
+    fromRow.updatedAt = new Date().toISOString();
+    toRow.updatedAt = new Date().toISOString();
+    syncInventoryTotalsFromWarehouses(item);
+    item.updatedAt = new Date().toISOString();
+    const referenceNumber = `${fromWarehouse.code || fromWarehouse.name} -> ${toWarehouse.code || toWarehouse.name}`;
+    addInventoryLedger(db, item, { type: "transfer_out", source: "inventory", warehouseId: fromWarehouse.id, warehouseName: fromWarehouse.name, locationBin: fromRow.locationBin || "", referenceNumber, quantityChange: -qty, qtyBefore: fromBefore, qtyAfter: fromRow.qty, reservedBefore: Number(fromRow.reserved || 0), reservedAfter: Number(fromRow.reserved || 0), reason: body.note || `Transferred to ${toWarehouse.name}`, user: body.user || "Luis" });
+    addInventoryLedger(db, item, { type: "transfer_in", source: "inventory", warehouseId: toWarehouse.id, warehouseName: toWarehouse.name, locationBin: toRow.locationBin || "", referenceNumber, quantityChange: qty, qtyBefore: toBefore, qtyAfter: toRow.qty, reservedBefore: Number(toRow.reserved || 0), reservedAfter: Number(toRow.reserved || 0), reason: body.note || `Transferred from ${fromWarehouse.name}`, user: body.user || "Luis" });
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
+    return sendJson(res, 200, { item: publicInventoryItem(updated || item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/inventory/export.csv" && postgres.isPostgresEnabled()) {
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="inventory-export-${new Date().toISOString().slice(0, 10)}.csv"`,
+      "Cache-Control": "no-store"
+    });
+    res.write("sku,title,on_hand,reserved,available,reorder_point,warehouse_count,cost,supplier,replenishable,status\n");
+    const filters = catalogFilterParams(url.searchParams);
+    const query = url.searchParams.get("q") || "";
+    const shopifyStatusMap = readShopifyStatusMapSync();
+    const sourceEnrichmentMap = readProductSourceEnrichmentSync();
+    for (let page = 1; ; page += 1) {
+      const result = await postgres.listProducts({ q: query, page, limit: 1000, includeInventoryLevels: true, filters });
+      const rows = result?.inventory || [];
+      if (!rows.length) break;
+      const csvRows = rows.map((item) => {
+        const product = publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap });
+        return [product.sku, product.title || product.marketplaceTitle || "", product.qty, product.reserved, product.available, product.reorderPoint, product.warehouseCount, product.cost, product.supplier || product.vendor || "", product.replenishable ? "true" : "false", product.active === false ? "Inactive" : "Active"].map(escapeCsv).join(",");
+      });
+      res.write(`${csvRows.join("\n")}\n`);
+      if (rows.length < 1000) break;
+    }
+    return res.end();
+  }
+
   if (req.method === "GET" && url.pathname === "/api/inventory") {
     if (postgres.isPostgresEnabled()) {
       const cacheQuery = url.searchParams.toString();
@@ -19580,6 +19663,7 @@ async function handleApi(req, res) {
         includeTotal: ["1", "true", "yes"].includes(String(url.searchParams.get("includeTotal") || "").toLowerCase()),
         sort: url.searchParams.get("sort") || "",
         sortDirection: url.searchParams.get("sortDirection") || "asc",
+        includeInventoryLevels: ["1", "true", "yes"].includes(String(url.searchParams.get("inventoryWorkspace") || "").toLowerCase()),
         filters: catalogFilterParams(url.searchParams)
       });
       if (result) {

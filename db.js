@@ -4953,6 +4953,15 @@ async function listProducts(options = {}) {
     case when coalesce(raw ->> 'stockQty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'stockQty')::numeric end,
     case when coalesce(raw ->> 'qty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'qty')::numeric end
   )`;
+  const reservedQtyExpression = `coalesce(
+    case when coalesce(raw ->> 'reserved', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'reserved')::numeric end,
+    0
+  )`;
+  const availableQtyExpression = `(${stockQtyExpression} - ${reservedQtyExpression})`;
+  const reorderPointExpression = `coalesce(
+    case when coalesce(raw ->> 'reorderPoint', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'reorderPoint')::numeric end,
+    0
+  )`;
   const stockQtyOperator = nullableString(filters.stockQtyOperator);
   const stockQtyValues = splitFilterValues(filters.stockQty).map((value) => Number(value)).filter((value) => Number.isFinite(value));
   if (stockQtyOperator) {
@@ -4979,6 +4988,36 @@ async function listProducts(options = {}) {
         where.push(`${stockQtyExpression} = $${params.length}`);
       }
     }
+  }
+  const inventoryAvailabilityValues = splitFilterValues(filters.inventoryAvailability).map((value) => value.toLowerCase());
+  if (inventoryAvailabilityValues.length) {
+    const clauses = inventoryAvailabilityValues.map((value) => {
+      if (value === "in-stock") return `${availableQtyExpression} > 0`;
+      if (value === "out-of-stock") return `${availableQtyExpression} <= 0`;
+      if (value === "negative") return `${availableQtyExpression} < 0`;
+      return "";
+    }).filter(Boolean);
+    if (clauses.length) where.push(`(${clauses.join(" or ")})`);
+  }
+  const lowStockValues = [...new Set(splitFilterValues(filters.lowStock).map(parseFilterBoolean))];
+  if (lowStockValues.length === 1) {
+    where.push(lowStockValues[0]
+      ? `(${reorderPointExpression} > 0 and ${availableQtyExpression} <= ${reorderPointExpression})`
+      : `(${reorderPointExpression} <= 0 or ${availableQtyExpression} > ${reorderPointExpression})`);
+  }
+  const replenishableValues = [...new Set(splitFilterValues(filters.replenishable).map(parseFilterBoolean))];
+  if (replenishableValues.length === 1) {
+    params.push(replenishableValues[0]);
+    where.push(`case when lower(coalesce(raw ->> 'replenishable', 'false')) in ('true','1','yes','y') then true else false end = $${params.length}`);
+  }
+  const warehouseValues = splitFilterValues(filters.warehouse);
+  if (warehouseValues.length) {
+    params.push(warehouseValues);
+    where.push(`exists (
+      select 1 from inventory_levels il
+      where il.product_id = products.product_id
+        and il.location_key = any($${params.length})
+    )`);
   }
   const hazardousValues = [...new Set(splitFilterValues(filters.hazardous).map(parseFilterBoolean))];
   if (hazardousValues.length === 1) {
@@ -5231,7 +5270,9 @@ async function listProducts(options = {}) {
     limit $${params.length - 1} offset $${params.length}
   `, params);
   const hasMore = fastPage && result.rows.length > limit;
-  const inventory = await hydrateProductsWithShopifyStatuses(result.rows.slice(0, limit).map(productRowToState));
+  let inventory = result.rows.slice(0, limit).map(productRowToState);
+  if (options.includeInventoryLevels) inventory = await hydrateProductsWithInventoryLevels(inventory);
+  inventory = await hydrateProductsWithShopifyStatuses(inventory);
   return {
     inventory,
     total: countResult?.rows[0]?.total || 0,
@@ -5239,6 +5280,36 @@ async function listProducts(options = {}) {
     limit,
     hasMore
   };
+}
+
+async function hydrateProductsWithInventoryLevels(items = []) {
+  const client = getPool();
+  const ids = [...new Set((Array.isArray(items) ? items : []).map((item) => nullableString(item.id)).filter(Boolean))];
+  if (!client || !ids.length) return items;
+  const result = await client.query(`
+    select product_id, location_key, on_hand, available, reserved, committed, incoming, updated_at
+    from inventory_levels
+    where product_id = any($1::text[])
+    order by location_key
+  `, [ids]);
+  const byProductId = new Map();
+  for (const row of result.rows) {
+    const rows = byProductId.get(row.product_id) || [];
+    rows.push(inventoryLevelRowToState(row));
+    byProductId.set(row.product_id, rows);
+  }
+  return items.map((item) => {
+    const warehouseStock = byProductId.get(item.id) || [];
+    if (!warehouseStock.length) return item;
+    return {
+      ...item,
+      warehouseStock,
+      qty: warehouseStock.reduce((sum, row) => sum + Number(row.qty || 0), 0),
+      stockQty: warehouseStock.reduce((sum, row) => sum + Number(row.qty || 0), 0),
+      reserved: warehouseStock.reduce((sum, row) => sum + Number(row.reserved || 0), 0),
+      reorderPoint: warehouseStock.reduce((sum, row) => sum + Number(row.reorderPoint || 0), 0)
+    };
+  });
 }
 
 async function productFacets() {
