@@ -166,6 +166,7 @@ async function initRelationalSchema() {
       parent_sku text,
       alias_sku text not null,
       source text,
+      channel_source text,
       alias_type text not null default 'direct',
       active boolean not null default true,
       created_from_order_id text,
@@ -427,6 +428,7 @@ async function initRelationalSchema() {
     );
     create index if not exists order_records_status_idx on order_records (status, created_at desc);
     create index if not exists order_records_source_idx on order_records (lower(source), created_at desc);
+    create index if not exists order_records_channel_source_idx on order_records (lower(channel_source), created_at desc);
     create index if not exists order_records_customer_idx on order_records (customer_id, created_at desc);
     create index if not exists order_records_order_number_idx on order_records (lower(order_number));
     create index if not exists order_records_marketplace_order_idx on order_records (lower(marketplace_order_id));
@@ -751,6 +753,7 @@ async function readCategoryState() {
     from app_state
     where id = 1
   `);
+  await client.query("alter table order_records add column if not exists channel_source text");
   return result.rows[0]?.data || null;
 }
 
@@ -3273,6 +3276,7 @@ function orderRecordFromState(order = {}) {
     internal_order_number: nullableString(order.internalOrderNumber),
     marketplace_order_id: nullableString(order.marketplaceOrderId || order.marketplaceOrderNumber),
     source: nullableString(order.source),
+    channel_source: nullableString(order.channelSource || order.salesChannel || order.sourceChannel),
     status: nullableString(order.status),
     buyer: nullableString(order.buyer || order.customerName),
     buyer_email: nullableString(order.buyerEmail),
@@ -3395,6 +3399,7 @@ function orderRowToState(row = {}, lines = []) {
     marketplaceOrderId: row.marketplace_order_id || row.raw?.marketplaceOrderId || "",
     marketplaceOrderNumber: row.marketplace_order_id || row.raw?.marketplaceOrderNumber || "",
     source: row.source || row.raw?.source || "",
+    channelSource: row.channel_source || row.raw?.channelSource || row.raw?.salesChannel || row.raw?.sourceChannel || "",
     status: row.status || row.raw?.status || "",
     buyer: row.buyer || row.raw?.buyer || row.raw?.customerName || "",
     buyerEmail: row.buyer_email || row.raw?.buyerEmail || "",
@@ -3480,19 +3485,19 @@ async function upsertOrdersFromState(orders = [], options = {}) {
     for (let i = 0; i < records.length; i += batchSize) {
       await client.query(`
         insert into order_records (
-          order_id, order_number, internal_order_number, marketplace_order_id, source,
+          order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source,
           status, buyer, buyer_email, phone, customer_id, total, product_cost,
           marketplace_fees, shipping_cost, refund_amount, paid_amount, qty, ship_by,
           shipped_at, tracking_number, shipping_carrier, reportable, raw, created_at, updated_at
         )
-        select order_id, order_number, internal_order_number, marketplace_order_id, source,
+        select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source,
           status, buyer, buyer_email, phone, customer_id, total, product_cost,
           marketplace_fees, shipping_cost, refund_amount, paid_amount, qty, ship_by,
           shipped_at, tracking_number, shipping_carrier, reportable, raw,
           coalesce(created_at, now()), coalesce(updated_at, now())
         from jsonb_to_recordset($1::jsonb) as x(
           order_id text, order_number text, internal_order_number text, marketplace_order_id text,
-          source text, status text, buyer text, buyer_email text, phone text, customer_id text,
+          source text, channel_source text, status text, buyer text, buyer_email text, phone text, customer_id text,
           total numeric, product_cost numeric, marketplace_fees numeric, shipping_cost numeric,
           refund_amount numeric, paid_amount numeric, qty numeric, ship_by date, shipped_at timestamptz,
           tracking_number text, shipping_carrier text, reportable boolean, raw jsonb,
@@ -3503,6 +3508,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           internal_order_number = excluded.internal_order_number,
           marketplace_order_id = excluded.marketplace_order_id,
           source = excluded.source,
+          channel_source = excluded.channel_source,
           status = excluded.status,
           buyer = excluded.buyer,
           buyer_email = excluded.buyer_email,

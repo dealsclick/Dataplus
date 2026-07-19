@@ -19124,6 +19124,63 @@ async function shopifyGraphqlRequestAuto(query, variables = {}, options = {}) {
   throw new Error("Shopify GraphQL request failed after throttle retries.");
 }
 
+function shopifySalesChannelName(sourceName = "") {
+  const value = String(sourceName || "").trim();
+  const lookup = { web: "Online Store", shop: "Shop", pos: "Point of Sale", draft_order: "Draft Order" };
+  return lookup[value.toLowerCase()] || value || "Online Store";
+}
+
+function shopifyOrderToDataPlusOrder(node = {}) {
+  const customer = node.customer || {};
+  const shipping = node.shippingAddress || {};
+  const financial = String(node.displayFinancialStatus || "").toLowerCase();
+  const fulfillment = String(node.displayFulfillmentStatus || "").toLowerCase();
+  const status = node.cancelledAt ? "canceled" : fulfillment === "fulfilled" ? "fulfilled" : fulfillment === "partial" ? "partial_fulfilled" : financial === "paid" ? "processing" : "new";
+  return {
+    id: String(node.id || "").replace("gid://shopify/Order/", "shopify-order-"),
+    shopifyOrderId: node.id || "",
+    orderNumber: node.name || String(node.orderNumber || ""),
+    marketplaceOrderId: String(node.id || ""),
+    source: "Shopify",
+    channelSource: shopifySalesChannelName(node.sourceName),
+    orderType: "online",
+    status,
+    financialStatus: node.displayFinancialStatus || "",
+    fulfillmentStatus: node.displayFulfillmentStatus || "",
+    buyer: customer.displayName || [shipping.firstName, shipping.lastName].filter(Boolean).join(" ") || node.email || "",
+    buyerEmail: customer.email || node.email || "",
+    phone: shipping.phone || customer.phone || "",
+    customerId: customer.id || "",
+    currency: node.currencyCode || "USD",
+    total: Number(node.totalPriceSet?.shopMoney?.amount || 0),
+    subtotal: Number(node.subtotalPriceSet?.shopMoney?.amount || 0),
+    tax: Number(node.totalTaxSet?.shopMoney?.amount || 0),
+    shippingCost: Number(node.totalShippingPriceSet?.shopMoney?.amount || 0),
+    discountTotal: Number(node.totalDiscountsSet?.shopMoney?.amount || 0),
+    paidAmount: financial === "paid" ? Number(node.totalPriceSet?.shopMoney?.amount || 0) : 0,
+    qty: (node.lineItems?.edges || []).reduce((sum, edge) => sum + Number(edge.node?.quantity || 0), 0),
+    address: { name: [shipping.firstName, shipping.lastName].filter(Boolean).join(" "), company: shipping.company || "", line1: shipping.address1 || "", line2: shipping.address2 || "", city: shipping.city || "", state: shipping.province || "", postalCode: shipping.zip || "", country: shipping.countryCodeV2 || shipping.country || "", phone: shipping.phone || "" },
+    shippingLines: (node.shippingLines?.edges || []).map((edge) => ({ title: edge.node?.title || "", code: edge.node?.code || "", price: Number(edge.node?.originalPriceSet?.shopMoney?.amount || 0) })),
+    discountCodes: (node.discountCodes || []).map((code) => String(code)),
+    items: (node.lineItems?.edges || []).map((edge, index) => ({ lineId: edge.node?.id || "", lineIndex: index, sku: edge.node?.sku || "", originalSku: edge.node?.sku || "", title: edge.node?.title || "", qty: Number(edge.node?.quantity || 0), price: Number(edge.node?.originalUnitPriceSet?.shopMoney?.amount || 0), taxable: Boolean(edge.node?.taxable), vendor: edge.node?.vendor || "", variantTitle: edge.node?.variantTitle || "" })),
+    payments: (node.transactions?.edges || []).map((edge) => ({ id: edge.node?.id || crypto.randomUUID(), provider: edge.node?.gateway || "Shopify", transactionId: edge.node?.authorizationCode || edge.node?.id || "", amount: Number(edge.node?.amountSet?.shopMoney?.amount || 0), currency: edge.node?.amountSet?.shopMoney?.currencyCode || node.currencyCode || "USD", status: String(edge.node?.status || "").toLowerCase(), kind: String(edge.node?.kind || "").toLowerCase(), createdAt: edge.node?.createdAt || "" })),
+    shopifyAdminUrl: node.legacyResourceId ? `https://admin.shopify.com/store/${shopifyAdminConfig().shop.split(".")[0]}/orders/${node.legacyResourceId}` : "",
+    createdAt: node.createdAt || new Date().toISOString(), updatedAt: node.updatedAt || new Date().toISOString(), importedAt: new Date().toISOString()
+  };
+}
+
+async function importShopifyOrders(limit = 250) {
+  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name orderNumber sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } customer { id displayName email phone } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { edges { node { id kind status gateway authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } } } } } } } }`;
+  const imported = []; let after = null;
+  while (imported.length < limit) {
+    const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, limit - imported.length), after }, { operation: "Import Shopify orders" });
+    const connection = data?.orders || {}; imported.push(...(connection.edges || []).map((edge) => shopifyOrderToDataPlusOrder(edge.node)).filter((order) => order.id));
+    if (!connection.pageInfo?.hasNextPage || !connection.pageInfo?.endCursor) break; after = connection.pageInfo.endCursor;
+  }
+  await postgres.upsertOrdersFromState(imported, { replace: false });
+  return imported;
+}
+
 function shopifyRestRequestWithToken(method, resourcePath, body = null, accessToken = "", options = {}) {
   const config = shopifyAdminConfig();
   if (!config.shop || !accessToken) {
@@ -20121,6 +20178,17 @@ async function handleApi(req, res) {
       customers: db.customers || [],
       ordersLoaded: true
     });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/orders/import" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const limit = Math.max(1, Math.min(1000, Number(body.limit || 250)));
+    try {
+      const orders = await importShopifyOrders(limit);
+      return sendJson(res, 200, { imported: orders.length, orders, message: `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed.` });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Shopify order import failed: ${error.message || "Unknown error"}. Confirm the Shopify app has the read_orders scope and refresh its token.` });
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/order-workflows") {
