@@ -150,6 +150,7 @@ type ChannelSettings = {
   shopifyStatusSyncLimit?: number
   shopifyPublishScope?: string
   shopifyCloseoutsEnabled?: boolean
+  shopifyOrderImportEnabled?: boolean
   shopifyInventoryPushEnabled?: boolean
   shopifyInventoryWarehouseId?: string
   shopifyInventoryLocationId?: string
@@ -1864,6 +1865,7 @@ function ChannelDetail({
                 <ToggleField label="Enable Shopify status sync" checked={Boolean(settings.shopifySyncStatusEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifySyncStatusEnabled", value)} />
                 <ToggleField label="Auto-sync after API actions" checked={Boolean(settings.shopifyAutoSyncStatus)} disabled={!editing} onCheckedChange={(value) => update("shopifyAutoSyncStatus", value)} />
                 <ToggleField label="Manage Closeouts collection" checked={Boolean(settings.shopifyCloseoutsEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyCloseoutsEnabled", value)} />
+                <ToggleField label="Enable Shopify order imports" checked={Boolean(settings.shopifyOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportEnabled", value)} />
               </>}
             </CardContent>
           </Card>

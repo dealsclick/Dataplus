@@ -743,6 +743,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyStatusSyncLimit: 100,
   shopifyPublishScope: "global",
   shopifyCloseoutsEnabled: true,
+  shopifyOrderImportEnabled: false,
   shopifyInventoryPushEnabled: false,
   shopifyInventoryWarehouseId: "",
   shopifyInventoryLocationId: "",
@@ -3588,7 +3589,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyInventoryPushEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -20182,6 +20183,9 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/shopify/orders/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    if (!settings.shopifyOrderImportEnabled) return sendJson(res, 403, { error: "Enable Shopify order imports in Channel Settings before importing orders." });
     const limit = Math.max(1, Math.min(1000, Number(body.limit || 250)));
     try {
       const orders = await importShopifyOrders(limit);
