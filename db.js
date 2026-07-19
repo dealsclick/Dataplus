@@ -166,7 +166,6 @@ async function initRelationalSchema() {
       parent_sku text,
       alias_sku text not null,
       source text,
-      channel_source text,
       alias_type text not null default 'direct',
       active boolean not null default true,
       created_from_order_id text,
@@ -405,6 +404,7 @@ async function initRelationalSchema() {
       internal_order_number text,
       marketplace_order_id text,
       source text,
+      channel_source text,
       status text,
       buyer text,
       buyer_email text,
@@ -428,7 +428,6 @@ async function initRelationalSchema() {
     );
     create index if not exists order_records_status_idx on order_records (status, created_at desc);
     create index if not exists order_records_source_idx on order_records (lower(source), created_at desc);
-    create index if not exists order_records_channel_source_idx on order_records (lower(channel_source), created_at desc);
     create index if not exists order_records_customer_idx on order_records (customer_id, created_at desc);
     create index if not exists order_records_order_number_idx on order_records (lower(order_number));
     create index if not exists order_records_marketplace_order_idx on order_records (lower(marketplace_order_id));
@@ -613,6 +612,8 @@ async function initRelationalSchema() {
     create index if not exists product_quality_rows_discontinued_idx on product_quality_rows (to_be_discontinued);
     create index if not exists product_quality_rows_issue_types_idx on product_quality_rows using gin (issue_types);
     `);
+    await client.query("alter table order_records add column if not exists channel_source text");
+    await client.query("create index if not exists order_records_channel_source_idx on order_records (lower(channel_source), created_at desc)");
     await client.query(
       "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
       ["2026-05-26-core-catalog-ops"]
@@ -753,7 +754,6 @@ async function readCategoryState() {
     from app_state
     where id = 1
   `);
-  await client.query("alter table order_records add column if not exists channel_source text");
   return result.rows[0]?.data || null;
 }
 
