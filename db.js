@@ -3652,6 +3652,19 @@ async function listOrders(options = {}) {
     params.push(status.toLowerCase());
     where.push("lower(coalesce(status, '')) = $" + params.length);
   }
+  const sku = nullableString(options.sku);
+  if (sku) {
+    params.push(sku.toLowerCase());
+    where.push(`exists (
+      select 1 from order_line_items oli
+      where oli.order_id = order_records.order_id
+        and (
+          lower(coalesce(oli.sku, '')) = $${params.length}
+          or lower(coalesce(oli.mapped_sku, '')) = $${params.length}
+          or lower(coalesce(oli.original_sku, '')) = $${params.length}
+        )
+    )`);
+  }
   if (options.includeDeleted !== true) {
     where.push("lower(coalesce(status, '')) <> 'deleted'");
   }

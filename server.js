@@ -8417,6 +8417,62 @@ function addInventoryLedger(db, item, event = {}) {
   });
 }
 
+function skuMatchesInventoryItem(value, item = {}) {
+  const key = String(value || "").trim().toLowerCase();
+  if (!key) return false;
+  return [item.sku, item.id, ...(item.aliases || []).map((row) => row.aliasSku)]
+    .filter(Boolean)
+    .some((candidate) => String(candidate).toLowerCase() === key);
+}
+
+function inventoryOrderLines(order = {}, item = {}) {
+  return orderLineItems(order).filter((line) => skuMatchesInventoryItem(line.sku || line.mappedSku || line.originalSku, item));
+}
+
+function inventorySkuOperations(item = {}, orders = [], ledger = []) {
+  const now = Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  const terminal = new Set(["fulfilled", "shipped", "canceled", "cancelled", "void", "deleted", "refunded"]);
+  const rows = orders.map((order) => {
+    const lines = inventoryOrderLines(order, item);
+    const quantity = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
+    const allocations = (Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : [])
+      .filter((allocation) => skuMatchesInventoryItem(allocation.sku || allocation.productId, item) && allocation.status !== "released")
+      .map((allocation) => ({ ...allocation, orderId: order.id, orderNumber: order.orderNumber, buyer: order.buyer, status: order.status }));
+    const fulfilled = (Array.isArray(order.fulfillmentLines) ? order.fulfillmentLines : [])
+      .filter((line) => skuMatchesInventoryItem(line.sku, item))
+      .reduce((sum, line) => sum + Number(line.qtyFulfilled || 0), 0);
+    return { ...order, inventoryQuantity: quantity, inventoryFulfilledQty: fulfilled, inventoryAllocations: allocations };
+  }).filter((order) => order.inventoryQuantity > 0 || order.inventoryAllocations.length > 0);
+  const openOrders = rows.filter((order) => !terminal.has(String(order.status || "").toLowerCase()));
+  const shippedRows = rows.filter((order) => order.inventoryFulfilledQty > 0 || terminal.has(String(order.status || "").toLowerCase()));
+  const soldWithin = (days) => shippedRows.reduce((sum, order) => {
+    const timestamp = new Date(order.shippedAt || order.fulfilledAt || order.updatedAt || order.createdAt || 0).getTime();
+    return timestamp && now - timestamp <= days * day ? sum + Number(order.inventoryFulfilledQty || order.inventoryQuantity || 0) : sum;
+  }, 0);
+  const shipped30 = soldWithin(30);
+  const shipped90 = soldWithin(90);
+  const available = Number(item.qty || 0) - Number(item.reserved || 0);
+  const activeAllocations = rows.flatMap((order) => order.inventoryAllocations);
+  return {
+    orders: rows,
+    allocations: activeAllocations,
+    ledger: ledger.filter((row) => skuMatchesInventoryItem(row.sku || row.productId, item)).slice(0, 100),
+    metrics: {
+      openOrderCount: openOrders.length,
+      openOrderUnits: openOrders.reduce((sum, order) => sum + Number(order.inventoryQuantity || 0), 0),
+      allocatedUnits: activeAllocations.reduce((sum, allocation) => sum + Number(allocation.qty || 0), 0),
+      shippedOrderCount: shippedRows.length,
+      shipped30,
+      shipped90,
+      averageDaily30: shipped30 / 30,
+      averageDaily90: shipped90 / 90,
+      daysOfCover: shipped30 > 0 ? Math.max(0, available) / (shipped30 / 30) : null,
+      available
+    }
+  };
+}
+
 function cleanSerialPart(value) {
   return String(value || "")
     .trim()
@@ -19446,6 +19502,104 @@ async function handleApi(req, res) {
         shopifyLiveVariants: liveVariantRows.length
       }
     });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "operations" && postgres.isPostgresEnabled()) {
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const [orders, db, ledger] = await Promise.all([
+      postgres.listOrders({ sku: item.sku, limit: 500 }),
+      readDbFast({ skipInventory: true }),
+      postgres.readStateField("inventoryLedger")
+    ]);
+    const operations = inventorySkuOperations(item, orders || [], ledger || []);
+    return sendJson(res, 200, {
+      item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
+      warehouses: (db.warehouses || []).filter((warehouse) => warehouse.status !== "inactive"),
+      ...operations
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "allocations" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    const order = await postgres.readOrderByKey(body.orderId);
+    if (!item) return notFound(res);
+    if (!order) return sendJson(res, 404, { error: "Order not found." });
+    if (!inventoryOrderLines(order, item).length) return sendJson(res, 400, { error: "This order does not contain the selected SKU." });
+    const db = await readDbFast({ skipInventory: true });
+    const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId) || findPreferredOrderWarehouse(db, order);
+    const targetQty = Number(body.qty || 0);
+    if (!warehouse) return sendJson(res, 400, { error: "Warehouse is required." });
+    if (!(targetQty > 0)) return sendJson(res, 400, { error: "Allocation quantity must be greater than zero." });
+    order.inventoryAllocations = Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : [];
+    let allocation = order.inventoryAllocations.find((row) => skuMatchesInventoryItem(row.sku || row.productId, item) && row.warehouseId === warehouse.id && row.status !== "released");
+    const previousQty = Number(allocation?.qty || 0);
+    const delta = targetQty - previousQty;
+    const stockRow = ensureInventoryWarehouseStock(item, warehouse);
+    const available = Number(stockRow.qty || 0) - Number(stockRow.reserved || 0);
+    if (delta > available) return sendJson(res, 400, { error: `Only ${available} available in ${warehouse.name}.` });
+    const reservedBefore = Number(stockRow.reserved || 0);
+    stockRow.reserved = Math.max(0, reservedBefore + delta);
+    stockRow.updatedAt = new Date().toISOString();
+    if (!allocation) {
+      allocation = { id: crypto.randomUUID(), sku: item.sku, productId: item.id, warehouseId: warehouse.id, warehouseName: warehouse.name, qty: targetQty, status: "reserved", assignedAt: new Date().toISOString(), note: String(body.note || "").trim() };
+      order.inventoryAllocations.push(allocation);
+    } else {
+      allocation.qty = targetQty;
+      allocation.warehouseName = warehouse.name;
+      allocation.updatedAt = new Date().toISOString();
+      allocation.note = String(body.note || allocation.note || "").trim();
+    }
+    syncInventoryTotalsFromWarehouses(item);
+    item.updatedAt = new Date().toISOString();
+    order.reservedQty = order.inventoryAllocations.filter((row) => row.status !== "released").reduce((sum, row) => sum + Number(row.qty || 0), 0);
+    order.reservationWarehouseId = warehouse.id;
+    order.reservationWarehouseName = warehouse.name;
+    order.reservedAt = new Date().toISOString();
+    order.updatedAt = new Date().toISOString();
+    addInventoryLedger(db, item, { type: delta >= 0 ? "order_allocation" : "order_allocation_adjustment", source: "order", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, locationBin: stockRow.locationBin || "", quantityChange: 0, reservedChange: delta, qtyBefore: Number(stockRow.qty || 0), qtyAfter: Number(stockRow.qty || 0), reservedBefore, reservedAfter: stockRow.reserved, reason: body.note || `Allocated to ${order.orderNumber}`, user: body.user || "Luis" });
+    addOrderTimeline(order, { type: "allocation", title: "Inventory allocated", message: `${targetQty} unit(s) of ${item.sku} reserved from ${warehouse.name}.`, user: body.user || "Luis" });
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    await postgres.saveOrder(order);
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    return sendJson(res, 200, { allocation, order, item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) });
+  }
+
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "allocations" && parts[4] && postgres.isPostgresEnabled()) {
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const orders = await postgres.listOrders({ sku: item.sku, limit: 500 });
+    const order = (orders || []).find((row) => (row.inventoryAllocations || []).some((allocation) => allocation.id === parts[4]));
+    if (!order) return sendJson(res, 404, { error: "Active allocation not found." });
+    const allocation = (order.inventoryAllocations || []).find((row) => row.id === parts[4]);
+    if (!allocation || allocation.status === "released") return sendJson(res, 400, { error: "Allocation is already released." });
+    const db = await readDbFast({ skipInventory: true });
+    const warehouse = (db.warehouses || []).find((row) => row.id === allocation.warehouseId);
+    if (!warehouse) return sendJson(res, 400, { error: "Allocation warehouse is unavailable." });
+    const stockRow = ensureInventoryWarehouseStock(item, warehouse);
+    const releaseQty = Number(allocation.qty || 0);
+    const reservedBefore = Number(stockRow.reserved || 0);
+    stockRow.reserved = Math.max(0, reservedBefore - releaseQty);
+    stockRow.updatedAt = new Date().toISOString();
+    allocation.status = "released";
+    allocation.releasedAt = new Date().toISOString();
+    order.reservedQty = (order.inventoryAllocations || []).filter((row) => row.status !== "released").reduce((sum, row) => sum + Number(row.qty || 0), 0);
+    order.updatedAt = new Date().toISOString();
+    syncInventoryTotalsFromWarehouses(item);
+    item.updatedAt = new Date().toISOString();
+    addInventoryLedger(db, item, { type: "order_allocation_release", source: "order", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, locationBin: stockRow.locationBin || "", quantityChange: 0, reservedChange: -releaseQty, qtyBefore: Number(stockRow.qty || 0), qtyAfter: Number(stockRow.qty || 0), reservedBefore, reservedAfter: stockRow.reserved, reason: `Released allocation for ${order.orderNumber}`, user: "Luis" });
+    addOrderTimeline(order, { type: "allocation", title: "Inventory allocation released", message: `${releaseQty} unit(s) of ${item.sku} released from ${warehouse.name}.`, user: "Luis" });
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    await postgres.saveOrder(order);
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    return sendJson(res, 200, { released: true, order, item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[2] !== "export.csv" && parts.length === 3) {
