@@ -57,6 +57,7 @@ const IMPORT_JOB_HISTORY_LIMIT = Math.max(1000, Math.min(5000, Number(process.en
 const REDIS_CATALOG_CACHE_TTL_SECONDS = Math.max(15, Math.min(600, Number(process.env.REDIS_CATALOG_CACHE_TTL_SECONDS || 90) || 90));
 const REDIS_PRODUCTS_CACHE_TTL_SECONDS = Math.max(15, Math.min(300, Number(process.env.REDIS_PRODUCTS_CACHE_TTL_SECONDS || 45) || 45));
 const REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS = Math.max(60, Math.min(3600, Number(process.env.REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS || 900) || 900));
+const REDIS_CATEGORY_REQUIREMENTS_CACHE_TTL_SECONDS = Math.max(300, Math.min(86400, Number(process.env.REDIS_CATEGORY_REQUIREMENTS_CACHE_TTL_SECONDS || 43200) || 43200));
 const SERVER_STARTED_AT = new Date();
 const activeJobProgress = new Map();
 const activeJobRecords = new Map();
@@ -8306,12 +8307,21 @@ function filterCategoryResponse(data = {}, query = "", scope = "source") {
 
 function clearCategoryResponseCache() {
   categoryResponseCache = new Map();
+  redisCache.deleteByPrefix("dataplus:category-requirements:").catch(() => {});
   try {
     if (fs.existsSync(CATEGORY_CACHE_FILE)) fs.unlinkSync(CATEGORY_CACHE_FILE);
   } catch {
     // Cache invalidation is best-effort; the in-memory cache is cleared above.
   }
   scheduleStoredCategorySummaryRebuild("both");
+}
+
+function categoryRequirementsCacheKey(categoryId = "", channel = "") {
+  const category = String(categoryId || "").trim().toLowerCase();
+  const marketplace = String(channel || "").trim().toLowerCase();
+  if (!category || !marketplace) return "";
+  const identity = crypto.createHash("sha1").update(`${category}|${marketplace}`).digest("hex");
+  return `dataplus:category-requirements:v1:${identity}`;
 }
 
 const categorySummaryRebuildTimers = new Map();
@@ -22076,19 +22086,27 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/categories/attributes") {
     const categoryId = String(url.searchParams.get("categoryId") || "").trim();
+    const channel = String(url.searchParams.get("channel") || "").trim().toLowerCase();
+    const cacheKey = categoryRequirementsCacheKey(categoryId, channel);
+    if (cacheKey) {
+      const cached = await redisCache.getJson(cacheKey);
+      if (cached) return sendJson(res, 200, { ...cached, cached: true });
+    }
     const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
     if (postgres.isPostgresEnabled() && !categoryId) db.__mainCategoryRows = await postgres.listCategoryProductStats();
     const rows = marketplaceCategoryAttributeRows(db, {
-      channel: url.searchParams.get("channel") || "",
+      channel,
       categoryId
     });
-    return sendJson(res, 200, {
+    const payload = {
       rows,
       total: rows.length,
       mappedCount: rows.filter((row) => row["Mapped Source Field"] || row["Fallback Value"]).length,
       requiredCount: rows.filter((row) => row.Required === "true").length,
       attributeGroups: readAttributeGroups()
-    });
+    };
+    if (cacheKey) await redisCache.setJson(cacheKey, payload, REDIS_CATEGORY_REQUIREMENTS_CACHE_TTL_SECONDS);
+    return sendJson(res, 200, payload);
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories/export/matrixify-smart-collections.csv") {
