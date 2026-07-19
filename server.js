@@ -19139,7 +19139,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
   return {
     id: String(node.id || "").replace("gid://shopify/Order/", "shopify-order-"),
     shopifyOrderId: node.id || "",
-    orderNumber: node.name || String(node.orderNumber || ""),
+    orderNumber: node.name || "",
     marketplaceOrderId: String(node.id || ""),
     source: "Shopify",
     channelSource: shopifySalesChannelName(node.sourceName),
@@ -19163,14 +19163,14 @@ function shopifyOrderToDataPlusOrder(node = {}) {
     shippingLines: (node.shippingLines?.edges || []).map((edge) => ({ title: edge.node?.title || "", code: edge.node?.code || "", price: Number(edge.node?.originalPriceSet?.shopMoney?.amount || 0) })),
     discountCodes: (node.discountCodes || []).map((code) => String(code)),
     items: (node.lineItems?.edges || []).map((edge, index) => ({ lineId: edge.node?.id || "", lineIndex: index, sku: edge.node?.sku || "", originalSku: edge.node?.sku || "", title: edge.node?.title || "", qty: Number(edge.node?.quantity || 0), price: Number(edge.node?.originalUnitPriceSet?.shopMoney?.amount || 0), taxable: Boolean(edge.node?.taxable), vendor: edge.node?.vendor || "", variantTitle: edge.node?.variantTitle || "" })),
-    payments: (node.transactions?.edges || []).map((edge) => ({ id: edge.node?.id || crypto.randomUUID(), provider: edge.node?.gateway || "Shopify", transactionId: edge.node?.authorizationCode || edge.node?.id || "", amount: Number(edge.node?.amountSet?.shopMoney?.amount || 0), currency: edge.node?.amountSet?.shopMoney?.currencyCode || node.currencyCode || "USD", status: String(edge.node?.status || "").toLowerCase(), kind: String(edge.node?.kind || "").toLowerCase(), createdAt: edge.node?.createdAt || "" })),
+    payments: (node.transactions || []).map((transaction) => ({ id: transaction?.id || crypto.randomUUID(), provider: transaction?.gateway || "Shopify", transactionId: transaction?.authorizationCode || transaction?.id || "", amount: Number(transaction?.amountSet?.shopMoney?.amount || 0), currency: transaction?.amountSet?.shopMoney?.currencyCode || node.currencyCode || "USD", status: String(transaction?.status || "").toLowerCase(), kind: String(transaction?.kind || "").toLowerCase(), createdAt: transaction?.createdAt || "" })),
     shopifyAdminUrl: node.legacyResourceId ? `https://admin.shopify.com/store/${shopifyAdminConfig().shop.split(".")[0]}/orders/${node.legacyResourceId}` : "",
     createdAt: node.createdAt || new Date().toISOString(), updatedAt: node.updatedAt || new Date().toISOString(), importedAt: new Date().toISOString()
   };
 }
 
 async function importShopifyOrders(limit = 250) {
-  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name orderNumber sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } customer { id displayName email phone } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { edges { node { id kind status gateway authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } } } } } } } }`;
+  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } customer { id displayName email phone } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const imported = []; let after = null;
   while (imported.length < limit) {
     const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, limit - imported.length), after }, { operation: "Import Shopify orders" });
