@@ -19448,7 +19448,7 @@ async function handleApi(req, res) {
     });
   }
 
-  if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts.length === 3) {
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[2] !== "export.csv" && parts.length === 3) {
     if (postgres.isPostgresEnabled()) {
       const cacheKey = `dataplus:product-detail:v1:${crypto.createHash("sha1").update(String(parts[2]).toLowerCase()).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
