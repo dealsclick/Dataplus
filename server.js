@@ -7654,8 +7654,13 @@ function masterCategoryMappingRows(db = {}) {
 }
 
 function marketplaceCategoryAttributeRows(db = {}, options = {}) {
-  const settings = normalizeCategorySettings(db.categorySettings);
-  const mainRows = aggregateMainCatalogCategories(db);
+  const categoryIdFilter = String(options.categoryId || "").trim();
+  const settings = normalizeCategorySettings(db.categorySettings).filter((setting) => {
+    if (!categoryIdFilter) return true;
+    const settingId = String(setting.categoryId || setting.id || categoryIdentity(formatCategoryName(setting.name || ""), "main").id);
+    return settingId === categoryIdFilter;
+  });
+  const mainRows = categoryIdFilter ? [] : aggregateMainCatalogCategories(db);
   const mainByName = new Map(mainRows.map((row) => [formatCategoryName(row.name).toLowerCase(), row]));
   const channels = ["shopify", "ebay", "temu", "tiktok", "whatnot"];
   const channelFilter = String(options.channel || "").trim().toLowerCase();
@@ -22070,11 +22075,13 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/categories/attributes") {
-    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
-    if (postgres.isPostgresEnabled()) db.__mainCategoryRows = await postgres.listCategoryProductStats();
     const categoryId = String(url.searchParams.get("categoryId") || "").trim();
-    const rows = marketplaceCategoryAttributeRows(db, { channel: url.searchParams.get("channel") || "" })
-      .filter((row) => !categoryId || String(row["Category ID"] || "") === categoryId);
+    const db = await readDbFast({ skipInventory: postgres.isPostgresEnabled() });
+    if (postgres.isPostgresEnabled() && !categoryId) db.__mainCategoryRows = await postgres.listCategoryProductStats();
+    const rows = marketplaceCategoryAttributeRows(db, {
+      channel: url.searchParams.get("channel") || "",
+      categoryId
+    });
     return sendJson(res, 200, {
       rows,
       total: rows.length,
