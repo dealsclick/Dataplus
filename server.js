@@ -14575,6 +14575,94 @@ function releaseOrderReservation(db, order, body = {}) {
   return true;
 }
 
+function defaultOrderWorkflowSettings() {
+  return {
+    version: 1,
+    allocationPolicy: { allowSplitShipments: true, createBackorders: true, warehousePriority: [] },
+    orderTypes: [
+      { id: "online", name: "Online order", statuses: ["new", "processing", "on_hold", "partial_fulfilled", "fulfilled", "canceled"], defaultStatus: "new" },
+      { id: "draft", name: "Draft order", statuses: ["draft", "approved", "canceled"], defaultStatus: "draft" },
+      { id: "replacement", name: "Replacement", statuses: ["new", "processing", "fulfilled", "canceled"], defaultStatus: "new" }
+    ]
+  };
+}
+
+async function readOrderWorkflowSettings() {
+  const stored = postgres.isPostgresEnabled() ? await postgres.readStateField("orderWorkflowSettings") : (await readDbFast()).orderWorkflowSettings;
+  return { ...defaultOrderWorkflowSettings(), ...(stored || {}), allocationPolicy: { ...defaultOrderWorkflowSettings().allocationPolicy, ...((stored || {}).allocationPolicy || {}) } };
+}
+
+function addOrderWorkflowEvent(order, event = {}) {
+  order.workflowHistory = Array.isArray(order.workflowHistory) ? order.workflowHistory : [];
+  const row = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), status: "success", ...event };
+  order.workflowHistory.unshift(row);
+  addOrderTimeline(order, { type: "workflow", title: event.title || event.step || "Order workflow", message: event.message || "Workflow step completed.", user: event.user || "System" });
+  return row;
+}
+
+function orderShipmentSummary(order = {}) {
+  const lines = orderLineItems(order);
+  const shipments = Array.isArray(order.shipments) ? order.shipments : [];
+  const fulfilled = new Map();
+  for (const shipment of shipments) for (const line of shipment.lines || []) fulfilled.set(`${line.lineIndex}:${String(line.sku || "").toLowerCase()}`, (fulfilled.get(`${line.lineIndex}:${String(line.sku || "").toLowerCase()}`) || 0) + Number(line.qtyFulfilled || 0));
+  return { shipments, lines, fulfilled };
+}
+
+async function allocateOrderInventory(db, order, body = {}) {
+  const settings = await readOrderWorkflowSettings();
+  const warehouses = [...(db.warehouses || [])].sort((a, b) => {
+    const priority = settings.allocationPolicy.warehousePriority || [];
+    const left = priority.indexOf(a.id); const right = priority.indexOf(b.id);
+    return (left < 0 ? 9999 : left) - (right < 0 ? 9999 : right) || String(a.name || "").localeCompare(String(b.name || ""));
+  });
+  order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+  const shipment = { id: crypto.randomUUID(), status: "allocated", createdAt: new Date().toISOString(), warehouseId: "", warehouseName: "", lines: [], packages: [] };
+  const backorders = [];
+  const touched = [];
+  for (let lineIndex = 0; lineIndex < orderLineItems(order).length; lineIndex += 1) {
+    const line = orderLineItems(order)[lineIndex]; const sku = String(line.sku || "").trim(); const requested = Number(line.qty || 0);
+    if (!sku || requested <= 0) continue;
+    const product = await postgres.readProductByKey(sku);
+    let remaining = requested;
+    for (const warehouse of warehouses) {
+      if (!product || remaining <= 0) break;
+      const stock = ensureInventoryWarehouseStock(product, warehouse);
+      const available = Math.max(0, Number(stock.qty || 0) - Number(stock.reserved || 0));
+      const qty = Math.min(remaining, available);
+      if (!qty) continue;
+      stock.reserved = Number(stock.reserved || 0) + qty; stock.updatedAt = new Date().toISOString();
+      syncInventoryTotalsFromWarehouses(product); product.updatedAt = new Date().toISOString(); touched.push(product);
+      let target = shipment;
+      if (target.warehouseId && target.warehouseId !== warehouse.id) {
+        target = { id: crypto.randomUUID(), status: "allocated", createdAt: shipment.createdAt, warehouseId: warehouse.id, warehouseName: warehouse.name, lines: [], packages: [] };
+        order.shipments.push(target);
+      }
+      target.warehouseId = warehouse.id; target.warehouseName = warehouse.name;
+      target.lines.push({ lineIndex, sku, title: line.title || sku, qtyAllocated: qty, qtyFulfilled: 0 });
+      remaining -= qty;
+      addInventoryLedger(db, product, { type: "order_reservation", source: "order", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: qty, reason: `Allocated ${qty} for ${order.orderNumber}`, user: body.user || "System" });
+      if (!settings.allocationPolicy.allowSplitShipments) break;
+    }
+    if (remaining) backorders.push({ id: crypto.randomUUID(), lineIndex, sku, title: line.title || sku, qty: remaining, status: "unallocated", createdAt: new Date().toISOString() });
+  }
+  if (shipment.lines.length) order.shipments.push(shipment);
+  order.backorderLines = backorders;
+  order.allocationStatus = backorders.length ? (shipment.lines.length || order.shipments.some((row) => row.lines?.length) ? "partial" : "unallocated") : "allocated";
+  addOrderWorkflowEvent(order, { step: "allocate_inventory", status: backorders.length ? "warning" : "success", title: "Inventory allocation", message: backorders.length ? `${backorders.length} line(s) need backorder review.` : "All order lines were allocated." });
+  return { touched, backorders };
+}
+
+async function createBackorderPurchaseOrder(db, order, body = {}) {
+  const lines = (order.backorderLines || []).filter((line) => line.status === "unallocated");
+  if (!lines.length) throw new Error("This order has no unallocated lines.");
+  const now = new Date().toISOString();
+  const po = { id: crypto.randomUUID(), poNumber: `BO-${Date.now().toString().slice(-8)}`, status: "draft", type: "backorder", orderId: order.id, orderNumber: order.orderNumber, supplier: body.supplier || "Unassigned supplier", warehouseId: body.warehouseId || "", lines: lines.map((line) => ({ sku: line.sku, title: line.title, qty: line.qty, orderId: order.id })), createdAt: now, updatedAt: now };
+  db.purchaseOrders = Array.isArray(db.purchaseOrders) ? db.purchaseOrders : []; db.purchaseOrders.unshift(po);
+  for (const line of lines) { line.status = "po_draft"; line.purchaseOrderId = po.id; }
+  addOrderWorkflowEvent(order, { step: "create_backorder_po", title: "Backorder PO draft created", message: `${po.poNumber} contains ${lines.length} unallocated line(s).`, user: body.user || "Luis" });
+  return po;
+}
+
 function applyOrderSkuAliases(db, order = {}) {
   const items = orderLineItems(order);
   for (let index = 0; index < items.length; index += 1) {
@@ -20035,6 +20123,58 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/order-workflows") {
+    return sendJson(res, 200, { settings: await readOrderWorkflowSettings() });
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/order-workflows") {
+    const body = await parseBody(req);
+    const settings = { ...defaultOrderWorkflowSettings(), ...(body || {}), updatedAt: new Date().toISOString() };
+    if (postgres.isPostgresEnabled()) await postgres.writeStateField("orderWorkflowSettings", settings);
+    else { const db = await readDbFast(); db.orderWorkflowSettings = settings; await writeDb(db); }
+    return sendJson(res, 200, { settings });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
+    const [order, db] = await Promise.all([postgres.readOrderByKey(parts[2]), readDbFast({ skipInventory: true })]);
+    if (!order) return notFound(res);
+    return sendJson(res, 200, { order, warehouses: db.warehouses || [], settings: await readOrderWorkflowSettings() });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "allocate" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
+    const db = await readDbFast({ skipInventory: true }); db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
+    const result = await allocateOrderInventory(db, order, body);
+    if (result.touched.length) { await postgres.upsertProductsFromState(result.touched); await postgres.upsertInventoryLevelsFromProducts(result.touched); await postgres.writeStateField("inventoryLedger", db.inventoryLedger); }
+    order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order);
+    return sendJson(res, 200, { order, backorders: result.backorders, message: result.backorders.length ? "Allocation completed with backordered lines." : "All lines were allocated." });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "backorder-po" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
+    const db = await readDbFast({ skipInventory: true }); const po = await createBackorderPurchaseOrder(db, order, body);
+    await postgres.savePurchaseOrder(po); order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order);
+    return sendJson(res, 201, { order, purchaseOrder: po });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "payments" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
+    const amount = Number(body.amount || 0); if (!(amount > 0)) return sendJson(res, 400, { error: "A payment amount greater than zero is required." });
+    order.payments = Array.isArray(order.payments) ? order.payments : [];
+    const payment = { id: crypto.randomUUID(), provider: String(body.provider || "Manual"), transactionId: String(body.transactionId || ""), amount, currency: String(body.currency || order.currency || "USD"), status: String(body.status || "authorized"), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    order.payments.unshift(payment); addOrderWorkflowEvent(order, { step: "payment_recorded", title: "Payment recorded", message: `${payment.status} ${payment.amount} ${payment.currency} through ${payment.provider}.`, user: body.user || "Luis" }); order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order);
+    return sendJson(res, 201, { order, payment });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "payments" && parts[4] && parts[5] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
+    const payment = (order.payments || []).find((row) => row.id === parts[4]); if (!payment) return notFound(res);
+    const action = String(parts[5]).toLowerCase(); const status = { capture: "captured", void: "voided", refund: "refunded" }[action]; if (!status) return sendJson(res, 400, { error: "Unsupported payment action." });
+    payment.status = status; payment.updatedAt = new Date().toISOString(); if (action === "refund") payment.refundAmount = Number(body.amount || payment.amount || 0);
+    addOrderWorkflowEvent(order, { step: `payment_${action}`, title: `Payment ${status}`, message: `${payment.provider || "Manual"} payment marked ${status}.`, user: body.user || "Luis" }); order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order);
+    return sendJson(res, 200, { order, payment });
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const order = await postgres.readOrderByKey(parts[2]);
@@ -22040,6 +22180,12 @@ async function handleApi(req, res) {
       .filter((line) => line.sku && line.qty > 0);
     if (!requestedLines.length) return sendJson(res, 400, { error: "Select at least one line to fulfill." });
     order.fulfillmentLines = Array.isArray(order.fulfillmentLines) ? order.fulfillmentLines : [];
+    order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+    const shipmentId = String(body.shipmentId || "").trim();
+    const shipment = shipmentId ? order.shipments.find((row) => row.id === shipmentId) : null;
+    if (shipmentId && !shipment) return sendJson(res, 404, { error: "Shipment not found." });
+    const shipmentRecord = shipment || { id: crypto.randomUUID(), status: "allocated", createdAt: new Date().toISOString(), warehouseId: warehouse.id, warehouseName: warehouse.name, lines: [], packages: [] };
+    shipmentRecord.lines = Array.isArray(shipmentRecord.lines) ? shipmentRecord.lines : [];
     const previousStatus = order.status || "new";
     const touched = [];
     let totalFulfilledNow = 0;
@@ -22089,6 +22235,10 @@ async function handleApi(req, res) {
 
       if (fulfillmentRow) fulfillmentRow.qtyFulfilled = alreadyFulfilled + requestLine.qty;
       else order.fulfillmentLines.push({ sku: requestLine.sku, lineIndex: requestLine.lineIndex, qtyFulfilled: requestLine.qty });
+      const shipmentLine = shipmentRecord.lines.find((line) => Number(line.lineIndex || 0) === Number(requestLine.lineIndex || 0) && String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase())
+        || shipmentRecord.lines.find((line) => String(line.sku || "").toLowerCase() === requestLine.sku.toLowerCase());
+      if (shipmentLine) shipmentLine.qtyFulfilled = Number(shipmentLine.qtyFulfilled || 0) + requestLine.qty;
+      else shipmentRecord.lines.push({ sku: requestLine.sku, lineIndex: requestLine.lineIndex, qtyAllocated: requestLine.qty, qtyFulfilled: requestLine.qty });
       totalFulfilledNow += requestLine.qty;
     }
 
@@ -22105,6 +22255,15 @@ async function handleApi(req, res) {
     order.shipDate = shipDate;
     order.fulfillmentWarehouseId = warehouse.id;
     order.fulfillmentWarehouseName = warehouse.name;
+    shipmentRecord.status = "fulfilled";
+    shipmentRecord.carrier = carrier;
+    shipmentRecord.carrierName = carrierName;
+    shipmentRecord.service = body.service || carrierName;
+    shipmentRecord.trackingNumber = trackingNumber;
+    shipmentRecord.trackingUrl = trackingUrl;
+    shipmentRecord.shipDate = shipDate;
+    shipmentRecord.fulfilledAt = new Date().toISOString();
+    if (!shipment) order.shipments.push(shipmentRecord);
     order.updatedAt = new Date().toISOString();
     addOrderTimeline(order, {
       type: "status",
@@ -22112,6 +22271,7 @@ async function handleApi(req, res) {
       message: `${carrierName} tracking ${trackingNumber} added for ship date ${shipDate} from ${warehouse.name}. ${totalFulfilledNow} unit${totalFulfilledNow === 1 ? "" : "s"} fulfilled.${previousStatus !== order.status ? ` Status moved from ${previousStatus} to ${order.status}.` : ""}`,
       user: body.user || "Luis"
     });
+    addOrderWorkflowEvent(order, { step: "fulfill_shipment", title: "Shipment fulfilled", message: `${shipmentRecord.lines.length} line(s) fulfilled in shipment ${shipmentRecord.trackingNumber}.`, user: body.user || "Luis" });
     if (touched.length) {
       await postgres.upsertProductsFromState(touched);
       await postgres.upsertInventoryLevelsFromProducts(touched);
