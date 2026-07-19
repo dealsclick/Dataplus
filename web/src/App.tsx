@@ -151,6 +151,9 @@ type ChannelSettings = {
   shopifyPublishScope?: string
   shopifyCloseoutsEnabled?: boolean
   shopifyOrderImportEnabled?: boolean
+  shopifyOrderImportLimit?: number
+  shopifyOrderImportSources?: string
+  shopifyOrderImportIncludeCanceled?: boolean
   shopifyInventoryPushEnabled?: boolean
   shopifyInventoryWarehouseId?: string
   shopifyInventoryLocationId?: string
@@ -1633,6 +1636,11 @@ function ChannelDetail({
         body: {},
         successMessage: "Shopify SKU pair audit queued.",
       },
+      orderImport: {
+        path: "/api/shopify/orders/import",
+        body: { limit: Number(settings.shopifyOrderImportLimit || 250), sources: String(settings.shopifyOrderImportSources || ""), includeCanceled: Boolean(settings.shopifyOrderImportIncludeCanceled) },
+        successMessage: "Shopify orders imported or refreshed.",
+      },
       inventoryDryRun: {
         path: "/api/shopify/inventory-update",
         body: { apply: false, dryRun: true, warehouseId: inventoryWarehouseId, locationId: inventoryLocationId },
@@ -1865,7 +1873,6 @@ function ChannelDetail({
                 <ToggleField label="Enable Shopify status sync" checked={Boolean(settings.shopifySyncStatusEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifySyncStatusEnabled", value)} />
                 <ToggleField label="Auto-sync after API actions" checked={Boolean(settings.shopifyAutoSyncStatus)} disabled={!editing} onCheckedChange={(value) => update("shopifyAutoSyncStatus", value)} />
                 <ToggleField label="Manage Closeouts collection" checked={Boolean(settings.shopifyCloseoutsEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyCloseoutsEnabled", value)} />
-                <ToggleField label="Enable Shopify order imports" checked={Boolean(settings.shopifyOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportEnabled", value)} />
               </>}
             </CardContent>
           </Card>
@@ -1992,6 +1999,16 @@ function ChannelDetail({
               <ToggleField label="Tracking updates" checked={Boolean(settings.trackingUpdateEnabled)} disabled={!editing} onCheckedChange={(value) => update("trackingUpdateEnabled", value)} />
               <ToggleField label="Auto-create shadows" checked={Boolean(settings.autoCreateShadow)} disabled={!editing} onCheckedChange={(value) => update("autoCreateShadow", value)} />
               {isShopify && <>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify order imports</p><p className="pt-1 text-xs text-muted-foreground">Manual imports use these rules. Shopify remains the integration; sources identify Online Store, Shop, and other sales surfaces.</p></div>
+                <Field label="Orders per manual import">
+                  <Input disabled={!editing} type="number" min="1" max="1000" value={String(settings.shopifyOrderImportLimit ?? 250)} onChange={(event) => update("shopifyOrderImportLimit", Number(event.target.value || 250))} />
+                </Field>
+                <Field label="Sales channel allowlist">
+                  <Input disabled={!editing} value={String(settings.shopifyOrderImportSources || "")} placeholder="Online Store, Shop (blank = all)" onChange={(event) => update("shopifyOrderImportSources", event.target.value)} />
+                </Field>
+                <ToggleField label="Enable Shopify order imports" checked={Boolean(settings.shopifyOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportEnabled", value)} />
+                <ToggleField label="Include canceled orders" checked={Boolean(settings.shopifyOrderImportIncludeCanceled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportIncludeCanceled", value)} />
+                <div className="col-span-full"><Button size="sm" variant="outline" disabled={!Boolean(settings.shopifyOrderImportEnabled)} onClick={() => queueShopifyAction("orderImport")}>Import Shopify orders now</Button></div>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify inventory push</p></div>
                 <Field label="DataPlus warehouse">
                   <Select disabled={!editing} value={selectedWarehouseId || "none"} onValueChange={(value) => update("shopifyInventoryWarehouseId", value === "none" ? "" : value)}>

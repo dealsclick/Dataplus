@@ -744,6 +744,9 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyPublishScope: "global",
   shopifyCloseoutsEnabled: true,
   shopifyOrderImportEnabled: false,
+  shopifyOrderImportLimit: 250,
+  shopifyOrderImportSources: "",
+  shopifyOrderImportIncludeCanceled: false,
   shopifyInventoryPushEnabled: false,
   shopifyInventoryWarehouseId: "",
   shopifyInventoryLocationId: "",
@@ -3586,10 +3589,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyInventoryPushEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -19170,7 +19173,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
   };
 }
 
-async function importShopifyOrders(limit = 250) {
+async function importShopifyOrders(limit = 250, filters = {}) {
   const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } customer { id displayName email phone } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const imported = []; let after = null;
   while (imported.length < limit) {
@@ -19178,8 +19181,10 @@ async function importShopifyOrders(limit = 250) {
     const connection = data?.orders || {}; imported.push(...(connection.edges || []).map((edge) => shopifyOrderToDataPlusOrder(edge.node)).filter((order) => order.id));
     if (!connection.pageInfo?.hasNextPage || !connection.pageInfo?.endCursor) break; after = connection.pageInfo.endCursor;
   }
-  await postgres.upsertOrdersFromState(imported, { replace: false });
-  return imported;
+  const sources = String(filters.sources || "").split(/[,;]+/).map((value) => value.trim().toLowerCase()).filter(Boolean);
+  const filtered = imported.filter((order) => (filters.includeCanceled || order.status !== "canceled") && (!sources.length || sources.includes(String(order.channelSource || "").toLowerCase())));
+  await postgres.upsertOrdersFromState(filtered, { replace: false });
+  return filtered;
 }
 
 function shopifyRestRequestWithToken(method, resourcePath, body = null, accessToken = "", options = {}) {
@@ -20186,9 +20191,9 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
     if (!settings.shopifyOrderImportEnabled) return sendJson(res, 403, { error: "Enable Shopify order imports in Channel Settings before importing orders." });
-    const limit = Math.max(1, Math.min(1000, Number(body.limit || 250)));
+    const limit = Math.max(1, Math.min(1000, Number(body.limit || settings.shopifyOrderImportLimit || 250)));
     try {
-      const orders = await importShopifyOrders(limit);
+      const orders = await importShopifyOrders(limit, { sources: body.sources ?? settings.shopifyOrderImportSources, includeCanceled: body.includeCanceled ?? settings.shopifyOrderImportIncludeCanceled });
       return sendJson(res, 200, { imported: orders.length, orders, message: `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed.` });
     } catch (error) {
       return sendJson(res, 502, { error: `Shopify order import failed: ${error.message || "Unknown error"}. Confirm the Shopify app has the read_orders scope and refresh its token.` });
