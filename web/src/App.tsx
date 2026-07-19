@@ -88,7 +88,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
-type AppView = "overview" | "jobs" | "channels" | "catalog" | "product-detail" | "category-detail" | "vendors" | "settings"
+type AppView = "overview" | "jobs" | "channels" | "catalog" | "operations" | "product-detail" | "category-detail" | "vendors" | "settings"
 
 type ImportJob = {
   id: string
@@ -466,6 +466,7 @@ const navItems: Array<{ id: AppView; label: string; icon: React.ComponentType<{ 
   { id: "overview", label: "Overview", icon: Home },
   { id: "jobs", label: "Jobs", icon: History },
   { id: "channels", label: "Channels", icon: Store },
+  { id: "operations", label: "Orders", icon: ShoppingBag },
   { id: "catalog", label: "Catalog", icon: PackageSearch },
   { id: "vendors", label: "Vendors", icon: Warehouse },
   { id: "settings", label: "Settings", icon: Settings },
@@ -490,6 +491,7 @@ const viewPaths: Record<AppView, string> = {
   jobs: "/jobs",
   channels: "/channels",
   catalog: "/products",
+  operations: "/orders",
   "product-detail": "/products",
   "category-detail": "/categories",
   vendors: "/vendors",
@@ -500,6 +502,7 @@ function viewFromPath(pathname = "/"): AppView {
   const path = pathname.replace(/\/+$/, "") || "/"
   if (path.startsWith("/jobs")) return "jobs"
   if (path.startsWith("/channels")) return "channels"
+  if (["/orders", "/drafts", "/returns"].some((prefix) => path.startsWith(prefix))) return "operations"
   if (path.startsWith("/products/")) return "product-detail"
   if (path.startsWith("/categories/")) return "category-detail"
   if (path.startsWith("/products") || path.startsWith("/catalog")) return "catalog"
@@ -989,6 +992,7 @@ function App() {
                     onRefreshData={() => refreshData({ quiet: true })}
                   />
                 )}
+                {view === "operations" && <OperationsPage />}
                 {view === "catalog" && <CatalogPage />}
                 {view === "product-detail" && <StandaloneProductPage />}
                 {view === "category-detail" && <StandaloneCategoryPage />}
@@ -3035,6 +3039,20 @@ function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "produ
   useEffect(() => { load() }, [tab])
 
   return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title={config.title} description={config.description} action={<div className="flex gap-2"><Button variant="outline" onClick={() => load(true)} disabled={refreshing}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} /><Card><CardHeader className="border-b"><CardTitle className="text-sm">{numberLabel(rows.length)} loaded</CardTitle><CardDescription>Data loads only when this workspace is opened.</CardDescription></CardHeader><CardContent className="p-4">{loading ? <div className="grid gap-2"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <CatalogRecordsTable rows={rows} columns={config.columns} empty={`No ${config.title.toLowerCase()} records are available.`} />}</CardContent></Card></div>
+}
+
+function OperationsPage() {
+  const initial = window.location.pathname.startsWith("/returns") ? "returns" : window.location.pathname.startsWith("/drafts") ? "drafts" : "orders"
+  const [tab, setTab] = useState(initial)
+  const [data, setData] = useState<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>> }>({})
+  const [loading, setLoading] = useState(true)
+  const [query, setQuery] = useState("")
+  async function load() { setLoading(true); try { setData(await api("/api/orders?limit=5000")) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load operations data.") } finally { setLoading(false) } }
+  useEffect(() => { void load() }, [])
+  const rows: Array<Record<string, unknown> & { customer?: { name?: string } }> = tab === "orders" ? data.orders || [] : tab === "drafts" ? data.orderDrafts || [] : data.returns || []
+  const filtered = rows.filter((row) => JSON.stringify(row).toLowerCase().includes(query.toLowerCase()))
+  const title = tab === "orders" ? "Orders" : tab === "drafts" ? "Draft orders" : "Returns"
+  return <div className="grid gap-5"><PageHeader eyebrow="Operations" title={title} description="Sales, draft workflows, and returns share one operational record so status, customer, fulfillment, and financial context do not drift." action={<Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button>} /><Tabs value={tab} onValueChange={(next) => { setTab(next); window.history.replaceState({}, "", next === "orders" ? "/orders" : `/${next}`) }}><TabsList><TabsTrigger value="orders">Orders ({numberLabel(data.orders?.length)})</TabsTrigger><TabsTrigger value="drafts">Drafts ({numberLabel(data.orderDrafts?.length)})</TabsTrigger><TabsTrigger value="returns">Returns ({numberLabel(data.returns?.length)})</TabsTrigger></TabsList></Tabs><Card><CardHeader className="gap-3 border-b"><div className="relative max-w-lg"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${title.toLowerCase()}`} /></div><CardDescription>{numberLabel(filtered.length)} {title.toLowerCase()} shown. Open the legacy record only for advanced actions until those detail drawers are migrated.</CardDescription></CardHeader><CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Reference</TableHead><TableHead>Customer</TableHead><TableHead>Status</TableHead><TableHead>Channel</TableHead><TableHead>Total</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader><TableBody>{filtered.map((row, index) => { const reference = String(row.orderNumber || row.reference || row.returnNumber || row.id || "-"); return <TableRow key={`${reference}-${index}`}><TableCell className="font-medium">{reference}</TableCell><TableCell>{String(row.customerName || row.customer?.name || row.customerEmail || "-")}</TableCell><TableCell><Badge variant="outline">{String(row.status || row.returnStatus || "Draft")}</Badge></TableCell><TableCell>{String(row.channel || row.marketplace || row.source || "-")}</TableCell><TableCell>{moneyLabel(Number(row.total || row.refundAmount || 0))}</TableCell><TableCell>{dateLabel(String(row.updatedAt || row.createdAt || ""))}</TableCell><TableCell><Button size="sm" variant="outline" asChild><a href={`/legacy/${tab === "drafts" ? "orders" : tab}/${encodeURIComponent(String(row.id || reference))}`} target="_blank" rel="noreferrer">Open</a></Button></TableCell></TableRow>})}{!filtered.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No {title.toLowerCase()} are available.</TableCell></TableRow>}</TableBody></Table></div>}</CardContent></Card></div>
 }
 
 function ImportReviewPage() {
