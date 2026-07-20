@@ -19225,7 +19225,7 @@ function orderAddressLabel(address = {}) {
 async function enrichOrderDetail(order = {}) {
   const lines = Array.isArray(order.items) ? order.items : [];
   const keys = lines.flatMap((line) => [line.sku, line.mappedSku, line.originalSku]).filter(Boolean);
-  const products = postgres.isPostgresEnabled() ? await postgres.readProductsByKeys(keys) : [];
+  const products = postgres.isPostgresEnabled() ? await postgres.readProductsForOrderSkus(keys) : [];
   const localByKey = new Map();
   for (const product of products) {
     for (const key of [product.sku, product.id, product.vendorSku, ...(product.systemVariants || []).map((variant) => variant.sku)]) {

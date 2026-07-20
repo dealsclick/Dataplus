@@ -4894,6 +4894,29 @@ async function readProductsByKeys(keys = []) {
   return result.rows.map(productRowToState);
 }
 
+async function readProductsForOrderSkus(keys = []) {
+  const client = getPool();
+  if (!client) return [];
+  const normalized = [...new Set((Array.isArray(keys) ? keys : [])
+    .map((key) => nullableString(key)?.toLowerCase())
+    .filter(Boolean))];
+  if (!normalized.length) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    select distinct p.*
+    from products p
+    where lower(p.sku) = any($1)
+       or exists (
+         select 1
+         from product_aliases pa
+         where pa.product_id = p.product_id
+           and pa.active = true
+           and lower(pa.alias_sku) = any($1)
+       )
+  `, [normalized]);
+  return result.rows.map(productRowToState);
+}
+
 async function listProducts(options = {}) {
   const client = getPool();
   if (!client) return null;
@@ -6139,6 +6162,7 @@ module.exports = {
   readProductQualityRows,
   readProductSourceEnrichmentMap,
   readProductsByKeys,
+  readProductsForOrderSkus,
   readPurchaseOrderByKey,
   readShopifyStatusMap,
   countShopifyVariantStatuses,
