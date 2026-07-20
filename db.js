@@ -4903,16 +4903,19 @@ async function readProductsForOrderSkus(keys = []) {
   if (!normalized.length) return [];
   await initRelationalSchema();
   const result = await client.query(`
-    select distinct p.*
+    with matched_product_ids as (
+      select product_id
+      from products
+      where lower(sku) = any($1)
+      union
+      select product_id
+      from product_aliases
+      where active = true
+        and lower(alias_sku) = any($1)
+    )
+    select p.*
     from products p
-    where lower(p.sku) = any($1)
-       or exists (
-         select 1
-         from product_aliases pa
-         where pa.product_id = p.product_id
-           and pa.active = true
-           and lower(pa.alias_sku) = any($1)
-       )
+    join matched_product_ids matched on matched.product_id = p.product_id
   `, [normalized]);
   return result.rows.map(productRowToState);
 }
