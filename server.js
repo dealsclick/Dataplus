@@ -3855,6 +3855,84 @@ async function queueShopifySkuMapSyncJob(db, body = {}, options = {}) {
   return { duplicate: false, job, workerPayload };
 }
 
+async function queueShopifyOrderImportJob(db, body = {}, options = {}) {
+  const channel = findChannelByName(db, "Shopify");
+  const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+  if (!channel) {
+    const error = new Error("Shopify channel was not found.");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!settings.shopifyOrderImportEnabled) {
+    const error = new Error("Enable Shopify order imports in Channel Settings before importing orders.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const limit = Math.max(1, Math.min(1000, Number(body.limit || settings.shopifyOrderImportLimit || 250)));
+  const sources = String(body.sources ?? settings.shopifyOrderImportSources ?? "Online Store, Shop").trim() || "Online Store, Shop";
+  const includeCanceled = body.includeCanceled ?? settings.shopifyOrderImportIncludeCanceled === true;
+  const workerPayload = {
+    limit,
+    sources,
+    includeCanceled: Boolean(includeCanceled),
+    scheduled: options.scheduled === true,
+    scheduleKey: options.scheduleKey || ""
+  };
+  const operation = options.operation || "Shopify order import";
+  const duplicate = await findActiveDuplicateImportJob(db, {
+    section: "Operations",
+    operation,
+    direction: "import",
+    fileName: "shopify-orders.json",
+    workerTask: "shopify-order-import",
+    workerPayload
+  });
+  if (duplicate) return { duplicate: true, job: duplicate, workerPayload };
+  const schedulePrefix = options.scheduled ? "Scheduled " : "";
+  const job = createImportJob(db, {
+    section: "Operations",
+    category: "Orders",
+    operation,
+    direction: "import",
+    status: "queued",
+    fileName: "shopify-orders.json",
+    totalRows: limit,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "shopify-order-import",
+    workerPayload: shouldRunJobsInline() ? {} : workerPayload,
+    message: `${schedulePrefix}Shopify order reconciliation queued for up to ${limit.toLocaleString()} orders from ${sources}.`
+  });
+  upsertImportJobStore(job);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  appendChannelApiLog({
+    channel: "Shopify",
+    transport: "Job",
+    method: "QUEUE",
+    path: "shopify-orders",
+    operation: options.scheduled ? "Scheduled Shopify order reconciliation queued" : "Shopify order import queued",
+    statusCode: 202,
+    ok: true,
+    jobId: job.id,
+    message: job.message
+  });
+  if (shouldRunJobsInline()) {
+    setTimeout(() => runShopifyOrderImportWorkerJob(job, workerPayload).catch((error) => {
+      finishImportJob(job, {
+        status: "failed",
+        phase: "failed",
+        message: error.message || "Shopify order import failed.",
+        errors: [error.message || "Shopify order import failed."],
+        missingCount: 1,
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+    }), 25);
+  }
+  return { duplicate: false, job, workerPayload };
+}
+
 function applyChannelDefaultsToShadow(db, shadow, marketplace) {
   const channel = findChannelByName(db, marketplace);
   const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
@@ -13527,6 +13605,61 @@ async function runShopifyStatusImportWorkerJob(job = {}) {
   return job;
 }
 
+async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const limit = Math.max(1, Math.min(1000, Number(payload.limit || job.totalRows || 250)));
+  const sources = String(payload.sources || "Online Store, Shop");
+  const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "importing_shopify_orders",
+    totalRows: limit,
+    processedRows: 0,
+    startedAt,
+    message: `Importing and reconciling Shopify orders from ${sources}...`
+  });
+  appendChannelApiLog({
+    channel: "Shopify",
+    transport: "Job",
+    method: "RUN",
+    path: "shopify-orders",
+    operation: "Shopify order reconciliation started",
+    statusCode: 102,
+    ok: true,
+    jobId: job.id,
+    message: job.message
+  });
+  try {
+    const orders = await importShopifyOrders(limit, { sources, includeCanceled: Boolean(payload.includeCanceled) });
+    const message = `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed from ${sources}.`;
+    job = await persistWorkerImportJob(job, {
+      status: "success",
+      phase: "complete",
+      processedRows: orders.length,
+      changed: orders.length,
+      progressPercent: 100,
+      estimatedSecondsRemaining: 0,
+      message,
+      finishedAt: new Date().toISOString()
+    });
+    appendChannelApiLog({ channel: "Shopify", transport: "Job", method: "RUN", path: "shopify-orders", operation: "Shopify order reconciliation complete", statusCode: 200, ok: true, jobId: job.id, message });
+    return job;
+  } catch (error) {
+    const message = error.message || "Shopify order import failed.";
+    await persistWorkerImportJob(job, {
+      status: "failed",
+      phase: "failed",
+      missingCount: 1,
+      errors: [message],
+      estimatedSecondsRemaining: 0,
+      message,
+      finishedAt: new Date().toISOString()
+    });
+    appendChannelApiLog({ channel: "Shopify", transport: "Job", method: "RUN", path: "shopify-orders", operation: "Shopify order reconciliation failed", statusCode: 502, ok: false, jobId: job.id, message });
+    throw error;
+  }
+}
+
 const PUBLIC_SOURCE_FIELD_KEYS = [
   "_id",
   "sku",
@@ -20853,12 +20986,14 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/shopify/orders/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
-    const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
-    if (!settings.shopifyOrderImportEnabled) return sendJson(res, 403, { error: "Enable Shopify order imports in Channel Settings before importing orders." });
-    const limit = Math.max(1, Math.min(1000, Number(body.limit || settings.shopifyOrderImportLimit || 250)));
     try {
-      const orders = await importShopifyOrders(limit, { sources: body.sources ?? settings.shopifyOrderImportSources, includeCanceled: body.includeCanceled ?? settings.shopifyOrderImportIncludeCanceled });
-      return sendJson(res, 200, { imported: orders.length, orders, message: `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed.` });
+      const result = await queueShopifyOrderImportJob(db, body);
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        message: result.duplicate ? "A Shopify order import is already queued or running." : result.job.message
+      });
     } catch (error) {
       const message = error.message || "Unknown error";
       const guidance = /read_orders/i.test(message)
@@ -30599,6 +30734,7 @@ module.exports = {
   normalizeShopifyStatus,
   normalizeShopifyVariantGid,
   queueShopifyInventoryUpdateJob,
+  queueShopifyOrderImportJob,
   queueShopifySkuMapSyncJob,
   readDbFast,
   readExportMappingsApiStore,
@@ -30609,6 +30745,7 @@ module.exports = {
   runJobsRetentionCleanupWorkerJob,
   runMappedProductImportWorkerJob,
   runShopifyExistingVariantLinkWorkerJob,
+  runShopifyOrderImportWorkerJob,
   runShopifyProductCreateWorkerJob,
   runShopifyProductTypeCollectionSyncWorkerJob,
   runShopifyTaxonomyPushWorkerJob,

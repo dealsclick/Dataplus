@@ -41,6 +41,7 @@ const SUPPORTED_TASKS = [
   "source-catalog-import",
   "mapped-product-import",
   "shopify-status-import",
+  "shopify-order-import",
   "shopify-sku-map-sync",
   "shopify-variant-price-push",
   "shopify-product-create",
@@ -555,13 +556,13 @@ async function checkScheduledShopifyOrderImport(force = false) {
   const previous = scheduleState[scheduleId] || {};
   if (previous.lastRunDate === today || previous.lastAttemptedDate === today) return false;
   try {
-    const orders = await dataplus.importShopifyOrders(Math.max(1, Math.min(1000, Number(settings.shopifyOrderImportLimit || 250))), {
+    const result = await dataplus.queueShopifyOrderImportJob(stateDb, {
+      limit: settings.shopifyOrderImportLimit,
       sources: settings.shopifyOrderImportSources || "Online Store, Shop",
       includeCanceled: Boolean(settings.shopifyOrderImportIncludeCanceled)
-    });
-    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "Shopify", time: dueSlot, lastRunDate: today, lastAttemptedDate: today, lastRunAt: new Date(nowMs).toISOString(), imported: orders.length, lastError: "" };
-    dataplus.appendChannelApiLog({ channel: "Shopify", transport: "Scheduler", method: "IMPORT", path: "shopify-orders", operation: "Scheduled Shopify order reconciliation", statusCode: 200, ok: true, message: `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed for ${dueSlot}.` });
-    console.log(`[${WORKER_ID}] reconciled ${orders.length} Shopify order(s) for ${dueSlot}`);
+    }, { scheduled: true, scheduleKey: scheduleId, operation: "Scheduled Shopify order reconciliation" });
+    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "Shopify", time: dueSlot, lastRunDate: today, lastAttemptedDate: today, lastRunAt: new Date(nowMs).toISOString(), lastJobId: result.job?.id || "", lastError: result.duplicate ? "A Shopify order import is already active." : "" };
+    console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled Shopify order reconciliation for ${dueSlot} (${result.job?.id || "duplicate"})`);
     await postgres.writeStateDocuments({ channelOrderImportSchedules: scheduleState });
     return true;
   } catch (error) {
@@ -899,6 +900,10 @@ async function runShopifyStatusImportJob(job) {
   return dataplus.runShopifyStatusImportWorkerJob(job);
 }
 
+async function runShopifyOrderImportJob(job) {
+  return dataplus.runShopifyOrderImportWorkerJob(job, job.workerPayload || {});
+}
+
 async function runShopifyStatusSyncJob(job) {
   return dataplus.runShopifyStatusSyncWorkerJob(job, job.workerPayload || {});
 }
@@ -1197,6 +1202,7 @@ async function runJob(job) {
   if (task === "source-catalog-import") return runSourceCatalogImportJob(job);
   if (task === "mapped-product-import") return runMappedProductImportJob(job);
   if (task === "shopify-status-import") return runShopifyStatusImportJob(job);
+  if (task === "shopify-order-import") return runShopifyOrderImportJob(job);
   if (task === "shopify-sku-map-sync") return runShopifySkuMapSyncJob(job);
   if (task === "shopify-variant-price-push") return runShopifyVariantPricePushJob(job);
   if (task === "shopify-product-create") return runShopifyProductCreateJob(job);

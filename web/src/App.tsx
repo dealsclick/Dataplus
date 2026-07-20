@@ -3688,7 +3688,7 @@ function OperationsPage() {
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null)
   const [busy, setBusy] = useState(false)
   async function load() { setLoading(true); try { setData(await api("/api/orders?limit=5000")) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load operations data.") } finally { setLoading(false) } }
-  async function importShopifyOrders() { setBusy(true); try { const result = await api<{ imported?: number; message?: string }>("/api/shopify/orders/import", { method: "POST", body: JSON.stringify({ limit: 250 }) }); toast.success(result.message || `${numberLabel(result.imported)} Shopify orders imported.`); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to import Shopify orders.") } finally { setBusy(false) } }
+  async function importShopifyOrders() { setBusy(true); try { const result = await api<{ queued?: boolean; duplicate?: boolean; imported?: number; message?: string }>("/api/shopify/orders/import", { method: "POST", body: JSON.stringify({ limit: 250 }) }); toast.success(result.message || (result.queued ? "Shopify order import queued. Follow progress in Jobs." : `${numberLabel(result.imported)} Shopify orders imported.`)); if (!result.queued) await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to import Shopify orders.") } finally { setBusy(false) } }
   useEffect(() => { void load() }, [])
   useEffect(() => {
     const handleAction = (event: Event) => {
