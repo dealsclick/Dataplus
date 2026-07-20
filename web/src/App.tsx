@@ -3471,20 +3471,53 @@ function OrderDetailWorkspace() {
     const shipped = fulfilled.find((entry) => Number(entry.lineIndex || 0) === index && String(entry.sku || "").toLowerCase() === String(line.sku || "").toLowerCase())
     return Math.max(0, Number(line.qty || 0) - Number(shipped?.qtyFulfilled || 0))
   }
+  const shipmentPackageDefaults = (quantities: Record<number, number>) => {
+    let weight = 0
+    let length = 0
+    let width = 0
+    let height = 0
+    lines.forEach((line, index) => {
+      const quantity = Number(quantities[index] || 0)
+      if (quantity <= 0) return
+      const localProduct = (line.localProduct || {}) as Record<string, unknown>
+      const numeric = (...values: unknown[]) => values.map(Number).find((value) => Number.isFinite(value) && value > 0) || 0
+      const lineWeight = numeric(localProduct.packageWeight, localProduct.itemWeight, line.packageWeight, line.itemWeight, line.weight)
+      const lineLength = numeric(localProduct.packageLength, localProduct.itemLength, line.packageLength, line.itemLength)
+      const lineWidth = numeric(localProduct.packageWidth, localProduct.itemWidth, line.packageWidth, line.itemWidth)
+      const lineHeight = numeric(localProduct.packageHeight, localProduct.itemHeight, line.packageHeight, line.itemHeight)
+      weight += lineWeight * quantity
+      length = Math.max(length, lineLength)
+      width = Math.max(width, lineWidth)
+      height = Math.max(height, lineHeight)
+    })
+    const label = (value: number) => value > 0 ? String(Math.round(value * 100) / 100) : ""
+    return { weight: label(weight), length: label(length), width: label(width), height: label(height) }
+  }
+  const applyShipmentPackageDefaults = (quantities: Record<number, number>) => {
+    const defaults = shipmentPackageDefaults(quantities)
+    setPackageWeight(defaults.weight)
+    setPackageLength(defaults.length)
+    setPackageWidth(defaults.width)
+    setPackageHeight(defaults.height)
+  }
   const openFulfill = (allRemaining = true) => {
+    const quantities = Object.fromEntries(lines.map((line, index) => [index, allRemaining ? remaining(line, index) : 0]))
     setLabelWorkflow(false)
     setWarehouseId(String(order?.fulfillmentWarehouseId || warehouses[0]?.id || ""))
     setService(String(order?.shippingService || "Ground"))
     setShippingCost("")
-    setPackageWeight("")
-    setPackageLength("")
-    setPackageWidth("")
-    setPackageHeight("")
+    applyShipmentPackageDefaults(quantities)
     setNotifyCustomer(false)
-    setLineQty(Object.fromEntries(lines.map((line, index) => [index, allRemaining ? remaining(line, index) : 0])))
+    setLineQty(quantities)
     setFulfillOpen(true)
   }
-  const openShippingLabel = () => { openFulfill(false); setLabelWorkflow(true) }
+  const updateShipmentQuantity = (index: number, value: number) => {
+    const quantity = Math.max(0, Math.min(remaining(lines[index], index), value))
+    const quantities = { ...lineQty, [index]: quantity }
+    setLineQty(quantities)
+    applyShipmentPackageDefaults(quantities)
+  }
+  const openShippingLabel = () => { openFulfill(true); setLabelWorkflow(true) }
   useEffect(() => {
     const handleDetailAction = (event: Event) => {
       const action = (event as CustomEvent<{ action?: string }>).detail?.action
@@ -3585,7 +3618,7 @@ function OrderDetailWorkspace() {
           <Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageHeight} onChange={(event) => setPackageHeight(event.target.value)} /></Field>
         </div>
         <ToggleField label="Request customer notification" checked={notifyCustomer} onCheckedChange={setNotifyCustomer} />
-        <div className="max-h-64 overflow-y-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Remaining</TableHead><TableHead>Ship now</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => <TableRow key={`${String(line.sku)}-${index}`}><TableCell>{String(line.sku || "-")}</TableCell><TableCell>{numberLabel(remaining(line, index))}</TableCell><TableCell><Input className="w-24" type="number" min="0" max={remaining(line, index)} value={String(lineQty[index] || 0)} onChange={(event) => setLineQty((current) => ({ ...current, [index]: Math.max(0, Math.min(remaining(line, index), Number(event.target.value || 0))) }))} /></TableCell></TableRow>)}</TableBody></Table></div>
+        <div className="max-h-64 overflow-y-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Remaining</TableHead><TableHead>Ship now</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => <TableRow key={`${String(line.sku)}-${index}`}><TableCell>{String(line.sku || "-")}</TableCell><TableCell>{numberLabel(remaining(line, index))}</TableCell><TableCell><Input className="w-24" type="number" min="0" max={remaining(line, index)} value={String(lineQty[index] || 0)} onChange={(event) => updateShipmentQuantity(index, Number(event.target.value || 0))} /></TableCell></TableRow>)}</TableBody></Table></div>
         {labelWorkflow && String(order.source || "").toLowerCase() === "shopify" && <div className="grid gap-4 border-t pt-4"><div className="rounded-md border bg-muted/30 p-3 text-sm"><span className="font-medium">Shipping reference: </span>{String(order.orderNumber || orderId).replace(/^#/, "")}-SH{shipments.length + 1}</div><ShopifyDeliveryQuotePanel orderId={orderId} order={order} onUpdated={load} selectedLines={lines.map((_, lineIndex) => ({ lineIndex, qty: Number(lineQty[lineIndex] || 0) })).filter((line) => line.qty > 0)} /><ShippingLabelReadinessPanel orderId={orderId} order={order} onUpdated={load} /></div>}
         <DialogFooter><Button variant="outline" onClick={() => setFulfillOpen(false)}>Cancel</Button>{!labelWorkflow && <Button disabled={saving} onClick={() => void saveFulfillment()}>Record shipment</Button>}</DialogFooter>
       </DialogContent>
