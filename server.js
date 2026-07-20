@@ -19415,6 +19415,15 @@ function ensureLocalShipmentForPurchasedLabel(order = {}, purchase = {}) {
     channelSync: { status: "awaiting_fulfillment", channel: "Shopify", updatedAt: new Date().toISOString(), message: "Label purchased. Confirm fulfillment before sending the shipment to Shopify." }
   };
   order.shipments.push(shipment);
+  order.documents = Array.isArray(order.documents) ? order.documents : [];
+  for (const document of shipment.documents) {
+    const url = String(document?.url || "").trim();
+    if (!url || order.documents.some((entry) => String(entry?.url || "") === url)) continue;
+    order.documents.unshift({
+      id: crypto.randomUUID(), name: `${shipment.reference} ${String(document?.format || document?.documentType || "label")}`,
+      url, type: "shipping_label", note: `Shopify Shipping label for ${shipment.reference}.`, createdAt: new Date().toISOString(), createdBy: "Shopify"
+    });
+  }
   purchase.shipmentId = shipment.id;
   purchase.shipmentReference = shipment.reference;
   return shipment;
