@@ -19138,6 +19138,7 @@ function shopifySalesChannelName(sourceName = "") {
 function shopifyOrderToDataPlusOrder(node = {}) {
   const customer = node.customer || {};
   const shipping = node.shippingAddress || {};
+  const billing = node.billingAddress || {};
   const financial = String(node.displayFinancialStatus || "").toLowerCase();
   const fulfillment = String(node.displayFulfillmentStatus || "").toLowerCase();
   const status = node.cancelledAt ? "canceled" : fulfillment === "fulfilled" ? "fulfilled" : fulfillment === "partial" ? "partial_fulfilled" : financial === "paid" ? "processing" : "new";
@@ -19165,6 +19166,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
     paidAmount: financial === "paid" ? Number(node.totalPriceSet?.shopMoney?.amount || 0) : 0,
     qty: (node.lineItems?.edges || []).reduce((sum, edge) => sum + Number(edge.node?.quantity || 0), 0),
     address: { name: [shipping.firstName, shipping.lastName].filter(Boolean).join(" "), company: shipping.company || "", line1: shipping.address1 || "", line2: shipping.address2 || "", city: shipping.city || "", state: shipping.province || "", postalCode: shipping.zip || "", country: shipping.countryCodeV2 || shipping.country || "", phone: shipping.phone || "" },
+    billingAddress: { name: [billing.firstName, billing.lastName].filter(Boolean).join(" "), company: billing.company || "", line1: billing.address1 || "", line2: billing.address2 || "", city: billing.city || "", state: billing.province || "", postalCode: billing.zip || "", country: billing.countryCodeV2 || billing.country || "", phone: billing.phone || "" },
     shippingLines: (node.shippingLines?.edges || []).map((edge) => ({ title: edge.node?.title || "", code: edge.node?.code || "", price: Number(edge.node?.originalPriceSet?.shopMoney?.amount || 0) })),
     discountCodes: (node.discountCodes || []).map((code) => String(code)),
     items: (node.lineItems?.edges || []).map((edge, index) => ({ lineId: edge.node?.id || "", lineIndex: index, sku: edge.node?.sku || "", originalSku: edge.node?.sku || "", title: edge.node?.title || "", qty: Number(edge.node?.quantity || 0), price: Number(edge.node?.originalUnitPriceSet?.shopMoney?.amount || 0), taxable: Boolean(edge.node?.taxable), vendor: edge.node?.vendor || "", variantTitle: edge.node?.variantTitle || "" })),
@@ -19177,7 +19179,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
 async function importShopifyOrders(limit = 250, filters = {}) {
   // Order and shipping fields are sufficient for DataPlus imports. Requesting the separate
   // customer object would unnecessarily require Shopify's read_customers permission.
-  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } } } } } }`;
+  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const imported = []; let after = null;
   while (imported.length < limit) {
     const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, limit - imported.length), after }, { operation: "Import Shopify orders" });
@@ -19187,6 +19189,7 @@ async function importShopifyOrders(limit = 250, filters = {}) {
   const sources = String(filters.sources || "Online Store, Shop").split(/[,;]+/).map((value) => value.trim().toLowerCase()).filter(Boolean);
   const filtered = imported.filter((order) => (filters.includeCanceled || order.status !== "canceled") && sources.includes(String(order.channelSource || "").toLowerCase()));
   await postgres.upsertOrdersFromState(filtered, { replace: false });
+  clearOrderApiCache();
   return filtered;
 }
 
@@ -19206,6 +19209,76 @@ async function cancelShopifyOrder(order = {}, options = {}) {
   const errors = data?.orderCancel?.orderCancelUserErrors || [];
   if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not cancel the order.").join("; "));
   return data?.orderCancel?.job || {};
+}
+
+function clearOrderApiCache(orderId = "") {
+  redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
+  if (orderId) redisCache.deleteByPrefix(`dataplus:order-detail:${orderId}:`).catch(() => {});
+}
+
+function orderAddressLabel(address = {}) {
+  return [address.name, address.company, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+async function enrichOrderDetail(order = {}) {
+  const lines = Array.isArray(order.items) ? order.items : [];
+  const keys = lines.flatMap((line) => [line.sku, line.mappedSku, line.originalSku]).filter(Boolean);
+  const products = postgres.isPostgresEnabled() ? await postgres.readProductsByKeys(keys) : [];
+  const localByKey = new Map();
+  for (const product of products) {
+    for (const key of [product.sku, product.id, product.vendorSku, ...(product.systemVariants || []).map((variant) => variant.sku)]) {
+      if (key) localByKey.set(String(key).toLowerCase(), product);
+    }
+  }
+  let itemRevenue = 0;
+  let estimatedCogs = 0;
+  const enrichedLines = lines.map((line) => {
+    const lineKeys = [line.sku, line.mappedSku, line.originalSku].filter(Boolean).map((value) => String(value).toLowerCase());
+    const product = lineKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
+    const matchedVariant = product?.systemVariants?.find((variant) => lineKeys.includes(String(variant.sku || "").toLowerCase())) || null;
+    const sellUnitQty = Number(matchedVariant?.uomQty || product?.uomQty || 1) || 1;
+    const sourceUnitCost = matchedVariant?.unitCost ?? (product ? Number(product.cost || 0) * sellUnitQty : line.cost);
+    const unitCost = Number(sourceUnitCost || 0);
+    const quantity = Number(line.qty || 0);
+    const revenue = Number(line.price || 0) * quantity;
+    const cogs = unitCost * quantity;
+    itemRevenue += revenue;
+    estimatedCogs += cogs;
+    return {
+      ...line,
+      localSku: product?.sku || "",
+      parentSku: product?.sku || line.mappedSku || "",
+      localProduct: product ? { sku: product.sku, title: product.marketplaceTitle || product.title || "", supplier: product.supplier || "", uom: product.uom || "EA", uomQty: Number(product.uomQty || 1), qty: Number(product.qty || 0), reserved: Number(product.reserved || 0), available: Math.max(0, Number(product.qty || 0) - Number(product.reserved || 0)) } : null,
+      variant: matchedVariant ? { sku: matchedVariant.sku, parentSku: matchedVariant.parentSku || product?.sku || "", label: matchedVariant.optionValue || matchedVariant.uomName || "", uomQty: Number(matchedVariant.uomQty || 1) } : null,
+      sellUnitQty,
+      unitCost,
+      revenue,
+      estimatedCogs: cogs,
+      grossProfit: revenue - cogs,
+      grossMarginPercent: revenue > 0 ? ((revenue - cogs) / revenue) * 100 : 0
+    };
+  });
+  const marketplaceFees = Number(order.marketplaceFees || 0);
+  const refunds = Number(order.refundAmount || 0);
+  const total = Number(order.total || 0);
+  return {
+    ...order,
+    items: enrichedLines,
+    shippingAddressLabel: orderAddressLabel(order.address || {}),
+    billingAddressLabel: orderAddressLabel(order.billingAddress || {}),
+    profitLoss: {
+      orderTotal: total,
+      itemRevenue,
+      shippingCollected: Number(order.shippingCost || 0),
+      estimatedCogs,
+      marketplaceFees,
+      refunds,
+      grossProfit: total - estimatedCogs - marketplaceFees - refunds,
+      grossMarginPercent: total > 0 ? ((total - estimatedCogs - marketplaceFees - refunds) / total) * 100 : 0
+    }
+  };
 }
 
 function shopifyRestRequestWithToken(method, resourcePath, body = null, accessToken = "", options = {}) {
@@ -20184,18 +20257,24 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/orders") {
     if (postgres.isPostgresEnabled()) {
+      const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get("limit") || 5000)));
+      const cacheKey = `dataplus:orders:${limit}`;
+      const cached = await redisCache.getJson(cacheKey);
+      if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const [orders, db] = await Promise.all([
-        postgres.listOrders({ limit: url.searchParams.get("limit") || 5000 }),
+        postgres.listOrders({ limit }),
         readDbFast({ skipInventory: true })
       ]);
-      return sendJson(res, 200, {
+      const payload = {
         orders: orders || [],
         orderDrafts: db.orderDrafts || [],
         returns: db.returns || [],
         customers: db.customers || [],
         ordersLoaded: true,
         storage: "postgres"
-      });
+      };
+      await redisCache.setJson(cacheKey, payload, 45);
+      return sendJson(res, 200, payload);
     }
     const db = await readDbFast();
     return sendJson(res, 200, {
@@ -20238,9 +20317,14 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
+    const cacheKey = `dataplus:order-detail:${parts[2]}:`;
+    const cached = await redisCache.getJson(cacheKey);
+    if (cached) return sendJson(res, 200, { ...cached, cached: true });
     const [order, db] = await Promise.all([postgres.readOrderByKey(parts[2]), readDbFast({ skipInventory: true })]);
     if (!order) return notFound(res);
-    return sendJson(res, 200, { order, warehouses: db.warehouses || [], settings: await readOrderWorkflowSettings() });
+    const payload = { order: await enrichOrderDetail(order), warehouses: db.warehouses || [], settings: await readOrderWorkflowSettings() };
+    await redisCache.setJson(cacheKey, payload, 300);
+    return sendJson(res, 200, payload);
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "allocate" && postgres.isPostgresEnabled()) {
@@ -20248,7 +20332,7 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true }); db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
     const result = await allocateOrderInventory(db, order, body);
     if (result.touched.length) { await postgres.upsertProductsFromState(result.touched); await postgres.upsertInventoryLevelsFromProducts(result.touched); await postgres.writeStateField("inventoryLedger", db.inventoryLedger); }
-    order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order);
+    order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order); clearOrderApiCache(order.id);
     return sendJson(res, 200, { order, backorders: result.backorders, message: result.backorders.length ? "Allocation completed with backordered lines." : "All lines were allocated." });
   }
 
@@ -20307,7 +20391,7 @@ async function handleApi(req, res) {
         user: body.user || "Luis"
       });
     }
-    await postgres.saveOrder(order);
+    await postgres.saveOrder(order); clearOrderApiCache(order.id);
     const db = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { order, state: publicState(db, { lite: true }) });
   }
@@ -20367,6 +20451,7 @@ async function handleApi(req, res) {
       user: body.user || "Luis"
     });
     await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
     const db = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, action === "delete"
       ? { deleted: true, deletedOrderId: order.id, order, state: publicState(db, { lite: true }) }
@@ -20964,6 +21049,7 @@ async function handleApi(req, res) {
     await postgres.upsertInventoryLevelsFromProducts([item]);
     await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
     await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { order, item: publicProductItem(item), state: publicState(stateDb, { lite: true }) });
   }
@@ -22265,6 +22351,7 @@ async function handleApi(req, res) {
       await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
     }
     await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { order, state: publicState(stateDb, { lite: true }) });
   }
