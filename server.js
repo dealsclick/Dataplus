@@ -20261,15 +20261,17 @@ async function handleApi(req, res) {
       const cacheKey = `dataplus:orders:${limit}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
-      const [orders, db] = await Promise.all([
+      const [orders, orderDrafts, returns, customers] = await Promise.all([
         postgres.listOrders({ limit }),
-        readDbFast({ skipInventory: true })
+        postgres.readStateField("orderDrafts"),
+        postgres.readStateField("returns"),
+        postgres.readStateField("customers")
       ]);
       const payload = {
         orders: orders || [],
-        orderDrafts: db.orderDrafts || [],
-        returns: db.returns || [],
-        customers: db.customers || [],
+        orderDrafts: orderDrafts || [],
+        returns: returns || [],
+        customers: customers || [],
         ordersLoaded: true,
         storage: "postgres"
       };
@@ -20320,9 +20322,9 @@ async function handleApi(req, res) {
     const cacheKey = `dataplus:order-detail:${parts[2]}:`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
-    const [order, db] = await Promise.all([postgres.readOrderByKey(parts[2]), readDbFast({ skipInventory: true })]);
+    const [order, warehouses] = await Promise.all([postgres.readOrderByKey(parts[2]), postgres.readStateField("warehouses")]);
     if (!order) return notFound(res);
-    const payload = { order: await enrichOrderDetail(order), warehouses: db.warehouses || [], settings: await readOrderWorkflowSettings() };
+    const payload = { order: await enrichOrderDetail(order), warehouses: warehouses || [], settings: await readOrderWorkflowSettings() };
     await redisCache.setJson(cacheKey, payload, 300);
     return sendJson(res, 200, payload);
   }
