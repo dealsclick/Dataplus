@@ -3,6 +3,7 @@ import { createColumnHelper, flexRender, getCoreRowModel, getFilteredRowModel, u
 import {
   Activity,
   AlertCircle,
+  Archive,
   Boxes,
   CheckCircle2,
   Database,
@@ -154,6 +155,7 @@ type ChannelSettings = {
   shopifyOrderImportLimit?: number
   shopifyOrderImportSources?: string
   shopifyOrderImportIncludeCanceled?: boolean
+  shopifyCancellationNotificationEnabled?: boolean
   shopifyInventoryPushEnabled?: boolean
   shopifyInventoryWarehouseId?: string
   shopifyInventoryLocationId?: string
@@ -1003,7 +1005,7 @@ function App() {
                   />
                 )}
                 {view === "operations" && <OperationsPage />}
-                {view === "order-detail" && <OrderDetailPage />}
+                {view === "order-detail" && <><OrderDetailPage /><OrderActionDock /></>}
                 {view === "catalog" && <CatalogPage />}
                 {view === "product-detail" && <StandaloneProductPage />}
                 {view === "inventory-detail" && <InventorySkuDetailPage />}
@@ -2004,10 +2006,12 @@ function ChannelDetail({
                   <Input disabled={!editing} type="number" min="1" max="1000" value={String(settings.shopifyOrderImportLimit ?? 250)} onChange={(event) => update("shopifyOrderImportLimit", Number(event.target.value || 250))} />
                 </Field>
                 <Field label="Sales channel allowlist">
-                  <Input disabled={!editing} value={String(settings.shopifyOrderImportSources || "")} placeholder="Online Store, Shop (blank = all)" onChange={(event) => update("shopifyOrderImportSources", event.target.value)} />
+                  <Input disabled={!editing} value={String(settings.shopifyOrderImportSources || "Online Store, Shop")} placeholder="Online Store, Shop" onChange={(event) => update("shopifyOrderImportSources", event.target.value)} />
                 </Field>
                 <ToggleField label="Enable Shopify order imports" checked={Boolean(settings.shopifyOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportEnabled", value)} />
                 <ToggleField label="Include canceled orders" checked={Boolean(settings.shopifyOrderImportIncludeCanceled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportIncludeCanceled", value)} />
+                <ToggleField label="Enable Shopify cancellation API" checked={Boolean(settings.shopifyCancellationNotificationEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyCancellationNotificationEnabled", value)} />
+                <p className="col-span-full -mt-2 text-xs text-muted-foreground">Imports are restricted to Online Store and Shop unless you intentionally change the allowlist. Cancellation API stays off until enabled here.</p>
                 <div className="col-span-full"><Button size="sm" variant="outline" disabled={!Boolean(settings.shopifyOrderImportEnabled)} onClick={() => queueShopifyAction("orderImport")}>Import Shopify orders now</Button></div>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify inventory push</p></div>
                 <Field label="DataPlus warehouse">
@@ -3166,12 +3170,88 @@ function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "produ
   return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title={config.title} description={config.description} action={<div className="flex gap-2"><Button variant="outline" onClick={() => load(true)} disabled={refreshing}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} /><Card><CardHeader className="border-b"><CardTitle className="text-sm">{numberLabel(rows.length)} loaded</CardTitle><CardDescription>Data loads only when this workspace is opened.</CardDescription></CardHeader><CardContent className="p-4">{loading ? <div className="grid gap-2"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <CatalogRecordsTable rows={rows} columns={config.columns} empty={`No ${config.title.toLowerCase()} records are available.`} />}</CardContent></Card></div>
 }
 
+function OrderActionsMenu({ order, busy, onAction }: { order: Record<string, unknown>; busy?: boolean; onAction: (action: string, body?: Record<string, unknown>) => Promise<void> }) {
+  const [cancelOpen, setCancelOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [mode, setMode] = useState<"local" | "channel">("local")
+  const [reason, setReason] = useState("OTHER")
+  const [note, setNote] = useState("")
+  const [restock, setRestock] = useState(true)
+  const [notifyCustomer, setNotifyCustomer] = useState(false)
+  const [confirmation, setConfirmation] = useState("")
+  const isShopify = String(order.source || "").toLowerCase() === "shopify"
+  const reference = String(order.internalOrderNumber || order.orderNumber || order.id || "")
+  const cancel = async () => {
+    await onAction("cancel", { notifyChannel: mode === "channel", reason, note, restock, notifyCustomer })
+    setCancelOpen(false)
+  }
+  const remove = async () => {
+    await onAction("delete", { confirmation, reason: note || "Deleted from DataPlus" })
+    setDeleteOpen(false)
+  }
+  return <>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy}><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={() => void onAction("hold")}>Place on hold</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void onAction("archive")}><Archive className="size-4" /> Archive locally</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setCancelOpen(true)}>Cancel order</DropdownMenuItem>
+        <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setDeleteOpen(true)}><Trash2 className="size-4" /> Delete locally</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+    <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Cancel {reference}</DialogTitle><DialogDescription>Choose whether this cancellation stays inside DataPlus or is also sent to Shopify. Shopify cancellations are irreversible and this action does not issue a refund.</DialogDescription></DialogHeader>
+        <div className="grid gap-4 py-2">
+          <Field label="Cancellation scope"><Select value={mode} onValueChange={(value) => setMode(value as "local" | "channel")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="local">Cancel locally only</SelectItem>{isShopify && <SelectItem value="channel">Cancel locally and send to Shopify</SelectItem>}</SelectContent></Select></Field>
+          <Field label="Reason"><Select value={reason} onValueChange={setReason}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="CUSTOMER">Customer request</SelectItem><SelectItem value="INVENTORY">Inventory unavailable</SelectItem><SelectItem value="FRAUD">Fraud</SelectItem><SelectItem value="DECLINED">Payment declined</SelectItem><SelectItem value="STAFF">Staff error</SelectItem><SelectItem value="OTHER">Other</SelectItem></SelectContent></Select></Field>
+          {mode === "channel" && <div className="grid gap-3 rounded-md border p-3"><ToggleField label="Restock Shopify inventory" checked={restock} onCheckedChange={setRestock} /><ToggleField label="Email customer" checked={notifyCustomer} onCheckedChange={setNotifyCustomer} /></div>}
+          <Field label="Internal note"><Textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Optional cancellation note" /></Field>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={() => setCancelOpen(false)}>Back</Button><Button variant="destructive" disabled={busy} onClick={() => void cancel()}>Cancel order</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Delete {reference} locally?</DialogTitle><DialogDescription>This removes the DataPlus operational record only. It does not change Shopify or any other sales channel.</DialogDescription></DialogHeader>
+        <Field label={`Type ${reference} to confirm`}><Input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></Field>
+        <DialogFooter><Button variant="outline" onClick={() => setDeleteOpen(false)}>Back</Button><Button variant="destructive" disabled={busy || confirmation !== reference} onClick={() => void remove()}>Delete locally</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </>
+}
+
+function OrderActionDock() {
+  const orderId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
+  const [order, setOrder] = useState<Record<string, unknown> | null>(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { if (!orderId) return; void api<{ order?: Record<string, unknown> }>(`/api/orders/${encodeURIComponent(orderId)}`).then((result) => setOrder(result.order || null)).catch(() => setOrder(null)) }, [orderId])
+  async function run(action: string, body: Record<string, unknown> = {}) {
+    if (!order) return
+    setBusy(true)
+    try {
+      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order.id || orderId))}/action`, { method: "POST", body: JSON.stringify({ action, ...body }) })
+      setOrder(result.order || order)
+      toast.success(result.message || `Order ${action} completed.`)
+      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Order action failed.")
+    } finally {
+      setBusy(false)
+    }
+  }
+  if (!order) return null
+  return <div className="fixed bottom-5 right-5 z-40"><OrderActionsMenu order={order} busy={busy} onAction={run} /></div>
+}
+
 function OrderDetailPage() {
   const orderId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
   const [order, setOrder] = useState<Record<string, unknown> | null>(null)
   const [loading, setLoading] = useState(true)
   async function load() { setLoading(true); try { const result = await api<{ order?: Record<string, unknown> }>(`/api/orders/${encodeURIComponent(orderId)}`); setOrder(result.order || null) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load order.") } finally { setLoading(false) } }
   useEffect(() => { void load() }, [orderId])
+  useEffect(() => { const refresh = () => void load(); window.addEventListener("dataplus:order-updated", refresh); return () => window.removeEventListener("dataplus:order-updated", refresh) }, [orderId])
   const items = Array.isArray(order?.items) ? order.items as Array<Record<string, unknown>> : []
   const shipments = Array.isArray(order?.shipments) ? order.shipments as Array<Record<string, unknown>> : []
   const payments = Array.isArray(order?.payments) ? order.payments as Array<Record<string, unknown>> : []

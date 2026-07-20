@@ -745,8 +745,9 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyCloseoutsEnabled: true,
   shopifyOrderImportEnabled: false,
   shopifyOrderImportLimit: 250,
-  shopifyOrderImportSources: "",
+  shopifyOrderImportSources: "Online Store, Shop",
   shopifyOrderImportIncludeCanceled: false,
+  shopifyCancellationNotificationEnabled: false,
   shopifyInventoryPushEnabled: false,
   shopifyInventoryWarehouseId: "",
   shopifyInventoryLocationId: "",
@@ -3592,7 +3593,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyInventoryPushEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -19183,10 +19184,28 @@ async function importShopifyOrders(limit = 250, filters = {}) {
     const connection = data?.orders || {}; imported.push(...(connection.edges || []).map((edge) => shopifyOrderToDataPlusOrder(edge.node)).filter((order) => order.id));
     if (!connection.pageInfo?.hasNextPage || !connection.pageInfo?.endCursor) break; after = connection.pageInfo.endCursor;
   }
-  const sources = String(filters.sources || "").split(/[,;]+/).map((value) => value.trim().toLowerCase()).filter(Boolean);
-  const filtered = imported.filter((order) => (filters.includeCanceled || order.status !== "canceled") && (!sources.length || sources.includes(String(order.channelSource || "").toLowerCase())));
+  const sources = String(filters.sources || "Online Store, Shop").split(/[,;]+/).map((value) => value.trim().toLowerCase()).filter(Boolean);
+  const filtered = imported.filter((order) => (filters.includeCanceled || order.status !== "canceled") && sources.includes(String(order.channelSource || "").toLowerCase()));
   await postgres.upsertOrdersFromState(filtered, { replace: false });
   return filtered;
+}
+
+async function cancelShopifyOrder(order = {}, options = {}) {
+  const orderId = String(order.shopifyOrderId || "").trim();
+  if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
+  const allowedReasons = new Set(["CUSTOMER", "DECLINED", "FRAUD", "INVENTORY", "STAFF", "OTHER"]);
+  const reason = String(options.reason || "OTHER").trim().toUpperCase();
+  const query = `mutation DataPlusCancelOrder($orderId: ID!, $reason: OrderCancelReason!, $restock: Boolean!, $notifyCustomer: Boolean!, $staffNote: String) { orderCancel(orderId: $orderId, reason: $reason, restock: $restock, notifyCustomer: $notifyCustomer, staffNote: $staffNote, refundMethod: { originalPaymentMethodsRefund: false }) { job { id done } orderCancelUserErrors { field message code } } }`;
+  const data = await shopifyGraphqlRequestAuto(query, {
+    orderId,
+    reason: allowedReasons.has(reason) ? reason : "OTHER",
+    restock: options.restock !== false,
+    notifyCustomer: Boolean(options.notifyCustomer),
+    staffNote: String(options.note || "").slice(0, 255) || null
+  }, { operation: `Cancel Shopify order ${order.orderNumber || orderId}` });
+  const errors = data?.orderCancel?.orderCancelUserErrors || [];
+  if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not cancel the order.").join("; "));
+  return data?.orderCancel?.job || {};
 }
 
 function shopifyRestRequestWithToken(method, resourcePath, body = null, accessToken = "", options = {}) {
@@ -20303,10 +20322,20 @@ async function handleApi(req, res) {
       hold: "hold",
       cancel: "canceled",
       void: "void",
+      archive: "archived",
       done: "done",
       delete: "deleted"
     }[action];
     if (!nextStatus) return sendJson(res, 400, { error: "Unsupported order action." });
+    let channelCancellation = null;
+    if (action === "cancel" && body.notifyChannel) {
+      const source = String(order.source || "").trim().toLowerCase();
+      if (source !== "shopify") return sendJson(res, 400, { error: "Channel cancellation is available only for Shopify-imported orders." });
+      const db = await readDbFast({ skipInventory: true });
+      const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+      if (!settings.shopifyCancellationNotificationEnabled) return sendJson(res, 400, { error: "Enable Shopify cancellation API in Channel Settings before sending a cancellation to Shopify." });
+      channelCancellation = await cancelShopifyOrder(order, body);
+    }
     if (action === "delete") {
       const confirmation = String(body.confirmation || "").trim();
       const expected = order.internalOrderNumber || order.orderNumber;
@@ -20321,6 +20350,7 @@ async function handleApi(req, res) {
     if (action === "approve") order.approvedAt = order.actionedAt;
     if (action === "hold") order.holdAt = order.actionedAt;
     if (action === "cancel") order.canceledAt = order.actionedAt;
+    if (action === "archive") order.archivedAt = order.actionedAt;
     if (action === "done") order.doneAt = order.actionedAt;
     if (["void", "delete", "cancel"].includes(action)) {
       order.financialExcludedAt = order.financialExcludedAt || order.actionedAt;
@@ -20333,14 +20363,14 @@ async function handleApi(req, res) {
     addOrderTimeline(order, {
       type: "status",
       title: action === "delete" ? "Order deleted" : `Order ${nextStatus}`,
-      message: body.note || `Status changed to ${nextStatus}.`,
+      message: channelCancellation ? `Cancelled locally and sent to Shopify (job ${channelCancellation.id || "queued"}).` : body.note || `Status changed to ${nextStatus}.`,
       user: body.user || "Luis"
     });
     await postgres.saveOrder(order);
     const db = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, action === "delete"
       ? { deleted: true, deletedOrderId: order.id, order, state: publicState(db, { lite: true }) }
-      : { order, state: publicState(db, { lite: true }) });
+      : { order, channelCancellation, state: publicState(db, { lite: true }) });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && postgres.isPostgresEnabled()) {
