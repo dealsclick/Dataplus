@@ -3454,15 +3454,6 @@ function OrderDetailWorkspace() {
   }
   useEffect(() => { void load() }, [orderId])
   useEffect(() => { const refresh = () => void load(); window.addEventListener("dataplus:order-updated", refresh); return () => window.removeEventListener("dataplus:order-updated", refresh) }, [orderId])
-  useEffect(() => {
-    const openShippingWorkspace = () => {
-      const trigger = Array.from(document.querySelectorAll<HTMLElement>("[role='tab']")).find((element) => element.textContent?.includes("Fulfillment"))
-      trigger?.click()
-      trigger?.scrollIntoView({ behavior: "smooth", block: "nearest" })
-    }
-    window.addEventListener("dataplus:open-shipping-workspace", openShippingWorkspace)
-    return () => window.removeEventListener("dataplus:open-shipping-workspace", openShippingWorkspace)
-  }, [])
   const lines = Array.isArray(order?.items) ? order.items as Array<Record<string, unknown>> : []
   const fulfilled = Array.isArray(order?.fulfillmentLines) ? order.fulfillmentLines as Array<Record<string, unknown>> : []
   const shipments = Array.isArray(order?.shipments) ? order.shipments as Array<Record<string, unknown>> : []
@@ -3547,7 +3538,7 @@ function OrderDetailWorkspace() {
   if (loading) return <div className="grid gap-4"><Skeleton className="h-24" /><Skeleton className="h-44" /><Skeleton className="h-72" /></div>
   if (!order) return <Card><CardContent className="p-8 text-center text-muted-foreground">This order was not found.</CardContent></Card>
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button>{String(order.source || "").toLowerCase() === "shopify" && <Button size="sm" variant="outline" onClick={() => window.dispatchEvent(new CustomEvent("dataplus:open-shipping-workspace"))}><Truck className="size-4" /> Shipping & labels</Button>}<OrderActionsMenu order={order} busy={saving} onAction={runOrderAction} onRefresh={() => void load()} /></div>} />
+    <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button>{String(order.source || "").toLowerCase() === "shopify" && <Button size="sm" variant="outline" onClick={() => document.querySelector<HTMLElement>("[role='tab'][aria-controls*='fulfillment']")?.click()}><Truck className="size-4" /> Shipping & labels</Button>}<OrderActionsMenu order={order} busy={saving} onAction={runOrderAction} onRefresh={() => void load()} /></div>} />
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Detail label="Status" value={String(order.status || "New")} /><Detail label="Payment" value={String(order.financialStatus || "-")} /><Detail label="Fulfillment" value={String(order.fulfillmentStatus || order.status || "-")} /><Detail label="Order total" value={moneyLabel(Number(order.total || 0))} /><Detail label="Estimated profit" value={moneyLabel(Number(pnl.grossProfit || 0))} /></div>
     <div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader><CardTitle className="text-sm">Shipping</CardTitle><CardDescription>{String(order.shippingAddressLabel || "Delivery address")}</CardDescription></CardHeader><CardContent><p className="whitespace-pre-line text-sm leading-6">{addressText(order.address)}</p>{String(order.shippingCarrier || order.shippingService || "") && <p className="mt-3 text-sm text-muted-foreground">{String(order.shippingCarrier || order.shippingService)} {String(order.trackingNumber || "")}</p>}</CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Billing</CardTitle><CardDescription>{String(order.buyer || order.buyerEmail || "Customer")}</CardDescription></CardHeader><CardContent><p className="whitespace-pre-line text-sm leading-6">{addressText(order.billingAddress || order.address)}</p><p className="mt-3 text-sm text-muted-foreground">{String(order.buyerEmail || "")} {String(order.phone || "")}</p></CardContent></Card></div>
     <Tabs defaultValue="items"><TabsList className="flex flex-wrap"><TabsTrigger value="items">Items & P&amp;L</TabsTrigger><TabsTrigger value="fulfillment">Fulfillment ({shipments.length})</TabsTrigger><TabsTrigger value="finance">Finance</TabsTrigger><TabsTrigger value="customer">Customer</TabsTrigger><TabsTrigger value="returns">Returns ({relatedReturns.length})</TabsTrigger><TabsTrigger value="documents">Documents ({documents.length})</TabsTrigger><TabsTrigger value="channel">Channel</TabsTrigger><TabsTrigger value="activity">Activity ({events.length})</TabsTrigger></TabsList>
