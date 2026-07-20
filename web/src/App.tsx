@@ -612,6 +612,10 @@ function FloatingActions({
   const openLegacy = (path = "/legacy") => window.open(path, "_blank", "noreferrer")
   const shopifyStatusLimit = Number(shopify?.settings?.shopifyStatusSyncLimit || 100) || 100
 
+  // Order detail provides the same universal dock with order-aware actions.
+  // Avoid mounting the generic fallback beside it.
+  if (view === "order-detail") return null
+
   const items = (() => {
     if (view === "jobs") return <>
       <DropdownMenuItem onClick={onRefresh}><RefreshCw className="size-4" /> Refresh jobs</DropdownMenuItem>
