@@ -3735,6 +3735,42 @@ async function readOrderByKey(key) {
   return orderRowToState(result.rows[0], lines.rows);
 }
 
+async function readOrderCustomerSummary(order = {}) {
+  const client = getPool();
+  if (!client) return null;
+  const customerId = nullableString(order.customerId);
+  const email = nullableString(order.buyerEmail)?.toLowerCase();
+  if (!customerId && !email) return { orderCount: 0, lifetimeValue: 0, firstOrderAt: "", lastOrderAt: "" };
+  await initRelationalSchema();
+  const conditions = [];
+  const params = [];
+  if (customerId) {
+    params.push(customerId);
+    conditions.push(`customer_id = $${params.length}`);
+  }
+  if (email) {
+    params.push(email);
+    conditions.push(`lower(buyer_email) = $${params.length}`);
+  }
+  const result = await client.query(`
+    select
+      count(*)::integer as order_count,
+      coalesce(sum(total), 0) as lifetime_value,
+      min(created_at) as first_order_at,
+      max(created_at) as last_order_at
+    from order_records
+    where (${conditions.join(" or ")})
+      and lower(coalesce(status, '')) <> 'deleted'
+  `, params);
+  const row = result.rows[0] || {};
+  return {
+    orderCount: Number(row.order_count || 0),
+    lifetimeValue: Number(row.lifetime_value || 0),
+    firstOrderAt: row.first_order_at?.toISOString?.() || "",
+    lastOrderAt: row.last_order_at?.toISOString?.() || ""
+  };
+}
+
 async function saveOrder(order = {}) {
   const result = await upsertOrdersFromState([order], { replace: false });
   return result;
@@ -6168,6 +6204,7 @@ module.exports = {
   listOrders,
   listPurchaseOrders,
   readOrderByKey,
+  readOrderCustomerSummary,
   readProductByKey,
   readProductByShopifyGid,
   readProductQualitySummary,

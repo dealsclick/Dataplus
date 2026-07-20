@@ -20322,9 +20322,14 @@ async function handleApi(req, res) {
     const cacheKey = `dataplus:order-detail:${parts[2]}:`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
-    const [order, warehouses] = await Promise.all([postgres.readOrderByKey(parts[2]), postgres.readStateField("warehouses")]);
+    const [order, warehouses, returns] = await Promise.all([postgres.readOrderByKey(parts[2]), postgres.readStateField("warehouses"), postgres.readStateField("returns")]);
     if (!order) return notFound(res);
-    const payload = { order: await enrichOrderDetail(order), warehouses: warehouses || [], settings: await readOrderWorkflowSettings() };
+    const [customerSummary, settings] = await Promise.all([
+      postgres.readOrderCustomerSummary(order),
+      readOrderWorkflowSettings()
+    ]);
+    const relatedReturns = (Array.isArray(returns) ? returns : []).filter((record) => record?.orderId === order.id || record?.orderNumber === order.orderNumber);
+    const payload = { order: await enrichOrderDetail(order), warehouses: warehouses || [], settings, customerSummary, relatedReturns };
     await redisCache.setJson(cacheKey, payload, 300);
     return sendJson(res, 200, payload);
   }
@@ -20350,7 +20355,7 @@ async function handleApi(req, res) {
     const amount = Number(body.amount || 0); if (!(amount > 0)) return sendJson(res, 400, { error: "A payment amount greater than zero is required." });
     order.payments = Array.isArray(order.payments) ? order.payments : [];
     const payment = { id: crypto.randomUUID(), provider: String(body.provider || "Manual"), transactionId: String(body.transactionId || ""), amount, currency: String(body.currency || order.currency || "USD"), status: String(body.status || "authorized"), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-    order.payments.unshift(payment); addOrderWorkflowEvent(order, { step: "payment_recorded", title: "Payment recorded", message: `${payment.status} ${payment.amount} ${payment.currency} through ${payment.provider}.`, user: body.user || "Luis" }); order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order);
+    order.payments.unshift(payment); addOrderWorkflowEvent(order, { step: "payment_recorded", title: "Payment recorded", message: `${payment.status} ${payment.amount} ${payment.currency} through ${payment.provider}.`, user: body.user || "Luis" }); order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order); clearOrderApiCache(order.id);
     return sendJson(res, 201, { order, payment });
   }
 
@@ -20359,8 +20364,26 @@ async function handleApi(req, res) {
     const payment = (order.payments || []).find((row) => row.id === parts[4]); if (!payment) return notFound(res);
     const action = String(parts[5]).toLowerCase(); const status = { capture: "captured", void: "voided", refund: "refunded" }[action]; if (!status) return sendJson(res, 400, { error: "Unsupported payment action." });
     payment.status = status; payment.updatedAt = new Date().toISOString(); if (action === "refund") payment.refundAmount = Number(body.amount || payment.amount || 0);
-    addOrderWorkflowEvent(order, { step: `payment_${action}`, title: `Payment ${status}`, message: `${payment.provider || "Manual"} payment marked ${status}.`, user: body.user || "Luis" }); order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order);
+    addOrderWorkflowEvent(order, { step: `payment_${action}`, title: `Payment ${status}`, message: `${payment.provider || "Manual"} payment marked ${status}.`, user: body.user || "Luis" }); order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order); clearOrderApiCache(order.id);
     return sendJson(res, 200, { order, payment });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "documents" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const url = String(body.url || "").trim();
+    const name = String(body.name || "").trim();
+    if (!url || !/^https?:\/\//i.test(url)) return sendJson(res, 400, { error: "A valid document URL is required." });
+    if (!name) return sendJson(res, 400, { error: "A document name is required." });
+    order.documents = Array.isArray(order.documents) ? order.documents : [];
+    const document = { id: crypto.randomUUID(), name, url, type: String(body.type || "other").trim(), note: String(body.note || "").trim(), createdAt: new Date().toISOString(), createdBy: body.user || "Luis" };
+    order.documents.unshift(document);
+    addOrderTimeline(order, { type: "document", title: "Document linked", message: `${document.name} was linked to this order.`, user: document.createdBy });
+    order.updatedAt = new Date().toISOString();
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 201, { order, document });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && postgres.isPostgresEnabled()) {
@@ -21135,6 +21158,7 @@ async function handleApi(req, res) {
     });
     await postgres.writeStateDocuments({ returns: db.returns });
     await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { return: record, state: publicState(stateDb, { lite: true }) });
   }
@@ -21192,6 +21216,7 @@ async function handleApi(req, res) {
       user: refund.createdBy
     });
     await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { refund, order, state: publicState(stateDb, { lite: true }) });
   }
