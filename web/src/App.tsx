@@ -155,6 +155,10 @@ type ChannelSettings = {
   shopifyOrderImportLimit?: number
   shopifyOrderImportSources?: string
   shopifyOrderImportIncludeCanceled?: boolean
+  shopifyOrderImportScheduleEnabled?: boolean
+  shopifyOrderImportScheduleType?: string
+  shopifyOrderImportScheduleTimes?: string
+  shopifyOrderImportScheduleEveryHours?: number
   shopifyCancellationNotificationEnabled?: boolean
   shopifyFulfillmentSyncEnabled?: boolean
   shopifyInventoryPushEnabled?: boolean
@@ -1623,6 +1627,7 @@ function ChannelDetail({
   const settings = { ...(channel.settings || {}), ...draft }
   const shippingProfiles = Array.isArray(channel.settings?.shopifyShippingProfiles) ? channel.settings.shopifyShippingProfiles : []
   const scheduleTimes = String(settings.inventoryScheduleTimes || "03:00,13:00").split(/[,;\s]+/).filter(Boolean)
+  const orderImportScheduleTimes = String(settings.shopifyOrderImportScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
   const selectedWarehouseId = String(settings.shopifyInventoryWarehouseId || "")
 
   useEffect(() => {
@@ -1894,6 +1899,11 @@ function ChannelDetail({
                 <Field label="Orders per manual import"><Input disabled={!editing} type="number" min="1" max="1000" value={String(settings.shopifyOrderImportLimit ?? 250)} onChange={(event) => update("shopifyOrderImportLimit", Number(event.target.value || 250))} /></Field>
                 <Field label="Sales channel allowlist"><Input disabled={!editing} value={String(settings.shopifyOrderImportSources || "Online Store, Shop")} placeholder="Online Store, Shop" onChange={(event) => update("shopifyOrderImportSources", event.target.value)} /></Field>
                 <ToggleField label="Include canceled orders" checked={Boolean(settings.shopifyOrderImportIncludeCanceled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportIncludeCanceled", value)} />
+                <Field label="Order reconciliation schedule"><Select disabled={!editing} value={String(settings.shopifyOrderImportScheduleType || "times")} onValueChange={(value) => update("shopifyOrderImportScheduleType", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="times">Specific times</SelectItem><SelectItem value="interval">Every X hours</SelectItem></SelectContent></Select></Field>
+                <Field label="First reconciliation"><Input disabled={!editing} type="time" value={orderImportScheduleTimes[0] || "04:00"} onChange={(event) => update("shopifyOrderImportScheduleTimes", [event.target.value, orderImportScheduleTimes[1] || "16:00"].join(","))} /></Field>
+                <Field label="Second reconciliation"><Input disabled={!editing} type="time" value={orderImportScheduleTimes[1] || "16:00"} onChange={(event) => update("shopifyOrderImportScheduleTimes", [orderImportScheduleTimes[0] || "04:00", event.target.value].join(","))} /></Field>
+                <Field label="Reconcile every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings.shopifyOrderImportScheduleEveryHours ?? 12)} onChange={(event) => update("shopifyOrderImportScheduleEveryHours", Number(event.target.value || 12))} /></Field>
+                <ToggleField label="Schedule Shopify order reconciliation" checked={Boolean(settings.shopifyOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.shopifyOrderImportEnabled)} onCheckedChange={(value) => update("shopifyOrderImportScheduleEnabled", value)} />
               </>}
             </CardContent>
           </Card>

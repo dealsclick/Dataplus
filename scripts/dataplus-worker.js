@@ -57,6 +57,7 @@ const SUPPORTED_TASKS = [
 let lastHeartbeatAt = 0;
 let lastScheduleCheckAt = 0;
 let lastSkuMapScheduleCheckAt = 0;
+let lastOrderImportScheduleCheckAt = 0;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -99,6 +100,18 @@ function dueChannelInventoryScheduleSlot(settings = {}, now = new Date()) {
     return nowMinutes >= slotStart ? `${pad2(hour)}:${pad2(minute)}` : "";
   }
   return scheduleTimeValues(settings.inventoryScheduleTimes || "03:00,13:00")
+    .filter((time) => nowMinutes >= scheduledMinutes(time))
+    .pop() || "";
+}
+
+function dueScheduleSlot(settings = {}, prefix = "inventorySchedule", now = new Date()) {
+  const nowMinutes = minutesSinceMidnight(now);
+  if (String(settings[`${prefix}Type`] || "times").toLowerCase() === "interval") {
+    const everyHours = Math.max(1, Math.min(24, Number(settings[`${prefix}EveryHours`] || 12) || 12));
+    const slotStart = Math.floor(nowMinutes / (everyHours * 60)) * everyHours * 60;
+    return `${pad2(Math.floor(slotStart / 60))}:${pad2(slotStart % 60)}`;
+  }
+  return scheduleTimeValues(settings[`${prefix}Times`] || "04:00,16:00")
     .filter((time) => nowMinutes >= scheduledMinutes(time))
     .pop() || "";
 }
@@ -522,6 +535,42 @@ async function checkScheduledShopifySkuPairAudit(force = false) {
   }
   await postgres.writeStateDocuments({ channelSkuMapSchedules: scheduleState });
   return queued;
+}
+
+async function checkScheduledShopifyOrderImport(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastOrderImportScheduleCheckAt < 60000) return false;
+  lastOrderImportScheduleCheckAt = nowMs;
+  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "shopify");
+  const settings = channel?.settings || {};
+  if (!channel || !settings.shopifyOrderImportEnabled || !settings.shopifyOrderImportScheduleEnabled) return false;
+  const now = new Date(nowMs);
+  const dueSlot = dueScheduleSlot(settings, "shopifyOrderImportSchedule", now);
+  if (!dueSlot) return false;
+  const today = localDateKey(now);
+  const scheduleId = `${channel.id || "shopify"}:${today}:${dueSlot}`;
+  const scheduleState = docs.channelOrderImportSchedules && typeof docs.channelOrderImportSchedules === "object" ? docs.channelOrderImportSchedules : {};
+  const previous = scheduleState[scheduleId] || {};
+  if (previous.lastRunDate === today || previous.lastAttemptedDate === today) return false;
+  try {
+    const orders = await dataplus.importShopifyOrders(Math.max(1, Math.min(1000, Number(settings.shopifyOrderImportLimit || 250))), {
+      sources: settings.shopifyOrderImportSources || "Online Store, Shop",
+      includeCanceled: Boolean(settings.shopifyOrderImportIncludeCanceled)
+    });
+    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "Shopify", time: dueSlot, lastRunDate: today, lastAttemptedDate: today, lastRunAt: new Date(nowMs).toISOString(), imported: orders.length, lastError: "" };
+    dataplus.appendChannelApiLog({ channel: "Shopify", transport: "Scheduler", method: "IMPORT", path: "shopify-orders", operation: "Scheduled Shopify order reconciliation", statusCode: 200, ok: true, message: `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed for ${dueSlot}.` });
+    console.log(`[${WORKER_ID}] reconciled ${orders.length} Shopify order(s) for ${dueSlot}`);
+    await postgres.writeStateDocuments({ channelOrderImportSchedules: scheduleState });
+    return true;
+  } catch (error) {
+    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "Shopify", time: dueSlot, lastAttemptedDate: today, lastAttemptedAt: new Date(nowMs).toISOString(), lastError: error.message || "Unable to reconcile Shopify orders." };
+    dataplus.appendChannelApiLog({ channel: "Shopify", transport: "Scheduler", method: "IMPORT", path: "shopify-orders", operation: "Scheduled Shopify order reconciliation", statusCode: 502, ok: false, message: error.message || "Unable to reconcile Shopify orders." });
+    await postgres.writeStateDocuments({ channelOrderImportSchedules: scheduleState });
+    console.error(`[${WORKER_ID}] scheduled Shopify order reconciliation failed:`, error.message || error);
+    return false;
+  }
 }
 
 async function runBackupJob(job) {
@@ -1175,6 +1224,7 @@ async function tick() {
   await writeHeartbeat("idle");
   await checkScheduledShopifyInventoryUpdate();
   await checkScheduledShopifySkuPairAudit();
+  await checkScheduledShopifyOrderImport();
   const job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS });
   if (!job) return false;
   await writeHeartbeat("running", job, true);

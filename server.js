@@ -750,6 +750,10 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyOrderImportLimit: 250,
   shopifyOrderImportSources: "Online Store, Shop",
   shopifyOrderImportIncludeCanceled: false,
+  shopifyOrderImportScheduleEnabled: false,
+  shopifyOrderImportScheduleType: "times",
+  shopifyOrderImportScheduleTimes: "04:00,16:00",
+  shopifyOrderImportScheduleEveryHours: 12,
   shopifyCancellationNotificationEnabled: false,
   shopifyFulfillmentSyncEnabled: false,
   shopifyRefundSyncEnabled: false,
@@ -3599,10 +3603,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -3612,6 +3616,9 @@ function normalizeChannel(channel = {}) {
   settings.inventoryScheduleType = String(settings.inventoryScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.inventoryScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.inventoryScheduleEveryHours || 12) || 12));
   settings.inventoryScheduleTimes = normalizeChannelScheduleTimes(settings.inventoryScheduleTimes || DEFAULT_CHANNEL_SETTINGS.inventoryScheduleTimes);
+  settings.shopifyOrderImportScheduleType = String(settings.shopifyOrderImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
+  settings.shopifyOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.shopifyOrderImportScheduleEveryHours || 12) || 12));
+  settings.shopifyOrderImportScheduleTimes = normalizeChannelScheduleTimes(settings.shopifyOrderImportScheduleTimes || DEFAULT_CHANNEL_SETTINGS.shopifyOrderImportScheduleTimes);
   settings.shopifySkuMapScheduleTime = normalizeChannelScheduleTimes(settings.shopifySkuMapScheduleTime || DEFAULT_CHANNEL_SETTINGS.shopifySkuMapScheduleTime).split(",")[0];
   settings.shopifyShippingProfiles = normalizeShopifyShippingProfiles(settings.shopifyShippingProfiles);
   settings.shopifyShippingProfilesSyncedAt = String(settings.shopifyShippingProfilesSyncedAt || "");
@@ -30572,6 +30579,7 @@ module.exports = {
   attachExportManifestFile,
   productShippingClassification,
   exportManifestPayload,
+  importShopifyOrders,
   appendChannelApiLog,
   IMPORT_JOB_FILE_DIR,
   mappedExportFilename,
