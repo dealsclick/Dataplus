@@ -750,6 +750,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyCancellationNotificationEnabled: false,
   shopifyFulfillmentSyncEnabled: false,
   shopifyRefundSyncEnabled: false,
+  shopifyReturnSyncEnabled: false,
   shopifyOrderAddressSyncEnabled: false,
   shopifyLabelPurchaseEnabled: false,
   shopifyInventoryPushEnabled: false,
@@ -3597,7 +3598,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -19279,6 +19280,66 @@ async function syncShopifyRefund(order = {}, refund = {}) {
   return data?.refundCreate?.refund || {};
 }
 
+async function syncShopifyReturn(order = {}, returnRecord = {}) {
+  const orderId = String(order.shopifyOrderId || "").trim();
+  if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
+  const selectedItems = Array.isArray(returnRecord.items) ? returnRecord.items : [];
+  if (!selectedItems.length) throw new Error("This return has no line items to send to Shopify.");
+
+  // Shopify returns must reference fulfilled fulfillment-line items, not order line IDs.
+  const lookup = `query DataPlusReturnableFulfillments($id: ID!) {
+    order(id: $id) {
+      returnableFulfillments(first: 100) {
+        nodes {
+          returnableFulfillmentLineItems(first: 250) {
+            nodes {
+              quantity
+              fulfillmentLineItem { id lineItem { id sku } }
+            }
+          }
+        }
+      }
+    }
+  }`;
+  const lookupData = await shopifyGraphqlRequestAuto(lookup, { id: orderId }, { operation: `Find returnable Shopify lines for ${order.orderNumber || orderId}` });
+  const candidates = (lookupData?.order?.returnableFulfillments?.nodes || []).flatMap((fulfillment) => fulfillment?.returnableFulfillmentLineItems?.nodes || []);
+  const localLines = orderLineItems(order);
+  const usedFulfillmentLineIds = new Set();
+  const returnLineItems = selectedItems.map((item) => {
+    const localLine = localLines[Number(item.lineIndex || 0)]
+      || localLines.find((line) => String(line.sku || "").toLowerCase() === String(item.sku || "").toLowerCase());
+    const requestedQty = Number(item.qty || 0);
+    const matching = candidates.find((candidate) => {
+      const fulfillmentLine = candidate?.fulfillmentLineItem || {};
+      const exactOrderLine = String(localLine?.lineId || localLine?.id || "") === String(fulfillmentLine?.lineItem?.id || "");
+      const sameSku = String(localLine?.sku || item.sku || "").trim().toLowerCase() === String(fulfillmentLine?.lineItem?.sku || "").trim().toLowerCase();
+      return !usedFulfillmentLineIds.has(String(fulfillmentLine.id || "")) && Number(candidate?.quantity || 0) >= requestedQty && (exactOrderLine || sameSku);
+    });
+    if (!matching || requestedQty <= 0) return null;
+    const fulfillmentLineItemId = String(matching.fulfillmentLineItem?.id || "");
+    usedFulfillmentLineIds.add(fulfillmentLineItemId);
+    return {
+      fulfillmentLineItemId,
+      quantity: requestedQty,
+      returnReason: "OTHER",
+      returnReasonNote: String(returnRecord.reason || returnRecord.note || "Return created in DataPlus").slice(0, 255)
+    };
+  }).filter(Boolean);
+  if (!returnLineItems.length) throw new Error("No eligible Shopify fulfilled lines matched this return. Refresh the order and confirm the selected quantities were fulfilled and not already refunded.");
+  const mutation = `mutation DataPlusReturnCreate($returnInput: ReturnInput!) {
+    returnCreate(returnInput: $returnInput) {
+      return { id status order { id } }
+      userErrors { field message }
+    }
+  }`;
+  const data = await shopifyGraphqlRequestAuto(mutation, {
+    returnInput: { orderId, returnLineItems }
+  }, { operation: `Create Shopify return for ${order.orderNumber || orderId}` });
+  const errors = data?.returnCreate?.userErrors || [];
+  if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not create the return.").join("; "));
+  return data?.returnCreate?.return || {};
+}
+
 async function syncShopifyOrderAddress(order = {}) {
   const orderId = String(order.shopifyOrderId || "").trim();
   if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
@@ -21504,6 +21565,32 @@ async function handleApi(req, res) {
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
       return sendJson(res, 502, { error: `Shopify refund sync failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "sync-shopify" && postgres.isPostgresEnabled()) {
+    const state = await readDbFast({ skipInventory: true });
+    const returnRecord = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    if (!returnRecord) return notFound(res);
+    const order = await postgres.readOrderByKey(String(returnRecord.orderId || ""));
+    if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
+    if (String(order.source || "").trim().toLowerCase() !== "shopify") return sendJson(res, 400, { error: "Shopify sync is available only for Shopify-imported orders." });
+    if (["sent", "synced"].includes(String(returnRecord.channelSync?.status || "").toLowerCase())) return sendJson(res, 400, { error: "This return was already sent to Shopify." });
+    const settings = findChannelByName(state, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    if (!settings.shopifyReturnSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify return sync in Channel Settings before sending returns." });
+    try {
+      const shopifyReturn = await syncShopifyReturn(order, returnRecord);
+      returnRecord.channelSync = { status: "sent", channel: "Shopify", returnId: shopifyReturn.id || "", updatedAt: new Date().toISOString(), message: "Return sent to Shopify." };
+      order.updatedAt = new Date().toISOString();
+      addOrderTimeline(order, { type: "channel_sync", title: "Return sent to Shopify", message: `${returnRecord.returnNumber || "Return"} was sent to Shopify.`, user: "Luis" });
+      await postgres.writeStateDocuments({ returns: state.returns });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 200, { order, return: returnRecord, shopifyReturn, message: "Return sent to Shopify." });
+    } catch (error) {
+      returnRecord.channelSync = { status: "failed", channel: "Shopify", updatedAt: new Date().toISOString(), message: error.message || "Shopify return sync failed." };
+      await postgres.writeStateDocuments({ returns: state.returns });
+      return sendJson(res, 502, { error: `Shopify return sync failed: ${error.message || "Unknown error"}` });
     }
   }
 
