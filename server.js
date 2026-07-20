@@ -20407,6 +20407,12 @@ async function handleApi(req, res) {
         order[field] = newValue;
       }
     }
+    for (const field of ["address", "billingAddress"]) {
+      if (body[field] && typeof body[field] === "object" && !Array.isArray(body[field])) {
+        order[field] = { ...(order[field] || {}), ...body[field] };
+        changes.push(`${field === "address" ? "shipping" : "billing"} address updated`);
+      }
+    }
     order.updatedAt = new Date().toISOString();
     if (changes.length) {
       addOrderTimeline(order, {
