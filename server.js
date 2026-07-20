@@ -751,6 +751,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyFulfillmentSyncEnabled: false,
   shopifyRefundSyncEnabled: false,
   shopifyOrderAddressSyncEnabled: false,
+  shopifyLabelPurchaseEnabled: false,
   shopifyInventoryPushEnabled: false,
   shopifyInventoryWarehouseId: "",
   shopifyInventoryLocationId: "",
@@ -3596,7 +3597,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyOrderAddressSyncEnabled", "shopifyInventoryPushEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -20484,6 +20485,26 @@ async function handleApi(req, res) {
       return sameEmail || sameAddress;
     }).slice(0, 25).map((candidate) => ({ id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, total: candidate.total, buyer: candidate.buyer, buyerEmail: candidate.buyerEmail, address: candidate.address || {}, createdAt: candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "" }));
     return sendJson(res, 200, { orderId: order.id, candidates });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-label-readiness" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    const shipment = (order.shipments || []).find((row) => String(row.status || "").toLowerCase() === "fulfilled") || (order.shipments || [])[0] || {};
+    const packageInfo = (shipment.packages || [])[0] || {};
+    const address = order.address || {};
+    const apiVersion = String(settings.shopifyAdminApiVersion || shopifyAdminConfig().apiVersion || "");
+    const blockers = [];
+    if (String(order.source || "").toLowerCase() !== "shopify") blockers.push("Order was not imported from Shopify.");
+    if (!String(order.shopifyOrderId || "").startsWith("gid://shopify/Order/")) blockers.push("Shopify order link is missing.");
+    if (apiVersion < "2026-07") blockers.push("Shopify API 2026-07 or later is required for label purchase.");
+    if (!settings.shopifyLabelPurchaseEnabled) blockers.push("Enable Shopify label purchase in Channel Settings after granting the required Shopify staff permission.");
+    if (![address.line1, address.city, address.postalCode, address.country].every((value) => String(value || "").trim())) blockers.push("Shipping address is incomplete.");
+    if (!Number(packageInfo.weight || shipment.packageWeight || 0)) blockers.push("Package weight is required.");
+    if (!String(shipment.warehouseId || order.fulfillmentWarehouseId || "").trim()) blockers.push("Fulfillment warehouse is required.");
+    return sendJson(res, 200, { ready: blockers.length === 0, blockers, apiVersion, shipment: { id: shipment.id || "", trackingNumber: shipment.trackingNumber || "", warehouseName: shipment.warehouseName || order.fulfillmentWarehouseName || "", packageWeight: Number(packageInfo.weight || shipment.packageWeight || 0) } });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && postgres.isPostgresEnabled()) {
