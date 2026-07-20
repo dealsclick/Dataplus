@@ -18753,11 +18753,20 @@ function shopifyAdminConfig() {
 function publicShopifyConfigStatus() {
   const config = shopifyAdminConfig();
   const runtime = readShopifyRuntimeCredentials();
+  const previewCredential = (value) => {
+    const normalized = String(value || "").trim();
+    if (!normalized) return "";
+    if (normalized.length <= 8) return `${normalized.slice(0, 2)}${"*".repeat(Math.max(2, normalized.length - 2))}`;
+    return `${normalized.slice(0, 4)}${"*".repeat(Math.min(12, Math.max(6, normalized.length - 8)))}${normalized.slice(-4)}`;
+  };
   return {
     shop: config.shop,
     apiVersion: config.apiVersion,
     hasAccessToken: Boolean(config.accessToken),
     hasClientCredentials: Boolean(config.clientId && config.clientSecret),
+    clientIdPreview: previewCredential(config.clientId),
+    clientSecretPreview: previewCredential(config.clientSecret),
+    accessTokenPreview: previewCredential(config.accessToken),
     runtimeManaged: Boolean(Object.keys(runtime).length),
     configured: Boolean(config.shop && (config.accessToken || (config.clientId && config.clientSecret)))
   };

@@ -1615,7 +1615,7 @@ function ChannelDetail({
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
-  const [credentials, setCredentials] = useState<{ shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; runtimeManaged?: boolean } | null>(null)
+  const [credentials, setCredentials] = useState<{ shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; clientIdPreview?: string; clientSecretPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean } | null>(null)
   const [credentialsOpen, setCredentialsOpen] = useState(false)
   const [credentialSaving, setCredentialSaving] = useState(false)
   const [credentialDraft, setCredentialDraft] = useState({ storeDomain: "", apiVersion: "", clientId: "", clientSecret: "", accessToken: "" })
@@ -1632,7 +1632,7 @@ function ChannelDetail({
 
   useEffect(() => {
     if (!isShopify) return
-    api<{ credentials?: { shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; runtimeManaged?: boolean } }>("/api/shopify/credentials")
+    api<{ credentials?: { shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; clientIdPreview?: string; clientSecretPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean } }>("/api/shopify/credentials")
       .then((result) => setCredentials(result.credentials || null))
       .catch(() => setCredentials(null))
   }, [isShopify])
@@ -1899,13 +1899,13 @@ function ChannelDetail({
           </Card>
           <Dialog open={credentialsOpen} onOpenChange={setCredentialsOpen}>
             <DialogContent className="max-w-xl">
-              <DialogHeader><DialogTitle>Update Shopify API credentials</DialogTitle><DialogDescription>Existing client secrets and access tokens are never displayed. Leave a secret field blank to keep its current value.</DialogDescription></DialogHeader>
+              <DialogHeader><DialogTitle>Update Shopify API credentials</DialogTitle><DialogDescription>Current connection settings are loaded below. Credential previews show only a few characters; leave a credential field blank to keep its current value.</DialogDescription></DialogHeader>
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field label="Store domain"><Input value={credentialDraft.storeDomain} placeholder="store.myshopify.com" onChange={(event) => setCredentialDraft({ ...credentialDraft, storeDomain: event.target.value })} /></Field>
                 <Field label="Admin API version"><Input value={credentialDraft.apiVersion} placeholder="2026-04" onChange={(event) => setCredentialDraft({ ...credentialDraft, apiVersion: event.target.value })} /></Field>
-                <Field label="Client ID"><Input value={credentialDraft.clientId} placeholder={credentials?.hasClientCredentials ? "Configured - enter to replace" : "Shopify app client ID"} onChange={(event) => setCredentialDraft({ ...credentialDraft, clientId: event.target.value })} /></Field>
-                <Field label="Client secret"><Input type="password" autoComplete="new-password" value={credentialDraft.clientSecret} placeholder={credentials?.hasClientCredentials ? "Configured - enter to replace" : "Shopify app client secret"} onChange={(event) => setCredentialDraft({ ...credentialDraft, clientSecret: event.target.value })} /></Field>
-                <div className="sm:col-span-2"><Field label="Admin access token"><Input type="password" autoComplete="new-password" value={credentialDraft.accessToken} placeholder={credentials?.hasAccessToken ? "Configured - enter to replace" : "shpat_..."} onChange={(event) => setCredentialDraft({ ...credentialDraft, accessToken: event.target.value })} /></Field></div>
+                <Field label="Client ID"><Input value={credentialDraft.clientId} placeholder={credentials?.clientIdPreview || "Shopify app client ID"} onChange={(event) => setCredentialDraft({ ...credentialDraft, clientId: event.target.value })} /><p className="mt-1 text-xs text-muted-foreground">{credentials?.clientIdPreview ? `Current: ${credentials.clientIdPreview}. Enter a value only to replace it.` : "Not configured."}</p></Field>
+                <Field label="Client secret"><Input type="password" autoComplete="new-password" value={credentialDraft.clientSecret} placeholder={credentials?.clientSecretPreview || "Shopify app client secret"} onChange={(event) => setCredentialDraft({ ...credentialDraft, clientSecret: event.target.value })} /><p className="mt-1 text-xs text-muted-foreground">{credentials?.clientSecretPreview ? `Current: ${credentials.clientSecretPreview}. Enter a value only to replace it.` : "Not configured."}</p></Field>
+                <div className="sm:col-span-2"><Field label="Admin access token"><Input type="password" autoComplete="new-password" value={credentialDraft.accessToken} placeholder={credentials?.accessTokenPreview || "shpat_..."} onChange={(event) => setCredentialDraft({ ...credentialDraft, accessToken: event.target.value })} /><p className="mt-1 text-xs text-muted-foreground">{credentials?.accessTokenPreview ? `Current: ${credentials.accessTokenPreview}. Enter a value only to replace it.` : "Not configured. Client credentials are used when available."}</p></Field></div>
               </div>
               <DialogFooter><Button variant="outline" onClick={() => setCredentialsOpen(false)}>Cancel</Button><Button disabled={credentialSaving} onClick={() => void saveCredentials()}>{credentialSaving ? "Updating..." : "Update credentials"}</Button></DialogFooter>
             </DialogContent>
