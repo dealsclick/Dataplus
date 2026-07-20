@@ -751,6 +751,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyFulfillmentSyncEnabled: false,
   shopifyRefundSyncEnabled: false,
   shopifyReturnSyncEnabled: false,
+  shopifyPaymentCaptureEnabled: false,
   shopifyOrderAddressSyncEnabled: false,
   shopifyLabelPurchaseEnabled: false,
   shopifyInventoryPushEnabled: false,
@@ -3598,7 +3599,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -19175,7 +19176,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
     shippingLines: (node.shippingLines?.edges || []).map((edge) => ({ title: edge.node?.title || "", code: edge.node?.code || "", price: Number(edge.node?.originalPriceSet?.shopMoney?.amount || 0) })),
     discountCodes: (node.discountCodes || []).map((code) => String(code)),
     items: (node.lineItems?.edges || []).map((edge, index) => ({ lineId: edge.node?.id || "", lineIndex: index, sku: edge.node?.sku || edge.node?.variant?.sku || "", originalSku: edge.node?.sku || edge.node?.variant?.sku || "", channelVariantSku: edge.node?.variant?.sku || edge.node?.sku || "", channelVariantId: edge.node?.variant?.id || "", title: edge.node?.title || "", qty: Number(edge.node?.quantity || 0), price: Number(edge.node?.originalUnitPriceSet?.shopMoney?.amount || 0), taxable: Boolean(edge.node?.taxable), vendor: edge.node?.vendor || "", variantTitle: edge.node?.variantTitle || "" })),
-    payments: (node.transactions || []).map((transaction) => ({ id: transaction?.id || crypto.randomUUID(), provider: transaction?.gateway || "Shopify", transactionId: transaction?.authorizationCode || transaction?.id || "", amount: Number(transaction?.amountSet?.shopMoney?.amount || 0), currency: transaction?.amountSet?.shopMoney?.currencyCode || node.currencyCode || "USD", status: String(transaction?.status || "").toLowerCase(), kind: String(transaction?.kind || "").toLowerCase(), createdAt: transaction?.createdAt || "" })),
+    payments: (node.transactions || []).map((transaction) => ({ id: transaction?.id || crypto.randomUUID(), provider: transaction?.gateway || "Shopify", transactionId: transaction?.authorizationCode || transaction?.id || "", amount: Number(transaction?.amountSet?.shopMoney?.amount || 0), currency: transaction?.amountSet?.shopMoney?.currencyCode || node.currencyCode || "USD", status: String(transaction?.status || "").toLowerCase(), kind: String(transaction?.kind || "").toLowerCase(), manuallyCapturable: Boolean(transaction?.manuallyCapturable), parentTransactionId: transaction?.parentTransaction?.id || "", createdAt: transaction?.createdAt || "" })),
     shopifyAdminUrl: node.legacyResourceId ? `https://admin.shopify.com/store/${shopifyAdminConfig().shop.split(".")[0]}/orders/${node.legacyResourceId}` : "",
     createdAt: node.createdAt || new Date().toISOString(), updatedAt: node.updatedAt || new Date().toISOString(), importedAt: new Date().toISOString()
   };
@@ -19184,7 +19185,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
 async function importShopifyOrders(limit = 250, filters = {}) {
   // Order and shipping fields are sufficient for DataPlus imports. Requesting the separate
   // customer object would unnecessarily require Shopify's read_customers permission.
-  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } } } } } }`;
+  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const imported = []; let after = null;
   while (imported.length < limit) {
     const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, limit - imported.length), after }, { operation: "Import Shopify orders" });
@@ -19338,6 +19339,27 @@ async function syncShopifyReturn(order = {}, returnRecord = {}) {
   const errors = data?.returnCreate?.userErrors || [];
   if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not create the return.").join("; "));
   return data?.returnCreate?.return || {};
+}
+
+async function captureShopifyPayment(order = {}, payment = {}, amount = 0) {
+  const orderId = String(order.shopifyOrderId || "").trim();
+  const parentTransactionId = String(payment.id || "").trim();
+  const captureAmount = Number(amount || 0);
+  if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
+  if (!parentTransactionId.startsWith("gid://shopify/OrderTransaction/")) throw new Error("This payment authorization is not linked to a Shopify transaction.");
+  if (!(captureAmount > 0)) throw new Error("Enter a capture amount greater than zero.");
+  const mutation = `mutation DataPlusOrderCapture($input: OrderCaptureInput!) {
+    orderCapture(input: $input) {
+      transaction { id kind status authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } }
+      userErrors { field message }
+    }
+  }`;
+  const data = await shopifyGraphqlRequestAuto(mutation, {
+    input: { id: orderId, parentTransactionId, amount: captureAmount.toFixed(2) }
+  }, { operation: `Capture payment for Shopify order ${order.orderNumber || orderId}` });
+  const errors = data?.orderCapture?.userErrors || [];
+  if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not capture the payment.").join("; "));
+  return data?.orderCapture?.transaction || {};
 }
 
 async function syncShopifyOrderAddress(order = {}) {
@@ -21591,6 +21613,34 @@ async function handleApi(req, res) {
       returnRecord.channelSync = { status: "failed", channel: "Shopify", updatedAt: new Date().toISOString(), message: error.message || "Shopify return sync failed." };
       await postgres.writeStateDocuments({ returns: state.returns });
       return sendJson(res, 502, { error: `Shopify return sync failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "payments" && parts[4] && parts[5] === "capture-shopify" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    if (String(order.source || "").trim().toLowerCase() !== "shopify") return sendJson(res, 400, { error: "Shopify capture is available only for Shopify-imported orders." });
+    const payment = (order.payments || []).find((entry) => String(entry.id || "") === parts[4]);
+    if (!payment) return notFound(res);
+    if (String(payment.kind || "").toLowerCase() !== "authorization" || !payment.manuallyCapturable) return sendJson(res, 400, { error: "This Shopify transaction is not available for manual capture." });
+    if (!(Number(body.amount || 0) > 0) || Number(body.amount || 0) > Number(payment.amount || 0)) return sendJson(res, 400, { error: "Capture amount must be greater than zero and cannot exceed the selected authorization." });
+    const db = await readDbFast({ skipInventory: true });
+    const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    if (!settings.shopifyPaymentCaptureEnabled) return sendJson(res, 400, { error: "Enable Shopify payment capture in Channel Settings before capturing an authorization." });
+    try {
+      const transaction = await captureShopifyPayment(order, payment, Number(body.amount || 0));
+      payment.manuallyCapturable = false;
+      payment.captureSync = { status: "sent", channel: "Shopify", transactionId: transaction.id || "", capturedAt: new Date().toISOString() };
+      order.payments = Array.isArray(order.payments) ? order.payments : [];
+      order.payments.unshift({ id: transaction.id || crypto.randomUUID(), provider: payment.provider || "Shopify", transactionId: transaction.authorizationCode || transaction.id || "", amount: Number(transaction.amountSet?.shopMoney?.amount || body.amount || 0), currency: transaction.amountSet?.shopMoney?.currencyCode || payment.currency || "USD", status: String(transaction.status || "success").toLowerCase(), kind: String(transaction.kind || "capture").toLowerCase(), createdAt: transaction.createdAt || new Date().toISOString(), channelSync: { status: "sent", channel: "Shopify" } });
+      order.updatedAt = new Date().toISOString();
+      addOrderTimeline(order, { type: "payment", title: "Payment captured in Shopify", message: `${Number(body.amount || 0).toFixed(2)} was captured from the selected Shopify authorization.`, user: "Luis" });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 200, { order, transaction, message: "Payment captured in Shopify." });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Shopify payment capture failed: ${error.message || "Unknown error"}` });
     }
   }
 
