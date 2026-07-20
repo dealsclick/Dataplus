@@ -1615,6 +1615,10 @@ function ChannelDetail({
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
+  const [credentials, setCredentials] = useState<{ shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; runtimeManaged?: boolean } | null>(null)
+  const [credentialsOpen, setCredentialsOpen] = useState(false)
+  const [credentialSaving, setCredentialSaving] = useState(false)
+  const [credentialDraft, setCredentialDraft] = useState({ storeDomain: "", apiVersion: "", clientId: "", clientSecret: "", accessToken: "" })
   const isShopify = channel.name?.toLowerCase() === "shopify"
   const settings = { ...(channel.settings || {}), ...draft }
   const shippingProfiles = Array.isArray(channel.settings?.shopifyShippingProfiles) ? channel.settings.shopifyShippingProfiles : []
@@ -1625,6 +1629,13 @@ function ChannelDetail({
     setDraft({})
     setEditing(false)
   }, [channel.id])
+
+  useEffect(() => {
+    if (!isShopify) return
+    api<{ credentials?: { shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; runtimeManaged?: boolean } }>("/api/shopify/credentials")
+      .then((result) => setCredentials(result.credentials || null))
+      .catch(() => setCredentials(null))
+  }, [isShopify])
 
   function update(field: string, value: unknown) {
     setDraft((current) => ({ ...current, [field]: value }))
@@ -1647,6 +1658,23 @@ function ChannelDetail({
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to import Shopify shipping profiles.")
     }
+  }
+
+  function openCredentials() {
+    setCredentialDraft({ storeDomain: String(credentials?.shop || settings.shopifyStoreDomain || channel.shopifyConfig?.shop || ""), apiVersion: String(credentials?.apiVersion || settings.shopifyAdminApiVersion || channel.shopifyConfig?.apiVersion || "2026-04"), clientId: "", clientSecret: "", accessToken: "" })
+    setCredentialsOpen(true)
+  }
+
+  async function saveCredentials() {
+    setCredentialSaving(true)
+    try {
+      const result = await api<{ credentials?: typeof credentials; message?: string }>("/api/shopify/credentials", { method: "PUT", body: JSON.stringify(credentialDraft) })
+      setCredentials(result.credentials || null)
+      setCredentialDraft((current) => ({ ...current, clientId: "", clientSecret: "", accessToken: "" }))
+      setCredentialsOpen(false)
+      toast.success(result.message || "Shopify credentials updated.")
+      onRefreshData()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update Shopify credentials.") } finally { setCredentialSaving(false) }
   }
 
   function queueShopifyAction(kind: string, apply = false) {
@@ -1841,12 +1869,10 @@ function ChannelDetail({
               <ToggleField label="Auto-create shadows" checked={Boolean(settings.autoCreateShadow)} disabled={!editing} onCheckedChange={(value) => update("autoCreateShadow", value)} />
               {isShopify && <>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify Admin API</p></div>
-                <Field label="Store domain">
-                  <Input disabled={!editing} value={String(settings.shopifyStoreDomain || channel.shopifyConfig?.shop || "")} placeholder="store.myshopify.com" onChange={(event) => update("shopifyStoreDomain", event.target.value)} />
-                </Field>
-                <Field label="Admin API version">
-                  <Input disabled={!editing} value={String(settings.shopifyAdminApiVersion || channel.shopifyConfig?.apiVersion || "2026-04")} onChange={(event) => update("shopifyAdminApiVersion", event.target.value)} />
-                </Field>
+                <div className="col-span-full flex flex-wrap items-center justify-between gap-3 rounded-md border p-4">
+                  <div className="text-sm"><p className="font-medium">Shopify credentials</p><p className="text-muted-foreground">{credentials?.shop || "Store domain not configured"} / API {credentials?.apiVersion || "not configured"}</p><p className="pt-1 text-xs text-muted-foreground">Client credentials: {credentials?.hasClientCredentials ? "configured" : "missing"} / Admin token: {credentials?.hasAccessToken ? "configured" : "missing"}</p></div>
+                  <Button size="sm" variant="outline" onClick={openCredentials}>Update API credentials</Button>
+                </div>
                 <Field label="Status sync limit">
                   <Input disabled={!editing} min="1" max="500" type="number" value={String(settings.shopifyStatusSyncLimit ?? 100)} onChange={(event) => update("shopifyStatusSyncLimit", Number(event.target.value || 100))} />
                 </Field>
@@ -1871,6 +1897,19 @@ function ChannelDetail({
               </>}
             </CardContent>
           </Card>
+          <Dialog open={credentialsOpen} onOpenChange={setCredentialsOpen}>
+            <DialogContent className="max-w-xl">
+              <DialogHeader><DialogTitle>Update Shopify API credentials</DialogTitle><DialogDescription>Existing client secrets and access tokens are never displayed. Leave a secret field blank to keep its current value.</DialogDescription></DialogHeader>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="Store domain"><Input value={credentialDraft.storeDomain} placeholder="store.myshopify.com" onChange={(event) => setCredentialDraft({ ...credentialDraft, storeDomain: event.target.value })} /></Field>
+                <Field label="Admin API version"><Input value={credentialDraft.apiVersion} placeholder="2026-04" onChange={(event) => setCredentialDraft({ ...credentialDraft, apiVersion: event.target.value })} /></Field>
+                <Field label="Client ID"><Input value={credentialDraft.clientId} placeholder={credentials?.hasClientCredentials ? "Configured - enter to replace" : "Shopify app client ID"} onChange={(event) => setCredentialDraft({ ...credentialDraft, clientId: event.target.value })} /></Field>
+                <Field label="Client secret"><Input type="password" autoComplete="new-password" value={credentialDraft.clientSecret} placeholder={credentials?.hasClientCredentials ? "Configured - enter to replace" : "Shopify app client secret"} onChange={(event) => setCredentialDraft({ ...credentialDraft, clientSecret: event.target.value })} /></Field>
+                <div className="sm:col-span-2"><Field label="Admin access token"><Input type="password" autoComplete="new-password" value={credentialDraft.accessToken} placeholder={credentials?.hasAccessToken ? "Configured - enter to replace" : "shpat_..."} onChange={(event) => setCredentialDraft({ ...credentialDraft, accessToken: event.target.value })} /></Field></div>
+              </div>
+              <DialogFooter><Button variant="outline" onClick={() => setCredentialsOpen(false)}>Cancel</Button><Button disabled={credentialSaving} onClick={() => void saveCredentials()}>{credentialSaving ? "Updating..." : "Update credentials"}</Button></DialogFooter>
+            </DialogContent>
+          </Dialog>
         </TabsContent>
 
         <TabsContent value="actions">
@@ -2651,6 +2690,7 @@ function ProductChannelPanel({ channel, product, section, values }: { channel: C
     const commerceRows: Array<[string, string]> = [["DataPlus price", moneyLabel(product.shopifySystemPrice ?? product.websitePrice ?? product.price)], ["Live Shopify price", moneyLabel(product.shopifyLivePrice)], ["Compare-at price", moneyLabel(product.shopifyLiveCompareAtPrice ?? undefined)], ["Price difference", moneyLabel(product.shopifyPriceDelta ?? undefined)], ["Price match", product.shopifyPriceMismatch ? "Needs review" : "Matched"], ["Live inventory", numberLabel(product.shopifyLiveInventoryQuantity)], ["Inventory variant", product.shopifyLiveVariantSku || ""], ["Selling UOM", product.uomDisplay || "Each"]]
     return <>{section("Shopify product pair", "The parent product and sellable variant linked to this DataPlus SKU.", values(productRows))}{section("Shopify commercial values", "Channel-specific price, inventory, and UOM sell-unit information for this product.", <><div className="mb-4">{values(commerceRows)}</div><ProductVariantsTable rows={product.shopifyPurchaseVariants || []} /></>)}</>
   }
+
   if (kind === "ebay") {
     const ebay = product.ebayListing || {}
     const listingRows: Array<[string, string]> = [["Status", ebay.status || "Not listed"], ["Listing ID", ebay.listingId || "Not linked"], ["Offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", ebay.marketplaceId || "EBAY_US"], ["Merchant location", ebay.merchantLocationKey || ""], ["Category ID", ebay.categoryId || ""], ["Category path", ebay.categoryPath || ""], ["Taxonomy version", ebay.taxonomyVersion || ""], ["Condition", ebay.condition || product.condition || "New"], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]

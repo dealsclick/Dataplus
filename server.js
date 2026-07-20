@@ -51,6 +51,7 @@ const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
 const IMPORT_JOB_STORE_FILE = path.join(DATA_DIR, "import-jobs.json");
 const CONNECTOR_STATE_FILE = path.join(DATA_DIR, "connectors.json");
 const ENV_FILE = path.join(ROOT, ".env");
+const SHOPIFY_RUNTIME_CREDENTIALS_FILE = path.join(DATA_DIR, "shopify-runtime-credentials.json");
 const BACKGROUND_EXPORT_PAGE_SIZE = 100;
 const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(60, Number(process.env.IMPORT_JOB_FILE_RETENTION_DAYS || 60) || 60);
 const IMPORT_JOB_HISTORY_LIMIT = Math.max(1000, Math.min(5000, Number(process.env.IMPORT_JOB_HISTORY_LIMIT || 1000) || 1000));
@@ -62,6 +63,7 @@ const SERVER_STARTED_AT = new Date();
 const activeJobProgress = new Map();
 const activeJobRecords = new Map();
 let dbCache = { mtimeMs: 0, data: null };
+let shopifyRuntimeCredentialsCache = { mtimeMs: 0, value: {} };
 let publicStateJsonCache = null;
 let operationalSummaryCache = { value: null, refreshedAt: 0, pending: null };
 let shopifyAccessTokenCache = { token: "", expiresAt: 0, scope: "" };
@@ -18715,22 +18717,48 @@ function catalogChangeTrackingStatus() {
   };
 }
 
+function readShopifyRuntimeCredentials() {
+  try {
+    const stats = fs.statSync(SHOPIFY_RUNTIME_CREDENTIALS_FILE);
+    if (shopifyRuntimeCredentialsCache.mtimeMs === stats.mtimeMs) return shopifyRuntimeCredentialsCache.value;
+    const parsed = JSON.parse(fs.readFileSync(SHOPIFY_RUNTIME_CREDENTIALS_FILE, "utf8"));
+    shopifyRuntimeCredentialsCache = { mtimeMs: stats.mtimeMs, value: parsed && typeof parsed === "object" ? parsed : {} };
+  } catch {
+    shopifyRuntimeCredentialsCache = { mtimeMs: 0, value: {} };
+  }
+  return shopifyRuntimeCredentialsCache.value;
+}
+
+function writeShopifyRuntimeCredentials(patch = {}) {
+  const current = readShopifyRuntimeCredentials();
+  const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
+  fs.mkdirSync(path.dirname(SHOPIFY_RUNTIME_CREDENTIALS_FILE), { recursive: true });
+  const temporary = `${SHOPIFY_RUNTIME_CREDENTIALS_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, SHOPIFY_RUNTIME_CREDENTIALS_FILE);
+  shopifyRuntimeCredentialsCache = { mtimeMs: 0, value: next };
+  return next;
+}
+
 function shopifyAdminConfig() {
-  const shop = String(process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOPIFY_SHOP_DOMAIN || process.env.SHOPIFY_STORE || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/g, "");
-  const accessToken = String(process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || process.env.SHOPIFY_ACCESS_TOKEN || "").trim();
-  const clientId = String(process.env.SHOPIFY_CLIENT_ID || process.env.SHOPIFY_APP_CLIENT_ID || "").trim();
-  const clientSecret = String(process.env.SHOPIFY_CLIENT_SECRET || process.env.SHOPIFY_APP_CLIENT_SECRET || "").trim();
-  const apiVersion = String(process.env.SHOPIFY_ADMIN_API_VERSION || "2026-04").trim();
+  const runtime = readShopifyRuntimeCredentials();
+  const shop = String(runtime.storeDomain || process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOPIFY_SHOP_DOMAIN || process.env.SHOPIFY_STORE || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/g, "");
+  const accessToken = String(runtime.accessToken || process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || process.env.SHOPIFY_ACCESS_TOKEN || "").trim();
+  const clientId = String(runtime.clientId || process.env.SHOPIFY_CLIENT_ID || process.env.SHOPIFY_APP_CLIENT_ID || "").trim();
+  const clientSecret = String(runtime.clientSecret || process.env.SHOPIFY_CLIENT_SECRET || process.env.SHOPIFY_APP_CLIENT_SECRET || "").trim();
+  const apiVersion = String(runtime.apiVersion || process.env.SHOPIFY_ADMIN_API_VERSION || "2026-04").trim();
   return { shop, accessToken, clientId, clientSecret, apiVersion };
 }
 
 function publicShopifyConfigStatus() {
   const config = shopifyAdminConfig();
+  const runtime = readShopifyRuntimeCredentials();
   return {
     shop: config.shop,
     apiVersion: config.apiVersion,
     hasAccessToken: Boolean(config.accessToken),
     hasClientCredentials: Boolean(config.clientId && config.clientSecret),
+    runtimeManaged: Boolean(Object.keys(runtime).length),
     configured: Boolean(config.shop && (config.accessToken || (config.clientId && config.clientSecret)))
   };
 }
@@ -19919,6 +19947,40 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/system/database") {
     return sendJson(res, 200, await postgres.databaseHealth());
+  }
+
+  if (url.pathname === "/api/shopify/credentials") {
+    if (req.method === "GET") return sendJson(res, 200, { credentials: publicShopifyConfigStatus() });
+    if (req.method === "PUT") {
+      const body = await parseBody(req);
+      const patch = {};
+      const storeDomain = String(body.storeDomain || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/g, "");
+      const apiVersion = String(body.apiVersion || "").trim();
+      if (storeDomain) {
+        if (!/^[a-z0-9][a-z0-9.-]*\.myshopify\.com$/i.test(storeDomain)) return sendJson(res, 400, { error: "Enter a valid Shopify store domain, for example store.myshopify.com." });
+        patch.storeDomain = storeDomain;
+      }
+      if (apiVersion) {
+        if (!/^20\d{2}-(01|04|07|10)$/.test(apiVersion)) return sendJson(res, 400, { error: "Enter a Shopify Admin API version such as 2026-04." });
+        patch.apiVersion = apiVersion;
+      }
+      for (const [field, key] of [["clientId", "clientId"], ["clientSecret", "clientSecret"], ["accessToken", "accessToken"]]) {
+        const value = String(body[field] || "").trim();
+        if (value) patch[key] = value;
+      }
+      if (!Object.keys(patch).length) return sendJson(res, 400, { error: "Enter at least one credential value to update." });
+      writeShopifyRuntimeCredentials(patch);
+      Object.assign(process.env, {
+        ...(patch.storeDomain ? { SHOPIFY_STORE_DOMAIN: patch.storeDomain } : {}),
+        ...(patch.apiVersion ? { SHOPIFY_ADMIN_API_VERSION: patch.apiVersion } : {}),
+        ...(patch.clientId ? { SHOPIFY_CLIENT_ID: patch.clientId } : {}),
+        ...(patch.clientSecret ? { SHOPIFY_CLIENT_SECRET: patch.clientSecret } : {}),
+        ...(patch.accessToken ? { SHOPIFY_ADMIN_ACCESS_TOKEN: patch.accessToken } : {})
+      });
+      shopifyAccessTokenCache = { token: "", expiresAt: 0, scope: "" };
+      appendChannelApiLog({ channel: "Shopify", transport: "configuration", method: "PUT", path: url.pathname, operation: "Update Shopify credentials", statusCode: 200, ok: true, message: `Updated ${Object.keys(patch).filter((key) => !["clientSecret", "accessToken"].includes(key)).join(", ") || "secret credentials"}.` });
+      return sendJson(res, 200, { credentials: publicShopifyConfigStatus(), message: "Shopify credentials updated. Existing secrets remain masked." });
+    }
   }
 
   if (parts[0] === "api" && parts[1] === "export-mappings" && !parts[3]) {
