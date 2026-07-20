@@ -3707,15 +3707,24 @@ async function readOrderByKey(key) {
   const value = nullableString(key);
   if (!client || !value) return null;
   await initRelationalSchema();
-  const result = await client.query(`
+  // Detail routes normally use the internal order ID. Query it first so the
+  // primary-key index is not bypassed by the flexible identifier fallbacks.
+  let result = await client.query(`
     select *
     from order_records
     where order_id = $1
-      or lower(order_number) = lower($1)
-      or lower(internal_order_number) = lower($1)
-      or lower(marketplace_order_id) = lower($1)
     limit 1
   `, [value]);
+  if (!result.rows[0]) {
+    result = await client.query(`
+      select *
+      from order_records
+      where lower(order_number) = lower($1)
+         or lower(internal_order_number) = lower($1)
+         or lower(marketplace_order_id) = lower($1)
+      limit 1
+    `, [value]);
+  }
   if (!result.rows[0]) return null;
   const lines = await client.query(`
     select *
