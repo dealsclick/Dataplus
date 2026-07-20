@@ -20887,9 +20887,11 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { orderId: order.id, candidates });
   }
 
-  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-label-readiness" && postgres.isPostgresEnabled()) {
+  if (["GET", "POST"].includes(req.method) && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-label-readiness" && postgres.isPostgresEnabled()) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
+    const body = req.method === "POST" ? await parseBody(req) : {};
+    const draft = body.shipment && typeof body.shipment === "object" ? body.shipment : {};
     const db = await readDbFast({ skipInventory: true });
     const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
     const shipment = (order.shipments || []).find((row) => String(row.status || "").toLowerCase() === "fulfilled") || (order.shipments || [])[0] || {};
@@ -20902,9 +20904,11 @@ async function handleApi(req, res) {
     if (apiVersion < "2026-07") blockers.push("Shopify API 2026-07 or later is required for label purchase.");
     if (!settings.shopifyLabelPurchaseEnabled) blockers.push("Enable Shopify label purchase in Channel Settings after granting the required Shopify staff permission.");
     if (![address.line1, address.city, address.postalCode, address.country].every((value) => String(value || "").trim())) blockers.push("Shipping address is incomplete.");
-    if (!Number(packageInfo.weight || shipment.packageWeight || 0)) blockers.push("Package weight is required.");
-    if (!String(shipment.warehouseId || order.fulfillmentWarehouseId || "").trim()) blockers.push("Fulfillment warehouse is required.");
-    return sendJson(res, 200, { ready: blockers.length === 0, blockers, apiVersion, shipment: { id: shipment.id || "", trackingNumber: shipment.trackingNumber || "", warehouseName: shipment.warehouseName || order.fulfillmentWarehouseName || "", packageWeight: Number(packageInfo.weight || shipment.packageWeight || 0) } });
+    const packageWeight = Number(draft.packageWeight || packageInfo.weight || shipment.packageWeight || 0);
+    const warehouseId = String(draft.warehouseId || shipment.warehouseId || order.fulfillmentWarehouseId || "").trim();
+    if (!packageWeight) blockers.push("Package weight is required.");
+    if (!warehouseId) blockers.push("Fulfillment warehouse is required.");
+    return sendJson(res, 200, { ready: blockers.length === 0, blockers, apiVersion, shipment: { id: shipment.id || "", trackingNumber: shipment.trackingNumber || "", warehouseId, warehouseName: shipment.warehouseName || order.fulfillmentWarehouseName || "", packageWeight } });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-quotes" && parts[4] === "shopify" && postgres.isPostgresEnabled()) {
