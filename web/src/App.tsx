@@ -3568,7 +3568,7 @@ function OrderDetailWorkspace() {
       <TabsContent value="activity" className="grid gap-3 pt-4">{events.length ? events.map((event) => <Card key={String(event.id)}><CardContent className="p-4 text-sm"><p className="font-medium">{String(event.title || event.step || "Order event")}</p><p className="mt-1 text-muted-foreground">{String(event.message || "")} / {dateLabel(String(event.createdAt || ""))}</p></CardContent></Card>) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No workflow events yet.</CardContent></Card>}</TabsContent>
     </Tabs>
     <Dialog open={fulfillOpen} onOpenChange={setFulfillOpen}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
         <DialogHeader><DialogTitle>{labelWorkflow ? "Create Shopify shipping label" : "Record shipment"}</DialogTitle><DialogDescription>{labelWorkflow ? `Select what will ship in ${String(order.orderNumber || orderId).replace(/^#/, "")}-SH${shipments.length + 1}, then calculate delivery options before purchasing a carrier label.` : "Update local inventory, preserve the package record, and prepare the fulfillment for its sales channel."}</DialogDescription></DialogHeader>
         <div className="grid gap-4 py-2 sm:grid-cols-2">
           <Field label="Warehouse"><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field>
