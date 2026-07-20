@@ -19348,6 +19348,79 @@ async function syncShopifyShipment(order = {}, shipment = {}) {
   return data?.fulfillmentCreate?.fulfillment || {};
 }
 
+function shopifyLabelPurchaseSummary(result = {}) {
+  const labels = Array.isArray(result.shippingLabels) ? result.shippingLabels : [];
+  return {
+    id: String(result.id || ""),
+    status: String(result.status || "PENDING_PURCHASE"),
+    done: Boolean(result.done),
+    errors: (Array.isArray(result.errors) ? result.errors : []).map((entry) => ({ code: String(entry?.code || ""), message: String(entry?.message || "") })).filter((entry) => entry.message),
+    labels: labels.map((label) => ({
+      id: String(label?.id || ""),
+      cancellable: Boolean(label?.cancellable),
+      printed: Boolean(label?.printed),
+      tracking: label?.trackingInfo ? { company: String(label.trackingInfo.company || ""), number: String(label.trackingInfo.number || ""), url: String(label.trackingInfo.url || "") } : null
+    }))
+  };
+}
+
+async function fetchShopifyFulfillmentOrdersForLabel(order = {}) {
+  const orderId = String(order.shopifyOrderId || "").trim();
+  if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
+  const query = `query DataPlusLabelFulfillmentOrders($orderId: ID!) { order(id: $orderId) { fulfillmentOrders(first: 50) { nodes { id status } } } }`;
+  const data = await shopifyGraphqlRequestAuto(query, { orderId }, { operation: `Load label fulfillment orders ${order.orderNumber || orderId}` });
+  return data?.order?.fulfillmentOrders?.nodes || [];
+}
+
+async function purchaseShopifyShippingLabel(order = {}, input = {}) {
+  const fulfillmentOrders = await fetchShopifyFulfillmentOrdersForLabel(order);
+  const requestedFulfillmentOrderId = String(input.fulfillmentOrderId || "").trim();
+  const fulfillmentOrder = fulfillmentOrders.find((entry) => String(entry.id || "") === requestedFulfillmentOrderId)
+    || fulfillmentOrders.find((entry) => !["CLOSED", "CANCELLED", "INCOMPLETE"].includes(String(entry.status || "").toUpperCase()));
+  if (!fulfillmentOrder?.id) throw new Error("No open Shopify fulfillment order is available for label purchase.");
+  const weightPounds = Number(input.weightPounds || 0);
+  const lengthInches = Number(input.lengthInches || 0);
+  const widthInches = Number(input.widthInches || 0);
+  const heightInches = Number(input.heightInches || 0);
+  if (!(weightPounds > 0)) throw new Error("A package weight greater than zero is required.");
+  if (![lengthInches, widthInches, heightInches].every((value) => value > 0)) throw new Error("Package length, width, and height are required.");
+  const shipDate = String(input.shipDate || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(shipDate)) throw new Error("Enter a valid ship date.");
+  const shippingDatetime = new Date(`${shipDate}T12:00:00.000Z`);
+  if (!Number.isFinite(shippingDatetime.getTime()) || shippingDatetime.getTime() < Date.now() - 60 * 60 * 1000) throw new Error("The ship date cannot be in the past.");
+  const carrierCode = String(input.carrierCode || "").trim();
+  const serviceCode = String(input.serviceCode || "").trim();
+  if (Boolean(carrierCode) !== Boolean(serviceCode)) throw new Error("Enter both a carrier code and service code, or leave both blank for Shopify's recommended rate.");
+  const shippingLabelPurchase = {
+    fulfillmentOrderId: fulfillmentOrder.id,
+    notifyCustomer: Boolean(input.notifyCustomer),
+    shippingDatetime: shippingDatetime.toISOString(),
+    totalWeight: { unit: "GRAMS", value: Math.round(weightPounds * 453.592 * 100) / 100 },
+    packageInfo: {
+      customPackage: {
+        type: String(input.packageType || "BOX").toUpperCase(),
+        dimensions: { unit: "INCHES", length: lengthInches, width: widthInches, height: heightInches },
+        weight: { unit: "GRAMS", value: Math.round(weightPounds * 453.592 * 100) / 100 }
+      }
+    },
+    ...(carrierCode && serviceCode ? { preferredRateSelection: { carrierCode, serviceCode } } : {})
+  };
+  const mutation = `mutation DataPlusShippingLabelPurchase($shippingLabelPurchase: ShippingLabelPurchaseInput!) { shippingLabelPurchase(shippingLabelPurchase: $shippingLabelPurchase) { shippingLabelPurchaseResult { id done status errors { code message } shippingLabels { id cancellable printed trackingInfo { company number url } } } userErrors { field message code } } }`;
+  const data = await shopifyGraphqlRequestAuto(mutation, { shippingLabelPurchase }, { operation: `Purchase Shopify shipping label ${order.orderNumber || order.id || "order"}` });
+  const userErrors = data?.shippingLabelPurchase?.userErrors || [];
+  if (userErrors.length) throw new Error(userErrors.map((entry) => entry.message || "Shopify could not start the label purchase.").join("; "));
+  return { fulfillmentOrderId: fulfillmentOrder.id, result: shopifyLabelPurchaseSummary(data?.shippingLabelPurchase?.shippingLabelPurchaseResult || {}) };
+}
+
+async function getShopifyShippingLabelPurchase(purchaseId = "") {
+  const id = String(purchaseId || "").trim();
+  if (!id.startsWith("gid://shopify/")) throw new Error("A valid Shopify label purchase ID is required.");
+  const query = `query DataPlusShippingLabelPurchaseStatus($id: ID!) { node(id: $id) { ... on ShippingLabelPurchaseResult { id done status errors { code message } shippingLabels { id cancellable printed trackingInfo { company number url } } } } }`;
+  const data = await shopifyGraphqlRequestAuto(query, { id }, { operation: "Check Shopify shipping label purchase" });
+  if (!data?.node?.id) throw new Error("Shopify could not find this label purchase.");
+  return shopifyLabelPurchaseSummary(data.node);
+}
+
 async function syncShopifyRefund(order = {}, refund = {}) {
   const orderId = String(order.shopifyOrderId || "").trim();
   if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
@@ -20757,7 +20830,7 @@ async function handleApi(req, res) {
     const shipment = (order.shipments || []).find((row) => String(row.status || "").toLowerCase() === "fulfilled") || (order.shipments || [])[0] || {};
     const packageInfo = (shipment.packages || [])[0] || {};
     const address = order.address || {};
-    const apiVersion = String(settings.shopifyAdminApiVersion || shopifyAdminConfig().apiVersion || "");
+    const apiVersion = String(shopifyAdminConfig().apiVersion || "");
     const blockers = [];
     if (String(order.source || "").toLowerCase() !== "shopify") blockers.push("Order was not imported from Shopify.");
     if (!String(order.shopifyOrderId || "").startsWith("gid://shopify/Order/")) blockers.push("Shopify order link is missing.");
@@ -20767,6 +20840,49 @@ async function handleApi(req, res) {
     if (!Number(packageInfo.weight || shipment.packageWeight || 0)) blockers.push("Package weight is required.");
     if (!String(shipment.warehouseId || order.fulfillmentWarehouseId || "").trim()) blockers.push("Fulfillment warehouse is required.");
     return sendJson(res, 200, { ready: blockers.length === 0, blockers, apiVersion, shipment: { id: shipment.id || "", trackingNumber: shipment.trackingNumber || "", warehouseName: shipment.warehouseName || order.fulfillmentWarehouseName || "", packageWeight: Number(packageInfo.weight || shipment.packageWeight || 0) } });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-labels" && parts[4] === "shopify" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    if (String(order.source || "").toLowerCase() !== "shopify") return sendJson(res, 400, { error: "Shopify labels are available only for Shopify-imported orders." });
+    if (!settings.shopifyLabelPurchaseEnabled) return sendJson(res, 400, { error: "Enable Shopify label purchase in Channel Settings before buying a label." });
+    if (String(shopifyAdminConfig().apiVersion || "") < "2026-07") return sendJson(res, 400, { error: "Update the Shopify Admin API version to 2026-07 or later before buying labels." });
+    try {
+      const body = await parseBody(req);
+      const purchase = await purchaseShopifyShippingLabel(order, body);
+      order.shippingLabelPurchases = Array.isArray(order.shippingLabelPurchases) ? order.shippingLabelPurchases : [];
+      const record = { ...purchase.result, fulfillmentOrderId: purchase.fulfillmentOrderId, requestedAt: new Date().toISOString(), requestedBy: body.user || "Luis", package: { weightPounds: Number(body.weightPounds || 0), lengthInches: Number(body.lengthInches || 0), widthInches: Number(body.widthInches || 0), heightInches: Number(body.heightInches || 0), packageType: String(body.packageType || "BOX"), shipDate: String(body.shipDate || "") } };
+      order.shippingLabelPurchases = [record, ...order.shippingLabelPurchases.filter((entry) => String(entry?.id || "") !== record.id)];
+      addOrderTimeline(order, { type: "shipping_label", title: "Shopify label purchase started", message: `Label purchase ${record.id} is ${record.status}.`, user: record.requestedBy });
+      order.updatedAt = new Date().toISOString();
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 202, { order, purchase: record, message: record.done ? "Shopify label purchase completed." : "Shopify label purchase started. Check status shortly." });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Shopify label purchase failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-labels" && parts[4] === "shopify" && parts[5] && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    try {
+      const result = await getShopifyShippingLabelPurchase(decodeURIComponent(parts[5]));
+      order.shippingLabelPurchases = Array.isArray(order.shippingLabelPurchases) ? order.shippingLabelPurchases : [];
+      const previous = order.shippingLabelPurchases.find((entry) => String(entry?.id || "") === result.id) || {};
+      const record = { ...previous, ...result, checkedAt: new Date().toISOString() };
+      order.shippingLabelPurchases = [record, ...order.shippingLabelPurchases.filter((entry) => String(entry?.id || "") !== result.id)];
+      if (result.done && String(previous.status || "") !== result.status) addOrderTimeline(order, { type: "shipping_label", title: result.status === "PURCHASED" ? "Shopify label purchased" : "Shopify label purchase failed", message: result.errors?.map((entry) => entry.message).join("; ") || `Label purchase ${result.id} is ${result.status}.`, user: "Shopify" });
+      order.updatedAt = new Date().toISOString();
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 200, { order, purchase: record });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Shopify label status check failed: ${error.message || "Unknown error"}` });
+    }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && postgres.isPostgresEnabled()) {
