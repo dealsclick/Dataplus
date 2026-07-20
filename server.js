@@ -749,6 +749,8 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyOrderImportIncludeCanceled: false,
   shopifyCancellationNotificationEnabled: false,
   shopifyFulfillmentSyncEnabled: false,
+  shopifyRefundSyncEnabled: false,
+  shopifyOrderAddressSyncEnabled: false,
   shopifyInventoryPushEnabled: false,
   shopifyInventoryWarehouseId: "",
   shopifyInventoryLocationId: "",
@@ -3594,7 +3596,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyInventoryPushEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyOrderAddressSyncEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -19249,6 +19251,57 @@ async function syncShopifyShipment(order = {}, shipment = {}) {
   return data?.fulfillmentCreate?.fulfillment || {};
 }
 
+async function syncShopifyRefund(order = {}, refund = {}) {
+  const orderId = String(order.shopifyOrderId || "").trim();
+  if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
+  const localLines = orderLineItems(order);
+  const refundLineItems = (refund.items || []).map((item) => {
+    const line = localLines[Number(item.lineIndex || 0)]
+      || localLines.find((candidate) => String(candidate.sku || "").toLowerCase() === String(item.sku || "").toLowerCase());
+    const lineItemId = String(line?.lineId || line?.id || "").trim();
+    return lineItemId.startsWith("gid://shopify/LineItem/") && Number(item.qty || 0) > 0
+      ? { lineItemId, quantity: Number(item.qty || 0) }
+      : null;
+  }).filter(Boolean);
+  if (!refundLineItems.length) throw new Error("No Shopify order lines matched this refund. Refresh the order and verify the selected line items.");
+  const mutation = `mutation DataPlusRefundCreate($input: RefundInput!) { refundCreate(input: $input) @idempotent(key: "${crypto.randomUUID()}") { refund { id totalRefundedSet { shopMoney { amount currencyCode } } } userErrors { field message } } }`;
+  const data = await shopifyGraphqlRequestAuto(mutation, {
+    input: {
+      orderId,
+      refundLineItems,
+      note: String(refund.note || refund.reason || "Refund recorded in DataPlus").slice(0, 255),
+      transactions: []
+    }
+  }, { operation: `Refund Shopify order ${order.orderNumber || orderId}` });
+  const errors = data?.refundCreate?.userErrors || [];
+  if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not create the refund.").join("; "));
+  return data?.refundCreate?.refund || {};
+}
+
+async function syncShopifyOrderAddress(order = {}) {
+  const orderId = String(order.shopifyOrderId || "").trim();
+  if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
+  const address = order.address || {};
+  const contactParts = String(address.name || order.buyer || "").trim().split(/\s+/).filter(Boolean);
+  const shippingAddress = {
+    firstName: String(address.firstName || contactParts[0] || "").trim() || undefined,
+    lastName: String(address.lastName || contactParts.slice(1).join(" ") || "").trim() || undefined,
+    company: String(address.company || "").trim() || undefined,
+    address1: String(address.line1 || "").trim() || undefined,
+    address2: String(address.line2 || "").trim() || undefined,
+    city: String(address.city || "").trim() || undefined,
+    province: String(address.state || "").trim() || undefined,
+    zip: String(address.postalCode || "").trim() || undefined,
+    country: String(address.country || "").trim() || undefined,
+    phone: String(address.phone || order.phone || "").trim() || undefined
+  };
+  const mutation = `mutation DataPlusOrderUpdate($input: OrderInput!) { orderUpdate(input: $input) { order { id email shippingAddress { address1 city province zip country } } userErrors { field message } } }`;
+  const data = await shopifyGraphqlRequestAuto(mutation, { input: { id: orderId, email: String(order.buyerEmail || "").trim() || undefined, shippingAddress } }, { operation: `Update Shopify order address ${order.orderNumber || orderId}` });
+  const errors = data?.orderUpdate?.userErrors || [];
+  if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not update the order address.").join("; "));
+  return data?.orderUpdate?.order || {};
+}
+
 function clearOrderApiCache(orderId = "") {
   redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
   if (orderId) redisCache.deleteByPrefix(`dataplus:order-detail:${orderId}:`).catch(() => {});
@@ -21250,7 +21303,7 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { return: record, state: publicState(stateDb, { lite: true }) });
   }
 
-  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "refunds" && postgres.isPostgresEnabled()) {
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "refunds" && !parts[4] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
@@ -21306,6 +21359,53 @@ async function handleApi(req, res) {
     clearOrderApiCache(order.id);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { refund, order, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "refunds" && parts[4] && parts[5] === "sync-shopify" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    if (String(order.source || "").trim().toLowerCase() !== "shopify") return sendJson(res, 400, { error: "Shopify sync is available only for Shopify-imported orders." });
+    const refund = (order.refunds || []).find((row) => String(row.id || "") === parts[4]);
+    if (!refund) return notFound(res);
+    if (["sent", "synced"].includes(String(refund.channelSync?.status || "").toLowerCase())) return sendJson(res, 400, { error: "This refund was already sent to Shopify." });
+    const db = await readDbFast({ skipInventory: true });
+    const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    if (!settings.shopifyRefundSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify refund sync in Channel Settings before sending refunds." });
+    try {
+      const shopifyRefund = await syncShopifyRefund(order, refund);
+      refund.channelSync = { status: "sent", channel: "Shopify", refundId: shopifyRefund.id || "", updatedAt: new Date().toISOString(), message: "Refund sent to Shopify." };
+      order.updatedAt = new Date().toISOString();
+      addOrderTimeline(order, { type: "channel_sync", title: "Refund sent to Shopify", message: `$${Number(refund.amount || 0).toFixed(2)} refund was sent to Shopify.`, user: "Luis" });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 200, { order, refund, shopifyRefund, message: "Refund sent to Shopify." });
+    } catch (error) {
+      refund.channelSync = { status: "failed", channel: "Shopify", updatedAt: new Date().toISOString(), message: error.message || "Shopify refund sync failed." };
+      order.updatedAt = new Date().toISOString();
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 502, { error: `Shopify refund sync failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "sync-shopify-address" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    if (String(order.source || "").trim().toLowerCase() !== "shopify") return sendJson(res, 400, { error: "Shopify address sync is available only for Shopify-imported orders." });
+    const db = await readDbFast({ skipInventory: true });
+    const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    if (!settings.shopifyOrderAddressSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify order address sync in Channel Settings before sending an address update." });
+    try {
+      const shopifyOrder = await syncShopifyOrderAddress(order);
+      order.channelAddressSync = { status: "sent", channel: "Shopify", updatedAt: new Date().toISOString(), message: "Customer email and shipping address sent to Shopify.", orderId: shopifyOrder.id || "" };
+      order.updatedAt = new Date().toISOString();
+      addOrderTimeline(order, { type: "channel_sync", title: "Address sent to Shopify", message: "Customer email and shipping address were sent to Shopify.", user: "Luis" });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 200, { order, shopifyOrder, message: "Address sent to Shopify." });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Shopify address sync failed: ${error.message || "Unknown error"}` });
+    }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "items" && parts[5] === "map-sku" && postgres.isPostgresEnabled()) {
