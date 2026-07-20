@@ -19439,11 +19439,12 @@ function shopifyMailingAddressInput(address = {}) {
   };
 }
 
-async function quoteShopifyOrderShipping(order = {}) {
+async function quoteShopifyOrderShipping(order = {}, requestedLines = []) {
   if (String(order.source || "").toLowerCase() !== "shopify") throw new Error("Shopify delivery quotes are available only for Shopify-imported orders.");
   const address = shopifyMailingAddressInput(order.address || {});
   if (![address.address1, address.city, address.zip, address.countryCode].every(Boolean)) throw new Error("A complete shipping address is required before calculating Shopify delivery options.");
-  let lineItems = orderLineItems(order).map((line) => ({ variantId: String(line.channelVariantId || line.shopifyVariantId || "").trim(), quantity: Number(line.qty || 0) })).filter((line) => line.variantId.startsWith("gid://shopify/ProductVariant/") && line.quantity > 0);
+  const requestedByIndex = new Map((Array.isArray(requestedLines) ? requestedLines : []).map((line) => [Number(line.lineIndex), Number(line.qty || 0)]).filter(([, quantity]) => quantity > 0));
+  let lineItems = orderLineItems(order).map((line, index) => ({ variantId: String(line.channelVariantId || line.shopifyVariantId || "").trim(), quantity: requestedByIndex.size ? Number(requestedByIndex.get(index) || 0) : Number(line.qty || 0) })).filter((line) => line.variantId.startsWith("gid://shopify/ProductVariant/") && line.quantity > 0);
   if (!lineItems.length) {
     const orderId = String(order.shopifyOrderId || "").trim();
     if (orderId.startsWith("gid://shopify/Order/")) {
@@ -20892,7 +20893,8 @@ async function handleApi(req, res) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
     try {
-      const quote = await quoteShopifyOrderShipping(order);
+      const body = await parseBody(req);
+      const quote = await quoteShopifyOrderShipping(order, body.lines || []);
       order.shippingQuotes = Array.isArray(order.shippingQuotes) ? order.shippingQuotes : [];
       order.shippingQuotes.unshift(quote);
       order.shippingQuotes = order.shippingQuotes.slice(0, 20);
