@@ -19174,7 +19174,9 @@ function shopifyOrderToDataPlusOrder(node = {}) {
 }
 
 async function importShopifyOrders(limit = 250, filters = {}) {
-  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } customer { id displayName email phone } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } } } } } }`;
+  // Order and shipping fields are sufficient for DataPlus imports. Requesting the separate
+  // customer object would unnecessarily require Shopify's read_customers permission.
+  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const imported = []; let after = null;
   while (imported.length < limit) {
     const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, limit - imported.length), after }, { operation: "Import Shopify orders" });
@@ -20196,7 +20198,11 @@ async function handleApi(req, res) {
       const orders = await importShopifyOrders(limit, { sources: body.sources ?? settings.shopifyOrderImportSources, includeCanceled: body.includeCanceled ?? settings.shopifyOrderImportIncludeCanceled });
       return sendJson(res, 200, { imported: orders.length, orders, message: `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed.` });
     } catch (error) {
-      return sendJson(res, 502, { error: `Shopify order import failed: ${error.message || "Unknown error"}. Confirm the Shopify app has the read_orders scope and refresh its token.` });
+      const message = error.message || "Unknown error";
+      const guidance = /read_orders/i.test(message)
+        ? "Confirm the Shopify app has the read_orders scope and refresh its token."
+        : "Review the missing scope named by Shopify, then refresh the token after approving the updated app installation.";
+      return sendJson(res, 502, { error: `Shopify order import failed: ${message}. ${guidance}` });
     }
   }
 
