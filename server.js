@@ -744,6 +744,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyPublishScope: "global",
   shopifyCloseoutsEnabled: true,
   shopifyOrderImportEnabled: false,
+  shopifyOrderWebhookEnabled: false,
   shopifyOrderImportLimit: 250,
   shopifyOrderImportSources: "Online Store, Shop",
   shopifyOrderImportIncludeCanceled: false,
@@ -3599,7 +3600,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -9579,6 +9580,24 @@ function parseBody(req) {
         reject(error);
       }
     });
+  });
+}
+
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 5_000_000) {
+        req.destroy();
+        reject(new Error("Webhook body too large"));
+        return;
+      }
+      chunks.push(Buffer.from(chunk));
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
   });
 }
 
@@ -19199,6 +19218,44 @@ async function importShopifyOrders(limit = 250, filters = {}) {
   return filtered;
 }
 
+function shopifyOrderWebhookQuery() {
+  return `query DataPlusOrderWebhook($id: ID!) { order(id: $id) { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } }`;
+}
+
+async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}) {
+  if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("Webhook payload did not include a Shopify order ID.");
+  const data = await shopifyGraphqlRequestAuto(shopifyOrderWebhookQuery(), { id: orderId }, { operation: `Refresh Shopify order webhook ${orderId}` });
+  const incoming = shopifyOrderToDataPlusOrder(data?.order || {});
+  if (!incoming.id) throw new Error("Shopify could not load the order referenced by this webhook.");
+  const allowedSources = String(settings.shopifyOrderImportSources || "Online Store, Shop").split(/[,;]+/).map((value) => value.trim().toLowerCase()).filter(Boolean);
+  if (allowedSources.length && !allowedSources.includes(String(incoming.channelSource || "").toLowerCase())) return { skipped: true, reason: `Sales channel ${incoming.channelSource || "Unknown"} is not enabled for Shopify order imports.` };
+  const existing = await postgres.readOrderByKey(incoming.id);
+  const preservedKeys = ["shipments", "fulfillmentLines", "inventoryAllocations", "backorderLines", "workflowHistory", "timeline", "documents", "notifications", "returnWarehouseId", "returnWarehouseName", "fulfillmentStage", "notes", "localFlags"];
+  const preserved = Object.fromEntries(preservedKeys.filter((key) => existing?.[key] !== undefined).map((key) => [key, existing[key]]));
+  const merged = { ...incoming, ...preserved, updatedAt: new Date().toISOString(), importedAt: new Date().toISOString() };
+  await postgres.saveOrder(merged);
+  clearOrderApiCache(merged.id);
+  return { order: merged, created: !existing };
+}
+
+async function registerShopifyOrderWebhooks() {
+  const baseUrl = configuredShopifyAppUrl().replace(/\/+$/, "");
+  if (!/^https:\/\//i.test(baseUrl)) throw new Error("Set SHOPIFY_APP_URL to the public HTTPS DataPlus URL before registering webhooks.");
+  const uri = `${baseUrl}/api/webhooks/shopify/orders`;
+  const topics = ["ORDERS_CREATE", "ORDERS_UPDATED", "ORDERS_CANCELLED", "FULFILLMENTS_CREATE", "REFUNDS_CREATE"];
+  const current = await shopifyGraphqlRequestAuto(`query DataPlusWebhookSubscriptions { webhookSubscriptions(first: 100) { nodes { id topic uri } } }`, {}, { operation: "Inspect Shopify order webhooks" });
+  const existing = current?.webhookSubscriptions?.nodes || [];
+  const created = [];
+  for (const topic of topics) {
+    if (existing.some((entry) => String(entry.topic || "") === topic && String(entry.uri || "") === uri)) continue;
+    const data = await shopifyGraphqlRequestAuto(`mutation DataPlusWebhookCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) { webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) { webhookSubscription { id topic uri } userErrors { field message } } }`, { topic, webhookSubscription: { uri } }, { operation: `Register Shopify webhook ${topic}` });
+    const errors = data?.webhookSubscriptionCreate?.userErrors || [];
+    if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not register the webhook.").join("; "));
+    created.push(data?.webhookSubscriptionCreate?.webhookSubscription || { topic });
+  }
+  return { uri, created, existing: topics.length - created.length };
+}
+
 async function cancelShopifyOrder(order = {}, options = {}) {
   const orderId = String(order.shopifyOrderId || "").trim();
   if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
@@ -19835,6 +19892,30 @@ async function findCatalogProductBySku(sku, db = {}) {
 async function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split("/").filter(Boolean);
+
+  if (req.method === "POST" && url.pathname === "/api/webhooks/shopify/orders") {
+    const rawBody = await readRawBody(req);
+    const signature = String(req.headers["x-shopify-hmac-sha256"] || "");
+    const secret = shopifyAdminConfig().clientSecret;
+    const digest = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
+    const valid = Boolean(secret && signature && signature.length === digest.length && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest)));
+    if (!valid) return sendJson(res, 401, { error: "Invalid Shopify webhook signature." });
+    const db = await readDbFast({ skipInventory: true });
+    const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    if (!settings.shopifyOrderWebhookEnabled || !settings.shopifyOrderImportEnabled) return sendJson(res, 202, { accepted: true, message: "Shopify order webhook received while order webhooks are disabled." });
+    const payload = rawBody.length ? JSON.parse(rawBody.toString("utf8")) : {};
+    const numericId = String(payload.order_id || payload.id || "").trim();
+    const orderId = String(payload.admin_graphql_api_id || (numericId ? `gid://shopify/Order/${numericId}` : "")).trim();
+    const startedAt = Date.now();
+    try {
+      const result = await refreshShopifyOrderFromWebhook(orderId, settings);
+      appendChannelApiLog({ channel: "Shopify", transport: "webhook", method: "POST", path: url.pathname, operation: String(req.headers["x-shopify-topic"] || "orders/update"), statusCode: 200, ok: true, durationMs: Date.now() - startedAt, message: result.skipped ? result.reason : `Order ${result.order?.orderNumber || orderId} refreshed from webhook.` });
+      return sendJson(res, 200, { accepted: true, ...result });
+    } catch (error) {
+      appendChannelApiLog({ channel: "Shopify", transport: "webhook", method: "POST", path: url.pathname, operation: String(req.headers["x-shopify-topic"] || "orders/update"), statusCode: 500, ok: false, durationMs: Date.now() - startedAt, message: error.message || "Shopify webhook processing failed." });
+      return sendJson(res, 500, { error: "Shopify webhook processing failed." });
+    }
+  }
 
   if (req.method === "GET" && url.pathname === "/api/system/database") {
     return sendJson(res, 200, await postgres.databaseHealth());
@@ -20510,6 +20591,19 @@ async function handleApi(req, res) {
         ? "Confirm the Shopify app has the read_orders scope and refresh its token."
         : "Review the missing scope named by Shopify, then refresh the token after approving the updated app installation.";
       return sendJson(res, 502, { error: `Shopify order import failed: ${message}. ${guidance}` });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/webhooks/orders/register" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    if (!settings.shopifyOrderImportEnabled || !settings.shopifyOrderWebhookEnabled) return sendJson(res, 400, { error: "Enable Shopify order imports and order webhooks in Channel Settings before registering subscriptions." });
+    try {
+      const result = await registerShopifyOrderWebhooks();
+      appendChannelApiLog({ channel: "Shopify", transport: "webhook", method: "POST", path: url.pathname, operation: "Register Shopify order webhooks", statusCode: 200, ok: true, message: `${result.created.length} webhook subscription(s) registered.` });
+      return sendJson(res, 200, { ...result, message: `${result.created.length} Shopify order webhook subscription(s) registered.` });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Shopify webhook registration failed: ${error.message || "Unknown error"}` });
     }
   }
 

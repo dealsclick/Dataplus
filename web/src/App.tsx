@@ -1668,6 +1668,11 @@ function ChannelDetail({
         body: { limit: Number(settings.shopifyOrderImportLimit || 250), sources: String(settings.shopifyOrderImportSources || ""), includeCanceled: Boolean(settings.shopifyOrderImportIncludeCanceled) },
         successMessage: "Shopify orders imported or refreshed.",
       },
+      registerOrderWebhooks: {
+        path: "/api/shopify/webhooks/orders/register",
+        body: {},
+        successMessage: "Shopify order webhooks registered.",
+      },
       inventoryDryRun: {
         path: "/api/shopify/inventory-update",
         body: { apply: false, dryRun: true, warehouseId: inventoryWarehouseId, locationId: inventoryLocationId },
@@ -2039,11 +2044,12 @@ function ChannelDetail({
                   <Input disabled={!editing} value={String(settings.shopifyOrderImportSources || "Online Store, Shop")} placeholder="Online Store, Shop" onChange={(event) => update("shopifyOrderImportSources", event.target.value)} />
                 </Field>
                 <ToggleField label="Enable Shopify order imports" checked={Boolean(settings.shopifyOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportEnabled", value)} />
+                <ToggleField label="Enable Shopify order webhooks" checked={Boolean(settings.shopifyOrderWebhookEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderWebhookEnabled", value)} />
                 <ToggleField label="Include canceled orders" checked={Boolean(settings.shopifyOrderImportIncludeCanceled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportIncludeCanceled", value)} />
                 <ToggleField label="Enable Shopify cancellation API" checked={Boolean(settings.shopifyCancellationNotificationEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyCancellationNotificationEnabled", value)} />
                 <ToggleField label="Enable Shopify fulfillment sync" checked={Boolean(settings.shopifyFulfillmentSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyFulfillmentSyncEnabled", value)} />
-                <p className="col-span-full -mt-2 text-xs text-muted-foreground">Imports are restricted to Online Store and Shop unless you intentionally change the allowlist. Channel cancellation and fulfillment sync stay off until enabled here.</p>
-                <div className="col-span-full"><Button size="sm" variant="outline" disabled={!Boolean(settings.shopifyOrderImportEnabled)} onClick={() => queueShopifyAction("orderImport")}>Import Shopify orders now</Button></div>
+                <p className="col-span-full -mt-2 text-xs text-muted-foreground">Imports are restricted to Online Store and Shop unless you intentionally change the allowlist. Webhooks refresh only those allowed orders and retain DataPlus operational data.</p>
+                <div className="col-span-full flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={!Boolean(settings.shopifyOrderImportEnabled)} onClick={() => queueShopifyAction("orderImport")}>Import Shopify orders now</Button><Button size="sm" variant="outline" disabled={!Boolean(settings.shopifyOrderImportEnabled) || !Boolean(settings.shopifyOrderWebhookEnabled)} onClick={() => queueShopifyAction("registerOrderWebhooks")}>Register order webhooks</Button></div>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify inventory push</p></div>
                 <Field label="DataPlus warehouse">
                   <Select disabled={!editing} value={selectedWarehouseId || "none"} onValueChange={(value) => update("shopifyInventoryWarehouseId", value === "none" ? "" : value)}>
