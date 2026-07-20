@@ -19359,7 +19359,13 @@ function shopifyLabelPurchaseSummary(result = {}) {
       id: String(label?.id || ""),
       cancellable: Boolean(label?.cancellable),
       printed: Boolean(label?.printed),
-      tracking: label?.trackingInfo ? { company: String(label.trackingInfo.company || ""), number: String(label.trackingInfo.number || ""), url: String(label.trackingInfo.url || "") } : null
+      tracking: label?.trackingInfo ? { company: String(label.trackingInfo.company || ""), number: String(label.trackingInfo.number || ""), url: String(label.trackingInfo.url || "") } : null,
+      documents: (Array.isArray(label?.shippingDocuments) ? label.shippingDocuments : []).map((document) => ({
+        documentType: String(document?.documentType || "LABEL"),
+        format: String(document?.format || ""),
+        url: String(document?.url || ""),
+        printedAt: String(document?.printedAt || "")
+      })).filter((document) => document.url)
     }))
   };
 }
@@ -19405,7 +19411,7 @@ async function purchaseShopifyShippingLabel(order = {}, input = {}) {
     },
     ...(carrierCode && serviceCode ? { preferredRateSelection: { carrierCode, serviceCode } } : {})
   };
-  const mutation = `mutation DataPlusShippingLabelPurchase($shippingLabelPurchase: ShippingLabelPurchaseInput!) { shippingLabelPurchase(shippingLabelPurchase: $shippingLabelPurchase) { shippingLabelPurchaseResult { id done status errors { code message } shippingLabels { id cancellable printed trackingInfo { company number url } } } userErrors { field message code } } }`;
+  const mutation = `mutation DataPlusShippingLabelPurchase($shippingLabelPurchase: ShippingLabelPurchaseInput!) { shippingLabelPurchase(shippingLabelPurchase: $shippingLabelPurchase) { shippingLabelPurchaseResult { id done status errors { code message } shippingLabels { id cancellable printed trackingInfo { company number url } shippingDocuments { documentType format url printedAt } } } userErrors { field message code } } }`;
   const data = await shopifyGraphqlRequestAuto(mutation, { shippingLabelPurchase }, { operation: `Purchase Shopify shipping label ${order.orderNumber || order.id || "order"}` });
   const userErrors = data?.shippingLabelPurchase?.userErrors || [];
   if (userErrors.length) throw new Error(userErrors.map((entry) => entry.message || "Shopify could not start the label purchase.").join("; "));
@@ -19415,7 +19421,7 @@ async function purchaseShopifyShippingLabel(order = {}, input = {}) {
 async function getShopifyShippingLabelPurchase(purchaseId = "") {
   const id = String(purchaseId || "").trim();
   if (!id.startsWith("gid://shopify/")) throw new Error("A valid Shopify label purchase ID is required.");
-  const query = `query DataPlusShippingLabelPurchaseStatus($id: ID!) { node(id: $id) { ... on ShippingLabelPurchaseResult { id done status errors { code message } shippingLabels { id cancellable printed trackingInfo { company number url } } } } }`;
+  const query = `query DataPlusShippingLabelPurchaseStatus($id: ID!) { node(id: $id) { ... on ShippingLabelPurchaseResult { id done status errors { code message } shippingLabels { id cancellable printed trackingInfo { company number url } shippingDocuments { documentType format url printedAt } } } } }`;
   const data = await shopifyGraphqlRequestAuto(query, { id }, { operation: "Check Shopify shipping label purchase" });
   if (!data?.node?.id) throw new Error("Shopify could not find this label purchase.");
   return shopifyLabelPurchaseSummary(data.node);
@@ -20979,6 +20985,13 @@ async function handleApi(req, res) {
       const previous = order.shippingLabelPurchases.find((entry) => String(entry?.id || "") === result.id) || {};
       const record = { ...previous, ...result, checkedAt: new Date().toISOString() };
       order.shippingLabelPurchases = [record, ...order.shippingLabelPurchases.filter((entry) => String(entry?.id || "") !== result.id)];
+      const purchasedLabel = result.done && result.status === "PURCHASED" ? result.labels?.[0] : null;
+      const tracking = purchasedLabel?.tracking || {};
+      if (tracking.number) {
+        order.shippingCarrier = tracking.company || order.shippingCarrier || "Shopify Shipping";
+        order.trackingNumber = tracking.number;
+        order.trackingUrl = tracking.url || order.trackingUrl || "";
+      }
       if (result.done && String(previous.status || "") !== result.status) addOrderTimeline(order, { type: "shipping_label", title: result.status === "PURCHASED" ? "Shopify label purchased" : "Shopify label purchase failed", message: result.errors?.map((entry) => entry.message).join("; ") || `Label purchase ${result.id} is ${result.status}.`, user: "Shopify" });
       order.updatedAt = new Date().toISOString();
       await postgres.saveOrder(order);
