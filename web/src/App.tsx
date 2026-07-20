@@ -1829,46 +1829,16 @@ function ChannelDetail({
         <TabsContent value="setup">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Editable setup</CardTitle>
-              <CardDescription>Click Edit above before changing values. Dark/disabled fields are locked.</CardDescription>
+              <CardTitle className="text-base">Connection and enabled features</CardTitle>
+              <CardDescription>Credentials, Shopify connection details, and integrations that are allowed to run. Click Edit above before changing values.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              <Field label="Default shadow status">
-                <Select disabled={!editing} value={String(settings.defaultShadowStatus || "Draft")} onValueChange={(value) => update("defaultShadowStatus", value)}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="Draft">Draft</SelectItem>
-                    <SelectItem value="Active">Active</SelectItem>
-                    <SelectItem value="Archived">Archived</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field label="Default handling days">
-                <Input disabled={!editing} type="number" value={String(settings.defaultHandlingTimeDays ?? 0)} onChange={(event) => update("defaultHandlingTimeDays", Number(event.target.value || 0))} />
-              </Field>
-              <Field label="Default safety qty">
-                <Input disabled={!editing} type="number" value={String(settings.defaultSafetyQty ?? 0)} onChange={(event) => update("defaultSafetyQty", Number(event.target.value || 0))} />
-              </Field>
-              <Field label="Default max sellable qty">
-                <Input disabled={!editing} type="number" value={String(settings.defaultMaxSellableQty ?? 0)} onChange={(event) => update("defaultMaxSellableQty", Number(event.target.value || 0))} />
-              </Field>
-              <Field label="Default shipping profile">
-                {shippingProfiles.length ? (
-                  <Select disabled={!editing} value={String(settings.defaultShippingProfile || "")} onValueChange={(value) => update("defaultShippingProfile", value)}>
-                    <SelectTrigger><SelectValue placeholder="Select profile" /></SelectTrigger>
-                    <SelectContent>
-                      {shippingProfiles.map((profile) => (
-                        <SelectItem key={profile.id || profile.name} value={profile.name || profile.id || ""}>{profile.name || profile.id}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <Input disabled={!editing} value={String(settings.defaultShippingProfile || "")} onChange={(event) => update("defaultShippingProfile", event.target.value)} />
-                )}
-              </Field>
-              <Field label="Default shipping service">
-                <Input disabled={!editing} value={String(settings.defaultShippingService || "")} onChange={(event) => update("defaultShippingService", event.target.value)} />
-              </Field>
+              <div className="col-span-full"><p className="text-sm font-semibold">General channel enablement</p><p className="pt-1 text-xs text-muted-foreground">Turn on only the integrations this channel is permitted to run.</p></div>
+              <ToggleField label="Enable price updates" checked={Boolean(settings.priceUpdateEnabled)} disabled={!editing} onCheckedChange={(value) => update("priceUpdateEnabled", value)} />
+              <ToggleField label="Enable inventory updates" checked={Boolean(settings.inventoryUpdateEnabled)} disabled={!editing} onCheckedChange={(value) => update("inventoryUpdateEnabled", value)} />
+              <ToggleField label="Enable order downloads" checked={Boolean(settings.orderDownloadEnabled)} disabled={!editing} onCheckedChange={(value) => update("orderDownloadEnabled", value)} />
+              <ToggleField label="Enable tracking updates" checked={Boolean(settings.trackingUpdateEnabled)} disabled={!editing} onCheckedChange={(value) => update("trackingUpdateEnabled", value)} />
+              <ToggleField label="Auto-create shadows" checked={Boolean(settings.autoCreateShadow)} disabled={!editing} onCheckedChange={(value) => update("autoCreateShadow", value)} />
               {isShopify && <>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify Admin API</p></div>
                 <Field label="Store domain">
@@ -1880,36 +1850,24 @@ function ChannelDetail({
                 <Field label="Status sync limit">
                   <Input disabled={!editing} min="1" max="500" type="number" value={String(settings.shopifyStatusSyncLimit ?? 100)} onChange={(event) => update("shopifyStatusSyncLimit", Number(event.target.value || 100))} />
                 </Field>
-                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify product defaults</p></div>
-                <Field label="Default product status">
-                  <Select disabled={!editing} value={String(settings.shopifyDefaultStatus || "draft")} onValueChange={(value) => update("shopifyDefaultStatus", value)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent><SelectItem value="draft">Draft</SelectItem><SelectItem value="active">Active</SelectItem><SelectItem value="archived">Archived</SelectItem></SelectContent>
-                  </Select>
-                </Field>
-                <Field label="Inventory policy">
-                  <Select disabled={!editing} value={String(settings.shopifyInventoryPolicy || "deny")} onValueChange={(value) => update("shopifyInventoryPolicy", value)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent><SelectItem value="deny">Deny oversell</SelectItem><SelectItem value="continue">Continue selling</SelectItem></SelectContent>
-                  </Select>
-                </Field>
-                <Field label="Fulfillment service">
-                  <Input disabled={!editing} value={String(settings.shopifyFulfillmentService || "manual")} onChange={(event) => update("shopifyFulfillmentService", event.target.value)} />
-                </Field>
-                <Field label="Publish scope">
-                  <Select disabled={!editing} value={String(settings.shopifyPublishScope || "global")} onValueChange={(value) => update("shopifyPublishScope", value)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent><SelectItem value="global">Global</SelectItem><SelectItem value="web">Web</SelectItem></SelectContent>
-                  </Select>
-                </Field>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Enabled Shopify features</p><p className="pt-1 text-xs text-muted-foreground">These switches grant DataPlus permission to run the matching channel operation. Product and fulfillment defaults live under Rules.</p></div>
                 <ToggleField label="Enable Shopify status sync" checked={Boolean(settings.shopifySyncStatusEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifySyncStatusEnabled", value)} />
                 <ToggleField label="Auto-sync after API actions" checked={Boolean(settings.shopifyAutoSyncStatus)} disabled={!editing} onCheckedChange={(value) => update("shopifyAutoSyncStatus", value)} />
                 <ToggleField label="Manage Closeouts collection" checked={Boolean(settings.shopifyCloseoutsEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyCloseoutsEnabled", value)} />
+                <ToggleField label="Enable Shopify order imports" checked={Boolean(settings.shopifyOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportEnabled", value)} />
+                <ToggleField label="Enable Shopify order webhooks" checked={Boolean(settings.shopifyOrderWebhookEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderWebhookEnabled", value)} />
+                <ToggleField label="Enable Shopify cancellation API" checked={Boolean(settings.shopifyCancellationNotificationEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyCancellationNotificationEnabled", value)} />
+                <ToggleField label="Enable Shopify fulfillment sync" checked={Boolean(settings.shopifyFulfillmentSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyFulfillmentSyncEnabled", value)} />
                 <ToggleField label="Enable Shopify refund sync" checked={Boolean(settings.shopifyRefundSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyRefundSyncEnabled", value)} />
                 <ToggleField label="Enable Shopify return sync" checked={Boolean(settings.shopifyReturnSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyReturnSyncEnabled", value)} />
                 <ToggleField label="Enable Shopify payment capture" checked={Boolean(settings.shopifyPaymentCaptureEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyPaymentCaptureEnabled", value)} />
                 <ToggleField label="Enable Shopify order address sync" checked={Boolean(settings.shopifyOrderAddressSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderAddressSyncEnabled", value)} />
                 <ToggleField label="Enable Shopify label purchase (API 2026-07+)" checked={Boolean(settings.shopifyLabelPurchaseEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyLabelPurchaseEnabled", value)} />
+                <ToggleField label="Enable DataPlus inventory push" checked={Boolean(settings.shopifyInventoryPushEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyInventoryPushEnabled", value)} />
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Order sync behavior</p></div>
+                <Field label="Orders per manual import"><Input disabled={!editing} type="number" min="1" max="1000" value={String(settings.shopifyOrderImportLimit ?? 250)} onChange={(event) => update("shopifyOrderImportLimit", Number(event.target.value || 250))} /></Field>
+                <Field label="Sales channel allowlist"><Input disabled={!editing} value={String(settings.shopifyOrderImportSources || "Online Store, Shop")} placeholder="Online Store, Shop" onChange={(event) => update("shopifyOrderImportSources", event.target.value)} /></Field>
+                <ToggleField label="Include canceled orders" checked={Boolean(settings.shopifyOrderImportIncludeCanceled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportIncludeCanceled", value)} />
               </>}
             </CardContent>
           </Card>
@@ -1929,6 +1887,8 @@ function ChannelDetail({
                   <Button variant="outline" onClick={syncShippingProfiles}>Import shipping profiles</Button>
                   <Button variant="outline" onClick={() => queueShopifyAction("skuMap")}>Audit SKU pairs</Button>
                   <Button variant="outline" onClick={() => queueShopifyAction("status")}>Sync Shopify status</Button>
+                  <Button variant="outline" disabled={!Boolean(settings.shopifyOrderImportEnabled)} onClick={() => queueShopifyAction("orderImport")}>Import Shopify orders</Button>
+                  <Button variant="outline" disabled={!Boolean(settings.shopifyOrderImportEnabled) || !Boolean(settings.shopifyOrderWebhookEnabled)} onClick={() => queueShopifyAction("registerOrderWebhooks")}>Register order webhooks</Button>
                 </CardContent>
               </Card>
 
@@ -2014,10 +1974,31 @@ function ChannelDetail({
         <TabsContent value="rules">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Pricing and inventory rules</CardTitle>
-              <CardDescription>Rules that background pushes use by default.</CardDescription>
+              <CardTitle className="text-base">Channel defaults and operating rules</CardTitle>
+              <CardDescription>Reusable defaults applied when DataPlus prepares products, inventory, and fulfillment for this channel.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <div className="col-span-full pt-1"><p className="text-sm font-semibold">Product and fulfillment defaults</p></div>
+              <Field label="Default shadow status">
+                <Select disabled={!editing} value={String(settings.defaultShadowStatus || "Draft")} onValueChange={(value) => update("defaultShadowStatus", value)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="Draft">Draft</SelectItem><SelectItem value="Active">Active</SelectItem><SelectItem value="Archived">Archived</SelectItem></SelectContent>
+                </Select>
+              </Field>
+              <Field label="Default handling days"><Input disabled={!editing} type="number" value={String(settings.defaultHandlingTimeDays ?? 0)} onChange={(event) => update("defaultHandlingTimeDays", Number(event.target.value || 0))} /></Field>
+              <Field label="Default safety qty"><Input disabled={!editing} type="number" value={String(settings.defaultSafetyQty ?? 0)} onChange={(event) => update("defaultSafetyQty", Number(event.target.value || 0))} /></Field>
+              <Field label="Default max sellable qty"><Input disabled={!editing} type="number" value={String(settings.defaultMaxSellableQty ?? 0)} onChange={(event) => update("defaultMaxSellableQty", Number(event.target.value || 0))} /></Field>
+              <Field label="Default shipping profile">
+                {shippingProfiles.length ? <Select disabled={!editing} value={String(settings.defaultShippingProfile || "")} onValueChange={(value) => update("defaultShippingProfile", value)}><SelectTrigger><SelectValue placeholder="Select profile" /></SelectTrigger><SelectContent>{shippingProfiles.map((profile) => <SelectItem key={profile.id || profile.name} value={profile.name || profile.id || ""}>{profile.name || profile.id}</SelectItem>)}</SelectContent></Select> : <Input disabled={!editing} value={String(settings.defaultShippingProfile || "")} onChange={(event) => update("defaultShippingProfile", event.target.value)} />}
+              </Field>
+              <Field label="Default shipping service"><Input disabled={!editing} value={String(settings.defaultShippingService || "")} onChange={(event) => update("defaultShippingService", event.target.value)} /></Field>
+              {isShopify && <>
+                <Field label="Default product status"><Select disabled={!editing} value={String(settings.shopifyDefaultStatus || "draft")} onValueChange={(value) => update("shopifyDefaultStatus", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="draft">Draft</SelectItem><SelectItem value="active">Active</SelectItem><SelectItem value="archived">Archived</SelectItem></SelectContent></Select></Field>
+                <Field label="Inventory policy"><Select disabled={!editing} value={String(settings.shopifyInventoryPolicy || "deny")} onValueChange={(value) => update("shopifyInventoryPolicy", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="deny">Deny oversell</SelectItem><SelectItem value="continue">Continue selling</SelectItem></SelectContent></Select></Field>
+                <Field label="Fulfillment service"><Input disabled={!editing} value={String(settings.shopifyFulfillmentService || "manual")} onChange={(event) => update("shopifyFulfillmentService", event.target.value)} /></Field>
+                <Field label="Publish scope"><Select disabled={!editing} value={String(settings.shopifyPublishScope || "global")} onValueChange={(value) => update("shopifyPublishScope", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="global">Global</SelectItem><SelectItem value="web">Web</SelectItem></SelectContent></Select></Field>
+              </>}
+              <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Pricing rules</p></div>
               <Field label="Price markup percent">
                 <Input disabled={!editing} type="number" value={String(settings.priceMarkupPercent ?? 0)} onChange={(event) => update("priceMarkupPercent", Number(event.target.value || 0))} />
               </Field>
@@ -2030,26 +2011,7 @@ function ChannelDetail({
                   <SelectContent><SelectItem value="none">No rounding</SelectItem><SelectItem value="nearest .99">Nearest .99</SelectItem><SelectItem value="nearest .95">Nearest .95</SelectItem><SelectItem value="round up">Round up</SelectItem></SelectContent>
                 </Select>
               </Field>
-              <ToggleField label="Price updates" checked={Boolean(settings.priceUpdateEnabled)} disabled={!editing} onCheckedChange={(value) => update("priceUpdateEnabled", value)} />
-              <ToggleField label="Inventory updates" checked={Boolean(settings.inventoryUpdateEnabled)} disabled={!editing} onCheckedChange={(value) => update("inventoryUpdateEnabled", value)} />
-              <ToggleField label="Order downloads" checked={Boolean(settings.orderDownloadEnabled)} disabled={!editing} onCheckedChange={(value) => update("orderDownloadEnabled", value)} />
-              <ToggleField label="Tracking updates" checked={Boolean(settings.trackingUpdateEnabled)} disabled={!editing} onCheckedChange={(value) => update("trackingUpdateEnabled", value)} />
-              <ToggleField label="Auto-create shadows" checked={Boolean(settings.autoCreateShadow)} disabled={!editing} onCheckedChange={(value) => update("autoCreateShadow", value)} />
               {isShopify && <>
-                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify order imports</p><p className="pt-1 text-xs text-muted-foreground">Manual imports use these rules. Shopify remains the integration; sources identify Online Store, Shop, and other sales surfaces.</p></div>
-                <Field label="Orders per manual import">
-                  <Input disabled={!editing} type="number" min="1" max="1000" value={String(settings.shopifyOrderImportLimit ?? 250)} onChange={(event) => update("shopifyOrderImportLimit", Number(event.target.value || 250))} />
-                </Field>
-                <Field label="Sales channel allowlist">
-                  <Input disabled={!editing} value={String(settings.shopifyOrderImportSources || "Online Store, Shop")} placeholder="Online Store, Shop" onChange={(event) => update("shopifyOrderImportSources", event.target.value)} />
-                </Field>
-                <ToggleField label="Enable Shopify order imports" checked={Boolean(settings.shopifyOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportEnabled", value)} />
-                <ToggleField label="Enable Shopify order webhooks" checked={Boolean(settings.shopifyOrderWebhookEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderWebhookEnabled", value)} />
-                <ToggleField label="Include canceled orders" checked={Boolean(settings.shopifyOrderImportIncludeCanceled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportIncludeCanceled", value)} />
-                <ToggleField label="Enable Shopify cancellation API" checked={Boolean(settings.shopifyCancellationNotificationEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyCancellationNotificationEnabled", value)} />
-                <ToggleField label="Enable Shopify fulfillment sync" checked={Boolean(settings.shopifyFulfillmentSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyFulfillmentSyncEnabled", value)} />
-                <p className="col-span-full -mt-2 text-xs text-muted-foreground">Imports are restricted to Online Store and Shop unless you intentionally change the allowlist. Webhooks refresh only those allowed orders and retain DataPlus operational data.</p>
-                <div className="col-span-full flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={!Boolean(settings.shopifyOrderImportEnabled)} onClick={() => queueShopifyAction("orderImport")}>Import Shopify orders now</Button><Button size="sm" variant="outline" disabled={!Boolean(settings.shopifyOrderImportEnabled) || !Boolean(settings.shopifyOrderWebhookEnabled)} onClick={() => queueShopifyAction("registerOrderWebhooks")}>Register order webhooks</Button></div>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify inventory push</p></div>
                 <Field label="DataPlus warehouse">
                   <Select disabled={!editing} value={selectedWarehouseId || "none"} onValueChange={(value) => update("shopifyInventoryWarehouseId", value === "none" ? "" : value)}>
@@ -2089,7 +2051,6 @@ function ChannelDetail({
                 <Field label="Every hours">
                   <Input disabled={!editing} type="number" min="1" max="24" value={String(settings.inventoryScheduleEveryHours ?? 12)} onChange={(event) => update("inventoryScheduleEveryHours", Number(event.target.value || 12))} />
                 </Field>
-                <ToggleField label="Enable DataPlus inventory push" checked={Boolean(settings.shopifyInventoryPushEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyInventoryPushEnabled", value)} />
                 <ToggleField label="Scheduled inventory updates" checked={Boolean(settings.inventoryScheduleEnabled)} disabled={!editing} onCheckedChange={(value) => update("inventoryScheduleEnabled", value)} />
                 <ToggleField label="Require successful product dump" checked={Boolean(settings.inventoryScheduleRequireSuccessfulDump)} disabled={!editing} onCheckedChange={(value) => update("inventoryScheduleRequireSuccessfulDump", value)} />
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify SKU pair audit</p><p className="pt-1 text-xs text-muted-foreground">Checks each Shopify SKU mapping and records both the parent Shopify product ID and the matching variant ID.</p></div>
