@@ -3225,6 +3225,7 @@ function OrderActionsMenu({ order, busy, onAction, onRefresh }: { order: Record<
       <DropdownMenuContent align="end">
         {onRefresh && <><DropdownMenuItem onSelect={onRefresh}><RefreshCw className="size-4" /> Refresh order</DropdownMenuItem><DropdownMenuSeparator /></>}
         <DropdownMenuItem onSelect={() => window.open(packingSlipUrl, "_blank", "noopener,noreferrer")}><FileDown className="size-4" /> Print packing slip</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => window.open("/api/orders/accounting-export.csv", "_blank", "noopener,noreferrer")}><FileDown className="size-4" /> Export accounting CSV</DropdownMenuItem>
         {isShopify && <DropdownMenuItem onSelect={() => void onAction("sync-address")}><RefreshCw className="size-4" /> Send address to Shopify</DropdownMenuItem>}
         <DropdownMenuItem onSelect={() => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-all" } }))}><Truck className="size-4" /> Record full shipment</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-partial" } }))}><Truck className="size-4" /> Record partial shipment</DropdownMenuItem>

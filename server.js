@@ -20442,6 +20442,20 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { settings });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "accounting-export.csv" && postgres.isPostgresEnabled()) {
+    const orders = await postgres.listOrders({ limit: 10000 });
+    const columns = ["Order", "Created", "Integration", "Sales channel", "Customer", "Currency", "Order total", "Shipping collected", "Marketplace fees", "Estimated COGS", "Refunds", "Estimated profit", "Status"];
+    const rows = (orders || []).filter((order) => String(order.status || "").toLowerCase() !== "deleted").map((order) => {
+      const total = Number(order.total || 0);
+      const cogs = orderLineItems(order).reduce((sum, line) => sum + Number(line.cost || line.unitCost || 0) * Number(line.qty || 0), 0) || Number(order.productCost || 0);
+      const fees = Number(order.marketplaceFees || 0);
+      const refunds = Number(order.refundAmount || 0);
+      return [order.orderNumber || order.id, order.createdAt || "", order.source || "", order.channelSource || "", order.buyerEmail || order.buyer || "", order.currency || "USD", total, Number(order.shippingCost || 0), fees, cogs, refunds, total - cogs - fees - refunds, order.status || ""];
+    });
+    const csv = [columns, ...rows].map((row) => row.map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    return sendCsv(res, csv, `dataplus-order-accounting-${new Date().toISOString().slice(0, 10)}.csv`);
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
     const cacheKey = `dataplus:order-detail:${parts[2]}:`;
     const cached = await redisCache.getJson(cacheKey);
