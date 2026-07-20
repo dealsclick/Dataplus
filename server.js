@@ -19443,7 +19443,15 @@ async function quoteShopifyOrderShipping(order = {}) {
   if (String(order.source || "").toLowerCase() !== "shopify") throw new Error("Shopify delivery quotes are available only for Shopify-imported orders.");
   const address = shopifyMailingAddressInput(order.address || {});
   if (![address.address1, address.city, address.zip, address.countryCode].every(Boolean)) throw new Error("A complete shipping address is required before calculating Shopify delivery options.");
-  const lineItems = orderLineItems(order).map((line) => ({ variantId: String(line.channelVariantId || line.shopifyVariantId || "").trim(), quantity: Number(line.qty || 0) })).filter((line) => line.variantId.startsWith("gid://shopify/ProductVariant/") && line.quantity > 0);
+  let lineItems = orderLineItems(order).map((line) => ({ variantId: String(line.channelVariantId || line.shopifyVariantId || "").trim(), quantity: Number(line.qty || 0) })).filter((line) => line.variantId.startsWith("gid://shopify/ProductVariant/") && line.quantity > 0);
+  if (!lineItems.length) {
+    const orderId = String(order.shopifyOrderId || "").trim();
+    if (orderId.startsWith("gid://shopify/Order/")) {
+      const orderQuery = `query DataPlusQuoteOrderLines($id: ID!) { order(id: $id) { lineItems(first: 250) { nodes { quantity variant { id } } } } }`;
+      const source = await shopifyGraphqlRequestAuto(orderQuery, { id: orderId }, { operation: `Load Shopify quote lines ${order.orderNumber || order.id || "order"}` });
+      lineItems = (source?.order?.lineItems?.nodes || []).map((line) => ({ variantId: String(line?.variant?.id || "").trim(), quantity: Number(line?.quantity || 0) })).filter((line) => line.variantId.startsWith("gid://shopify/ProductVariant/") && line.quantity > 0);
+    }
+  }
   if (!lineItems.length) throw new Error("No Shopify product variants were found on this order. Refresh the order and review its SKU matches.");
   const query = `mutation DataPlusDraftOrderCalculate($input: DraftOrderInput!) { draftOrderCalculate(input: $input) { calculatedDraftOrder { availableShippingRates { handle title price { amount currencyCode } } totalShippingPriceSet { shopMoney { amount currencyCode } } } userErrors { field message } } }`;
   const data = await shopifyGraphqlRequestAuto(query, { input: { lineItems, shippingAddress: address } }, { operation: `Calculate Shopify delivery options ${order.orderNumber || order.id || "order"}` });
