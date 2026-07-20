@@ -1778,7 +1778,7 @@ function ChannelDetail({
         <TabsList className="flex flex-wrap">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="setup">Setup</TabsTrigger>
-          <TabsTrigger value="actions">Actions</TabsTrigger>
+          <TabsTrigger value="actions">Run</TabsTrigger>
           <TabsTrigger value="rules">Rules</TabsTrigger>
           <TabsTrigger value="mappings">Mappings</TabsTrigger>
           <TabsTrigger value="attributes">Attributes</TabsTrigger>
@@ -1878,8 +1878,8 @@ function ChannelDetail({
             <div className="grid gap-4">
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">Connection and setup actions</CardTitle>
-                  <CardDescription>These do not change products. Use them to verify credentials and import Shopify setup data.</CardDescription>
+                  <CardTitle className="text-base">Connection tools</CardTitle>
+                  <CardDescription>Verify credentials, refresh access, and load Shopify configuration data without changing products.</CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-wrap gap-2">
                   <Button onClick={onCheckShopify}>Check connection</Button>
@@ -1894,7 +1894,7 @@ function ChannelDetail({
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">Product launch and linking</CardTitle>
+                  <CardTitle className="text-base">Catalog operations</CardTitle>
                   <CardDescription>Run dry runs first. Live actions ask for confirmation before queueing.</CardDescription>
                 </CardHeader>
                 <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -1961,8 +1961,8 @@ function ChannelDetail({
           ) : (
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Channel actions</CardTitle>
-                <CardDescription>Advanced actions for this channel are still available in the legacy workspace.</CardDescription>
+                <CardTitle className="text-base">Run channel operation</CardTitle>
+                <CardDescription>Advanced operations for this channel are still available in the legacy workspace.</CardDescription>
               </CardHeader>
               <CardContent>
                 <Button variant="outline" onClick={() => window.open("/legacy/channels", "_blank")}>Open advanced channel actions</Button>
