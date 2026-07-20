@@ -19370,6 +19370,49 @@ function shopifyLabelPurchaseSummary(result = {}) {
   };
 }
 
+function ensureLocalShipmentForPurchasedLabel(order = {}, purchase = {}) {
+  if (String(purchase.status || "").toUpperCase() !== "PURCHASED" || !Array.isArray(purchase.labels) || !purchase.labels.length) return null;
+  order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+  const existing = order.shipments.find((shipment) => String(shipment.labelPurchaseId || "") === String(purchase.id || ""));
+  if (existing) return existing;
+  const label = purchase.labels[0] || {};
+  const tracking = label.tracking || {};
+  const packageInfo = purchase.package || {};
+  const shipmentNumber = order.shipments.length + 1;
+  const referenceBase = String(order.orderNumber || order.id || "ORDER").replace(/^#/, "");
+  const shipment = {
+    id: crypto.randomUUID(),
+    reference: `${referenceBase}-SH${shipmentNumber}`,
+    status: "label_purchased",
+    labelPurchaseId: String(purchase.id || ""),
+    labelId: String(label.id || ""),
+    createdAt: new Date().toISOString(),
+    labelPurchasedAt: new Date().toISOString(),
+    warehouseId: String(purchase.warehouseId || order.fulfillmentWarehouseId || ""),
+    warehouseName: String(purchase.warehouseName || order.fulfillmentWarehouseName || ""),
+    carrier: String(tracking.company || "Shopify Shipping"),
+    carrierName: String(tracking.company || "Shopify Shipping"),
+    service: String(order.selectedShippingQuote?.title || order.shippingService || "Shopify Shipping"),
+    trackingNumber: String(tracking.number || ""),
+    trackingUrl: String(tracking.url || ""),
+    shipDate: String(packageInfo.shipDate || ""),
+    notifyCustomer: Boolean(purchase.notifyCustomer),
+    documents: Array.isArray(label.documents) ? label.documents : [],
+    lines: (Array.isArray(purchase.lines) ? purchase.lines : []).map((line) => ({
+      sku: String(line?.sku || ""), lineIndex: Number(line?.lineIndex || 0), qtyAllocated: Number(line?.qty || 0), qtyFulfilled: 0
+    })).filter((line) => line.sku && line.qtyAllocated > 0),
+    packages: [{
+      id: crypto.randomUUID(), weight: Number(packageInfo.weightPounds || 0), length: Number(packageInfo.lengthInches || 0),
+      width: Number(packageInfo.widthInches || 0), height: Number(packageInfo.heightInches || 0), updatedAt: new Date().toISOString()
+    }],
+    channelSync: { status: "awaiting_fulfillment", channel: "Shopify", updatedAt: new Date().toISOString(), message: "Label purchased. Confirm fulfillment before sending the shipment to Shopify." }
+  };
+  order.shipments.push(shipment);
+  purchase.shipmentId = shipment.id;
+  purchase.shipmentReference = shipment.reference;
+  return shipment;
+}
+
 async function fetchShopifyFulfillmentOrdersForLabel(order = {}) {
   const orderId = String(order.shopifyOrderId || "").trim();
   if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
@@ -20911,10 +20954,14 @@ async function handleApi(req, res) {
     if (!settings.shopifyLabelPurchaseEnabled) blockers.push("Enable Shopify label purchase in Channel Settings after granting the required Shopify staff permission.");
     if (![address.line1, address.city, address.postalCode, address.country].every((value) => String(value || "").trim())) blockers.push("Shipping address is incomplete.");
     const packageWeight = Number(draft.packageWeight || packageInfo.weight || shipment.packageWeight || 0);
+    const packageLength = Number(draft.packageLength || packageInfo.length || shipment.packageLength || 0);
+    const packageWidth = Number(draft.packageWidth || packageInfo.width || shipment.packageWidth || 0);
+    const packageHeight = Number(draft.packageHeight || packageInfo.height || shipment.packageHeight || 0);
     const warehouseId = String(draft.warehouseId || shipment.warehouseId || order.fulfillmentWarehouseId || "").trim();
     if (!packageWeight) blockers.push("Package weight is required.");
+    if (![packageLength, packageWidth, packageHeight].every((value) => value > 0)) blockers.push("Package length, width, and height are required.");
     if (!warehouseId) blockers.push("Fulfillment warehouse is required.");
-    return sendJson(res, 200, { ready: blockers.length === 0, blockers, apiVersion, shipment: { id: shipment.id || "", trackingNumber: shipment.trackingNumber || "", warehouseId, warehouseName: shipment.warehouseName || order.fulfillmentWarehouseName || "", packageWeight } });
+    return sendJson(res, 200, { ready: blockers.length === 0, blockers, apiVersion, shipment: { id: shipment.id || "", trackingNumber: shipment.trackingNumber || "", warehouseId, warehouseName: shipment.warehouseName || order.fulfillmentWarehouseName || "", packageWeight, packageLength, packageWidth, packageHeight } });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-quotes" && parts[4] === "shopify" && postgres.isPostgresEnabled()) {
@@ -20964,13 +21011,15 @@ async function handleApi(req, res) {
       const body = await parseBody(req);
       const purchase = await purchaseShopifyShippingLabel(order, body);
       order.shippingLabelPurchases = Array.isArray(order.shippingLabelPurchases) ? order.shippingLabelPurchases : [];
-      const record = { ...purchase.result, fulfillmentOrderId: purchase.fulfillmentOrderId, requestedAt: new Date().toISOString(), requestedBy: body.user || "Luis", package: { weightPounds: Number(body.weightPounds || 0), lengthInches: Number(body.lengthInches || 0), widthInches: Number(body.widthInches || 0), heightInches: Number(body.heightInches || 0), packageType: String(body.packageType || "BOX"), shipDate: String(body.shipDate || "") } };
+      const record = { ...purchase.result, fulfillmentOrderId: purchase.fulfillmentOrderId, requestedAt: new Date().toISOString(), requestedBy: body.user || "Luis", notifyCustomer: Boolean(body.notifyCustomer), warehouseId: String(body.warehouseId || ""), warehouseName: String(body.warehouseName || ""), lines: (Array.isArray(body.lines) ? body.lines : []).map((line) => ({ sku: String(line?.sku || ""), lineIndex: Number(line?.lineIndex || 0), qty: Number(line?.qty || 0) })).filter((line) => line.sku && line.qty > 0), package: { weightPounds: Number(body.weightPounds || 0), lengthInches: Number(body.lengthInches || 0), widthInches: Number(body.widthInches || 0), heightInches: Number(body.heightInches || 0), packageType: String(body.packageType || "BOX"), shipDate: String(body.shipDate || "") } };
       order.shippingLabelPurchases = [record, ...order.shippingLabelPurchases.filter((entry) => String(entry?.id || "") !== record.id)];
+      const shipment = ensureLocalShipmentForPurchasedLabel(order, record);
       addOrderTimeline(order, { type: "shipping_label", title: "Shopify label purchase started", message: `Label purchase ${record.id} is ${record.status}.`, user: record.requestedBy });
+      if (shipment) addOrderTimeline(order, { type: "shipping_label", title: "Local shipment created from Shopify label", message: `${shipment.reference} is ready for fulfillment confirmation.`, user: "Shopify" });
       order.updatedAt = new Date().toISOString();
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
-      return sendJson(res, 202, { order, purchase: record, message: record.done ? "Shopify label purchase completed." : "Shopify label purchase started. Check status shortly." });
+      return sendJson(res, 202, { order, purchase: record, shipment, message: record.done ? "Shopify label purchase completed." : "Shopify label purchase started. Check status shortly." });
     } catch (error) {
       return sendJson(res, 502, { error: `Shopify label purchase failed: ${error.message || "Unknown error"}` });
     }
@@ -20985,6 +21034,7 @@ async function handleApi(req, res) {
       const previous = order.shippingLabelPurchases.find((entry) => String(entry?.id || "") === result.id) || {};
       const record = { ...previous, ...result, checkedAt: new Date().toISOString() };
       order.shippingLabelPurchases = [record, ...order.shippingLabelPurchases.filter((entry) => String(entry?.id || "") !== result.id)];
+      const shipment = ensureLocalShipmentForPurchasedLabel(order, record);
       const purchasedLabel = result.done && result.status === "PURCHASED" ? result.labels?.[0] : null;
       const tracking = purchasedLabel?.tracking || {};
       if (tracking.number) {
@@ -20993,10 +21043,11 @@ async function handleApi(req, res) {
         order.trackingUrl = tracking.url || order.trackingUrl || "";
       }
       if (result.done && String(previous.status || "") !== result.status) addOrderTimeline(order, { type: "shipping_label", title: result.status === "PURCHASED" ? "Shopify label purchased" : "Shopify label purchase failed", message: result.errors?.map((entry) => entry.message).join("; ") || `Label purchase ${result.id} is ${result.status}.`, user: "Shopify" });
+      if (shipment) addOrderTimeline(order, { type: "shipping_label", title: "Local shipment created from Shopify label", message: `${shipment.reference} is ready for fulfillment confirmation.`, user: "Shopify" });
       order.updatedAt = new Date().toISOString();
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
-      return sendJson(res, 200, { order, purchase: record });
+      return sendJson(res, 200, { order, purchase: record, shipment });
     } catch (error) {
       return sendJson(res, 502, { error: `Shopify label status check failed: ${error.message || "Unknown error"}` });
     }
@@ -23377,6 +23428,7 @@ async function handleApi(req, res) {
     if (String(order.source || "").trim().toLowerCase() !== "shopify") return sendJson(res, 400, { error: "Shopify sync is available only for Shopify-imported orders." });
     const shipment = (order.shipments || []).find((row) => String(row.id || "") === parts[4]);
     if (!shipment) return notFound(res);
+    if (String(shipment.status || "").toLowerCase() !== "fulfilled") return sendJson(res, 400, { error: "Confirm this shipment as fulfilled before sending it to Shopify." });
     const db = await readDbFast({ skipInventory: true });
     const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
     if (!settings.shopifyFulfillmentSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify fulfillment sync in Channel Settings before sending shipments." });
