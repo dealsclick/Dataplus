@@ -3279,9 +3279,16 @@ function OrderDetailWorkspace() {
   const [warehouseId, setWarehouseId] = useState("")
   const [carrier, setCarrier] = useState("UPS")
   const [carrierName, setCarrierName] = useState("UPS")
+  const [service, setService] = useState("Ground")
   const [trackingNumber, setTrackingNumber] = useState("")
   const [trackingUrl, setTrackingUrl] = useState("")
   const [shipDate, setShipDate] = useState(new Date().toISOString().slice(0, 10))
+  const [shippingCost, setShippingCost] = useState("")
+  const [packageWeight, setPackageWeight] = useState("")
+  const [packageLength, setPackageLength] = useState("")
+  const [packageWidth, setPackageWidth] = useState("")
+  const [packageHeight, setPackageHeight] = useState("")
+  const [notifyCustomer, setNotifyCustomer] = useState(false)
   const [lineQty, setLineQty] = useState<Record<number, number>>({})
   async function load() {
     setLoading(true)
@@ -3313,6 +3320,13 @@ function OrderDetailWorkspace() {
   }
   const openFulfill = (allRemaining = true) => {
     setWarehouseId(String(order?.fulfillmentWarehouseId || warehouses[0]?.id || ""))
+    setService(String(order?.shippingService || "Ground"))
+    setShippingCost("")
+    setPackageWeight("")
+    setPackageLength("")
+    setPackageWidth("")
+    setPackageHeight("")
+    setNotifyCustomer(false)
     setLineQty(Object.fromEntries(lines.map((line, index) => [index, allRemaining ? remaining(line, index) : 0])))
     setFulfillOpen(true)
   }
@@ -3321,7 +3335,7 @@ function OrderDetailWorkspace() {
     if (!selectedLines.length) return toast.error("Choose at least one quantity to ship.")
     setSaving(true)
     try {
-      const result = await api<{ order?: Record<string, unknown> }>(`/api/orders/${encodeURIComponent(orderId)}/fulfill`, { method: "POST", body: JSON.stringify({ warehouseId, carrier, carrierName, trackingNumber, trackingUrl, shipDate, lines: selectedLines }) })
+      const result = await api<{ order?: Record<string, unknown> }>(`/api/orders/${encodeURIComponent(orderId)}/fulfill`, { method: "POST", body: JSON.stringify({ warehouseId, carrier, carrierName, service, trackingNumber, trackingUrl, shipDate, shippingCost: Number(shippingCost || 0), packageWeight: Number(packageWeight || 0), packageLength: Number(packageLength || 0), packageWidth: Number(packageWidth || 0), packageHeight: Number(packageHeight || 0), notifyCustomer, lines: selectedLines }) })
       setOrder(result.order || order)
       setFulfillOpen(false)
       toast.success("Shipment recorded and local inventory updated.")
@@ -3340,11 +3354,41 @@ function OrderDetailWorkspace() {
     <div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader><CardTitle className="text-sm">Shipping</CardTitle><CardDescription>{String(order.shippingAddressLabel || "Delivery address")}</CardDescription></CardHeader><CardContent><p className="whitespace-pre-line text-sm leading-6">{addressText(order.address)}</p>{String(order.shippingCarrier || order.shippingService || "") && <p className="mt-3 text-sm text-muted-foreground">{String(order.shippingCarrier || order.shippingService)} {String(order.trackingNumber || "")}</p>}</CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Billing</CardTitle><CardDescription>{String(order.buyer || order.buyerEmail || "Customer")}</CardDescription></CardHeader><CardContent><p className="whitespace-pre-line text-sm leading-6">{addressText(order.billingAddress || order.address)}</p><p className="mt-3 text-sm text-muted-foreground">{String(order.buyerEmail || "")} {String(order.phone || "")}</p></CardContent></Card></div>
     <Tabs defaultValue="items"><TabsList className="flex flex-wrap"><TabsTrigger value="items">Items & P&amp;L</TabsTrigger><TabsTrigger value="fulfillment">Fulfillment ({shipments.length})</TabsTrigger><TabsTrigger value="payments">Payments ({payments.length})</TabsTrigger><TabsTrigger value="activity">Activity ({events.length})</TabsTrigger></TabsList>
       <TabsContent value="items" className="grid gap-4 pt-4"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Items revenue" value={moneyLabel(Number(pnl.itemRevenue || 0))} /><Detail label="Shipping collected" value={moneyLabel(Number(pnl.shippingCollected || 0))} /><Detail label="Estimated COGS" value={moneyLabel(Number(pnl.estimatedCogs || 0))} /><Detail label="Gross margin" value={`${Number(pnl.grossMarginPercent || 0).toFixed(1)}%`} /></div><Card><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Ordered SKU</TableHead><TableHead>Local catalog</TableHead><TableHead>Sell unit</TableHead><TableHead>Qty</TableHead><TableHead>Unit price</TableHead><TableHead>Unit cost</TableHead><TableHead>Profit</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => { const local = (line.localProduct || {}) as Record<string, unknown>; const variant = (line.variant || {}) as Record<string, unknown>; return <TableRow key={`${String(line.sku)}-${index}`}><TableCell><p className="font-medium">{String(line.sku || "-")}</p><p className="max-w-64 truncate text-xs text-muted-foreground">{String(line.title || "")}</p></TableCell><TableCell>{local.sku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(local.sku))}`}>{String(local.sku)}</a> : <span className="text-muted-foreground">No local match</span>}<p className="text-xs text-muted-foreground">{local.supplier ? `${String(local.supplier)} / ${numberLabel(Number(local.available || 0))} available` : ""}</p></TableCell><TableCell>{variant.sku ? <><p>{String(variant.label || "Variant")}</p><p className="text-xs text-muted-foreground">Parent {String(variant.parentSku || local.sku || "-")}</p></> : <span>{Number(line.sellUnitQty || 1)} unit</span>}</TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{moneyLabel(Number(line.price || 0))}</TableCell><TableCell>{moneyLabel(Number(line.unitCost || 0))}</TableCell><TableCell><p className={Number(line.grossProfit || 0) < 0 ? "text-destructive" : "font-medium"}>{moneyLabel(Number(line.grossProfit || 0))}</p><p className="text-xs text-muted-foreground">{Number(line.grossMarginPercent || 0).toFixed(1)}% margin</p></TableCell></TableRow> })}</TableBody></Table></div></CardContent></Card></TabsContent>
-      <TabsContent value="fulfillment" className="grid gap-4 pt-4"><div className="flex flex-wrap gap-2"><Button onClick={() => openFulfill(true)}>Mark all remaining as shipped</Button><Button variant="outline" onClick={() => openFulfill(false)}>Create partial shipment</Button></div>{shipments.length ? shipments.map((shipment) => <Card key={String(shipment.id)}><CardContent className="grid gap-1 p-4 text-sm"><div className="font-medium">{String(shipment.warehouseName || "Warehouse")} / {String(shipment.status || "Shipment")}</div><div className="text-muted-foreground">{String(shipment.carrierName || shipment.service || "Carrier")} / {String(shipment.trackingNumber || "No tracking")}</div></CardContent></Card>) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No shipments recorded yet.</CardContent></Card>}</TabsContent>
+      <TabsContent value="fulfillment" className="grid gap-4 pt-4">
+        <div className="flex flex-wrap gap-2"><Button onClick={() => openFulfill(true)}>Mark all remaining as shipped</Button><Button variant="outline" onClick={() => openFulfill(false)}>Create partial shipment</Button></div>
+        {shipments.length ? shipments.map((shipment) => {
+          const shipmentPackage = (Array.isArray(shipment.packages) ? shipment.packages[0] : {}) as Record<string, unknown>
+          const channelSync = (shipment.channelSync || {}) as Record<string, unknown>
+          const trackingUrl = String(shipment.trackingUrl || "")
+          const channelMessage = String(channelSync.message || "")
+          return <Card key={String(shipment.id)}><CardContent className="grid gap-3 p-4 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><p className="font-medium">{String(shipment.warehouseName || "Warehouse")} / {String(shipment.status || "Shipment")}</p><Badge variant={String(channelSync.status || "").toLowerCase() === "pending" ? "secondary" : "outline"}>{String(channelSync.status || "Local only")}</Badge></div><div className="grid gap-2 text-muted-foreground sm:grid-cols-2"><p>{String(shipment.carrierName || shipment.service || "Carrier")} / {String(shipment.service || "Service")}</p><p>{String(shipment.trackingNumber || "No tracking")}</p><p>{Number(shipment.shippingCost || 0) > 0 ? `Shipping cost ${moneyLabel(Number(shipment.shippingCost || 0))}` : "Shipping cost not recorded"}</p><p>{Number(shipmentPackage.weight || 0) > 0 ? `${Number(shipmentPackage.weight)} lb package` : "Package measurements not recorded"}</p></div>{trackingUrl && <a className="w-fit text-primary hover:underline" href={trackingUrl} target="_blank" rel="noreferrer">Track shipment</a>}{channelMessage && <p className="text-xs text-muted-foreground">{channelMessage}</p>}</CardContent></Card>
+        }) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No shipments recorded yet.</CardContent></Card>}
+      </TabsContent>
       <TabsContent value="payments" className="grid gap-3 pt-4">{payments.length ? payments.map((payment) => <Card key={String(payment.id)}><CardContent className="flex items-center justify-between p-4 text-sm"><span>{String(payment.provider || "Payment")} / {moneyLabel(Number(payment.amount || 0))}</span><Badge>{String(payment.status || "-")}</Badge></CardContent></Card>) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No payment events recorded.</CardContent></Card>}</TabsContent>
       <TabsContent value="activity" className="grid gap-3 pt-4">{events.length ? events.map((event) => <Card key={String(event.id)}><CardContent className="p-4 text-sm"><p className="font-medium">{String(event.title || event.step || "Order event")}</p><p className="mt-1 text-muted-foreground">{String(event.message || "")} / {dateLabel(String(event.createdAt || ""))}</p></CardContent></Card>) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No workflow events yet.</CardContent></Card>}</TabsContent>
     </Tabs>
-    <Dialog open={fulfillOpen} onOpenChange={setFulfillOpen}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>Record shipment</DialogTitle><DialogDescription>Update DataPlus warehouse stock and mark the selected quantities fulfilled. Partial quantities keep the order open.</DialogDescription></DialogHeader><div className="grid gap-4 py-2 sm:grid-cols-2"><Field label="Warehouse"><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field><Field label="Carrier"><Input value={carrier} onChange={(event) => { setCarrier(event.target.value); setCarrierName(event.target.value) }} /></Field><Field label="Tracking number"><Input value={trackingNumber} onChange={(event) => setTrackingNumber(event.target.value)} /></Field><Field label="Ship date"><Input type="date" value={shipDate} onChange={(event) => setShipDate(event.target.value)} /></Field><Field label="Carrier display name"><Input value={carrierName} onChange={(event) => setCarrierName(event.target.value)} /></Field><Field label="Tracking URL"><Input value={trackingUrl} onChange={(event) => setTrackingUrl(event.target.value)} /></Field></div><div className="max-h-64 overflow-y-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Remaining</TableHead><TableHead>Ship now</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => <TableRow key={`${String(line.sku)}-${index}`}><TableCell>{String(line.sku || "-")}</TableCell><TableCell>{numberLabel(remaining(line, index))}</TableCell><TableCell><Input className="w-24" type="number" min="0" max={remaining(line, index)} value={String(lineQty[index] || 0)} onChange={(event) => setLineQty((current) => ({ ...current, [index]: Math.max(0, Math.min(remaining(line, index), Number(event.target.value || 0))) }))} /></TableCell></TableRow>)}</TableBody></Table></div><DialogFooter><Button variant="outline" onClick={() => setFulfillOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void saveFulfillment()}>Record shipment</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={fulfillOpen} onOpenChange={setFulfillOpen}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader><DialogTitle>Record shipment</DialogTitle><DialogDescription>Update local inventory, preserve the package record, and prepare the fulfillment for its sales channel.</DialogDescription></DialogHeader>
+        <div className="grid gap-4 py-2 sm:grid-cols-2">
+          <Field label="Warehouse"><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="Carrier"><Input value={carrier} onChange={(event) => { setCarrier(event.target.value); setCarrierName(event.target.value) }} /></Field>
+          <Field label="Carrier display name"><Input value={carrierName} onChange={(event) => setCarrierName(event.target.value)} /></Field>
+          <Field label="Service"><Input value={service} onChange={(event) => setService(event.target.value)} placeholder="Ground, 2-day, freight" /></Field>
+          <Field label="Tracking number"><Input value={trackingNumber} onChange={(event) => setTrackingNumber(event.target.value)} /></Field>
+          <Field label="Tracking URL"><Input value={trackingUrl} onChange={(event) => setTrackingUrl(event.target.value)} /></Field>
+          <Field label="Ship date"><Input type="date" value={shipDate} onChange={(event) => setShipDate(event.target.value)} /></Field>
+          <Field label="Shipping cost"><Input type="number" min="0" step="0.01" value={shippingCost} onChange={(event) => setShippingCost(event.target.value)} /></Field>
+          <Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageWeight} onChange={(event) => setPackageWeight(event.target.value)} /></Field>
+          <Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageLength} onChange={(event) => setPackageLength(event.target.value)} /></Field>
+          <Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageWidth} onChange={(event) => setPackageWidth(event.target.value)} /></Field>
+          <Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageHeight} onChange={(event) => setPackageHeight(event.target.value)} /></Field>
+        </div>
+        <ToggleField label="Request customer notification" checked={notifyCustomer} onCheckedChange={setNotifyCustomer} />
+        <div className="max-h-64 overflow-y-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Remaining</TableHead><TableHead>Ship now</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => <TableRow key={`${String(line.sku)}-${index}`}><TableCell>{String(line.sku || "-")}</TableCell><TableCell>{numberLabel(remaining(line, index))}</TableCell><TableCell><Input className="w-24" type="number" min="0" max={remaining(line, index)} value={String(lineQty[index] || 0)} onChange={(event) => setLineQty((current) => ({ ...current, [index]: Math.max(0, Math.min(remaining(line, index), Number(event.target.value || 0))) }))} /></TableCell></TableRow>)}</TableBody></Table></div>
+        <DialogFooter><Button variant="outline" onClick={() => setFulfillOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void saveFulfillment()}>Record shipment</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 }
 

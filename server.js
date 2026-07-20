@@ -22368,6 +22368,13 @@ async function handleApi(req, res) {
     const trackingNumber = String(body.trackingNumber || "").trim();
     const trackingUrl = String(body.trackingUrl || "").trim();
     const shipDate = String(body.shipDate || "").trim();
+    const service = String(body.service || carrierName).trim();
+    const shippingCost = Math.max(0, Number(body.shippingCost || 0));
+    const packageWeight = Math.max(0, Number(body.packageWeight || 0));
+    const packageLength = Math.max(0, Number(body.packageLength || 0));
+    const packageWidth = Math.max(0, Number(body.packageWidth || 0));
+    const packageHeight = Math.max(0, Number(body.packageHeight || 0));
+    const notifyCustomer = Boolean(body.notifyCustomer);
     const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId) || findPreferredOrderWarehouse(db, order);
     if (!carrier) return sendJson(res, 400, { error: "Carrier is required." });
     if (!trackingNumber) return sendJson(res, 400, { error: "Tracking number is required." });
@@ -22460,17 +22467,30 @@ async function handleApi(req, res) {
     shipmentRecord.status = "fulfilled";
     shipmentRecord.carrier = carrier;
     shipmentRecord.carrierName = carrierName;
-    shipmentRecord.service = body.service || carrierName;
+    shipmentRecord.service = service;
     shipmentRecord.trackingNumber = trackingNumber;
     shipmentRecord.trackingUrl = trackingUrl;
     shipmentRecord.shipDate = shipDate;
     shipmentRecord.fulfilledAt = new Date().toISOString();
+    shipmentRecord.shippingCost = shippingCost;
+    shipmentRecord.notifyCustomer = notifyCustomer;
+    shipmentRecord.packages = [{
+      id: shipmentRecord.packages?.[0]?.id || crypto.randomUUID(),
+      weight: packageWeight,
+      length: packageLength,
+      width: packageWidth,
+      height: packageHeight,
+      updatedAt: new Date().toISOString()
+    }];
+    shipmentRecord.channelSync = String(order.source || "").toLowerCase() === "shopify"
+      ? { status: "pending", channel: "Shopify", updatedAt: new Date().toISOString(), message: "Fulfillment is recorded in DataPlus and is ready to send to Shopify." }
+      : { status: "not_applicable", channel: String(order.source || "DataPlus"), updatedAt: new Date().toISOString() };
     if (!shipment) order.shipments.push(shipmentRecord);
     order.updatedAt = new Date().toISOString();
     addOrderTimeline(order, {
       type: "status",
       title: order.status === "fulfilled" ? "Order fulfilled" : "Order partially fulfilled",
-      message: `${carrierName} tracking ${trackingNumber} added for ship date ${shipDate} from ${warehouse.name}. ${totalFulfilledNow} unit${totalFulfilledNow === 1 ? "" : "s"} fulfilled.${previousStatus !== order.status ? ` Status moved from ${previousStatus} to ${order.status}.` : ""}`,
+      message: `${carrierName} ${service} tracking ${trackingNumber} added for ship date ${shipDate} from ${warehouse.name}. ${totalFulfilledNow} unit${totalFulfilledNow === 1 ? "" : "s"} fulfilled.${notifyCustomer ? " Customer notification requested." : ""}${previousStatus !== order.status ? ` Status moved from ${previousStatus} to ${order.status}.` : ""}`,
       user: body.user || "Luis"
     });
     addOrderWorkflowEvent(order, { step: "fulfill_shipment", title: "Shipment fulfilled", message: `${shipmentRecord.lines.length} line(s) fulfilled in shipment ${shipmentRecord.trackingNumber}.`, user: body.user || "Luis" });
@@ -22480,6 +22500,7 @@ async function handleApi(req, res) {
       await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
     }
     await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { order, state: publicState(stateDb, { lite: true }) });
   }
