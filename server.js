@@ -20468,6 +20468,46 @@ async function handleApi(req, res) {
     return sendHtml(res, 200, htmlDoc);
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group-candidates" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const email = String(order.buyerEmail || "").trim().toLowerCase();
+    const address = order.address || {};
+    const postalCode = String(address.postalCode || "").trim().toLowerCase();
+    const addressLine = String(address.line1 || "").trim().toLowerCase();
+    const orders = await postgres.listOrders({ limit: 5000 });
+    const candidates = (orders || []).filter((candidate) => {
+      if (candidate.id === order.id || ["canceled", "cancelled", "deleted", "fulfilled"].includes(String(candidate.status || "").toLowerCase())) return false;
+      const candidateAddress = candidate.address || {};
+      const sameEmail = email && String(candidate.buyerEmail || "").trim().toLowerCase() === email;
+      const sameAddress = postalCode && String(candidateAddress.postalCode || "").trim().toLowerCase() === postalCode && (!addressLine || String(candidateAddress.line1 || "").trim().toLowerCase() === addressLine);
+      return sameEmail || sameAddress;
+    }).slice(0, 25).map((candidate) => ({ id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, total: candidate.total, buyer: candidate.buyer, buyerEmail: candidate.buyerEmail, address: candidate.address || {}, createdAt: candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "" }));
+    return sendJson(res, 200, { orderId: order.id, candidates });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const candidateIds = [...new Set((Array.isArray(body.orderIds) ? body.orderIds : []).map((id) => String(id || "").trim()).filter(Boolean))];
+    const candidates = await Promise.all(candidateIds.map((id) => postgres.readOrderByKey(id)));
+    const groupOrders = [order, ...candidates.filter(Boolean).filter((candidate) => candidate.id !== order.id)];
+    if (groupOrders.length < 2) return sendJson(res, 400, { error: "Select at least one compatible additional order." });
+    if (groupOrders.some((candidate) => ["canceled", "cancelled", "deleted", "fulfilled"].includes(String(candidate.status || "").toLowerCase()))) return sendJson(res, 400, { error: "Only active, unfulfilled orders can be combined." });
+    const groupId = String(body.groupId || order.shipmentGroupId || `SG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`);
+    const now = new Date().toISOString();
+    for (const candidate of groupOrders) {
+      candidate.shipmentGroupId = groupId;
+      candidate.shipmentGroupOrderIds = groupOrders.map((entry) => entry.id);
+      candidate.updatedAt = now;
+      addOrderTimeline(candidate, { type: "shipment_group", title: "Shipment group updated", message: `Order assigned to combined shipment group ${groupId}.`, user: body.user || "Luis" });
+      await postgres.saveOrder(candidate);
+      clearOrderApiCache(candidate.id);
+    }
+    return sendJson(res, 200, { groupId, orders: groupOrders, message: `${groupOrders.length} orders grouped for one shipment.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "allocate" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
     const db = await readDbFast({ skipInventory: true }); db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
