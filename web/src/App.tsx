@@ -3217,6 +3217,9 @@ function OrderActionsMenu({ order, busy, onAction }: { order: Record<string, unk
     <DropdownMenu>
       <DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy}><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger>
       <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={() => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-all" } }))}><Truck className="size-4" /> Record full shipment</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-partial" } }))}><Truck className="size-4" /> Record partial shipment</DropdownMenuItem>
+        <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void onAction("hold")}>Place on hold</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => void onAction("archive")}><Archive className="size-4" /> Archive locally</DropdownMenuItem>
         <DropdownMenuSeparator />
@@ -3377,6 +3380,15 @@ function OrderDetailWorkspace() {
     setLineQty(Object.fromEntries(lines.map((line, index) => [index, allRemaining ? remaining(line, index) : 0])))
     setFulfillOpen(true)
   }
+  useEffect(() => {
+    const handleDetailAction = (event: Event) => {
+      const action = (event as CustomEvent<{ action?: string }>).detail?.action
+      if (action === "fulfill-all") openFulfill(true)
+      if (action === "fulfill-partial") openFulfill(false)
+    }
+    window.addEventListener("dataplus:order-detail-action", handleDetailAction)
+    return () => window.removeEventListener("dataplus:order-detail-action", handleDetailAction)
+  }, [order, warehouses, lines])
   async function saveFulfillment() {
     const selectedLines = lines.map((line, index) => ({ sku: String(line.sku || ""), lineIndex: index, qty: Number(lineQty[index] || 0) })).filter((line) => line.sku && line.qty > 0)
     if (!selectedLines.length) return toast.error("Choose at least one quantity to ship.")
@@ -3402,7 +3414,7 @@ function OrderDetailWorkspace() {
     <Tabs defaultValue="items"><TabsList className="flex flex-wrap"><TabsTrigger value="items">Items & P&amp;L</TabsTrigger><TabsTrigger value="fulfillment">Fulfillment ({shipments.length})</TabsTrigger><TabsTrigger value="finance">Finance</TabsTrigger><TabsTrigger value="customer">Customer</TabsTrigger><TabsTrigger value="returns">Returns ({relatedReturns.length})</TabsTrigger><TabsTrigger value="documents">Documents ({documents.length})</TabsTrigger><TabsTrigger value="channel">Channel</TabsTrigger><TabsTrigger value="activity">Activity ({events.length})</TabsTrigger></TabsList>
       <TabsContent value="items" className="grid gap-4 pt-4"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Items revenue" value={moneyLabel(Number(pnl.itemRevenue || 0))} /><Detail label="Shipping collected" value={moneyLabel(Number(pnl.shippingCollected || 0))} /><Detail label="Estimated COGS" value={moneyLabel(Number(pnl.estimatedCogs || 0))} /><Detail label="Gross margin" value={`${Number(pnl.grossMarginPercent || 0).toFixed(1)}%`} /></div><Card><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Ordered SKU</TableHead><TableHead>Local catalog</TableHead><TableHead>Sell unit</TableHead><TableHead>Qty</TableHead><TableHead>Unit price</TableHead><TableHead>Unit cost</TableHead><TableHead>Profit</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => { const local = (line.localProduct || {}) as Record<string, unknown>; const variant = (line.variant || {}) as Record<string, unknown>; return <TableRow key={`${String(line.sku)}-${index}`}><TableCell><p className="font-medium">{String(line.sku || "-")}</p><p className="max-w-64 truncate text-xs text-muted-foreground">{String(line.title || "")}</p></TableCell><TableCell>{local.sku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(local.sku))}`}>{String(local.sku)}</a> : <span className="text-muted-foreground">No local match</span>}<p className="text-xs text-muted-foreground">{local.supplier ? `${String(local.supplier)} / ${numberLabel(Number(local.available || 0))} available` : ""}</p></TableCell><TableCell>{variant.sku ? <><p>{String(variant.label || "Variant")}</p><p className="text-xs text-muted-foreground">Parent {String(variant.parentSku || local.sku || "-")}</p></> : <span>{Number(line.sellUnitQty || 1)} unit</span>}</TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{moneyLabel(Number(line.price || 0))}</TableCell><TableCell>{moneyLabel(Number(line.unitCost || 0))}</TableCell><TableCell><p className={Number(line.grossProfit || 0) < 0 ? "text-destructive" : "font-medium"}>{moneyLabel(Number(line.grossProfit || 0))}</p><p className="text-xs text-muted-foreground">{Number(line.grossMarginPercent || 0).toFixed(1)}% margin</p></TableCell></TableRow> })}</TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="fulfillment" className="grid gap-4 pt-4">
-        <div className="flex flex-wrap gap-2"><Button onClick={() => openFulfill(true)}>Mark all remaining as shipped</Button><Button variant="outline" onClick={() => openFulfill(false)}>Create partial shipment</Button></div>
+        <p className="text-sm text-muted-foreground">Use the fixed Actions menu to record a full or partial shipment. Every shipment remains visible here with its package and channel-sync state.</p>
         {shipments.length ? shipments.map((shipment) => {
           const shipmentPackage = (Array.isArray(shipment.packages) ? shipment.packages[0] : {}) as Record<string, unknown>
           const channelSync = (shipment.channelSync || {}) as Record<string, unknown>
