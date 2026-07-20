@@ -611,12 +611,20 @@ function FloatingActions({
 }) {
   const openLegacy = (path = "/legacy") => window.open(path, "_blank", "noreferrer")
   const shopifyStatusLimit = Number(shopify?.settings?.shopifyStatusSyncLimit || 100) || 100
+  const pathname = window.location.pathname
 
   // Order detail provides the same universal dock with order-aware actions.
   // Avoid mounting the generic fallback beside it.
   if (view === "order-detail") return null
 
   const items = (() => {
+    if (view === "operations") return <>
+      <DropdownMenuItem onClick={() => window.dispatchEvent(new CustomEvent("dataplus:operations-action", { detail: { action: "import-shopify" } }))}><Store className="size-4" /> Import Shopify orders</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => window.dispatchEvent(new CustomEvent("dataplus:operations-action", { detail: { action: "refresh" } }))}><RefreshCw className="size-4" /> Refresh orders</DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onClick={() => onNavigate("channels")}><Store className="size-4" /> Open Shopify settings</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => onNavigate("jobs")}><Activity className="size-4" /> View order jobs</DropdownMenuItem>
+    </>
     if (view === "jobs") return <>
       <DropdownMenuItem onClick={onRefresh}><RefreshCw className="size-4" /> Refresh jobs</DropdownMenuItem>
       <DropdownMenuItem onClick={onCleanupJobs}><RotateCcw className="size-4" /> Clean stale jobs</DropdownMenuItem>
@@ -648,11 +656,23 @@ function FloatingActions({
       <DropdownMenuItem onClick={() => onNavigate("catalog")}><Boxes className="size-4" /> Back to categories</DropdownMenuItem>
     </>
     if (view === "catalog") return <>
+      {pathname.startsWith("/source-catalog") ? <>
+        <DropdownMenuItem onClick={() => window.location.reload()}><RefreshCw className="size-4" /> Refresh source catalog</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => window.location.assign("/import-review")}><FileWarning className="size-4" /> Open import review</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={() => onNavigate("catalog")}><Boxes className="size-4" /> Open products</DropdownMenuItem>
+      </> : pathname.startsWith("/categories") ? <>
+        <DropdownMenuItem onClick={() => window.location.reload()}><RefreshCw className="size-4" /> Refresh categories</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => window.location.assign("/vendor-category-mappings")}><Boxes className="size-4" /> Vendor category mappings</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={() => onNavigate("catalog")}><Boxes className="size-4" /> Open products</DropdownMenuItem>
+      </> : <>
       <DropdownMenuItem onClick={() => window.open("/api/catalog/changes.csv", "_blank", "noreferrer")}><FileDown className="size-4" /> Export SKU changes</DropdownMenuItem>
       <DropdownMenuItem onClick={() => window.open("/api/catalog/closeouts.csv", "_blank", "noreferrer")}><FileDown className="size-4" /> Export closeouts</DropdownMenuItem>
       <DropdownMenuItem onClick={() => onRunShopifyAction({ path: "/api/shopify/status-sync-all", body: { limit: shopifyStatusLimit }, successMessage: "Shopify status sync queued." })}><RotateCcw className="size-4" /> Sync Shopify status</DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => openLegacy("/legacy/catalog")}><ExternalLink className="size-4" /> Open legacy catalog tools</DropdownMenuItem>
+      </>}
     </>
     if (view === "vendors") return <>
       <DropdownMenuItem onClick={() => onNavigate("catalog")}><Boxes className="size-4" /> Open catalog</DropdownMenuItem>
@@ -3354,6 +3374,15 @@ function OperationsPage() {
   async function load() { setLoading(true); try { setData(await api("/api/orders?limit=5000")) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load operations data.") } finally { setLoading(false) } }
   async function importShopifyOrders() { setBusy(true); try { const result = await api<{ imported?: number; message?: string }>("/api/shopify/orders/import", { method: "POST", body: JSON.stringify({ limit: 250 }) }); toast.success(result.message || `${numberLabel(result.imported)} Shopify orders imported.`); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to import Shopify orders.") } finally { setBusy(false) } }
   useEffect(() => { void load() }, [])
+  useEffect(() => {
+    const handleAction = (event: Event) => {
+      const action = (event as CustomEvent<{ action?: string }>).detail?.action
+      if (action === "import-shopify") void importShopifyOrders()
+      if (action === "refresh") void load()
+    }
+    window.addEventListener("dataplus:operations-action", handleAction)
+    return () => window.removeEventListener("dataplus:operations-action", handleAction)
+  }, [])
   async function openOrder(row: Record<string, unknown>) { setSelected(row); setDetail(null); try { const result = await api<{ order?: Record<string, unknown> }>(`/api/orders/${encodeURIComponent(String(row.id || row.orderNumber || ""))}`); setDetail(result.order || row) } catch { setDetail(row) } }
   async function command(path: string, body: Record<string, unknown> = {}) { if (!selected) return; setBusy(true); try { const result = await api<{ order?: Record<string, unknown>; message?: string }>(path, { method: "POST", body: JSON.stringify(body) }); setDetail(result.order || detail); toast.success(result.message || "Order workflow updated."); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Order action failed.") } finally { setBusy(false) } }
   const rows: Array<Record<string, unknown> & { customer?: { name?: string } }> = tab === "orders" ? data.orders || [] : tab === "drafts" ? data.orderDrafts || [] : data.returns || []
