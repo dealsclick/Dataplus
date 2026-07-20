@@ -748,6 +748,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyOrderImportSources: "Online Store, Shop",
   shopifyOrderImportIncludeCanceled: false,
   shopifyCancellationNotificationEnabled: false,
+  shopifyFulfillmentSyncEnabled: false,
   shopifyInventoryPushEnabled: false,
   shopifyInventoryWarehouseId: "",
   shopifyInventoryLocationId: "",
@@ -3593,7 +3594,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyInventoryPushEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderImportIncludeCanceled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyInventoryPushEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -19211,6 +19212,43 @@ async function cancelShopifyOrder(order = {}, options = {}) {
   return data?.orderCancel?.job || {};
 }
 
+async function syncShopifyShipment(order = {}, shipment = {}) {
+  const orderId = String(order.shopifyOrderId || "").trim();
+  if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
+  const fulfillmentOrderQuery = `query DataPlusFulfillmentOrders($orderId: ID!) { order(id: $orderId) { fulfillmentOrders(first: 50) { nodes { id status lineItems(first: 250) { nodes { id remainingQuantity lineItem { id sku } } } } } } }`;
+  const source = await shopifyGraphqlRequestAuto(fulfillmentOrderQuery, { orderId }, { operation: `Load Shopify fulfillment orders ${order.orderNumber || orderId}` });
+  const fulfillmentOrders = source?.order?.fulfillmentOrders?.nodes || [];
+  const localOrderLines = orderLineItems(order);
+  const shipmentLines = Array.isArray(shipment.lines) ? shipment.lines : [];
+  const lineItemsByFulfillmentOrder = [];
+  for (const fulfillmentOrder of fulfillmentOrders) {
+    const fulfillmentOrderLineItems = [];
+    for (const fulfillmentLine of fulfillmentOrder.lineItems?.nodes || []) {
+      const shopifyLineId = String(fulfillmentLine.lineItem?.id || "");
+      const sku = String(fulfillmentLine.lineItem?.sku || "").trim().toLowerCase();
+      const localIndex = localOrderLines.findIndex((line) => String(line.lineId || line.id || "") === shopifyLineId || (sku && [line.sku, line.originalSku, line.channelVariantSku].some((value) => String(value || "").trim().toLowerCase() === sku)));
+      if (localIndex < 0) continue;
+      const localShipmentLine = shipmentLines.find((line) => Number(line.lineIndex || 0) === localIndex)
+        || shipmentLines.find((line) => sku && String(line.sku || "").trim().toLowerCase() === sku);
+      const quantity = Math.min(Number(localShipmentLine?.qtyFulfilled || localShipmentLine?.qtyAllocated || 0), Number(fulfillmentLine.remainingQuantity || 0));
+      if (quantity > 0) fulfillmentOrderLineItems.push({ id: fulfillmentLine.id, quantity });
+    }
+    if (fulfillmentOrderLineItems.length) lineItemsByFulfillmentOrder.push({ fulfillmentOrderId: fulfillmentOrder.id, fulfillmentOrderLineItems });
+  }
+  if (!lineItemsByFulfillmentOrder.length) throw new Error("No fulfillable Shopify line items matched this shipment. Refresh the order from Shopify and review the shipment lines.");
+  const mutation = `mutation DataPlusFulfillmentCreate($fulfillment: FulfillmentInput!, $message: String) { fulfillmentCreate(fulfillment: $fulfillment, message: $message) { fulfillment { id status trackingInfo { company number url } } userErrors { field message } } }`;
+  const trackingInfo = { company: String(shipment.carrierName || shipment.carrier || "").trim() || undefined, number: String(shipment.trackingNumber || "").trim() || undefined, url: String(shipment.trackingUrl || "").trim() || undefined };
+  const fulfillment = {
+    lineItemsByFulfillmentOrder,
+    notifyCustomer: Boolean(shipment.notifyCustomer),
+    trackingInfo: Object.values(trackingInfo).some(Boolean) ? trackingInfo : undefined
+  };
+  const data = await shopifyGraphqlRequestAuto(mutation, { fulfillment, message: `Shipment recorded in DataPlus for ${order.orderNumber || "order"}.` }, { operation: `Send fulfillment to Shopify ${order.orderNumber || orderId}` });
+  const errors = data?.fulfillmentCreate?.userErrors || [];
+  if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not create the fulfillment.").join("; "));
+  return data?.fulfillmentCreate?.fulfillment || {};
+}
+
 function clearOrderApiCache(orderId = "") {
   redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
   if (orderId) redisCache.deleteByPrefix(`dataplus:order-detail:${orderId}:`).catch(() => {});
@@ -22566,6 +22604,33 @@ async function handleApi(req, res) {
     clearOrderApiCache(order.id);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { order, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "sync-shopify" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    if (String(order.source || "").trim().toLowerCase() !== "shopify") return sendJson(res, 400, { error: "Shopify sync is available only for Shopify-imported orders." });
+    const shipment = (order.shipments || []).find((row) => String(row.id || "") === parts[4]);
+    if (!shipment) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    if (!settings.shopifyFulfillmentSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify fulfillment sync in Channel Settings before sending shipments." });
+    if (["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) return sendJson(res, 400, { error: "This shipment was already sent to Shopify." });
+    try {
+      const fulfillment = await syncShopifyShipment(order, shipment);
+      shipment.channelSync = { status: "sent", channel: "Shopify", fulfillmentId: fulfillment.id || "", updatedAt: new Date().toISOString(), message: "Fulfillment and tracking were sent to Shopify." };
+      order.updatedAt = new Date().toISOString();
+      addOrderTimeline(order, { type: "channel_sync", title: "Shipment sent to Shopify", message: `${shipment.trackingNumber || "Shipment"} was sent to Shopify.${fulfillment.id ? ` Fulfillment ${fulfillment.id}.` : ""}`, user: "Luis" });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 200, { order, shipment, fulfillment, message: "Shipment sent to Shopify." });
+    } catch (error) {
+      shipment.channelSync = { status: "failed", channel: "Shopify", updatedAt: new Date().toISOString(), message: error.message || "Shopify fulfillment sync failed." };
+      order.updatedAt = new Date().toISOString();
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 502, { error: `Shopify fulfillment sync failed: ${error.message || "Unknown error"}` });
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/state") {

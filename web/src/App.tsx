@@ -156,6 +156,7 @@ type ChannelSettings = {
   shopifyOrderImportSources?: string
   shopifyOrderImportIncludeCanceled?: boolean
   shopifyCancellationNotificationEnabled?: boolean
+  shopifyFulfillmentSyncEnabled?: boolean
   shopifyInventoryPushEnabled?: boolean
   shopifyInventoryWarehouseId?: string
   shopifyInventoryLocationId?: string
@@ -1029,7 +1030,7 @@ function App() {
                   />
                 )}
                 {view === "operations" && <OperationsPage />}
-                {view === "order-detail" && <><OrderDetailWorkspace /><OrderActionDock /></>}
+                {view === "order-detail" && <OrderDetailWorkspace />}
                 {view === "catalog" && <CatalogPage />}
                 {view === "product-detail" && <StandaloneProductPage />}
                 {view === "inventory-detail" && <InventorySkuDetailPage />}
@@ -2035,7 +2036,8 @@ function ChannelDetail({
                 <ToggleField label="Enable Shopify order imports" checked={Boolean(settings.shopifyOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportEnabled", value)} />
                 <ToggleField label="Include canceled orders" checked={Boolean(settings.shopifyOrderImportIncludeCanceled)} disabled={!editing} onCheckedChange={(value) => update("shopifyOrderImportIncludeCanceled", value)} />
                 <ToggleField label="Enable Shopify cancellation API" checked={Boolean(settings.shopifyCancellationNotificationEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyCancellationNotificationEnabled", value)} />
-                <p className="col-span-full -mt-2 text-xs text-muted-foreground">Imports are restricted to Online Store and Shop unless you intentionally change the allowlist. Cancellation API stays off until enabled here.</p>
+                <ToggleField label="Enable Shopify fulfillment sync" checked={Boolean(settings.shopifyFulfillmentSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyFulfillmentSyncEnabled", value)} />
+                <p className="col-span-full -mt-2 text-xs text-muted-foreground">Imports are restricted to Online Store and Shop unless you intentionally change the allowlist. Channel cancellation and fulfillment sync stay off until enabled here.</p>
                 <div className="col-span-full"><Button size="sm" variant="outline" disabled={!Boolean(settings.shopifyOrderImportEnabled)} onClick={() => queueShopifyAction("orderImport")}>Import Shopify orders now</Button></div>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify inventory push</p></div>
                 <Field label="DataPlus warehouse">
@@ -3194,7 +3196,7 @@ function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "produ
   return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title={config.title} description={config.description} action={<div className="flex gap-2"><Button variant="outline" onClick={() => load(true)} disabled={refreshing}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} /><Card><CardHeader className="border-b"><CardTitle className="text-sm">{numberLabel(rows.length)} loaded</CardTitle><CardDescription>Data loads only when this workspace is opened.</CardDescription></CardHeader><CardContent className="p-4">{loading ? <div className="grid gap-2"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <CatalogRecordsTable rows={rows} columns={config.columns} empty={`No ${config.title.toLowerCase()} records are available.`} />}</CardContent></Card></div>
 }
 
-function OrderActionsMenu({ order, busy, onAction }: { order: Record<string, unknown>; busy?: boolean; onAction: (action: string, body?: Record<string, unknown>) => Promise<void> }) {
+function OrderActionsMenu({ order, busy, onAction, onRefresh }: { order: Record<string, unknown>; busy?: boolean; onAction: (action: string, body?: Record<string, unknown>) => Promise<void>; onRefresh?: () => void }) {
   const [cancelOpen, setCancelOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [mode, setMode] = useState<"local" | "channel">("local")
@@ -3217,6 +3219,7 @@ function OrderActionsMenu({ order, busy, onAction }: { order: Record<string, unk
     <DropdownMenu>
       <DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy}><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger>
       <DropdownMenuContent align="end">
+        {onRefresh && <><DropdownMenuItem onSelect={onRefresh}><RefreshCw className="size-4" /> Refresh order</DropdownMenuItem><DropdownMenuSeparator /></>}
         <DropdownMenuItem onSelect={() => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-all" } }))}><Truck className="size-4" /> Record full shipment</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-partial" } }))}><Truck className="size-4" /> Record partial shipment</DropdownMenuItem>
         <DropdownMenuSeparator />
@@ -3247,29 +3250,6 @@ function OrderActionsMenu({ order, busy, onAction }: { order: Record<string, unk
       </DialogContent>
     </Dialog>
   </>
-}
-
-function OrderActionDock() {
-  const orderId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
-  const [order, setOrder] = useState<Record<string, unknown> | null>(null)
-  const [busy, setBusy] = useState(false)
-  useEffect(() => { if (!orderId) return; void api<{ order?: Record<string, unknown> }>(`/api/orders/${encodeURIComponent(orderId)}`).then((result) => setOrder(result.order || null)).catch(() => setOrder(null)) }, [orderId])
-  async function run(action: string, body: Record<string, unknown> = {}) {
-    if (!order) return
-    setBusy(true)
-    try {
-      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order.id || orderId))}/action`, { method: "POST", body: JSON.stringify({ action, ...body }) })
-      setOrder(result.order || order)
-      toast.success(result.message || `Order ${action} completed.`)
-      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Order action failed.")
-    } finally {
-      setBusy(false)
-    }
-  }
-  if (!order) return null
-  return <div className="fixed bottom-5 right-5 z-40"><OrderActionsMenu order={order} busy={busy} onAction={run} /></div>
 }
 
 function OrderFinancePanel({ orderId, order, lines, onUpdated }: { orderId: string; order: Record<string, unknown>; lines: Array<Record<string, unknown>>; onUpdated: () => Promise<void> }) {
@@ -3405,10 +3385,35 @@ function OrderDetailWorkspace() {
       setSaving(false)
     }
   }
+  async function runOrderAction(action: string, body: Record<string, unknown> = {}) {
+    setSaving(true)
+    try {
+      const result = await api<{ order?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/action`, { method: "POST", body: JSON.stringify({ action, ...body }) })
+      setOrder(result.order || order)
+      toast.success(result.message || `Order ${action} completed.`)
+      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Order action failed.")
+    } finally {
+      setSaving(false)
+    }
+  }
+  async function syncShipmentToShopify(shipment: Record<string, unknown>) {
+    setSaving(true)
+    try {
+      const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(String(shipment.id || ""))}/sync-shopify`, { method: "POST" })
+      await load()
+      toast.success(result.message || "Shipment sent to Shopify.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to send shipment to Shopify.")
+    } finally {
+      setSaving(false)
+    }
+  }
   if (loading) return <div className="grid gap-4"><Skeleton className="h-24" /><Skeleton className="h-44" /><Skeleton className="h-72" /></div>
   if (!order) return <Card><CardContent className="p-8 text-center text-muted-foreground">This order was not found.</CardContent></Card>
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}`} action={<div className="flex gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button><Button size="sm" variant="outline" onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button></div>} />
+    <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}`} action={<div className="flex gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button><OrderActionsMenu order={order} busy={saving} onAction={runOrderAction} onRefresh={() => void load()} /></div>} />
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Detail label="Status" value={String(order.status || "New")} /><Detail label="Payment" value={String(order.financialStatus || "-")} /><Detail label="Fulfillment" value={String(order.fulfillmentStatus || order.status || "-")} /><Detail label="Order total" value={moneyLabel(Number(order.total || 0))} /><Detail label="Estimated profit" value={moneyLabel(Number(pnl.grossProfit || 0))} /></div>
     <div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader><CardTitle className="text-sm">Shipping</CardTitle><CardDescription>{String(order.shippingAddressLabel || "Delivery address")}</CardDescription></CardHeader><CardContent><p className="whitespace-pre-line text-sm leading-6">{addressText(order.address)}</p>{String(order.shippingCarrier || order.shippingService || "") && <p className="mt-3 text-sm text-muted-foreground">{String(order.shippingCarrier || order.shippingService)} {String(order.trackingNumber || "")}</p>}</CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Billing</CardTitle><CardDescription>{String(order.buyer || order.buyerEmail || "Customer")}</CardDescription></CardHeader><CardContent><p className="whitespace-pre-line text-sm leading-6">{addressText(order.billingAddress || order.address)}</p><p className="mt-3 text-sm text-muted-foreground">{String(order.buyerEmail || "")} {String(order.phone || "")}</p></CardContent></Card></div>
     <Tabs defaultValue="items"><TabsList className="flex flex-wrap"><TabsTrigger value="items">Items & P&amp;L</TabsTrigger><TabsTrigger value="fulfillment">Fulfillment ({shipments.length})</TabsTrigger><TabsTrigger value="finance">Finance</TabsTrigger><TabsTrigger value="customer">Customer</TabsTrigger><TabsTrigger value="returns">Returns ({relatedReturns.length})</TabsTrigger><TabsTrigger value="documents">Documents ({documents.length})</TabsTrigger><TabsTrigger value="channel">Channel</TabsTrigger><TabsTrigger value="activity">Activity ({events.length})</TabsTrigger></TabsList>
@@ -3420,7 +3425,8 @@ function OrderDetailWorkspace() {
           const channelSync = (shipment.channelSync || {}) as Record<string, unknown>
           const trackingUrl = String(shipment.trackingUrl || "")
           const channelMessage = String(channelSync.message || "")
-          return <Card key={String(shipment.id)}><CardContent className="grid gap-3 p-4 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><p className="font-medium">{String(shipment.warehouseName || "Warehouse")} / {String(shipment.status || "Shipment")}</p><Badge variant={String(channelSync.status || "").toLowerCase() === "pending" ? "secondary" : "outline"}>{String(channelSync.status || "Local only")}</Badge></div><div className="grid gap-2 text-muted-foreground sm:grid-cols-2"><p>{String(shipment.carrierName || shipment.service || "Carrier")} / {String(shipment.service || "Service")}</p><p>{String(shipment.trackingNumber || "No tracking")}</p><p>{Number(shipment.shippingCost || 0) > 0 ? `Shipping cost ${moneyLabel(Number(shipment.shippingCost || 0))}` : "Shipping cost not recorded"}</p><p>{Number(shipmentPackage.weight || 0) > 0 ? `${Number(shipmentPackage.weight)} lb package` : "Package measurements not recorded"}</p></div>{trackingUrl && <a className="w-fit text-primary hover:underline" href={trackingUrl} target="_blank" rel="noreferrer">Track shipment</a>}{channelMessage && <p className="text-xs text-muted-foreground">{channelMessage}</p>}</CardContent></Card>
+          const shopifyPending = String(order.source || "").toLowerCase() === "shopify" && String(channelSync.status || "").toLowerCase() === "pending"
+          return <Card key={String(shipment.id)}><CardContent className="grid gap-3 p-4 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><p className="font-medium">{String(shipment.warehouseName || "Warehouse")} / {String(shipment.status || "Shipment")}</p><div className="flex items-center gap-2"><Badge variant={String(channelSync.status || "").toLowerCase() === "pending" ? "secondary" : "outline"}>{String(channelSync.status || "Local only")}</Badge>{shopifyPending && <Button size="sm" variant="outline" disabled={saving} onClick={() => void syncShipmentToShopify(shipment)}>Send to Shopify</Button>}</div></div><div className="grid gap-2 text-muted-foreground sm:grid-cols-2"><p>{String(shipment.carrierName || shipment.service || "Carrier")} / {String(shipment.service || "Service")}</p><p>{String(shipment.trackingNumber || "No tracking")}</p><p>{Number(shipment.shippingCost || 0) > 0 ? `Shipping cost ${moneyLabel(Number(shipment.shippingCost || 0))}` : "Shipping cost not recorded"}</p><p>{Number(shipmentPackage.weight || 0) > 0 ? `${Number(shipmentPackage.weight)} lb package` : "Package measurements not recorded"}</p></div>{trackingUrl && <a className="w-fit text-primary hover:underline" href={trackingUrl} target="_blank" rel="noreferrer">Track shipment</a>}{channelMessage && <p className="text-xs text-muted-foreground">{channelMessage}</p>}</CardContent></Card>
         }) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No shipments recorded yet.</CardContent></Card>}
       </TabsContent>
       <TabsContent value="payments" className="grid gap-3 pt-4">{payments.length ? payments.map((payment) => <Card key={String(payment.id)}><CardContent className="flex items-center justify-between p-4 text-sm"><span>{String(payment.provider || "Payment")} / {moneyLabel(Number(payment.amount || 0))}</span><Badge>{String(payment.status || "-")}</Badge></CardContent></Card>) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No payment events recorded.</CardContent></Card>}</TabsContent>
