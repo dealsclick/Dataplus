@@ -20684,6 +20684,50 @@ async function handleApi(req, res) {
       : { order, channelCancellation, state: publicState(db, { lite: true }) });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "fulfillment-stage" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const stage = String(body.stage || "").trim().toLowerCase();
+    const validStages = new Set(["picked", "packed", "unpicked", "unpacked"]);
+    if (!validStages.has(stage)) return sendJson(res, 400, { error: "Unsupported fulfillment stage." });
+    const nextStage = stage === "unpicked" ? "ready" : stage === "unpacked" ? "picked" : stage;
+    order.fulfillmentStage = nextStage;
+    order.fulfillmentStageUpdatedAt = new Date().toISOString();
+    order.fulfillmentStageUpdatedBy = body.user || "Luis";
+    addOrderTimeline(order, { type: "fulfillment", title: `Order ${nextStage}`, message: body.note || `Order marked ${nextStage} in the DataPlus fulfillment workspace.`, user: body.user || "Luis" });
+    addOrderWorkflowEvent(order, { step: `fulfillment_${nextStage}`, title: `Order ${nextStage}`, message: body.note || `Fulfillment stage updated to ${nextStage}.`, user: body.user || "Luis" });
+    order.updatedAt = new Date().toISOString();
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 200, { order, message: `Order marked ${nextStage}.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "notifications" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const template = String(body.template || "order-update").trim();
+    const recipient = String(body.recipient || order.buyerEmail || "").trim();
+    if (!recipient) return sendJson(res, 400, { error: "A customer email is required." });
+    const messages = {
+      "shipment": `Your order ${order.orderNumber || ""} has shipped.${order.trackingNumber ? ` Tracking: ${order.trackingNumber}.` : ""}`,
+      "partial-shipment": `Part of your order ${order.orderNumber || ""} has shipped. Remaining items will follow separately.`,
+      "return-approved": `Your return for order ${order.orderNumber || ""} has been approved.`,
+      "refund": `A refund has been recorded for order ${order.orderNumber || ""}.`,
+      "backorder": `An item on order ${order.orderNumber || ""} is currently backordered.`,
+      "order-update": `There is an update on your order ${order.orderNumber || ""}.`
+    };
+    order.notifications = Array.isArray(order.notifications) ? order.notifications : [];
+    const notification = { id: crypto.randomUUID(), template, recipient, subject: String(body.subject || `Update for order ${order.orderNumber || ""}`).trim(), message: String(body.message || messages[template] || messages["order-update"]).trim(), status: "queued", createdAt: new Date().toISOString(), createdBy: body.user || "Luis" };
+    order.notifications.unshift(notification);
+    addOrderTimeline(order, { type: "notification", title: "Customer notification queued", message: `${template} notification queued for ${recipient}.`, user: notification.createdBy });
+    order.updatedAt = new Date().toISOString();
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 201, { order, notification, message: "Customer notification queued." });
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
