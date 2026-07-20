@@ -19421,6 +19421,44 @@ async function getShopifyShippingLabelPurchase(purchaseId = "") {
   return shopifyLabelPurchaseSummary(data.node);
 }
 
+function shopifyMailingAddressInput(address = {}) {
+  const name = String(address.name || "").trim().split(/\s+/).filter(Boolean);
+  const country = String(address.countryCode || address.country || "").trim().toUpperCase();
+  const countryCode = country.length === 2 ? country : ({ "UNITED STATES": "US", USA: "US", CANADA: "CA" }[country] || "");
+  return {
+    address1: String(address.line1 || "").trim(),
+    address2: String(address.line2 || "").trim() || undefined,
+    city: String(address.city || "").trim(),
+    provinceCode: String(address.state || "").trim() || undefined,
+    zip: String(address.postalCode || "").trim(),
+    countryCode: countryCode || undefined,
+    firstName: name[0] || undefined,
+    lastName: name.slice(1).join(" ") || undefined,
+    company: String(address.company || "").trim() || undefined,
+    phone: String(address.phone || "").trim() || undefined
+  };
+}
+
+async function quoteShopifyOrderShipping(order = {}) {
+  if (String(order.source || "").toLowerCase() !== "shopify") throw new Error("Shopify delivery quotes are available only for Shopify-imported orders.");
+  const address = shopifyMailingAddressInput(order.address || {});
+  if (![address.address1, address.city, address.zip, address.countryCode].every(Boolean)) throw new Error("A complete shipping address is required before calculating Shopify delivery options.");
+  const lineItems = orderLineItems(order).map((line) => ({ variantId: String(line.channelVariantId || line.shopifyVariantId || "").trim(), quantity: Number(line.qty || 0) })).filter((line) => line.variantId.startsWith("gid://shopify/ProductVariant/") && line.quantity > 0);
+  if (!lineItems.length) throw new Error("No Shopify product variants were found on this order. Refresh the order and review its SKU matches.");
+  const query = `mutation DataPlusDraftOrderCalculate($input: DraftOrderInput!) { draftOrderCalculate(input: $input) { calculatedDraftOrder { availableShippingRates { handle title price { amount currencyCode } } totalShippingPriceSet { shopMoney { amount currencyCode } } } userErrors { field message } } }`;
+  const data = await shopifyGraphqlRequestAuto(query, { input: { lineItems, shippingAddress: address } }, { operation: `Calculate Shopify delivery options ${order.orderNumber || order.id || "order"}` });
+  const errors = data?.draftOrderCalculate?.userErrors || [];
+  if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not calculate delivery options.").join("; "));
+  const calculated = data?.draftOrderCalculate?.calculatedDraftOrder || {};
+  return {
+    id: crypto.randomUUID(),
+    source: "Shopify draft-order calculation",
+    quotedAt: new Date().toISOString(),
+    options: (calculated.availableShippingRates || []).map((rate) => ({ handle: String(rate.handle || ""), title: String(rate.title || "Shipping"), amount: Number(rate.price?.amount || 0), currency: String(rate.price?.currencyCode || order.currency || "USD") })),
+    calculatedShipping: { amount: Number(calculated.totalShippingPriceSet?.shopMoney?.amount || 0), currency: String(calculated.totalShippingPriceSet?.shopMoney?.currencyCode || order.currency || "USD") }
+  };
+}
+
 async function syncShopifyRefund(order = {}, refund = {}) {
   const orderId = String(order.shopifyOrderId || "").trim();
   if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("This order is not linked to a Shopify order.");
@@ -20840,6 +20878,40 @@ async function handleApi(req, res) {
     if (!Number(packageInfo.weight || shipment.packageWeight || 0)) blockers.push("Package weight is required.");
     if (!String(shipment.warehouseId || order.fulfillmentWarehouseId || "").trim()) blockers.push("Fulfillment warehouse is required.");
     return sendJson(res, 200, { ready: blockers.length === 0, blockers, apiVersion, shipment: { id: shipment.id || "", trackingNumber: shipment.trackingNumber || "", warehouseName: shipment.warehouseName || order.fulfillmentWarehouseName || "", packageWeight: Number(packageInfo.weight || shipment.packageWeight || 0) } });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-quotes" && parts[4] === "shopify" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    try {
+      const quote = await quoteShopifyOrderShipping(order);
+      order.shippingQuotes = Array.isArray(order.shippingQuotes) ? order.shippingQuotes : [];
+      order.shippingQuotes.unshift(quote);
+      order.shippingQuotes = order.shippingQuotes.slice(0, 20);
+      addOrderTimeline(order, { type: "shipping_quote", title: "Shopify delivery options calculated", message: `${quote.options.length} customer-facing delivery option${quote.options.length === 1 ? "" : "s"} returned.`, user: "Shopify" });
+      order.updatedAt = new Date().toISOString();
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 200, { order, quote, message: quote.options.length ? "Shopify delivery options are ready." : "Shopify returned no delivery options for this shipment." });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Shopify delivery quote failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-quotes" && parts[4] && parts[5] === "select" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const quoteId = decodeURIComponent(parts[4]);
+    const body = await parseBody(req);
+    const quote = (order.shippingQuotes || []).find((entry) => String(entry?.id || "") === quoteId);
+    const option = (quote?.options || []).find((entry) => String(entry?.handle || "") === String(body.handle || ""));
+    if (!quote || !option) return sendJson(res, 400, { error: "Choose an option from a saved Shopify delivery quote." });
+    order.selectedShippingQuote = { quoteId, ...option, selectedAt: new Date().toISOString(), selectedBy: body.user || "Luis" };
+    addOrderTimeline(order, { type: "shipping_quote", title: "Shopify delivery option selected", message: `${option.title} selected at ${option.amount} ${option.currency}. This does not buy a shipping label.`, user: order.selectedShippingQuote.selectedBy });
+    order.updatedAt = new Date().toISOString();
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 200, { order, selection: order.selectedShippingQuote, message: "Delivery option selected locally. No label was purchased." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-labels" && parts[4] === "shopify" && postgres.isPostgresEnabled()) {
