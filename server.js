@@ -19169,7 +19169,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
     billingAddress: { name: [billing.firstName, billing.lastName].filter(Boolean).join(" "), company: billing.company || "", line1: billing.address1 || "", line2: billing.address2 || "", city: billing.city || "", state: billing.province || "", postalCode: billing.zip || "", country: billing.countryCodeV2 || billing.country || "", phone: billing.phone || "" },
     shippingLines: (node.shippingLines?.edges || []).map((edge) => ({ title: edge.node?.title || "", code: edge.node?.code || "", price: Number(edge.node?.originalPriceSet?.shopMoney?.amount || 0) })),
     discountCodes: (node.discountCodes || []).map((code) => String(code)),
-    items: (node.lineItems?.edges || []).map((edge, index) => ({ lineId: edge.node?.id || "", lineIndex: index, sku: edge.node?.sku || "", originalSku: edge.node?.sku || "", title: edge.node?.title || "", qty: Number(edge.node?.quantity || 0), price: Number(edge.node?.originalUnitPriceSet?.shopMoney?.amount || 0), taxable: Boolean(edge.node?.taxable), vendor: edge.node?.vendor || "", variantTitle: edge.node?.variantTitle || "" })),
+    items: (node.lineItems?.edges || []).map((edge, index) => ({ lineId: edge.node?.id || "", lineIndex: index, sku: edge.node?.sku || edge.node?.variant?.sku || "", originalSku: edge.node?.sku || edge.node?.variant?.sku || "", channelVariantSku: edge.node?.variant?.sku || edge.node?.sku || "", channelVariantId: edge.node?.variant?.id || "", title: edge.node?.title || "", qty: Number(edge.node?.quantity || 0), price: Number(edge.node?.originalUnitPriceSet?.shopMoney?.amount || 0), taxable: Boolean(edge.node?.taxable), vendor: edge.node?.vendor || "", variantTitle: edge.node?.variantTitle || "" })),
     payments: (node.transactions || []).map((transaction) => ({ id: transaction?.id || crypto.randomUUID(), provider: transaction?.gateway || "Shopify", transactionId: transaction?.authorizationCode || transaction?.id || "", amount: Number(transaction?.amountSet?.shopMoney?.amount || 0), currency: transaction?.amountSet?.shopMoney?.currencyCode || node.currencyCode || "USD", status: String(transaction?.status || "").toLowerCase(), kind: String(transaction?.kind || "").toLowerCase(), createdAt: transaction?.createdAt || "" })),
     shopifyAdminUrl: node.legacyResourceId ? `https://admin.shopify.com/store/${shopifyAdminConfig().shop.split(".")[0]}/orders/${node.legacyResourceId}` : "",
     createdAt: node.createdAt || new Date().toISOString(), updatedAt: node.updatedAt || new Date().toISOString(), importedAt: new Date().toISOString()
@@ -19179,7 +19179,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
 async function importShopifyOrders(limit = 250, filters = {}) {
   // Order and shipping fields are sufficient for DataPlus imports. Requesting the separate
   // customer object would unnecessarily require Shopify's read_customers permission.
-  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } } } } } }`;
+  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const imported = []; let after = null;
   while (imported.length < limit) {
     const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, limit - imported.length), after }, { operation: "Import Shopify orders" });
@@ -19222,21 +19222,52 @@ function orderAddressLabel(address = {}) {
     .join(" | ");
 }
 
+function orderSkuBaseFromUomVariant(sku = "") {
+  const value = String(sku || "").trim();
+  // These are DataPlus-generated sell-unit suffixes. Restricting the fallback to
+  // explicit UOM shapes avoids incorrectly collapsing ordinary hyphenated SKUs.
+  return value.replace(/-(?:\d+(?:PC|PK|PACK|CT|CS|CASE|BX|EA)|EA|EACH)$/i, "");
+}
+
+function orderLineSkuLookupKeys(lines = []) {
+  const keys = [];
+  for (const line of Array.isArray(lines) ? lines : []) {
+    for (const value of [line.sku, line.mappedSku, line.originalSku, line.channelVariantSku, line.channelVariantId]) {
+      const sku = String(value || "").trim();
+      if (!sku) continue;
+      keys.push(sku);
+      const baseSku = orderSkuBaseFromUomVariant(sku);
+      if (baseSku && baseSku.toLowerCase() !== sku.toLowerCase()) keys.push(baseSku);
+    }
+  }
+  return [...new Set(keys.map((value) => value.toLowerCase()))];
+}
+
 async function enrichOrderDetail(order = {}) {
   const lines = Array.isArray(order.items) ? order.items : [];
-  const keys = lines.flatMap((line) => [line.sku, line.mappedSku, line.originalSku]).filter(Boolean);
+  const keys = orderLineSkuLookupKeys(lines);
   const products = postgres.isPostgresEnabled() ? await postgres.readProductsForOrderSkus(keys) : [];
   const localByKey = new Map();
   for (const product of products) {
-    for (const key of [product.sku, product.id, product.vendorSku, ...(product.systemVariants || []).map((variant) => variant.sku)]) {
+    for (const key of [
+      product.sku,
+      product.id,
+      product.vendorSku,
+      ...(product.systemVariants || []).map((variant) => variant.sku),
+      ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku),
+      ...(product.shopifyVariantSkus || []),
+      ...(product.shopifyVariantIds || [])
+    ]) {
       if (key) localByKey.set(String(key).toLowerCase(), product);
     }
   }
   let itemRevenue = 0;
   let estimatedCogs = 0;
   const enrichedLines = lines.map((line) => {
-    const lineKeys = [line.sku, line.mappedSku, line.originalSku].filter(Boolean).map((value) => String(value).toLowerCase());
-    const product = lineKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
+    const lineKeys = [line.sku, line.mappedSku, line.originalSku, line.channelVariantSku, line.channelVariantId].filter(Boolean).map((value) => String(value).toLowerCase());
+    const fallbackKeys = lineKeys.map((key) => orderSkuBaseFromUomVariant(key).toLowerCase()).filter((key, index, all) => key && key !== lineKeys[index] && !all.slice(0, index).includes(key));
+    const directProduct = lineKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
+    const product = directProduct || fallbackKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
     const matchedVariant = product?.systemVariants?.find((variant) => lineKeys.includes(String(variant.sku || "").toLowerCase())) || null;
     const sellUnitQty = Number(matchedVariant?.uomQty || product?.uomQty || 1) || 1;
     const sourceUnitCost = matchedVariant?.unitCost ?? (product ? Number(product.cost || 0) * sellUnitQty : line.cost);
@@ -19248,6 +19279,7 @@ async function enrichOrderDetail(order = {}) {
     estimatedCogs += cogs;
     return {
       ...line,
+      skuMatchMode: matchedVariant ? "channel-variant" : directProduct ? "direct" : product ? "uom-parent" : "unmatched",
       localSku: product?.sku || "",
       parentSku: product?.sku || line.mappedSku || "",
       localProduct: product ? { sku: product.sku, title: product.marketplaceTitle || product.title || "", supplier: product.supplier || "", uom: product.uom || "EA", uomQty: Number(product.uomQty || 1), qty: Number(product.qty || 0), reserved: Number(product.reserved || 0), available: Math.max(0, Number(product.qty || 0) - Number(product.reserved || 0)) } : null,
