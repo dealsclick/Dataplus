@@ -8722,8 +8722,12 @@ function nextOrderNumber(db) {
 
 function nextPoNumber(db) {
   db.sequence = db.sequence || {};
-  db.sequence.po = Number(db.sequence.po || 2000) + 1;
-  return `PO-${String(db.sequence.po).padStart(6, "0")}`;
+  const highestExisting = (db.purchaseOrders || []).reduce((highest, po) => {
+    const match = String(po.poNumber || "").match(/(\d+)$/);
+    return Math.max(highest, Number(match?.[1] || 0));
+  }, 1000);
+  db.sequence.po = Math.max(Number(db.sequence.po || 1000), highestExisting) + 1;
+  return `PO#${db.sequence.po}`;
 }
 
 function nextVendorNumber(db) {
@@ -14936,7 +14940,7 @@ async function createBackorderPurchaseOrder(db, order, body = {}) {
   const lines = (order.backorderLines || []).filter((line) => line.status === "unallocated");
   if (!lines.length) throw new Error("This order has no unallocated lines.");
   const now = new Date().toISOString();
-  const po = { id: crypto.randomUUID(), poNumber: `BO-${Date.now().toString().slice(-8)}`, status: "draft", type: "backorder", orderId: order.id, orderNumber: order.orderNumber, supplier: body.supplier || "Unassigned supplier", warehouseId: body.warehouseId || "", lines: lines.map((line) => ({ sku: line.sku, title: line.title, qty: line.qty, orderId: order.id })), createdAt: now, updatedAt: now };
+  const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: "draft", type: "backorder", orderId: order.id, orderNumber: order.orderNumber, supplier: body.supplier || "Unassigned supplier", warehouseId: body.warehouseId || "", lines: lines.map((line) => ({ sku: line.sku, title: line.title, qty: line.qty, orderId: order.id })), createdAt: now, updatedAt: now };
   db.purchaseOrders = Array.isArray(db.purchaseOrders) ? db.purchaseOrders : []; db.purchaseOrders.unshift(po);
   for (const line of lines) {
     line.status = "po_draft"; line.purchaseOrderId = po.id;
@@ -21602,6 +21606,13 @@ async function handleApi(req, res) {
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     return sendJson(res, 201, { order, notification, message: "Customer notification queued." });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const linkedOrders = await Promise.all([...(po.orderIds || []), po.orderId].filter(Boolean).map((id) => postgres.readOrderByKey(id)));
+    return sendJson(res, 200, { purchaseOrder: po, linkedOrders: linkedOrders.filter(Boolean) });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && postgres.isPostgresEnabled()) {
