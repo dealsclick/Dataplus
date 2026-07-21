@@ -14867,7 +14867,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     if (remaining > 0) {
       const vendorName = String(line.vendor || product?.vendor || "").trim();
       if (product?.dropShipEligible === true || product?.fulfillmentMethod === "drop_ship") {
-        created.push(createWorkflowRoute(order, { type: "drop_ship", status: "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku, qty: remaining, vendorId: product.vendorId || "", vendorName }));
+        created.push(createWorkflowRoute(order, { type: "drop_ship", status: "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku, qty: remaining, vendorId: product?.vendorId || "", vendorName }));
       } else if (vendorName || product?.vendorId) {
         created.push(createWorkflowRoute(order, { type: "purchase", status: "new", lineIndex, sku: line.sku, title: line.title || line.sku, qty: remaining, vendorId: product.vendorId || "", vendorName }));
       } else {
