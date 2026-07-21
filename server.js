@@ -21064,6 +21064,19 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/work" && postgres.isPostgresEnabled()) {
+    const orders = await postgres.listOrders({ limit: 5000 });
+    const warehouseId = String(url.searchParams.get("warehouseId") || "");
+    const status = String(url.searchParams.get("status") || "").toLowerCase();
+    const work = orders.flatMap((order) => (order.fulfillmentRoutes || [])
+      .filter((route) => route.type === "warehouse")
+      .filter((route) => !warehouseId || route.warehouseId === warehouseId)
+      .filter((route) => !status || String(route.status || "").toLowerCase() === status)
+      .map((route) => ({ ...route, orderId: order.id, orderNumber: order.orderNumber, customer: order.buyer || order.customerName || "", channel: order.channelSource || order.source || "", shipBy: order.shipBy || "", paymentStatus: order.financialStatus || "", operationalStatus: order.operationalStatus || "", package: order.selectedShippingQuote?.package || order.package || {} })));
+    const exceptions = work.filter((route) => ["exception"].includes(String(route.status || "").toLowerCase()) || !route.warehouseId || !route.sku);
+    return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/orders") {
     if (postgres.isPostgresEnabled()) {
       const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get("limit") || 5000)));

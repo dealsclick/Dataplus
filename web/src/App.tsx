@@ -89,7 +89,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
-type AppView = "overview" | "jobs" | "channels" | "catalog" | "operations" | "order-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "settings"
+type AppView = "overview" | "jobs" | "channels" | "catalog" | "operations" | "fulfillment" | "order-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "settings"
 
 type ImportJob = {
   id: string
@@ -480,6 +480,7 @@ const navItems: Array<{ id: AppView; label: string; icon: React.ComponentType<{ 
   { id: "jobs", label: "Jobs", icon: History },
   { id: "channels", label: "Channels", icon: Store },
   { id: "operations", label: "Orders", icon: ShoppingBag },
+  { id: "fulfillment", label: "Fulfillment", icon: Truck },
   { id: "catalog", label: "Catalog", icon: PackageSearch },
   { id: "vendors", label: "Vendors", icon: Warehouse },
   { id: "settings", label: "Settings", icon: Settings },
@@ -505,6 +506,7 @@ const viewPaths: Record<AppView, string> = {
   channels: "/channels",
   catalog: "/products",
   operations: "/orders",
+  fulfillment: "/fulfillment",
   "order-detail": "/orders",
   "product-detail": "/products",
   "inventory-detail": "/inventory",
@@ -519,6 +521,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (path.startsWith("/channels")) return "channels"
   if (path.startsWith("/orders/")) return "order-detail"
   if (["/orders", "/drafts", "/returns"].some((prefix) => path.startsWith(prefix))) return "operations"
+  if (path.startsWith("/fulfillment")) return "fulfillment"
   if (path.startsWith("/inventory/")) return "inventory-detail"
   if (path.startsWith("/products/")) return "product-detail"
   if (path.startsWith("/categories/")) return "category-detail"
@@ -1034,6 +1037,7 @@ function App() {
                   />
                 )}
                 {view === "operations" && <OperationsPage />}
+                {view === "fulfillment" && <FulfillmentPage />}
                 {view === "order-detail" && <OrderDetailWorkspace />}
                 {view === "catalog" && <CatalogPage />}
                 {view === "product-detail" && <StandaloneProductPage />}
@@ -3850,6 +3854,21 @@ function OperationsPage() {
     </Card>
     <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(null)}><SheetContent className="w-full overflow-y-auto sm:max-w-2xl"><SheetHeader><SheetTitle>{String(current.orderNumber || current.id || "Order")}</SheetTitle><SheetDescription>Quick operational view. Open the full order for fulfillment, labels, payments, and channel controls.</SheetDescription></SheetHeader>{!detail ? <div className="grid gap-2 py-6"><Skeleton className="h-20" /><Skeleton className="h-20" /></div> : <div className="grid gap-5 py-5"><div className="flex flex-wrap gap-2"><Button size="sm" asChild><a href={`/orders/${encodeURIComponent(String(current.id || current.orderNumber || ""))}`}>Open full order</a></Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction([String(current.id || "")], "hold")}>Put on hold</Button></div><div className="grid gap-3 sm:grid-cols-2"><Detail label="Status" value={String(current.status || "New")} /><Detail label="Allocation" value={String(current.allocationStatus || "Not allocated")} /><Detail label="Total" value={moneyLabel(Number(current.total || 0))} /><Detail label="Source" value={String(current.source || "-")} /></div><Tabs defaultValue="shipments"><TabsList><TabsTrigger value="shipments">Shipments ({currentShipments.length})</TabsTrigger><TabsTrigger value="payments">Payments ({currentPayments.length})</TabsTrigger><TabsTrigger value="items">Items</TabsTrigger></TabsList><TabsContent value="shipments" className="grid gap-2 pt-3">{currentShipments.map((shipment) => <Card key={String(shipment.id)}><CardContent className="p-3 text-sm"><p className="font-medium">{String(shipment.reference || shipment.warehouseName || "Shipment")}</p><p className="text-muted-foreground">{String(shipment.status || "allocated")} / {String(shipment.trackingNumber || "No tracking")}</p></CardContent></Card>)}{!currentShipments.length && <p className="text-sm text-muted-foreground">No shipments have been created.</p>}</TabsContent><TabsContent value="payments" className="grid gap-2 pt-3">{currentPayments.map((payment) => <Card key={String(payment.id)}><CardContent className="flex justify-between p-3 text-sm"><span>{String(payment.provider || "Payment")}</span><span>{moneyLabel(Number(payment.amount || 0))}</span></CardContent></Card>)}{!currentPayments.length && <p className="text-sm text-muted-foreground">No payment events recorded.</p>}</TabsContent><TabsContent value="items" className="grid gap-2 pt-3">{(Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((item, index) => <div key={`${String(item.sku)}-${index}`} className="rounded-md border p-3 text-sm"><p className="font-medium">{String(item.title || item.sku || "Item")}</p><p className="text-muted-foreground">{String(item.sku || "-")} / Qty {numberLabel(Number(item.qty || 0))}</p></div>)}</TabsContent></Tabs></div>}<SheetFooter><Button variant="outline" onClick={() => setSelected(null)}>Close</Button></SheetFooter></SheetContent></Sheet>
   </div>
+}
+
+function FulfillmentPage() {
+  const [rows, setRows] = useState<Array<Record<string, unknown>>>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState("all")
+  const [query, setQuery] = useState("")
+  const load = async () => { setLoading(true); try { const result = await api<{ work?: Array<Record<string, unknown>> }>("/api/fulfillment/work"); setRows(result.work || []) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load fulfillment work.") } finally { setLoading(false) } }
+  useEffect(() => { void load() }, [])
+  const stages = ["all", "allocated", "picking", "picked", "packing", "ready_to_ship", "shipped", "exception"]
+  const shown = rows.filter((row) => (status === "all" || String(row.status) === status) && JSON.stringify(row).toLowerCase().includes(query.toLowerCase()))
+  const advance = async (row: Record<string, unknown>, next: string) => { setBusy(true); try { await api(`/api/orders/${encodeURIComponent(String(row.orderId))}/workflow-routes/${encodeURIComponent(String(row.id))}/status`, { method: "POST", body: JSON.stringify({ status: next }) }); toast.success(`Work moved to ${next.replace(/_/g, " ")}.`); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update fulfillment work.") } finally { setBusy(false) } }
+  const nextStage = (current: string) => ({ allocated: "picking", picking: "picked", picked: "packing", packing: "ready_to_ship", ready_to_ship: "shipped" } as Record<string, string>)[current]
+  return <div className="grid gap-5"><PageHeader eyebrow="Warehouse operations" title="Fulfillment" description="Warehouse work released from paid and routed customer-order lines." action={<Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button>} /><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><Detail label="Open work" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready to ship" value={numberLabel(rows.filter((row) => row.status === "ready_to_ship").length)} /><Detail label="Missing data" value={numberLabel(rows.filter((row) => !row.warehouseId || !row.sku).length)} /><Detail label="Picking" value={numberLabel(rows.filter((row) => row.status === "picking").length)} /><Detail label="Shipped" value={numberLabel(rows.filter((row) => row.status === "shipped").length)} /></div><div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "All work" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div><Card><CardHeader className="border-b"><div className="relative max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, SKU, warehouse, or carrier" /></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order / customer</TableHead><TableHead>SKU / quantity</TableHead><TableHead>Warehouse</TableHead><TableHead>Ship by</TableHead><TableHead>Stage</TableHead><TableHead>Action</TableHead></TableRow></TableHeader><TableBody>{shown.map((row) => { const next = nextStage(String(row.status)); return <TableRow key={String(row.id)}><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="text-xs text-muted-foreground">{String(row.customer || "Customer")}</p></TableCell><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(row.sku || ""))}`}>{String(row.sku || "Missing SKU")}</a><p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell>{String(row.warehouseName || "Unassigned")}</TableCell><TableCell>{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant={row.status === "exception" ? "destructive" : row.status === "ready_to_ship" ? "secondary" : "outline"}>{String(row.status || "new").replace(/_/g, " ")}</Badge></TableCell><TableCell>{next ? <Button size="sm" disabled={busy} onClick={() => void advance(row, next)}>Mark {next.replace(/_/g, " ")}</Button> : <Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}>Open order</a></Button>}</TableCell></TableRow>})}{!shown.length && <TableRow><TableCell colSpan={6} className="h-28 text-center text-muted-foreground">No fulfillment work matches this view.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></div>
 }
 
 function AttributesPage() {
