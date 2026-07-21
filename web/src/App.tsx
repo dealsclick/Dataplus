@@ -3787,7 +3787,8 @@ function OperationsPage() {
     const backorders = Array.isArray(row.backorderLines) ? row.backorderLines : []
     const items = Array.isArray(row.items) ? row.items as Array<Record<string, unknown>> : []
     if (["canceled", "cancelled", "void", "deleted"].includes(orderStatus)) return "canceled"
-    if (fulfillment.includes("fulfilled") || shipments.some((item) => ["fulfilled", "shipped"].includes(String(item.status || "").toLowerCase()))) return "done"
+    const fullyFulfilled = fulfillment === "fulfilled"
+    if (fullyFulfilled || shipments.some((item) => ["fulfilled", "shipped"].includes(String(item.status || "").toLowerCase()))) return "done"
     if (shipments.some((item) => String(item.status || "").toLowerCase() === "label_purchased")) return "ready-ship"
     if (backorders.length) return "waiting-po"
     if (orderStatus === "hold" || items.some((item) => String(item.sku || "") && !item.localProductId && !item.productId)) return "review"
