@@ -21077,6 +21077,12 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/purchasing/work" && postgres.isPostgresEnabled()) {
+    const [orders, purchaseOrders] = await Promise.all([postgres.listOrders({ limit: 5000 }), postgres.listPurchaseOrders({ limit: 5000 })]);
+    const requirements = orders.flatMap((order) => (order.fulfillmentRoutes || []).filter((route) => route.type === "purchase" || route.type === "drop_ship").map((route) => ({ ...route, orderId: order.id, orderNumber: order.orderNumber, customer: order.buyer || "", shipBy: order.shipBy || "", operationalStatus: order.operationalStatus || "" })));
+    return sendJson(res, 200, { requirements, purchaseOrders: purchaseOrders || [], generatedAt: new Date().toISOString() });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/orders") {
     if (postgres.isPostgresEnabled()) {
       const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get("limit") || 5000)));
