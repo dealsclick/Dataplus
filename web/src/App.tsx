@@ -3781,6 +3781,8 @@ function OperationsPage() {
 
   const orderRows = data.orders || []
   const queueFor = (row: Record<string, unknown>) => {
+    const workflow = String(row.operationalStatus || row.workflowStatus || "").toLowerCase()
+    if (workflow) return ({ pending_payment: "new", payment_review: "review", processing: "processing", in_fulfillment: "processing", partially_fulfilled: "processing", on_hold: "review", completed: "done", canceled: "canceled" } as Record<string, string>)[workflow] || "processing"
     const orderStatus = String(row.status || "new").toLowerCase()
     const fulfillment = String(row.fulfillmentStatus || row.fulfillmentStage || "").toLowerCase()
     const shipments = Array.isArray(row.shipments) ? row.shipments as Array<Record<string, unknown>> : []
