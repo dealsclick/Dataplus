@@ -3904,6 +3904,120 @@ function FulfillmentPage() {
   const [status, setStatus] = useState("all")
   const [query, setQuery] = useState("")
   const [selectedRouteIds, setSelectedRouteIds] = useState<Set<string>>(new Set())
+  const [packageRow, setPackageRow] = useState<Record<string, unknown> | null>(null)
+  const [packageDraft, setPackageDraft] = useState({ packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
+  const stages = ["all", "allocated", "picking", "picked", "packing", "ready_to_ship", "shipped", "exception"]
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const result = await api<{ work?: Array<Record<string, unknown>> }>("/api/fulfillment/work")
+      setRows(result.work || [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load fulfillment work.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void load() }, [])
+
+  const shown = rows.filter((row) =>
+    (status === "all" || String(row.status) === status) &&
+    JSON.stringify(row).toLowerCase().includes(query.toLowerCase()),
+  )
+  const readinessFor = (row: Record<string, unknown>) => (row.labelReadiness || {}) as Record<string, unknown>
+  const nextStage = (current: string) => ({ allocated: "picking", picking: "picked", picked: "packing", packing: "ready_to_ship", ready_to_ship: "shipped" } as Record<string, string>)[current]
+
+  const advance = async (row: Record<string, unknown>, next: string) => {
+    setBusy(true)
+    try {
+      await api(`/api/orders/${encodeURIComponent(String(row.orderId))}/workflow-routes/${encodeURIComponent(String(row.id))}/status`, { method: "POST", body: JSON.stringify({ status: next }) })
+      toast.success(`Work moved to ${next.replace(/_/g, " ")}.`)
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to update fulfillment work.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const createBatch = async () => {
+    setBusy(true)
+    try {
+      const result = await api<{ batch?: Record<string, unknown>; message?: string }>("/api/fulfillment/batches", { method: "POST", body: JSON.stringify({ routeIds: [...selectedRouteIds], user: "Luis" }) })
+      toast.success(`${result.message || "Batch created."} ${String(result.batch?.batchNumber || "")}`)
+      setSelectedRouteIds(new Set())
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to create fulfillment batch.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const editPackage = (row: Record<string, unknown>) => {
+    const readiness = readinessFor(row)
+    setPackageRow(row)
+    setPackageDraft({
+      packageWeight: String(readiness.weight || ""),
+      packageLength: String(readiness.length || ""),
+      packageWidth: String(readiness.width || ""),
+      packageHeight: String(readiness.height || ""),
+    })
+  }
+
+  const savePackage = async () => {
+    if (!packageRow) return
+    setBusy(true)
+    try {
+      await api(`/api/orders/${encodeURIComponent(String(packageRow.orderId))}/fulfillment-package`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          packageWeight: Number(packageDraft.packageWeight || 0),
+          packageLength: Number(packageDraft.packageLength || 0),
+          packageWidth: Number(packageDraft.packageWidth || 0),
+          packageHeight: Number(packageDraft.packageHeight || 0),
+          warehouseId: packageRow.warehouseId,
+          warehouseName: packageRow.warehouseName,
+          user: "Luis",
+        }),
+      })
+      toast.success("Package details saved and label readiness refreshed.")
+      setPackageRow(null)
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save package details.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const packageComplete = Object.values(packageDraft).every((value) => Number(value) > 0)
+  const selectedReady = shown.filter((row) => selectedRouteIds.has(String(row.id)) && readinessFor(row).ready === true).length
+
+  return (
+    <div className="grid gap-5">
+      <PageHeader
+        eyebrow="Warehouse operations"
+        title="Fulfillment"
+        description="Work released from paid orders. Resolve package exceptions before quotes or labels are requested."
+        action={<div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy || selectedRouteIds.size === 0} onClick={() => void createBatch()}>Create batch ({selectedRouteIds.size})</Button><Button size="sm" variant="outline" onClick={() => window.open(`/api/fulfillment/pick-list?status=${encodeURIComponent(status === "all" ? "ready_to_ship" : status)}`, "_blank", "noopener,noreferrer")}>Print pick list</Button><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>}
+      />
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><Detail label="Open work" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready to ship" value={numberLabel(rows.filter((row) => row.status === "ready_to_ship").length)} /><Detail label="Label-ready" value={numberLabel(rows.filter((row) => readinessFor(row).ready === true).length)} /><Detail label="Needs package data" value={numberLabel(rows.filter((row) => readinessFor(row).ready !== true).length)} /><Detail label="Selected label-ready" value={numberLabel(selectedReady)} /></div>
+      <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "All work" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
+      <Card><CardHeader className="border-b"><div className="relative max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, SKU, warehouse, or carrier" /></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible fulfillment work" checked={shown.length > 0 && shown.every((row) => selectedRouteIds.has(String(row.id)))} onCheckedChange={(checked) => setSelectedRouteIds(checked === true ? new Set(shown.map((row) => String(row.id))) : new Set())} /></TableHead><TableHead>Order / customer</TableHead><TableHead>SKU / quantity</TableHead><TableHead>Warehouse</TableHead><TableHead>Package / label readiness</TableHead><TableHead>Ship by</TableHead><TableHead>Stage</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{shown.map((row) => { const readiness = readinessFor(row); const blockers = Array.isArray(readiness.blockers) ? readiness.blockers as string[] : []; const next = nextStage(String(row.status)); return <TableRow key={String(row.id)}><TableCell><Checkbox aria-label={`Select ${String(row.orderNumber || row.orderId)}`} checked={selectedRouteIds.has(String(row.id))} onCheckedChange={(checked) => setSelectedRouteIds((current) => { const selected = new Set(current); if (checked === true) selected.add(String(row.id)); else selected.delete(String(row.id)); return selected })} /></TableCell><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="text-xs text-muted-foreground">{String(row.customer || "Customer")}</p></TableCell><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(row.sku || ""))}`}>{String(row.sku || "Missing SKU")}</a><p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell>{String(row.warehouseName || "Unassigned")}</TableCell><TableCell><button type="button" className={`w-full rounded-md border p-2 text-left transition-colors hover:bg-muted/50 ${readiness.ready ? "border-emerald-200 bg-emerald-50/50" : "border-destructive/50 bg-destructive/5"}`} onClick={() => editPackage(row)}><div className="flex items-center justify-between gap-2"><p className={`text-xs font-medium ${readiness.ready ? "text-emerald-800" : "text-destructive"}`}>{readiness.ready ? "Label-ready" : blockers[0] || "Needs package data"}</p><Pencil className="size-3.5 text-muted-foreground" /></div><p className="mt-1 text-xs text-muted-foreground">{String(readiness.weight || 0)} lb · {String(readiness.length || 0)} × {String(readiness.width || 0)} × {String(readiness.height || 0)} in</p></button></TableCell><TableCell>{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant={row.status === "exception" ? "destructive" : row.status === "ready_to_ship" ? "secondary" : "outline"}>{String(row.status || "new").replace(/_/g, " ")}</Badge></TableCell><TableCell className="text-right"><div className="flex justify-end gap-2">{readiness.ready ? <Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}>Get quotes</a></Button> : <Button size="sm" variant="outline" onClick={() => editPackage(row)}>Fix package</Button>}{next ? <Button size="sm" disabled={busy} onClick={() => void advance(row, next)}>Mark {next.replace(/_/g, " ")}</Button> : <Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}>Open order</a></Button>}</div></TableCell></TableRow> })}{!shown.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No fulfillment work matches this view.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
+      <Dialog open={Boolean(packageRow)} onOpenChange={(open) => !open && setPackageRow(null)}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>Edit package</DialogTitle><DialogDescription>These values are checked before carrier quotes and label purchase. Saving them refreshes the fulfillment queue immediately.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageLength} onChange={(event) => setPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWidth} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageHeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setPackageRow(null)}>Cancel</Button><Button disabled={busy || !packageComplete} onClick={() => void savePackage()}>{busy && <Loader2 className="size-4 animate-spin" />} Save package</Button></DialogFooter></DialogContent></Dialog>
+    </div>
+  )
+}
+
+function LegacyFulfillmentPage() {
+  const [rows, setRows] = useState<Array<Record<string, unknown>>>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState("all")
+  const [query, setQuery] = useState("")
+  const [selectedRouteIds, setSelectedRouteIds] = useState<Set<string>>(new Set())
   const load = async () => { setLoading(true); try { const result = await api<{ work?: Array<Record<string, unknown>> }>("/api/fulfillment/work"); setRows(result.work || []) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load fulfillment work.") } finally { setLoading(false) } }
   useEffect(() => { void load() }, [])
   const stages = ["all", "allocated", "picking", "picked", "packing", "ready_to_ship", "shipped", "exception"]
@@ -3913,6 +4027,8 @@ function FulfillmentPage() {
   const nextStage = (current: string) => ({ allocated: "picking", picking: "picked", picked: "packing", packing: "ready_to_ship", ready_to_ship: "shipped" } as Record<string, string>)[current]
   return <div className="grid gap-5"><PageHeader eyebrow="Warehouse operations" title="Fulfillment" description="Warehouse work released from paid and routed customer-order lines." action={<div className="flex gap-2"><Button size="sm" disabled={busy || selectedRouteIds.size === 0} onClick={() => void createBatch()}>Create batch ({selectedRouteIds.size})</Button><Button size="sm" variant="outline" onClick={() => window.open(`/api/fulfillment/pick-list?status=${encodeURIComponent(status === "all" ? "ready_to_ship" : status)}`, "_blank", "noopener,noreferrer")}>Print pick list</Button><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} /><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><Detail label="Open work" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready to ship" value={numberLabel(rows.filter((row) => row.status === "ready_to_ship").length)} /><Detail label="Missing data" value={numberLabel(rows.filter((row) => !row.warehouseId || !row.sku).length)} /><Detail label="Picking" value={numberLabel(rows.filter((row) => row.status === "picking").length)} /><Detail label="Shipped" value={numberLabel(rows.filter((row) => row.status === "shipped").length)} /></div><div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "All work" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div><Card><CardHeader className="border-b"><div className="relative max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, SKU, warehouse, or carrier" /></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible fulfillment work" checked={shown.length > 0 && shown.every((row) => selectedRouteIds.has(String(row.id)))} onCheckedChange={(checked) => setSelectedRouteIds(checked === true ? new Set(shown.map((row) => String(row.id))) : new Set())} /></TableHead><TableHead>Order / customer</TableHead><TableHead>SKU / quantity</TableHead><TableHead>Warehouse</TableHead><TableHead>Package</TableHead><TableHead>Ship by</TableHead><TableHead>Stage</TableHead><TableHead>Action</TableHead></TableRow></TableHeader><TableBody>{shown.map((row) => { const next = nextStage(String(row.status)); return <TableRow key={String(row.id)}><TableCell><Checkbox aria-label={`Select ${String(row.orderNumber || row.orderId)}`} checked={selectedRouteIds.has(String(row.id))} onCheckedChange={(checked) => setSelectedRouteIds((current) => { const next = new Set(current); if (checked === true) next.add(String(row.id)); else next.delete(String(row.id)); return next })} /></TableCell><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="text-xs text-muted-foreground">{String(row.customer || "Customer")}</p></TableCell><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(row.sku || ""))}`}>{String(row.sku || "Missing SKU")}</a><p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell>{String(row.warehouseName || "Unassigned")}</TableCell><TableCell>{(() => { const readiness = (row.labelReadiness || {}) as Record<string, unknown>; const blockers = Array.isArray(readiness.blockers) ? readiness.blockers as string[] : []; return <div className={readiness.ready ? "" : "rounded border border-destructive/50 bg-destructive/5 p-1.5"}><p className={readiness.ready ? "text-xs" : "text-xs font-medium text-destructive"}>{readiness.ready ? `${String(readiness.weight || 0)} lb · ${String(readiness.length || 0)} × ${String(readiness.width || 0)} × ${String(readiness.height || 0)} in` : blockers[0] || "Needs package data"}</p>{!readiness.ready && <p className="text-xs text-muted-foreground">Label blocked</p>}</div> })()}</TableCell><TableCell>{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant={row.status === "exception" ? "destructive" : row.status === "ready_to_ship" ? "secondary" : "outline"}>{String(row.status || "new").replace(/_/g, " ")}</Badge></TableCell><TableCell>{next ? <Button size="sm" disabled={busy} onClick={() => void advance(row, next)}>Mark {next.replace(/_/g, " ")}</Button> : <Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}>Open order</a></Button>}</TableCell></TableRow>})}{!shown.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No fulfillment work matches this view.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></div>
 }
+
+void LegacyFulfillmentPage
 
 function PurchasingPage() {
   const [data, setData] = useState<{ requirements?: Array<Record<string, unknown>>; purchaseOrders?: Array<Record<string, unknown>> }>({})

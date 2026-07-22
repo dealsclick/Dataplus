@@ -21239,9 +21239,23 @@ async function handleApi(req, res) {
       .filter((route) => route.type === "warehouse")
       .filter((route) => !warehouseId || route.warehouseId === warehouseId)
       .filter((route) => !status || String(route.status || "").toLowerCase() === status)
-      .map((route) => { const packageInfo = order.selectedShippingQuote?.package || order.package || {}; const weight = Number(packageInfo.packageWeight || packageInfo.weightPounds || packageInfo.weight || 0); const length = Number(packageInfo.packageLength || packageInfo.lengthInches || packageInfo.length || 0); const width = Number(packageInfo.packageWidth || packageInfo.widthInches || packageInfo.width || 0); const height = Number(packageInfo.packageHeight || packageInfo.heightInches || packageInfo.height || 0); const blockers = [!route.warehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !(order.shippingAddress || order.shipping_address || order.shippingAddress1) ? "Shipping address missing" : ""].filter(Boolean); return { ...route, orderId: order.id, orderNumber: order.orderNumber, customer: order.buyer || order.customerName || "", channel: order.channelSource || order.source || "", shipBy: order.shipBy || "", paymentStatus: order.financialStatus || "", operationalStatus: order.operationalStatus || "", package: packageInfo, labelReadiness: { ready: blockers.length === 0, blockers, weight, length, width, height } }; }));
+      .map((route) => { const packageInfo = order.selectedShippingQuote?.package || order.package || {}; const address = order.address || order.shippingAddress || order.shipping_address || {}; const hasAddress = Boolean(order.shippingAddress1 || address.line1 || address.address1 || address.city || address.postalCode || address.zip); const weight = Number(packageInfo.packageWeight || packageInfo.weightPounds || packageInfo.weight || 0); const length = Number(packageInfo.packageLength || packageInfo.lengthInches || packageInfo.length || 0); const width = Number(packageInfo.packageWidth || packageInfo.widthInches || packageInfo.width || 0); const height = Number(packageInfo.packageHeight || packageInfo.heightInches || packageInfo.height || 0); const blockers = [!route.warehouseId ? "Warehouse missing" : "", !weight ? "Package weight missing" : "", !length || !width || !height ? "Package dimensions missing" : "", !hasAddress ? "Shipping address missing" : ""].filter(Boolean); return { ...route, orderId: order.id, orderNumber: order.orderNumber, customer: order.buyer || order.customerName || "", channel: order.channelSource || order.source || "", shipBy: order.shipBy || "", paymentStatus: order.financialStatus || "", operationalStatus: order.operationalStatus || "", package: packageInfo, labelReadiness: { ready: blockers.length === 0, blockers, weight, length, width, height } }; }));
     const exceptions = work.filter((route) => ["exception"].includes(String(route.status || "").toLowerCase()) || !route.warehouseId || !route.sku);
     return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "fulfillment-package" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const packageInfo = { packageWeight: Math.max(0, Number(body.packageWeight || 0)), packageLength: Math.max(0, Number(body.packageLength || 0)), packageWidth: Math.max(0, Number(body.packageWidth || 0)), packageHeight: Math.max(0, Number(body.packageHeight || 0)) };
+    order.package = { ...(order.package || {}), ...packageInfo };
+    if (body.warehouseId) order.fulfillmentWarehouseId = String(body.warehouseId);
+    if (body.warehouseName) order.fulfillmentWarehouseName = String(body.warehouseName);
+    order.updatedAt = new Date().toISOString();
+    addOrderTimeline(order, { type: "package", title: "Fulfillment package updated", message: `${packageInfo.packageWeight} lb · ${packageInfo.packageLength} × ${packageInfo.packageWidth} × ${packageInfo.packageHeight} in.`, user: body.user || "Luis" });
+    await postgres.saveOrder(order); clearOrderApiCache(order.id);
+    return sendJson(res, 200, { order, package: order.package, message: "Package details saved. Readiness will refresh now." });
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/batches" && postgres.isPostgresEnabled()) {
@@ -21256,7 +21270,7 @@ async function handleApi(req, res) {
     const orders = await postgres.listOrders({ limit: 5000 });
     const lines = orders.flatMap((order) => (order.fulfillmentRoutes || []).filter((route) => routeIds.includes(String(route.id))).map((route) => ({ route, order })));
     if (lines.length !== routeIds.length) return sendJson(res, 400, { error: "One or more selected fulfillment lines no longer exist." });
-    const blockers = lines.flatMap(({ route, order }) => [!route.warehouseId ? `${order.orderNumber}: warehouse missing` : "", !route.sku ? `${order.orderNumber}: SKU missing` : "", !order.shippingAddress && !order.shipping_address ? `${order.orderNumber}: shipping address missing` : "", !order.package && !order.selectedShippingQuote?.package ? `${order.orderNumber}: package details missing` : ""].filter(Boolean));
+    const blockers = lines.flatMap(({ route, order }) => { const address = order.address || order.shippingAddress || order.shipping_address || {}; const hasAddress = Boolean(order.shippingAddress1 || address.line1 || address.address1 || address.city || address.postalCode || address.zip); return [!route.warehouseId ? `${order.orderNumber}: warehouse missing` : "", !route.sku ? `${order.orderNumber}: SKU missing` : "", !hasAddress ? `${order.orderNumber}: shipping address missing` : "", !order.package && !order.selectedShippingQuote?.package ? `${order.orderNumber}: package details missing` : ""].filter(Boolean); });
     const batches = await postgres.readStateField("fulfillmentBatches").catch(() => []) || [];
     const batch = { id: crypto.randomUUID(), batchNumber: `BATCH-${String(batches.length + 1).padStart(4, "0")}`, status: blockers.length ? "needs_review" : "ready_for_quotes", routeIds, orderIds: [...new Set(lines.map(({ order }) => order.id))], warehouseIds: [...new Set(lines.map(({ route }) => route.warehouseId).filter(Boolean))], blockers, createdAt: new Date().toISOString(), createdBy: body.user || "Luis" };
     batches.unshift(batch);
