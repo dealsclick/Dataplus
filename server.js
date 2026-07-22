@@ -21258,31 +21258,62 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { order, package: order.package, message: "Package details saved. Readiness will refresh now." });
   }
 
-  if (req.method === "GET" && url.pathname === "/api/fulfillment/batches" && postgres.isPostgresEnabled()) {
-    const batches = await postgres.readStateField("fulfillmentBatches").catch(() => []);
-    return sendJson(res, 200, { batches: Array.isArray(batches) ? batches : [] });
+  if (req.method === "GET" && ["/api/fulfillment/pick-lists", "/api/fulfillment/batches"].includes(url.pathname) && postgres.isPostgresEnabled()) {
+    const [pickLists, legacyBatches] = await Promise.all([postgres.readStateField("fulfillmentPickLists").catch(() => []), postgres.readStateField("fulfillmentBatches").catch(() => [])]);
+    const rows = Array.isArray(pickLists) && pickLists.length ? pickLists : (Array.isArray(legacyBatches) ? legacyBatches.map((batch) => ({ ...batch, pickListNumber: String(batch.batchNumber || "").replace(/^BATCH-/, "PICK-"), status: batch.status === "ready_for_quotes" ? "picked" : "draft", lines: [] })) : []);
+    return sendJson(res, 200, { pickLists: rows, batches: rows });
   }
 
-  if (req.method === "POST" && url.pathname === "/api/fulfillment/batches" && postgres.isPostgresEnabled()) {
+  if (req.method === "POST" && ["/api/fulfillment/pick-lists", "/api/fulfillment/batches"].includes(url.pathname) && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const routeIds = [...new Set(Array.isArray(body.routeIds) ? body.routeIds.map(String).filter(Boolean) : [])];
     if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment line." });
     const orders = await postgres.listOrders({ limit: 5000 });
     const lines = orders.flatMap((order) => (order.fulfillmentRoutes || []).filter((route) => routeIds.includes(String(route.id))).map((route) => ({ route, order })));
     if (lines.length !== routeIds.length) return sendJson(res, 400, { error: "One or more selected fulfillment lines no longer exist." });
-    const blockers = lines.flatMap(({ route, order }) => { const address = order.address || order.shippingAddress || order.shipping_address || {}; const hasAddress = Boolean(order.shippingAddress1 || address.line1 || address.address1 || address.city || address.postalCode || address.zip); return [!route.warehouseId ? `${order.orderNumber}: warehouse missing` : "", !route.sku ? `${order.orderNumber}: SKU missing` : "", !hasAddress ? `${order.orderNumber}: shipping address missing` : "", !order.package && !order.selectedShippingQuote?.package ? `${order.orderNumber}: package details missing` : ""].filter(Boolean); });
-    const batches = await postgres.readStateField("fulfillmentBatches").catch(() => []) || [];
-    const batch = { id: crypto.randomUUID(), batchNumber: `BATCH-${String(batches.length + 1).padStart(4, "0")}`, status: blockers.length ? "needs_review" : "ready_for_quotes", routeIds, orderIds: [...new Set(lines.map(({ order }) => order.id))], warehouseIds: [...new Set(lines.map(({ route }) => route.warehouseId).filter(Boolean))], blockers, createdAt: new Date().toISOString(), createdBy: body.user || "Luis" };
-    batches.unshift(batch);
-    await postgres.writeStateDocuments({ fulfillmentBatches: batches.slice(0, 500) });
-    return sendJson(res, 201, { batch, message: blockers.length ? "Batch created with shipping-data blockers." : "Batch created and ready for quote review." });
+    const warehouseIds = [...new Set(lines.map(({ route }) => String(route.warehouseId || "")).filter(Boolean))];
+    if (warehouseIds.length !== 1) return sendJson(res, 400, { error: "Create one pick list per warehouse. Select lines from a single warehouse." });
+    const existing = await postgres.readStateField("fulfillmentPickLists").catch(() => []) || [];
+    const highest = Math.max(1000, ...existing.map((row) => Number(String(row.pickListNumber || "").replace(/\D/g, "")) || 0));
+    const now = new Date().toISOString();
+    const pickList = { id: crypto.randomUUID(), pickListNumber: `PICK-${highest + 1}`, status: "picking", warehouseId: warehouseIds[0], warehouseName: lines[0].route.warehouseName || "Warehouse", orderIds: [...new Set(lines.map(({ order }) => order.id))], routeIds, lines: lines.map(({ route, order }) => ({ routeId: String(route.id), orderId: order.id, orderNumber: order.orderNumber || order.id, sku: route.sku || "", title: route.title || "", qty: Number(route.qty || 0), status: "picking" })), createdAt: now, startedAt: now, createdBy: body.user || "Luis" };
+    for (const { order, route } of lines) { const current = (order.fulfillmentRoutes || []).find((candidate) => String(candidate.id) === String(route.id)); if (current) { current.pickListId = pickList.id; current.pickListNumber = pickList.pickListNumber; current.status = "picking"; current.pickingStartedAt = now; } order.updatedAt = now; addOrderTimeline(order, { type: "pick_list", title: "Added to pick list", message: `${pickList.pickListNumber} created for ${pickList.warehouseName}.`, user: body.user || "Luis" }); await postgres.saveOrder(order); clearOrderApiCache(order.id); }
+    existing.unshift(pickList);
+    await postgres.writeStateDocuments({ fulfillmentPickLists: existing.slice(0, 500) });
+    return sendJson(res, 201, { pickList, batch: pickList, message: `${pickList.pickListNumber} is ready for warehouse picking.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "pick-lists" && parts[3] && parts[4] === "lines" && parts[5] && parts[6] === "picked" && postgres.isPostgresEnabled()) {
+    const pickLists = await postgres.readStateField("fulfillmentPickLists").catch(() => []) || [];
+    const pickList = pickLists.find((row) => String(row.id) === String(parts[3]));
+    if (!pickList) return notFound(res);
+    const line = (pickList.lines || []).find((row) => String(row.routeId) === String(parts[5]));
+    if (!line) return sendJson(res, 404, { error: "Pick-list line not found." });
+    const order = await postgres.readOrderByKey(line.orderId);
+    if (!order) return notFound(res);
+    const route = (order.fulfillmentRoutes || []).find((row) => String(row.id) === String(line.routeId));
+    if (!route) return sendJson(res, 404, { error: "Fulfillment line not found." });
+    const now = new Date().toISOString();
+    route.status = "picked"; route.pickedAt = now; line.status = "picked"; line.pickedAt = now;
+    pickList.status = (pickList.lines || []).every((entry) => entry.status === "picked") ? "picked" : "picking";
+    pickList.updatedAt = now;
+    order.updatedAt = now;
+    addOrderTimeline(order, { type: "pick_list", title: "Line picked", message: `${route.sku || "Item"} marked picked on ${pickList.pickListNumber}.`, user: "Warehouse" });
+    await postgres.saveOrder(order); clearOrderApiCache(order.id);
+    await postgres.writeStateDocuments({ fulfillmentPickLists: pickLists.slice(0, 500) });
+    return sendJson(res, 200, { pickList, line, message: `${route.sku || "Line"} marked picked.` });
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/pick-list" && postgres.isPostgresEnabled()) {
     const requestedStatus = String(url.searchParams.get("status") || "ready_to_ship").toLowerCase();
+    const pickListId = String(url.searchParams.get("pickListId") || "");
+    const pickLists = await postgres.readStateField("fulfillmentPickLists").catch(() => []) || [];
+    const pickList = pickListId ? pickLists.find((row) => String(row.id) === pickListId) : null;
+    if (pickListId && !pickList) return notFound(res);
+    const routeIds = new Set((pickList?.lines || []).map((line) => String(line.routeId)));
     const orders = await postgres.listOrders({ limit: 5000 });
     const rows = orders.flatMap((order) => (order.fulfillmentRoutes || [])
-      .filter((route) => route.type === "warehouse" && String(route.status || "").toLowerCase() === requestedStatus)
+      .filter((route) => route.type === "warehouse" && (pickList ? routeIds.has(String(route.id)) : String(route.status || "").toLowerCase() === requestedStatus))
       .map((route) => ({ orderNumber: order.orderNumber || order.id, customer: order.buyer || order.customerName || "", sku: route.sku || "", title: route.title || "", qty: Number(route.qty || 0), warehouse: route.warehouseName || "Unassigned", bin: route.locationBin || "", shipBy: order.shipBy || "" })));
     const htmlRows = rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.warehouse)}</td><td>${escapeHtml(row.bin)}</td><td>${escapeHtml(row.sku)}</td><td>${escapeHtml(row.title)}</td><td>${row.qty}</td><td>${escapeHtml(row.orderNumber)}</td><td>${escapeHtml(row.customer)}</td><td>${escapeHtml(row.shipBy)}</td><td class="check"></td></tr>`).join("");
     return sendHtml(res, 200, `<!doctype html><html><head><title>DataPlus pick list</title><style>body{font-family:Arial,sans-serif;margin:32px;color:#111}h1{margin:0 0 4px}p{color:#555;margin:0 0 20px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:8px;text-align:left;vertical-align:top}th{background:#eee}.check{width:34px;height:24px}@media print{body{margin:12px}}</style></head><body><h1>Warehouse pick list</h1><p>Queue: ${escapeHtml(requestedStatus.replace(/_/g, " "))} · ${rows.length} line${rows.length === 1 ? "" : "s"} · Generated ${escapeHtml(new Date().toLocaleString())}</p><table><thead><tr><th>#</th><th>Warehouse</th><th>Bin</th><th>SKU</th><th>Item</th><th>Qty</th><th>Order</th><th>Customer</th><th>Ship by</th><th>Picked</th></tr></thead><tbody>${htmlRows || '<tr><td colspan="10">No work in this queue.</td></tr>'}</tbody></table></body></html>`);
@@ -21502,6 +21533,8 @@ async function handleApi(req, res) {
     if (String(order.source || "").toLowerCase() !== "shopify") return sendJson(res, 400, { error: "Shopify labels are available only for Shopify-imported orders." });
     if (!settings.shopifyLabelPurchaseEnabled) return sendJson(res, 400, { error: "Enable Shopify label purchase in Channel Settings before buying a label." });
     if (String(shopifyAdminConfig().apiVersion || "") < "2026-07") return sendJson(res, 400, { error: "Update the Shopify Admin API version to 2026-07 or later before buying labels." });
+    const pickRoutes = (order.fulfillmentRoutes || []).filter((route) => route.type === "warehouse" && route.pickListId);
+    if (pickRoutes.length && pickRoutes.some((route) => String(route.status || "") !== "picked" && String(route.status || "") !== "packing" && String(route.status || "") !== "ready_to_ship")) return sendJson(res, 400, { error: "All lines on the assigned pick list must be marked picked before purchasing a label." });
     try {
       const body = await parseBody(req);
       const purchase = await purchaseShopifyShippingLabel(order, body);
