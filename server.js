@@ -8719,10 +8719,39 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   for (const group of groups.values()) {
     const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
     db.purchaseOrders = db.purchaseOrders || []; db.purchaseOrders.unshift(po); created.push(po);
-    for (const route of group.routes) { route.purchaseOrderId = po.id; route.purchaseOrderNumber = po.poNumber; route.purchaseGroupId = purchaseGroupId; route.status = "buyer_review"; route.updatedAt = po.updatedAt; }
+    for (const route of group.routes) { const linkedRoute = (route.order.fulfillmentRoutes || []).find((candidate) => candidate.id === route.id); if (linkedRoute) { linkedRoute.purchaseOrderId = po.id; linkedRoute.purchaseOrderNumber = po.poNumber; linkedRoute.purchaseGroupId = purchaseGroupId; linkedRoute.status = "buyer_review"; linkedRoute.updatedAt = po.updatedAt; } }
     for (const order of group.orders) { order.purchaseGroupId = purchaseGroupId; order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), po.id])]; order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), po.poNumber])]; recalculateOrderOperationalStatus(order); addOrderWorkflowEvent(order, { step: "purchase_order_created", title: "Purchase order created", message: `${po.poNumber} created for ${po.supplier}.`, user: options.user || "System" }); }
   }
   return { purchaseGroupId, purchaseOrders: created, orders };
+}
+
+function reconcilePurchaseOrderLinks(db, orderIds = []) {
+  const requestedIds = new Set((orderIds || []).filter(Boolean));
+  const orders = (db.orders || []).filter((order) => !requestedIds.size || requestedIds.has(order.id));
+  const purchaseOrders = db.purchaseOrders || [];
+  let linkedRoutes = 0;
+  let linkedOrders = 0;
+  for (const order of orders) {
+    const related = purchaseOrders.filter((po) => (po.orderIds || []).includes(order.id) || (po.orderNumbers || []).includes(order.orderNumber));
+    if (!related.length) continue;
+    order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), ...related.map((po) => po.id)])];
+    order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), ...related.map((po) => po.poNumber)])];
+    for (const route of order.fulfillmentRoutes || []) {
+      if (route.type !== "purchase" || route.purchaseOrderId) continue;
+      const po = related.find((candidate) => (candidate.items || []).some((item) => (item.orderId === order.id || item.orderNumber === order.orderNumber) && (item.routeId === route.id || String(item.sku || "").toLowerCase() === String(route.sku || "").toLowerCase())));
+      if (!po) continue;
+      route.purchaseOrderId = po.id;
+      route.purchaseOrderNumber = po.poNumber;
+      route.purchaseGroupId = po.purchaseGroupId || route.purchaseGroupId || "";
+      if (["new", "buyer_review"].includes(String(route.status || "").toLowerCase())) route.status = String(po.status || "draft").toLowerCase() === "draft" ? "buyer_review" : String(po.status || "").toLowerCase();
+      route.updatedAt = new Date().toISOString();
+      linkedRoutes += 1;
+    }
+    recalculateOrderOperationalStatus(order);
+    order.updatedAt = new Date().toISOString();
+    linkedOrders += 1;
+  }
+  return { orders, linkedOrders, linkedRoutes };
 }
 
 function nextDraftNumber(db) {
@@ -21667,6 +21696,15 @@ async function handleApi(req, res) {
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     return sendJson(res, 201, { order, notification, message: "Customer notification queued." });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] === "reconcile-links" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    db.orders = await postgres.listOrders({ limit: 5000 });
+    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
+    const result = reconcilePurchaseOrderLinks(db);
+    for (const order of result.orders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
+    return sendJson(res, 200, { linkedOrders: result.linkedOrders, linkedRoutes: result.linkedRoutes, message: `Reconciled ${result.linkedRoutes} purchase route${result.linkedRoutes === 1 ? "" : "s"} across ${result.linkedOrders} order${result.linkedOrders === 1 ? "" : "s"}.` });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
