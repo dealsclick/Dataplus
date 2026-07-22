@@ -21451,6 +21451,16 @@ async function handleApi(req, res) {
     return sendJson(res, 201, { order, purchaseOrder: po });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "purchase-orders" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
+    const db = await readDbFast({ skipInventory: true }); db.orders = (db.orders || []).map((row) => row.id === order.id ? order : row);
+    const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { warehouseId: body.warehouseId, supplier: body.supplier, user: body.user || "Luis" });
+    for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
+    for (const linkedOrder of result.orders) await postgres.saveOrder(linkedOrder);
+    await postgres.writeStateDocuments({ sequence: db.sequence || {} }); clearOrderApiCache(order.id);
+    return sendJson(res, 201, { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "payments" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
     const amount = Number(body.amount || 0); if (!(amount > 0)) return sendJson(res, 400, { error: "A payment amount greater than zero is required." });
