@@ -21244,6 +21244,26 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/batches" && postgres.isPostgresEnabled()) {
+    const batches = await postgres.readStateField("fulfillmentBatches").catch(() => []);
+    return sendJson(res, 200, { batches: Array.isArray(batches) ? batches : [] });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/fulfillment/batches" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const routeIds = [...new Set(Array.isArray(body.routeIds) ? body.routeIds.map(String).filter(Boolean) : [])];
+    if (!routeIds.length) return sendJson(res, 400, { error: "Select at least one fulfillment line." });
+    const orders = await postgres.listOrders({ limit: 5000 });
+    const lines = orders.flatMap((order) => (order.fulfillmentRoutes || []).filter((route) => routeIds.includes(String(route.id))).map((route) => ({ route, order })));
+    if (lines.length !== routeIds.length) return sendJson(res, 400, { error: "One or more selected fulfillment lines no longer exist." });
+    const blockers = lines.flatMap(({ route, order }) => [!route.warehouseId ? `${order.orderNumber}: warehouse missing` : "", !route.sku ? `${order.orderNumber}: SKU missing` : "", !order.shippingAddress && !order.shipping_address ? `${order.orderNumber}: shipping address missing` : "", !order.package && !order.selectedShippingQuote?.package ? `${order.orderNumber}: package details missing` : ""].filter(Boolean));
+    const batches = await postgres.readStateField("fulfillmentBatches").catch(() => []) || [];
+    const batch = { id: crypto.randomUUID(), batchNumber: `BATCH-${String(batches.length + 1).padStart(4, "0")}`, status: blockers.length ? "needs_review" : "ready_for_quotes", routeIds, orderIds: [...new Set(lines.map(({ order }) => order.id))], warehouseIds: [...new Set(lines.map(({ route }) => route.warehouseId).filter(Boolean))], blockers, createdAt: new Date().toISOString(), createdBy: body.user || "Luis" };
+    batches.unshift(batch);
+    await postgres.writeStateDocuments({ fulfillmentBatches: batches.slice(0, 500) });
+    return sendJson(res, 201, { batch, message: blockers.length ? "Batch created with shipping-data blockers." : "Batch created and ready for quote review." });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/fulfillment/pick-list" && postgres.isPostgresEnabled()) {
     const requestedStatus = String(url.searchParams.get("status") || "ready_to_ship").toLowerCase();
     const orders = await postgres.listOrders({ limit: 5000 });
