@@ -8717,7 +8717,9 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   const purchaseGroupId = options.purchaseGroupId || `PG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
   const created = [];
   for (const group of groups.values()) {
-    const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
+    const estimatedCost = group.routes.reduce((sum, route) => sum + Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0) * Number(route.qty || 0), 0);
+    const approvalRequired = group.vendor?.purchaseOrderRules?.requireBuyerApproval !== false && estimatedCost >= Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0));
+    const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: approvalRequired ? "awaiting_approval" : "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), estimatedCost, approval: { required: approvalRequired, threshold: Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)), status: approvalRequired ? "awaiting_approval" : "not_required" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
     db.purchaseOrders = db.purchaseOrders || []; db.purchaseOrders.unshift(po); created.push(po);
     for (const route of group.routes) { const linkedRoute = (route.order.fulfillmentRoutes || []).find((candidate) => candidate.id === route.id); if (linkedRoute) { linkedRoute.purchaseOrderId = po.id; linkedRoute.purchaseOrderNumber = po.poNumber; linkedRoute.purchaseGroupId = purchaseGroupId; linkedRoute.status = "buyer_review"; linkedRoute.updatedAt = po.updatedAt; } }
     for (const order of group.orders) { order.purchaseGroupId = purchaseGroupId; order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), po.id])]; order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), po.poNumber])]; recalculateOrderOperationalStatus(order); addOrderWorkflowEvent(order, { step: "purchase_order_created", title: "Purchase order created", message: `${po.poNumber} created for ${po.supplier}.`, user: options.user || "System" }); }
@@ -9144,6 +9146,7 @@ function normalizeVendor(db, vendor) {
     purchaseOrderRules: {
       autoCreateDrafts: Boolean(vendor.purchaseOrderRules?.autoCreateDrafts),
       requireBuyerApproval: vendor.purchaseOrderRules?.requireBuyerApproval !== false,
+      approvalThreshold: Math.max(0, Number(vendor.purchaseOrderRules?.approvalThreshold || 0)),
       defaultWarehouseId: vendor.purchaseOrderRules?.defaultWarehouseId || "",
       defaultWarehouseName: (db.warehouses || []).find((warehouse) => warehouse.id === vendor.purchaseOrderRules?.defaultWarehouseId)?.name || "",
       note: vendor.purchaseOrderRules?.note || ""
@@ -21599,6 +21602,7 @@ async function handleApi(req, res) {
     const action = String(body.action || "").toLowerCase();
     const nextStatus = {
       approve: "approved",
+      reject: "rejected",
       hold: "hold",
       cancel: "canceled",
       void: "void",
@@ -23367,8 +23371,9 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "defaultWarehouseId", "note"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "approvalThreshold", "defaultWarehouseId", "note"]);
     const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval"]);
+    const numericPurchaseOrderRuleFields = new Set(["approvalThreshold"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
@@ -23443,7 +23448,7 @@ async function handleApi(req, res) {
         const key = field.split(".")[1];
         if (!purchaseOrderRuleFields.has(key)) continue;
         vendor.purchaseOrderRules = vendor.purchaseOrderRules || {};
-        const value = booleanPurchaseOrderRuleFields.has(key) ? Boolean(rawValue) : String(rawValue ?? "");
+        const value = booleanPurchaseOrderRuleFields.has(key) ? Boolean(rawValue) : numericPurchaseOrderRuleFields.has(key) ? Math.max(0, Number(rawValue || 0)) : String(rawValue ?? "");
         if (vendor.purchaseOrderRules[key] !== value) {
           changes.push(`${field} changed`);
           vendor.purchaseOrderRules[key] = value;
