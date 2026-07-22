@@ -21603,6 +21603,7 @@ async function handleApi(req, res) {
     const nextStatus = {
       approve: "approved",
       reject: "rejected",
+      reject: "rejected",
       hold: "hold",
       cancel: "canceled",
       void: "void",
@@ -21824,7 +21825,7 @@ async function handleApi(req, res) {
     addPoTimeline(po, {
       type: "status",
       title: `PO ${nextStatus}`,
-      message: action === "acknowledge" ? `Supplier acknowledged the PO${po.expectedAt ? `; expected ${po.expectedAt}` : ""}.` : `Status changed from ${previousStatus} to ${nextStatus}.`,
+      message: action === "acknowledge" ? `Supplier acknowledged the PO${po.expectedAt ? `; expected ${po.expectedAt}` : ""}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${nextStatus}.` : `Status changed from ${previousStatus} to ${nextStatus}.`,
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po);
