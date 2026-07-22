@@ -21304,6 +21304,52 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { pickList, line, message: `${route.sku || "Line"} marked picked.` });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "pick-lists" && parts[3] && parts[4] === "quotes" && postgres.isPostgresEnabled()) {
+    const pickLists = await postgres.readStateField("fulfillmentPickLists").catch(() => []) || [];
+    const pickList = pickLists.find((row) => String(row.id) === String(parts[3]));
+    if (!pickList) return notFound(res);
+    const lines = Array.isArray(pickList.lines) ? pickList.lines : [];
+    if (!lines.length || lines.some((line) => String(line.status) !== "picked")) return sendJson(res, 400, { error: "Every pick-list line must be marked picked before calculating shipping quotes." });
+    const orderIds = [...new Set(lines.map((line) => String(line.orderId)).filter(Boolean))];
+    const results = [];
+    for (const orderId of orderIds) {
+      const order = await postgres.readOrderByKey(orderId);
+      if (!order) { results.push({ orderId, ok: false, error: "Order was not found." }); continue; }
+      if (String(order.source || "").toLowerCase() !== "shopify") { results.push({ orderId, orderNumber: order.orderNumber, ok: false, error: "Shipping quotes are currently available for Shopify orders only." }); continue; }
+      try {
+        const selectedLines = lines.filter((line) => String(line.orderId) === orderId).map((line) => ({ sku: line.sku, qty: Number(line.qty || 0) }));
+        const quote = await quoteShopifyOrderShipping(order, selectedLines);
+        order.shippingQuotes = Array.isArray(order.shippingQuotes) ? order.shippingQuotes : [];
+        order.shippingQuotes.unshift(quote);
+        order.shippingQuotes = order.shippingQuotes.slice(0, 20);
+        order.updatedAt = new Date().toISOString();
+        addOrderTimeline(order, { type: "shipping_quote", title: "Pick-list shipping quotes calculated", message: `${quote.options.length} delivery option${quote.options.length === 1 ? "" : "s"} returned for ${pickList.pickListNumber}.`, user: "Shopify" });
+        await postgres.saveOrder(order); clearOrderApiCache(order.id);
+        results.push({ orderId, orderNumber: order.orderNumber, ok: true, optionCount: quote.options.length, options: quote.options });
+      } catch (error) {
+        results.push({ orderId, orderNumber: order.orderNumber, ok: false, error: error.message || "Shopify could not calculate quotes." });
+      }
+    }
+    pickList.status = "packing";
+    pickList.quoteCheckedAt = new Date().toISOString();
+    pickList.updatedAt = pickList.quoteCheckedAt;
+    await postgres.writeStateDocuments({ fulfillmentPickLists: pickLists.slice(0, 500) });
+    return sendJson(res, 200, { pickList, results, message: `Quotes checked for ${results.length} order${results.length === 1 ? "" : "s"}.` });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "pick-lists" && parts[3] && parts[4] === "labels" && postgres.isPostgresEnabled()) {
+    const pickLists = await postgres.readStateField("fulfillmentPickLists").catch(() => []) || [];
+    const pickList = pickLists.find((row) => String(row.id) === String(parts[3]));
+    if (!pickList) return notFound(res);
+    const rows = [];
+    for (const orderId of [...new Set((pickList.lines || []).map((line) => String(line.orderId)).filter(Boolean))]) {
+      const order = await postgres.readOrderByKey(orderId);
+      for (const purchase of order?.shippingLabelPurchases || []) for (const label of purchase.labels || []) for (const document of label.documents || []) rows.push({ orderNumber: order.orderNumber || order.id, carrier: label.tracking?.company || "Shopify Shipping", tracking: label.tracking?.number || "Pending", url: document.url || "" });
+    }
+    const htmlRows = rows.map((row) => `<tr><td>${escapeHtml(row.orderNumber)}</td><td>${escapeHtml(row.carrier)}</td><td>${escapeHtml(row.tracking)}</td><td>${row.url ? `<a href="${escapeHtml(row.url)}" target="_blank">Open label</a>` : "Pending"}</td></tr>`).join("");
+    return sendHtml(res, 200, `<!doctype html><html><head><title>${escapeHtml(pickList.pickListNumber)} labels</title><style>body{font-family:Arial,sans-serif;margin:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #bbb;padding:8px;text-align:left}th{background:#eee}</style></head><body><h1>${escapeHtml(pickList.pickListNumber)} label documents</h1><p>Open each Shopify label in a new tab, then print at its carrier-provided size.</p><table><thead><tr><th>Order</th><th>Carrier</th><th>Tracking</th><th>Label</th></tr></thead><tbody>${htmlRows || '<tr><td colspan="4">No purchased labels are attached to this pick list yet.</td></tr>'}</tbody></table></body></html>`);
+  }
+
   if (req.method === "GET" && url.pathname === "/api/fulfillment/pick-list" && postgres.isPostgresEnabled()) {
     const requestedStatus = String(url.searchParams.get("status") || "ready_to_ship").toLowerCase();
     const pickListId = String(url.searchParams.get("pickListId") || "");

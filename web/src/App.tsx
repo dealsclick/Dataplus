@@ -4014,6 +4014,55 @@ function FulfillmentPage() {
 
 function PickListPanel({ onChanged }: { onChanged: () => Promise<void> }) {
   const [pickLists, setPickLists] = useState<Array<Record<string, unknown>>>([])
+  const [activePickList, setActivePickList] = useState<Record<string, unknown> | null>(null)
+  const [quoteResults, setQuoteResults] = useState<Array<Record<string, unknown>>>([])
+  const [busyId, setBusyId] = useState("")
+  const load = async () => {
+    try {
+      const result = await api<{ pickLists?: Array<Record<string, unknown>> }>("/api/fulfillment/pick-lists")
+      setPickLists(result.pickLists || [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load pick lists.")
+    }
+  }
+  useEffect(() => { void load() }, [])
+  const markAllPicked = async (pickList: Record<string, unknown>) => {
+    const lines = Array.isArray(pickList.lines) ? pickList.lines as Array<Record<string, unknown>> : []
+    const openLines = lines.filter((line) => String(line.status) !== "picked")
+    if (!openLines.length) return
+    setBusyId(String(pickList.id))
+    try {
+      await Promise.all(openLines.map((line) => api(`/api/fulfillment/pick-lists/${encodeURIComponent(String(pickList.id))}/lines/${encodeURIComponent(String(line.routeId))}/picked`, { method: "POST" })))
+      toast.success(`${String(pickList.pickListNumber)} is fully picked.`)
+      await Promise.all([load(), onChanged()])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to mark pick-list lines picked.")
+    } finally {
+      setBusyId("")
+    }
+  }
+  const calculateQuotes = async () => {
+    if (!activePickList) return
+    setBusyId(String(activePickList.id))
+    try {
+      const result = await api<{ results?: Array<Record<string, unknown>>; pickList?: Record<string, unknown>; message?: string }>(`/api/fulfillment/pick-lists/${encodeURIComponent(String(activePickList.id))}/quotes`, { method: "POST" })
+      setQuoteResults(result.results || [])
+      if (result.pickList) setActivePickList(result.pickList)
+      toast.success(result.message || "Shipping quotes calculated.")
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to calculate pick-list quotes.")
+    } finally {
+      setBusyId("")
+    }
+  }
+  const active = pickLists.filter((row) => !["completed", "labels_purchased"].includes(String(row.status)))
+  if (!active.length) return null
+  return <><Card><CardHeader className="flex-row items-start justify-between gap-3"><div><CardTitle className="text-base">Active pick lists</CardTitle><CardDescription>Pick every line, then pack and calculate delivery options before any label is purchased.</CardDescription></div><Badge variant="outline">{numberLabel(active.length)} open</Badge></CardHeader><CardContent className="grid gap-2">{active.slice(0, 4).map((pickList) => { const lines = Array.isArray(pickList.lines) ? pickList.lines as Array<Record<string, unknown>> : []; const picked = lines.filter((line) => String(line.status) === "picked").length; const complete = lines.length > 0 && picked === lines.length; return <div key={String(pickList.id)} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"><div><div className="flex items-center gap-2"><p className="font-medium">{String(pickList.pickListNumber || "Pick list")}</p><Badge variant={complete ? "secondary" : "outline"}>{complete ? "Picked" : "Picking"}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{String(pickList.warehouseName || "Warehouse")} · {numberLabel(picked)} of {numberLabel(lines.length)} lines picked</p></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => window.open(`/api/fulfillment/pick-list?pickListId=${encodeURIComponent(String(pickList.id))}`, "_blank", "noopener,noreferrer")}>Print pick list</Button>{!complete && <Button size="sm" disabled={busyId === String(pickList.id)} onClick={() => void markAllPicked(pickList)}>{busyId === String(pickList.id) && <Loader2 className="size-4 animate-spin" />} Mark all picked</Button>}{complete && <Button size="sm" onClick={() => { setQuoteResults([]); setActivePickList(pickList) }}>Pack & labels</Button>}</div></div>})}</CardContent></Card><Dialog open={Boolean(activePickList)} onOpenChange={(open) => !open && setActivePickList(null)}><DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl"><DialogHeader><DialogTitle>Pack & labels: {String(activePickList?.pickListNumber || "Pick list")}</DialogTitle><DialogDescription>All lines are picked. Calculate quotes for each order, choose the carrier service in the order record, then purchase and print its Shopify label.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="flex flex-wrap gap-2"><Button disabled={busyId === String(activePickList?.id)} onClick={() => void calculateQuotes()}>{busyId === String(activePickList?.id) && <Loader2 className="size-4 animate-spin" />} Get shipping quotes</Button><Button variant="outline" onClick={() => activePickList && window.open(`/api/fulfillment/pick-lists/${encodeURIComponent(String(activePickList.id))}/labels`, "_blank", "noopener,noreferrer")}>Open label documents</Button></div><div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Line items</TableHead><TableHead>Quote result</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{[...new Set((Array.isArray(activePickList?.lines) ? activePickList?.lines as Array<Record<string, unknown>> : []).map((line) => String(line.orderId)))].map((orderId) => { const lines = (activePickList?.lines as Array<Record<string, unknown>> || []).filter((line) => String(line.orderId) === orderId); const result = quoteResults.find((entry) => String(entry.orderId) === orderId); return <TableRow key={orderId}><TableCell className="font-medium">{String(lines[0]?.orderNumber || orderId)}</TableCell><TableCell>{lines.map((line) => `${String(line.sku || "Item")} × ${numberLabel(Number(line.qty || 0))}`).join(", ")}</TableCell><TableCell>{result ? result.ok ? `${numberLabel(Number(result.optionCount || 0))} options` : String(result.error || "Quote unavailable") : "Not calculated"}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(orderId)}`}>Choose service / buy label</a></Button></TableCell></TableRow> })}</TableBody></Table></div></div><DialogFooter><Button variant="outline" onClick={() => setActivePickList(null)}>Close</Button></DialogFooter></DialogContent></Dialog></>
+}
+
+function LegacyPickListPanel({ onChanged }: { onChanged: () => Promise<void> }) {
+  const [pickLists, setPickLists] = useState<Array<Record<string, unknown>>>([])
   const [busyId, setBusyId] = useState("")
   const load = async () => {
     try {
@@ -4061,6 +4110,7 @@ function LegacyFulfillmentPage() {
   return <div className="grid gap-5"><PageHeader eyebrow="Warehouse operations" title="Fulfillment" description="Warehouse work released from paid and routed customer-order lines." action={<div className="flex gap-2"><Button size="sm" disabled={busy || selectedRouteIds.size === 0} onClick={() => void createBatch()}>Create batch ({selectedRouteIds.size})</Button><Button size="sm" variant="outline" onClick={() => window.open(`/api/fulfillment/pick-list?status=${encodeURIComponent(status === "all" ? "ready_to_ship" : status)}`, "_blank", "noopener,noreferrer")}>Print pick list</Button><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} /><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><Detail label="Open work" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready to ship" value={numberLabel(rows.filter((row) => row.status === "ready_to_ship").length)} /><Detail label="Missing data" value={numberLabel(rows.filter((row) => !row.warehouseId || !row.sku).length)} /><Detail label="Picking" value={numberLabel(rows.filter((row) => row.status === "picking").length)} /><Detail label="Shipped" value={numberLabel(rows.filter((row) => row.status === "shipped").length)} /></div><div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "All work" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div><Card><CardHeader className="border-b"><div className="relative max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, SKU, warehouse, or carrier" /></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible fulfillment work" checked={shown.length > 0 && shown.every((row) => selectedRouteIds.has(String(row.id)))} onCheckedChange={(checked) => setSelectedRouteIds(checked === true ? new Set(shown.map((row) => String(row.id))) : new Set())} /></TableHead><TableHead>Order / customer</TableHead><TableHead>SKU / quantity</TableHead><TableHead>Warehouse</TableHead><TableHead>Package</TableHead><TableHead>Ship by</TableHead><TableHead>Stage</TableHead><TableHead>Action</TableHead></TableRow></TableHeader><TableBody>{shown.map((row) => { const next = nextStage(String(row.status)); return <TableRow key={String(row.id)}><TableCell><Checkbox aria-label={`Select ${String(row.orderNumber || row.orderId)}`} checked={selectedRouteIds.has(String(row.id))} onCheckedChange={(checked) => setSelectedRouteIds((current) => { const next = new Set(current); if (checked === true) next.add(String(row.id)); else next.delete(String(row.id)); return next })} /></TableCell><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="text-xs text-muted-foreground">{String(row.customer || "Customer")}</p></TableCell><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(row.sku || ""))}`}>{String(row.sku || "Missing SKU")}</a><p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell>{String(row.warehouseName || "Unassigned")}</TableCell><TableCell>{(() => { const readiness = (row.labelReadiness || {}) as Record<string, unknown>; const blockers = Array.isArray(readiness.blockers) ? readiness.blockers as string[] : []; return <div className={readiness.ready ? "" : "rounded border border-destructive/50 bg-destructive/5 p-1.5"}><p className={readiness.ready ? "text-xs" : "text-xs font-medium text-destructive"}>{readiness.ready ? `${String(readiness.weight || 0)} lb · ${String(readiness.length || 0)} × ${String(readiness.width || 0)} × ${String(readiness.height || 0)} in` : blockers[0] || "Needs package data"}</p>{!readiness.ready && <p className="text-xs text-muted-foreground">Label blocked</p>}</div> })()}</TableCell><TableCell>{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant={row.status === "exception" ? "destructive" : row.status === "ready_to_ship" ? "secondary" : "outline"}>{String(row.status || "new").replace(/_/g, " ")}</Badge></TableCell><TableCell>{next ? <Button size="sm" disabled={busy} onClick={() => void advance(row, next)}>Mark {next.replace(/_/g, " ")}</Button> : <Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}>Open order</a></Button>}</TableCell></TableRow>})}{!shown.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No fulfillment work matches this view.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></div>
 }
 
+void LegacyPickListPanel
 void LegacyFulfillmentPage
 
 function PurchasingPage() {
