@@ -8707,7 +8707,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
     });
     for (const route of routes) {
       const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName) || findVendorByName(db, options.supplier);
-      const warehouse = (db.warehouses || []).find((row) => row.id === route.warehouseId || row.id === options.warehouseId) || (db.warehouses || [])[0] || null;
+      const warehouse = (db.warehouses || []).find((row) => row.id === route.warehouseId || row.id === options.warehouseId || row.id === vendor?.purchaseOrderRules?.defaultWarehouseId) || (db.warehouses || [])[0] || null;
       const key = `${vendor?.id || route.vendorName || "unassigned"}:${warehouse?.id || ""}`;
       const group = groups.get(key) || { vendor, warehouse, routes: [], orders: [] };
       group.routes.push({ ...route, order }); if (!group.orders.includes(order)) group.orders.push(order); groups.set(key, group);
