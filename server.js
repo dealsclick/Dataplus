@@ -9116,6 +9116,7 @@ function normalizeVendor(db, vendor) {
       autoCreateDrafts: Boolean(vendor.purchaseOrderRules?.autoCreateDrafts),
       requireBuyerApproval: vendor.purchaseOrderRules?.requireBuyerApproval !== false,
       defaultWarehouseId: vendor.purchaseOrderRules?.defaultWarehouseId || "",
+      defaultWarehouseName: (db.warehouses || []).find((warehouse) => warehouse.id === vendor.purchaseOrderRules?.defaultWarehouseId)?.name || "",
       note: vendor.purchaseOrderRules?.note || ""
     },
     channelRules: {
@@ -21744,16 +21745,26 @@ async function handleApi(req, res) {
       cancel: "canceled",
       received: "received",
       close: "closed",
-      reopen: "draft"
+      reopen: "draft",
+      acknowledge: "vendor_confirmed"
     }[action];
     if (!nextStatus) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
     po.status = nextStatus;
+    if (action === "acknowledge") {
+      po.vendorAcknowledgement = {
+        acknowledgedAt: new Date().toISOString(),
+        expectedAt: String(body.expectedAt || po.expectedAt || "").trim(),
+        note: String(body.note || "").trim(),
+        user: body.user || "Luis"
+      };
+      if (po.vendorAcknowledgement.expectedAt) po.expectedAt = po.vendorAcknowledgement.expectedAt;
+    }
     po.updatedAt = new Date().toISOString();
     addPoTimeline(po, {
       type: "status",
       title: `PO ${nextStatus}`,
-      message: `Status changed from ${previousStatus} to ${nextStatus}.`,
+      message: action === "acknowledge" ? `Supplier acknowledged the PO${po.expectedAt ? `; expected ${po.expectedAt}` : ""}.` : `Status changed from ${previousStatus} to ${nextStatus}.`,
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po);
