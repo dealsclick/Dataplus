@@ -21244,6 +21244,16 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/pick-list" && postgres.isPostgresEnabled()) {
+    const requestedStatus = String(url.searchParams.get("status") || "ready_to_ship").toLowerCase();
+    const orders = await postgres.listOrders({ limit: 5000 });
+    const rows = orders.flatMap((order) => (order.fulfillmentRoutes || [])
+      .filter((route) => route.type === "warehouse" && String(route.status || "").toLowerCase() === requestedStatus)
+      .map((route) => ({ orderNumber: order.orderNumber || order.id, customer: order.buyer || order.customerName || "", sku: route.sku || "", title: route.title || "", qty: Number(route.qty || 0), warehouse: route.warehouseName || "Unassigned", bin: route.locationBin || "", shipBy: order.shipBy || "" })));
+    const htmlRows = rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.warehouse)}</td><td>${escapeHtml(row.bin)}</td><td>${escapeHtml(row.sku)}</td><td>${escapeHtml(row.title)}</td><td>${row.qty}</td><td>${escapeHtml(row.orderNumber)}</td><td>${escapeHtml(row.customer)}</td><td>${escapeHtml(row.shipBy)}</td><td class="check"></td></tr>`).join("");
+    return sendHtml(res, 200, `<!doctype html><html><head><title>DataPlus pick list</title><style>body{font-family:Arial,sans-serif;margin:32px;color:#111}h1{margin:0 0 4px}p{color:#555;margin:0 0 20px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:8px;text-align:left;vertical-align:top}th{background:#eee}.check{width:34px;height:24px}@media print{body{margin:12px}}</style></head><body><h1>Warehouse pick list</h1><p>Queue: ${escapeHtml(requestedStatus.replace(/_/g, " "))} · ${rows.length} line${rows.length === 1 ? "" : "s"} · Generated ${escapeHtml(new Date().toLocaleString())}</p><table><thead><tr><th>#</th><th>Warehouse</th><th>Bin</th><th>SKU</th><th>Item</th><th>Qty</th><th>Order</th><th>Customer</th><th>Ship by</th><th>Picked</th></tr></thead><tbody>${htmlRows || '<tr><td colspan="10">No work in this queue.</td></tr>'}</tbody></table></body></html>`);
+  }
+
   if (req.method === "GET" && url.pathname === "/api/purchasing/work" && postgres.isPostgresEnabled()) {
     const [orders, purchaseOrders] = await Promise.all([postgres.listOrders({ limit: 5000 }), postgres.listPurchaseOrders({ limit: 5000 })]);
     const requirements = orders.flatMap((order) => (order.fulfillmentRoutes || []).filter((route) => route.type === "purchase" || route.type === "drop_ship").map((route) => ({ ...route, orderId: order.id, orderNumber: order.orderNumber, customer: order.buyer || "", shipBy: order.shipBy || "", operationalStatus: order.operationalStatus || "" })));
