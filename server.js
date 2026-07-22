@@ -21706,6 +21706,27 @@ async function handleApi(req, res) {
         user: body.user || "Luis"
       });
     }
+    if (body.notes !== undefined) {
+      po.notes = String(body.notes || "").trim();
+      addPoTimeline(po, { type: "edited", title: "PO notes updated", message: "Buyer notes were updated.", user: body.user || "Luis" });
+    }
+    if (body.expectedAt !== undefined) {
+      po.expectedAt = String(body.expectedAt || "").trim();
+      addPoTimeline(po, { type: "edited", title: "Expected date updated", message: po.expectedAt ? `Expected on ${po.expectedAt}.` : "Expected date cleared.", user: body.user || "Luis" });
+    }
+    if (Array.isArray(body.items)) {
+      if (!["draft", "hold", "awaiting_approval"].includes(String(po.status || "draft").toLowerCase())) return sendJson(res, 400, { error: "PO lines can only be edited before submission." });
+      const bySku = new Map((po.items || []).map((line) => [String(line.sku || "").toLowerCase(), line]));
+      for (const item of body.items) {
+        const line = bySku.get(String(item.sku || "").toLowerCase());
+        const qty = Number(item.qty || 0);
+        if (!line || !Number.isFinite(qty) || qty < Number(line.receivedQty || 0)) continue;
+        line.qty = qty;
+        line.remainingQty = Math.max(0, qty - Number(line.receivedQty || 0));
+      }
+      po.totalUnits = (po.items || []).reduce((sum, line) => sum + Number(line.qty || 0), 0);
+      addPoTimeline(po, { type: "edited", title: "PO quantities updated", message: "Buyer updated unreceived PO quantities.", user: body.user || "Luis" });
+    }
     po.updatedAt = new Date().toISOString();
     await postgres.savePurchaseOrder(po);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
