@@ -793,6 +793,14 @@ const DEFAULT_SYSTEM_SETTINGS = {
   shopifyDailyInventoryUpdateMode: "dry-run",
   shopifyDailyInventoryRequireSuccessfulDump: true,
   requireAdminConfirmationForDeletes: true,
+  smtpEnabled: false,
+  smtpHost: "",
+  smtpPort: 587,
+  smtpSecure: false,
+  smtpUsername: "",
+  smtpPassword: "",
+  smtpFromName: "DataPlus",
+  smtpFromEmail: "",
   systemUsers: [
     { id: "owner", name: "Luis", email: "", role: "Owner", status: "active" }
   ],
@@ -4167,6 +4175,14 @@ function normalizeSystemSettings(settings = {}) {
   normalized.backupRetentionDays = Math.max(1, Math.min(365, Number(normalized.backupRetentionDays || 30) || 30));
   normalized.jobsRetentionDays = IMPORT_JOB_FILE_RETENTION_DAYS;
   normalized.jobsRetentionAutoCleanupEnabled = normalized.jobsRetentionAutoCleanupEnabled !== false;
+  normalized.smtpEnabled = normalized.smtpEnabled === true || String(normalized.smtpEnabled).toLowerCase() === "true";
+  normalized.smtpHost = String(normalized.smtpHost || "").trim();
+  normalized.smtpPort = Math.max(1, Math.min(65535, Number(normalized.smtpPort || 587) || 587));
+  normalized.smtpSecure = normalized.smtpSecure === true || String(normalized.smtpSecure).toLowerCase() === "true";
+  normalized.smtpUsername = String(normalized.smtpUsername || "").trim();
+  normalized.smtpPassword = String(normalized.smtpPassword || "");
+  normalized.smtpFromName = String(normalized.smtpFromName || "DataPlus").trim();
+  normalized.smtpFromEmail = String(normalized.smtpFromEmail || "").trim();
   normalized.systemUsers = (Array.isArray(normalized.systemUsers) ? normalized.systemUsers : DEFAULT_SYSTEM_SETTINGS.systemUsers)
     .map((user, index) => ({
       id: String(user.id || crypto.randomUUID?.() || `user-${index + 1}`),

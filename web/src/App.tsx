@@ -5010,6 +5010,7 @@ function SettingsPage({
           <TabsTrigger value="worker">Worker</TabsTrigger>
           <TabsTrigger value="backups">Backups</TabsTrigger>
           <TabsTrigger value="catalog">Catalog</TabsTrigger>
+          <TabsTrigger value="email">Email</TabsTrigger>
           <TabsTrigger value="users">Users</TabsTrigger>
         </TabsList>
         <TabsContent value="operations">
@@ -5037,6 +5038,7 @@ function SettingsPage({
             </CardContent>
           </Card>
         </TabsContent>
+        <TabsContent value="email"><Card><CardHeader><CardTitle className="text-base">SMTP delivery</CardTitle><CardDescription>Configure the outbound email transport used for supplier PO reminders. Credentials are stored in system settings and never displayed after save.</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><ToggleField label="Enable SMTP delivery" checked={boolValue("smtpEnabled")} disabled={!editing} onCheckedChange={(next) => update("smtpEnabled", next)} /><ToggleField label="Use TLS / SSL" checked={boolValue("smtpSecure")} disabled={!editing} onCheckedChange={(next) => update("smtpSecure", next)} /><Field label="SMTP host"><Input disabled={!editing} value={String(value("smtpHost") || "")} onChange={(event) => update("smtpHost", event.target.value)} placeholder="smtp.example.com" /></Field><Field label="SMTP port"><Input disabled={!editing} type="number" value={String(value("smtpPort") || 587)} onChange={(event) => update("smtpPort", Number(event.target.value || 587))} /></Field><Field label="Username"><Input disabled={!editing} value={String(value("smtpUsername") || "")} onChange={(event) => update("smtpUsername", event.target.value)} /></Field><Field label="Password"><Input disabled={!editing} type="password" value={String(draft.smtpPassword || "")} onChange={(event) => update("smtpPassword", event.target.value)} placeholder={settings.smtpPassword ? "Configured (enter only to replace)" : "SMTP password or app password"} /></Field><Field label="Sender name"><Input disabled={!editing} value={String(value("smtpFromName") || "DataPlus")} onChange={(event) => update("smtpFromName", event.target.value)} /></Field><Field label="Sender email"><Input disabled={!editing} type="email" value={String(value("smtpFromEmail") || "")} onChange={(event) => update("smtpFromEmail", event.target.value)} placeholder="purchasing@yourcompany.com" /></Field></CardContent></Card></TabsContent>
         <TabsContent value="worker">
           <Card>
             <CardHeader>
