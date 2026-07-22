@@ -21808,6 +21808,7 @@ async function handleApi(req, res) {
     const action = String(body.action || "").toLowerCase();
     const nextStatus = {
       approve: "approved",
+      reject: "rejected",
       hold: "hold",
       cancel: "canceled",
       received: "received",
