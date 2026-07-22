@@ -8718,8 +8718,11 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   const created = [];
   for (const group of groups.values()) {
     const estimatedCost = group.routes.reduce((sum, route) => sum + Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0) * Number(route.qty || 0), 0);
-    const approvalRequired = group.vendor?.purchaseOrderRules?.requireBuyerApproval !== false && estimatedCost >= Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0));
-    const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: approvalRequired ? "awaiting_approval" : "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), estimatedCost, approval: { required: approvalRequired, threshold: Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)), status: approvalRequired ? "awaiting_approval" : "not_required" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
+    const budgetLimit = Math.max(0, Number(group.vendor?.purchaseOrderRules?.budgetLimit || 0));
+    const openCommitment = (db.purchaseOrders || []).filter((existing) => String(existing.vendorId || "") === String(group.vendor?.id || "") && !["received", "closed", "canceled", "rejected"].includes(String(existing.status || "").toLowerCase())).reduce((sum, existing) => sum + Number(existing.estimatedCost || 0), 0);
+    const budgetExceeded = budgetLimit > 0 && openCommitment + estimatedCost > budgetLimit;
+    const approvalRequired = budgetExceeded || (group.vendor?.purchaseOrderRules?.requireBuyerApproval !== false && estimatedCost >= Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)));
+    const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: approvalRequired ? "awaiting_approval" : "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), estimatedCost, approval: { required: approvalRequired, threshold: Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)), budgetLimit, budgetExceeded, status: approvalRequired ? "awaiting_approval" : "not_required" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
     db.purchaseOrders = db.purchaseOrders || []; db.purchaseOrders.unshift(po); created.push(po);
     for (const route of group.routes) { const linkedRoute = (route.order.fulfillmentRoutes || []).find((candidate) => candidate.id === route.id); if (linkedRoute) { linkedRoute.purchaseOrderId = po.id; linkedRoute.purchaseOrderNumber = po.poNumber; linkedRoute.purchaseGroupId = purchaseGroupId; linkedRoute.status = "buyer_review"; linkedRoute.updatedAt = po.updatedAt; } }
     for (const order of group.orders) { order.purchaseGroupId = purchaseGroupId; order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), po.id])]; order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), po.poNumber])]; recalculateOrderOperationalStatus(order); addOrderWorkflowEvent(order, { step: "purchase_order_created", title: "Purchase order created", message: `${po.poNumber} created for ${po.supplier}.`, user: options.user || "System" }); }
@@ -9147,6 +9150,10 @@ function normalizeVendor(db, vendor) {
       autoCreateDrafts: Boolean(vendor.purchaseOrderRules?.autoCreateDrafts),
       requireBuyerApproval: vendor.purchaseOrderRules?.requireBuyerApproval !== false,
       approvalThreshold: Math.max(0, Number(vendor.purchaseOrderRules?.approvalThreshold || 0)),
+      budgetLimit: Math.max(0, Number(vendor.purchaseOrderRules?.budgetLimit || 0)),
+      overdueReminderEnabled: Boolean(vendor.purchaseOrderRules?.overdueReminderEnabled),
+      overdueReminderSubject: vendor.purchaseOrderRules?.overdueReminderSubject || "Action needed: overdue PO {{poNumber}}",
+      overdueReminderBody: vendor.purchaseOrderRules?.overdueReminderBody || "Hello {{supplier}},\n\nPurchase order {{poNumber}} was expected on {{expectedAt}}. Please confirm its current status and expected ship date.\n\nThank you.",
       defaultWarehouseId: vendor.purchaseOrderRules?.defaultWarehouseId || "",
       defaultWarehouseName: (db.warehouses || []).find((warehouse) => warehouse.id === vendor.purchaseOrderRules?.defaultWarehouseId)?.name || "",
       note: vendor.purchaseOrderRules?.note || ""
@@ -23384,9 +23391,9 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "approvalThreshold", "defaultWarehouseId", "note"]);
-    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval"]);
-    const numericPurchaseOrderRuleFields = new Set(["approvalThreshold"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "defaultWarehouseId", "note"]);
+    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "overdueReminderEnabled"]);
+    const numericPurchaseOrderRuleFields = new Set(["approvalThreshold", "budgetLimit"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
