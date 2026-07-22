@@ -21714,6 +21714,24 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { purchaseOrder: po, linkedOrders: linkedOrders.filter(Boolean) });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "documents" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const url = String(body.url || "").trim();
+    const name = String(body.name || "").trim();
+    if (!url || !/^https?:\/\//i.test(url)) return sendJson(res, 400, { error: "A valid document URL is required." });
+    if (!name) return sendJson(res, 400, { error: "A document name is required." });
+    po.documents = Array.isArray(po.documents) ? po.documents : [];
+    const document = { id: crypto.randomUUID(), name, url, type: String(body.type || "supplier_document").trim(), note: String(body.note || "").trim(), createdAt: new Date().toISOString(), createdBy: body.user || "Luis" };
+    po.documents.unshift(document);
+    po.timeline = Array.isArray(po.timeline) ? po.timeline : [];
+    po.timeline.unshift({ id: crypto.randomUUID(), type: "document", title: "Document linked", message: `${document.name} was linked to this PO.`, user: document.createdBy, createdAt: document.createdAt });
+    po.updatedAt = document.createdAt;
+    await postgres.savePurchaseOrder(po);
+    return sendJson(res, 201, { purchaseOrder: po, document, message: "PO document linked." });
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
