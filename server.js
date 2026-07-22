@@ -8699,7 +8699,12 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   if (!orders.length) throw new Error("No matching orders found for purchase order.");
   const groups = new Map();
   for (const order of orders) {
-    const routes = (order.fulfillmentRoutes || []).filter((route) => route.type === "purchase" && !route.purchaseOrderId && !["canceled", "received", "closed"].includes(String(route.status || "").toLowerCase()));
+    const routes = (order.fulfillmentRoutes || []).filter((route) => {
+      if (route.type !== "purchase" || route.purchaseOrderId || ["canceled", "received", "closed"].includes(String(route.status || "").toLowerCase())) return false;
+      if (!Array.isArray(options.vendorIds) || !options.vendorIds.length) return true;
+      const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName);
+      return options.vendorIds.includes(vendor?.id || route.vendorId);
+    });
     for (const route of routes) {
       const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName) || findVendorByName(db, options.supplier);
       const warehouse = (db.warehouses || []).find((row) => row.id === route.warehouseId || row.id === options.warehouseId) || (db.warehouses || [])[0] || null;
@@ -9106,6 +9111,12 @@ function normalizeVendor(db, vendor) {
       emailSubjectTemplate: vendor.submissionSettings?.emailSubjectTemplate || "Purchase order {{poNumber}}",
       attachCsv: vendor.submissionSettings?.attachCsv !== false,
       attachPdf: vendor.submissionSettings?.attachPdf !== false
+    },
+    purchaseOrderRules: {
+      autoCreateDrafts: Boolean(vendor.purchaseOrderRules?.autoCreateDrafts),
+      requireBuyerApproval: vendor.purchaseOrderRules?.requireBuyerApproval !== false,
+      defaultWarehouseId: vendor.purchaseOrderRules?.defaultWarehouseId || "",
+      note: vendor.purchaseOrderRules?.note || ""
     },
     channelRules: {
       ...existingChannelRules,
@@ -14907,7 +14918,17 @@ async function routeOrderForFulfillment(db, order, body = {}) {
   }
   recalculateOrderOperationalStatus(order);
   if (created.length) addOrderWorkflowEvent(order, { step: "route_fulfillment", title: "Fulfillment routed", message: `${created.length} line-level fulfillment route${created.length === 1 ? "" : "s"} created.`, user: body.user || "System" });
-  return { routes: created, touchedProducts, skipped: false };
+  const autoVendorIds = [...new Set(created.filter((route) => route.type === "purchase").map((route) => {
+    const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName);
+    return vendor?.purchaseOrderRules?.autoCreateDrafts === true ? vendor.id : "";
+  }).filter(Boolean))];
+  let autoPurchaseOrders = [];
+  if (autoVendorIds.length) {
+    db.orders = [...(db.orders || []).filter((row) => row.id !== order.id), order];
+    const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { vendorIds: autoVendorIds, user: "Auto PO" });
+    autoPurchaseOrders = result.purchaseOrders;
+  }
+  return { routes: created, touchedProducts, autoPurchaseOrders, skipped: false };
 }
 
 function orderShipmentSummary(order = {}) {
@@ -21404,6 +21425,8 @@ async function handleApi(req, res) {
     const result = await routeOrderForFulfillment(db, order, body);
     const products = [...new Map((result.touchedProducts || []).map((product) => [product.id, product])).values()];
     if (products.length) { await postgres.upsertProductsFromState(products); await postgres.upsertInventoryLevelsFromProducts(products); await postgres.writeStateField("inventoryLedger", db.inventoryLedger); }
+    for (const po of result.autoPurchaseOrders || []) await postgres.savePurchaseOrder(po);
+    if ((result.autoPurchaseOrders || []).length) await postgres.writeStateDocuments({ sequence: db.sequence || {} });
     order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order); clearOrderApiCache(order.id);
     return sendJson(res, 200, { order, routes: result.routes, message: result.skipped ? result.reason : `Routed ${result.routes.length} fulfillment assignment${result.routes.length === 1 ? "" : "s"}.` });
   }
@@ -21427,12 +21450,13 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "reroute" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req); const rows = await postgres.listOrders({ limit: Math.min(5000, Math.max(1, Number(body.limit || 5000))) });
     const db = await readDbFast({ skipInventory: true }); db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
-    const report = { scanned: 0, routed: 0, pendingPayment: 0, exceptions: 0, completed: 0, skipped: 0, orders: [] }; const touchedProducts = new Map();
+    const report = { scanned: 0, routed: 0, pendingPayment: 0, exceptions: 0, completed: 0, skipped: 0, orders: [] }; const touchedProducts = new Map(); const autoPurchaseOrders = new Map();
     for (const order of rows) {
       if (["canceled", "cancelled", "void", "deleted", "fulfilled"].includes(String(order.status || "").toLowerCase())) { recalculateOrderOperationalStatus(order); report.skipped += 1; continue; }
       report.scanned += 1;
       const result = await routeOrderForFulfillment(db, order, { user: body.user || "System", force: body.force === true });
       for (const product of result.touchedProducts || []) touchedProducts.set(product.id, product);
+      for (const po of result.autoPurchaseOrders || []) autoPurchaseOrders.set(po.id, po);
       recalculateOrderOperationalStatus(order);
       report.routed += result.routes.length; if (result.skipped) report.pendingPayment += 1;
       report.exceptions += (order.workflowExceptions || []).filter((entry) => entry.status !== "resolved").length;
@@ -21440,7 +21464,7 @@ async function handleApi(req, res) {
       report.orders.push({ id: order.id, orderNumber: order.orderNumber, status: order.operationalStatus, routes: result.routes.length, skipped: result.skipped || false });
       if (body.dryRun !== true) { order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order); clearOrderApiCache(order.id); }
     }
-    if (body.dryRun !== true) { if (touchedProducts.size) { await postgres.upsertProductsFromState([...touchedProducts.values()]); await postgres.upsertInventoryLevelsFromProducts([...touchedProducts.values()]); } await postgres.writeStateField("inventoryLedger", db.inventoryLedger); }
+    if (body.dryRun !== true) { if (touchedProducts.size) { await postgres.upsertProductsFromState([...touchedProducts.values()]); await postgres.upsertInventoryLevelsFromProducts([...touchedProducts.values()]); } for (const po of autoPurchaseOrders.values()) await postgres.savePurchaseOrder(po); if (autoPurchaseOrders.size) await postgres.writeStateDocuments({ sequence: db.sequence || {} }); await postgres.writeStateField("inventoryLedger", db.inventoryLedger); }
     return sendJson(res, 200, { report, message: `Workflow reroute evaluated ${report.scanned} active orders.` });
   }
 
@@ -23255,6 +23279,8 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "defaultWarehouseId", "note"]);
+    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
@@ -23322,6 +23348,17 @@ async function handleApi(req, res) {
         if (vendor.inventoryRules[key] !== value) {
           changes.push(`${field} changed`);
           vendor.inventoryRules[key] = value;
+        }
+        continue;
+      }
+      if (field.startsWith("purchaseOrderRules.")) {
+        const key = field.split(".")[1];
+        if (!purchaseOrderRuleFields.has(key)) continue;
+        vendor.purchaseOrderRules = vendor.purchaseOrderRules || {};
+        const value = booleanPurchaseOrderRuleFields.has(key) ? Boolean(rawValue) : String(rawValue ?? "");
+        if (vendor.purchaseOrderRules[key] !== value) {
+          changes.push(`${field} changed`);
+          vendor.purchaseOrderRules[key] = value;
         }
         continue;
       }
