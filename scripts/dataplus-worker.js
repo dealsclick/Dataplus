@@ -59,6 +59,7 @@ let lastHeartbeatAt = 0;
 let lastScheduleCheckAt = 0;
 let lastSkuMapScheduleCheckAt = 0;
 let lastOrderImportScheduleCheckAt = 0;
+let lastSupplierReminderScheduleCheckAt = 0;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -570,6 +571,35 @@ async function checkScheduledShopifyOrderImport(force = false) {
     dataplus.appendChannelApiLog({ channel: "Shopify", transport: "Scheduler", method: "IMPORT", path: "shopify-orders", operation: "Scheduled Shopify order reconciliation", statusCode: 502, ok: false, message: error.message || "Unable to reconcile Shopify orders." });
     await postgres.writeStateDocuments({ channelOrderImportSchedules: scheduleState });
     console.error(`[${WORKER_ID}] scheduled Shopify order reconciliation failed:`, error.message || error);
+    return false;
+  }
+}
+
+async function checkScheduledSupplierReminders(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastSupplierReminderScheduleCheckAt < 60000) return false;
+  lastSupplierReminderScheduleCheckAt = nowMs;
+  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const settings = dataplus.readSystemSettingsStore(docs.systemSettings || {});
+  if (!settings.smtpReminderScheduleEnabled) return false;
+  const now = new Date(nowMs);
+  const dueTime = scheduledMinutes(settings.smtpReminderScheduleTime || "08:00");
+  if (minutesSinceMidnight(now) < dueTime) return false;
+  const today = localDateKey(now);
+  const scheduleState = docs.supplierReminderSchedules && typeof docs.supplierReminderSchedules === "object" ? docs.supplierReminderSchedules : {};
+  if (scheduleState[today]?.lastRunDate === today) return false;
+  try {
+    const response = await fetch("http://dataplus:4173/api/purchase-orders/reminders/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dryRun: false, user: "System" }) });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "Unable to run supplier reminder schedule.");
+    scheduleState[today] = { lastRunDate: today, lastRunAt: new Date(nowMs).toISOString(), sent: Number(result.sent || 0), skipped: Array.isArray(result.skipped) ? result.skipped.length : 0, failed: Array.isArray(result.failed) ? result.failed.length : 0 };
+    await postgres.writeStateDocuments({ supplierReminderSchedules: scheduleState });
+    console.log(`[${WORKER_ID}] ran scheduled supplier reminders: ${scheduleState[today].sent} sent`);
+    return true;
+  } catch (error) {
+    scheduleState[today] = { lastAttemptedDate: today, lastAttemptedAt: new Date(nowMs).toISOString(), lastError: error.message || "Unable to run supplier reminder schedule." };
+    await postgres.writeStateDocuments({ supplierReminderSchedules: scheduleState });
+    console.error(`[${WORKER_ID}] scheduled supplier reminders failed:`, error.message || error);
     return false;
   }
 }
@@ -1231,6 +1261,7 @@ async function tick() {
   await checkScheduledShopifyInventoryUpdate();
   await checkScheduledShopifySkuPairAudit();
   await checkScheduledShopifyOrderImport();
+  await checkScheduledSupplierReminders();
   const job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS });
   if (!job) return false;
   await writeHeartbeat("running", job, true);

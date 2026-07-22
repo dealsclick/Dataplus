@@ -802,6 +802,8 @@ const DEFAULT_SYSTEM_SETTINGS = {
   smtpPassword: "",
   smtpFromName: "DataPlus",
   smtpFromEmail: "",
+  smtpReminderScheduleEnabled: false,
+  smtpReminderScheduleTime: "08:00",
   systemUsers: [
     { id: "owner", name: "Luis", email: "", role: "Owner", status: "active" }
   ],
@@ -4184,6 +4186,8 @@ function normalizeSystemSettings(settings = {}) {
   normalized.smtpPassword = String(normalized.smtpPassword || "");
   normalized.smtpFromName = String(normalized.smtpFromName || "DataPlus").trim();
   normalized.smtpFromEmail = String(normalized.smtpFromEmail || "").trim();
+  normalized.smtpReminderScheduleEnabled = normalized.smtpReminderScheduleEnabled === true || String(normalized.smtpReminderScheduleEnabled).toLowerCase() === "true";
+  normalized.smtpReminderScheduleTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(normalized.smtpReminderScheduleTime || "")) ? String(normalized.smtpReminderScheduleTime) : "08:00";
   normalized.systemUsers = (Array.isArray(normalized.systemUsers) ? normalized.systemUsers : DEFAULT_SYSTEM_SETTINGS.systemUsers)
     .map((user, index) => ({
       id: String(user.id || crypto.randomUUID?.() || `user-${index + 1}`),
@@ -9176,6 +9180,8 @@ function normalizeVendor(db, vendor) {
       overdueReminderEnabled: Boolean(vendor.purchaseOrderRules?.overdueReminderEnabled),
       overdueReminderSubject: vendor.purchaseOrderRules?.overdueReminderSubject || "Action needed: overdue PO {{poNumber}}",
       overdueReminderBody: vendor.purchaseOrderRules?.overdueReminderBody || "Hello {{supplier}},\n\nPurchase order {{poNumber}} was expected on {{expectedAt}}. Please confirm its current status and expected ship date.\n\nThank you.",
+      overdueReminderFollowUpDays: Math.max(1, Number(vendor.purchaseOrderRules?.overdueReminderFollowUpDays || 3)),
+      overdueReminderMaxFollowUps: Math.max(0, Number(vendor.purchaseOrderRules?.overdueReminderMaxFollowUps || 2)),
       defaultWarehouseId: vendor.purchaseOrderRules?.defaultWarehouseId || "",
       defaultWarehouseName: (db.warehouses || []).find((warehouse) => warehouse.id === vendor.purchaseOrderRules?.defaultWarehouseId)?.name || "",
       note: vendor.purchaseOrderRules?.note || ""
@@ -9295,6 +9301,16 @@ function poIsOverdue(po) {
 function addPoReminder(po, reminder) {
   po.reminders = Array.isArray(po.reminders) ? po.reminders : [];
   po.reminders.unshift({ id: crypto.randomUUID(), type: "overdue", ...reminder });
+}
+
+function supplierReminderIsDue(po, vendor) {
+  const rules = vendor?.purchaseOrderRules || {};
+  const delivered = (po.reminders || []).filter((reminder) => reminder.status === "sent");
+  if (delivered.length > Math.max(0, Number(rules.overdueReminderMaxFollowUps || 2))) return false;
+  const lastSentAt = delivered[0]?.sentAt;
+  if (!lastSentAt) return true;
+  const followUpDays = Math.max(1, Number(rules.overdueReminderFollowUpDays || 3));
+  return Date.now() - new Date(lastSentAt).getTime() >= followUpDays * 86400000;
 }
 
 function normalizeBrands(db) {
@@ -21832,8 +21848,8 @@ async function handleApi(req, res) {
     for (const po of candidates) {
       const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
       const preview = supplierReminderPreview(po, vendor, settings);
-      const alreadySentToday = (po.reminders || []).some((reminder) => reminder.status === "sent" && String(reminder.sentAt || "").slice(0, 10) === new Date().toISOString().slice(0, 10));
-      if (!preview.ready || alreadySentToday) { report.skipped.push({ poNumber: po.poNumber, reason: alreadySentToday ? "Already sent today." : preview.missing.join(" ") }); continue; }
+      const reminderDue = supplierReminderIsDue(po, vendor);
+      if (!preview.ready || !reminderDue) { report.skipped.push({ poNumber: po.poNumber, reason: !reminderDue ? "Follow-up cadence is not due yet." : preview.missing.join(" ") }); continue; }
       if (dryRun) { report.sent += 1; continue; }
       try {
         const delivery = await sendSupplierOverdueReminder(po, vendor, settings);
@@ -23509,9 +23525,9 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "defaultWarehouseId", "note"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
     const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "overdueReminderEnabled"]);
-    const numericPurchaseOrderRuleFields = new Set(["approvalThreshold", "budgetLimit"]);
+    const numericPurchaseOrderRuleFields = new Set(["approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
@@ -24520,6 +24536,21 @@ async function handleApi(req, res) {
       queued: true,
       job: { id: jobId, status: "queued" }
     });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/system-settings/smtp-test") {
+    const body = await parseBody(req);
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const recipient = String(body.recipient || settings.smtpFromEmail || "").trim();
+    if (!recipient) return sendJson(res, 400, { error: "Enter a recipient email address for the test." });
+    if (!settings.smtpEnabled || !settings.smtpHost || !settings.smtpFromEmail) return sendJson(res, 400, { error: "Configure and enable SMTP delivery first." });
+    try {
+      const transporter = nodemailer.createTransport({ host: settings.smtpHost, port: Number(settings.smtpPort || 587), secure: Boolean(settings.smtpSecure), auth: settings.smtpUsername ? { user: settings.smtpUsername, pass: settings.smtpPassword } : undefined });
+      const result = await transporter.sendMail({ from: `${settings.smtpFromName || "DataPlus"} <${settings.smtpFromEmail}>`, to: recipient, subject: "DataPlus SMTP test", text: "This confirms that DataPlus can send supplier PO reminders through the configured SMTP server." });
+      return sendJson(res, 200, { message: "SMTP test email sent.", messageId: result.messageId || "" });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message || "SMTP test delivery failed." });
+    }
   }
 
   if (req.method === "PATCH" && url.pathname === "/api/system-settings") {
