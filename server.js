@@ -21604,6 +21604,7 @@ async function handleApi(req, res) {
       approve: "approved",
       reject: "rejected",
       reject: "rejected",
+      reject: "rejected",
       hold: "hold",
       cancel: "canceled",
       void: "void",
@@ -21734,6 +21735,11 @@ async function handleApi(req, res) {
     po.timeline.unshift({ id: crypto.randomUUID(), type: "document", title: "Document linked", message: `${document.name} was linked to this PO.`, user: document.createdBy, createdAt: document.createdAt });
     po.updatedAt = document.createdAt;
     await postgres.savePurchaseOrder(po);
+    const linkedOrders = await Promise.all((po.orderIds || []).map((orderId) => postgres.readOrderByKey(orderId)));
+    for (const linkedOrder of linkedOrders.filter(Boolean)) {
+      for (const route of linkedOrder.fulfillmentRoutes || []) if (String(route.purchaseOrderId || "") === String(po.id)) route.status = action === "approve" ? "awaiting_approval" : action === "reject" ? "exception" : action === "hold" ? "buyer_review" : route.status;
+      recalculateOrderOperationalStatus(linkedOrder); linkedOrder.updatedAt = new Date().toISOString(); await postgres.saveOrder(linkedOrder); clearOrderApiCache(linkedOrder.id);
+    }
     return sendJson(res, 201, { purchaseOrder: po, document, message: "PO document linked." });
   }
 
@@ -21892,6 +21898,11 @@ async function handleApi(req, res) {
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po);
+    const linkedOrders = await Promise.all((po.orderIds || []).map((orderId) => postgres.readOrderByKey(orderId)));
+    for (const linkedOrder of linkedOrders.filter(Boolean)) {
+      for (const route of linkedOrder.fulfillmentRoutes || []) if (String(route.purchaseOrderId || "") === String(po.id)) { route.status = "po_placed"; route.updatedAt = new Date().toISOString(); }
+      recalculateOrderOperationalStatus(linkedOrder); linkedOrder.updatedAt = new Date().toISOString(); await postgres.saveOrder(linkedOrder); clearOrderApiCache(linkedOrder.id);
+    }
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
   }
