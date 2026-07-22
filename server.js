@@ -8694,6 +8694,32 @@ function createPurchaseOrderFromOrders(db, orderIds, options = {}) {
   return po;
 }
 
+function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
+  const orders = (orderIds || []).map((id) => (db.orders || []).find((order) => order.id === id)).filter(Boolean);
+  if (!orders.length) throw new Error("No matching orders found for purchase order.");
+  const groups = new Map();
+  for (const order of orders) {
+    const routes = (order.fulfillmentRoutes || []).filter((route) => route.type === "purchase" && !route.purchaseOrderId && !["canceled", "received", "closed"].includes(String(route.status || "").toLowerCase()));
+    for (const route of routes) {
+      const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName) || findVendorByName(db, options.supplier);
+      const warehouse = (db.warehouses || []).find((row) => row.id === route.warehouseId || row.id === options.warehouseId) || (db.warehouses || [])[0] || null;
+      const key = `${vendor?.id || route.vendorName || "unassigned"}:${warehouse?.id || ""}`;
+      const group = groups.get(key) || { vendor, warehouse, routes: [], orders: [] };
+      group.routes.push({ ...route, order }); if (!group.orders.includes(order)) group.orders.push(order); groups.set(key, group);
+    }
+  }
+  if (!groups.size) throw new Error("No unassigned purchase requirements are available for PO creation.");
+  const purchaseGroupId = options.purchaseGroupId || `PG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+  const created = [];
+  for (const group of groups.values()) {
+    const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
+    db.purchaseOrders = db.purchaseOrders || []; db.purchaseOrders.unshift(po); created.push(po);
+    for (const route of group.routes) { route.purchaseOrderId = po.id; route.purchaseOrderNumber = po.poNumber; route.purchaseGroupId = purchaseGroupId; route.status = "buyer_review"; route.updatedAt = po.updatedAt; }
+    for (const order of group.orders) { order.purchaseGroupId = purchaseGroupId; order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), po.id])]; order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), po.poNumber])]; recalculateOrderOperationalStatus(order); addOrderWorkflowEvent(order, { step: "purchase_order_created", title: "Purchase order created", message: `${po.poNumber} created for ${po.supplier}.`, user: options.user || "System" }); }
+  }
+  return { purchaseGroupId, purchaseOrders: created, orders };
+}
+
 function nextDraftNumber(db) {
   db.sequence = db.sequence || {};
   db.sequence.draft = Number(db.sequence.draft || 0) + 1;
@@ -21684,6 +21710,13 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
     try {
+      if (body.groupBySupplier === true) {
+        const result = createSupplierPurchaseOrdersFromOrders(db, body.orderIds || [], { warehouseId: body.warehouseId, supplier: body.supplier, user: body.user || "Luis" });
+        for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
+        for (const order of result.orders) await postgres.saveOrder(order);
+        await postgres.writeStateDocuments({ sequence: db.sequence || {} });
+        return sendJson(res, 201, { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` });
+      }
       const po = createPurchaseOrderFromOrders(db, body.orderIds || [], {
         vendorId: body.vendorId,
         supplier: body.supplier,
