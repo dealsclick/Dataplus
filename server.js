@@ -21244,6 +21244,80 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { work, exceptions, generatedAt: new Date().toISOString() });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/barcodes/resolve" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
+    if (!barcode) return sendJson(res, 400, { error: "Enter or scan a barcode." });
+    const result = await postgres.listProducts({ q: barcode, page: 1, limit: 50, includeInventoryLevels: true });
+    const product = (result.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku].some((value) => String(value || "").trim().toLowerCase() === barcode.toLowerCase())) || null;
+    if (product) return sendJson(res, 200, { barcode, product, source: "catalog", matched: true });
+    let enrichment = null;
+    if (/^\d{8,14}$/.test(barcode)) {
+      try {
+        const response = await fetch(`https://world.openfoodfacts.org/api/v3/product/${encodeURIComponent(barcode)}?fields=product_name,brands,image_url,categories`, { headers: { "User-Agent": "DataPlus/1.0 (warehouse barcode intake)" }, signal: AbortSignal.timeout(4000) });
+        const payload = await response.json();
+        const item = payload?.product || {};
+        if (item.product_name || item.brands) enrichment = { title: item.product_name || "", brand: item.brands || "", image: item.image_url || "", category: item.categories || "", provider: "Open Food Facts" };
+      } catch { /* Enrichment is optional; unknown UPC intake still succeeds. */ }
+    }
+    const unresolved = await postgres.readStateField("unresolvedBarcodes").catch(() => []) || [];
+    const existing = unresolved.find((row) => String(row.barcode) === barcode);
+    if (existing) { existing.lastSeenAt = new Date().toISOString(); existing.seenCount = Number(existing.seenCount || 0) + 1; if (enrichment) existing.enrichment = enrichment; } else unresolved.unshift({ id: crypto.randomUUID(), barcode, status: "unresolved", enrichment, firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(), seenCount: 1 });
+    await postgres.writeStateDocuments({ unresolvedBarcodes: unresolved.slice(0, 5000) });
+    return sendJson(res, 200, { barcode, product: null, source: enrichment ? "open-data" : "unresolved", enrichment, matched: false });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []);
+    return sendJson(res, 200, { audits: Array.isArray(audits) ? audits : [] });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const highest = Math.max(122, ...audits.map((audit) => Number(String(audit.auditNumber || "").replace(/\D/g, "")) || 0));
+    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", warehouseId: String(body.warehouseId || ""), warehouseName: String(body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis" };
+    audits.unshift(audit);
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 201, { audit, message: `${audit.auditNumber} started.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "scan" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
+    const result = await postgres.listProducts({ q: barcode, page: 1, limit: 50, includeInventoryLevels: true });
+    const product = (result.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku].some((value) => String(value || "").trim().toLowerCase() === barcode.toLowerCase())) || null;
+    const now = new Date().toISOString();
+    if (product) {
+      const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku));
+      if (line) { line.countedQty = Number(line.countedQty || 0) + 1; line.lastScannedAt = now; } else (audit.lines || (audit.lines = [])).push({ productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, barcode, expectedQty: Number(product.qty || 0), countedQty: 1, firstScannedAt: now, lastScannedAt: now });
+      audit.updatedAt = now;
+      await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+      return sendJson(res, 200, { audit, product, matched: true, message: `${product.sku} counted.` });
+    }
+    const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode);
+    if (unknown) unknown.count = Number(unknown.count || 0) + 1; else audit.unknownBarcodes.push({ barcode, count: 1, scannedAt: now });
+    audit.updatedAt = now;
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 200, { audit, matched: false, barcode, message: `${barcode} saved as an unknown UPC.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "complete" && postgres.isPostgresEnabled()) {
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    const products = [];
+    for (const line of audit.lines || []) { const product = await postgres.readProductByKey(line.productId || line.sku); if (!product) continue; product.qty = Number(line.countedQty || 0); product.lastInventoryAuditAt = new Date().toISOString(); product.lastInventoryAuditId = audit.id; products.push(product); }
+    if (products.length) { await postgres.upsertProductsFromState(products); await postgres.upsertInventoryLevelsFromProducts(products); }
+    audit.status = "completed"; audit.completedAt = new Date().toISOString(); audit.appliedLines = products.length;
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 200, { audit, message: `${audit.auditNumber} completed. ${products.length} catalog counts were updated.` });
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "fulfillment-package" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const order = await postgres.readOrderByKey(parts[2]);
