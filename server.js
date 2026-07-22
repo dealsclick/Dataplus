@@ -6,6 +6,7 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 const readline = require("readline");
 const zlib = require("zlib");
+const nodemailer = require("nodemailer");
 const postgres = require("./db");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -4230,6 +4231,11 @@ function writeSystemSettingsStore(settings = {}) {
     });
   }
   return normalized;
+}
+
+function publicSystemSettings(settings = {}) {
+  const normalized = normalizeSystemSettings(settings);
+  return { ...normalized, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword) };
 }
 
 const TABLE_PREFERENCE_IDS = new Set(["orders", "catalog.products", "catalog.inventory"]);
@@ -9253,6 +9259,44 @@ function addPoTimeline(po, event) {
   po.updatedAt = new Date().toISOString();
 }
 
+function renderSupplierReminderTemplate(template, po, vendor) {
+  return String(template || "").replace(/\{\{(poNumber|supplier|expectedAt)\}\}/g, (_, key) => ({ poNumber: po.poNumber || "", supplier: vendor?.name || po.supplier || "", expectedAt: po.expectedAt || "" }[key]));
+}
+
+async function sendSupplierOverdueReminder(po, vendor, settings) {
+  if (!settings.smtpEnabled || !settings.smtpHost || !settings.smtpFromEmail) throw new Error("Configure and enable SMTP delivery in System Settings first.");
+  const recipient = String(vendor?.submissionSettings?.emailTo || vendor?.email || "").trim();
+  if (!recipient) throw new Error("This supplier has no reminder email address.");
+  const rules = vendor?.purchaseOrderRules || {};
+  const subject = renderSupplierReminderTemplate(rules.overdueReminderSubject, po, vendor);
+  const text = renderSupplierReminderTemplate(rules.overdueReminderBody, po, vendor);
+  const transporter = nodemailer.createTransport({ host: settings.smtpHost, port: Number(settings.smtpPort || 587), secure: Boolean(settings.smtpSecure), auth: settings.smtpUsername ? { user: settings.smtpUsername, pass: settings.smtpPassword } : undefined });
+  const delivery = await transporter.sendMail({ from: `${settings.smtpFromName || "DataPlus"} <${settings.smtpFromEmail}>`, to: recipient, cc: String(vendor?.submissionSettings?.emailCc || "") || undefined, subject, text });
+  return { recipient, subject, text, messageId: delivery.messageId || "", sentAt: new Date().toISOString() };
+}
+
+function supplierReminderPreview(po, vendor, settings) {
+  const rules = vendor?.purchaseOrderRules || {};
+  const recipient = String(vendor?.submissionSettings?.emailTo || vendor?.email || "").trim();
+  const subject = renderSupplierReminderTemplate(rules.overdueReminderSubject, po, vendor);
+  const text = renderSupplierReminderTemplate(rules.overdueReminderBody, po, vendor);
+  const missing = [];
+  if (!rules.overdueReminderEnabled) missing.push("Overdue reminders are disabled for this supplier.");
+  if (!settings.smtpEnabled || !settings.smtpHost || !settings.smtpFromEmail) missing.push("SMTP delivery is not fully configured and enabled.");
+  if (!recipient) missing.push("The supplier has no reminder email address.");
+  return { recipient, subject, text, ready: missing.length === 0, missing };
+}
+
+function poIsOverdue(po) {
+  const expectedAt = String(po?.expectedAt || "").slice(0, 10);
+  return Boolean(expectedAt && expectedAt < new Date().toISOString().slice(0, 10) && !["received", "closed", "canceled", "rejected"].includes(String(po?.status || "").toLowerCase()));
+}
+
+function addPoReminder(po, reminder) {
+  po.reminders = Array.isArray(po.reminders) ? po.reminders : [];
+  po.reminders.unshift({ id: crypto.randomUUID(), type: "overdue", ...reminder });
+}
+
 function normalizeBrands(db) {
   let changed = false;
   const existing = new Map();
@@ -14192,7 +14236,7 @@ function publicState(db, options = {}) {
   const systemSettings = normalizeSystemSettings(db.systemSettings || {});
   const safeDb = {
     ...db,
-    systemSettings,
+    systemSettings: publicSystemSettings(systemSettings),
     tablePreferences: normalizeUserTablePreferences(db.tablePreferences || {}),
     connections: (db.connections || []).map(publicConnection),
     inventory: lite ? [] : (db.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, systemSettings })),
@@ -21743,6 +21787,64 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { purchaseOrder: po, linkedOrders: linkedOrders.filter(Boolean) });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "reminder" && parts[4] === "preview" && postgres.isPostgresEnabled()) {
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    if (!vendor) return sendJson(res, 400, { error: "This PO has no matching supplier profile." });
+    const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+    return sendJson(res, 200, { preview: { ...supplierReminderPreview(po, vendor, settings), overdue: poIsOverdue(po), expectedAt: po.expectedAt || "" } });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "reminder" && parts[4] === "send" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    if (!vendor) return sendJson(res, 400, { error: "This PO has no matching supplier profile." });
+    const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+    const preview = supplierReminderPreview(po, vendor, settings);
+    if (!preview.ready) return sendJson(res, 400, { error: preview.missing.join(" "), preview });
+    try {
+      const delivery = await sendSupplierOverdueReminder(po, vendor, settings);
+      addPoReminder(po, { ...delivery, status: "sent", sentBy: body.user || "Luis", expectedAt: po.expectedAt || "" });
+      addPoTimeline(po, { type: "reminder", title: "Supplier overdue reminder sent", message: `Reminder sent to ${delivery.recipient}.`, user: body.user || "Luis" });
+      await postgres.savePurchaseOrder(po);
+      return sendJson(res, 200, { purchaseOrder: po, reminder: delivery, message: "Supplier reminder sent." });
+    } catch (error) {
+      addPoReminder(po, { recipient: preview.recipient, subject: preview.subject, text: preview.text, status: "failed", error: error.message || String(error), attemptedAt: new Date().toISOString(), sentBy: body.user || "Luis" });
+      addPoTimeline(po, { type: "reminder", title: "Supplier reminder failed", message: error.message || "SMTP delivery failed.", user: body.user || "Luis" });
+      await postgres.savePurchaseOrder(po);
+      return sendJson(res, 502, { error: error.message || "Unable to send supplier reminder." });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] === "reminders" && parts[3] === "run" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const dryRun = body.dryRun !== false;
+    const db = await readDbFast({ skipInventory: true });
+    const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+    const purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
+    const candidates = purchaseOrders.filter(poIsOverdue);
+    const report = { scanned: purchaseOrders.length, overdue: candidates.length, sent: 0, skipped: [], failed: [] };
+    for (const po of candidates) {
+      const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+      const preview = supplierReminderPreview(po, vendor, settings);
+      const alreadySentToday = (po.reminders || []).some((reminder) => reminder.status === "sent" && String(reminder.sentAt || "").slice(0, 10) === new Date().toISOString().slice(0, 10));
+      if (!preview.ready || alreadySentToday) { report.skipped.push({ poNumber: po.poNumber, reason: alreadySentToday ? "Already sent today." : preview.missing.join(" ") }); continue; }
+      if (dryRun) { report.sent += 1; continue; }
+      try {
+        const delivery = await sendSupplierOverdueReminder(po, vendor, settings);
+        addPoReminder(po, { ...delivery, status: "sent", sentBy: body.user || "System", expectedAt: po.expectedAt || "" });
+        addPoTimeline(po, { type: "reminder", title: "Supplier overdue reminder sent", message: `Reminder sent to ${delivery.recipient}.`, user: body.user || "System" });
+        await postgres.savePurchaseOrder(po); report.sent += 1;
+      } catch (error) { report.failed.push({ poNumber: po.poNumber, error: error.message || String(error) }); }
+    }
+    return sendJson(res, 200, { ...report, dryRun, message: dryRun ? "Reminder scan preview complete." : "Reminder scan complete." });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "documents" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
@@ -24429,12 +24531,13 @@ async function handleApi(req, res) {
       else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") current[field] = Number(body[field] || 0);
       else if (Array.isArray(DEFAULT_SYSTEM_SETTINGS[field])) current[field] = Array.isArray(body[field]) ? body[field] : current[field];
       else if (DEFAULT_SYSTEM_SETTINGS[field] && typeof DEFAULT_SYSTEM_SETTINGS[field] === "object") current[field] = body[field] && typeof body[field] === "object" ? body[field] : current[field];
+      else if (field === "smtpPassword" && !String(body[field] || "")) current[field] = current[field];
       else current[field] = String(body[field] || "");
     }
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
-    return sendJson(res, 200, { systemSettings });
+    return sendJson(res, 200, { systemSettings: publicSystemSettings(systemSettings) });
   }
 
   if (req.method === "GET" && url.pathname === "/api/user-preferences/table") {
