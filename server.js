@@ -21382,6 +21382,28 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { audit, message: `${audit.auditNumber} completed. ${products.length} catalog counts were updated.` });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "manual-item" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
+    const quantity = Number(body.qty || 0);
+    if (!barcode) return sendJson(res, 400, { error: "A UPC is required." });
+    if (!Number.isFinite(quantity) || quantity <= 0) return sendJson(res, 400, { error: "Quantity must be greater than zero." });
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
+    const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode)
+      || (() => { const entry = { barcode, count: 0, scannedAt: new Date().toISOString() }; audit.unknownBarcodes.push(entry); return entry; })();
+    unknown.count = quantity;
+    unknown.manualSku = String(body.sku || "").trim();
+    unknown.manualTitle = String(body.title || "").trim();
+    unknown.locationBin = String(body.locationBin || "").trim();
+    unknown.manualDetailsUpdatedAt = new Date().toISOString();
+    audit.updatedAt = unknown.manualDetailsUpdatedAt;
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 200, { audit, message: `${barcode} saved as an unmatched audit item.` });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/warehouse-receipts" && postgres.isPostgresEnabled()) {
     const receipts = await postgres.readStateField("manualWarehouseReceipts").catch(() => []);
     return sendJson(res, 200, { receipts: Array.isArray(receipts) ? receipts.slice(0, 50) : [] });
