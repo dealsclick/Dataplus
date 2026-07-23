@@ -17293,7 +17293,22 @@ async function resolveScannedCatalogBarcode(value) {
       if (product) break;
     }
   }
+  if (product) product = await postgres.readProductByKey(product.id || product.sku) || product;
   return { barcode: forms[0], product, sourceItem };
+}
+
+function auditWarehouseStockRow(product, audit) {
+  const rows = Array.isArray(product?.warehouseStock) ? product.warehouseStock : [];
+  const warehouseId = String(audit?.warehouseId || "").trim().toLowerCase();
+  const warehouseName = String(audit?.warehouseName || "").trim().toLowerCase();
+  return rows.find((row) => (warehouseId && String(row.warehouseId || "").trim().toLowerCase() === warehouseId)
+    || (warehouseName && String(row.warehouseName || "").trim().toLowerCase() === warehouseName)) || null;
+}
+
+function auditExpectedQuantity(product, audit) {
+  const warehouseRow = auditWarehouseStockRow(product, audit);
+  if (warehouseRow) return Number(warehouseRow.qty || 0);
+  return Array.isArray(product?.warehouseStock) && product.warehouseStock.length ? 0 : Number(product?.qty || 0);
 }
 
 function normalizeReturnAttachment(file = {}, user = "Luis") {
@@ -21307,9 +21322,12 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const requestedWarehouse = String(body.warehouseId || body.warehouseName || "").trim().toLowerCase();
+    const warehouse = (db.warehouses || []).find((row) => String(row.id || "").toLowerCase() === requestedWarehouse || String(row.name || "").toLowerCase() === requestedWarehouse) || null;
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const highest = Math.max(122, ...audits.map((audit) => Number(String(audit.auditNumber || "").replace(/\D/g, "")) || 0));
-    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", warehouseId: String(body.warehouseId || ""), warehouseName: String(body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis" };
+    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis" };
     audits.unshift(audit);
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
     return sendJson(res, 201, { audit, message: `${audit.auditNumber} started.` });
@@ -21327,7 +21345,7 @@ async function handleApi(req, res) {
     const now = new Date().toISOString();
     if (product) {
       const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku));
-      if (line) { line.countedQty = Number(line.countedQty || 0) + 1; line.lastScannedAt = now; } else (audit.lines || (audit.lines = [])).push({ productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, barcode, expectedQty: Number(product.qty || 0), countedQty: 1, firstScannedAt: now, lastScannedAt: now });
+      if (line) { line.countedQty = Number(line.countedQty || 0) + 1; line.lastScannedAt = now; } else (audit.lines || (audit.lines = [])).push({ productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, barcode, expectedQty: auditExpectedQuantity(product, audit), countedQty: 1, firstScannedAt: now, lastScannedAt: now });
       audit.updatedAt = now;
       await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
       return sendJson(res, 200, { audit, product, matched: true, message: `${product.sku} counted.` });
@@ -21343,8 +21361,21 @@ async function handleApi(req, res) {
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const auditWarehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "") || String(row.name || "").toLowerCase() === String(audit.warehouseName || "").toLowerCase()) || null;
     const products = [];
-    for (const line of audit.lines || []) { const product = await postgres.readProductByKey(line.productId || line.sku); if (!product) continue; product.qty = Number(line.countedQty || 0); product.lastInventoryAuditAt = new Date().toISOString(); product.lastInventoryAuditId = audit.id; products.push(product); }
+    for (const line of audit.lines || []) {
+      const product = await postgres.readProductByKey(line.productId || line.sku);
+      if (!product) continue;
+      const stockRow = auditWarehouseStockRow(product, audit) || (auditWarehouse ? ensureInventoryWarehouseStock(product, auditWarehouse) : null);
+      if (stockRow) {
+        stockRow.qty = Number(line.countedQty || 0);
+        syncInventoryTotalsFromWarehouses(product);
+      } else product.qty = Number(line.countedQty || 0);
+      product.lastInventoryAuditAt = new Date().toISOString();
+      product.lastInventoryAuditId = audit.id;
+      products.push(product);
+    }
     if (products.length) { await postgres.upsertProductsFromState(products); await postgres.upsertInventoryLevelsFromProducts(products); }
     audit.status = "completed"; audit.completedAt = new Date().toISOString(); audit.appliedLines = products.length;
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
