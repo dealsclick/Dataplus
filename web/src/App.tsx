@@ -4109,24 +4109,31 @@ function WarehouseAuditPanel() {
   useEffect(() => { void load() }, [])
   useEffect(() => {
     if (!cameraOpen || !videoRef.current) return
-    let stream: MediaStream | null = null
-    let timer = 0
+    const video = videoRef.current
+    let controls: { stop: () => void } | null = null
+    let canceled = false
     const start = async () => {
       try {
-        const Detector = (window as any).BarcodeDetector
-        if (!Detector || !resumedAudit) { toast.error("Camera barcode scanning is not supported in this browser. Use the scanner input instead."); setCameraOpen(false); return }
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
-        if (!videoRef.current) return
-        videoRef.current.srcObject = stream
-        await videoRef.current.play()
-        const detector = new Detector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39"] })
-        const loop = async () => { if (!videoRef.current || scanRef.current) return; const matches = await detector.detect(videoRef.current); const value = String(matches[0]?.rawValue || ""); if (value) { scanRef.current = true; setBarcode(value); await submit(value); window.setTimeout(() => { scanRef.current = false }, 1200) } if (cameraOpen) timer = window.setTimeout(loop, 350) }
-        void loop()
-      } catch { toast.error("Camera access was not available. Use a Bluetooth scanner or type the UPC."); setCameraOpen(false) }
+        if (!resumedAudit) return
+        const { BrowserMultiFormatReader } = await import("@zxing/browser")
+        const reader = new BrowserMultiFormatReader()
+        controls = await reader.decodeFromConstraints(
+          { audio: false, video: { facingMode: { ideal: "environment" } } },
+          video,
+          (result) => {
+            const value = String(result?.getText() || "")
+            if (canceled || !value || scanRef.current) return
+            scanRef.current = true
+            setBarcode(value)
+            void submit(value)
+            window.setTimeout(() => { scanRef.current = false }, 1200)
+          }
+        )
+      } catch { toast.error("Camera access was not available. Allow camera access in Safari, then try again."); setCameraOpen(false) }
     }
     void start()
-    return () => { if (timer) window.clearTimeout(timer); stream?.getTracks().forEach((track) => track.stop()) }
-  }, [cameraOpen, resumedAudit])
+    return () => { canceled = true; controls?.stop() }
+  }, [cameraOpen, resumedAudit?.id])
   const create = async () => { setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; message?: string }>("/api/warehouse-audits", { method: "POST", body: JSON.stringify({ warehouseName: warehouse, user: "Luis" }) }); setActive(result.audit || null); toast.success(result.message || "Warehouse audit started."); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to start warehouse audit.") } finally { setBusy(false) } }
   const submit = async (value = barcode) => { if (!resumedAudit || !String(value).trim()) return; setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; matched?: boolean; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/scan`, { method: "POST", body: JSON.stringify({ barcode: value }) }); applyAuditUpdate(result.audit || resumedAudit); setBarcode(""); toast[result.matched ? "success" : "warning"](result.message || "Scan saved."); void load().catch(() => undefined) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save scan.") } finally { setBusy(false) } }
   const complete = async () => { if (!resumedAudit) return; setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/complete`, { method: "POST" }); setActive(result.audit || null); toast.success(result.message || "Warehouse audit completed."); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to complete audit.") } finally { setBusy(false) } }
