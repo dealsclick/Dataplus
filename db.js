@@ -5418,6 +5418,39 @@ async function listProducts(options = {}) {
   };
 }
 
+async function findBarcodeMatches(values = []) {
+  const client = getPool();
+  if (!client) return { products: [], sourceItems: [] };
+  await initRelationalSchema();
+  const candidates = [...new Set((Array.isArray(values) ? values : [values]).map((value) => String(value || "").replace(/[^0-9A-Za-z]/g, "").toLowerCase()).filter(Boolean))];
+  if (!candidates.length) return { products: [], sourceItems: [] };
+  const normalized = (expression) => `lower(regexp_replace(coalesce(${expression}, ''), '[^0-9A-Za-z]', '', 'g'))`;
+  const [productRows, sourceRows] = await Promise.all([
+    client.query(`
+      select * from products
+      where ${normalized("barcode")} = any($1::text[])
+         or ${normalized("raw ->> 'upc'")} = any($1::text[])
+         or ${normalized("raw ->> 'gtin'")} = any($1::text[])
+         or ${normalized("raw ->> 'upcCode'")} = any($1::text[])
+      order by updated_at desc
+      limit 25
+    `, [candidates]),
+    client.query(`
+      select * from vendor_catalog_items
+      where ${normalized("barcode")} = any($1::text[])
+         or ${normalized("raw ->> 'upc'")} = any($1::text[])
+         or ${normalized("raw ->> 'gtin'")} = any($1::text[])
+         or ${normalized("raw ->> 'upcCode'")} = any($1::text[])
+      order by updated_at desc
+      limit 25
+    `, [candidates])
+  ]);
+  return {
+    products: productRows.rows.map(productRowToState),
+    sourceItems: sourceRows.rows.map(vendorCatalogRowToState)
+  };
+}
+
 async function hydrateProductsWithInventoryLevels(items = []) {
   const client = getPool();
   const ids = [...new Set((Array.isArray(items) ? items : []).map((item) => nullableString(item.id)).filter(Boolean))];
@@ -6272,6 +6305,7 @@ module.exports = {
   listCategoryProductStats,
   listUncategorizedProducts,
   listProducts,
+  findBarcodeMatches,
   productFacets,
   listVendorCatalogItems,
   listVendorCategoryMappingSources,

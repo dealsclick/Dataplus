@@ -17273,6 +17273,29 @@ function normalizeReceiptAttachment(file = {}, user = "Luis") {
   };
 }
 
+function barcodeLookupForms(value) {
+  const barcode = String(value || "").replace(/[^0-9A-Za-z]/g, "").trim();
+  const forms = new Set([barcode]);
+  if (/^\d{11}$/.test(barcode)) forms.add(`0${barcode}`);
+  if (/^0\d{11}$/.test(barcode)) forms.add(barcode.slice(1));
+  return [...forms].filter(Boolean);
+}
+
+async function resolveScannedCatalogBarcode(value) {
+  const forms = barcodeLookupForms(value);
+  if (!forms.length) return { barcode: "", product: null, sourceItem: null };
+  const matches = await postgres.findBarcodeMatches(forms);
+  let product = matches.products?.[0] || null;
+  const sourceItem = matches.sourceItems?.[0] || null;
+  if (!product && sourceItem) {
+    for (const key of [sourceItem.sku, sourceItem.id, sourceItem.internalSku, sourceItem.vendorSku].filter(Boolean)) {
+      product = await postgres.readProductByKey(key);
+      if (product) break;
+    }
+  }
+  return { barcode: forms[0], product, sourceItem };
+}
+
 function normalizeReturnAttachment(file = {}, user = "Luis") {
   return {
     id: file.id || crypto.randomUUID(),
@@ -21252,9 +21275,9 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
     if (!barcode) return sendJson(res, 400, { error: "Enter or scan a barcode." });
-    const result = await postgres.listProducts({ q: barcode, page: 1, limit: 50, includeInventoryLevels: true });
-    const product = (result.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku].some((value) => String(value || "").trim().toLowerCase() === barcode.toLowerCase())) || null;
-    if (product) return sendJson(res, 200, { barcode, product, source: "catalog", matched: true });
+    const lookup = await resolveScannedCatalogBarcode(barcode);
+    const product = lookup.product;
+    if (product) return sendJson(res, 200, { barcode, product, sourceItem: lookup.sourceItem, source: "catalog", matched: true });
     let enrichment = null;
     const scannerSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
     if (scannerSettings.openFoodFactsLookupEnabled && /^\d{8,14}$/.test(barcode)) {
@@ -21267,9 +21290,9 @@ async function handleApi(req, res) {
     }
     const unresolved = await postgres.readStateField("unresolvedBarcodes").catch(() => []) || [];
     const existing = unresolved.find((row) => String(row.barcode) === barcode);
-    if (existing) { existing.lastSeenAt = new Date().toISOString(); existing.seenCount = Number(existing.seenCount || 0) + 1; if (enrichment) existing.enrichment = enrichment; } else unresolved.unshift({ id: crypto.randomUUID(), barcode, status: "unresolved", enrichment, firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(), seenCount: 1 });
+    if (existing) { existing.lastSeenAt = new Date().toISOString(); existing.seenCount = Number(existing.seenCount || 0) + 1; if (enrichment) existing.enrichment = enrichment; if (lookup.sourceItem) existing.sourceMatch = lookup.sourceItem; } else unresolved.unshift({ id: crypto.randomUUID(), barcode, status: lookup.sourceItem ? "source_only" : "unresolved", enrichment, sourceMatch: lookup.sourceItem, firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(), seenCount: 1 });
     await postgres.writeStateDocuments({ unresolvedBarcodes: unresolved.slice(0, 5000) });
-    return sendJson(res, 200, { barcode, product: null, source: enrichment ? "open-data" : "unresolved", enrichment, matched: false });
+    return sendJson(res, 200, { barcode, product: null, sourceItem: lookup.sourceItem, source: lookup.sourceItem ? "source-catalog" : enrichment ? "open-data" : "unresolved", enrichment, matched: false });
   }
 
   if (req.method === "GET" && url.pathname === "/api/barcodes/unresolved" && postgres.isPostgresEnabled()) {
@@ -21299,8 +21322,8 @@ async function handleApi(req, res) {
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
     if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
-    const result = await postgres.listProducts({ q: barcode, page: 1, limit: 50, includeInventoryLevels: true });
-    const product = (result.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku].some((value) => String(value || "").trim().toLowerCase() === barcode.toLowerCase())) || null;
+    const lookup = await resolveScannedCatalogBarcode(barcode);
+    const product = lookup.product;
     const now = new Date().toISOString();
     if (product) {
       const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku));
@@ -21310,10 +21333,10 @@ async function handleApi(req, res) {
       return sendJson(res, 200, { audit, product, matched: true, message: `${product.sku} counted.` });
     }
     const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode);
-    if (unknown) unknown.count = Number(unknown.count || 0) + 1; else audit.unknownBarcodes.push({ barcode, count: 1, scannedAt: now });
+    if (unknown) { unknown.count = Number(unknown.count || 0) + 1; if (lookup.sourceItem) unknown.sourceMatch = lookup.sourceItem; } else audit.unknownBarcodes.push({ barcode, count: 1, scannedAt: now, sourceMatch: lookup.sourceItem || null });
     audit.updatedAt = now;
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
-    return sendJson(res, 200, { audit, matched: false, barcode, message: `${barcode} saved as an unknown UPC.` });
+    return sendJson(res, 200, { audit, matched: false, barcode, sourceItem: lookup.sourceItem, message: lookup.sourceItem ? `${barcode} was found in the source catalog as ${lookup.sourceItem.sku || lookup.sourceItem.vendorSku || "a source SKU"}, but is not yet an approved catalog SKU.` : `${barcode} saved as an unknown UPC.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "complete" && postgres.isPostgresEnabled()) {
