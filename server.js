@@ -21272,6 +21272,11 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { barcode, product: null, source: enrichment ? "open-data" : "unresolved", enrichment, matched: false });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/barcodes/unresolved" && postgres.isPostgresEnabled()) {
+    const rows = await postgres.readStateField("unresolvedBarcodes").catch(() => []);
+    return sendJson(res, 200, { rows: Array.isArray(rows) ? rows : [] });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []);
     return sendJson(res, 200, { audits: Array.isArray(audits) ? audits : [] });
@@ -21381,6 +21386,27 @@ async function handleApi(req, res) {
     await postgres.saveOrder(order); clearOrderApiCache(order.id);
     await postgres.writeStateDocuments({ fulfillmentPickLists: pickLists.slice(0, 500) });
     return sendJson(res, 200, { pickList, line, message: `${route.sku || "Line"} marked picked.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "pick-lists" && parts[3] && parts[4] === "scan" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
+    const pickLists = await postgres.readStateField("fulfillmentPickLists").catch(() => []) || [];
+    const pickList = pickLists.find((row) => String(row.id) === String(parts[3]));
+    if (!pickList) return notFound(res);
+    const products = await postgres.listProducts({ q: barcode, page: 1, limit: 50 });
+    const product = (products.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku].some((value) => String(value || "").trim().toLowerCase() === barcode.toLowerCase()));
+    if (!product) return sendJson(res, 404, { error: "This barcode is not in the local catalog." });
+    const line = (pickList.lines || []).find((entry) => String(entry.sku || "").toLowerCase() === String(product.sku || "").toLowerCase() && String(entry.status) !== "picked");
+    if (!line) return sendJson(res, 409, { error: `${product.sku} is not an unpicked line on ${pickList.pickListNumber}.` });
+    const order = await postgres.readOrderByKey(line.orderId);
+    const route = (order?.fulfillmentRoutes || []).find((entry) => String(entry.id) === String(line.routeId));
+    if (!order || !route) return sendJson(res, 404, { error: "The fulfillment line could not be found." });
+    const now = new Date().toISOString();
+    route.status = "picked"; route.pickedAt = now; line.status = "picked"; line.pickedAt = now; pickList.status = (pickList.lines || []).every((entry) => entry.status === "picked") ? "picked" : "picking"; pickList.updatedAt = now; order.updatedAt = now;
+    addOrderTimeline(order, { type: "pick_list", title: "Line picked by barcode", message: `${product.sku} scanned into ${pickList.pickListNumber}.`, user: body.user || "Warehouse" });
+    await postgres.saveOrder(order); clearOrderApiCache(order.id); await postgres.writeStateDocuments({ fulfillmentPickLists: pickLists.slice(0, 500) });
+    return sendJson(res, 200, { pickList, product, line, message: `${product.sku} marked picked.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "pick-lists" && parts[3] && parts[4] === "quotes" && postgres.isPostgresEnabled()) {
