@@ -901,7 +901,12 @@ const STATE_DOCUMENT_KEYS = [
   "shopifySettings",
   "ebaySettings",
   "channelInventorySchedules",
-  "workerHeartbeat"
+  "workerHeartbeat",
+  "unresolvedBarcodes",
+  "warehouseAudits",
+  "manualWarehouseReceipts",
+  "fulfillmentPickLists",
+  "fulfillmentBatches"
 ];
 
 const ENTITY_DOCUMENT_COLLECTIONS = new Set([
