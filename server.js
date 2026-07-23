@@ -21385,23 +21385,55 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "manual-item" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
+    const sku = String(body.sku || "").trim();
+    const title = String(body.title || "").trim();
     const quantity = Number(body.qty || 0);
     if (!barcode) return sendJson(res, 400, { error: "A UPC is required." });
+    if (!sku) return sendJson(res, 400, { error: "SKU is required to create a catalog item." });
+    if (!title) return sendJson(res, 400, { error: "Product name is required to create a catalog item." });
     if (!Number.isFinite(quantity) || quantity <= 0) return sendJson(res, 400, { error: "Quantity must be greater than zero." });
+    const photoDataUrl = String(body.photoDataUrl || "");
+    if (photoDataUrl && (!/^data:image\/(png|jpe?g|webp);base64,/i.test(photoDataUrl) || photoDataUrl.length > 4.25 * 1024 * 1024)) {
+      return sendJson(res, 400, { error: "Use a PNG, JPG, or WebP photo smaller than 3 MB." });
+    }
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
     if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
+    const existingProduct = await postgres.readProductByKey(sku);
+    if (existingProduct) return sendJson(res, 409, { error: `Catalog SKU ${existingProduct.sku} already exists.` });
+    const db = await readDbFast({ skipInventory: true });
+    const auditWarehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "") || String(row.name || "").toLowerCase() === String(audit.warehouseName || "").toLowerCase()) || null;
+    const createdBy = String(body.user || "Warehouse user").trim() || "Warehouse user";
+    const now = new Date().toISOString();
+    const product = {
+      id: crypto.randomUUID(), sku, title, marketplaceTitle: title, barcode,
+      qty: quantity, stockQty: quantity, reserved: 0, reorderPoint: 0,
+      active: true, status: "Draft", condition: "New", source: "warehouse-audit",
+      category: "", mainCategory: "", supplier: "", brand: "", cost: 0, price: 0,
+      locationBin: String(body.locationBin || "").trim(),
+      warehouseStock: [normalizeWarehouseStockRow({ warehouseId: auditWarehouse?.id || audit.warehouseId || "", warehouseName: auditWarehouse?.name || audit.warehouseName || "Warehouse", locationBin: String(body.locationBin || "").trim(), qty: quantity, reserved: 0 }, auditWarehouse)],
+      images: photoDataUrl ? [photoDataUrl] : [], defaultImage: photoDataUrl,
+      createdAt: now, updatedAt: now, createdBy, createdSource: "Warehouse audit", createdAuditId: audit.id, createdAuditNumber: audit.auditNumber
+    };
+    await postgres.upsertProductsFromState([product]);
+    await postgres.upsertInventoryLevelsFromProducts([product]);
     const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode)
       || (() => { const entry = { barcode, count: 0, scannedAt: new Date().toISOString() }; audit.unknownBarcodes.push(entry); return entry; })();
     unknown.count = quantity;
-    unknown.manualSku = String(body.sku || "").trim();
-    unknown.manualTitle = String(body.title || "").trim();
+    unknown.manualSku = sku;
+    unknown.manualTitle = title;
     unknown.locationBin = String(body.locationBin || "").trim();
-    unknown.manualDetailsUpdatedAt = new Date().toISOString();
+    unknown.createdProductSku = product.sku;
+    unknown.createdProductId = product.id;
+    unknown.createdProductBy = createdBy;
+    unknown.createdProductAt = now;
+    unknown.manualDetailsUpdatedAt = now;
     audit.updatedAt = unknown.manualDetailsUpdatedAt;
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
-    return sendJson(res, 200, { audit, message: `${barcode} saved as an unmatched audit item.` });
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    return sendJson(res, 201, { audit, product, message: `${product.sku} was created as a draft catalog SKU.` });
   }
 
   if (req.method === "GET" && url.pathname === "/api/warehouse-receipts" && postgres.isPostgresEnabled()) {
