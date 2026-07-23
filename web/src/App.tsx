@@ -90,7 +90,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
-type AppView = "overview" | "jobs" | "channels" | "catalog" | "operations" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "settings"
+type AppView = "overview" | "jobs" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "settings"
 
 type ImportJob = {
   id: string
@@ -481,6 +481,7 @@ const navItems: Array<{ id: AppView; label: string; icon: React.ComponentType<{ 
   { id: "jobs", label: "Jobs", icon: History },
   { id: "channels", label: "Channels", icon: Store },
   { id: "operations", label: "Orders", icon: ShoppingBag },
+  { id: "warehouse", label: "Warehouse", icon: Warehouse },
   { id: "fulfillment", label: "Fulfillment", icon: Truck },
   { id: "purchasing", label: "Purchasing", icon: Archive },
   { id: "catalog", label: "Catalog", icon: PackageSearch },
@@ -502,12 +503,19 @@ const catalogSidebarItems: Array<{ label: string; path: string; icon: React.Comp
   { label: "Readiness", path: "/readiness", icon: ShieldCheck },
 ]
 
+const warehouseSidebarItems: Array<{ label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { label: "Receiving", path: "/warehouse/receiving", icon: Archive },
+  { label: "Warehouse Audits", path: "/warehouse/audits", icon: CheckCircle2 },
+  { label: "Fulfillment", path: "/fulfillment", icon: Truck },
+]
+
 const viewPaths: Record<AppView, string> = {
   overview: "/",
   jobs: "/jobs",
   channels: "/channels",
   catalog: "/products",
   operations: "/orders",
+  warehouse: "/warehouse/receiving",
   fulfillment: "/fulfillment",
   purchasing: "/purchasing",
   "po-detail": "/purchasing",
@@ -525,6 +533,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (path.startsWith("/channels")) return "channels"
   if (path.startsWith("/orders/")) return "order-detail"
   if (["/orders", "/drafts", "/returns"].some((prefix) => path.startsWith(prefix))) return "operations"
+  if (path.startsWith("/warehouse")) return "warehouse"
   if (path.startsWith("/fulfillment")) return "fulfillment"
   if (path.startsWith("/purchasing")) return "purchasing"
   if (path.startsWith("/purchase-orders/")) return "po-detail"
@@ -953,11 +962,17 @@ function App() {
                   {navItems.map((item) => {
                     const Icon = item.icon
                     const catalogActive = item.id === "catalog" && (view === "catalog" || view === "product-detail" || view === "category-detail")
+                    const warehouseActive = item.id === "warehouse" && view === "warehouse"
                     return <SidebarMenuItem key={item.id}>
-                      <SidebarMenuButton isActive={view === item.id || catalogActive} tooltip={item.label} onClick={() => navigateTo(item.id)}><Icon /><span>{item.label}</span></SidebarMenuButton>
+                      <SidebarMenuButton isActive={view === item.id || catalogActive || warehouseActive} tooltip={item.label} onClick={() => navigateTo(item.id)}><Icon /><span>{item.label}</span></SidebarMenuButton>
                       {item.id === "catalog" && catalogActive && <SidebarMenuSub>{catalogSidebarItems.map((child) => {
                         const ChildIcon = child.icon
                         const active = child.path === "/categories" ? window.location.pathname === "/categories" || window.location.pathname.startsWith("/categories/") : window.location.pathname === child.path
+                        return <SidebarMenuSubItem key={child.path}><SidebarMenuSubButton asChild isActive={active}><a href={child.path}><ChildIcon /><span>{child.label}</span></a></SidebarMenuSubButton></SidebarMenuSubItem>
+                      })}</SidebarMenuSub>}
+                      {item.id === "warehouse" && warehouseActive && <SidebarMenuSub>{warehouseSidebarItems.map((child) => {
+                        const ChildIcon = child.icon
+                        const active = window.location.pathname === child.path
                         return <SidebarMenuSubItem key={child.path}><SidebarMenuSubButton asChild isActive={active}><a href={child.path}><ChildIcon /><span>{child.label}</span></a></SidebarMenuSubButton></SidebarMenuSubItem>
                       })}</SidebarMenuSub>}
                     </SidebarMenuItem>
@@ -1043,6 +1058,7 @@ function App() {
                   />
                 )}
                 {view === "operations" && <OperationsPage />}
+                {view === "warehouse" && <WarehouseWorkspace />}
                 {view === "fulfillment" && <FulfillmentPage />}
                 {view === "purchasing" && <PurchasingPage />}
                 {view === "po-detail" && <PurchaseOrderDetailPage />}
@@ -4005,14 +4021,22 @@ function FulfillmentPage() {
       />
       <PickListPanel onChanged={load} />
       <PickScanPanel onChanged={load} />
-      <ManualReceivingPanel />
-      <WarehouseAuditPanel />
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><Detail label="Open work" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready to ship" value={numberLabel(rows.filter((row) => row.status === "ready_to_ship").length)} /><Detail label="Label-ready" value={numberLabel(rows.filter((row) => readinessFor(row).ready === true).length)} /><Detail label="Needs package data" value={numberLabel(rows.filter((row) => readinessFor(row).ready !== true).length)} /><Detail label="Selected label-ready" value={numberLabel(selectedReady)} /></div>
       <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "All work" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
       <Card><CardHeader className="border-b"><div className="relative max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, SKU, warehouse, or carrier" /></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible fulfillment work" checked={shown.length > 0 && shown.every((row) => selectedRouteIds.has(String(row.id)))} onCheckedChange={(checked) => setSelectedRouteIds(checked === true ? new Set(shown.map((row) => String(row.id))) : new Set())} /></TableHead><TableHead>Order / customer</TableHead><TableHead>SKU / quantity</TableHead><TableHead>Warehouse</TableHead><TableHead>Package / label readiness</TableHead><TableHead>Ship by</TableHead><TableHead>Stage</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{shown.map((row) => { const readiness = readinessFor(row); const blockers = Array.isArray(readiness.blockers) ? readiness.blockers as string[] : []; const next = nextStage(String(row.status)); return <TableRow key={String(row.id)}><TableCell><Checkbox aria-label={`Select ${String(row.orderNumber || row.orderId)}`} checked={selectedRouteIds.has(String(row.id))} onCheckedChange={(checked) => setSelectedRouteIds((current) => { const selected = new Set(current); if (checked === true) selected.add(String(row.id)); else selected.delete(String(row.id)); return selected })} /></TableCell><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="text-xs text-muted-foreground">{String(row.customer || "Customer")}</p></TableCell><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(row.sku || ""))}`}>{String(row.sku || "Missing SKU")}</a><p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell>{String(row.warehouseName || "Unassigned")}</TableCell><TableCell><button type="button" className={`w-full rounded-md border p-2 text-left transition-colors hover:bg-muted/50 ${readiness.ready ? "border-emerald-200 bg-emerald-50/50" : "border-destructive/50 bg-destructive/5"}`} onClick={() => editPackage(row)}><div className="flex items-center justify-between gap-2"><p className={`text-xs font-medium ${readiness.ready ? "text-emerald-800" : "text-destructive"}`}>{readiness.ready ? "Label-ready" : blockers[0] || "Needs package data"}</p><Pencil className="size-3.5 text-muted-foreground" /></div><p className="mt-1 text-xs text-muted-foreground">{String(readiness.weight || 0)} lb · {String(readiness.length || 0)} × {String(readiness.width || 0)} × {String(readiness.height || 0)} in</p></button></TableCell><TableCell>{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant={row.status === "exception" ? "destructive" : row.status === "ready_to_ship" ? "secondary" : "outline"}>{String(row.status || "new").replace(/_/g, " ")}</Badge></TableCell><TableCell className="text-right"><div className="flex justify-end gap-2">{readiness.ready ? <Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}>Get quotes</a></Button> : <Button size="sm" variant="outline" onClick={() => editPackage(row)}>Fix package</Button>}{next ? <Button size="sm" disabled={busy} onClick={() => void advance(row, next)}>Mark {next.replace(/_/g, " ")}</Button> : <Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}>Open order</a></Button>}</div></TableCell></TableRow> })}{!shown.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No fulfillment work matches this view.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
       <Dialog open={Boolean(packageRow)} onOpenChange={(open) => !open && setPackageRow(null)}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>Edit package</DialogTitle><DialogDescription>These values are checked before carrier quotes and label purchase. Saving them refreshes the fulfillment queue immediately.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageLength} onChange={(event) => setPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWidth} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageHeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setPackageRow(null)}>Cancel</Button><Button disabled={busy || !packageComplete} onClick={() => void savePackage()}>{busy && <Loader2 className="size-4 animate-spin" />} Save package</Button></DialogFooter></DialogContent></Dialog>
     </div>
   )
+}
+
+function WarehouseWorkspace() {
+  const path = window.location.pathname.replace(/\/+$/, "")
+  const [tab, setTab] = useState(path.endsWith("/audits") ? "audits" : "receiving")
+  const selectTab = (next: string) => {
+    setTab(next)
+    window.history.replaceState({}, "", next === "audits" ? "/warehouse/audits" : "/warehouse/receiving")
+  }
+  return <div className="grid gap-5"><PageHeader eyebrow="Warehouse operations" title="Warehouse" description="Receive inventory, manage counts, and keep an auditable record of every physical-stock change." /><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="receiving">Receiving</TabsTrigger><TabsTrigger value="audits">Warehouse audits</TabsTrigger></TabsList></div><TabsContent value="receiving" className="mt-4 grid gap-4"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"><Detail label="Manual receipts" value="Receive arrivals without a PO" /><Detail label="PO receipts" value="Receive supplier orders in Purchasing" /><Detail label="Return receipts" value="Inspect and restock from the order" /></div><ManualReceivingPanel /><Card><CardHeader className="flex-row items-center justify-between gap-3"><div><CardTitle className="text-sm">Purchase-order receiving</CardTitle><CardDescription>Receive expected supplier deliveries against their PO to update remaining quantities and release linked fulfillment demand.</CardDescription></div><Button size="sm" variant="outline" asChild><a href="/purchasing">Open purchasing</a></Button></CardHeader></Card></TabsContent><TabsContent value="audits" className="mt-4"><WarehouseAuditPanel /></TabsContent></Tabs></div>
 }
 
 function PickScanPanel({ onChanged }: { onChanged: () => Promise<void> }) {
