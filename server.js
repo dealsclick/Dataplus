@@ -804,6 +804,8 @@ const DEFAULT_SYSTEM_SETTINGS = {
   smtpFromEmail: "",
   smtpReminderScheduleEnabled: false,
   smtpReminderScheduleTime: "08:00",
+  openFoodFactsLookupEnabled: false,
+  openFoodFactsApiBaseUrl: "https://world.openfoodfacts.org/api/v3",
   systemUsers: [
     { id: "owner", name: "Luis", email: "", role: "Owner", status: "active" }
   ],
@@ -4188,6 +4190,8 @@ function normalizeSystemSettings(settings = {}) {
   normalized.smtpFromEmail = String(normalized.smtpFromEmail || "").trim();
   normalized.smtpReminderScheduleEnabled = normalized.smtpReminderScheduleEnabled === true || String(normalized.smtpReminderScheduleEnabled).toLowerCase() === "true";
   normalized.smtpReminderScheduleTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(normalized.smtpReminderScheduleTime || "")) ? String(normalized.smtpReminderScheduleTime) : "08:00";
+  normalized.openFoodFactsLookupEnabled = normalized.openFoodFactsLookupEnabled === true || String(normalized.openFoodFactsLookupEnabled).toLowerCase() === "true";
+  normalized.openFoodFactsApiBaseUrl = String(normalized.openFoodFactsApiBaseUrl || "https://world.openfoodfacts.org/api/v3").replace(/\/+$/, "");
   normalized.systemUsers = (Array.isArray(normalized.systemUsers) ? normalized.systemUsers : DEFAULT_SYSTEM_SETTINGS.systemUsers)
     .map((user, index) => ({
       id: String(user.id || crypto.randomUUID?.() || `user-${index + 1}`),
@@ -21252,9 +21256,10 @@ async function handleApi(req, res) {
     const product = (result.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku].some((value) => String(value || "").trim().toLowerCase() === barcode.toLowerCase())) || null;
     if (product) return sendJson(res, 200, { barcode, product, source: "catalog", matched: true });
     let enrichment = null;
-    if (/^\d{8,14}$/.test(barcode)) {
+    const scannerSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (scannerSettings.openFoodFactsLookupEnabled && /^\d{8,14}$/.test(barcode)) {
       try {
-        const response = await fetch(`https://world.openfoodfacts.org/api/v3/product/${encodeURIComponent(barcode)}?fields=product_name,brands,image_url,categories`, { headers: { "User-Agent": "DataPlus/1.0 (warehouse barcode intake)" }, signal: AbortSignal.timeout(4000) });
+        const response = await fetch(`${scannerSettings.openFoodFactsApiBaseUrl}/product/${encodeURIComponent(barcode)}?fields=product_name,brands,image_url,categories`, { headers: { "User-Agent": "DataPlus/1.0 (warehouse barcode intake)" }, signal: AbortSignal.timeout(4000) });
         const payload = await response.json();
         const item = payload?.product || {};
         if (item.product_name || item.brands) enrichment = { title: item.product_name || "", brand: item.brands || "", image: item.image_url || "", category: item.categories || "", provider: "Open Food Facts" };
