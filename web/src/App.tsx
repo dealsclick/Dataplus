@@ -4005,6 +4005,7 @@ function FulfillmentPage() {
       />
       <PickListPanel onChanged={load} />
       <PickScanPanel onChanged={load} />
+      <ManualReceivingPanel />
       <WarehouseAuditPanel />
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><Detail label="Open work" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready to ship" value={numberLabel(rows.filter((row) => row.status === "ready_to_ship").length)} /><Detail label="Label-ready" value={numberLabel(rows.filter((row) => readinessFor(row).ready === true).length)} /><Detail label="Needs package data" value={numberLabel(rows.filter((row) => readinessFor(row).ready !== true).length)} /><Detail label="Selected label-ready" value={numberLabel(selectedReady)} /></div>
       <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "All work" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
@@ -4023,6 +4024,34 @@ function PickScanPanel({ onChanged }: { onChanged: () => Promise<void> }) {
   const scan = async () => { if (!pickListId || !barcode.trim()) return; setBusy(true); try { const result = await api<{ message?: string }>(`/api/fulfillment/pick-lists/${encodeURIComponent(pickListId)}/scan`, { method: "POST", body: JSON.stringify({ barcode, user: "Warehouse" }) }); setBarcode(""); toast.success(result.message || "Line picked."); await onChanged() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to scan pick line.") } finally { setBusy(false) } }
   if (!pickLists.length) return null
   return <Card><CardHeader><CardTitle className="text-base">Pick by barcode</CardTitle><CardDescription>Use a Bluetooth scanner or enter a UPC. DataPlus confirms that the item belongs to the selected Pick List before marking it picked.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-end gap-2"><Field label="Pick List"><Select value={pickListId} onValueChange={setPickListId}><SelectTrigger className="w-48"><SelectValue /></SelectTrigger><SelectContent>{pickLists.map((row) => <SelectItem key={String(row.id)} value={String(row.id)}>{String(row.pickListNumber)}</SelectItem>)}</SelectContent></Select></Field><Field label="Barcode"><Input autoFocus value={barcode} onChange={(event) => setBarcode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void scan() } }} placeholder="Scan UPC" /></Field><Button disabled={busy || !pickListId || !barcode.trim()} onClick={() => void scan()}>{busy && <Loader2 className="size-4 animate-spin" />} Confirm pick</Button></CardContent></Card>
+}
+
+function ManualReceivingPanel() {
+  const [lookup, setLookup] = useState("")
+  const [quantity, setQuantity] = useState("1")
+  const [warehouse, setWarehouse] = useState("Staten Island")
+  const [locationBin, setLocationBin] = useState("")
+  const [note, setNote] = useState("")
+  const [receipts, setReceipts] = useState<Array<Record<string, unknown>>>([])
+  const [busy, setBusy] = useState(false)
+  const load = async () => { try { const result = await api<{ receipts?: Array<Record<string, unknown>> }>("/api/warehouse-receipts"); setReceipts(result.receipts || []) } catch { /* The receipt form remains usable if history is unavailable. */ } }
+  useEffect(() => { void load() }, [])
+  const receive = async () => {
+    if (!lookup.trim() || Number(quantity) <= 0) return
+    setBusy(true)
+    try {
+      const result = await api<{ receipt?: Record<string, unknown>; message?: string }>("/api/warehouse-receipts", { method: "POST", body: JSON.stringify({ lookup, quantity: Number(quantity), warehouseName: warehouse, locationBin, note, user: "Warehouse" }) })
+      toast.success(result.message || "Manual receipt posted.")
+      setLookup("")
+      setQuantity("1")
+      setLocationBin("")
+      setNote("")
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to post manual receipt.")
+    } finally { setBusy(false) }
+  }
+  return <Card><CardHeader><CardTitle className="text-base">Manual receiving</CardTitle><CardDescription>Receive catalog inventory that arrives without a purchase order. Every receipt posts a warehouse-level count and an auditable inventory ledger entry.</CardDescription></CardHeader><CardContent className="grid gap-4"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_120px_180px_180px]"><Field label="SKU, UPC, or barcode"><Input autoFocus value={lookup} onChange={(event) => setLookup(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void receive() } }} placeholder="Scan or enter identifier" /></Field><Field label="Quantity"><Input type="number" min="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></Field><Field label="Receiving warehouse"><Input value={warehouse} onChange={(event) => setWarehouse(event.target.value)} placeholder="Staten Island" /></Field><Field label="Bin location"><Input value={locationBin} onChange={(event) => setLocationBin(event.target.value)} placeholder="Optional bin" /></Field></div><div className="flex flex-wrap items-end gap-3"><Field label="Receiving note"><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Delivery, adjustment, or receiving note" /></Field><Button disabled={busy || !lookup.trim() || Number(quantity) <= 0} onClick={() => void receive()}>{busy && <Loader2 className="size-4 animate-spin" />} Post receipt</Button></div>{receipts.length > 0 && <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Receipt</TableHead><TableHead>SKU</TableHead><TableHead>Quantity</TableHead><TableHead>Warehouse / bin</TableHead><TableHead>Received</TableHead></TableRow></TableHeader><TableBody>{receipts.slice(0, 5).map((receipt) => { const item = (Array.isArray(receipt.items) ? receipt.items[0] : {}) as Record<string, unknown>; return <TableRow key={String(receipt.id)}><TableCell className="font-medium">{String(receipt.receiptNumber || "Receipt")}</TableCell><TableCell>{String(item.sku || "-")}</TableCell><TableCell>{numberLabel(Number(item.qtyReceived || 0))}</TableCell><TableCell>{String(receipt.warehouseName || "-")}{receipt.locationBin ? ` / ${String(receipt.locationBin)}` : ""}</TableCell><TableCell>{dateLabel(String(receipt.receivedAt || ""))}</TableCell></TableRow> })}</TableBody></Table></div>}</CardContent></Card>
 }
 
 function WarehouseAuditPanel() {

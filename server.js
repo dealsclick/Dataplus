@@ -21328,6 +21328,84 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { audit, message: `${audit.auditNumber} completed. ${products.length} catalog counts were updated.` });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/warehouse-receipts" && postgres.isPostgresEnabled()) {
+    const receipts = await postgres.readStateField("manualWarehouseReceipts").catch(() => []);
+    return sendJson(res, 200, { receipts: Array.isArray(receipts) ? receipts.slice(0, 50) : [] });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/warehouse-receipts" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const lookup = String(body.lookup || body.sku || body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
+    const quantity = Number(body.quantity || 0);
+    if (!lookup) return sendJson(res, 400, { error: "Enter or scan a SKU, UPC, or barcode." });
+    if (!Number.isFinite(quantity) || quantity <= 0) return sendJson(res, 400, { error: "Receiving quantity must be greater than zero." });
+
+    const db = await readDbFast({ skipInventory: true });
+    const products = await postgres.listProducts({ q: lookup, page: 1, limit: 50, includeInventoryLevels: true });
+    const product = (products.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku]
+      .some((value) => String(value || "").trim().toLowerCase() === lookup.toLowerCase())) || null;
+    if (!product) return sendJson(res, 404, { error: `No catalog SKU matches ${lookup}. Add it to the catalog before receiving it.` });
+
+    const requestedWarehouse = String(body.warehouseId || body.warehouseName || "").trim().toLowerCase();
+    const warehouse = (db.warehouses || []).find((row) => String(row.id || "").toLowerCase() === requestedWarehouse || String(row.name || "").toLowerCase() === requestedWarehouse)
+      || (db.warehouses || []).find((row) => row.isDefaultReceiving)
+      || (db.warehouses || [])[0]
+      || null;
+    if (!warehouse) return sendJson(res, 400, { error: "Create or select a receiving warehouse before posting inventory." });
+
+    const receipts = await postgres.readStateField("manualWarehouseReceipts").catch(() => []) || [];
+    const highest = Math.max(1000, ...receipts.map((receipt) => Number(String(receipt.receiptNumber || "").replace(/\D/g, "")) || 0));
+    const now = new Date().toISOString();
+    const locationBin = String(body.locationBin || "").trim();
+    const note = String(body.note || "").trim();
+    const stockRow = ensureInventoryWarehouseStock(product, warehouse);
+    const qtyBefore = Number(stockRow.qty || 0);
+    const reservedBefore = Number(stockRow.reserved || 0);
+    stockRow.qty = qtyBefore + quantity;
+    stockRow.locationBin = locationBin || stockRow.locationBin || "";
+    stockRow.updatedAt = now;
+    syncInventoryTotalsFromWarehouses(product);
+    product.stockQty = Number(product.qty || 0);
+    product.stockStatus = "Received";
+    product.stockUpdatedAt = now;
+    product.updatedAt = now;
+
+    const receipt = {
+      id: crypto.randomUUID(),
+      receiptNumber: `MRCV-${highest + 1}`,
+      status: "received",
+      source: "manual_receiving",
+      warehouseId: warehouse.id,
+      warehouseName: warehouse.name,
+      locationBin,
+      receivedAt: now,
+      receivedBy: body.user || "Warehouse",
+      note,
+      items: [{ sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, qtyReceived: quantity, qtyBefore, qtyAfter: Number(stockRow.qty || 0) }]
+    };
+    addInventoryLedger(db, product, {
+      type: "manual_receipt",
+      source: "warehouse_receiving",
+      referenceId: receipt.id,
+      referenceNumber: receipt.receiptNumber,
+      warehouseId: warehouse.id,
+      warehouseName: warehouse.name,
+      locationBin,
+      quantityChange: quantity,
+      qtyBefore,
+      qtyAfter: Number(stockRow.qty || 0),
+      reservedBefore,
+      reservedAfter: Number(stockRow.reserved || 0),
+      reason: note || "Manual warehouse receipt",
+      user: body.user || "Warehouse"
+    });
+    receipts.unshift(receipt);
+    await postgres.upsertProductsFromState([product]);
+    await postgres.upsertInventoryLevelsFromProducts([product]);
+    await postgres.writeStateDocuments({ manualWarehouseReceipts: receipts.slice(0, 5000), inventoryLedger: db.inventoryLedger || [] });
+    return sendJson(res, 201, { receipt, product, message: `${receipt.receiptNumber} posted ${quantity} unit${quantity === 1 ? "" : "s"} of ${product.sku} to ${warehouse.name}.` });
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "fulfillment-package" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const order = await postgres.readOrderByKey(parts[2]);
