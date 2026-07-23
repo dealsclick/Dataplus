@@ -4100,6 +4100,12 @@ function WarehouseAuditPanel() {
   const scanRef = useRef(false)
   const load = async () => { const result = await api<{ audits?: Array<Record<string, unknown>> }>("/api/warehouse-audits"); setAudits(result.audits || []) }
   const resumedAudit = active || audits.find((audit) => String(audit.status) === "in_progress") || null
+  const applyAuditUpdate = (audit: Record<string, unknown>) => {
+    // Keep the scanner responsive even while the audit-register refresh finishes.
+    const snapshot: Record<string, unknown> = { ...audit, lines: Array.isArray(audit.lines) ? [...audit.lines] : [], unknownBarcodes: Array.isArray(audit.unknownBarcodes) ? [...audit.unknownBarcodes] : [] }
+    setActive(snapshot)
+    setAudits((current) => [snapshot, ...current.filter((row) => String(row.id) !== String(snapshot.id))])
+  }
   useEffect(() => { void load() }, [])
   useEffect(() => {
     if (!cameraOpen || !videoRef.current) return
@@ -4122,7 +4128,7 @@ function WarehouseAuditPanel() {
     return () => { if (timer) window.clearTimeout(timer); stream?.getTracks().forEach((track) => track.stop()) }
   }, [cameraOpen, resumedAudit])
   const create = async () => { setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; message?: string }>("/api/warehouse-audits", { method: "POST", body: JSON.stringify({ warehouseName: warehouse, user: "Luis" }) }); setActive(result.audit || null); toast.success(result.message || "Warehouse audit started."); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to start warehouse audit.") } finally { setBusy(false) } }
-  const submit = async (value = barcode) => { if (!resumedAudit || !String(value).trim()) return; setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; matched?: boolean; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/scan`, { method: "POST", body: JSON.stringify({ barcode: value }) }); setActive(result.audit || resumedAudit); setBarcode(""); toast[result.matched ? "success" : "warning"](result.message || "Scan saved."); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save scan.") } finally { setBusy(false) } }
+  const submit = async (value = barcode) => { if (!resumedAudit || !String(value).trim()) return; setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; matched?: boolean; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/scan`, { method: "POST", body: JSON.stringify({ barcode: value }) }); applyAuditUpdate(result.audit || resumedAudit); setBarcode(""); toast[result.matched ? "success" : "warning"](result.message || "Scan saved."); void load().catch(() => undefined) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save scan.") } finally { setBusy(false) } }
   const complete = async () => { if (!resumedAudit) return; setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/complete`, { method: "POST" }); setActive(result.audit || null); toast.success(result.message || "Warehouse audit completed."); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to complete audit.") } finally { setBusy(false) } }
   const current = resumedAudit
   const lines = Array.isArray(current?.lines) ? current?.lines as Array<Record<string, unknown>> : []
