@@ -182,6 +182,18 @@ const SHOPIFY_SHIPPING_CLASSIFICATION_METAFIELDS = {
   shippingClassReason: SHOPIFY_DUMP_FIELD_METAFIELDS.shippingClassReason
 };
 const ORDER_PREFIX = "DP";
+const AI_TOOL_SCOPE_DEFINITIONS = [
+  { id: "catalog.read", group: "Read context", label: "Catalog and readiness", description: "Lets David use the current product's approved catalog data and readiness checks.", implemented: true, defaultEnabled: true },
+  { id: "operations.read", group: "Read context", label: "Operations context", description: "Lets David use a compact current-order, purchasing, fulfillment, or jobs summary.", implemented: true, defaultEnabled: true },
+  { id: "shopify.launch", group: "Approved actions", label: "Launch a SKU on Shopify", description: "Preflights one approved SKU and queues the standard Shopify launch job after approval.", implemented: true, defaultEnabled: false },
+  { id: "catalog.draft", group: "Planned actions", label: "Draft catalog fixes", description: "Will prepare editable product-field changes without applying them.", implemented: false, defaultEnabled: false },
+  { id: "shopify.sync", group: "Planned actions", label: "Prepare Shopify syncs", description: "Will prepare price, inventory, and content sync jobs for approval.", implemented: false, defaultEnabled: false },
+  { id: "orders.workflow", group: "Planned actions", label: "Prepare order workflow changes", description: "Will prepare holds, allocations, cancellations, and routing decisions.", implemented: false, defaultEnabled: false },
+  { id: "purchasing.po", group: "Planned actions", label: "Prepare purchase orders", description: "Will group eligible order lines by supplier and draft purchase orders.", implemented: false, defaultEnabled: false },
+  { id: "fulfillment.plan", group: "Planned actions", label: "Prepare fulfillment work", description: "Will prepare pick lists, shipping-readiness work, and fulfillment plans.", implemented: false, defaultEnabled: false },
+  { id: "inventory.adjust", group: "Planned actions", label: "Prepare inventory adjustments", description: "Will prepare transfers, replenishment, and reviewed audit adjustments.", implemented: false, defaultEnabled: false },
+  { id: "jobs.recovery", group: "Planned actions", label: "Prepare job recovery", description: "Will prepare safe retries and remediation steps for failed jobs.", implemented: false, defaultEnabled: false }
+];
 
 const PRODUCT_MAPPING_FIELDS = [
   { key: "sku", label: "SKU", type: "text", requiredForImport: true },
@@ -820,6 +832,11 @@ const DEFAULT_SYSTEM_SETTINGS = {
   aiOperationalActionsEnabled: false,
   aiShopifyLaunchEnabled: false,
   aiActionProposalExpiryMinutes: 15,
+  aiAllowPageContext: true,
+  aiRequireActionConfirmation: true,
+  aiMaxActionItems: 25,
+  aiAuditLoggingEnabled: true,
+  aiToolScopes: Object.fromEntries(AI_TOOL_SCOPE_DEFINITIONS.map((scope) => [scope.id, scope.defaultEnabled])),
   warehouseImageAnalysisEnabled: true,
   warehouseImageAnalysisModel: "gpt-4o-mini",
   warehouseImageAnalysisApiKey: "",
@@ -4223,6 +4240,18 @@ function normalizeSystemSettings(settings = {}) {
   normalized.aiOperationalActionsEnabled = normalized.aiOperationalActionsEnabled === true || String(normalized.aiOperationalActionsEnabled).toLowerCase() === "true";
   normalized.aiShopifyLaunchEnabled = normalized.aiShopifyLaunchEnabled === true || String(normalized.aiShopifyLaunchEnabled).toLowerCase() === "true";
   normalized.aiActionProposalExpiryMinutes = Math.max(5, Math.min(60, Number(normalized.aiActionProposalExpiryMinutes || 15) || 15));
+  normalized.aiAllowPageContext = normalized.aiAllowPageContext !== false;
+  normalized.aiRequireActionConfirmation = true;
+  normalized.aiMaxActionItems = Math.max(1, Math.min(100, Number(normalized.aiMaxActionItems || 25) || 25));
+  normalized.aiAuditLoggingEnabled = normalized.aiAuditLoggingEnabled !== false;
+  const submittedAiScopes = normalized.aiToolScopes && typeof normalized.aiToolScopes === "object" ? normalized.aiToolScopes : {};
+  normalized.aiToolScopes = Object.fromEntries(AI_TOOL_SCOPE_DEFINITIONS.map((scope) => [
+    scope.id,
+    scope.id === "shopify.launch"
+      ? (submittedAiScopes[scope.id] === undefined ? normalized.aiShopifyLaunchEnabled : submittedAiScopes[scope.id] === true || String(submittedAiScopes[scope.id]).toLowerCase() === "true")
+      : (submittedAiScopes[scope.id] === undefined ? scope.defaultEnabled : submittedAiScopes[scope.id] === true || String(submittedAiScopes[scope.id]).toLowerCase() === "true")
+  ]));
+  normalized.aiShopifyLaunchEnabled = normalized.aiToolScopes["shopify.launch"] === true;
   normalized.warehouseImageAnalysisEnabled = normalized.warehouseImageAnalysisEnabled === true || String(normalized.warehouseImageAnalysisEnabled).toLowerCase() === "true";
   normalized.warehouseImageAnalysisModel = String(normalized.warehouseImageAnalysisModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
   normalized.warehouseImageAnalysisApiKey = String(normalized.warehouseImageAnalysisApiKey || "").trim();
@@ -4280,7 +4309,12 @@ function publicSystemSettings(settings = {}) {
   const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
   const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
   const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
-  return { ...normalized, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured };
+  return { ...normalized, aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured };
+}
+
+function davidToolEnabled(settings = {}, scopeId = "") {
+  const normalized = normalizeSystemSettings(settings);
+  return normalized.aiEnabled === true && normalized.aiToolScopes?.[scopeId] === true;
 }
 
 function getAiRuntimeConfig(settings = {}) {
@@ -20707,7 +20741,7 @@ async function queueShopifyProductCreateJob(payload = {}) {
 async function davidShopifyLaunchPreflight(sku, settings) {
   const normalizedSku = sourceTextValue(sku).toUpperCase();
   if (!normalizedSku) return { state: "needs_input", message: "Tell David which SKU to launch in Shopify." };
-  if (!settings.aiOperationalActionsEnabled || !settings.aiShopifyLaunchEnabled) {
+  if (!settings.aiOperationalActionsEnabled || !davidToolEnabled(settings, "shopify.launch")) {
     return { state: "disabled", sku: normalizedSku, message: "Operational actions are disabled. Enable David operational actions and Shopify SKU launch in System Settings first." };
   }
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
@@ -20754,10 +20788,36 @@ async function davidShopifyLaunchPreflight(sku, settings) {
 }
 
 async function recordDavidAction(entry = {}) {
-  if (!postgres.isPostgresEnabled()) return;
+  const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+  if (!postgres.isPostgresEnabled() || !settings.aiAuditLoggingEnabled) return;
   const history = await postgres.readStateField("davidActionHistory").catch(() => []) || [];
   history.unshift({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), actor: "David", ...entry });
   await postgres.writeStateDocuments({ davidActionHistory: history.slice(0, 1000) });
+}
+
+async function davidPageContextSnapshot(context = {}, settings = {}) {
+  if (!settings.aiAllowPageContext) return { enabled: false };
+  const pathname = String(context?.path || "").split("?")[0].slice(0, 300);
+  const productMatch = pathname.match(/^\/products\/([^/]+)$/);
+  const orderMatch = pathname.match(/^\/orders\/([^/]+)$/);
+  if (productMatch && davidToolEnabled(settings, "catalog.read")) {
+    const sku = decodeURIComponent(productMatch[1]);
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const product = await postgres.readProductByKey(sku).catch(() => null);
+    if (!product) return { page: "product", sku, found: false };
+    const readiness = shopifyProductCreateReadiness(db, product);
+    return { page: "product", sku: product.sku || sku, title: shopifyExportTitle(product), supplier: product.supplier || product.vendor || "", mainCategory: product.mainCategory || product.category || "", price: Number(product.websitePrice ?? product.price ?? 0), available: Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)), shopifyLinked: Boolean(product.shopifyId || product.shopifyProductId), shopifyReadiness: readiness };
+  }
+  if (orderMatch && davidToolEnabled(settings, "operations.read")) {
+    const order = await postgres.readOrderByKey(decodeURIComponent(orderMatch[1])).catch(() => null);
+    if (!order) return { page: "order", found: false };
+    return { page: "order", id: order.id, orderNumber: order.orderNumber || order.id, status: order.status || "", operationalStatus: order.operationalStatus || "", paymentStatus: order.financialStatus || "", source: order.source || "", channelSource: order.channelSource || "", total: Number(order.total || 0), itemCount: Array.isArray(order.items) ? order.items.length : 0, hasPurchaseOrder: Boolean(order.hasPurchaseOrder || (order.purchaseOrderIds || []).length), fulfillmentStatus: order.fulfillmentStatus || "" };
+  }
+  if (pathname === "/jobs" && davidToolEnabled(settings, "operations.read")) {
+    const jobs = await mergedImportJobsAsync({});
+    return { page: "jobs", active: jobs.filter((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase())).slice(0, 10).map((job) => ({ id: job.id, operation: job.operation, status: job.status, progressPercent: job.progressPercent, message: job.message })) };
+  }
+  return pathname ? { page: pathname } : {};
 }
 
 async function handleApi(req, res) {
@@ -21554,7 +21614,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/ai/actions/shopify-launch/execute") {
     const body = await parseBody(req);
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
-    if (!settings.aiEnabled || !settings.aiOperationalActionsEnabled || !settings.aiShopifyLaunchEnabled) {
+    if (!settings.aiEnabled || !settings.aiOperationalActionsEnabled || !davidToolEnabled(settings, "shopify.launch")) {
       return sendJson(res, 403, { error: "David operational actions or Shopify SKU launch is disabled in System Settings." });
     }
     const proposalId = sourceTextValue(body.proposalId);
@@ -21597,7 +21657,9 @@ async function handleApi(req, res) {
       .map((message) => ({ role: message?.role === "assistant" ? "assistant" : "user", content: String(message?.content || "").trim().slice(0, 5000) }))
       .filter((message) => message.content);
     if (!messages.length || messages[messages.length - 1].role !== "user") return sendJson(res, 400, { error: "Ask David a question to begin." });
-    const instruction = "You are David, DataPlus's concise internal operations assistant. Help users understand catalog, inventory, fulfillment, purchasing, warehouse, channel, and settings workflows. Some approved actions are available through separate DataPlus controls, but you never execute, claim to execute, or imply that you executed a system change yourself. For an action request, explain that DataPlus will run a readiness review and require explicit user approval. Be practical, direct, and say when information is unavailable.";
+    const pageContext = await davidPageContextSnapshot(body.context || {}, settings).catch(() => ({}));
+    const enabledScopes = AI_TOOL_SCOPE_DEFINITIONS.filter((scope) => davidToolEnabled(settings, scope.id)).map((scope) => scope.id);
+    const instruction = `You are David, DataPlus's concise internal operations assistant. Help users understand catalog, inventory, fulfillment, purchasing, warehouse, channel, and settings workflows. You have only these enabled capabilities: ${enabledScopes.join(", ") || "none"}. Some approved actions are available through separate DataPlus controls, but you never execute, claim to execute, or imply that you executed a system change yourself. For an action request, explain that DataPlus will run a readiness review and require explicit user approval. Use the supplied page context when it is relevant, never expose sensitive customer details, and say when information is unavailable.\n\nCurrent page context:\n${JSON.stringify(pageContext)}`;
     try {
       const response = aiConfig.provider === "google-ai-studio"
         ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {

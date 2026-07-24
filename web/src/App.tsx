@@ -5459,6 +5459,7 @@ function createDavidTransport(): ChatTransport<UIMessage> {
         headers: { "Content-Type": "application/json" },
         signal: abortSignal,
         body: JSON.stringify({
+          context: { path: window.location.pathname },
           messages: messages
             .map((message) => ({ role: message.role, content: davidMessageText(message) }))
             .filter((message) => message.content),
@@ -5512,7 +5513,7 @@ function DavidConversation({
   const provider = String(settings.aiProvider || "openai") === "google-ai-studio" ? "Google AI Studio" : "OpenAI"
   const ready = Boolean(settings.aiEnabled)
   const sending = status === "submitted" || status === "streaming" || actionBusy
-  const actionsEnabled = Boolean(settings.aiOperationalActionsEnabled && settings.aiShopifyLaunchEnabled)
+  const actionsEnabled = Boolean(settings.aiOperationalActionsEnabled && (settings.aiToolScopes as Record<string, unknown> | undefined)?.["shopify.launch"])
 
   useEffect(() => { scrollTarget.current?.scrollIntoView({ block: "end", behavior: "smooth" }) }, [messages, status])
   useEffect(() => {
@@ -5630,7 +5631,7 @@ function DavidChatPage({ settings, onOpenSettings }: { settings: SystemSettings;
     <PageHeader
       eyebrow="AI assistant"
       title="David"
-      description="A read-only operational assistant for understanding and navigating DataPlus. Chat history stays in this browser session."
+      description="An operational assistant that uses enabled, page-aware scopes and prepares approved actions. Chat history stays in this browser session."
       action={<div className="flex items-center gap-2"><Badge variant={ready ? "default" : "secondary"}>{ready ? `${provider} connected` : "AI setup required"}</Badge><Button variant="outline" size="sm" onClick={onOpenSettings}><Settings className="size-4" /> AI settings</Button></div>}
     />
     <Card className="overflow-hidden"><DavidConversation settings={settings} onOpenSettings={onOpenSettings} /></Card>
@@ -5656,9 +5657,16 @@ function SettingsPage({
   const aiKeyField = aiProvider === "google-ai-studio" ? "geminiApiKey" : "openAiApiKey"
   const aiDefaultModel = aiProvider === "google-ai-studio" ? "gemini-3.6-flash" : "gpt-4o-mini"
   const aiKeyConfigured = aiProvider === "google-ai-studio" ? Boolean(settings.geminiApiKeyConfigured) : Boolean(settings.openAiApiKeyConfigured)
+  const aiToolScopeDefinitions = (Array.isArray(settings.aiToolScopeDefinitions) ? settings.aiToolScopeDefinitions : []) as Array<Record<string, unknown>>
+  const aiToolScopes = () => (value("aiToolScopes") && typeof value("aiToolScopes") === "object" ? value("aiToolScopes") as Record<string, unknown> : {})
 
   function update(field: string, next: unknown) {
     setDraft((current) => ({ ...current, [field]: next }))
+  }
+
+  function updateAiToolScope(scopeId: string, enabled: boolean) {
+    update("aiToolScopes", { ...aiToolScopes(), [scopeId]: enabled })
+    if (scopeId === "shopify.launch") update("aiShopifyLaunchEnabled", enabled)
   }
 
   async function save() {
@@ -5799,15 +5807,20 @@ function SettingsPage({
           <Card>
             <CardHeader>
               <CardTitle className="text-base">David operational actions</CardTitle>
-              <CardDescription>David can prepare narrowly scoped system work, run the same readiness checks as the product workflow, and require explicit approval before a job is queued. It never receives unrestricted channel access.</CardDescription>
+              <CardDescription>Enable individual capabilities instead of giving David broad access. Read scopes provide compact page context; every write scope is opt-in, approval-gated, and audited.</CardDescription>
             </CardHeader>
-            <CardContent className="grid gap-4 md:grid-cols-2">
+            <CardContent className="grid gap-5">
+              <div className="grid gap-4 md:grid-cols-2">
               <ToggleField label="Enable David operational actions" checked={boolValue("aiOperationalActionsEnabled")} disabled={!editing || !boolValue("aiEnabled")} onCheckedChange={(next) => update("aiOperationalActionsEnabled", next)} />
-              <ToggleField label="Allow Shopify SKU launch requests" checked={boolValue("aiShopifyLaunchEnabled")} disabled={!editing || !boolValue("aiEnabled") || !boolValue("aiOperationalActionsEnabled")} onCheckedChange={(next) => update("aiShopifyLaunchEnabled", next)} />
+              <ToggleField label="Share current page context" checked={boolValue("aiAllowPageContext")} disabled={!editing || !boolValue("aiEnabled")} onCheckedChange={(next) => update("aiAllowPageContext", next)} />
               <Field label="Approval expiry (minutes)">
                 <Input disabled={!editing || !boolValue("aiOperationalActionsEnabled")} type="number" min="5" max="60" value={String(value("aiActionProposalExpiryMinutes") || 15)} onChange={(event) => update("aiActionProposalExpiryMinutes", Number(event.target.value || 15))} />
               </Field>
-              <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Every action is logged, validated again when approved, and queued as a standard DataPlus job. David will surface missing title, description, category/product type, vendor, price, inventory, or image details before launch.</div>
+              <Field label="Maximum records per proposed action"><Input disabled={!editing || !boolValue("aiOperationalActionsEnabled")} type="number" min="1" max="100" value={String(value("aiMaxActionItems") || 25)} onChange={(event) => update("aiMaxActionItems", Number(event.target.value || 25))} /></Field>
+              <ToggleField label="Keep David action audit log" checked={boolValue("aiAuditLoggingEnabled")} disabled={!editing} onCheckedChange={(next) => update("aiAuditLoggingEnabled", next)} />
+              <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Explicit approval is always required for a write action. DataPlus checks the target again at approval time, then queues the regular workflow job.</div>
+              </div>
+              {Array.from(new Set(aiToolScopeDefinitions.map((scope) => String(scope.group || "Capabilities")))).map((group) => <div key={group} className="grid gap-2"><p className="text-sm font-medium">{group}</p><div className="grid gap-2 md:grid-cols-2">{aiToolScopeDefinitions.filter((scope) => String(scope.group || "Capabilities") === group).map((scope) => { const id = String(scope.id || ""); const implemented = scope.implemented === true; const enabled = Boolean(aiToolScopes()[id]); return <div key={id} className="flex items-start justify-between gap-3 rounded-md border p-3"><div><p className="text-sm font-medium">{String(scope.label || id)}</p><p className="mt-1 text-xs text-muted-foreground">{String(scope.description || "")}</p></div><div className="grid justify-items-end gap-1"><Switch checked={enabled} disabled={!editing || !boolValue("aiEnabled") || !implemented || (group === "Approved actions" && !boolValue("aiOperationalActionsEnabled"))} onCheckedChange={(next) => updateAiToolScope(id, next)} /><span className="text-[11px] text-muted-foreground">{implemented ? "Available" : "Coming soon"}</span></div></div>})}</div></div>)}
             </CardContent>
           </Card>
         </TabsContent>
