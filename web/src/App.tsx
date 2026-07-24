@@ -4107,6 +4107,9 @@ function WarehouseAuditPanel({ auditId = "", createOnly = false }: { auditId?: s
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const photoVideoRef = useRef<HTMLVideoElement | null>(null)
   const scanRef = useRef(false)
+  // The camera decoder remains alive across renders, so it must call the latest
+  // submit handler instead of the closure from the moment the camera was opened.
+  const submitScanRef = useRef<(value: string) => Promise<void>>(async () => undefined)
   const lastCameraScanRef = useRef({ value: "", at: 0 })
   const load = async () => { const result = await api<{ audits?: Array<Record<string, unknown>> }>("/api/warehouse-audits"); setAudits(result.audits || []) }
   const resumedAudit = active || audits.find((audit) => auditId ? String(audit.id) === auditId : String(audit.status) === "in_progress") || null
@@ -4138,7 +4141,7 @@ function WarehouseAuditPanel({ auditId = "", createOnly = false }: { auditId?: s
             lastCameraScanRef.current = { value, at: now }
             setBarcode(value)
             setCameraMessage(`Looking up ${value}...`)
-            void submit(value).finally(() => { scanRef.current = false })
+            void submitScanRef.current(value).finally(() => { scanRef.current = false })
           }
         )
       } catch { toast.error("Camera access was not available. Allow camera access in Safari, then try again."); setCameraOpen(false) }
@@ -4155,6 +4158,7 @@ function WarehouseAuditPanel({ auditId = "", createOnly = false }: { auditId?: s
   }, [photoCameraOpen])
   const create = async () => { setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; message?: string }>("/api/warehouse-audits", { method: "POST", body: JSON.stringify({ warehouseName: warehouse, user: auditOwner }) }); setActive(result.audit || null); toast.success(result.message || "Warehouse audit started."); if (createOnly && result.audit?.id) { window.location.assign(`/warehouse/audits/${encodeURIComponent(String(result.audit.id))}`); return } await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to start warehouse audit.") } finally { setBusy(false) } }
   const submit = async (value = barcode) => { if (!resumedAudit || !String(value).trim()) return; setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; matched?: boolean; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/scan`, { method: "POST", body: JSON.stringify({ barcode: value }) }); const matched = result.matched === true; const message = result.message || (matched ? "Catalog item counted." : "No catalog item found."); applyAuditUpdate(result.audit || resumedAudit); setLastScan({ barcode: String(value), matched, message }); setCameraMessage(matched ? `✓ ${message} Ready for the next barcode.` : `Product not found: ${value}. Add details below.`); if (!matched) { setManualUnknown({ barcode: String(value), sku: "", title: "", locationBin: "", qty: "1" }); setCameraOpen(false) } setBarcode(""); toast[matched ? "success" : "warning"](message); void load().catch(() => undefined) } catch (error) { const message = error instanceof Error ? error.message : "Unable to save scan."; setCameraMessage(message); toast.error(message) } finally { setBusy(false) } }
+  submitScanRef.current = submit
   const readManualPhoto = (file?: File) => { if (!file) return; if (file.size > 3 * 1024 * 1024) { toast.error("Choose a photo smaller than 3 MB."); return } const reader = new FileReader(); reader.onload = () => setManualUnknown((entry) => entry ? { ...entry, photoDataUrl: String(reader.result || "") } : entry); reader.readAsDataURL(file) }
   const captureManualPhoto = () => { const video = photoVideoRef.current; if (!video || !video.videoWidth || !video.videoHeight) return; const scale = Math.min(1, 1280 / video.videoWidth); const canvas = document.createElement("canvas"); canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale); canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height); setManualUnknown((entry) => entry ? { ...entry, photoDataUrl: canvas.toDataURL("image/jpeg", 0.82) } : entry); setPhotoCameraOpen(false) }
   const saveManualUnknown = async () => { if (!resumedAudit || !manualUnknown) return; setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/manual-item`, { method: "POST", body: JSON.stringify({ ...manualUnknown, user: "Luis" }) }); applyAuditUpdate(result.audit || resumedAudit); setManualUnknown(null); toast.success(result.message || "Catalog SKU created from audit."); void load().catch(() => undefined) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create catalog SKU.") } finally { setBusy(false) } }
