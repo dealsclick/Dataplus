@@ -4113,133 +4113,1170 @@ function ManualReceivingPanel() {
   return <Card><CardHeader><CardTitle className="text-base">Manual receiving</CardTitle><CardDescription>Receive catalog inventory that arrives without a purchase order. Every receipt posts a warehouse-level count and an auditable inventory ledger entry.</CardDescription></CardHeader><CardContent className="grid gap-4"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_120px_180px_180px]"><Field label="SKU, UPC, or barcode"><Input autoFocus value={lookup} onChange={(event) => setLookup(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void receive() } }} placeholder="Scan or enter identifier" /></Field><Field label="Quantity"><Input type="number" min="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></Field><Field label="Receiving warehouse"><Input value={warehouse} onChange={(event) => setWarehouse(event.target.value)} placeholder="Staten Island" /></Field><Field label="Bin location"><Input value={locationBin} onChange={(event) => setLocationBin(event.target.value)} placeholder="Optional bin" /></Field></div><div className="flex flex-wrap items-end gap-3"><Field label="Receiving note"><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Delivery, adjustment, or receiving note" /></Field><Button disabled={busy || !lookup.trim() || Number(quantity) <= 0} onClick={() => void receive()}>{busy && <Loader2 className="size-4 animate-spin" />} Post receipt</Button></div>{receipts.length > 0 && <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Receipt</TableHead><TableHead>SKU</TableHead><TableHead>Quantity</TableHead><TableHead>Warehouse / bin</TableHead><TableHead>Received</TableHead></TableRow></TableHeader><TableBody>{receipts.slice(0, 5).map((receipt) => { const item = (Array.isArray(receipt.items) ? receipt.items[0] : {}) as Record<string, unknown>; return <TableRow key={String(receipt.id)}><TableCell className="font-medium">{String(receipt.receiptNumber || "Receipt")}</TableCell><TableCell>{String(item.sku || "-")}</TableCell><TableCell>{numberLabel(Number(item.qtyReceived || 0))}</TableCell><TableCell>{String(receipt.warehouseName || "-")}{receipt.locationBin ? ` / ${String(receipt.locationBin)}` : ""}</TableCell><TableCell>{dateLabel(String(receipt.receivedAt || ""))}</TableCell></TableRow> })}</TableBody></Table></div>}</CardContent></Card>
 }
 
-function WarehouseAuditPanel({ auditId = "", createOnly = false }: { auditId?: string; createOnly?: boolean }) {
-  const [audits, setAudits] = useState<Array<Record<string, unknown>>>([])
-  const [active, setActive] = useState<Record<string, unknown> | null>(null)
-  const [barcode, setBarcode] = useState("")
-  const [warehouse, setWarehouse] = useState("Staten Island")
-  const [auditOwner, setAuditOwner] = useState("Luis")
-  const [busy, setBusy] = useState(false)
-  const [cameraOpen, setCameraOpen] = useState(false)
-  const [cameraMessage, setCameraMessage] = useState("Camera ready. Point it at the next barcode.")
-  const [lastScan, setLastScan] = useState<{ barcode: string; matched: boolean; message: string } | null>(null)
-  const [manualUnknown, setManualUnknown] = useState<Record<string, string> | null>(null)
-  const [photoCameraOpen, setPhotoCameraOpen] = useState(false)
-  const [photoAnalysisBusy, setPhotoAnalysisBusy] = useState(false)
-  const videoRef = useRef<HTMLVideoElement | null>(null)
-  const photoVideoRef = useRef<HTMLVideoElement | null>(null)
-  const scanRef = useRef(false)
+function WarehouseAuditPanel({
+  auditId = "",
+  createOnly = false,
+}: {
+  auditId?: string;
+  createOnly?: boolean;
+}) {
+  const [audits, setAudits] = useState<Array<Record<string, unknown>>>([]);
+  const [active, setActive] = useState<Record<string, unknown> | null>(null);
+  const [barcode, setBarcode] = useState("");
+  const [warehouse, setWarehouse] = useState("Staten Island");
+  const [auditOwner, setAuditOwner] = useState("Luis");
+  const [busy, setBusy] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraMessage, setCameraMessage] = useState(
+    "Camera ready. Point it at the next barcode.",
+  );
+  const [lastScan, setLastScan] = useState<{
+    barcode: string;
+    matched: boolean;
+    message: string;
+  } | null>(null);
+  const [manualUnknown, setManualUnknown] = useState<Record<
+    string,
+    string
+  > | null>(null);
+  const [photoCameraOpen, setPhotoCameraOpen] = useState(false);
+  const [photoAnalysisBusy, setPhotoAnalysisBusy] = useState(false);
+  const [upcResearchBusy, setUpcResearchBusy] = useState(false);
+  const [upcResearch, setUpcResearch] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const photoVideoRef = useRef<HTMLVideoElement | null>(null);
+  const scanRef = useRef(false);
   // The camera decoder remains alive across renders, so it must call the latest
   // submit handler instead of the closure from the moment the camera was opened.
-  const submitScanRef = useRef<(value: string) => Promise<void>>(async () => undefined)
-  const lastCameraScanRef = useRef({ value: "", at: 0 })
-  const load = async () => { const result = await api<{ audits?: Array<Record<string, unknown>> }>("/api/warehouse-audits"); setAudits(result.audits || []) }
-  const resumedAudit = active || audits.find((audit) => auditId ? String(audit.id) === auditId : String(audit.status) === "in_progress") || null
+  const submitScanRef = useRef<(value: string) => Promise<void>>(
+    async () => undefined,
+  );
+  const lastCameraScanRef = useRef({ value: "", at: 0 });
+  const load = async () => {
+    const result = await api<{ audits?: Array<Record<string, unknown>> }>(
+      "/api/warehouse-audits",
+    );
+    setAudits(result.audits || []);
+  };
+  const resumedAudit =
+    active ||
+    audits.find((audit) =>
+      auditId
+        ? String(audit.id) === auditId
+        : String(audit.status) === "in_progress",
+    ) ||
+    null;
   const applyAuditUpdate = (audit: Record<string, unknown>) => {
     // Keep the scanner responsive even while the audit-register refresh finishes.
-    const snapshot: Record<string, unknown> = { ...audit, lines: Array.isArray(audit.lines) ? [...audit.lines] : [], unknownBarcodes: Array.isArray(audit.unknownBarcodes) ? [...audit.unknownBarcodes] : [] }
-    setActive(snapshot)
-    setAudits((current) => [snapshot, ...current.filter((row) => String(row.id) !== String(snapshot.id))])
-  }
-  useEffect(() => { void load() }, [])
+    const snapshot: Record<string, unknown> = {
+      ...audit,
+      lines: Array.isArray(audit.lines) ? [...audit.lines] : [],
+      unknownBarcodes: Array.isArray(audit.unknownBarcodes)
+        ? [...audit.unknownBarcodes]
+        : [],
+    };
+    setActive(snapshot);
+    setAudits((current) => [
+      snapshot,
+      ...current.filter((row) => String(row.id) !== String(snapshot.id)),
+    ]);
+  };
   useEffect(() => {
-    if (!cameraOpen || !videoRef.current) return
-    const video = videoRef.current
-    let controls: { stop: () => void } | null = null
-    let canceled = false
+    void load();
+  }, []);
+  useEffect(() => {
+    if (!cameraOpen || !videoRef.current) return;
+    const video = videoRef.current;
+    let controls: { stop: () => void } | null = null;
+    let canceled = false;
     const start = async () => {
       try {
-        if (!resumedAudit) return
-        const { BrowserMultiFormatReader } = await import("@zxing/browser")
-        const reader = new BrowserMultiFormatReader()
+        if (!resumedAudit) return;
+        const { BrowserMultiFormatReader } = await import("@zxing/browser");
+        const reader = new BrowserMultiFormatReader();
         controls = await reader.decodeFromConstraints(
           { audio: false, video: { facingMode: { ideal: "environment" } } },
           video,
           (result) => {
-            const value = String(result?.getText() || "")
-            const now = Date.now()
-            if (canceled || !value || scanRef.current || (lastCameraScanRef.current.value === value && now - lastCameraScanRef.current.at < 1800)) return
-            scanRef.current = true
-            lastCameraScanRef.current = { value, at: now }
-            setBarcode(value)
-            setCameraMessage(`Looking up ${value}...`)
-            void submitScanRef.current(value).finally(() => { scanRef.current = false })
-          }
-        )
-      } catch { toast.error("Camera access was not available. Allow camera access in Safari, then try again."); setCameraOpen(false) }
-    }
-    void start()
-    return () => { canceled = true; controls?.stop() }
-  }, [cameraOpen, resumedAudit?.id])
+            const value = String(result?.getText() || "");
+            const now = Date.now();
+            if (
+              canceled ||
+              !value ||
+              scanRef.current ||
+              (lastCameraScanRef.current.value === value &&
+                now - lastCameraScanRef.current.at < 1800)
+            )
+              return;
+            scanRef.current = true;
+            lastCameraScanRef.current = { value, at: now };
+            setBarcode(value);
+            setCameraMessage(`Looking up ${value}...`);
+            void submitScanRef.current(value).finally(() => {
+              scanRef.current = false;
+            });
+          },
+        );
+      } catch {
+        toast.error(
+          "Camera access was not available. Allow camera access in Safari, then try again.",
+        );
+        setCameraOpen(false);
+      }
+    };
+    void start();
+    return () => {
+      canceled = true;
+      controls?.stop();
+    };
+  }, [cameraOpen, resumedAudit?.id]);
   useEffect(() => {
-    if (!photoCameraOpen || !photoVideoRef.current) return
-    const video = photoVideoRef.current
-    let stream: MediaStream | null = null
-    void navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false }).then(async (next) => { stream = next; video.srcObject = next; await video.play() }).catch(() => { toast.error("Camera access was not available for the product photo."); setPhotoCameraOpen(false) })
-    return () => stream?.getTracks().forEach((track) => track.stop())
-  }, [photoCameraOpen])
-  const create = async () => { setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; message?: string }>("/api/warehouse-audits", { method: "POST", body: JSON.stringify({ warehouseName: warehouse, user: auditOwner }) }); setActive(result.audit || null); toast.success(result.message || "Warehouse audit started."); if (createOnly && result.audit?.id) { window.location.assign(`/warehouse/audits/${encodeURIComponent(String(result.audit.id))}`); return } await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to start warehouse audit.") } finally { setBusy(false) } }
-  const submit = async (value = barcode) => { if (!resumedAudit || !String(value).trim()) return; setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; matched?: boolean; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/scan`, { method: "POST", body: JSON.stringify({ barcode: value }) }); const matched = result.matched === true; const message = result.message || (matched ? "Catalog item counted." : "No catalog item found."); applyAuditUpdate(result.audit || resumedAudit); setLastScan({ barcode: String(value), matched, message }); setCameraMessage(matched ? `✓ ${message} Ready for the next barcode.` : `Product not found: ${value}. Add details below.`); if (!matched) { setManualUnknown({ barcode: String(value), sku: "", title: "", locationBin: "", qty: "1" }); setCameraOpen(false) } setBarcode(""); toast[matched ? "success" : "warning"](message); void load().catch(() => undefined) } catch (error) { const message = error instanceof Error ? error.message : "Unable to save scan."; setCameraMessage(message); toast.error(message) } finally { setBusy(false) } }
-  submitScanRef.current = submit
-  const analyzeManualPhoto = async (photoDataUrl: string) => { if (photoAnalysisBusy) return; setPhotoAnalysisBusy(true); try { const result = await api<{ suggestion?: Record<string, unknown> }>("/api/warehouse/photo-suggestions", { method: "POST", body: JSON.stringify({ photoDataUrl }) }); const suggestion = result.suggestion || {}; setManualUnknown((entry) => entry ? { ...entry, photoDataUrl, title: entry.title || String(suggestion.title || ""), brand: entry.brand || String(suggestion.brand || ""), manufacturer: entry.manufacturer || String(suggestion.manufacturer || ""), mfrPartNumber: entry.mfrPartNumber || String(suggestion.mfrPartNumber || ""), vendorSku: entry.vendorSku || String(suggestion.vendorSku || ""), category: entry.category || String(suggestion.category || ""), shortDescription: entry.shortDescription || String(suggestion.shortDescription || ""), packQuantity: entry.packQuantity || String(suggestion.packQuantity || ""), analysisConfidence: String(Math.round(Number(suggestion.confidence || 0) * 100)), analysisVisibleText: String(suggestion.visibleText || "") } : entry); toast.success("Package details suggested. Review them before creating the SKU.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to analyze this product photo.") } finally { setPhotoAnalysisBusy(false) } }
-  const readManualPhoto = (file?: File) => { if (!file) return; if (file.size > 3 * 1024 * 1024) { toast.error("Choose a photo smaller than 3 MB."); return } const reader = new FileReader(); reader.onload = () => { const photoDataUrl = String(reader.result || ""); setManualUnknown((entry) => entry ? { ...entry, photoDataUrl } : entry); if (photoDataUrl) void analyzeManualPhoto(photoDataUrl) }; reader.readAsDataURL(file) }
-  const captureManualPhoto = () => { const video = photoVideoRef.current; if (!video || !video.videoWidth || !video.videoHeight) return; const scale = Math.min(1, 1280 / video.videoWidth); const canvas = document.createElement("canvas"); canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale); canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height); const photoDataUrl = canvas.toDataURL("image/jpeg", 0.82); setManualUnknown((entry) => entry ? { ...entry, photoDataUrl } : entry); setPhotoCameraOpen(false); void analyzeManualPhoto(photoDataUrl) }
-  const saveManualUnknown = async () => { if (!resumedAudit || !manualUnknown) return; setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/manual-item`, { method: "POST", body: JSON.stringify({ ...manualUnknown, user: "Luis" }) }); applyAuditUpdate(result.audit || resumedAudit); setManualUnknown(null); toast.success(result.message || "Catalog SKU created from audit."); void load().catch(() => undefined) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create catalog SKU.") } finally { setBusy(false) } }
-  const complete = async () => { if (!resumedAudit) return; setBusy(true); try { const result = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/complete`, { method: "POST" }); setActive(result.audit || null); toast.success(result.message || "Warehouse audit completed."); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to complete audit.") } finally { setBusy(false) } }
-  const current = resumedAudit
-  const lines = Array.isArray(current?.lines) ? current?.lines as Array<Record<string, unknown>> : []
-  const unknowns = Array.isArray(current?.unknownBarcodes) ? current?.unknownBarcodes as Array<Record<string, unknown>> : []
-  if (createOnly) return <Card><CardHeader><CardTitle className="text-base">Start warehouse audit</CardTitle><CardDescription>Create a separate audit workspace for a warehouse and its assigned counter.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-end gap-3"><Field label="Warehouse"><Input value={warehouse} onChange={(event) => setWarehouse(event.target.value)} placeholder="Staten Island" /></Field><Field label="Assigned counter"><Input value={auditOwner} onChange={(event) => setAuditOwner(event.target.value)} placeholder="Team member name" /></Field><Button disabled={busy || !warehouse.trim() || !auditOwner.trim()} onClick={() => void create()}>{busy && <Loader2 className="size-4 animate-spin" />} Create audit</Button></CardContent></Card>
-  return <Card><CardHeader><CardTitle className="text-base">Warehouse audit</CardTitle><CardDescription>Start a count, scan UPCs with a phone camera or keyboard-wedge scanner, then apply verified inventory counts.</CardDescription></CardHeader><CardContent className="grid gap-4">{!current ? <div className="flex flex-wrap items-end gap-2"><Field label="Warehouse"><Input value={warehouse} onChange={(event) => setWarehouse(event.target.value)} /></Field><Button disabled={busy || !warehouse.trim()} onClick={() => void create()}>Start warehouse audit</Button></div> : <><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-3"><div><p className="font-medium">{String(current.auditNumber)}</p><p className="text-xs text-muted-foreground">{String(current.warehouseName)} · {numberLabel(lines.length)} catalog SKUs counted · {numberLabel(unknowns.length)} unknown UPCs</p></div><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => { setCameraMessage("Camera ready. Point it at the next barcode."); setCameraOpen((value) => !value) }}>{cameraOpen ? "Stop camera" : "Use phone camera"}</Button><Button size="sm" disabled={busy || !lines.length} onClick={() => void complete()}>Complete & apply counts</Button></div></div>{cameraOpen && <div className="relative overflow-hidden rounded-md bg-black"><video ref={videoRef} className="max-h-72 w-full object-contain" muted playsInline /><div className={`absolute inset-x-3 bottom-3 rounded-md px-3 py-2 text-sm font-medium shadow ${lastScan?.matched ? "bg-emerald-600 text-white" : lastScan && !lastScan.matched ? "bg-amber-500 text-black" : "bg-black/70 text-white"}`}>{cameraMessage}</div></div>}<div className="flex gap-2"><Input autoFocus value={barcode} onChange={(event) => setBarcode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submit() } }} placeholder="Scan or enter UPC, then press Enter" /><Button disabled={busy || !barcode.trim()} onClick={() => void submit()}>Add scan</Button></div>{lastScan && <div className={`rounded-md border p-3 text-sm ${lastScan.matched ? "border-emerald-200 bg-emerald-50 text-emerald-950" : "border-amber-200 bg-amber-50 text-amber-950"}`}><span className="font-medium">{lastScan.matched ? "Catalog item found." : "Catalog item not found."}</span> {lastScan.message} <span className="ml-1 font-mono text-xs">{lastScan.barcode}</span></div>}{manualUnknown && <div className="grid gap-3 rounded-md border border-amber-300 bg-amber-50/50 p-3"><div><p className="font-medium">Create catalog SKU from unmatched item</p><p className="text-xs text-muted-foreground">The UPC, count, photo, and creator are retained with the audit and the new draft catalog item.</p></div><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6"><Field label="UPC"><Input value={manualUnknown.barcode} disabled /></Field><Field label="SKU"><Input value={manualUnknown.sku} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, sku: event.target.value } : entry)} placeholder="Required SKU" /></Field><Field label="Product name"><Input value={manualUnknown.title} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, title: event.target.value } : entry)} placeholder="Required product name" /></Field><Field label="Location"><Input value={manualUnknown.locationBin} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, locationBin: event.target.value } : entry)} placeholder="Bin or area" /></Field><Field label="Quantity"><Input type="number" min="1" value={manualUnknown.qty} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, qty: event.target.value } : entry)} /></Field><Field label="Product photo"><div className="flex gap-2"><Button type="button" size="sm" variant="outline" onClick={() => setPhotoCameraOpen(true)}>Take photo</Button><Input className="max-w-36" type="file" accept="image/*" onChange={(event) => readManualPhoto(event.target.files?.[0])} /></div></Field></div>{photoCameraOpen && <div className="grid gap-2 rounded-md border p-3"><video ref={photoVideoRef} className="max-h-72 w-full rounded-md bg-black object-contain" muted playsInline /><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => setPhotoCameraOpen(false)}>Cancel</Button><Button size="sm" onClick={captureManualPhoto}>Use photo</Button></div></div>}{manualUnknown.photoDataUrl && <img src={manualUnknown.photoDataUrl} alt="New product" className="h-20 w-20 rounded-md border object-cover" />}<div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => setManualUnknown(null)}>Skip for now</Button><Button size="sm" disabled={busy || !manualUnknown.sku.trim() || !manualUnknown.title.trim() || Number(manualUnknown.qty || 0) <= 0} onClick={() => void saveManualUnknown()}>Create catalog SKU</Button></div></div>}<div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Product</TableHead><TableHead>Expected</TableHead><TableHead>Counted</TableHead><TableHead>Variance</TableHead></TableRow></TableHeader><TableBody>{lines.map((line) => <TableRow key={String(line.productId || line.sku)}><TableCell className="font-medium">{String(line.sku || "-")}</TableCell><TableCell>{String(line.title || "-")}</TableCell><TableCell>{numberLabel(Number(line.expectedQty || 0))}</TableCell><TableCell>{numberLabel(Number(line.countedQty || 0))}</TableCell><TableCell><Badge variant={Number(line.countedQty || 0) === Number(line.expectedQty || 0) ? "outline" : "secondary"}>{numberLabel(Number(line.countedQty || 0) - Number(line.expectedQty || 0))}</Badge></TableCell></TableRow>)}{!lines.length && <TableRow><TableCell colSpan={5} className="h-20 text-center text-muted-foreground">Scan the first UPC to begin counting.</TableCell></TableRow>}</TableBody></Table></div>{unknowns.length > 0 && <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Unmatched UPC</TableHead><TableHead>Created SKU</TableHead><TableHead>Product</TableHead><TableHead>Location</TableHead><TableHead>Created by</TableHead><TableHead className="text-right">Quantity</TableHead></TableRow></TableHeader><TableBody>{unknowns.map((item) => <TableRow key={String(item.barcode)}><TableCell className="font-mono">{String(item.barcode || "-")}</TableCell><TableCell>{item.createdProductSku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(item.createdProductSku))}`}>{String(item.createdProductSku)}</a> : "-"}</TableCell><TableCell>{String(item.manualTitle || "-")}</TableCell><TableCell>{String(item.locationBin || "-")}</TableCell><TableCell>{String(item.createdProductBy || "-")}</TableCell><TableCell className="text-right">{numberLabel(Number(item.count || 0))}</TableCell></TableRow>)}</TableBody></Table></div>}</>}</CardContent></Card>
+    if (!photoCameraOpen || !photoVideoRef.current) return;
+    const video = photoVideoRef.current;
+    let stream: MediaStream | null = null;
+    void navigator.mediaDevices
+      .getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false,
+      })
+      .then(async (next) => {
+        stream = next;
+        video.srcObject = next;
+        await video.play();
+      })
+      .catch(() => {
+        toast.error("Camera access was not available for the product photo.");
+        setPhotoCameraOpen(false);
+      });
+    return () => stream?.getTracks().forEach((track) => track.stop());
+  }, [photoCameraOpen]);
+  const create = async () => {
+    setBusy(true);
+    try {
+      const result = await api<{
+        audit?: Record<string, unknown>;
+        message?: string;
+      }>("/api/warehouse-audits", {
+        method: "POST",
+        body: JSON.stringify({ warehouseName: warehouse, user: auditOwner }),
+      });
+      setActive(result.audit || null);
+      toast.success(result.message || "Warehouse audit started.");
+      if (createOnly && result.audit?.id) {
+        window.location.assign(
+          `/warehouse/audits/${encodeURIComponent(String(result.audit.id))}`,
+        );
+        return;
+      }
+      await load();
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to start warehouse audit.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const submit = async (value = barcode) => {
+    if (!resumedAudit || !String(value).trim()) return;
+    setBusy(true);
+    try {
+      const result = await api<{
+        audit?: Record<string, unknown>;
+        matched?: boolean;
+        message?: string;
+      }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/scan`,
+        { method: "POST", body: JSON.stringify({ barcode: value }) },
+      );
+      const matched = result.matched === true;
+      const message =
+        result.message ||
+        (matched ? "Catalog item counted." : "No catalog item found.");
+      applyAuditUpdate(result.audit || resumedAudit);
+      setLastScan({ barcode: String(value), matched, message });
+      setCameraMessage(
+        matched
+          ? `✓ ${message} Ready for the next barcode.`
+          : `Product not found: ${value}. Add details below.`,
+      );
+      if (!matched) {
+        setManualUnknown({
+          barcode: String(value),
+          sku: "",
+          title: "",
+          locationBin: "",
+          qty: "1",
+        });
+        setCameraOpen(false);
+      }
+      setBarcode("");
+      toast[matched ? "success" : "warning"](message);
+      void load().catch(() => undefined);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to save scan.";
+      setCameraMessage(message);
+      toast.error(message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  submitScanRef.current = submit;
+  const researchUnknownUpc = async () => {
+    if (!resumedAudit || !manualUnknown || upcResearchBusy) return;
+    setUpcResearchBusy(true);
+    try {
+      const result = await api<{
+        audit?: Record<string, unknown>;
+        matched?: boolean;
+        product?: Record<string, unknown>;
+        research?: Record<string, unknown>;
+        message?: string;
+      }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/research-upc`,
+        {
+          method: "POST",
+          body: JSON.stringify({ barcode: manualUnknown.barcode }),
+        },
+      );
+      if (result.audit) applyAuditUpdate(result.audit);
+      if (result.matched && result.product) {
+        setManualUnknown(null);
+        setLastScan({
+          barcode: manualUnknown.barcode,
+          matched: true,
+          message: result.message || "Catalog item found.",
+        });
+        toast.success(result.message || "Catalog item found.");
+        return;
+      }
+      const research = result.research || {};
+      setUpcResearch(research);
+      setManualUnknown((entry) =>
+        entry
+          ? {
+              ...entry,
+              title: entry.title || String(research.title || ""),
+              brand: entry.brand || String(research.brand || ""),
+              manufacturer:
+                entry.manufacturer || String(research.manufacturer || ""),
+              mfrPartNumber:
+                entry.mfrPartNumber || String(research.mfrPartNumber || ""),
+              vendorSku: entry.vendorSku || String(research.vendorSku || ""),
+              category: entry.category || String(research.category || ""),
+              shortDescription:
+                entry.shortDescription ||
+                String(research.shortDescription || ""),
+              packQuantity:
+                entry.packQuantity || String(research.packQuantity || ""),
+              researchConfidence: String(
+                Math.round(Number(research.confidence || 0) * 100),
+              ),
+            }
+          : entry,
+      );
+      toast[research.found === true ? "success" : "warning"](
+        result.message || "Online UPC research completed.",
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to research this UPC online.",
+      );
+    } finally {
+      setUpcResearchBusy(false);
+    }
+  };
+  const analyzeManualPhoto = async (photoDataUrl: string) => {
+    if (photoAnalysisBusy) return;
+    setPhotoAnalysisBusy(true);
+    try {
+      const result = await api<{ suggestion?: Record<string, unknown> }>(
+        "/api/warehouse/photo-suggestions",
+        { method: "POST", body: JSON.stringify({ photoDataUrl }) },
+      );
+      const suggestion = result.suggestion || {};
+      setManualUnknown((entry) =>
+        entry
+          ? {
+              ...entry,
+              photoDataUrl,
+              title: entry.title || String(suggestion.title || ""),
+              brand: entry.brand || String(suggestion.brand || ""),
+              manufacturer:
+                entry.manufacturer || String(suggestion.manufacturer || ""),
+              mfrPartNumber:
+                entry.mfrPartNumber || String(suggestion.mfrPartNumber || ""),
+              vendorSku: entry.vendorSku || String(suggestion.vendorSku || ""),
+              category: entry.category || String(suggestion.category || ""),
+              shortDescription:
+                entry.shortDescription ||
+                String(suggestion.shortDescription || ""),
+              packQuantity:
+                entry.packQuantity || String(suggestion.packQuantity || ""),
+              analysisConfidence: String(
+                Math.round(Number(suggestion.confidence || 0) * 100),
+              ),
+              analysisVisibleText: String(suggestion.visibleText || ""),
+            }
+          : entry,
+      );
+      toast.success(
+        "Package details suggested. Review them before creating the SKU.",
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to analyze this product photo.",
+      );
+    } finally {
+      setPhotoAnalysisBusy(false);
+    }
+  };
+  const readManualPhoto = (file?: File) => {
+    if (!file) return;
+    if (file.size > 3 * 1024 * 1024) {
+      toast.error("Choose a photo smaller than 3 MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const photoDataUrl = String(reader.result || "");
+      setManualUnknown((entry) => (entry ? { ...entry, photoDataUrl } : entry));
+      if (photoDataUrl) void analyzeManualPhoto(photoDataUrl);
+    };
+    reader.readAsDataURL(file);
+  };
+  const captureManualPhoto = () => {
+    const video = photoVideoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) return;
+    const scale = Math.min(1, 1280 / video.videoWidth);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    canvas
+      .getContext("2d")
+      ?.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const photoDataUrl = canvas.toDataURL("image/jpeg", 0.82);
+    setManualUnknown((entry) => (entry ? { ...entry, photoDataUrl } : entry));
+    setPhotoCameraOpen(false);
+    void analyzeManualPhoto(photoDataUrl);
+  };
+  const saveManualUnknown = async () => {
+    if (!resumedAudit || !manualUnknown) return;
+    setBusy(true);
+    try {
+      const result = await api<{
+        audit?: Record<string, unknown>;
+        message?: string;
+      }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/manual-item`,
+        {
+          method: "POST",
+          body: JSON.stringify({ ...manualUnknown, user: "Luis" }),
+        },
+      );
+      applyAuditUpdate(result.audit || resumedAudit);
+      setManualUnknown(null);
+      toast.success(result.message || "Catalog SKU created from audit.");
+      void load().catch(() => undefined);
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to create catalog SKU.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const complete = async () => {
+    if (!resumedAudit) return;
+    setBusy(true);
+    try {
+      const result = await api<{
+        audit?: Record<string, unknown>;
+        message?: string;
+      }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/complete`,
+        { method: "POST" },
+      );
+      setActive(result.audit || null);
+      toast.success(result.message || "Warehouse audit completed.");
+      await load();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Unable to complete audit.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const current = resumedAudit;
+  const lines = Array.isArray(current?.lines)
+    ? (current?.lines as Array<Record<string, unknown>>)
+    : [];
+  const unknowns = Array.isArray(current?.unknownBarcodes)
+    ? (current?.unknownBarcodes as Array<Record<string, unknown>>)
+    : [];
+  if (createOnly)
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Start warehouse audit</CardTitle>
+          <CardDescription>
+            Create a separate audit workspace for a warehouse and its assigned
+            counter.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-wrap items-end gap-3">
+          <Field label="Warehouse">
+            <Input
+              value={warehouse}
+              onChange={(event) => setWarehouse(event.target.value)}
+              placeholder="Staten Island"
+            />
+          </Field>
+          <Field label="Assigned counter">
+            <Input
+              value={auditOwner}
+              onChange={(event) => setAuditOwner(event.target.value)}
+              placeholder="Team member name"
+            />
+          </Field>
+          <Button
+            disabled={busy || !warehouse.trim() || !auditOwner.trim()}
+            onClick={() => void create()}
+          >
+            {busy && <Loader2 className="size-4 animate-spin" />} Create audit
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Warehouse audit</CardTitle>
+        <CardDescription>
+          Start a count, scan UPCs with a phone camera or keyboard-wedge
+          scanner, then apply verified inventory counts.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        {!current ? (
+          <div className="flex flex-wrap items-end gap-2">
+            <Field label="Warehouse">
+              <Input
+                value={warehouse}
+                onChange={(event) => setWarehouse(event.target.value)}
+              />
+            </Field>
+            <Button
+              disabled={busy || !warehouse.trim()}
+              onClick={() => void create()}
+            >
+              Start warehouse audit
+            </Button>
+          </div>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-3">
+              <div>
+                <p className="font-medium">{String(current.auditNumber)}</p>
+                <p className="text-xs text-muted-foreground">
+                  {String(current.warehouseName)} · {numberLabel(lines.length)}{" "}
+                  catalog SKUs counted · {numberLabel(unknowns.length)} unknown
+                  UPCs
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setCameraMessage(
+                      "Camera ready. Point it at the next barcode.",
+                    );
+                    setCameraOpen((value) => !value);
+                  }}
+                >
+                  {cameraOpen ? "Stop camera" : "Use phone camera"}
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={busy || !lines.length}
+                  onClick={() => void complete()}
+                >
+                  Complete & apply counts
+                </Button>
+              </div>
+            </div>
+            {cameraOpen && (
+              <div className="relative overflow-hidden rounded-md bg-black">
+                <video
+                  ref={videoRef}
+                  className="max-h-72 w-full object-contain"
+                  muted
+                  playsInline
+                />
+                <div
+                  className={`absolute inset-x-3 bottom-3 rounded-md px-3 py-2 text-sm font-medium shadow ${lastScan?.matched ? "bg-emerald-600 text-white" : lastScan && !lastScan.matched ? "bg-amber-500 text-black" : "bg-black/70 text-white"}`}
+                >
+                  {cameraMessage}
+                </div>
+              </div>
+            )}
+            <div className="flex gap-2">
+              <Input
+                autoFocus
+                value={barcode}
+                onChange={(event) => setBarcode(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void submit();
+                  }
+                }}
+                placeholder="Scan or enter UPC, then press Enter"
+              />
+              <Button
+                disabled={busy || !barcode.trim()}
+                onClick={() => void submit()}
+              >
+                Add scan
+              </Button>
+            </div>
+            {lastScan && (
+              <div
+                className={`rounded-md border p-3 text-sm ${lastScan.matched ? "border-emerald-200 bg-emerald-50 text-emerald-950" : "border-amber-200 bg-amber-50 text-amber-950"}`}
+              >
+                <span className="font-medium">
+                  {lastScan.matched
+                    ? "Catalog item found."
+                    : "Catalog item not found."}
+                </span>{" "}
+                {lastScan.message}{" "}
+                <span className="ml-1 font-mono text-xs">
+                  {lastScan.barcode}
+                </span>
+              </div>
+            )}
+            {manualUnknown && (
+              <div className="grid gap-3 rounded-md border border-amber-300 bg-amber-50/50 p-3">
+                <div>
+                  <p className="font-medium">Resolve unmatched UPC</p>
+                  <p className="text-xs text-muted-foreground">
+                    DataPlus checked the local catalog first. Research is sent
+                    online only when requested, and every suggested field stays
+                    editable before a draft SKU is created.
+                  </p>
+                </div>
+                <div className="grid gap-2 rounded-md border bg-background/70 p-3 text-sm md:grid-cols-[minmax(0,1fr)_auto]">
+                  <div>
+                    <p className="font-medium">1. Catalog match</p>
+                    <p className="text-muted-foreground">
+                      No approved local SKU matches {manualUnknown.barcode}.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={upcResearchBusy || busy}
+                      onClick={() => void researchUnknownUpc()}
+                    >
+                      {upcResearchBusy && <Loader2 className="size-4 animate-spin" />}
+                      2. Ask AI to research online
+                    </Button>
+                    <Badge variant="outline">3. Create manually below</Badge>
+                  </div>
+                </div>
+                {upcResearch && (
+                  <div className="grid gap-2 rounded-md border bg-background/70 p-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">
+                        Online research {upcResearch.found === true ? "suggestion" : "found no reliable match"}
+                      </span>
+                      {upcResearch.found === true && (
+                        <Badge variant="secondary">
+                          {Math.round(Number(upcResearch.confidence || 0) * 100)}% confidence
+                        </Badge>
+                      )}
+                    </div>
+                    {Boolean(upcResearch.summary) && (
+                      <p className="text-muted-foreground">{String(upcResearch.summary)}</p>
+                    )}
+                    {Array.isArray(upcResearch.sources) && upcResearch.sources.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {(upcResearch.sources as Array<Record<string, unknown>>).map((source, index) => (
+                          <a
+                            key={`${String(source.url)}-${index}`}
+                            href={String(source.url || "#")}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                          >
+                            <ExternalLink className="size-3" />
+                            {String(source.title || source.url || "Source")}
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div>
+                  <p className="font-medium">Create catalog SKU</p>
+                  <p className="text-xs text-muted-foreground">
+                    Review any suggestion below, then create a draft SKU. Nothing is created until you choose Create catalog SKU.
+                  </p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+                  <Field label="UPC">
+                    <Input value={manualUnknown.barcode} disabled />
+                  </Field>
+                  <Field label="SKU">
+                    <Input
+                      value={manualUnknown.sku}
+                      onChange={(event) =>
+                        setManualUnknown((entry) =>
+                          entry ? { ...entry, sku: event.target.value } : entry,
+                        )
+                      }
+                      placeholder="Required SKU"
+                    />
+                  </Field>
+                  <Field label="Product name">
+                    <Input
+                      value={manualUnknown.title}
+                      onChange={(event) =>
+                        setManualUnknown((entry) =>
+                          entry
+                            ? { ...entry, title: event.target.value }
+                            : entry,
+                        )
+                      }
+                      placeholder="Required product name"
+                    />
+                  </Field>
+                  <Field label="Location">
+                    <Input
+                      value={manualUnknown.locationBin}
+                      onChange={(event) =>
+                        setManualUnknown((entry) =>
+                          entry
+                            ? { ...entry, locationBin: event.target.value }
+                            : entry,
+                        )
+                      }
+                      placeholder="Bin or area"
+                    />
+                  </Field>
+                  <Field label="Quantity">
+                    <Input
+                      type="number"
+                      min="1"
+                      value={manualUnknown.qty}
+                      onChange={(event) =>
+                        setManualUnknown((entry) =>
+                          entry ? { ...entry, qty: event.target.value } : entry,
+                        )
+                      }
+                    />
+                  </Field>
+                  <Field label="Product photo">
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setPhotoCameraOpen(true)}
+                      >
+                        Take photo
+                      </Button>
+                      <Input
+                        className="max-w-36"
+                        type="file"
+                        accept="image/*"
+                        onChange={(event) =>
+                          readManualPhoto(event.target.files?.[0])
+                        }
+                      />
+                    </div>
+                  </Field>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <Field label="Brand">
+                    <Input value={manualUnknown.brand || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, brand: event.target.value } : entry)} placeholder="Optional" />
+                  </Field>
+                  <Field label="Manufacturer">
+                    <Input value={manualUnknown.manufacturer || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, manufacturer: event.target.value } : entry)} placeholder="Optional" />
+                  </Field>
+                  <Field label="Manufacturer part number">
+                    <Input value={manualUnknown.mfrPartNumber || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, mfrPartNumber: event.target.value } : entry)} placeholder="Optional" />
+                  </Field>
+                  <Field label="Pack quantity">
+                    <Input value={manualUnknown.packQuantity || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, packQuantity: event.target.value } : entry)} placeholder="Optional" />
+                  </Field>
+                  <Field label="Vendor SKU">
+                    <Input value={manualUnknown.vendorSku || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, vendorSku: event.target.value } : entry)} placeholder="Optional" />
+                  </Field>
+                  <Field label="Suggested category">
+                    <Input value={manualUnknown.category || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, category: event.target.value } : entry)} placeholder="Optional" />
+                  </Field>
+                  <div className="grid gap-1.5 sm:col-span-2">
+                    <Label>Short description</Label>
+                    <Input value={manualUnknown.shortDescription || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, shortDescription: event.target.value } : entry)} placeholder="Optional" />
+                  </div>
+                </div>
+                {photoCameraOpen && (
+                  <div className="grid gap-2 rounded-md border p-3">
+                    <video
+                      ref={photoVideoRef}
+                      className="max-h-72 w-full rounded-md bg-black object-contain"
+                      muted
+                      playsInline
+                    />
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setPhotoCameraOpen(false)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button size="sm" onClick={captureManualPhoto}>
+                        Use photo
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                {manualUnknown.photoDataUrl && (
+                  <img
+                    src={manualUnknown.photoDataUrl}
+                    alt="New product"
+                    className="h-20 w-20 rounded-md border object-cover"
+                  />
+                )}
+                <div className="flex justify-end gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setManualUnknown(null)}
+                  >
+                    Skip for now
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={
+                      busy ||
+                      !manualUnknown.sku.trim() ||
+                      !manualUnknown.title.trim() ||
+                      Number(manualUnknown.qty || 0) <= 0
+                    }
+                    onClick={() => void saveManualUnknown()}
+                  >
+                    Create catalog SKU
+                  </Button>
+                </div>
+              </div>
+            )}
+            <div className="overflow-x-auto rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>SKU</TableHead>
+                    <TableHead>Product</TableHead>
+                    <TableHead>Expected</TableHead>
+                    <TableHead>Counted</TableHead>
+                    <TableHead>Variance</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {lines.map((line) => (
+                    <TableRow key={String(line.productId || line.sku)}>
+                      <TableCell className="font-medium">
+                        {String(line.sku || "-")}
+                      </TableCell>
+                      <TableCell>{String(line.title || "-")}</TableCell>
+                      <TableCell>
+                        {numberLabel(Number(line.expectedQty || 0))}
+                      </TableCell>
+                      <TableCell>
+                        {numberLabel(Number(line.countedQty || 0))}
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            Number(line.countedQty || 0) ===
+                            Number(line.expectedQty || 0)
+                              ? "outline"
+                              : "secondary"
+                          }
+                        >
+                          {numberLabel(
+                            Number(line.countedQty || 0) -
+                              Number(line.expectedQty || 0),
+                          )}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {!lines.length && (
+                    <TableRow>
+                      <TableCell
+                        colSpan={5}
+                        className="h-20 text-center text-muted-foreground"
+                      >
+                        Scan the first UPC to begin counting.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+            {unknowns.length > 0 && (
+              <div className="overflow-x-auto rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Unmatched UPC</TableHead>
+                      <TableHead>Created SKU</TableHead>
+                      <TableHead>Product</TableHead>
+                      <TableHead>Location</TableHead>
+                      <TableHead>Created by</TableHead>
+                      <TableHead className="text-right">Quantity</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {unknowns.map((item) => (
+                      <TableRow key={String(item.barcode)}>
+                        <TableCell className="font-mono">
+                          {String(item.barcode || "-")}
+                        </TableCell>
+                        <TableCell>
+                          {item.createdProductSku ? (
+                            <a
+                              className="font-medium hover:underline"
+                              href={`/products/${encodeURIComponent(String(item.createdProductSku))}`}
+                            >
+                              {String(item.createdProductSku)}
+                            </a>
+                          ) : (
+                            "-"
+                          )}
+                        </TableCell>
+                        <TableCell>{String(item.manualTitle || "-")}</TableCell>
+                        <TableCell>{String(item.locationBin || "-")}</TableCell>
+                        <TableCell>
+                          {String(item.createdProductBy || "-")}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {numberLabel(Number(item.count || 0))}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 function PickListPanel({ onChanged }: { onChanged: () => Promise<void> }) {
-  const [pickLists, setPickLists] = useState<Array<Record<string, unknown>>>([])
-  const [activePickList, setActivePickList] = useState<Record<string, unknown> | null>(null)
-  const [quoteResults, setQuoteResults] = useState<Array<Record<string, unknown>>>([])
-  const [busyId, setBusyId] = useState("")
+  const [pickLists, setPickLists] = useState<Array<Record<string, unknown>>>(
+    [],
+  );
+  const [activePickList, setActivePickList] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
+  const [quoteResults, setQuoteResults] = useState<
+    Array<Record<string, unknown>>
+  >([]);
+  const [busyId, setBusyId] = useState("");
   const load = async () => {
     try {
-      const result = await api<{ pickLists?: Array<Record<string, unknown>> }>("/api/fulfillment/pick-lists")
-      setPickLists(result.pickLists || [])
+      const result = await api<{ pickLists?: Array<Record<string, unknown>> }>(
+        "/api/fulfillment/pick-lists",
+      );
+      setPickLists(result.pickLists || []);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load pick lists.")
+      toast.error(
+        error instanceof Error ? error.message : "Unable to load pick lists.",
+      );
     }
-  }
-  useEffect(() => { void load() }, [])
+  };
+  useEffect(() => {
+    void load();
+  }, []);
   const markAllPicked = async (pickList: Record<string, unknown>) => {
-    const lines = Array.isArray(pickList.lines) ? pickList.lines as Array<Record<string, unknown>> : []
-    const openLines = lines.filter((line) => String(line.status) !== "picked")
-    if (!openLines.length) return
-    setBusyId(String(pickList.id))
+    const lines = Array.isArray(pickList.lines)
+      ? (pickList.lines as Array<Record<string, unknown>>)
+      : [];
+    const openLines = lines.filter((line) => String(line.status) !== "picked");
+    if (!openLines.length) return;
+    setBusyId(String(pickList.id));
     try {
-      await Promise.all(openLines.map((line) => api(`/api/fulfillment/pick-lists/${encodeURIComponent(String(pickList.id))}/lines/${encodeURIComponent(String(line.routeId))}/picked`, { method: "POST" })))
-      toast.success(`${String(pickList.pickListNumber)} is fully picked.`)
-      await Promise.all([load(), onChanged()])
+      await Promise.all(
+        openLines.map((line) =>
+          api(
+            `/api/fulfillment/pick-lists/${encodeURIComponent(String(pickList.id))}/lines/${encodeURIComponent(String(line.routeId))}/picked`,
+            { method: "POST" },
+          ),
+        ),
+      );
+      toast.success(`${String(pickList.pickListNumber)} is fully picked.`);
+      await Promise.all([load(), onChanged()]);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to mark pick-list lines picked.")
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to mark pick-list lines picked.",
+      );
     } finally {
-      setBusyId("")
+      setBusyId("");
     }
-  }
+  };
   const calculateQuotes = async () => {
-    if (!activePickList) return
-    setBusyId(String(activePickList.id))
+    if (!activePickList) return;
+    setBusyId(String(activePickList.id));
     try {
-      const result = await api<{ results?: Array<Record<string, unknown>>; pickList?: Record<string, unknown>; message?: string }>(`/api/fulfillment/pick-lists/${encodeURIComponent(String(activePickList.id))}/quotes`, { method: "POST" })
-      setQuoteResults(result.results || [])
-      if (result.pickList) setActivePickList(result.pickList)
-      toast.success(result.message || "Shipping quotes calculated.")
-      await load()
+      const result = await api<{
+        results?: Array<Record<string, unknown>>;
+        pickList?: Record<string, unknown>;
+        message?: string;
+      }>(
+        `/api/fulfillment/pick-lists/${encodeURIComponent(String(activePickList.id))}/quotes`,
+        { method: "POST" },
+      );
+      setQuoteResults(result.results || []);
+      if (result.pickList) setActivePickList(result.pickList);
+      toast.success(result.message || "Shipping quotes calculated.");
+      await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to calculate pick-list quotes.")
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to calculate pick-list quotes.",
+      );
     } finally {
-      setBusyId("")
+      setBusyId("");
     }
-  }
-  const active = pickLists.filter((row) => !["completed", "labels_purchased"].includes(String(row.status)))
-  if (!active.length) return null
-  return <><Card><CardHeader className="flex-row items-start justify-between gap-3"><div><CardTitle className="text-base">Active pick lists</CardTitle><CardDescription>Pick every line, then pack and calculate delivery options before any label is purchased.</CardDescription></div><Badge variant="outline">{numberLabel(active.length)} open</Badge></CardHeader><CardContent className="grid gap-2">{active.slice(0, 4).map((pickList) => { const lines = Array.isArray(pickList.lines) ? pickList.lines as Array<Record<string, unknown>> : []; const picked = lines.filter((line) => String(line.status) === "picked").length; const complete = lines.length > 0 && picked === lines.length; return <div key={String(pickList.id)} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"><div><div className="flex items-center gap-2"><p className="font-medium">{String(pickList.pickListNumber || "Pick list")}</p><Badge variant={complete ? "secondary" : "outline"}>{complete ? "Picked" : "Picking"}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{String(pickList.warehouseName || "Warehouse")} · {numberLabel(picked)} of {numberLabel(lines.length)} lines picked</p></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => window.open(`/api/fulfillment/pick-list?pickListId=${encodeURIComponent(String(pickList.id))}`, "_blank", "noopener,noreferrer")}>Print pick list</Button>{!complete && <Button size="sm" disabled={busyId === String(pickList.id)} onClick={() => void markAllPicked(pickList)}>{busyId === String(pickList.id) && <Loader2 className="size-4 animate-spin" />} Mark all picked</Button>}{complete && <Button size="sm" onClick={() => { setQuoteResults([]); setActivePickList(pickList) }}>Pack & labels</Button>}</div></div>})}</CardContent></Card><Dialog open={Boolean(activePickList)} onOpenChange={(open) => !open && setActivePickList(null)}><DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl"><DialogHeader><DialogTitle>Pack & labels: {String(activePickList?.pickListNumber || "Pick list")}</DialogTitle><DialogDescription>All lines are picked. Calculate quotes for each order, choose the carrier service in the order record, then purchase and print its Shopify label.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="flex flex-wrap gap-2"><Button disabled={busyId === String(activePickList?.id)} onClick={() => void calculateQuotes()}>{busyId === String(activePickList?.id) && <Loader2 className="size-4 animate-spin" />} Get shipping quotes</Button><Button variant="outline" onClick={() => activePickList && window.open(`/api/fulfillment/pick-lists/${encodeURIComponent(String(activePickList.id))}/labels`, "_blank", "noopener,noreferrer")}>Open label documents</Button></div><div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Line items</TableHead><TableHead>Quote result</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{[...new Set((Array.isArray(activePickList?.lines) ? activePickList?.lines as Array<Record<string, unknown>> : []).map((line) => String(line.orderId)))].map((orderId) => { const lines = (activePickList?.lines as Array<Record<string, unknown>> || []).filter((line) => String(line.orderId) === orderId); const result = quoteResults.find((entry) => String(entry.orderId) === orderId); return <TableRow key={orderId}><TableCell className="font-medium">{String(lines[0]?.orderNumber || orderId)}</TableCell><TableCell>{lines.map((line) => `${String(line.sku || "Item")} × ${numberLabel(Number(line.qty || 0))}`).join(", ")}</TableCell><TableCell>{result ? result.ok ? `${numberLabel(Number(result.optionCount || 0))} options` : String(result.error || "Quote unavailable") : "Not calculated"}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(orderId)}`}>Choose service / buy label</a></Button></TableCell></TableRow> })}</TableBody></Table></div></div><DialogFooter><Button variant="outline" onClick={() => setActivePickList(null)}>Close</Button></DialogFooter></DialogContent></Dialog></>
+  };
+  const active = pickLists.filter(
+    (row) => !["completed", "labels_purchased"].includes(String(row.status)),
+  );
+  if (!active.length) return null;
+  return (
+    <>
+      <Card>
+        <CardHeader className="flex-row items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-base">Active pick lists</CardTitle>
+            <CardDescription>
+              Pick every line, then pack and calculate delivery options before
+              any label is purchased.
+            </CardDescription>
+          </div>
+          <Badge variant="outline">{numberLabel(active.length)} open</Badge>
+        </CardHeader>
+        <CardContent className="grid gap-2">
+          {active.slice(0, 4).map((pickList) => {
+            const lines = Array.isArray(pickList.lines)
+              ? (pickList.lines as Array<Record<string, unknown>>)
+              : [];
+            const picked = lines.filter(
+              (line) => String(line.status) === "picked",
+            ).length;
+            const complete = lines.length > 0 && picked === lines.length;
+            return (
+              <div
+                key={String(pickList.id)}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"
+              >
+                <div>
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium">
+                      {String(pickList.pickListNumber || "Pick list")}
+                    </p>
+                    <Badge variant={complete ? "secondary" : "outline"}>
+                      {complete ? "Picked" : "Picking"}
+                    </Badge>
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {String(pickList.warehouseName || "Warehouse")} ·{" "}
+                    {numberLabel(picked)} of {numberLabel(lines.length)} lines
+                    picked
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      window.open(
+                        `/api/fulfillment/pick-list?pickListId=${encodeURIComponent(String(pickList.id))}`,
+                        "_blank",
+                        "noopener,noreferrer",
+                      )
+                    }
+                  >
+                    Print pick list
+                  </Button>
+                  {!complete && (
+                    <Button
+                      size="sm"
+                      disabled={busyId === String(pickList.id)}
+                      onClick={() => void markAllPicked(pickList)}
+                    >
+                      {busyId === String(pickList.id) && (
+                        <Loader2 className="size-4 animate-spin" />
+                      )}{" "}
+                      Mark all picked
+                    </Button>
+                  )}
+                  {complete && (
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        setQuoteResults([]);
+                        setActivePickList(pickList);
+                      }}
+                    >
+                      Pack & labels
+                    </Button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </CardContent>
+      </Card>
+      <Dialog
+        open={Boolean(activePickList)}
+        onOpenChange={(open) => !open && setActivePickList(null)}
+      >
+        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>
+              Pack & labels:{" "}
+              {String(activePickList?.pickListNumber || "Pick list")}
+            </DialogTitle>
+            <DialogDescription>
+              All lines are picked. Calculate quotes for each order, choose the
+              carrier service in the order record, then purchase and print its
+              Shopify label.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                disabled={busyId === String(activePickList?.id)}
+                onClick={() => void calculateQuotes()}
+              >
+                {busyId === String(activePickList?.id) && (
+                  <Loader2 className="size-4 animate-spin" />
+                )}{" "}
+                Get shipping quotes
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() =>
+                  activePickList &&
+                  window.open(
+                    `/api/fulfillment/pick-lists/${encodeURIComponent(String(activePickList.id))}/labels`,
+                    "_blank",
+                    "noopener,noreferrer",
+                  )
+                }
+              >
+                Open label documents
+              </Button>
+            </div>
+            <div className="overflow-x-auto rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Order</TableHead>
+                    <TableHead>Line items</TableHead>
+                    <TableHead>Quote result</TableHead>
+                    <TableHead className="text-right">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {[
+                    ...new Set(
+                      (Array.isArray(activePickList?.lines)
+                        ? (activePickList?.lines as Array<
+                            Record<string, unknown>
+                          >)
+                        : []
+                      ).map((line) => String(line.orderId)),
+                    ),
+                  ].map((orderId) => {
+                    const lines = (
+                      (activePickList?.lines as Array<
+                        Record<string, unknown>
+                      >) || []
+                    ).filter((line) => String(line.orderId) === orderId);
+                    const result = quoteResults.find(
+                      (entry) => String(entry.orderId) === orderId,
+                    );
+                    return (
+                      <TableRow key={orderId}>
+                        <TableCell className="font-medium">
+                          {String(lines[0]?.orderNumber || orderId)}
+                        </TableCell>
+                        <TableCell>
+                          {lines
+                            .map(
+                              (line) =>
+                                `${String(line.sku || "Item")} × ${numberLabel(Number(line.qty || 0))}`,
+                            )
+                            .join(", ")}
+                        </TableCell>
+                        <TableCell>
+                          {result
+                            ? result.ok
+                              ? `${numberLabel(Number(result.optionCount || 0))} options`
+                              : String(result.error || "Quote unavailable")
+                            : "Not calculated"}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button size="sm" variant="outline" asChild>
+                            <a href={`/orders/${encodeURIComponent(orderId)}`}>
+                              Choose service / buy label
+                            </a>
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setActivePickList(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
 }
 
 function LegacyPickListPanel({ onChanged }: { onChanged: () => Promise<void> }) {

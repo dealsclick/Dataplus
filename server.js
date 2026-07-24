@@ -185,6 +185,7 @@ const ORDER_PREFIX = "DP";
 const AI_TOOL_SCOPE_DEFINITIONS = [
   { id: "catalog.read", group: "Read context", label: "Catalog and readiness", description: "Lets David use the current product's approved catalog data and readiness checks.", implemented: true, defaultEnabled: true },
   { id: "operations.read", group: "Read context", label: "Operations context", description: "Lets David use a compact current-order, purchasing, fulfillment, or jobs summary.", implemented: true, defaultEnabled: true },
+  { id: "warehouse.upc-research", group: "External research", label: "Research unknown UPCs online", description: "On an explicit warehouse-user request, uses Gemini Google Search to draft product details and show sources. It never creates a SKU automatically.", implemented: true, defaultEnabled: true },
   { id: "shopify.launch", group: "Approved actions", label: "Launch a SKU on Shopify", description: "Preflights one approved SKU and queues the standard Shopify launch job after approval.", implemented: true, defaultEnabled: false },
   { id: "catalog.draft", group: "Planned actions", label: "Draft catalog fixes", description: "Will prepare editable product-field changes without applying them.", implemented: false, defaultEnabled: false },
   { id: "shopify.sync", group: "Planned actions", label: "Prepare Shopify syncs", description: "Will prepare price, inventory, and content sync jobs for approval.", implemented: false, defaultEnabled: false },
@@ -4333,6 +4334,26 @@ function interactionOutputText(payload = {}) {
     .flatMap((step) => step.content || [])
     .map((content) => content?.text || "")
     .join(""));
+}
+
+function interactionCitations(payload = {}) {
+  const citations = [];
+  for (const step of payload.steps || []) {
+    if (step?.type !== "model_output") continue;
+    for (const content of step.content || []) {
+      for (const annotation of content?.annotations || []) {
+        if (annotation?.type !== "url_citation") continue;
+        const url = String(annotation.url || "").trim();
+        if (!url || citations.some((citation) => citation.url === url)) continue;
+        citations.push({
+          url,
+          title: String(annotation.title || url).trim(),
+          citedText: String(content?.text || "").slice(Number(annotation.start_index ?? annotation.startIndex ?? 0), Number(annotation.end_index ?? annotation.endIndex ?? 0))
+        });
+      }
+    }
+  }
+  return citations.slice(0, 8);
 }
 
 const TABLE_PREFERENCE_IDS = new Set(["orders", "catalog.products", "catalog.inventory"]);
@@ -21732,6 +21753,103 @@ async function handleApi(req, res) {
     audit.updatedAt = now;
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
     return sendJson(res, 200, { audit, matched: false, barcode, sourceItem: lookup.sourceItem, message: lookup.sourceItem ? `${barcode} was found in the source catalog as ${lookup.sourceItem.sku || lookup.sourceItem.vendorSku || "a source SKU"}, but is not yet an approved catalog SKU.` : `${barcode} saved as an unknown UPC.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "research-upc" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
+    if (!barcode) return sendJson(res, 400, { error: "Enter or scan a UPC before researching it." });
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
+
+    // Never send a UPC outside DataPlus when a local match is now available.
+    const localLookup = await resolveScannedCatalogBarcode(barcode);
+    if (localLookup.product) {
+      return sendJson(res, 200, {
+        matched: true,
+        product: localLookup.product,
+        message: `${localLookup.product.sku} is already in the local catalog. No online research was needed.`
+      });
+    }
+
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (!davidToolEnabled(settings, "warehouse.upc-research")) {
+      return sendJson(res, 403, { error: "Online UPC research is disabled. Enable Research unknown UPCs online in System Settings > AI integration." });
+    }
+    const aiConfig = getAiRuntimeConfig(settings);
+    if (aiConfig.provider !== "google-ai-studio") {
+      return sendJson(res, 409, { error: "Online UPC research currently uses Google AI Studio with Gemini Google Search. Select and verify Google AI Studio in System Settings first." });
+    }
+    if (!aiConfig.apiKey) return sendJson(res, 503, { error: "Google AI Studio is enabled, but no Gemini API key is configured." });
+
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["found", "title", "brand", "manufacturer", "mfrPartNumber", "vendorSku", "category", "shortDescription", "packQuantity", "confidence", "summary"],
+      properties: {
+        found: { type: "boolean", description: "True only when reliable public sources identify a product for this UPC." },
+        title: { type: "string" },
+        brand: { type: "string" },
+        manufacturer: { type: "string" },
+        mfrPartNumber: { type: "string" },
+        vendorSku: { type: "string" },
+        category: { type: "string" },
+        shortDescription: { type: "string" },
+        packQuantity: { type: "string" },
+        confidence: { type: "number", minimum: 0, maximum: 1 },
+        summary: { type: "string" }
+      }
+    };
+    const instruction = `Research UPC ${barcode} using Google Search. Return only verified product information that clearly belongs to this exact UPC. Do not infer or invent values. If sources conflict or no reliable exact match exists, set found to false and use empty strings for product fields. Keep the title customer-friendly, the description concise, and category short. This response is an editable suggestion only; it will never create a catalog SKU automatically.`;
+    try {
+      const response = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+        method: "POST",
+        headers: { "x-goog-api-key": aiConfig.apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" },
+        signal: AbortSignal.timeout(30000),
+        body: JSON.stringify({
+          model: aiConfig.model,
+          store: false,
+          input: instruction,
+          tools: [{ type: "google_search" }],
+          response_format: { type: "text", mime_type: "application/json", schema }
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(String(payload?.error?.message || "Google Search could not research this UPC."));
+      const suggestion = JSON.parse(interactionOutputText(payload) || "{}");
+      const research = {
+        found: suggestion.found === true,
+        title: String(suggestion.title || "").trim(),
+        brand: String(suggestion.brand || "").trim(),
+        manufacturer: String(suggestion.manufacturer || "").trim(),
+        mfrPartNumber: String(suggestion.mfrPartNumber || "").trim(),
+        vendorSku: String(suggestion.vendorSku || "").trim(),
+        category: String(suggestion.category || "").trim(),
+        shortDescription: String(suggestion.shortDescription || "").trim(),
+        packQuantity: String(suggestion.packQuantity || "").trim(),
+        confidence: Math.max(0, Math.min(1, Number(suggestion.confidence || 0))),
+        summary: String(suggestion.summary || "").trim(),
+        sources: interactionCitations(payload)
+      };
+      const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode);
+      if (unknown) {
+        unknown.aiResearch = { ...research, researchedAt: new Date().toISOString(), provider: "Google AI Studio" };
+        audit.updatedAt = unknown.aiResearch.researchedAt;
+        await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+      }
+      await recordDavidAction({ type: "warehouse_upc_research", auditId: audit.id, auditNumber: audit.auditNumber, barcode, status: research.found ? "suggested" : "no_match", provider: "google-ai-studio" });
+      return sendJson(res, 200, {
+        audit,
+        matched: false,
+        research,
+        message: research.found ? "Online product suggestions are ready to review." : "No reliable online product match was found. Create the SKU manually if needed."
+      });
+    } catch (error) {
+      await recordDavidAction({ type: "warehouse_upc_research", auditId: audit.id, auditNumber: audit.auditNumber, barcode, status: "failed", provider: "google-ai-studio", message: error instanceof Error ? error.message : "Online UPC research failed." }).catch(() => {});
+      return sendJson(res, 502, { error: error instanceof Error ? error.message : "Unable to research this UPC online." });
+    }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "complete" && postgres.isPostgresEnabled()) {
