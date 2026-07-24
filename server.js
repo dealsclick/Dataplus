@@ -806,6 +806,13 @@ const DEFAULT_SYSTEM_SETTINGS = {
   smtpReminderScheduleTime: "08:00",
   openFoodFactsLookupEnabled: false,
   openFoodFactsApiBaseUrl: "https://world.openfoodfacts.org/api/v3",
+  aiEnabled: false,
+  aiProvider: "openai",
+  aiApiKey: "",
+  aiModel: "gpt-4o-mini",
+  aiConnectionVerifiedAt: "",
+  aiConnectionVerifiedModel: "",
+  aiConnectionKeyFingerprint: "",
   warehouseImageAnalysisEnabled: true,
   warehouseImageAnalysisModel: "gpt-4o-mini",
   warehouseImageAnalysisApiKey: "",
@@ -4195,6 +4202,13 @@ function normalizeSystemSettings(settings = {}) {
   normalized.smtpReminderScheduleTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(normalized.smtpReminderScheduleTime || "")) ? String(normalized.smtpReminderScheduleTime) : "08:00";
   normalized.openFoodFactsLookupEnabled = normalized.openFoodFactsLookupEnabled === true || String(normalized.openFoodFactsLookupEnabled).toLowerCase() === "true";
   normalized.openFoodFactsApiBaseUrl = String(normalized.openFoodFactsApiBaseUrl || "https://world.openfoodfacts.org/api/v3").replace(/\/+$/, "");
+  normalized.aiEnabled = normalized.aiEnabled === true || String(normalized.aiEnabled).toLowerCase() === "true";
+  normalized.aiProvider = "openai";
+  normalized.aiApiKey = String(normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || "").trim();
+  normalized.aiModel = String(normalized.aiModel || normalized.warehouseImageAnalysisModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
+  normalized.aiConnectionVerifiedAt = String(normalized.aiConnectionVerifiedAt || "").trim();
+  normalized.aiConnectionVerifiedModel = String(normalized.aiConnectionVerifiedModel || "").trim();
+  normalized.aiConnectionKeyFingerprint = String(normalized.aiConnectionKeyFingerprint || "").trim();
   normalized.warehouseImageAnalysisEnabled = normalized.warehouseImageAnalysisEnabled === true || String(normalized.warehouseImageAnalysisEnabled).toLowerCase() === "true";
   normalized.warehouseImageAnalysisModel = String(normalized.warehouseImageAnalysisModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
   normalized.warehouseImageAnalysisApiKey = String(normalized.warehouseImageAnalysisApiKey || "").trim();
@@ -4249,7 +4263,8 @@ function writeSystemSettingsStore(settings = {}) {
 
 function publicSystemSettings(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
-  return { ...normalized, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: Boolean(normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY) };
+  const aiApiKeyConfigured = Boolean(normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
+  return { ...normalized, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", aiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: aiApiKeyConfigured };
 }
 
 const TABLE_PREFERENCE_IDS = new Set(["orders", "catalog.products", "catalog.inventory"]);
@@ -21324,13 +21339,14 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/warehouse/photo-suggestions") {
     const body = await parseBody(req);
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
-    if (!settings.warehouseImageAnalysisEnabled) return sendJson(res, 403, { error: "Package-photo suggestions are disabled in Warehouse settings." });
+    if (!settings.aiEnabled) return sendJson(res, 403, { error: "AI integration is disabled. Verify and enable it in System Settings before using package-photo suggestions." });
+    if (!settings.warehouseImageAnalysisEnabled) return sendJson(res, 403, { error: "Package-photo suggestions are disabled in AI Integration settings." });
     const photoDataUrl = String(body.photoDataUrl || "");
     if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(photoDataUrl) || photoDataUrl.length > 4.25 * 1024 * 1024) {
       return sendJson(res, 400, { error: "Use a PNG, JPG, or WebP product photo smaller than 3 MB." });
     }
-    const apiKey = String(settings.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY || "").trim();
-    if (!apiKey) return sendJson(res, 503, { error: "Package-photo analysis is enabled, but the server does not have an OpenAI API key configured." });
+    const apiKey = String(settings.aiApiKey || settings.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY || "").trim();
+    if (!apiKey) return sendJson(res, 503, { error: "AI integration is enabled, but no OpenAI API key is configured." });
     const schema = {
       type: "object",
       additionalProperties: false,
@@ -21345,7 +21361,7 @@ async function handleApi(req, res) {
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
         signal: AbortSignal.timeout(20000),
         body: JSON.stringify({
-          model: settings.warehouseImageAnalysisModel || "gpt-4o-mini",
+          model: settings.aiModel || settings.warehouseImageAnalysisModel || "gpt-4o-mini",
           input: [{ role: "developer", content: [{ type: "input_text", text: "Extract only information clearly visible on this product package. Do not invent information. Return empty strings for fields that are not legible or cannot be confidently inferred. Use a short, customer-friendly product title and a concise category path only when the package makes it clear." }] }, { role: "user", content: [{ type: "input_text", text: "Create editable catalog-field suggestions from this package photo." }, { type: "input_image", image_url: photoDataUrl, detail: "high" }] }],
           max_output_tokens: 600,
           text: { format: { type: "json_schema", name: "warehouse_product_suggestion", strict: true, schema } }
@@ -25016,6 +25032,37 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/system-settings/ai-test") {
+    const body = await parseBody(req);
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const submittedKey = String(body.apiKey || "").trim();
+    const apiKey = submittedKey || String(current.aiApiKey || current.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY || "").trim();
+    const model = String(body.model || current.aiModel || current.warehouseImageAnalysisModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
+    if (!apiKey) return sendJson(res, 400, { error: "Enter an OpenAI API key before testing the AI connection." });
+    try {
+      const response = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(15000),
+        body: JSON.stringify({ model, input: "Reply with OK.", max_output_tokens: 16 })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(String(payload?.error?.message || "The OpenAI API rejected this key."));
+      current.aiProvider = "openai";
+      if (submittedKey) current.aiApiKey = submittedKey;
+      current.aiModel = model;
+      current.aiConnectionVerifiedAt = new Date().toISOString();
+      current.aiConnectionVerifiedModel = model;
+      current.aiConnectionKeyFingerprint = crypto.createHash("sha256").update(apiKey).digest("hex");
+      const systemSettings = writeSystemSettingsStore(current);
+      publicStateJsonCache = null;
+      if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+      return sendJson(res, 200, { message: "OpenAI connection verified.", systemSettings: publicSystemSettings(systemSettings) });
+    } catch (error) {
+      return sendJson(res, 502, { error: error instanceof Error ? error.message : "Unable to verify the AI connection." });
+    }
+  }
+
   if (req.method === "PATCH" && url.pathname === "/api/system-settings") {
     const body = await parseBody(req);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
@@ -25025,8 +25072,14 @@ async function handleApi(req, res) {
       else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") current[field] = Number(body[field] || 0);
       else if (Array.isArray(DEFAULT_SYSTEM_SETTINGS[field])) current[field] = Array.isArray(body[field]) ? body[field] : current[field];
       else if (DEFAULT_SYSTEM_SETTINGS[field] && typeof DEFAULT_SYSTEM_SETTINGS[field] === "object") current[field] = body[field] && typeof body[field] === "object" ? body[field] : current[field];
-      else if (["smtpPassword", "warehouseImageAnalysisApiKey"].includes(field) && !String(body[field] || "")) current[field] = current[field];
+      else if (["smtpPassword", "aiApiKey", "warehouseImageAnalysisApiKey"].includes(field) && !String(body[field] || "")) current[field] = current[field];
       else current[field] = String(body[field] || "");
+    }
+    const configuredAiKey = String(current.aiApiKey || current.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY || "").trim();
+    const verifiedFingerprint = configuredAiKey ? crypto.createHash("sha256").update(configuredAiKey).digest("hex") : "";
+    if (current.aiEnabled && (!configuredAiKey || !current.aiConnectionVerifiedAt || current.aiConnectionKeyFingerprint !== verifiedFingerprint)) {
+      current.aiEnabled = false;
+      current.warehouseImageAnalysisEnabled = false;
     }
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;

@@ -5348,6 +5348,7 @@ function SettingsPage({
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [testingSmtp, setTestingSmtp] = useState(false)
+  const [testingAi, setTestingAi] = useState(false)
   const value = (field: string) => draft[field] ?? settings[field]
   const boolValue = (field: string) => Boolean(value(field))
 
@@ -5373,6 +5374,27 @@ function SettingsPage({
     } finally { setTestingSmtp(false) }
   }
 
+  async function testAiConnection() {
+    setTestingAi(true)
+    try {
+      const result = await api<{ message?: string; systemSettings?: SystemSettings }>("/api/system-settings/ai-test", {
+        method: "POST",
+        body: JSON.stringify({ apiKey: String(draft.aiApiKey || ""), model: String(value("aiModel") || "gpt-4o-mini") }),
+      })
+      const verified = result.systemSettings || {}
+      setDraft((current) => ({
+        ...current,
+        aiModel: verified.aiModel || value("aiModel") || "gpt-4o-mini",
+        aiConnectionVerifiedAt: verified.aiConnectionVerifiedAt || new Date().toISOString(),
+        aiConnectionVerifiedModel: verified.aiConnectionVerifiedModel || value("aiModel") || "gpt-4o-mini",
+        aiConnectionKeyFingerprint: verified.aiConnectionKeyFingerprint || "verified",
+      }))
+      toast.success(result.message || "OpenAI connection verified.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "AI connection test failed.")
+    } finally { setTestingAi(false) }
+  }
+
   return (
     <div className="grid gap-5">
       <PageHeader
@@ -5394,7 +5416,7 @@ function SettingsPage({
           <TabsTrigger value="backups">Backups</TabsTrigger>
           <TabsTrigger value="catalog">Catalog</TabsTrigger>
           <TabsTrigger value="barcode">Barcode lookups</TabsTrigger>
-          <TabsTrigger value="warehouse">Warehouse</TabsTrigger>
+          <TabsTrigger value="ai">AI integration</TabsTrigger>
           <TabsTrigger value="email">Email</TabsTrigger>
           <TabsTrigger value="users">Users</TabsTrigger>
         </TabsList>
@@ -5424,7 +5446,44 @@ function SettingsPage({
           </Card>
         </TabsContent>
         <TabsContent value="barcode"><Card><CardHeader><CardTitle className="text-base">External barcode enrichment</CardTitle><CardDescription>DataPlus always searches the local catalog first. Enable this only when an unknown UPC may be sent to Open Food Facts for basic enrichment; it is not used for matching known catalog SKUs.</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><ToggleField label="Enable Open Food Facts for unknown UPCs" checked={boolValue("openFoodFactsLookupEnabled")} disabled={!editing} onCheckedChange={(next) => update("openFoodFactsLookupEnabled", next)} /><Field label="Open Food Facts API base URL"><Input disabled={!editing} value={String(value("openFoodFactsApiBaseUrl") || "https://world.openfoodfacts.org/api/v3")} onChange={(event) => update("openFoodFactsApiBaseUrl", event.target.value)} /></Field></CardContent></Card></TabsContent>
-        <TabsContent value="warehouse"><Card><CardHeader><CardTitle className="text-base">Package photo suggestions</CardTitle><CardDescription>When an audit scan does not match a catalog item, DataPlus can analyze an attached package photo and prefill editable product details. Only information visible on the package is suggested.</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><ToggleField label="Enable package photo suggestions" checked={boolValue("warehouseImageAnalysisEnabled")} disabled={!editing} onCheckedChange={(next) => update("warehouseImageAnalysisEnabled", next)} /><Field label="Analysis model"><Input disabled={!editing} value={String(value("warehouseImageAnalysisModel") || "gpt-4o-mini")} onChange={(event) => update("warehouseImageAnalysisModel", event.target.value)} placeholder="gpt-4o-mini" /></Field><Field label="OpenAI API key"><Input disabled={!editing} type="password" value={String(draft.warehouseImageAnalysisApiKey || "")} onChange={(event) => update("warehouseImageAnalysisApiKey", event.target.value)} placeholder={settings.warehouseImageAnalysisApiKeyConfigured ? "Configured (enter only to replace)" : "Server key not configured"} /><p className="mt-1 text-xs text-muted-foreground">Stored securely and never displayed after save. Suggestions remain editable before a SKU is created.</p></Field></CardContent></Card></TabsContent>
+        <TabsContent value="ai" className="grid gap-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">AI integration</CardTitle>
+              <CardDescription>Connect DataPlus once, verify the key, then enable AI-powered capabilities where they add value. Credentials are stored securely and never displayed after saving.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2">
+              <Field label="Provider">
+                <Input disabled value="OpenAI" />
+              </Field>
+              <Field label="Default model">
+                <Input disabled={!editing} value={String(value("aiModel") || "gpt-4o-mini")} onChange={(event) => update("aiModel", event.target.value)} placeholder="gpt-4o-mini" />
+              </Field>
+              <Field label="OpenAI API key">
+                <Input disabled={!editing} type="password" value={String(draft.aiApiKey || "")} onChange={(event) => update("aiApiKey", event.target.value)} placeholder={settings.aiApiKeyConfigured ? "Configured (enter only to replace)" : "Paste an OpenAI API key"} />
+                <p className="mt-1 text-xs text-muted-foreground">Use Verify connection after adding or replacing a key. Enabling AI requires a successful verification for the active key.</p>
+              </Field>
+              <div className="flex flex-col justify-end gap-2">
+                <Button type="button" variant="outline" disabled={!editing || testingAi} onClick={() => void testAiConnection()}>
+                  {testingAi ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Verify connection
+                </Button>
+                <p className="text-xs text-muted-foreground">{value("aiConnectionVerifiedAt") ? `Verified ${dateLabel(String(value("aiConnectionVerifiedAt")))}` : "Not verified yet"}</p>
+              </div>
+              <div className="md:col-span-2">
+                <ToggleField label="Enable AI integration" checked={boolValue("aiEnabled")} disabled={!editing || !Boolean(value("aiConnectionVerifiedAt"))} onCheckedChange={(next) => update("aiEnabled", next)} />
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Warehouse package analysis</CardTitle>
+              <CardDescription>For unmatched audit scans, analyze a product photo and suggest only text visibly present on the package. Users can review and edit every suggested field before creating a SKU.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ToggleField label="Enable package photo suggestions" checked={boolValue("warehouseImageAnalysisEnabled")} disabled={!editing || !boolValue("aiEnabled")} onCheckedChange={(next) => update("warehouseImageAnalysisEnabled", next)} />
+            </CardContent>
+          </Card>
+        </TabsContent>
         <TabsContent value="email"><Card><CardHeader><CardTitle className="text-base">SMTP delivery</CardTitle><CardDescription>Configure the outbound email transport used for supplier PO reminders. Credentials are stored in system settings and never displayed after save.</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><ToggleField label="Enable SMTP delivery" checked={boolValue("smtpEnabled")} disabled={!editing} onCheckedChange={(next) => update("smtpEnabled", next)} /><ToggleField label="Use TLS / SSL" checked={boolValue("smtpSecure")} disabled={!editing} onCheckedChange={(next) => update("smtpSecure", next)} /><Field label="SMTP host"><Input disabled={!editing} value={String(value("smtpHost") || "")} onChange={(event) => update("smtpHost", event.target.value)} placeholder="smtp.example.com" /></Field><Field label="SMTP port"><Input disabled={!editing} type="number" value={String(value("smtpPort") || 587)} onChange={(event) => update("smtpPort", Number(event.target.value || 587))} /></Field><Field label="Username"><Input disabled={!editing} value={String(value("smtpUsername") || "")} onChange={(event) => update("smtpUsername", event.target.value)} /></Field><Field label="Password"><Input disabled={!editing} type="password" value={String(draft.smtpPassword || "")} onChange={(event) => update("smtpPassword", event.target.value)} placeholder={settings.smtpPasswordConfigured ? "Configured (enter only to replace)" : "SMTP password or app password"} /></Field><Field label="Sender name"><Input disabled={!editing} value={String(value("smtpFromName") || "DataPlus")} onChange={(event) => update("smtpFromName", event.target.value)} /></Field><Field label="Sender email"><Input disabled={!editing} type="email" value={String(value("smtpFromEmail") || "")} onChange={(event) => update("smtpFromEmail", event.target.value)} placeholder="purchasing@yourcompany.com" /></Field><div className="md:col-span-2"><Button type="button" variant="outline" disabled={testingSmtp || !boolValue("smtpEnabled")} onClick={() => void sendSmtpTest()}>{testingSmtp ? <Loader2 className="size-4 animate-spin" /> : <Mail className="size-4" />} Send SMTP test</Button></div></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Overdue reminder schedule</CardTitle><CardDescription>The external worker scans overdue POs once daily and sends only enabled supplier reminders. A PO is never emailed twice on the same day.</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><ToggleField label="Run daily overdue reminder scan" checked={boolValue("smtpReminderScheduleEnabled")} disabled={!editing} onCheckedChange={(next) => update("smtpReminderScheduleEnabled", next)} /><Field label="Daily scan time"><Input disabled={!editing} type="time" value={String(value("smtpReminderScheduleTime") || "08:00")} onChange={(event) => update("smtpReminderScheduleTime", event.target.value)} /></Field></CardContent></Card></TabsContent>
         <TabsContent value="worker">
           <Card>
