@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { createColumnHelper, flexRender, getCoreRowModel, getFilteredRowModel, useReactTable } from "@tanstack/react-table"
+import { useChat } from "@ai-sdk/react"
+import { createChat } from "@shadcn/helpers/ai-sdk"
+import type { ChatTransport, UIMessage, UIMessageChunk } from "ai"
 import {
   Activity,
   AlertCircle,
@@ -17,6 +20,7 @@ import {
   MessageSquare,
   MoreHorizontal,
   PackageSearch,
+  PanelRightOpen,
   Play,
   RefreshCw,
   RotateCcw,
@@ -746,6 +750,7 @@ function App() {
   const [checkingShopify, setCheckingShopify] = useState(false)
   const [shopifyAuth, setShopifyAuth] = useState<ShopifyAuthCheck | null>(null)
   const [selectedJobId, setSelectedJobId] = useState<string>("")
+  const [davidOpen, setDavidOpen] = useState(false)
 
   async function loadJobs(next: Partial<typeof jobPageMeta> = {}, quiet = false) {
     const request = { ...jobPageMeta, ...next }
@@ -1007,6 +1012,9 @@ function App() {
                 <Badge variant={workerStatus.online ? "default" : "secondary"}>
                   {workerStatus.online ? "Worker online" : "Worker idle"}
                 </Badge>
+                <Button variant="outline" size="icon" className="rounded-full" onClick={() => setDavidOpen(true)} title="Open David" aria-label="Open David">
+                  <MessageSquare className="size-4" />
+                </Button>
                 <Button variant="outline" size="sm" onClick={() => refreshData()}>
                   <RefreshCw className="size-4" />
                   Refresh
@@ -1099,6 +1107,13 @@ function App() {
           onRefreshShopifyToken={refreshShopifyToken}
           onRunShopifyAction={runShopifyAction}
           onCleanupJobs={() => mutateJob("/api/import-jobs/cleanup", "Jobs cleaned.")}
+        />
+        <DavidChatDrawer
+          open={davidOpen}
+          onOpenChange={setDavidOpen}
+          settings={state.systemSettings || {}}
+          onOpenFull={() => { setDavidOpen(false); navigateTo("ai-chat") }}
+          onOpenSettings={() => { setDavidOpen(false); navigateTo("settings") }}
         />
       </SidebarProvider>
       <Toaster richColors closeButton />
@@ -5342,7 +5357,8 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
   )
 }
 
-function DavidChatPage({ settings, onOpenSettings }: { settings: SystemSettings; onOpenSettings: () => void }) {
+/*
+function LegacyDavidChatPage({ settings, onOpenSettings }: { settings: SystemSettings; onOpenSettings: () => void }) {
   const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([
     { role: "assistant", content: "Hi, I’m David. I can help you understand DataPlus workflows, troubleshoot a process, or prepare an operational next step. I won’t make changes unless you use the relevant system controls." },
   ])
@@ -5394,6 +5410,151 @@ function DavidChatPage({ settings, onOpenSettings }: { settings: SystemSettings;
         <div className="flex justify-end"><Button size="sm" variant="ghost" onClick={() => setMessages([{ role: "assistant", content: "New conversation started. What would you like to work through?" }])}>Clear conversation</Button></div>
       </CardContent>
     </Card>
+  </div>
+}
+
+*/
+
+function davidStarterMessages(): UIMessage[] {
+  return createChat()
+    .assistant("Hi, I'm David. I can help you understand DataPlus workflows, troubleshoot a process, or prepare an operational next step. I won't make changes unless you use the relevant system controls.")
+    .get()
+}
+
+function davidMessageText(message: UIMessage) {
+  return message.parts.filter((part) => part.type === "text").map((part) => part.text).join("").trim()
+}
+
+function createDavidTransport(): ChatTransport<UIMessage> {
+  return {
+    async sendMessages({ messages, abortSignal }) {
+      const response = await fetch("/api/ai/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: abortSignal,
+        body: JSON.stringify({
+          messages: messages
+            .map((message) => ({ role: message.role, content: davidMessageText(message) }))
+            .filter((message) => message.content),
+        }),
+      })
+      const payload = await response.json().catch(() => ({})) as { reply?: string; error?: string }
+      if (!response.ok) throw new Error(payload.error || "David is unavailable right now.")
+
+      const id = globalThis.crypto?.randomUUID?.() || `david-${Date.now()}`
+      const reply = String(payload.reply || "I couldn't prepare a response just now. Please try again.")
+      const chunks: UIMessageChunk[] = [
+        { type: "text-start", id },
+        ...(reply.match(/\S+\s*/g) || [reply]).map((delta) => ({ type: "text-delta" as const, id, delta })),
+        { type: "text-end", id },
+        { type: "finish", finishReason: "stop" },
+      ]
+      let index = 0
+      return new ReadableStream<UIMessageChunk>({
+        pull(controller) {
+          const next = chunks[index++]
+          if (next) controller.enqueue(next)
+          if (index >= chunks.length) controller.close()
+        },
+      })
+    },
+    async reconnectToStream() { return null },
+  }
+}
+
+function DavidConversation({
+  settings,
+  compact = false,
+  onOpenSettings,
+  onOpenFull,
+}: {
+  settings: SystemSettings
+  compact?: boolean
+  onOpenSettings: () => void
+  onOpenFull?: () => void
+}) {
+  const [draft, setDraft] = useState("")
+  const scrollTarget = useRef<HTMLDivElement | null>(null)
+  const transport = useMemo(() => createDavidTransport(), [])
+  const { messages, sendMessage, setMessages, status, error, clearError } = useChat({
+    id: compact ? "david-drawer" : "david-workspace",
+    messages: davidStarterMessages(),
+    transport,
+  })
+  const provider = String(settings.aiProvider || "openai") === "google-ai-studio" ? "Google AI Studio" : "OpenAI"
+  const ready = Boolean(settings.aiEnabled)
+  const sending = status === "submitted" || status === "streaming"
+
+  useEffect(() => { scrollTarget.current?.scrollIntoView({ block: "end", behavior: "smooth" }) }, [messages, status])
+  useEffect(() => {
+    if (error) toast.error(error.message || "David is unavailable right now.")
+  }, [error])
+
+  async function send() {
+    const message = draft.trim()
+    if (!message || sending || !ready) return
+    setDraft("")
+    clearError()
+    try {
+      await sendMessage({ text: message })
+    } catch (requestError) {
+      toast.error(requestError instanceof Error ? requestError.message : "David is unavailable right now.")
+    }
+  }
+
+  return <div className={compact ? "flex min-h-0 flex-1 flex-col" : "flex min-h-[560px] flex-col"}>
+    <div className="flex items-start justify-between gap-3 border-b px-4 py-3 pr-12">
+      <div>
+        <div className="flex items-center gap-2"><MessageSquare className="size-4 text-primary" /><h2 className="font-semibold">David</h2><Badge variant={ready ? "secondary" : "outline"}>{ready ? provider : "Setup required"}</Badge></div>
+        <p className="mt-1 text-xs text-muted-foreground">{String(settings.aiModel || "Default model")} - read-only operational guidance</p>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        {onOpenFull ? <Button variant="ghost" size="icon" title="Open full workspace" onClick={onOpenFull}><PanelRightOpen className="size-4" /></Button> : null}
+        <Button variant="ghost" size="sm" onClick={() => setMessages(davidStarterMessages())}>New chat</Button>
+      </div>
+    </div>
+    {!ready ? <Alert className="m-4"><AlertCircle className="size-4" /><AlertTitle>David is not enabled</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-2">Verify the AI integration before starting a chat.<Button size="sm" variant="outline" onClick={onOpenSettings}>AI settings</Button></AlertDescription></Alert> : null}
+    <div className={compact ? "min-h-0 flex-1 overflow-y-auto p-4" : "flex-1 overflow-y-auto p-4"}>
+      <div className="grid content-start gap-3">
+        {messages.map((message) => {
+          const content = davidMessageText(message)
+          if (!content) return null
+          return <div key={message.id} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground" : "mr-auto max-w-[88%] whitespace-pre-wrap rounded-lg border bg-background px-3 py-2 text-sm shadow-sm"}>
+            <p className="mb-1 text-xs font-semibold opacity-70">{message.role === "user" ? "You" : "David"}</p>{content}
+          </div>
+        })}
+        {sending ? <div className="mr-auto flex items-center gap-2 rounded-lg border bg-background px-3 py-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> David is thinking</div> : null}
+        <div ref={scrollTarget} />
+      </div>
+    </div>
+    <div className="border-t bg-background p-3">
+      <div className="flex items-end gap-2 rounded-lg border bg-muted/20 p-2">
+        <Textarea className="min-h-11 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0" disabled={!ready || sending} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send() } }} rows={compact ? 2 : 3} placeholder={ready ? "Ask David anything..." : "Enable AI integration to chat with David"} />
+        <Button size="icon" className="shrink-0" disabled={!ready || sending || !draft.trim()} onClick={() => void send()} title="Send message"><SendHorizontal className="size-4" /></Button>
+      </div>
+    </div>
+  </div>
+}
+
+function DavidChatDrawer({ open, onOpenChange, settings, onOpenSettings, onOpenFull }: { open: boolean; onOpenChange: (open: boolean) => void; settings: SystemSettings; onOpenSettings: () => void; onOpenFull: () => void }) {
+  return <Sheet open={open} onOpenChange={onOpenChange}>
+    <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-[440px]">
+      <DavidConversation compact settings={settings} onOpenSettings={onOpenSettings} onOpenFull={onOpenFull} />
+    </SheetContent>
+  </Sheet>
+}
+
+function DavidChatPage({ settings, onOpenSettings }: { settings: SystemSettings; onOpenSettings: () => void }) {
+  const provider = String(settings.aiProvider || "openai") === "google-ai-studio" ? "Google AI Studio" : "OpenAI"
+  const ready = Boolean(settings.aiEnabled)
+  return <div className="mx-auto grid w-full max-w-5xl gap-5">
+    <PageHeader
+      eyebrow="AI assistant"
+      title="David"
+      description="A read-only operational assistant for understanding and navigating DataPlus. Chat history stays in this browser session."
+      action={<div className="flex items-center gap-2"><Badge variant={ready ? "default" : "secondary"}>{ready ? `${provider} connected` : "AI setup required"}</Badge><Button variant="outline" size="sm" onClick={onOpenSettings}><Settings className="size-4" /> AI settings</Button></div>}
+    />
+    <Card className="overflow-hidden"><DavidConversation settings={settings} onOpenSettings={onOpenSettings} /></Card>
   </div>
 }
 
