@@ -145,6 +145,10 @@ async function initRelationalSchema() {
     create index if not exists products_sku_lower_idx on products (lower(sku));
     create index if not exists products_vendor_sku_idx on products (lower(vendor_sku));
     create index if not exists products_barcode_idx on products (barcode);
+    create index if not exists products_barcode_lower_idx on products (lower(barcode));
+    create index if not exists products_raw_upc_idx on products ((raw ->> 'upc'));
+    create index if not exists products_raw_gtin_idx on products ((raw ->> 'gtin'));
+    create index if not exists products_raw_upc_code_idx on products ((raw ->> 'upcCode'));
     create index if not exists products_mfr_part_number_idx on products (lower(mfr_part_number));
     create index if not exists products_supplier_idx on products (lower(supplier));
     create index if not exists products_category_idx on products (category);
@@ -261,6 +265,10 @@ async function initRelationalSchema() {
     create index if not exists vendor_catalog_items_source_sku_idx on vendor_catalog_items (lower(source_sku));
     create index if not exists vendor_catalog_items_internal_sku_idx on vendor_catalog_items (lower(internal_sku));
     create index if not exists vendor_catalog_items_vendor_sku_idx on vendor_catalog_items (lower(vendor_sku));
+    create index if not exists vendor_catalog_items_barcode_lower_idx on vendor_catalog_items (lower(barcode));
+    create index if not exists vendor_catalog_items_raw_upc_idx on vendor_catalog_items ((raw ->> 'upc'));
+    create index if not exists vendor_catalog_items_raw_gtin_idx on vendor_catalog_items ((raw ->> 'gtin'));
+    create index if not exists vendor_catalog_items_raw_upc_code_idx on vendor_catalog_items ((raw ->> 'upcCode'));
     create index if not exists vendor_catalog_items_brand_idx on vendor_catalog_items (lower(brand));
     create index if not exists vendor_catalog_items_category_idx on vendor_catalog_items (category);
     create index if not exists vendor_catalog_items_discontinued_idx on vendor_catalog_items (to_be_discontinued);
@@ -5425,30 +5433,30 @@ async function findBarcodeMatches(values = []) {
   const candidates = [...new Set((Array.isArray(values) ? values : [values]).map((value) => String(value || "").replace(/[^0-9A-Za-z]/g, "").toLowerCase()).filter(Boolean))];
   if (!candidates.length) return { products: [], sourceItems: [] };
   const normalized = (expression) => `lower(regexp_replace(coalesce(${expression}, ''), '[^0-9A-Za-z]', '', 'g'))`;
-  const [productRows, sourceRows] = await Promise.all([
-    client.query(`
-      select * from products
-      where ${normalized("barcode")} = any($1::text[])
-         or ${normalized("raw ->> 'upc'")} = any($1::text[])
-         or ${normalized("raw ->> 'gtin'")} = any($1::text[])
-         or ${normalized("raw ->> 'upcCode'")} = any($1::text[])
-      order by updated_at desc
-      limit 25
-    `, [candidates]),
-    client.query(`
-      select * from vendor_catalog_items
-      where ${normalized("barcode")} = any($1::text[])
-         or ${normalized("raw ->> 'upc'")} = any($1::text[])
-         or ${normalized("raw ->> 'gtin'")} = any($1::text[])
-         or ${normalized("raw ->> 'upcCode'")} = any($1::text[])
-      order by updated_at desc
-      limit 25
-    `, [candidates])
-  ]);
-  return {
-    products: productRows.rows.map(productRowToState),
-    sourceItems: sourceRows.rows.map(vendorCatalogRowToState)
-  };
+  const exactWhere = `lower(barcode) = any($1::text[])
+     or raw ->> 'upc' = any($1::text[])
+     or raw ->> 'gtin' = any($1::text[])
+     or raw ->> 'upcCode' = any($1::text[])`;
+  const normalizedWhere = `${normalized("barcode")} = any($1::text[])
+     or ${normalized("raw ->> 'upc'")} = any($1::text[])
+     or ${normalized("raw ->> 'gtin'")} = any($1::text[])
+     or ${normalized("raw ->> 'upcCode'")} = any($1::text[])`;
+  const queryMatches = async (table, where) => client.query(`
+    select * from ${table}
+    where ${where}
+    order by updated_at desc
+    limit 25
+  `, [candidates]);
+
+  // Product scans overwhelmingly target approved catalog SKUs. Resolve that
+  // indexed path first instead of waiting on the much larger source catalog.
+  let productRows = await queryMatches("products", exactWhere);
+  if (!productRows.rows.length) productRows = await queryMatches("products", normalizedWhere);
+  if (productRows.rows.length) return { products: productRows.rows.map(productRowToState), sourceItems: [] };
+
+  let sourceRows = await queryMatches("vendor_catalog_items", exactWhere);
+  if (!sourceRows.rows.length) sourceRows = await queryMatches("vendor_catalog_items", normalizedWhere);
+  return { products: [], sourceItems: sourceRows.rows.map(vendorCatalogRowToState) };
 }
 
 async function hydrateProductsWithInventoryLevels(items = []) {
