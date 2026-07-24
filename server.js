@@ -25077,7 +25077,7 @@ async function handleApi(req, res) {
     }
     const configuredAiKey = String(current.aiApiKey || current.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY || "").trim();
     const verifiedFingerprint = configuredAiKey ? crypto.createHash("sha256").update(configuredAiKey).digest("hex") : "";
-    if (current.aiEnabled && (!configuredAiKey || !current.aiConnectionVerifiedAt || current.aiConnectionKeyFingerprint !== verifiedFingerprint)) {
+    if (current.aiEnabled && (!configuredAiKey || !current.aiConnectionVerifiedAt || current.aiConnectionVerifiedModel !== current.aiModel || current.aiConnectionKeyFingerprint !== verifiedFingerprint)) {
       current.aiEnabled = false;
       current.warehouseImageAnalysisEnabled = false;
     }

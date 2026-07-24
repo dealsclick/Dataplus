@@ -5470,7 +5470,7 @@ function SettingsPage({
                 <p className="text-xs text-muted-foreground">{value("aiConnectionVerifiedAt") ? `Verified ${dateLabel(String(value("aiConnectionVerifiedAt")))}` : "Not verified yet"}</p>
               </div>
               <div className="md:col-span-2">
-                <ToggleField label="Enable AI integration" checked={boolValue("aiEnabled")} disabled={!editing || !Boolean(value("aiConnectionVerifiedAt"))} onCheckedChange={(next) => update("aiEnabled", next)} />
+                <ToggleField label="Enable AI integration" checked={boolValue("aiEnabled")} disabled={!editing || !Boolean(value("aiConnectionVerifiedAt")) || String(value("aiConnectionVerifiedModel") || "") !== String(value("aiModel") || "gpt-4o-mini")} onCheckedChange={(next) => update("aiEnabled", next)} />
               </div>
             </CardContent>
           </Card>
