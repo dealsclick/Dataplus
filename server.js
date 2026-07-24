@@ -806,6 +806,8 @@ const DEFAULT_SYSTEM_SETTINGS = {
   smtpReminderScheduleTime: "08:00",
   openFoodFactsLookupEnabled: false,
   openFoodFactsApiBaseUrl: "https://world.openfoodfacts.org/api/v3",
+  warehouseImageAnalysisEnabled: true,
+  warehouseImageAnalysisModel: "gpt-4o-mini",
   systemUsers: [
     { id: "owner", name: "Luis", email: "", role: "Owner", status: "active" }
   ],
@@ -4192,6 +4194,8 @@ function normalizeSystemSettings(settings = {}) {
   normalized.smtpReminderScheduleTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(normalized.smtpReminderScheduleTime || "")) ? String(normalized.smtpReminderScheduleTime) : "08:00";
   normalized.openFoodFactsLookupEnabled = normalized.openFoodFactsLookupEnabled === true || String(normalized.openFoodFactsLookupEnabled).toLowerCase() === "true";
   normalized.openFoodFactsApiBaseUrl = String(normalized.openFoodFactsApiBaseUrl || "https://world.openfoodfacts.org/api/v3").replace(/\/+$/, "");
+  normalized.warehouseImageAnalysisEnabled = normalized.warehouseImageAnalysisEnabled === true || String(normalized.warehouseImageAnalysisEnabled).toLowerCase() === "true";
+  normalized.warehouseImageAnalysisModel = String(normalized.warehouseImageAnalysisModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
   normalized.systemUsers = (Array.isArray(normalized.systemUsers) ? normalized.systemUsers : DEFAULT_SYSTEM_SETTINGS.systemUsers)
     .map((user, index) => ({
       id: String(user.id || crypto.randomUUID?.() || `user-${index + 1}`),
@@ -21315,6 +21319,48 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { rows: Array.isArray(rows) ? rows : [] });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/warehouse/photo-suggestions") {
+    const body = await parseBody(req);
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (!settings.warehouseImageAnalysisEnabled) return sendJson(res, 403, { error: "Package-photo suggestions are disabled in Warehouse settings." });
+    const photoDataUrl = String(body.photoDataUrl || "");
+    if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(photoDataUrl) || photoDataUrl.length > 4.25 * 1024 * 1024) {
+      return sendJson(res, 400, { error: "Use a PNG, JPG, or WebP product photo smaller than 3 MB." });
+    }
+    const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
+    if (!apiKey) return sendJson(res, 503, { error: "Package-photo analysis is enabled, but the server does not have an OpenAI API key configured." });
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["title", "brand", "manufacturer", "mfrPartNumber", "vendorSku", "category", "shortDescription", "packQuantity", "confidence", "visibleText"],
+      properties: {
+        title: { type: "string" }, brand: { type: "string" }, manufacturer: { type: "string" }, mfrPartNumber: { type: "string" }, vendorSku: { type: "string" }, category: { type: "string" }, shortDescription: { type: "string" }, packQuantity: { type: "string" }, confidence: { type: "number" }, visibleText: { type: "string" }
+      }
+    };
+    try {
+      const response = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(20000),
+        body: JSON.stringify({
+          model: settings.warehouseImageAnalysisModel || "gpt-4o-mini",
+          input: [{ role: "developer", content: [{ type: "input_text", text: "Extract only information clearly visible on this product package. Do not invent information. Return empty strings for fields that are not legible or cannot be confidently inferred. Use a short, customer-friendly product title and a concise category path only when the package makes it clear." }] }, { role: "user", content: [{ type: "input_text", text: "Create editable catalog-field suggestions from this package photo." }, { type: "input_image", image_url: photoDataUrl, detail: "high" }] }],
+          max_output_tokens: 600,
+          text: { format: { type: "json_schema", name: "warehouse_product_suggestion", strict: true, schema } }
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(String(payload?.error?.message || "The image-analysis request was rejected."));
+      const outputText = String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""));
+      const suggestion = JSON.parse(outputText || "{}");
+      return sendJson(res, 200, { suggestion: {
+        title: String(suggestion.title || "").trim(), brand: String(suggestion.brand || "").trim(), manufacturer: String(suggestion.manufacturer || "").trim(), mfrPartNumber: String(suggestion.mfrPartNumber || "").trim(), vendorSku: String(suggestion.vendorSku || "").trim(), category: String(suggestion.category || "").trim(), shortDescription: String(suggestion.shortDescription || "").trim(), packQuantity: String(suggestion.packQuantity || "").trim(), confidence: Math.max(0, Math.min(1, Number(suggestion.confidence || 0))), visibleText: String(suggestion.visibleText || "").trim()
+      } });
+    } catch (error) {
+      return sendJson(res, 502, { error: error instanceof Error ? error.message : "Unable to analyze this package photo." });
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []);
     return sendJson(res, 200, { audits: Array.isArray(audits) ? audits : [] });
@@ -21410,11 +21456,12 @@ async function handleApi(req, res) {
       id: crypto.randomUUID(), sku, title, marketplaceTitle: title, barcode,
       qty: quantity, stockQty: quantity, reserved: 0, reorderPoint: 0,
       active: true, status: "Draft", condition: "New", source: "warehouse-audit",
-      category: "", mainCategory: "", supplier: "", brand: "", cost: 0, price: 0,
+      category: "", mainCategory: "", sourceCategory: String(body.category || "").trim(), suggestedPackageCategory: String(body.category || "").trim(), supplier: "", brand: String(body.brand || "").trim(), manufacturer: String(body.manufacturer || "").trim(), mfrPartNumber: String(body.mfrPartNumber || "").trim(), vendorSku: String(body.vendorSku || "").trim(), shortDescription: String(body.shortDescription || "").trim(), packageQuantity: String(body.packQuantity || "").trim(), cost: 0, price: 0,
       locationBin: String(body.locationBin || "").trim(),
       warehouseStock: [normalizeWarehouseStockRow({ warehouseId: auditWarehouse?.id || audit.warehouseId || "", warehouseName: auditWarehouse?.name || audit.warehouseName || "Warehouse", locationBin: String(body.locationBin || "").trim(), qty: quantity, reserved: 0 }, auditWarehouse)],
       images: photoDataUrl ? [photoDataUrl] : [], defaultImage: photoDataUrl,
-      createdAt: now, updatedAt: now, createdBy, createdSource: "Warehouse audit", createdAuditId: audit.id, createdAuditNumber: audit.auditNumber
+      createdAt: now, updatedAt: now, createdBy, createdSource: "Warehouse audit", createdAuditId: audit.id, createdAuditNumber: audit.auditNumber,
+      packagePhotoAnalysis: { confidence: Math.max(0, Math.min(100, Number(body.analysisConfidence || 0))), visibleText: String(body.analysisVisibleText || "").trim(), analyzedAt: now }
     };
     await postgres.upsertProductsFromState([product]);
     await postgres.upsertInventoryLevelsFromProducts([product]);
