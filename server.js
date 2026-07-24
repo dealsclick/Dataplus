@@ -4356,6 +4356,20 @@ function interactionCitations(payload = {}) {
   return citations.slice(0, 8);
 }
 
+function googleAiRequestError(payload = {}, fallback = "Google AI Studio could not complete this request.") {
+  const error = payload?.error || {};
+  const message = String(error.message || fallback).trim();
+  const code = Number(error.code || 0);
+  const status = String(error.status || "").toUpperCase();
+  if (code === 429 || status === "RESOURCE_EXHAUSTED" || /quota|rate limit|token.*limit|resource exhausted/i.test(message)) {
+    return "Google AI Studio has reached its current quota for online research. Wait for the quota window to reset or review the AI Studio project's billing and rate limits, then try again. You can still create this SKU manually now.";
+  }
+  if (code === 401 || code === 403 || /api key|permission|unauthenticated/i.test(message)) {
+    return "Google AI Studio rejected the request. Verify the active Gemini API key and its project permissions in System Settings, then try again.";
+  }
+  return message || fallback;
+}
+
 const TABLE_PREFERENCE_IDS = new Set(["orders", "catalog.products", "catalog.inventory"]);
 const TABLE_PREFERENCE_SORT_DIRECTIONS = new Set(["asc", "desc"]);
 
@@ -21817,7 +21831,7 @@ async function handleApi(req, res) {
         })
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(String(payload?.error?.message || "Google Search could not research this UPC."));
+      if (!response.ok) throw new Error(googleAiRequestError(payload, "Google Search could not research this UPC."));
       const suggestion = JSON.parse(interactionOutputText(payload) || "{}");
       const research = {
         found: suggestion.found === true,
