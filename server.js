@@ -809,8 +809,11 @@ const DEFAULT_SYSTEM_SETTINGS = {
   aiEnabled: false,
   aiProvider: "openai",
   aiApiKey: "",
+  openAiApiKey: "",
+  geminiApiKey: "",
   aiModel: "gpt-4o-mini",
   aiConnectionVerifiedAt: "",
+  aiConnectionVerifiedProvider: "",
   aiConnectionVerifiedModel: "",
   aiConnectionKeyFingerprint: "",
   warehouseImageAnalysisEnabled: true,
@@ -4203,10 +4206,14 @@ function normalizeSystemSettings(settings = {}) {
   normalized.openFoodFactsLookupEnabled = normalized.openFoodFactsLookupEnabled === true || String(normalized.openFoodFactsLookupEnabled).toLowerCase() === "true";
   normalized.openFoodFactsApiBaseUrl = String(normalized.openFoodFactsApiBaseUrl || "https://world.openfoodfacts.org/api/v3").replace(/\/+$/, "");
   normalized.aiEnabled = normalized.aiEnabled === true || String(normalized.aiEnabled).toLowerCase() === "true";
-  normalized.aiProvider = "openai";
-  normalized.aiApiKey = String(normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || "").trim();
-  normalized.aiModel = String(normalized.aiModel || normalized.warehouseImageAnalysisModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
+  normalized.aiProvider = ["openai", "google-ai-studio"].includes(String(normalized.aiProvider || "").toLowerCase()) ? String(normalized.aiProvider).toLowerCase() : "openai";
+  const legacyAiKey = String(normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || "").trim();
+  normalized.openAiApiKey = String(normalized.openAiApiKey || (normalized.aiProvider === "openai" ? legacyAiKey : "")).trim();
+  normalized.geminiApiKey = String(normalized.geminiApiKey || (normalized.aiProvider === "google-ai-studio" ? legacyAiKey : "")).trim();
+  normalized.aiApiKey = legacyAiKey;
+  normalized.aiModel = String(normalized.aiModel || normalized.warehouseImageAnalysisModel || (normalized.aiProvider === "google-ai-studio" ? "gemini-3.6-flash" : "gpt-4o-mini")).trim() || (normalized.aiProvider === "google-ai-studio" ? "gemini-3.6-flash" : "gpt-4o-mini");
   normalized.aiConnectionVerifiedAt = String(normalized.aiConnectionVerifiedAt || "").trim();
+  normalized.aiConnectionVerifiedProvider = String(normalized.aiConnectionVerifiedProvider || "").trim();
   normalized.aiConnectionVerifiedModel = String(normalized.aiConnectionVerifiedModel || "").trim();
   normalized.aiConnectionKeyFingerprint = String(normalized.aiConnectionKeyFingerprint || "").trim();
   normalized.warehouseImageAnalysisEnabled = normalized.warehouseImageAnalysisEnabled === true || String(normalized.warehouseImageAnalysisEnabled).toLowerCase() === "true";
@@ -4263,8 +4270,28 @@ function writeSystemSettingsStore(settings = {}) {
 
 function publicSystemSettings(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
-  const aiApiKeyConfigured = Boolean(normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
-  return { ...normalized, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", aiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: aiApiKeyConfigured };
+  const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
+  const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
+  const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
+  return { ...normalized, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured };
+}
+
+function getAiRuntimeConfig(settings = {}) {
+  const normalized = normalizeSystemSettings(settings);
+  const provider = normalized.aiProvider === "google-ai-studio" ? "google-ai-studio" : "openai";
+  const apiKey = provider === "google-ai-studio"
+    ? String(normalized.geminiApiKey || process.env.GEMINI_API_KEY || "").trim()
+    : String(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY || "").trim();
+  const model = String(normalized.aiModel || (provider === "google-ai-studio" ? "gemini-3.6-flash" : "gpt-4o-mini")).trim();
+  return { provider, apiKey, model };
+}
+
+function interactionOutputText(payload = {}) {
+  return String(payload.output_text || (payload.steps || [])
+    .filter((step) => step?.type === "model_output")
+    .flatMap((step) => step.content || [])
+    .map((content) => content?.text || "")
+    .join(""));
 }
 
 const TABLE_PREFERENCE_IDS = new Set(["orders", "catalog.products", "catalog.inventory"]);
@@ -21345,8 +21372,8 @@ async function handleApi(req, res) {
     if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(photoDataUrl) || photoDataUrl.length > 4.25 * 1024 * 1024) {
       return sendJson(res, 400, { error: "Use a PNG, JPG, or WebP product photo smaller than 3 MB." });
     }
-    const apiKey = String(settings.aiApiKey || settings.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY || "").trim();
-    if (!apiKey) return sendJson(res, 503, { error: "AI integration is enabled, but no OpenAI API key is configured." });
+    const aiConfig = getAiRuntimeConfig(settings);
+    if (!aiConfig.apiKey) return sendJson(res, 503, { error: `AI integration is enabled, but no ${aiConfig.provider === "google-ai-studio" ? "Google AI Studio" : "OpenAI"} API key is configured.` });
     const schema = {
       type: "object",
       additionalProperties: false,
@@ -21356,20 +21383,26 @@ async function handleApi(req, res) {
       }
     };
     try {
-      const response = await fetch("https://api.openai.com/v1/responses", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        signal: AbortSignal.timeout(20000),
-        body: JSON.stringify({
-          model: settings.aiModel || settings.warehouseImageAnalysisModel || "gpt-4o-mini",
-          input: [{ role: "developer", content: [{ type: "input_text", text: "Extract only information clearly visible on this product package. Do not invent information. Return empty strings for fields that are not legible or cannot be confidently inferred. Use a short, customer-friendly product title and a concise category path only when the package makes it clear." }] }, { role: "user", content: [{ type: "input_text", text: "Create editable catalog-field suggestions from this package photo." }, { type: "input_image", image_url: photoDataUrl, detail: "high" }] }],
-          max_output_tokens: 600,
-          text: { format: { type: "json_schema", name: "warehouse_product_suggestion", strict: true, schema } }
+      const instruction = "Extract only information clearly visible on this product package. Do not invent information. Return empty strings for fields that are not legible or cannot be confidently inferred. Use a short, customer-friendly product title and a concise category path only when the package makes it clear. Create editable catalog-field suggestions from this package photo.";
+      const imageMatch = photoDataUrl.match(/^data:(image\/(?:png|jpe?g|webp));base64,(.+)$/i);
+      const response = aiConfig.provider === "google-ai-studio"
+        ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+          method: "POST",
+          headers: { "x-goog-api-key": aiConfig.apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" },
+          signal: AbortSignal.timeout(20000),
+          body: JSON.stringify({ model: aiConfig.model, store: false, input: [{ type: "text", text: instruction }, { type: "image", data: imageMatch?.[2] || "", mime_type: imageMatch?.[1] || "image/jpeg" }], response_format: { type: "text", mime_type: "application/json", schema } })
         })
-      });
+        : await fetch("https://api.openai.com/v1/responses", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${aiConfig.apiKey}`, "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(20000),
+          body: JSON.stringify({ model: aiConfig.model, input: [{ role: "developer", content: [{ type: "input_text", text: instruction }] }, { role: "user", content: [{ type: "input_image", image_url: photoDataUrl, detail: "high" }] }], max_output_tokens: 600, text: { format: { type: "json_schema", name: "warehouse_product_suggestion", strict: true, schema } } })
+        });
       const payload = await response.json();
       if (!response.ok) throw new Error(String(payload?.error?.message || "The image-analysis request was rejected."));
-      const outputText = String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""));
+      const outputText = aiConfig.provider === "google-ai-studio"
+        ? interactionOutputText(payload)
+        : String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""));
       const suggestion = JSON.parse(outputText || "{}");
       return sendJson(res, 200, { suggestion: {
         title: String(suggestion.title || "").trim(), brand: String(suggestion.brand || "").trim(), manufacturer: String(suggestion.manufacturer || "").trim(), mfrPartNumber: String(suggestion.mfrPartNumber || "").trim(), vendorSku: String(suggestion.vendorSku || "").trim(), category: String(suggestion.category || "").trim(), shortDescription: String(suggestion.shortDescription || "").trim(), packQuantity: String(suggestion.packQuantity || "").trim(), confidence: Math.max(0, Math.min(1, Number(suggestion.confidence || 0))), visibleText: String(suggestion.visibleText || "").trim()
@@ -25035,29 +25068,42 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/system-settings/ai-test") {
     const body = await parseBody(req);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const provider = String(body.provider || current.aiProvider || "openai").toLowerCase() === "google-ai-studio" ? "google-ai-studio" : "openai";
     const submittedKey = String(body.apiKey || "").trim();
-    const apiKey = submittedKey || String(current.aiApiKey || current.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY || "").trim();
-    const model = String(body.model || current.aiModel || current.warehouseImageAnalysisModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
-    if (!apiKey) return sendJson(res, 400, { error: "Enter an OpenAI API key before testing the AI connection." });
+    const savedConfig = getAiRuntimeConfig({ ...current, aiProvider: provider });
+    const apiKey = submittedKey || savedConfig.apiKey;
+    const model = String(body.model || current.aiModel || (provider === "google-ai-studio" ? "gemini-3.6-flash" : "gpt-4o-mini")).trim() || (provider === "google-ai-studio" ? "gemini-3.6-flash" : "gpt-4o-mini");
+    if (!apiKey) return sendJson(res, 400, { error: `Enter a ${provider === "google-ai-studio" ? "Google AI Studio" : "OpenAI"} API key before testing the AI connection.` });
     try {
-      const response = await fetch("https://api.openai.com/v1/responses", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        signal: AbortSignal.timeout(15000),
-        body: JSON.stringify({ model, input: "Reply with OK.", max_output_tokens: 16 })
-      });
+      const response = provider === "google-ai-studio"
+        ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+          method: "POST",
+          headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" },
+          signal: AbortSignal.timeout(15000),
+          body: JSON.stringify({ model, input: "Reply with OK.", store: false })
+        })
+        : await fetch("https://api.openai.com/v1/responses", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(15000),
+          body: JSON.stringify({ model, input: "Reply with OK.", max_output_tokens: 16 })
+        });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(String(payload?.error?.message || "The OpenAI API rejected this key."));
-      current.aiProvider = "openai";
-      if (submittedKey) current.aiApiKey = submittedKey;
+      if (!response.ok) throw new Error(String(payload?.error?.message || `The ${provider === "google-ai-studio" ? "Google AI Studio" : "OpenAI"} API rejected this key.`));
+      current.aiProvider = provider;
+      if (submittedKey) {
+        if (provider === "google-ai-studio") current.geminiApiKey = submittedKey;
+        else current.openAiApiKey = submittedKey;
+      }
       current.aiModel = model;
       current.aiConnectionVerifiedAt = new Date().toISOString();
+      current.aiConnectionVerifiedProvider = provider;
       current.aiConnectionVerifiedModel = model;
-      current.aiConnectionKeyFingerprint = crypto.createHash("sha256").update(apiKey).digest("hex");
+      current.aiConnectionKeyFingerprint = crypto.createHash("sha256").update(`${provider}:${apiKey}`).digest("hex");
       const systemSettings = writeSystemSettingsStore(current);
       publicStateJsonCache = null;
       if (dbCache.data) dbCache.data.systemSettings = systemSettings;
-      return sendJson(res, 200, { message: "OpenAI connection verified.", systemSettings: publicSystemSettings(systemSettings) });
+      return sendJson(res, 200, { message: `${provider === "google-ai-studio" ? "Google AI Studio" : "OpenAI"} connection verified.`, systemSettings: publicSystemSettings(systemSettings) });
     } catch (error) {
       return sendJson(res, 502, { error: error instanceof Error ? error.message : "Unable to verify the AI connection." });
     }
@@ -25072,12 +25118,12 @@ async function handleApi(req, res) {
       else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") current[field] = Number(body[field] || 0);
       else if (Array.isArray(DEFAULT_SYSTEM_SETTINGS[field])) current[field] = Array.isArray(body[field]) ? body[field] : current[field];
       else if (DEFAULT_SYSTEM_SETTINGS[field] && typeof DEFAULT_SYSTEM_SETTINGS[field] === "object") current[field] = body[field] && typeof body[field] === "object" ? body[field] : current[field];
-      else if (["smtpPassword", "aiApiKey", "warehouseImageAnalysisApiKey"].includes(field) && !String(body[field] || "")) current[field] = current[field];
+      else if (["smtpPassword", "aiApiKey", "openAiApiKey", "geminiApiKey", "warehouseImageAnalysisApiKey"].includes(field) && !String(body[field] || "")) current[field] = current[field];
       else current[field] = String(body[field] || "");
     }
-    const configuredAiKey = String(current.aiApiKey || current.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY || "").trim();
-    const verifiedFingerprint = configuredAiKey ? crypto.createHash("sha256").update(configuredAiKey).digest("hex") : "";
-    if (current.aiEnabled && (!configuredAiKey || !current.aiConnectionVerifiedAt || current.aiConnectionVerifiedModel !== current.aiModel || current.aiConnectionKeyFingerprint !== verifiedFingerprint)) {
+    const aiConfig = getAiRuntimeConfig(current);
+    const verifiedFingerprint = aiConfig.apiKey ? crypto.createHash("sha256").update(`${aiConfig.provider}:${aiConfig.apiKey}`).digest("hex") : "";
+    if (current.aiEnabled && (!aiConfig.apiKey || !current.aiConnectionVerifiedAt || current.aiConnectionVerifiedProvider !== aiConfig.provider || current.aiConnectionVerifiedModel !== current.aiModel || current.aiConnectionKeyFingerprint !== verifiedFingerprint)) {
       current.aiEnabled = false;
       current.warehouseImageAnalysisEnabled = false;
     }

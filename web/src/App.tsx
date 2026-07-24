@@ -5351,6 +5351,10 @@ function SettingsPage({
   const [testingAi, setTestingAi] = useState(false)
   const value = (field: string) => draft[field] ?? settings[field]
   const boolValue = (field: string) => Boolean(value(field))
+  const aiProvider = String(value("aiProvider") || "openai") === "google-ai-studio" ? "google-ai-studio" : "openai"
+  const aiKeyField = aiProvider === "google-ai-studio" ? "geminiApiKey" : "openAiApiKey"
+  const aiDefaultModel = aiProvider === "google-ai-studio" ? "gemini-3.6-flash" : "gpt-4o-mini"
+  const aiKeyConfigured = aiProvider === "google-ai-studio" ? Boolean(settings.geminiApiKeyConfigured) : Boolean(settings.openAiApiKeyConfigured)
 
   function update(field: string, next: unknown) {
     setDraft((current) => ({ ...current, [field]: next }))
@@ -5379,14 +5383,16 @@ function SettingsPage({
     try {
       const result = await api<{ message?: string; systemSettings?: SystemSettings }>("/api/system-settings/ai-test", {
         method: "POST",
-        body: JSON.stringify({ apiKey: String(draft.aiApiKey || ""), model: String(value("aiModel") || "gpt-4o-mini") }),
+        body: JSON.stringify({ provider: aiProvider, apiKey: String(draft[aiKeyField] || ""), model: String(value("aiModel") || aiDefaultModel) }),
       })
       const verified = result.systemSettings || {}
       setDraft((current) => ({
         ...current,
-        aiModel: verified.aiModel || value("aiModel") || "gpt-4o-mini",
+        aiProvider: verified.aiProvider || aiProvider,
+        aiModel: verified.aiModel || value("aiModel") || aiDefaultModel,
         aiConnectionVerifiedAt: verified.aiConnectionVerifiedAt || new Date().toISOString(),
-        aiConnectionVerifiedModel: verified.aiConnectionVerifiedModel || value("aiModel") || "gpt-4o-mini",
+        aiConnectionVerifiedProvider: verified.aiConnectionVerifiedProvider || aiProvider,
+        aiConnectionVerifiedModel: verified.aiConnectionVerifiedModel || value("aiModel") || aiDefaultModel,
         aiConnectionKeyFingerprint: verified.aiConnectionKeyFingerprint || "verified",
       }))
       toast.success(result.message || "OpenAI connection verified.")
@@ -5454,13 +5460,19 @@ function SettingsPage({
             </CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2">
               <Field label="Provider">
-                <Input disabled value="OpenAI" />
+                <Select disabled={!editing} value={aiProvider} onValueChange={(next) => setDraft((current) => ({ ...current, aiProvider: next, aiModel: next === "google-ai-studio" ? "gemini-3.6-flash" : "gpt-4o-mini", aiEnabled: false }))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="openai">OpenAI</SelectItem>
+                    <SelectItem value="google-ai-studio">Google AI Studio (Gemini)</SelectItem>
+                  </SelectContent>
+                </Select>
               </Field>
               <Field label="Default model">
-                <Input disabled={!editing} value={String(value("aiModel") || "gpt-4o-mini")} onChange={(event) => update("aiModel", event.target.value)} placeholder="gpt-4o-mini" />
+                <Input disabled={!editing} value={String(value("aiModel") || aiDefaultModel)} onChange={(event) => update("aiModel", event.target.value)} placeholder={aiDefaultModel} />
               </Field>
-              <Field label="OpenAI API key">
-                <Input disabled={!editing} type="password" value={String(draft.aiApiKey || "")} onChange={(event) => update("aiApiKey", event.target.value)} placeholder={settings.aiApiKeyConfigured ? "Configured (enter only to replace)" : "Paste an OpenAI API key"} />
+              <Field label={aiProvider === "google-ai-studio" ? "Google AI Studio API key" : "OpenAI API key"}>
+                <Input disabled={!editing} type="password" value={String(draft[aiKeyField] || "")} onChange={(event) => update(aiKeyField, event.target.value)} placeholder={aiKeyConfigured ? "Configured (enter only to replace)" : aiProvider === "google-ai-studio" ? "Paste a Gemini API key" : "Paste an OpenAI API key"} />
                 <p className="mt-1 text-xs text-muted-foreground">Use Verify connection after adding or replacing a key. Enabling AI requires a successful verification for the active key.</p>
               </Field>
               <div className="flex flex-col justify-end gap-2">
@@ -5470,7 +5482,7 @@ function SettingsPage({
                 <p className="text-xs text-muted-foreground">{value("aiConnectionVerifiedAt") ? `Verified ${dateLabel(String(value("aiConnectionVerifiedAt")))}` : "Not verified yet"}</p>
               </div>
               <div className="md:col-span-2">
-                <ToggleField label="Enable AI integration" checked={boolValue("aiEnabled")} disabled={!editing || !Boolean(value("aiConnectionVerifiedAt")) || String(value("aiConnectionVerifiedModel") || "") !== String(value("aiModel") || "gpt-4o-mini")} onCheckedChange={(next) => update("aiEnabled", next)} />
+                <ToggleField label="Enable AI integration" checked={boolValue("aiEnabled")} disabled={!editing || !Boolean(value("aiConnectionVerifiedAt")) || String(value("aiConnectionVerifiedProvider") || "") !== aiProvider || String(value("aiConnectionVerifiedModel") || "") !== String(value("aiModel") || aiDefaultModel)} onCheckedChange={(next) => update("aiEnabled", next)} />
               </div>
             </CardContent>
           </Card>
