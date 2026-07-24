@@ -21412,6 +21412,50 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/ai/chat") {
+    const body = await parseBody(req);
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (!settings.aiEnabled) return sendJson(res, 403, { error: "David is not enabled. Verify and enable an AI provider in System Settings first." });
+    const aiConfig = getAiRuntimeConfig(settings);
+    if (!aiConfig.apiKey) return sendJson(res, 503, { error: `David needs a ${aiConfig.provider === "google-ai-studio" ? "Google AI Studio" : "OpenAI"} API key in System Settings.` });
+    const messages = (Array.isArray(body.messages) ? body.messages : [])
+      .slice(-12)
+      .map((message) => ({ role: message?.role === "assistant" ? "assistant" : "user", content: String(message?.content || "").trim().slice(0, 5000) }))
+      .filter((message) => message.content);
+    if (!messages.length || messages[messages.length - 1].role !== "user") return sendJson(res, 400, { error: "Ask David a question to begin." });
+    const instruction = "You are David, DataPlus's concise internal operations assistant. Help users understand catalog, inventory, fulfillment, purchasing, warehouse, channel, and settings workflows. You are read-only: never claim to have changed data, sent a message, created a PO, or performed an integration action. If a request would require a system change, explain the appropriate DataPlus workflow. Be practical, direct, and say when information is unavailable.";
+    try {
+      const response = aiConfig.provider === "google-ai-studio"
+        ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+          method: "POST",
+          headers: { "x-goog-api-key": aiConfig.apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" },
+          signal: AbortSignal.timeout(30000),
+          body: JSON.stringify({
+            model: aiConfig.model,
+            store: false,
+            input: `${instruction}\n\nConversation:\n${messages.map((message) => `${message.role === "assistant" ? "David" : "User"}: ${message.content}`).join("\n")}\n\nDavid:`
+          })
+        })
+        : await fetch("https://api.openai.com/v1/responses", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${aiConfig.apiKey}`, "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(30000),
+          body: JSON.stringify({
+            model: aiConfig.model,
+            input: [{ role: "developer", content: [{ type: "input_text", text: instruction }] }, ...messages.map((message) => ({ role: message.role, content: [{ type: "input_text", text: message.content }] }))],
+            max_output_tokens: 900
+          })
+        });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(String(payload?.error?.message || "David could not complete that request."));
+      const reply = (aiConfig.provider === "google-ai-studio" ? interactionOutputText(payload) : String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""))).trim();
+      if (!reply) throw new Error("David returned an empty response. Please try again.");
+      return sendJson(res, 200, { reply, provider: aiConfig.provider, model: aiConfig.model });
+    } catch (error) {
+      return sendJson(res, 502, { error: error instanceof Error ? error.message : "David is unavailable right now." });
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []);
     return sendJson(res, 200, { audits: Array.isArray(audits) ? audits : [] });

@@ -14,6 +14,7 @@ import {
   Home,
   Loader2,
   Mail,
+  MessageSquare,
   MoreHorizontal,
   PackageSearch,
   Play,
@@ -29,6 +30,7 @@ import {
   Warehouse,
   Pencil,
   Save,
+  SendHorizontal,
   Trash2,
 } from "lucide-react"
 import { Toaster, toast } from "sonner"
@@ -90,7 +92,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
-type AppView = "overview" | "jobs" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "settings"
+type AppView = "overview" | "jobs" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "ai-chat" | "settings"
 
 type ImportJob = {
   id: string
@@ -486,6 +488,7 @@ const navItems: Array<{ id: AppView; label: string; icon: React.ComponentType<{ 
   { id: "purchasing", label: "Purchasing", icon: Archive },
   { id: "catalog", label: "Catalog", icon: PackageSearch },
   { id: "vendors", label: "Vendors", icon: Warehouse },
+  { id: "ai-chat", label: "David", icon: MessageSquare },
   { id: "settings", label: "Settings", icon: Settings },
 ]
 
@@ -524,6 +527,7 @@ const viewPaths: Record<AppView, string> = {
   "inventory-detail": "/inventory",
   "category-detail": "/categories",
   vendors: "/vendors",
+  "ai-chat": "/ai",
   settings: "/settings",
 }
 
@@ -543,6 +547,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (path.startsWith("/products") || path.startsWith("/catalog")) return "catalog"
   if (["/categories", "/source-catalog", "/import-review", "/sku-changes", "/vendor-category-mappings", "/attributes", "/groups", "/inventory", "/templates", "/readiness"].some((prefix) => path.startsWith(prefix))) return "catalog"
   if (path.startsWith("/vendors")) return "vendors"
+  if (path.startsWith("/ai")) return "ai-chat"
   if (path.startsWith("/settings")) return "settings"
   return "overview"
 }
@@ -1067,6 +1072,7 @@ function App() {
                 {view === "product-detail" && <StandaloneProductPage />}
                 {view === "inventory-detail" && <InventorySkuDetailPage />}
                 {view === "category-detail" && <StandaloneCategoryPage />}
+                {view === "ai-chat" && <DavidChatPage settings={state.systemSettings || {}} onOpenSettings={() => navigateTo("settings")} />}
                 {view === "vendors" && (
                   <VendorsPage
                     vendors={state.vendors || []}
@@ -5334,6 +5340,61 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
       </Tabs>
     </div>
   )
+}
+
+function DavidChatPage({ settings, onOpenSettings }: { settings: SystemSettings; onOpenSettings: () => void }) {
+  const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([
+    { role: "assistant", content: "Hi, I’m David. I can help you understand DataPlus workflows, troubleshoot a process, or prepare an operational next step. I won’t make changes unless you use the relevant system controls." },
+  ])
+  const [draft, setDraft] = useState("")
+  const [sending, setSending] = useState(false)
+  const provider = String(settings.aiProvider || "openai") === "google-ai-studio" ? "Google AI Studio" : "OpenAI"
+  const ready = Boolean(settings.aiEnabled)
+
+  async function send() {
+    const message = draft.trim()
+    if (!message || sending || !ready) return
+    const nextMessages = [...messages, { role: "user" as const, content: message }]
+    setMessages(nextMessages)
+    setDraft("")
+    setSending(true)
+    try {
+      const result = await api<{ reply: string }>('/api/ai/chat', { method: "POST", body: JSON.stringify({ messages: nextMessages }) })
+      setMessages((current) => [...current, { role: "assistant", content: result.reply }])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "David is unavailable right now.")
+      setMessages((current) => [...current, { role: "assistant", content: "I couldn’t answer that just now. Check the AI integration connection and try again." }])
+    } finally { setSending(false) }
+  }
+
+  return <div className="mx-auto grid w-full max-w-5xl gap-5">
+    <PageHeader
+      eyebrow="AI assistant"
+      title="David"
+      description="A read-only operational assistant for understanding and navigating DataPlus. Chat history stays in this browser session."
+      action={<div className="flex items-center gap-2"><Badge variant={ready ? "default" : "secondary"}>{ready ? `${provider} connected` : "AI setup required"}</Badge><Button variant="outline" size="sm" onClick={onOpenSettings}><Settings className="size-4" /> AI settings</Button></div>}
+    />
+    {!ready ? <Alert><AlertCircle className="size-4" /><AlertTitle>David is not enabled</AlertTitle><AlertDescription>Verify a provider and enable AI integration in System Settings before starting a chat.</AlertDescription></Alert> : null}
+    <Card className="overflow-hidden">
+      <CardHeader className="border-b bg-muted/20">
+        <CardTitle className="flex items-center gap-2 text-base"><MessageSquare className="size-4" /> David</CardTitle>
+        <CardDescription>{provider} · {String(settings.aiModel || "Default model")} · Read-only guidance</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-4 p-4">
+        <div className="grid min-h-[440px] content-start gap-3 overflow-y-auto rounded-md border bg-muted/10 p-4">
+          {messages.map((message, index) => <div key={`${message.role}-${index}`} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground" : "mr-auto max-w-[85%] whitespace-pre-wrap rounded-md border bg-background px-3 py-2 text-sm"}>
+            <p className="mb-1 text-xs font-semibold opacity-70">{message.role === "user" ? "You" : "David"}</p>{message.content}
+          </div>)}
+          {sending && <div className="mr-auto flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> David is thinking</div>}
+        </div>
+        <div className="flex items-end gap-2">
+          <Textarea disabled={!ready || sending} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send() } }} rows={3} placeholder={ready ? "Ask David about an inventory, catalog, order, purchasing, warehouse, or channel workflow" : "Enable AI integration to chat with David"} />
+          <Button className="shrink-0" disabled={!ready || sending || !draft.trim()} onClick={() => void send()}><SendHorizontal className="size-4" /> Send</Button>
+        </div>
+        <div className="flex justify-end"><Button size="sm" variant="ghost" onClick={() => setMessages([{ role: "assistant", content: "New conversation started. What would you like to work through?" }])}>Clear conversation</Button></div>
+      </CardContent>
+    </Card>
+  </div>
 }
 
 function SettingsPage({
