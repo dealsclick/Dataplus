@@ -808,6 +808,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   openFoodFactsApiBaseUrl: "https://world.openfoodfacts.org/api/v3",
   warehouseImageAnalysisEnabled: true,
   warehouseImageAnalysisModel: "gpt-4o-mini",
+  warehouseImageAnalysisApiKey: "",
   systemUsers: [
     { id: "owner", name: "Luis", email: "", role: "Owner", status: "active" }
   ],
@@ -4196,6 +4197,7 @@ function normalizeSystemSettings(settings = {}) {
   normalized.openFoodFactsApiBaseUrl = String(normalized.openFoodFactsApiBaseUrl || "https://world.openfoodfacts.org/api/v3").replace(/\/+$/, "");
   normalized.warehouseImageAnalysisEnabled = normalized.warehouseImageAnalysisEnabled === true || String(normalized.warehouseImageAnalysisEnabled).toLowerCase() === "true";
   normalized.warehouseImageAnalysisModel = String(normalized.warehouseImageAnalysisModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
+  normalized.warehouseImageAnalysisApiKey = String(normalized.warehouseImageAnalysisApiKey || "").trim();
   normalized.systemUsers = (Array.isArray(normalized.systemUsers) ? normalized.systemUsers : DEFAULT_SYSTEM_SETTINGS.systemUsers)
     .map((user, index) => ({
       id: String(user.id || crypto.randomUUID?.() || `user-${index + 1}`),
@@ -4247,7 +4249,7 @@ function writeSystemSettingsStore(settings = {}) {
 
 function publicSystemSettings(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
-  return { ...normalized, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword) };
+  return { ...normalized, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: Boolean(normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY) };
 }
 
 const TABLE_PREFERENCE_IDS = new Set(["orders", "catalog.products", "catalog.inventory"]);
@@ -21327,7 +21329,7 @@ async function handleApi(req, res) {
     if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(photoDataUrl) || photoDataUrl.length > 4.25 * 1024 * 1024) {
       return sendJson(res, 400, { error: "Use a PNG, JPG, or WebP product photo smaller than 3 MB." });
     }
-    const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
+    const apiKey = String(settings.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY || "").trim();
     if (!apiKey) return sendJson(res, 503, { error: "Package-photo analysis is enabled, but the server does not have an OpenAI API key configured." });
     const schema = {
       type: "object",
@@ -25023,7 +25025,7 @@ async function handleApi(req, res) {
       else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") current[field] = Number(body[field] || 0);
       else if (Array.isArray(DEFAULT_SYSTEM_SETTINGS[field])) current[field] = Array.isArray(body[field]) ? body[field] : current[field];
       else if (DEFAULT_SYSTEM_SETTINGS[field] && typeof DEFAULT_SYSTEM_SETTINGS[field] === "object") current[field] = body[field] && typeof body[field] === "object" ? body[field] : current[field];
-      else if (field === "smtpPassword" && !String(body[field] || "")) current[field] = current[field];
+      else if (["smtpPassword", "warehouseImageAnalysisApiKey"].includes(field) && !String(body[field] || "")) current[field] = current[field];
       else current[field] = String(body[field] || "");
     }
     const systemSettings = writeSystemSettingsStore(current);
