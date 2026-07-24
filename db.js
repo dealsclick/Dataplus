@@ -5454,8 +5454,10 @@ async function findBarcodeMatches(values = []) {
   if (!productRows.rows.length) productRows = await queryMatches("products", normalizedWhere);
   if (productRows.rows.length) return { products: productRows.rows.map(productRowToState), sourceItems: [] };
 
-  let sourceRows = await queryMatches("vendor_catalog_items", exactWhere);
-  if (!sourceRows.rows.length) sourceRows = await queryMatches("vendor_catalog_items", normalizedWhere);
+  const sourceRows = await queryMatches("vendor_catalog_items", exactWhere);
+  // Do not normalize every source-catalog row for an unknown scan. That table
+  // is intentionally large, and a warehouse user needs the create-SKU prompt
+  // promptly when an indexed UPC/GTIN is not present.
   return { products: [], sourceItems: sourceRows.rows.map(vendorCatalogRowToState) };
 }
 
