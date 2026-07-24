@@ -6688,6 +6688,8 @@ function SettingsPage({
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [testingSmtp, setTestingSmtp] = useState(false)
   const [testingAi, setTestingAi] = useState(false)
+  const [aiUsage, setAiUsage] = useState<Record<string, unknown> | null>(null)
+  const [loadingAiUsage, setLoadingAiUsage] = useState(false)
   const value = (field: string) => draft[field] ?? settings[field]
   const boolValue = (field: string) => Boolean(value(field))
   const aiProvider = String(value("aiProvider") || "openai") === "google-ai-studio" ? "google-ai-studio" : "openai"
@@ -6696,6 +6698,19 @@ function SettingsPage({
   const aiKeyConfigured = aiProvider === "google-ai-studio" ? Boolean(settings.geminiApiKeyConfigured) : Boolean(settings.openAiApiKeyConfigured)
   const aiToolScopeDefinitions = (Array.isArray(settings.aiToolScopeDefinitions) ? settings.aiToolScopeDefinitions : []) as Array<Record<string, unknown>>
   const aiToolScopes = () => (value("aiToolScopes") && typeof value("aiToolScopes") === "object" ? value("aiToolScopes") as Record<string, unknown> : {})
+  const usageNumber = (field: string, period = "thirtyDays") => Number((aiUsage?.[period] as Record<string, unknown> | undefined)?.[field] || 0).toLocaleString()
+
+  const loadAiUsage = async () => {
+    setLoadingAiUsage(true)
+    try {
+      const result = await api<{ usage?: Record<string, unknown> }>("/api/ai/usage")
+      setAiUsage(result.usage || null)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load AI usage.")
+    } finally { setLoadingAiUsage(false) }
+  }
+
+  useEffect(() => { void loadAiUsage() }, [])
 
   function update(field: string, next: unknown) {
     setDraft((current) => ({ ...current, [field]: next }))
@@ -6830,6 +6845,27 @@ function SettingsPage({
               <div className="md:col-span-2">
                 <ToggleField label="Enable AI integration" checked={boolValue("aiEnabled")} disabled={!editing || !Boolean(value("aiConnectionVerifiedAt")) || String(value("aiConnectionVerifiedProvider") || "") !== aiProvider || String(value("aiConnectionVerifiedModel") || "") !== String(value("aiModel") || aiDefaultModel)} onCheckedChange={(next) => update("aiEnabled", next)} />
               </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
+              <div>
+                <CardTitle className="text-base">DataPlus AI usage</CardTitle>
+                <CardDescription>Recorded usage from this system only. Provider account balance and free-tier limits remain in Google AI Studio or OpenAI.</CardDescription>
+              </div>
+              <Button size="sm" variant="outline" disabled={loadingAiUsage} onClick={() => void loadAiUsage()}>{loadingAiUsage && <Loader2 className="size-4 animate-spin" />} Refresh</Button>
+            </CardHeader>
+            <CardContent className="grid gap-3 md:grid-cols-4">
+              <Detail label="30-day requests" value={usageNumber("requests")} />
+              <Detail label="30-day input tokens" value={usageNumber("inputTokens")} />
+              <Detail label="30-day output tokens" value={usageNumber("outputTokens")} />
+              <Detail label="30-day total tokens" value={usageNumber("totalTokens")} />
+              <div className="md:col-span-4 grid gap-3 border-t pt-3 md:grid-cols-3">
+                <Detail label="Today" value={`${usageNumber("totalTokens", "today")} tokens / ${usageNumber("requests", "today")} requests`} />
+                <Detail label="Last 7 days" value={`${usageNumber("totalTokens", "sevenDays")} tokens / ${usageNumber("requests", "sevenDays")} requests`} />
+                <Detail label="Last recorded" value={aiUsage?.lastUpdatedAt ? dateLabel(String(aiUsage.lastUpdatedAt)) : "No recorded AI usage yet"} />
+              </div>
+              {Array.isArray(aiUsage?.byFeature) && aiUsage.byFeature.length > 0 && <div className="md:col-span-4 overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Feature</TableHead><TableHead>Requests</TableHead><TableHead>Input</TableHead><TableHead>Output</TableHead><TableHead>Thinking</TableHead><TableHead>Total</TableHead></TableRow></TableHeader><TableBody>{(aiUsage.byFeature as Array<Record<string, unknown>>).map((row) => <TableRow key={String(row.feature)}><TableCell className="font-medium">{String(row.feature || "Other").replaceAll("_", " ")}</TableCell><TableCell>{numberLabel(Number(row.requests || 0))}</TableCell><TableCell>{numberLabel(Number(row.inputTokens || 0))}</TableCell><TableCell>{numberLabel(Number(row.outputTokens || 0))}</TableCell><TableCell>{numberLabel(Number(row.thoughtTokens || 0))}</TableCell><TableCell>{numberLabel(Number(row.totalTokens || 0))}</TableCell></TableRow>)}</TableBody></Table></div>}
             </CardContent>
           </Card>
           <Card>

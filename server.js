@@ -20830,6 +20830,49 @@ async function recordDavidAction(entry = {}) {
   await postgres.writeStateDocuments({ davidActionHistory: history.slice(0, 1000) });
 }
 
+function aiUsageRecordFromPayload(provider = "", model = "", feature = "", payload = {}) {
+  const usage = payload?.usage || {};
+  const inputTokens = Number(usage.total_input_tokens ?? usage.input_tokens ?? usage.prompt_tokens ?? 0) || 0;
+  const outputTokens = Number(usage.total_output_tokens ?? usage.output_tokens ?? usage.completion_tokens ?? 0) || 0;
+  const thoughtTokens = Number(usage.total_thought_tokens ?? usage.thought_tokens ?? 0) || 0;
+  const totalTokens = Number(usage.total_tokens ?? 0) || inputTokens + outputTokens + thoughtTokens;
+  return { id: crypto.randomUUID(), createdAt: new Date().toISOString(), provider, model, feature, inputTokens, outputTokens, thoughtTokens, totalTokens };
+}
+
+async function recordAiUsage(provider = "", model = "", feature = "", payload = {}) {
+  if (!postgres.isPostgresEnabled()) return;
+  const record = aiUsageRecordFromPayload(provider, model, feature, payload);
+  if (!record.totalTokens) return;
+  const history = await postgres.readStateField("aiUsageHistory").catch(() => []) || [];
+  history.unshift(record);
+  await postgres.writeStateDocuments({ aiUsageHistory: history.slice(0, 10000) });
+}
+
+function aiUsageSummary(history = []) {
+  const rows = Array.isArray(history) ? history : [];
+  const now = Date.now();
+  const periods = { today: 24 * 60 * 60 * 1000, sevenDays: 7 * 24 * 60 * 60 * 1000, thirtyDays: 30 * 24 * 60 * 60 * 1000 };
+  const summarize = (items) => items.reduce((summary, row) => ({
+    requests: summary.requests + 1,
+    inputTokens: summary.inputTokens + Number(row.inputTokens || 0),
+    outputTokens: summary.outputTokens + Number(row.outputTokens || 0),
+    thoughtTokens: summary.thoughtTokens + Number(row.thoughtTokens || 0),
+    totalTokens: summary.totalTokens + Number(row.totalTokens || 0)
+  }), { requests: 0, inputTokens: 0, outputTokens: 0, thoughtTokens: 0, totalTokens: 0 });
+  const byFeature = Object.entries(rows.reduce((features, row) => {
+    const key = String(row.feature || "other");
+    (features[key] || (features[key] = [])).push(row);
+    return features;
+  }, {})).map(([feature, items]) => ({ feature, ...summarize(items) })).sort((a, b) => b.totalTokens - a.totalTokens);
+  return {
+    today: summarize(rows.filter((row) => now - Date.parse(row.createdAt || 0) <= periods.today)),
+    sevenDays: summarize(rows.filter((row) => now - Date.parse(row.createdAt || 0) <= periods.sevenDays)),
+    thirtyDays: summarize(rows.filter((row) => now - Date.parse(row.createdAt || 0) <= periods.thirtyDays)),
+    byFeature,
+    lastUpdatedAt: rows[0]?.createdAt || ""
+  };
+}
+
 async function davidPageContextSnapshot(context = {}, settings = {}) {
   if (!settings.aiAllowPageContext) return { enabled: false };
   const pathname = String(context?.path || "").split("?")[0].slice(0, 300);
@@ -21585,6 +21628,11 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { rows: Array.isArray(rows) ? rows : [] });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/ai/usage" && postgres.isPostgresEnabled()) {
+    const history = await postgres.readStateField("aiUsageHistory").catch(() => []);
+    return sendJson(res, 200, { usage: aiUsageSummary(history) });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/warehouse/photo-suggestions") {
     const body = await parseBody(req);
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
@@ -21622,6 +21670,7 @@ async function handleApi(req, res) {
         });
       const payload = await response.json();
       if (!response.ok) throw new Error(String(payload?.error?.message || "The image-analysis request was rejected."));
+      await recordAiUsage(aiConfig.provider, aiConfig.model, "warehouse_photo_analysis", payload).catch(() => {});
       const outputText = aiConfig.provider === "google-ai-studio"
         ? interactionOutputText(payload)
         : String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""));
@@ -21719,6 +21768,7 @@ async function handleApi(req, res) {
         });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(String(payload?.error?.message || "David could not complete that request."));
+      await recordAiUsage(aiConfig.provider, aiConfig.model, "david_chat", payload).catch(() => {});
       const reply = (aiConfig.provider === "google-ai-studio" ? interactionOutputText(payload) : String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""))).trim();
       if (!reply) throw new Error("David returned an empty response. Please try again.");
       return sendJson(res, 200, { reply, provider: aiConfig.provider, model: aiConfig.model });
@@ -21832,6 +21882,7 @@ async function handleApi(req, res) {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(googleAiRequestError(payload, "Google Search could not research this UPC."));
+      await recordAiUsage(aiConfig.provider, aiConfig.model, "warehouse_upc_research", payload).catch(() => {});
       const suggestion = JSON.parse(interactionOutputText(payload) || "{}");
       const research = {
         found: suggestion.found === true,
@@ -25502,6 +25553,7 @@ async function handleApi(req, res) {
         });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(String(payload?.error?.message || `The ${provider === "google-ai-studio" ? "Google AI Studio" : "OpenAI"} API rejected this key.`));
+      await recordAiUsage(provider, model, "connection_test", payload).catch(() => {});
       current.aiProvider = provider;
       if (submittedKey) {
         if (provider === "google-ai-studio") current.geminiApiKey = submittedKey;
