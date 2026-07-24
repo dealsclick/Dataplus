@@ -5387,7 +5387,7 @@ function LegacyDavidChatPage({ settings, onOpenSettings }: { settings: SystemSet
     <PageHeader
       eyebrow="AI assistant"
       title="David"
-      description="A read-only operational assistant for understanding and navigating DataPlus. Chat history stays in this browser session."
+      description="An operational assistant for understanding DataPlus and preparing approved actions. Chat history stays in this browser session."
       action={<div className="flex items-center gap-2"><Badge variant={ready ? "default" : "secondary"}>{ready ? `${provider} connected` : "AI setup required"}</Badge><Button variant="outline" size="sm" onClick={onOpenSettings}><Settings className="size-4" /> AI settings</Button></div>}
     />
     {!ready ? <Alert><AlertCircle className="size-4" /><AlertTitle>David is not enabled</AlertTitle><AlertDescription>Verify a provider and enable AI integration in System Settings before starting a chat.</AlertDescription></Alert> : null}
@@ -5423,6 +5423,32 @@ function davidStarterMessages(): UIMessage[] {
 
 function davidMessageText(message: UIMessage) {
   return message.parts.filter((part) => part.type === "text").map((part) => part.text).join("").trim()
+}
+
+type DavidActionProposal = {
+  id?: string
+  type?: string
+  state?: "disabled" | "needs_input" | "already_linked" | "ready_for_approval" | string
+  sku?: string
+  productName?: string
+  productType?: string
+  available?: number
+  price?: number
+  missing?: string[]
+  message?: string
+  productUrl?: string
+  expiresAt?: string
+}
+
+function davidShopifyLaunchSku(message: string) {
+  const normalized = message.trim()
+  const match = normalized.match(/\b(?:launch|publish|push|create)\s+(?:sku\s*)?([A-Za-z0-9][A-Za-z0-9._-]{1,})\s+(?:on|to|in)\s+shopify\b/i)
+    || normalized.match(/^\s*(?:launch|publish|push|create)\s+sku\s+([A-Za-z0-9][A-Za-z0-9._-]{1,})\s*$/i)
+  return match?.[1]?.trim().toUpperCase() || ""
+}
+
+function appendDavidExchange(messages: UIMessage[], userText: string, assistantText: string) {
+  return createChat({ messages }).user(userText).assistant(assistantText).get()
 }
 
 function createDavidTransport(): ChatTransport<UIMessage> {
@@ -5474,6 +5500,8 @@ function DavidConversation({
   onOpenFull?: () => void
 }) {
   const [draft, setDraft] = useState("")
+  const [actionBusy, setActionBusy] = useState(false)
+  const [proposal, setProposal] = useState<DavidActionProposal | null>(null)
   const scrollTarget = useRef<HTMLDivElement | null>(null)
   const transport = useMemo(() => createDavidTransport(), [])
   const { messages, sendMessage, setMessages, status, error, clearError } = useChat({
@@ -5483,7 +5511,8 @@ function DavidConversation({
   })
   const provider = String(settings.aiProvider || "openai") === "google-ai-studio" ? "Google AI Studio" : "OpenAI"
   const ready = Boolean(settings.aiEnabled)
-  const sending = status === "submitted" || status === "streaming"
+  const sending = status === "submitted" || status === "streaming" || actionBusy
+  const actionsEnabled = Boolean(settings.aiOperationalActionsEnabled && settings.aiShopifyLaunchEnabled)
 
   useEffect(() => { scrollTarget.current?.scrollIntoView({ block: "end", behavior: "smooth" }) }, [messages, status])
   useEffect(() => {
@@ -5495,6 +5524,26 @@ function DavidConversation({
     if (!message || sending || !ready) return
     setDraft("")
     clearError()
+    const launchSku = davidShopifyLaunchSku(message)
+    if (launchSku) {
+      setActionBusy(true)
+      try {
+        const result = await api<{ proposal?: DavidActionProposal }>("/api/ai/actions/shopify-launch/preflight", {
+          method: "POST",
+          body: JSON.stringify({ sku: launchSku }),
+        })
+        const nextProposal = result.proposal || { state: "needs_input", sku: launchSku, message: "David could not prepare that launch review." }
+        setProposal(nextProposal)
+        setMessages((current) => appendDavidExchange(current, message, String(nextProposal.message || "Shopify launch review completed.")))
+      } catch (requestError) {
+        const reply = requestError instanceof Error ? requestError.message : "David could not review that Shopify launch request."
+        setMessages((current) => appendDavidExchange(current, message, reply))
+        toast.error(reply)
+      } finally {
+        setActionBusy(false)
+      }
+      return
+    }
     try {
       await sendMessage({ text: message })
     } catch (requestError) {
@@ -5502,11 +5551,32 @@ function DavidConversation({
     }
   }
 
+  async function approveShopifyLaunch() {
+    if (!proposal?.id || proposal.state !== "ready_for_approval" || actionBusy) return
+    setActionBusy(true)
+    try {
+      const result = await api<{ message?: string; job?: ImportJob }>("/api/ai/actions/shopify-launch/execute", {
+        method: "POST",
+        body: JSON.stringify({ proposalId: proposal.id }),
+      })
+      const reply = result.message || `${proposal.sku || "SKU"} is queued for Shopify launch.`
+      setMessages((current) => appendDavidExchange(current, `Approve Shopify launch for ${proposal.sku}.`, reply))
+      setProposal(null)
+      toast.success(result.job?.id ? `Shopify launch job ${result.job.id.slice(0, 8)} queued.` : reply)
+    } catch (requestError) {
+      const reply = requestError instanceof Error ? requestError.message : "Unable to queue the Shopify launch."
+      setMessages((current) => appendDavidExchange(current, `Approve Shopify launch for ${proposal.sku}.`, reply))
+      toast.error(reply)
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   return <div className={compact ? "flex min-h-0 flex-1 flex-col" : "flex min-h-[560px] flex-col"}>
     <div className="flex items-start justify-between gap-3 border-b px-4 py-3 pr-12">
       <div>
         <div className="flex items-center gap-2"><MessageSquare className="size-4 text-primary" /><h2 className="font-semibold">David</h2><Badge variant={ready ? "secondary" : "outline"}>{ready ? provider : "Setup required"}</Badge></div>
-        <p className="mt-1 text-xs text-muted-foreground">{String(settings.aiModel || "Default model")} - read-only operational guidance</p>
+        <p className="mt-1 text-xs text-muted-foreground">{String(settings.aiModel || "Default model")} - guided actions require your approval</p>
       </div>
       <div className="flex shrink-0 items-center gap-1">
         {onOpenFull ? <Button variant="ghost" size="icon" title="Open full workspace" onClick={onOpenFull}><PanelRightOpen className="size-4" /></Button> : null}
@@ -5523,6 +5593,15 @@ function DavidConversation({
             <p className="mb-1 text-xs font-semibold opacity-70">{message.role === "user" ? "You" : "David"}</p>{content}
           </div>
         })}
+        {proposal ? <Card className="mr-auto max-w-[88%] border-primary/30 bg-primary/5 shadow-none">
+          <CardContent className="grid gap-3 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-semibold">Shopify launch review</p><p className="text-xs text-muted-foreground">{proposal.sku || "SKU"}{proposal.productName ? ` - ${proposal.productName}` : ""}</p></div><Badge variant={proposal.state === "ready_for_approval" ? "default" : proposal.state === "already_linked" ? "secondary" : "outline"}>{proposal.state === "ready_for_approval" ? "Ready for approval" : proposal.state === "already_linked" ? "Already linked" : proposal.state === "disabled" ? "Actions disabled" : "Needs information"}</Badge></div>
+            {proposal.state === "ready_for_approval" ? <div className="grid gap-1 rounded-md border bg-background p-2 text-xs text-muted-foreground"><span>Product type: {proposal.productType || "Not set"}</span><span>Available: {Number(proposal.available || 0).toLocaleString()}</span><span>Price: {moneyLabel(proposal.price || 0)}</span>{proposal.expiresAt ? <span>Approval expires {dateLabel(proposal.expiresAt)}</span> : null}</div> : null}
+            {proposal.missing?.length ? <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-950"><p className="font-medium">Complete before launch</p><p className="mt-1">{proposal.missing.join(", ")}</p></div> : null}
+            <div className="flex flex-wrap justify-end gap-2">{proposal.productUrl ? <Button asChild variant="outline" size="sm"><a href={proposal.productUrl}>Open product</a></Button> : null}{proposal.state === "ready_for_approval" ? <Button size="sm" disabled={!actionsEnabled || actionBusy} onClick={() => void approveShopifyLaunch()}>{actionBusy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Queue Shopify launch</Button> : null}</div>
+            {proposal.state === "ready_for_approval" && !actionsEnabled ? <p className="text-xs text-muted-foreground">Enable David operational actions and Shopify SKU launch in System Settings before approval.</p> : null}
+          </CardContent>
+        </Card> : null}
         {sending ? <div className="mr-auto flex items-center gap-2 rounded-lg border bg-background px-3 py-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> David is thinking</div> : null}
         <div ref={scrollTarget} />
       </div>
@@ -5715,6 +5794,20 @@ function SettingsPage({
             </CardHeader>
             <CardContent>
               <ToggleField label="Enable package photo suggestions" checked={boolValue("warehouseImageAnalysisEnabled")} disabled={!editing || !boolValue("aiEnabled")} onCheckedChange={(next) => update("warehouseImageAnalysisEnabled", next)} />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">David operational actions</CardTitle>
+              <CardDescription>David can prepare narrowly scoped system work, run the same readiness checks as the product workflow, and require explicit approval before a job is queued. It never receives unrestricted channel access.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2">
+              <ToggleField label="Enable David operational actions" checked={boolValue("aiOperationalActionsEnabled")} disabled={!editing || !boolValue("aiEnabled")} onCheckedChange={(next) => update("aiOperationalActionsEnabled", next)} />
+              <ToggleField label="Allow Shopify SKU launch requests" checked={boolValue("aiShopifyLaunchEnabled")} disabled={!editing || !boolValue("aiEnabled") || !boolValue("aiOperationalActionsEnabled")} onCheckedChange={(next) => update("aiShopifyLaunchEnabled", next)} />
+              <Field label="Approval expiry (minutes)">
+                <Input disabled={!editing || !boolValue("aiOperationalActionsEnabled")} type="number" min="5" max="60" value={String(value("aiActionProposalExpiryMinutes") || 15)} onChange={(event) => update("aiActionProposalExpiryMinutes", Number(event.target.value || 15))} />
+              </Field>
+              <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Every action is logged, validated again when approved, and queued as a standard DataPlus job. David will surface missing title, description, category/product type, vendor, price, inventory, or image details before launch.</div>
             </CardContent>
           </Card>
         </TabsContent>

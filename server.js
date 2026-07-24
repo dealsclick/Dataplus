@@ -63,6 +63,7 @@ const REDIS_CATEGORY_REQUIREMENTS_CACHE_TTL_SECONDS = Math.max(300, Math.min(864
 const SERVER_STARTED_AT = new Date();
 const activeJobProgress = new Map();
 const activeJobRecords = new Map();
+const davidActionProposals = new Map();
 let dbCache = { mtimeMs: 0, data: null };
 let shopifyRuntimeCredentialsCache = { mtimeMs: 0, value: {} };
 let publicStateJsonCache = null;
@@ -816,6 +817,9 @@ const DEFAULT_SYSTEM_SETTINGS = {
   aiConnectionVerifiedProvider: "",
   aiConnectionVerifiedModel: "",
   aiConnectionKeyFingerprint: "",
+  aiOperationalActionsEnabled: false,
+  aiShopifyLaunchEnabled: false,
+  aiActionProposalExpiryMinutes: 15,
   warehouseImageAnalysisEnabled: true,
   warehouseImageAnalysisModel: "gpt-4o-mini",
   warehouseImageAnalysisApiKey: "",
@@ -4216,6 +4220,9 @@ function normalizeSystemSettings(settings = {}) {
   normalized.aiConnectionVerifiedProvider = String(normalized.aiConnectionVerifiedProvider || "").trim();
   normalized.aiConnectionVerifiedModel = String(normalized.aiConnectionVerifiedModel || "").trim();
   normalized.aiConnectionKeyFingerprint = String(normalized.aiConnectionKeyFingerprint || "").trim();
+  normalized.aiOperationalActionsEnabled = normalized.aiOperationalActionsEnabled === true || String(normalized.aiOperationalActionsEnabled).toLowerCase() === "true";
+  normalized.aiShopifyLaunchEnabled = normalized.aiShopifyLaunchEnabled === true || String(normalized.aiShopifyLaunchEnabled).toLowerCase() === "true";
+  normalized.aiActionProposalExpiryMinutes = Math.max(5, Math.min(60, Number(normalized.aiActionProposalExpiryMinutes || 15) || 15));
   normalized.warehouseImageAnalysisEnabled = normalized.warehouseImageAnalysisEnabled === true || String(normalized.warehouseImageAnalysisEnabled).toLowerCase() === "true";
   normalized.warehouseImageAnalysisModel = String(normalized.warehouseImageAnalysisModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
   normalized.warehouseImageAnalysisApiKey = String(normalized.warehouseImageAnalysisApiKey || "").trim();
@@ -20633,6 +20640,126 @@ async function findCatalogProductBySku(sku, db = {}) {
   return null;
 }
 
+async function queueShopifyProductCreateJob(payload = {}) {
+  const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
+    .map((sku) => String(sku || "").trim())
+    .filter(Boolean))];
+  const dryRun = payload.apply === true ? false : payload.dryRun !== false;
+  const query = String(payload.query || "");
+  const limit = Math.max(1, Math.min(1000, Number(payload.limit || 100) || 100));
+  const allowDraftIncomplete = payload.allowDraftIncomplete === true;
+  const filters = payload.filters && Object.keys(payload.filters || {}).length
+    ? payload.filters
+    : (allowDraftIncomplete ? { channelStatus: "shopify-missing" } : { channelStatusAll: "shopify-missing|shopify-ready" });
+  const db = await readDbFast({ skipInventory: true });
+  const productTotal = requestedSkus.length || limit;
+  const job = createImportJob(db, {
+    section: "Products",
+    operation: dryRun ? "Shopify product create dry run" : "Shopify product create",
+    direction: "sync",
+    status: "queued",
+    fileName: dryRun ? "shopify-product-create-dry-run.json" : "shopify-product-create-report.json",
+    totalRows: productTotal,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "shopify-product-create",
+    workerPayload: shouldRunJobsInline() ? {} : {
+      skus: requestedSkus,
+      query,
+      filters,
+      limit,
+      dryRun,
+      apply: !dryRun,
+      allowDraftIncomplete
+    },
+    message: dryRun
+      ? `Shopify product create dry run queued for up to ${Number(productTotal || 0).toLocaleString()} product${Number(productTotal || 0) === 1 ? "" : "s"}.`
+      : `Shopify product create queued for up to ${Number(productTotal || 0).toLocaleString()} product${Number(productTotal || 0) === 1 ? "" : "s"}.`
+  });
+  upsertImportJobStore(job);
+  if (shouldRunJobsInline()) {
+    setTimeout(() => runShopifyProductCreateWorkerJob(job, {
+      skus: requestedSkus,
+      query,
+      filters,
+      limit,
+      dryRun,
+      apply: !dryRun,
+      allowDraftIncomplete
+    }).catch((error) => {
+      finishImportJob(job, {
+        status: "failed",
+        message: error.message || "Shopify product create failed.",
+        errors: [error.message || "Shopify product create failed."],
+        missingCount: 1,
+        phase: "failed",
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+    }), 250);
+  } else {
+    await postgres.upsertOperationJob(normalizeImportJob(job));
+  }
+  return { job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }) };
+}
+
+async function davidShopifyLaunchPreflight(sku, settings) {
+  const normalizedSku = sourceTextValue(sku).toUpperCase();
+  if (!normalizedSku) return { state: "needs_input", message: "Tell David which SKU to launch in Shopify." };
+  if (!settings.aiOperationalActionsEnabled || !settings.aiShopifyLaunchEnabled) {
+    return { state: "disabled", sku: normalizedSku, message: "Operational actions are disabled. Enable David operational actions and Shopify SKU launch in System Settings first." };
+  }
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const rawProduct = await postgres.readProductByKey(normalizedSku);
+  if (!rawProduct) return { state: "needs_input", sku: normalizedSku, message: `${normalizedSku} is not an approved catalog SKU. Review or add it before launching it in Shopify.` };
+  const shopifyStatusMap = readShopifyStatusMapSync();
+  const sourceEnrichmentMap = readProductSourceEnrichmentSync();
+  const sourceFallbackMap = await sourceCatalogExportFallbackMap([rawProduct]);
+  const product = shopifyPricedExportItem(withShopifyStatus(sourceEnrichedItem(rawProduct, sourceEnrichmentMap), shopifyStatusMap, db), sourceFallbackMap, db);
+  const variantMatch = shopifyExistingVariantMatch(product);
+  const linked = sourceTextValue(product.shopifyId || product.shopifyProductId || variantMatch?.shopifyId);
+  if (linked) return {
+    state: "already_linked",
+    sku: normalizedSku,
+    productName: shopifyExportTitle(product) || normalizedSku,
+    message: `${normalizedSku} is already linked to Shopify${variantMatch?.matchedVariantSku ? ` through variant ${variantMatch.matchedVariantSku}` : ""}.`,
+    productUrl: `/products/${encodeURIComponent(normalizedSku)}`
+  };
+  const readiness = shopifyProductCreateReadiness(db, product);
+  if (!readiness.ready) return {
+    state: "needs_input",
+    sku: normalizedSku,
+    productName: shopifyExportTitle(product) || normalizedSku,
+    missing: readiness.missing,
+    message: `${normalizedSku} is not ready for Shopify. Complete the missing product information, then ask David to launch it again.`,
+    productUrl: `/products/${encodeURIComponent(normalizedSku)}`
+  };
+  const proposalId = crypto.randomUUID();
+  const expiresAt = new Date(Date.now() + Number(settings.aiActionProposalExpiryMinutes || 15) * 60 * 1000).toISOString();
+  const proposal = {
+    id: proposalId,
+    type: "shopify_launch",
+    state: "ready_for_approval",
+    sku: normalizedSku,
+    productName: shopifyExportTitle(product) || normalizedSku,
+    productType: readiness.productType,
+    available: readiness.available,
+    price: Number(product.websitePrice ?? product.price ?? 0),
+    productUrl: `/products/${encodeURIComponent(normalizedSku)}`,
+    expiresAt
+  };
+  davidActionProposals.set(proposalId, { ...proposal, expiresAtMs: Date.parse(expiresAt) });
+  return { ...proposal, message: `${normalizedSku} passed the Shopify launch checks. Review the details and approve the launch when ready.` };
+}
+
+async function recordDavidAction(entry = {}) {
+  if (!postgres.isPostgresEnabled()) return;
+  const history = await postgres.readStateField("davidActionHistory").catch(() => []) || [];
+  history.unshift({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), actor: "David", ...entry });
+  await postgres.writeStateDocuments({ davidActionHistory: history.slice(0, 1000) });
+}
+
 async function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split("/").filter(Boolean);
@@ -21412,6 +21539,53 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/ai/actions/shopify-launch/preflight") {
+    const body = await parseBody(req);
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (!settings.aiEnabled) return sendJson(res, 403, { error: "David is not enabled. Verify and enable an AI provider in System Settings first." });
+    try {
+      const proposal = await davidShopifyLaunchPreflight(body.sku, settings);
+      return sendJson(res, 200, { proposal });
+    } catch (error) {
+      return sendJson(res, 500, { error: error instanceof Error ? error.message : "David could not review this SKU." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ai/actions/shopify-launch/execute") {
+    const body = await parseBody(req);
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (!settings.aiEnabled || !settings.aiOperationalActionsEnabled || !settings.aiShopifyLaunchEnabled) {
+      return sendJson(res, 403, { error: "David operational actions or Shopify SKU launch is disabled in System Settings." });
+    }
+    const proposalId = sourceTextValue(body.proposalId);
+    const proposal = davidActionProposals.get(proposalId);
+    if (!proposal || proposal.type !== "shopify_launch") return sendJson(res, 404, { error: "This launch approval is no longer available. Ask David to review the SKU again." });
+    if (Number(proposal.expiresAtMs || 0) < Date.now()) {
+      davidActionProposals.delete(proposalId);
+      return sendJson(res, 410, { error: "This launch approval expired. Ask David to review the SKU again." });
+    }
+    try {
+      const refreshed = await davidShopifyLaunchPreflight(proposal.sku, settings);
+      if (refreshed.state !== "ready_for_approval") {
+        davidActionProposals.delete(proposalId);
+        if (refreshed.id) davidActionProposals.delete(refreshed.id);
+        return sendJson(res, 409, { error: refreshed.message || "This SKU is no longer ready for Shopify launch.", proposal: refreshed });
+      }
+      if (refreshed.id) davidActionProposals.delete(refreshed.id);
+      const result = await queueShopifyProductCreateJob({ skus: [proposal.sku], apply: true, dryRun: false, limit: 1 });
+      davidActionProposals.delete(proposalId);
+      await recordDavidAction({ type: "shopify_launch", sku: proposal.sku, status: "queued", jobId: result.job.id, message: "Explicitly approved from David." });
+      return sendJson(res, 202, {
+        job: result.job,
+        state: result.state,
+        message: `${proposal.sku} has been queued for Shopify launch. David will not bypass any Shopify validation errors; review the job if it needs follow-up.`
+      });
+    } catch (error) {
+      await recordDavidAction({ type: "shopify_launch", sku: proposal.sku, status: "failed", message: error instanceof Error ? error.message : "Unable to queue Shopify launch." }).catch(() => {});
+      return sendJson(res, 500, { error: error instanceof Error ? error.message : "Unable to queue the Shopify launch." });
+    }
+  }
+
   if (req.method === "POST" && url.pathname === "/api/ai/chat") {
     const body = await parseBody(req);
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
@@ -21423,7 +21597,7 @@ async function handleApi(req, res) {
       .map((message) => ({ role: message?.role === "assistant" ? "assistant" : "user", content: String(message?.content || "").trim().slice(0, 5000) }))
       .filter((message) => message.content);
     if (!messages.length || messages[messages.length - 1].role !== "user") return sendJson(res, 400, { error: "Ask David a question to begin." });
-    const instruction = "You are David, DataPlus's concise internal operations assistant. Help users understand catalog, inventory, fulfillment, purchasing, warehouse, channel, and settings workflows. You are read-only: never claim to have changed data, sent a message, created a PO, or performed an integration action. If a request would require a system change, explain the appropriate DataPlus workflow. Be practical, direct, and say when information is unavailable.";
+    const instruction = "You are David, DataPlus's concise internal operations assistant. Help users understand catalog, inventory, fulfillment, purchasing, warehouse, channel, and settings workflows. Some approved actions are available through separate DataPlus controls, but you never execute, claim to execute, or imply that you executed a system change yourself. For an action request, explain that DataPlus will run a readiness review and require explicit user approval. Be practical, direct, and say when information is unavailable.";
     try {
       const response = aiConfig.provider === "google-ai-studio"
         ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
