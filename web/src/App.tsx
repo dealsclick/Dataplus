@@ -5150,10 +5150,9 @@ function PickListPanel({ onChanged }: { onChanged: () => Promise<void> }) {
             const lines = Array.isArray(pickList.lines)
               ? (pickList.lines as Array<Record<string, unknown>>)
               : [];
-            const picked = lines.filter(
-              (line) => String(line.status) === "picked",
-            ).length;
-            const complete = lines.length > 0 && picked === lines.length;
+            const picked = lines.reduce((total, line) => total + Math.min(Number(line.qty || 0), Number(line.qtyPicked || (String(line.status) === "picked" ? line.qty : 0))), 0);
+            const required = lines.reduce((total, line) => total + Number(line.qty || 0), 0);
+            const complete = required > 0 && picked >= required;
             return (
               <div
                 key={String(pickList.id)}
@@ -5170,8 +5169,7 @@ function PickListPanel({ onChanged }: { onChanged: () => Promise<void> }) {
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {String(pickList.warehouseName || "Warehouse")} ·{" "}
-                    {numberLabel(picked)} of {numberLabel(lines.length)} lines
-                    picked
+                    {numberLabel(picked)} of {numberLabel(required)} units picked
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">

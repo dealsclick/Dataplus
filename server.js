@@ -22196,6 +22196,8 @@ async function handleApi(req, res) {
     const route = (order.fulfillmentRoutes || []).find((row) => String(row.id) === String(line.routeId));
     if (!route) return sendJson(res, 404, { error: "Fulfillment line not found." });
     const now = new Date().toISOString();
+    line.qtyPicked = Number(line.qty || 0);
+    route.qtyPicked = Number(route.qty || 0);
     route.status = "picked"; route.pickedAt = now; line.status = "picked"; line.pickedAt = now;
     pickList.status = (pickList.lines || []).every((entry) => entry.status === "picked") ? "picked" : "picking";
     pickList.updatedAt = now;
@@ -22215,16 +22217,21 @@ async function handleApi(req, res) {
     const products = await postgres.listProducts({ q: barcode, page: 1, limit: 50 });
     const product = (products.items || []).find((item) => [item.sku, item.barcode, item.upc, item.gtin, item.vendorSku].some((value) => String(value || "").trim().toLowerCase() === barcode.toLowerCase()));
     if (!product) return sendJson(res, 404, { error: "This barcode is not in the local catalog." });
-    const line = (pickList.lines || []).find((entry) => String(entry.sku || "").toLowerCase() === String(product.sku || "").toLowerCase() && String(entry.status) !== "picked");
+    const line = (pickList.lines || []).find((entry) => String(entry.sku || "").toLowerCase() === String(product.sku || "").toLowerCase() && Number(entry.qtyPicked || 0) < Number(entry.qty || 0));
     if (!line) return sendJson(res, 409, { error: `${product.sku} is not an unpicked line on ${pickList.pickListNumber}.` });
     const order = await postgres.readOrderByKey(line.orderId);
     const route = (order?.fulfillmentRoutes || []).find((entry) => String(entry.id) === String(line.routeId));
     if (!order || !route) return sendJson(res, 404, { error: "The fulfillment line could not be found." });
     const now = new Date().toISOString();
-    route.status = "picked"; route.pickedAt = now; line.status = "picked"; line.pickedAt = now; pickList.status = (pickList.lines || []).every((entry) => entry.status === "picked") ? "picked" : "picking"; pickList.updatedAt = now; order.updatedAt = now;
-    addOrderTimeline(order, { type: "pick_list", title: "Line picked by barcode", message: `${product.sku} scanned into ${pickList.pickListNumber}.`, user: body.user || "Warehouse" });
+    const pickedQuantity = Math.min(Number(line.qty || 0), Number(line.qtyPicked || 0) + 1);
+    line.qtyPicked = pickedQuantity;
+    route.qtyPicked = pickedQuantity;
+    const complete = pickedQuantity >= Number(line.qty || 0);
+    if (complete) { route.status = "picked"; route.pickedAt = now; line.status = "picked"; line.pickedAt = now; }
+    pickList.status = (pickList.lines || []).every((entry) => Number(entry.qtyPicked || 0) >= Number(entry.qty || 0)) ? "picked" : "picking"; pickList.updatedAt = now; order.updatedAt = now;
+    addOrderTimeline(order, { type: "pick_list", title: "Line picked by barcode", message: `${product.sku} scanned into ${pickList.pickListNumber} (${pickedQuantity}/${Number(line.qty || 0)}).`, user: body.user || "Warehouse" });
     await postgres.saveOrder(order); clearOrderApiCache(order.id); await postgres.writeStateDocuments({ fulfillmentPickLists: pickLists.slice(0, 500) });
-    return sendJson(res, 200, { pickList, product, line, message: `${product.sku} marked picked.` });
+    return sendJson(res, 200, { pickList, product, line, message: complete ? `${product.sku} fully picked.` : `${product.sku} scanned (${pickedQuantity}/${Number(line.qty || 0)}).` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "pick-lists" && parts[3] && parts[4] === "quotes" && postgres.isPostgresEnabled()) {
@@ -22232,7 +22239,7 @@ async function handleApi(req, res) {
     const pickList = pickLists.find((row) => String(row.id) === String(parts[3]));
     if (!pickList) return notFound(res);
     const lines = Array.isArray(pickList.lines) ? pickList.lines : [];
-    if (!lines.length || lines.some((line) => String(line.status) !== "picked")) return sendJson(res, 400, { error: "Every pick-list line must be marked picked before calculating shipping quotes." });
+    if (!lines.length || lines.some((line) => Number(line.qtyPicked || 0) < Number(line.qty || 0))) return sendJson(res, 400, { error: "Every pick-list quantity must be scanned before calculating shipping quotes." });
     const orderIds = [...new Set(lines.map((line) => String(line.orderId)).filter(Boolean))];
     const results = [];
     for (const orderId of orderIds) {
