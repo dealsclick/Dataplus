@@ -17421,16 +17421,19 @@ async function resolveScannedCatalogBarcode(value) {
   return { barcode: forms[0], product, sourceItem };
 }
 
-function auditWarehouseStockRow(product, audit) {
+function auditWarehouseStockRow(product, audit, locationBin = "") {
   const rows = Array.isArray(product?.warehouseStock) ? product.warehouseStock : [];
   const warehouseId = String(audit?.warehouseId || "").trim().toLowerCase();
   const warehouseName = String(audit?.warehouseName || "").trim().toLowerCase();
-  return rows.find((row) => (warehouseId && String(row.warehouseId || "").trim().toLowerCase() === warehouseId)
-    || (warehouseName && String(row.warehouseName || "").trim().toLowerCase() === warehouseName)) || null;
+  const bin = String(locationBin || "").trim().toLowerCase();
+  const warehouseRows = rows.filter((row) => (warehouseId && String(row.warehouseId || "").trim().toLowerCase() === warehouseId)
+    || (warehouseName && String(row.warehouseName || "").trim().toLowerCase() === warehouseName));
+  if (bin) return warehouseRows.find((row) => String(row.locationBin || "").trim().toLowerCase() === bin) || warehouseRows[0] || null;
+  return warehouseRows[0] || null;
 }
 
-function auditExpectedQuantity(product, audit) {
-  const warehouseRow = auditWarehouseStockRow(product, audit);
+function auditExpectedQuantity(product, audit, locationBin = "") {
+  const warehouseRow = auditWarehouseStockRow(product, audit, locationBin);
   if (warehouseRow) return Number(warehouseRow.qty || 0);
   return Array.isArray(product?.warehouseStock) && product.warehouseStock.length ? 0 : Number(product?.qty || 0);
 }
@@ -21798,6 +21801,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "scan" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
+    const locationBin = String(body.locationBin || "").trim();
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
@@ -21806,14 +21810,14 @@ async function handleApi(req, res) {
     const product = lookup.product;
     const now = new Date().toISOString();
     if (product) {
-      const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku));
-      if (line) { line.countedQty = Number(line.countedQty || 0) + 1; line.lastScannedAt = now; } else (audit.lines || (audit.lines = [])).push({ productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, barcode, expectedQty: auditExpectedQuantity(product, audit), countedQty: 1, firstScannedAt: now, lastScannedAt: now });
+      const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku) && String(entry.locationBin || "").trim().toLowerCase() === locationBin.toLowerCase());
+      if (line) { line.countedQty = Number(line.countedQty || 0) + 1; line.lastScannedAt = now; } else (audit.lines || (audit.lines = [])).push({ productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, barcode, locationBin, expectedQty: auditExpectedQuantity(product, audit, locationBin), countedQty: 1, firstScannedAt: now, lastScannedAt: now });
       audit.updatedAt = now;
       await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
       return sendJson(res, 200, { audit, product, matched: true, message: `${product.sku} counted.` });
     }
-    const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode);
-    if (unknown) { unknown.count = Number(unknown.count || 0) + 1; if (lookup.sourceItem) unknown.sourceMatch = lookup.sourceItem; } else audit.unknownBarcodes.push({ barcode, count: 1, scannedAt: now, sourceMatch: lookup.sourceItem || null });
+    const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode && String(entry.locationBin || "").trim().toLowerCase() === locationBin.toLowerCase());
+    if (unknown) { unknown.count = Number(unknown.count || 0) + 1; if (lookup.sourceItem) unknown.sourceMatch = lookup.sourceItem; } else audit.unknownBarcodes.push({ barcode, count: 1, locationBin, scannedAt: now, sourceMatch: lookup.sourceItem || null });
     audit.updatedAt = now;
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
     return sendJson(res, 200, { audit, matched: false, barcode, sourceItem: lookup.sourceItem, message: lookup.sourceItem ? `${barcode} was found in the source catalog as ${lookup.sourceItem.sku || lookup.sourceItem.vendorSku || "a source SKU"}, but is not yet an approved catalog SKU.` : `${barcode} saved as an unknown UPC.` });

@@ -4126,6 +4126,8 @@ function WarehouseAuditPanel({
   const [warehouse, setWarehouse] = useState("Staten Island");
   const [auditOwner, setAuditOwner] = useState("Luis");
   const [auditReviewer, setAuditReviewer] = useState("");
+  const [activeBin, setActiveBin] = useState("");
+  const [cameraMode, setCameraMode] = useState<"product" | "bin">("product");
   const [busy, setBusy] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [cameraMessage, setCameraMessage] = useState(
@@ -4156,6 +4158,20 @@ function WarehouseAuditPanel({
     async () => undefined,
   );
   const lastCameraScanRef = useRef({ value: "", at: 0 });
+  const scannerFeedback = (kind: "success" | "unknown" | "error") => {
+    try { navigator.vibrate?.(kind === "success" ? [35] : kind === "unknown" ? [35, 55, 35] : [80, 45, 80]); } catch { /* Browsers may block haptics. */ }
+    try {
+      const Audio = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Audio) return;
+      const context = new Audio();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.frequency.value = kind === "success" ? 880 : kind === "unknown" ? 520 : 260;
+      gain.gain.setValueAtTime(0.045, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.13);
+      oscillator.connect(gain).connect(context.destination); oscillator.start(); oscillator.stop(context.currentTime + 0.14);
+    } catch { /* Audio feedback is optional. */ }
+  };
   const load = async () => {
     const result = await api<{ audits?: Array<Record<string, unknown>> }>(
       "/api/warehouse-audits",
@@ -4285,6 +4301,16 @@ function WarehouseAuditPanel({
   };
   const submit = async (value = barcode) => {
     if (!resumedAudit || !String(value).trim()) return;
+    if (cameraMode === "bin") {
+      const bin = String(value).trim();
+      setActiveBin(bin);
+      setCameraMode("product");
+      setBarcode("");
+      setCameraMessage(`Bin ${bin} selected. Scan the next product.`);
+      scannerFeedback("success");
+      toast.success(`Counting in bin ${bin}.`);
+      return;
+    }
     setBusy(true);
     try {
       const result = await api<{
@@ -4293,7 +4319,7 @@ function WarehouseAuditPanel({
         message?: string;
       }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/scan`,
-        { method: "POST", body: JSON.stringify({ barcode: value }) },
+        { method: "POST", body: JSON.stringify({ barcode: value, locationBin: activeBin }) },
       );
       const matched = result.matched === true;
       const message =
@@ -4316,6 +4342,7 @@ function WarehouseAuditPanel({
         });
         setCameraOpen(false);
       }
+      scannerFeedback(matched ? "success" : "unknown");
       setBarcode("");
       toast[matched ? "success" : "warning"](message);
       void load().catch(() => undefined);
@@ -4323,6 +4350,7 @@ function WarehouseAuditPanel({
       const message =
         error instanceof Error ? error.message : "Unable to save scan.";
       setCameraMessage(message);
+      scannerFeedback("error");
       toast.error(message);
     } finally {
       setBusy(false);
@@ -4655,14 +4683,16 @@ function WarehouseAuditPanel({
                   variant="outline"
                   disabled={busy || auditStatus !== "in_progress"}
                   onClick={() => {
+                    setCameraMode("product");
                     setCameraMessage(
-                      "Camera ready. Point it at the next barcode.",
+                      activeBin ? `Counting in bin ${activeBin}. Point at the next product barcode.` : "Camera ready. Point it at the next product barcode.",
                     );
                     setCameraOpen((value) => !value);
                   }}
                 >
                   {cameraOpen ? "Stop camera" : "Use phone camera"}
                 </Button>
+                {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}>Scan bin</Button>}
                 {auditStatus === "in_progress" && <Button size="sm" disabled={busy || !lines.length} onClick={() => void submitForReview()}>Submit for review</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" disabled={busy} onClick={() => void complete()}>Approve & apply counts</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}>Return to count</Button>}
@@ -4681,7 +4711,7 @@ function WarehouseAuditPanel({
                 />
                 <div className="pointer-events-none absolute inset-x-[12%] top-1/2 -translate-y-1/2" aria-hidden="true">
                   <div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_14px_rgba(74,222,128,0.95)]" />
-                  <div className="mx-auto mt-2 w-fit rounded-full bg-black/75 px-3 py-1 text-xs font-medium text-white">Align barcode with this line</div>
+                  <div className="mx-auto mt-2 w-fit rounded-full bg-black/75 px-3 py-1 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this line" : "Align product barcode with this line"}</div>
                 </div>
                 <div
                   className={`absolute inset-x-3 bottom-3 rounded-md px-3 py-2 text-sm font-medium shadow ${lastScan?.matched ? "bg-emerald-600 text-white" : lastScan && !lastScan.matched ? "bg-amber-500 text-black" : "bg-black/70 text-white"}`}
@@ -4690,6 +4720,11 @@ function WarehouseAuditPanel({
                 </div>
               </div>
             )}
+            <div className="flex flex-wrap items-end gap-2 rounded-md border bg-muted/20 p-3">
+              <Field label="Current bin / location"><Input value={activeBin} disabled={auditStatus !== "in_progress"} onChange={(event) => setActiveBin(event.target.value)} placeholder="Scan bin or enter location" /></Field>
+              {activeBin && <Button size="sm" variant="ghost" disabled={auditStatus !== "in_progress"} onClick={() => setActiveBin("")}>Clear bin</Button>}
+              <p className="pb-2 text-xs text-muted-foreground">The selected bin is saved against each new count line.</p>
+            </div>
             <div className="flex gap-2">
               <Input
                 autoFocus
@@ -4951,6 +4986,7 @@ function WarehouseAuditPanel({
                   <TableRow>
                     <TableHead>SKU</TableHead>
                     <TableHead>Product</TableHead>
+                    <TableHead>Bin</TableHead>
                     <TableHead>Expected</TableHead>
                     <TableHead>Counted</TableHead>
                     <TableHead>Variance</TableHead>
@@ -4958,11 +4994,12 @@ function WarehouseAuditPanel({
                 </TableHeader>
                 <TableBody>
                   {lines.map((line) => (
-                    <TableRow key={String(line.productId || line.sku)}>
+                    <TableRow key={`${String(line.productId || line.sku)}-${String(line.locationBin || "")}`}>
                       <TableCell className="font-medium">
                         {String(line.sku || "-")}
                       </TableCell>
                       <TableCell>{String(line.title || "-")}</TableCell>
+                      <TableCell>{String(line.locationBin || "-")}</TableCell>
                       <TableCell>
                         {numberLabel(Number(line.expectedQty || 0))}
                       </TableCell>
@@ -4989,7 +5026,7 @@ function WarehouseAuditPanel({
                   {!lines.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={5}
+                        colSpan={6}
                         className="h-20 text-center text-muted-foreground"
                       >
                         Scan the first UPC to begin counting.
@@ -5014,7 +5051,7 @@ function WarehouseAuditPanel({
                   </TableHeader>
                   <TableBody>
                     {unknowns.map((item) => (
-                      <TableRow key={String(item.barcode)}>
+                      <TableRow key={`${String(item.barcode)}-${String(item.locationBin || "")}`}>
                         <TableCell className="font-mono">
                           {String(item.barcode || "-")}
                         </TableCell>
