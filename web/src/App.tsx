@@ -4498,6 +4498,24 @@ function WarehouseAuditPanel({
       setBusy(false);
     }
   };
+  const submitForReview = async () => {
+    if (!resumedAudit) return;
+    setBusy(true);
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/submit-review`,
+        { method: "POST", body: JSON.stringify({ user: "Luis" }) },
+      );
+      setActive(result.audit || null);
+      setCameraOpen(false);
+      toast.success(result.message || "Warehouse audit submitted for review.");
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to submit this audit for review.");
+    } finally {
+      setBusy(false);
+    }
+  };
   const complete = async () => {
     if (!resumedAudit) return;
     setBusy(true);
@@ -4507,7 +4525,7 @@ function WarehouseAuditPanel({
         message?: string;
       }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/complete`,
-        { method: "POST" },
+        { method: "POST", body: JSON.stringify({ user: "Luis" }) },
       );
       setActive(result.audit || null);
       toast.success(result.message || "Warehouse audit completed.");
@@ -4527,6 +4545,9 @@ function WarehouseAuditPanel({
   const unknowns = Array.isArray(current?.unknownBarcodes)
     ? (current?.unknownBarcodes as Array<Record<string, unknown>>)
     : [];
+  const auditStatus = String(current?.status || "");
+  const varianceLines = lines.filter((line) => Number(line.countedQty || 0) !== Number(line.expectedQty || 0));
+  const unresolvedUnknowns = unknowns.filter((item) => !item.createdProductSku);
   if (createOnly)
     return (
       <Card>
@@ -4596,11 +4617,16 @@ function WarehouseAuditPanel({
                   catalog SKUs counted · {numberLabel(unknowns.length)} unknown
                   UPCs
                 </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Badge variant={auditStatus === "completed" ? "secondary" : auditStatus === "pending_review" ? "outline" : "default"}>{auditStatus === "pending_review" ? "Pending review" : auditStatus === "completed" ? "Applied" : "Counting"}</Badge>
+                  {auditStatus === "pending_review" && <span className="text-xs text-muted-foreground">{numberLabel(varianceLines.length)} variance lines · {numberLabel(unresolvedUnknowns.length)} unresolved UPCs</span>}
+                </div>
               </div>
               <div className="flex gap-2">
                 <Button
                   size="sm"
                   variant="outline"
+                  disabled={busy || auditStatus !== "in_progress"}
                   onClick={() => {
                     setCameraMessage(
                       "Camera ready. Point it at the next barcode.",
@@ -4610,15 +4636,11 @@ function WarehouseAuditPanel({
                 >
                   {cameraOpen ? "Stop camera" : "Use phone camera"}
                 </Button>
-                <Button
-                  size="sm"
-                  disabled={busy || !lines.length}
-                  onClick={() => void complete()}
-                >
-                  Complete & apply counts
-                </Button>
+                {auditStatus === "in_progress" && <Button size="sm" disabled={busy || !lines.length} onClick={() => void submitForReview()}>Submit for review</Button>}
+                {auditStatus === "pending_review" && <Button size="sm" disabled={busy} onClick={() => void complete()}>Approve & apply counts</Button>}
               </div>
             </div>
+            {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Review required before inventory changes</p><p className="text-muted-foreground">This audit contains {numberLabel(varianceLines.length)} SKU variance lines and {numberLabel(unresolvedUnknowns.length)} unresolved UPCs. Approving it posts the counted quantities to {String(current.warehouseName)}.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
             {cameraOpen && (
               <div className="relative overflow-hidden rounded-md bg-black">
                 <video
@@ -4637,6 +4659,7 @@ function WarehouseAuditPanel({
             <div className="flex gap-2">
               <Input
                 autoFocus
+                disabled={auditStatus !== "in_progress"}
                 value={barcode}
                 onChange={(event) => setBarcode(event.target.value)}
                 onKeyDown={(event) => {
@@ -4648,7 +4671,7 @@ function WarehouseAuditPanel({
                 placeholder="Scan or enter UPC, then press Enter"
               />
               <Button
-                disabled={busy || !barcode.trim()}
+                disabled={busy || auditStatus !== "in_progress" || !barcode.trim()}
                 onClick={() => void submit()}
               >
                 Add scan
@@ -4669,7 +4692,7 @@ function WarehouseAuditPanel({
                 </span>
               </div>
             )}
-            {manualUnknown && (
+            {manualUnknown && auditStatus === "in_progress" && (
               <div className="grid gap-3 rounded-md border border-amber-300 bg-amber-50/50 p-3">
                 <div>
                   <p className="font-medium">Resolve unmatched UPC</p>
