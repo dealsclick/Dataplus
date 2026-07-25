@@ -4071,7 +4071,7 @@ function WarehouseAuditHistory() {
   const [loading, setLoading] = useState(true)
   const load = async () => { setLoading(true); try { const result = await api<{ audits?: Array<Record<string, unknown>> }>("/api/warehouse-audits"); setAudits(result.audits || []) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load warehouse audits.") } finally { setLoading(false) } }
   useEffect(() => { void load() }, [])
-  return <><Card><CardHeader className="flex-row items-start justify-between gap-3"><div><CardTitle className="text-base">Audit register</CardTitle><CardDescription>Each audit has its own dedicated workspace, so teams can count different warehouses at the same time.</CardDescription></div><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Audit</TableHead><TableHead>Warehouse</TableHead><TableHead>Assigned counter</TableHead><TableHead>Status</TableHead><TableHead>Counted SKUs</TableHead><TableHead>Unknown UPCs</TableHead><TableHead>Started</TableHead><TableHead>Completed</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{audits.map((audit) => { const lines = Array.isArray(audit.lines) ? audit.lines : []; const unknown = Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []; const inProgress = String(audit.status) === "in_progress"; const href = `/warehouse/audits/${encodeURIComponent(String(audit.id))}`; return <TableRow key={String(audit.id)}><TableCell><a className="font-medium hover:underline" href={href}>{String(audit.auditNumber || "Audit")}</a></TableCell><TableCell>{String(audit.warehouseName || "-")}</TableCell><TableCell>{String(audit.createdBy || "-")}</TableCell><TableCell><Badge variant={inProgress ? "secondary" : "outline"}>{inProgress ? "In progress" : String(audit.status || "unknown").replace(/_/g, " ")}</Badge></TableCell><TableCell>{numberLabel(lines.length)}</TableCell><TableCell>{numberLabel(unknown.length)}</TableCell><TableCell>{dateLabel(String(audit.createdAt || ""))}</TableCell><TableCell>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={href}>{inProgress ? "Open audit" : "View audit"}</a></Button></TableCell></TableRow> })}{!audits.length && <TableRow><TableCell colSpan={9} className="h-20 text-center text-muted-foreground">No warehouse audits have been created yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></>
+  return <><Card><CardHeader className="flex-row items-start justify-between gap-3"><div><CardTitle className="text-base">Audit register</CardTitle><CardDescription>Each audit has its own dedicated workspace, so teams can count different warehouses at the same time.</CardDescription></div><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Audit</TableHead><TableHead>Warehouse</TableHead><TableHead>Counter</TableHead><TableHead>Reviewer</TableHead><TableHead>Status</TableHead><TableHead>Counted SKUs</TableHead><TableHead>Unknown UPCs</TableHead><TableHead>Started</TableHead><TableHead>Completed</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{audits.map((audit) => { const lines = Array.isArray(audit.lines) ? audit.lines : []; const unknown = Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []; const status = String(audit.status || "unknown"); const inProgress = status === "in_progress"; const href = `/warehouse/audits/${encodeURIComponent(String(audit.id))}`; return <TableRow key={String(audit.id)}><TableCell><a className="font-medium hover:underline" href={href}>{String(audit.auditNumber || "Audit")}</a></TableCell><TableCell>{String(audit.warehouseName || "-")}</TableCell><TableCell>{String(audit.createdBy || "-")}</TableCell><TableCell>{String(audit.reviewer || "Unassigned")}</TableCell><TableCell><Badge variant={status === "pending_review" ? "default" : inProgress ? "secondary" : "outline"}>{status === "pending_review" ? "Review" : inProgress ? "In progress" : status.replace(/_/g, " ")}</Badge></TableCell><TableCell>{numberLabel(lines.length)}</TableCell><TableCell>{numberLabel(unknown.length)}</TableCell><TableCell>{dateLabel(String(audit.createdAt || ""))}</TableCell><TableCell>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-2"><Button size="sm" variant="outline" asChild><a href={href}>{inProgress ? "Open audit" : "View audit"}</a></Button><Button size="icon" variant="ghost" title="Export audit CSV" asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(audit.id))}/export`}><FileDown className="size-4" /></a></Button></div></TableCell></TableRow> })}{!audits.length && <TableRow><TableCell colSpan={10} className="h-20 text-center text-muted-foreground">No warehouse audits have been created yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></>
 }
 
 function PickScanPanel({ onChanged }: { onChanged: () => Promise<void> }) {
@@ -4125,6 +4125,7 @@ function WarehouseAuditPanel({
   const [barcode, setBarcode] = useState("");
   const [warehouse, setWarehouse] = useState("Staten Island");
   const [auditOwner, setAuditOwner] = useState("Luis");
+  const [auditReviewer, setAuditReviewer] = useState("");
   const [busy, setBusy] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [cameraMessage, setCameraMessage] = useState(
@@ -4261,7 +4262,7 @@ function WarehouseAuditPanel({
         message?: string;
       }>("/api/warehouse-audits", {
         method: "POST",
-        body: JSON.stringify({ warehouseName: warehouse, user: auditOwner }),
+        body: JSON.stringify({ warehouseName: warehouse, user: auditOwner, reviewer: auditReviewer }),
       });
       setActive(result.audit || null);
       toast.success(result.message || "Warehouse audit started.");
@@ -4538,6 +4539,24 @@ function WarehouseAuditPanel({
       setBusy(false);
     }
   };
+  const returnToCount = async () => {
+    if (!resumedAudit) return;
+    const note = window.prompt("What should the counter verify before resubmitting?", "") || "";
+    setBusy(true);
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/return-to-count`,
+        { method: "POST", body: JSON.stringify({ user: "Luis", note }) },
+      );
+      setActive(result.audit || null);
+      toast.success(result.message || "Warehouse audit returned to counting.");
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to return this audit to counting.");
+    } finally {
+      setBusy(false);
+    }
+  };
   const current = resumedAudit;
   const lines = Array.isArray(current?.lines)
     ? (current?.lines as Array<Record<string, unknown>>)
@@ -4571,6 +4590,13 @@ function WarehouseAuditPanel({
               value={auditOwner}
               onChange={(event) => setAuditOwner(event.target.value)}
               placeholder="Team member name"
+            />
+          </Field>
+          <Field label="Assigned reviewer">
+            <Input
+              value={auditReviewer}
+              onChange={(event) => setAuditReviewer(event.target.value)}
+              placeholder="Optional reviewer name"
             />
           </Field>
           <Button
@@ -4617,6 +4643,7 @@ function WarehouseAuditPanel({
                   catalog SKUs counted · {numberLabel(unknowns.length)} unknown
                   UPCs
                 </p>
+                {String(current.reviewer || "").trim() && <p className="mt-1 text-xs text-muted-foreground">Reviewer: {String(current.reviewer)}</p>}
                 <div className="mt-2 flex flex-wrap gap-2">
                   <Badge variant={auditStatus === "completed" ? "secondary" : auditStatus === "pending_review" ? "outline" : "default"}>{auditStatus === "pending_review" ? "Pending review" : auditStatus === "completed" ? "Applied" : "Counting"}</Badge>
                   {auditStatus === "pending_review" && <span className="text-xs text-muted-foreground">{numberLabel(varianceLines.length)} variance lines · {numberLabel(unresolvedUnknowns.length)} unresolved UPCs</span>}
@@ -4638,9 +4665,12 @@ function WarehouseAuditPanel({
                 </Button>
                 {auditStatus === "in_progress" && <Button size="sm" disabled={busy || !lines.length} onClick={() => void submitForReview()}>Submit for review</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" disabled={busy} onClick={() => void complete()}>Approve & apply counts</Button>}
+                {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}>Return to count</Button>}
+                <Button size="sm" variant="ghost" asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export</a></Button>
               </div>
             </div>
             {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Review required before inventory changes</p><p className="text-muted-foreground">This audit contains {numberLabel(varianceLines.length)} SKU variance lines and {numberLabel(unresolvedUnknowns.length)} unresolved UPCs. Approving it posts the counted quantities to {String(current.warehouseName)}.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
+            {auditStatus === "in_progress" && Boolean(current.returnNote) && <div className="rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Returned for recount</p><p className="mt-1 text-muted-foreground">Reviewer note: {String(current.returnNote)}</p></div>}
             {cameraOpen && (
               <div className="relative overflow-hidden rounded-md bg-black">
                 <video

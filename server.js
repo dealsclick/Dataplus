@@ -21789,7 +21789,7 @@ async function handleApi(req, res) {
     const warehouse = (db.warehouses || []).find((row) => String(row.id || "").toLowerCase() === requestedWarehouse || String(row.name || "").toLowerCase() === requestedWarehouse) || null;
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const highest = Math.max(122, ...audits.map((audit) => Number(String(audit.auditNumber || "").replace(/\D/g, "")) || 0));
-    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis" };
+    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
     audits.unshift(audit);
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
     return sendJson(res, 201, { audit, message: `${audit.auditNumber} started.` });
@@ -21940,6 +21940,21 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { audit, message: `${audit.auditNumber} is ready for review. Inventory has not been changed.` });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "return-to-count" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "pending_review") return sendJson(res, 400, { error: "Only audits awaiting review can be returned to counting." });
+    audit.status = "in_progress";
+    audit.returnedForCountAt = new Date().toISOString();
+    audit.returnedForCountBy = String(body.user || "Reviewer").trim() || "Reviewer";
+    audit.returnNote = String(body.note || "").trim();
+    audit.updatedAt = audit.returnedForCountAt;
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 200, { audit, message: `${audit.auditNumber} was returned to counting. Inventory remains unchanged.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "complete" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
@@ -21947,24 +21962,55 @@ async function handleApi(req, res) {
     if (!audit) return notFound(res);
     if (audit.status !== "pending_review") return sendJson(res, 400, { error: "Submit this audit for review before applying inventory counts." });
     const db = await readDbFast({ skipInventory: true });
+    db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
     const auditWarehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "") || String(row.name || "").toLowerCase() === String(audit.warehouseName || "").toLowerCase()) || null;
     const products = [];
     for (const line of audit.lines || []) {
       const product = await postgres.readProductByKey(line.productId || line.sku);
       if (!product) continue;
       const stockRow = auditWarehouseStockRow(product, audit) || (auditWarehouse ? ensureInventoryWarehouseStock(product, auditWarehouse) : null);
+      const qtyBefore = stockRow ? Number(stockRow.qty || 0) : Number(product.qty || 0);
+      const reservedBefore = stockRow ? Number(stockRow.reserved || 0) : Number(product.reserved || 0);
       if (stockRow) {
         stockRow.qty = Number(line.countedQty || 0);
         syncInventoryTotalsFromWarehouses(product);
       } else product.qty = Number(line.countedQty || 0);
       product.lastInventoryAuditAt = new Date().toISOString();
       product.lastInventoryAuditId = audit.id;
+      addInventoryLedger(db, product, {
+        type: "warehouse_audit",
+        source: "warehouse_audit",
+        referenceId: audit.id,
+        referenceNumber: audit.auditNumber,
+        warehouseId: auditWarehouse?.id || audit.warehouseId || "",
+        warehouseName: auditWarehouse?.name || audit.warehouseName || "",
+        locationBin: stockRow?.locationBin || "",
+        quantityChange: Number(line.countedQty || 0) - qtyBefore,
+        qtyBefore,
+        qtyAfter: Number(line.countedQty || 0),
+        reservedBefore,
+        reservedAfter: stockRow ? Number(stockRow.reserved || 0) : Number(product.reserved || 0),
+        reason: `Approved warehouse audit ${audit.auditNumber}`,
+        user: String(body.user || "Approver").trim() || "Approver"
+      });
       products.push(product);
     }
     if (products.length) { await postgres.upsertProductsFromState(products); await postgres.upsertInventoryLevelsFromProducts(products); }
     audit.status = "completed"; audit.completedAt = new Date().toISOString(); audit.approvedAt = audit.completedAt; audit.approvedBy = String(body.user || "Approver").trim() || "Approver"; audit.appliedLines = products.length;
-    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500), inventoryLedger: db.inventoryLedger || [] });
     return sendJson(res, 200, { audit, message: `${audit.auditNumber} completed. ${products.length} catalog counts were updated.` });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "export" && postgres.isPostgresEnabled()) {
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    const quote = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const header = ["Audit", "Warehouse", "Status", "SKU", "Product", "Expected", "Counted", "Variance", "Last scanned"];
+    const rows = (audit.lines || []).map((line) => [audit.auditNumber, audit.warehouseName, audit.status, line.sku, line.title, Number(line.expectedQty || 0), Number(line.countedQty || 0), Number(line.countedQty || 0) - Number(line.expectedQty || 0), line.lastScannedAt || ""]);
+    const csv = [header, ...rows].map((row) => row.map(quote).join(",")).join("\n");
+    res.writeHead(200, { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename=${String(audit.auditNumber || "warehouse-audit").replace(/[^a-z0-9_-]/gi, "-")}.csv` });
+    return res.end(csv);
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "manual-item" && postgres.isPostgresEnabled()) {
