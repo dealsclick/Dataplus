@@ -4679,6 +4679,10 @@ function WarehouseAuditPanel({
                   muted
                   playsInline
                 />
+                <div className="pointer-events-none absolute inset-x-[12%] top-1/2 -translate-y-1/2" aria-hidden="true">
+                  <div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_14px_rgba(74,222,128,0.95)]" />
+                  <div className="mx-auto mt-2 w-fit rounded-full bg-black/75 px-3 py-1 text-xs font-medium text-white">Align barcode with this line</div>
+                </div>
                 <div
                   className={`absolute inset-x-3 bottom-3 rounded-md px-3 py-2 text-sm font-medium shadow ${lastScan?.matched ? "bg-emerald-600 text-white" : lastScan && !lastScan.matched ? "bg-amber-500 text-black" : "bg-black/70 text-white"}`}
                 >
