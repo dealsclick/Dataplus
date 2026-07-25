@@ -4128,6 +4128,8 @@ function WarehouseAuditPanel({
   const [auditReviewer, setAuditReviewer] = useState("");
   const [activeBin, setActiveBin] = useState("");
   const [cameraMode, setCameraMode] = useState<"product" | "bin">("product");
+  const [offlineScanCount, setOfflineScanCount] = useState(0);
+  const [syncingOfflineScans, setSyncingOfflineScans] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [cameraMessage, setCameraMessage] = useState(
@@ -4158,6 +4160,16 @@ function WarehouseAuditPanel({
     async () => undefined,
   );
   const lastCameraScanRef = useRef({ value: "", at: 0 });
+  const offlineQueueKey = "dataplus.warehouse-audit.offline-scans.v1";
+  const readOfflineScans = () => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(offlineQueueKey) || "[]");
+      return Array.isArray(saved) ? saved as Array<{ auditId: string; barcode: string; locationBin: string; queuedAt: string }> : [];
+    } catch { return []; }
+  };
+  const writeOfflineScans = (scans: Array<{ auditId: string; barcode: string; locationBin: string; queuedAt: string }>) => {
+    try { window.localStorage.setItem(offlineQueueKey, JSON.stringify(scans.slice(-500))); } catch { /* A full browser store should not block scanning. */ }
+  };
   const scannerFeedback = (kind: "success" | "unknown" | "error") => {
     try { navigator.vibrate?.(kind === "success" ? [35] : kind === "unknown" ? [35, 55, 35] : [80, 45, 80]); } catch { /* Browsers may block haptics. */ }
     try {
@@ -4204,6 +4216,10 @@ function WarehouseAuditPanel({
   useEffect(() => {
     void load();
   }, []);
+  useEffect(() => {
+    if (!resumedAudit?.id) return;
+    setOfflineScanCount(readOfflineScans().filter((scan) => scan.auditId === String(resumedAudit.id)).length);
+  }, [resumedAudit?.id]);
   useEffect(() => {
     if (!cameraOpen || !videoRef.current) return;
     const video = videoRef.current;
@@ -4311,6 +4327,17 @@ function WarehouseAuditPanel({
       toast.success(`Counting in bin ${bin}.`);
       return;
     }
+    if (!navigator.onLine) {
+      const queued = [...readOfflineScans(), { auditId: String(resumedAudit.id), barcode: String(value).trim(), locationBin: activeBin, queuedAt: new Date().toISOString() }];
+      writeOfflineScans(queued);
+      setOfflineScanCount(queued.filter((scan) => scan.auditId === String(resumedAudit.id)).length);
+      setLastScan({ barcode: String(value), matched: true, message: "Saved offline. It will sync when this phone reconnects." });
+      setCameraMessage(`Saved ${value} offline. Ready for the next barcode.`);
+      setBarcode("");
+      scannerFeedback("success");
+      toast.success("Scan saved on this phone and queued for sync.");
+      return;
+    }
     setBusy(true);
     try {
       const result = await api<{
@@ -4357,6 +4384,37 @@ function WarehouseAuditPanel({
     }
   };
   submitScanRef.current = submit;
+  const flushOfflineScans = async () => {
+    if (!resumedAudit?.id || !navigator.onLine || syncingOfflineScans) return;
+    const all = readOfflineScans();
+    const mine = all.filter((scan) => scan.auditId === String(resumedAudit.id));
+    if (!mine.length) return;
+    setSyncingOfflineScans(true);
+    const remaining = all.filter((scan) => scan.auditId !== String(resumedAudit.id));
+    let synced = 0;
+    try {
+      for (let index = 0; index < mine.length; index += 1) {
+        const scan = mine[index];
+        try {
+          const result = await api<{ audit?: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(scan.auditId)}/scan`, { method: "POST", body: JSON.stringify({ barcode: scan.barcode, locationBin: scan.locationBin }) });
+          if (result.audit) applyAuditUpdate(result.audit);
+          synced += 1;
+        } catch {
+          remaining.push(...mine.slice(index));
+          break;
+        }
+      }
+      writeOfflineScans(remaining);
+      setOfflineScanCount(remaining.filter((scan) => scan.auditId === String(resumedAudit.id)).length);
+      if (synced) toast.success(`${synced} offline scan${synced === 1 ? "" : "s"} synced.`);
+    } finally { setSyncingOfflineScans(false); }
+  };
+  useEffect(() => {
+    const sync = () => { void flushOfflineScans(); };
+    sync();
+    window.addEventListener("online", sync);
+    return () => window.removeEventListener("online", sync);
+  }, [resumedAudit?.id]);
   const researchUnknownUpc = async () => {
     if (!resumedAudit || !manualUnknown || upcResearchBusy) return;
     setUpcResearchBusy(true);
@@ -4674,6 +4732,7 @@ function WarehouseAuditPanel({
                 {String(current.reviewer || "").trim() && <p className="mt-1 text-xs text-muted-foreground">Reviewer: {String(current.reviewer)}</p>}
                 <div className="mt-2 flex flex-wrap gap-2">
                   <Badge variant={auditStatus === "completed" ? "secondary" : auditStatus === "pending_review" ? "outline" : "default"}>{auditStatus === "pending_review" ? "Pending review" : auditStatus === "completed" ? "Applied" : "Counting"}</Badge>
+                  {offlineScanCount > 0 && <Badge variant="outline">{syncingOfflineScans ? "Syncing offline scans" : `${offlineScanCount} scan${offlineScanCount === 1 ? "" : "s"} queued offline`}</Badge>}
                   {auditStatus === "pending_review" && <span className="text-xs text-muted-foreground">{numberLabel(varianceLines.length)} variance lines · {numberLabel(unresolvedUnknowns.length)} unresolved UPCs</span>}
                 </div>
               </div>
