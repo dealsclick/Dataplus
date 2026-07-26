@@ -9121,6 +9121,25 @@ function normalizeWarehouseBin(bin, index = 0) {
   };
 }
 
+function resolveWarehouseBin(warehouse, value) {
+  const requested = String(value || "").trim().toLowerCase();
+  if (!requested) return null;
+  return (Array.isArray(warehouse?.bins) ? warehouse.bins : []).find((bin) => (
+    bin.active !== false && [bin.id, bin.code, bin.name].some((candidate) => String(candidate || "").trim().toLowerCase() === requested)
+  )) || null;
+}
+
+function validateWarehouseBin(warehouse, value) {
+  const requested = String(value || "").trim();
+  const bins = Array.isArray(warehouse?.bins) ? warehouse.bins.filter((bin) => bin.active !== false) : [];
+  if (!warehouse?.requireBinValidation) return { bin: resolveWarehouseBin(warehouse, requested), value: requested };
+  if (!bins.length) return { bin: null, value: requested };
+  if (!requested) return { error: `Select an active bin for ${warehouse.name || "this warehouse"}.` };
+  const bin = resolveWarehouseBin(warehouse, requested);
+  if (!bin) return { error: `${requested} is not an active bin at ${warehouse.name || "this warehouse"}.` };
+  return { bin, value: bin.code };
+}
+
 function normalizeWarehouseStockRow(row = {}, warehouse, item) {
   return {
     warehouseId: row.warehouseId || warehouse?.id || "",
@@ -9180,6 +9199,7 @@ function normalizeWarehouse(warehouse) {
     requireSerialScan: warehouse.requireSerialScan === undefined ? false : Boolean(warehouse.requireSerialScan),
     requirePhotoForDamage: warehouse.requirePhotoForDamage === undefined ? false : Boolean(warehouse.requirePhotoForDamage),
     autoRouteReturns: warehouse.autoRouteReturns === undefined ? false : Boolean(warehouse.autoRouteReturns),
+    requireBinValidation: warehouse.requireBinValidation === undefined ? false : Boolean(warehouse.requireBinValidation),
     shopifyLocationId: normalizeShopifyLocationGid(warehouse.shopifyLocationId || ""),
     shopifyLocationName: warehouse.shopifyLocationName || "",
     shopifyInventoryPushEnabled: warehouse.shopifyInventoryPushEnabled === undefined ? false : Boolean(warehouse.shopifyInventoryPushEnabled),
@@ -21806,18 +21826,25 @@ async function handleApi(req, res) {
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
     if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
+    const auditDb = await readDbFast({ skipInventory: true });
+    const auditWarehouse = (auditDb.warehouses || []).find((warehouse) => String(warehouse.id || "") === String(audit.warehouseId || ""))
+      || (auditDb.warehouses || []).find((warehouse) => String(warehouse.name || "").trim().toLowerCase() === String(audit.warehouseName || "").trim().toLowerCase())
+      || null;
+    const binCheck = validateWarehouseBin(auditWarehouse, locationBin);
+    if (binCheck.error) return sendJson(res, 400, { error: binCheck.error });
+    const resolvedLocationBin = binCheck.value || locationBin;
     const lookup = await resolveScannedCatalogBarcode(barcode);
     const product = lookup.product;
     const now = new Date().toISOString();
     if (product) {
-      const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku) && String(entry.locationBin || "").trim().toLowerCase() === locationBin.toLowerCase());
-      if (line) { line.countedQty = Number(line.countedQty || 0) + 1; line.lastScannedAt = now; line.reviewStatus = "unreviewed"; } else (audit.lines || (audit.lines = [])).push({ id: crypto.randomUUID(), productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, barcode, locationBin, expectedQty: auditExpectedQuantity(product, audit, locationBin), countedQty: 1, firstScannedAt: now, lastScannedAt: now, reviewStatus: "unreviewed" });
+      const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku) && String(entry.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase());
+      if (line) { line.countedQty = Number(line.countedQty || 0) + 1; line.lastScannedAt = now; line.reviewStatus = "unreviewed"; } else (audit.lines || (audit.lines = [])).push({ id: crypto.randomUUID(), productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, barcode, locationBin: resolvedLocationBin, expectedQty: auditExpectedQuantity(product, audit, resolvedLocationBin), countedQty: 1, firstScannedAt: now, lastScannedAt: now, reviewStatus: "unreviewed" });
       audit.updatedAt = now;
       await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
       return sendJson(res, 200, { audit, product, matched: true, message: `${product.sku} counted.` });
     }
-    const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode && String(entry.locationBin || "").trim().toLowerCase() === locationBin.toLowerCase());
-    if (unknown) { unknown.count = Number(unknown.count || 0) + 1; if (lookup.sourceItem) unknown.sourceMatch = lookup.sourceItem; } else audit.unknownBarcodes.push({ barcode, count: 1, locationBin, scannedAt: now, sourceMatch: lookup.sourceItem || null });
+    const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode && String(entry.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase());
+    if (unknown) { unknown.count = Number(unknown.count || 0) + 1; if (lookup.sourceItem) unknown.sourceMatch = lookup.sourceItem; } else audit.unknownBarcodes.push({ barcode, count: 1, locationBin: resolvedLocationBin, scannedAt: now, sourceMatch: lookup.sourceItem || null });
     audit.updatedAt = now;
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
     return sendJson(res, 200, { audit, matched: false, barcode, sourceItem: lookup.sourceItem, message: lookup.sourceItem ? `${barcode} was found in the source catalog as ${lookup.sourceItem.sku || lookup.sourceItem.vendorSku || "a source SKU"}, but is not yet an approved catalog SKU.` : `${barcode} saved as an unknown UPC.` });
@@ -22144,10 +22171,14 @@ async function handleApi(req, res) {
       || null;
     if (!warehouse) return sendJson(res, 400, { error: "Create or select a receiving warehouse before posting inventory." });
 
+    const requestedBin = String(body.locationBin || "").trim();
+    const binCheck = validateWarehouseBin(warehouse, requestedBin);
+    if (binCheck.error) return sendJson(res, 400, { error: binCheck.error });
+
     const receipts = await postgres.readStateField("manualWarehouseReceipts").catch(() => []) || [];
     const highest = Math.max(1000, ...receipts.map((receipt) => Number(String(receipt.receiptNumber || "").replace(/\D/g, "")) || 0));
     const now = new Date().toISOString();
-    const locationBin = String(body.locationBin || "").trim();
+    const locationBin = binCheck.value || requestedBin;
     const note = String(body.note || "").trim();
     const stockRow = ensureInventoryWarehouseStock(product, warehouse);
     const qtyBefore = Number(stockRow.qty || 0);
@@ -24342,6 +24373,7 @@ async function handleApi(req, res) {
       requireSerialScan: Boolean(body.requireSerialScan),
       requirePhotoForDamage: Boolean(body.requirePhotoForDamage),
       autoRouteReturns: Boolean(body.autoRouteReturns),
+      requireBinValidation: Boolean(body.requireBinValidation),
       shopifyLocationId: normalizeShopifyLocationGid(body.shopifyLocationId || ""),
       shopifyLocationName: String(body.shopifyLocationName || "").trim(),
       shopifyInventoryPushEnabled: Boolean(body.shopifyInventoryPushEnabled),
@@ -24367,12 +24399,12 @@ async function handleApi(req, res) {
       "code", "name", "status", "warehouseType", "contactName", "managerName", "phone", "email", "timezone",
       "operatingHours", "carrierCutoffTime", "receivingInstructions", "addressLine1", "addressLine2", "city",
       "state", "postalCode", "country", "isDefaultReceiving", "isDefaultReturns", "requireAppointment",
-      "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "shopifyLocationId",
+      "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyLocationId",
       "shopifyLocationName", "shopifyInventoryPushEnabled", "notes"
     ];
     for (const field of fields) {
       if (body[field] === undefined) continue;
-      if (["isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "shopifyInventoryPushEnabled"].includes(field)) {
+      if (["isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyInventoryPushEnabled"].includes(field)) {
         warehouse[field] = Boolean(body[field]);
       } else if (field === "shopifyLocationId") {
         warehouse[field] = normalizeShopifyLocationGid(body[field]);
