@@ -4130,6 +4130,10 @@ function WarehouseAuditPanel({
   const [cameraMode, setCameraMode] = useState<"product" | "bin">("product");
   const [offlineScanCount, setOfflineScanCount] = useState(0);
   const [syncingOfflineScans, setSyncingOfflineScans] = useState(false);
+  const [reviewLine, setReviewLine] = useState<Record<string, unknown> | null>(null);
+  const [reviewContext, setReviewContext] = useState<Record<string, unknown> | null>(null);
+  const [reviewNote, setReviewNote] = useState("");
+  const [reviewBusy, setReviewBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [cameraMessage, setCameraMessage] = useState(
@@ -4643,6 +4647,32 @@ function WarehouseAuditPanel({
       setBusy(false);
     }
   };
+  const auditLineKey = (line: Record<string, unknown>) => String(line.id || `${String(line.productId || line.sku || "")}::${String(line.locationBin || "")}`);
+  const openLineReview = async (line: Record<string, unknown>) => {
+    if (!resumedAudit) return;
+    setReviewLine(line);
+    setReviewContext(null);
+    setReviewNote(String(line.reviewNote || ""));
+    try {
+      const result = await api<Record<string, unknown>>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lines/${encodeURIComponent(auditLineKey(line))}/context`);
+      setReviewContext(result);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load audit-line history.");
+    }
+  };
+  const reviewAuditLine = async (decision: "approved" | "excluded" | "recount") => {
+    if (!resumedAudit || !reviewLine) return;
+    setReviewBusy(true);
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lines/${encodeURIComponent(auditLineKey(reviewLine))}/review`, { method: "POST", body: JSON.stringify({ decision, note: reviewNote, user: "Luis" }) });
+      setActive(result.audit || null);
+      setReviewLine(null);
+      toast.success(result.message || "Audit-line review saved.");
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save audit-line review.");
+    } finally { setReviewBusy(false); }
+  };
   const current = resumedAudit;
   const lines = Array.isArray(current?.lines)
     ? (current?.lines as Array<Record<string, unknown>>)
@@ -5049,6 +5079,7 @@ function WarehouseAuditPanel({
                     <TableHead>Expected</TableHead>
                     <TableHead>Counted</TableHead>
                     <TableHead>Variance</TableHead>
+                    <TableHead className="text-right">Review</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -5080,12 +5111,15 @@ function WarehouseAuditPanel({
                           )}
                         </Badge>
                       </TableCell>
+                      <TableCell className="text-right">
+                        {Number(line.countedQty || 0) !== Number(line.expectedQty || 0) ? <Button size="sm" variant="outline" disabled={auditStatus !== "pending_review"} onClick={() => void openLineReview(line)}>{String(line.reviewStatus || "unreviewed").replace(/_/g, " ")}</Button> : <Badge variant="outline">Matched</Badge>}
+                      </TableCell>
                     </TableRow>
                   ))}
                   {!lines.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={6}
+                        colSpan={7}
                         className="h-20 text-center text-muted-foreground"
                       >
                         Scan the first UPC to begin counting.
@@ -5140,6 +5174,18 @@ function WarehouseAuditPanel({
                 </Table>
               </div>
             )}
+            <Dialog open={Boolean(reviewLine)} onOpenChange={(open) => !open && setReviewLine(null)}>
+              <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
+                <DialogHeader><DialogTitle>Review variance: {String(reviewLine?.sku || "Audit line")}</DialogTitle><DialogDescription>Approve this count, exclude it from the inventory adjustment, or return the audit to counting for a recount.</DialogDescription></DialogHeader>
+                <div className="grid gap-4 text-sm">
+                  <div className="grid gap-2 rounded-md border bg-muted/20 p-3 sm:grid-cols-4"><Detail label="Expected" value={numberLabel(Number(reviewLine?.expectedQty || 0))} /><Detail label="Counted" value={numberLabel(Number(reviewLine?.countedQty || 0))} /><Detail label="Variance" value={numberLabel(Number(reviewLine?.countedQty || 0) - Number(reviewLine?.expectedQty || 0))} /><Detail label="Bin" value={String(reviewLine?.locationBin || "-")} /></div>
+                  {reviewContext?.product ? <div className="rounded-md border p-3"><p className="font-medium">Current catalog inventory</p><p className="mt-1 text-muted-foreground">{String((reviewContext.product as Record<string, unknown>).sku || "-")} / on hand {numberLabel(Number((reviewContext.product as Record<string, unknown>).qty || 0))} / reserved {numberLabel(Number((reviewContext.product as Record<string, unknown>).reserved || 0))}</p></div> : null}
+                  <div className="rounded-md border"><p className="border-b px-3 py-2 font-medium">Recent inventory activity</p>{Array.isArray(reviewContext?.movements) && (reviewContext?.movements as Array<Record<string, unknown>>).length ? <div className="divide-y">{(reviewContext?.movements as Array<Record<string, unknown>>).map((movement) => <div key={String(movement.id)} className="grid gap-1 px-3 py-2 sm:grid-cols-[1fr_auto]"><div><p>{String(movement.type || "Inventory activity").replace(/_/g, " ")}</p><p className="text-xs text-muted-foreground">{String(movement.reason || movement.referenceNumber || "-")}</p></div><div className="text-right"><p>{Number(movement.quantityChange || 0) > 0 ? "+" : ""}{numberLabel(Number(movement.quantityChange || 0))}</p><p className="text-xs text-muted-foreground">{dateLabel(String(movement.createdAt || ""))}</p></div></div>)}</div> : <p className="p-3 text-muted-foreground">No recent inventory movement is available for this SKU.</p>}</div>
+                  <Field label="Reviewer note"><Textarea value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} placeholder="Reason for approval, exclusion, or recount" /></Field>
+                </div>
+                <DialogFooter className="flex-wrap"><Button variant="outline" onClick={() => setReviewLine(null)}>Close</Button><Button variant="outline" disabled={reviewBusy} onClick={() => void reviewAuditLine("excluded")}>Exclude line</Button><Button variant="outline" disabled={reviewBusy} onClick={() => void reviewAuditLine("recount")}>Return for recount</Button><Button disabled={reviewBusy} onClick={() => void reviewAuditLine("approved")}>{reviewBusy && <Loader2 className="size-4 animate-spin" />} Approve variance</Button></DialogFooter>
+              </DialogContent>
+            </Dialog>
           </>
         )}
       </CardContent>

@@ -21811,7 +21811,7 @@ async function handleApi(req, res) {
     const now = new Date().toISOString();
     if (product) {
       const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku) && String(entry.locationBin || "").trim().toLowerCase() === locationBin.toLowerCase());
-      if (line) { line.countedQty = Number(line.countedQty || 0) + 1; line.lastScannedAt = now; } else (audit.lines || (audit.lines = [])).push({ productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, barcode, locationBin, expectedQty: auditExpectedQuantity(product, audit, locationBin), countedQty: 1, firstScannedAt: now, lastScannedAt: now });
+      if (line) { line.countedQty = Number(line.countedQty || 0) + 1; line.lastScannedAt = now; line.reviewStatus = "unreviewed"; } else (audit.lines || (audit.lines = [])).push({ id: crypto.randomUUID(), productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, barcode, locationBin, expectedQty: auditExpectedQuantity(product, audit, locationBin), countedQty: 1, firstScannedAt: now, lastScannedAt: now, reviewStatus: "unreviewed" });
       audit.updatedAt = now;
       await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
       return sendJson(res, 200, { audit, product, matched: true, message: `${product.sku} counted.` });
@@ -21959,20 +21959,67 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { audit, message: `${audit.auditNumber} was returned to counting. Inventory remains unchanged.` });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "context" && postgres.isPostgresEnabled()) {
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    const lineKey = decodeURIComponent(parts[4]);
+    const line = (audit.lines || []).find((entry) => String(entry.id || `${entry.productId || entry.sku}::${entry.locationBin || ""}`) === lineKey);
+    if (!line) return sendJson(res, 404, { error: "Audit line not found." });
+    const [product, ledger] = await Promise.all([
+      postgres.readProductByKey(line.productId || line.sku),
+      postgres.readStateField("inventoryLedger").catch(() => [])
+    ]);
+    const movements = (Array.isArray(ledger) ? ledger : [])
+      .filter((entry) => String(entry.productId || "") === String(line.productId || "") || String(entry.sku || "").toLowerCase() === String(line.sku || "").toLowerCase())
+      .slice(0, 8);
+    return sendJson(res, 200, { line, product: product ? { sku: product.sku, title: product.marketplaceTitle || product.title || "", qty: product.qty, reserved: product.reserved, lastInventoryAuditAt: product.lastInventoryAuditAt || "", lastInventoryAuditId: product.lastInventoryAuditId || "" } : null, movements });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "review" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "pending_review") return sendJson(res, 400, { error: "Audit lines can be reviewed only while the audit is pending review." });
+    const lineKey = decodeURIComponent(parts[4]);
+    const line = (audit.lines || []).find((entry) => String(entry.id || `${entry.productId || entry.sku}::${entry.locationBin || ""}`) === lineKey);
+    if (!line) return sendJson(res, 404, { error: "Audit line not found." });
+    const decision = String(body.decision || "").toLowerCase();
+    if (!["approved", "excluded", "recount"].includes(decision)) return sendJson(res, 400, { error: "Choose approve, exclude, or recount." });
+    const now = new Date().toISOString();
+    line.reviewStatus = decision;
+    line.reviewedAt = now;
+    line.reviewedBy = String(body.user || "Reviewer").trim() || "Reviewer";
+    line.reviewNote = String(body.note || "").trim();
+    audit.updatedAt = now;
+    if (decision === "recount") {
+      audit.status = "in_progress";
+      audit.returnedForCountAt = now;
+      audit.returnedForCountBy = line.reviewedBy;
+      audit.returnNote = line.reviewNote || `Recount requested for ${line.sku || "audit line"}.`;
+    }
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 200, { audit, line, message: decision === "recount" ? `${audit.auditNumber} was returned to counting for ${line.sku}.` : `${line.sku || "Audit line"} marked ${decision}.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "complete" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
     if (audit.status !== "pending_review") return sendJson(res, 400, { error: "Submit this audit for review before applying inventory counts." });
+    const unreviewedVariances = (audit.lines || []).filter((line) => Number(line.countedQty || 0) !== Number(line.expectedQty || 0) && !["approved", "excluded"].includes(String(line.reviewStatus || "").toLowerCase()));
+    if (unreviewedVariances.length) return sendJson(res, 400, { error: `Review ${unreviewedVariances.length} remaining variance line${unreviewedVariances.length === 1 ? "" : "s"} before applying inventory counts.` });
     const db = await readDbFast({ skipInventory: true });
     db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
     const auditWarehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "") || String(row.name || "").toLowerCase() === String(audit.warehouseName || "").toLowerCase()) || null;
     const products = [];
     for (const line of audit.lines || []) {
+      if (String(line.reviewStatus || "").toLowerCase() === "excluded") continue;
       const product = await postgres.readProductByKey(line.productId || line.sku);
       if (!product) continue;
-      const stockRow = auditWarehouseStockRow(product, audit) || (auditWarehouse ? ensureInventoryWarehouseStock(product, auditWarehouse) : null);
+      const stockRow = auditWarehouseStockRow(product, audit, line.locationBin) || (auditWarehouse ? ensureInventoryWarehouseStock(product, auditWarehouse) : null);
       const qtyBefore = stockRow ? Number(stockRow.qty || 0) : Number(product.qty || 0);
       const reservedBefore = stockRow ? Number(stockRow.reserved || 0) : Number(product.reserved || 0);
       if (stockRow) {
@@ -21988,7 +22035,7 @@ async function handleApi(req, res) {
         referenceNumber: audit.auditNumber,
         warehouseId: auditWarehouse?.id || audit.warehouseId || "",
         warehouseName: auditWarehouse?.name || audit.warehouseName || "",
-        locationBin: stockRow?.locationBin || "",
+        locationBin: line.locationBin || stockRow?.locationBin || "",
         quantityChange: Number(line.countedQty || 0) - qtyBefore,
         qtyBefore,
         qtyAfter: Number(line.countedQty || 0),
