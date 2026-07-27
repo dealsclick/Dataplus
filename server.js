@@ -22204,7 +22204,7 @@ async function handleApi(req, res) {
       locationBin: String(body.locationBin || "").trim(),
       warehouseStock: [normalizeWarehouseStockRow({ warehouseId: auditWarehouse?.id || audit.warehouseId || "", warehouseName: auditWarehouse?.name || audit.warehouseName || "Warehouse", locationBin: String(body.locationBin || "").trim(), qty: quantity, reserved: 0 }, auditWarehouse)],
       images: photoDataUrl ? [photoDataUrl] : [], defaultImage: photoDataUrl,
-      createdAt: now, updatedAt: now, createdBy, createdSource: "Warehouse audit", createdAuditId: audit.id, createdAuditNumber: audit.auditNumber,
+      createdAt: now, updatedAt: now, createdBy, createdMethod: "Manual product creation", createdSource: "Warehouse audit", createdSourceDetail: audit.auditNumber, createdAuditId: audit.id, createdAuditNumber: audit.auditNumber,
       packagePhotoAnalysis: { confidence: Math.max(0, Math.min(100, Number(body.analysisConfidence || 0))), visibleText: String(body.analysisVisibleText || "").trim(), analyzedAt: now }
     };
     await postgres.upsertProductsFromState([product]);
