@@ -808,6 +808,9 @@ const DEFAULT_SYSTEM_SETTINGS = {
   shopifyDailyInventoryUpdateMode: "dry-run",
   shopifyDailyInventoryRequireSuccessfulDump: true,
   requireAdminConfirmationForDeletes: true,
+  warehouseAuditAdminPinHash: "",
+  warehouseAuditAdminPinSalt: "",
+  warehouseAuditAdminRoles: ["Owner", "Admin"],
   smtpEnabled: false,
   smtpHost: "",
   smtpPort: 587,
@@ -4215,6 +4218,10 @@ function normalizeSystemSettings(settings = {}) {
   normalized.backupRetentionDays = Math.max(1, Math.min(365, Number(normalized.backupRetentionDays || 30) || 30));
   normalized.jobsRetentionDays = IMPORT_JOB_FILE_RETENTION_DAYS;
   normalized.jobsRetentionAutoCleanupEnabled = normalized.jobsRetentionAutoCleanupEnabled !== false;
+  normalized.warehouseAuditAdminPinHash = String(normalized.warehouseAuditAdminPinHash || "");
+  normalized.warehouseAuditAdminPinSalt = String(normalized.warehouseAuditAdminPinSalt || "");
+  normalized.warehouseAuditAdminRoles = (Array.isArray(normalized.warehouseAuditAdminRoles) ? normalized.warehouseAuditAdminRoles : ["Owner", "Admin"])
+    .map((role) => String(role || "").trim()).filter(Boolean);
   normalized.smtpEnabled = normalized.smtpEnabled === true || String(normalized.smtpEnabled).toLowerCase() === "true";
   normalized.smtpHost = String(normalized.smtpHost || "").trim();
   normalized.smtpPort = Math.max(1, Math.min(65535, Number(normalized.smtpPort || 587) || 587));
@@ -4310,7 +4317,26 @@ function publicSystemSettings(settings = {}) {
   const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
   const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
   const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
-  return { ...normalized, aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured };
+  return { ...normalized, aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
+}
+
+function hashWarehouseAuditAdminPin(pin, salt) {
+  return crypto.scryptSync(String(pin || ""), String(salt || ""), 32).toString("hex");
+}
+
+function verifyWarehouseAuditAdminAccess(settings = {}, body = {}) {
+  const normalized = normalizeSystemSettings(settings);
+  const requestedUser = String(body.adminUserId || normalized.activeSystemUserId || "").trim();
+  const user = (normalized.systemUsers || []).find((candidate) => String(candidate.id || "") === requestedUser)
+    || (normalized.systemUsers || []).find((candidate) => String(candidate.name || "").trim().toLowerCase() === requestedUser.toLowerCase())
+    || null;
+  const allowedRoles = new Set((normalized.warehouseAuditAdminRoles || ["Owner", "Admin"]).map((role) => String(role).trim().toLowerCase()));
+  if (!user || !allowedRoles.has(String(user.role || "").trim().toLowerCase())) return { error: "This audit action requires an administrator account." };
+  if (!normalized.warehouseAuditAdminPinHash || !normalized.warehouseAuditAdminPinSalt) return { error: "Set the Warehouse audit administrator PIN in System Settings before locking or deleting audits." };
+  const expected = Buffer.from(normalized.warehouseAuditAdminPinHash, "hex");
+  const actual = Buffer.from(hashWarehouseAuditAdminPin(body.adminPin, normalized.warehouseAuditAdminPinSalt), "hex");
+  if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) return { error: "The administrator PIN is incorrect." };
+  return { user };
 }
 
 function davidToolEnabled(settings = {}, scopeId = "") {
@@ -21808,6 +21834,39 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { audits: Array.isArray(audits) ? audits : [] });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lock" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const access = verifyWarehouseAuditAdminAccess(settings, body);
+    if (access.error) return sendJson(res, 403, { error: access.error });
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status === "locked") return sendJson(res, 400, { error: "This audit is already locked." });
+    const now = new Date().toISOString();
+    audit.status = "locked";
+    audit.lockedAt = now;
+    audit.lockedBy = access.user.name || access.user.email || "Administrator";
+    audit.updatedAt = now;
+    audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), { type: "locked", at: now, user: audit.lockedBy }].slice(-100);
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 200, { audit, message: `${audit.auditNumber} is locked. Scanning and count changes are disabled.` });
+  }
+
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const access = verifyWarehouseAuditAdminAccess(settings, body);
+    if (access.error) return sendJson(res, 403, { error: access.error });
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status === "completed") return sendJson(res, 409, { error: "Completed audits cannot be deleted because they have already changed inventory. Post a correcting adjustment instead." });
+    const retained = audits.filter((row) => String(row.id) !== String(audit.id));
+    await postgres.writeStateDocuments({ warehouseAudits: retained.slice(0, 500) });
+    return sendJson(res, 200, { message: `${audit.auditNumber} was deleted by ${access.user.name || "an administrator"}.` });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
@@ -25743,8 +25802,14 @@ async function handleApi(req, res) {
   if (req.method === "PATCH" && url.pathname === "/api/system-settings") {
     const body = await parseBody(req);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (body.warehouseAuditAdminPin !== undefined && String(body.warehouseAuditAdminPin || "").trim()) {
+      if (!/^\d{4,12}$/.test(String(body.warehouseAuditAdminPin).trim())) return sendJson(res, 400, { error: "Warehouse audit administrator PIN must be 4 to 12 digits." });
+      current.warehouseAuditAdminPinSalt = crypto.randomBytes(16).toString("hex");
+      current.warehouseAuditAdminPinHash = hashWarehouseAuditAdminPin(body.warehouseAuditAdminPin, current.warehouseAuditAdminPinSalt);
+    }
     for (const field of Object.keys(DEFAULT_SYSTEM_SETTINGS)) {
       if (body[field] === undefined) continue;
+      if (["warehouseAuditAdminPinHash", "warehouseAuditAdminPinSalt"].includes(field)) continue;
       if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "boolean") current[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
       else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") current[field] = Number(body[field] || 0);
       else if (Array.isArray(DEFAULT_SYSTEM_SETTINGS[field])) current[field] = Array.isArray(body[field]) ? body[field] : current[field];
