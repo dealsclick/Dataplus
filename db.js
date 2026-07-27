@@ -4686,7 +4686,9 @@ function productRowToState(row = {}) {
     cost: row.cost ?? row.raw?.cost,
     price: row.price ?? row.raw?.price,
     qty: row.qty ?? row.raw?.qty,
-    defaultImage: row.default_image ?? row.raw?.defaultImage
+    defaultImage: row.default_image ?? row.raw?.defaultImage,
+    createdAt: row.created_at?.toISOString?.() || row.raw?.createdAt || "",
+    updatedAt: row.updated_at?.toISOString?.() || row.raw?.updatedAt || ""
   };
   product.systemVariants = productRowSystemVariants(product);
   return product;
@@ -5154,6 +5156,21 @@ async function listProducts(options = {}) {
     params.push(replenishableValues[0]);
     where.push(`case when lower(coalesce(raw ->> 'replenishable', 'false')) in ('true','1','yes','y') then true else false end = $${params.length}`);
   }
+  const createdFrom = nullableString(filters.createdFrom);
+  if (createdFrom) {
+    params.push(createdFrom);
+    where.push(`created_at >= $${params.length}::date`);
+  }
+  const createdTo = nullableString(filters.createdTo);
+  if (createdTo) {
+    params.push(createdTo);
+    where.push(`created_at < ($${params.length}::date + interval '1 day')`);
+  }
+  const creationSourceValues = splitFilterValues(filters.creationSource).map((value) => value.toLowerCase());
+  if (creationSourceValues.length) {
+    params.push(creationSourceValues);
+    where.push(`lower(coalesce(raw ->> 'createdSource', raw ->> 'creationSource', 'legacy catalog import')) = any($${params.length})`);
+  }
   const warehouseValues = splitFilterValues(filters.warehouse);
   if (warehouseValues.length) {
     params.push(warehouseValues);
@@ -5401,7 +5418,8 @@ async function listProducts(options = {}) {
     manufacturer: "manufacturer",
     vendorSku: "vendor_sku",
     status: "status",
-    updated: "updated_at"
+    updated: "updated_at",
+    created: "created_at"
   };
   const orderBy = sortableColumns[sortKey] || "sku";
   const countResult = fastPage && !includeTotal ? null : await client.query(`select count(*)::int as total from products ${whereSql}`, params);

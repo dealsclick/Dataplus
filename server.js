@@ -14200,6 +14200,11 @@ function publicInventoryItem(item = {}, context = {}) {
     stockUpdatedAt: item.stockUpdatedAt,
     lastPricesUpdateAt: item.lastPricesUpdateAt,
     lastPricesUpdateBy: item.lastPricesUpdateBy,
+    createdAt: item.createdAt || "",
+    createdBy: item.createdBy || "DataPlus",
+    createdMethod: item.createdMethod || "Product import",
+    createdSource: item.createdSource || item.creationSource || "Legacy catalog import",
+    createdSourceDetail: item.createdSourceDetail || "",
     condition: item.condition,
     status: item.status,
     active: item.active,
@@ -14222,6 +14227,11 @@ function publicInventoryItem(item = {}, context = {}) {
     shopifyUpdatedAt: item.shopifyUpdatedAt || "",
     shopifySyncedAt: item.shopifySyncedAt || "",
     shopifySyncSource: item.shopifySyncSource || "",
+    createdAt: item.createdAt || "",
+    createdBy: item.createdBy || "DataPlus",
+    createdMethod: item.createdMethod || "Product import",
+    createdSource: item.createdSource || item.creationSource || "Legacy catalog import",
+    createdSourceDetail: item.createdSourceDetail || "",
     shopifyOnlineStoreUrl: item.shopifyOnlineStoreUrl || "",
     shopifyVariantSku: item.shopifyVariantSku || "",
     shopifyVariantCount: Number(item.shopifyVariantCount || 0),
@@ -18220,7 +18230,7 @@ function isInventoryShellProduct(item) {
     && !sourceTextValue(item.longDescription || item.description);
 }
 
-function upsertInventoryProductFromCatalog(db, product) {
+function upsertInventoryProductFromCatalog(db, product, creation = {}) {
   product = normalizeCatalogProductForInventory(product);
   if (!product) return { item: null, existing: false };
   db.inventory = Array.isArray(db.inventory) ? db.inventory : [];
@@ -18255,6 +18265,11 @@ function upsertInventoryProductFromCatalog(db, product) {
     serialUnits: [],
     warehouseStock: [],
     sources: { ...(product.sources || {}), catalog: product.sku },
+    createdAt: new Date().toISOString(),
+    createdBy: String(creation.createdBy || "DataPlus").trim() || "DataPlus",
+    createdMethod: String(creation.createdMethod || "Product import").trim() || "Product import",
+    createdSource: String(creation.createdSource || "Source catalog / data dump").trim() || "Source catalog / data dump",
+    createdSourceDetail: String(creation.createdSourceDetail || "").trim(),
     updatedAt: new Date().toISOString()
   };
   db.inventory.push(item);
@@ -18960,7 +18975,11 @@ async function promoteSourceCatalogRows({ sourceRows = [], skus = [], progress, 
     if (isCanceled?.()) throw new Error("Source catalog import canceled.");
     const product = products[index];
     const existed = existingKeys.has(String(product.sku || "").toLowerCase());
-    const upserted = upsertInventoryProductFromCatalog(db, product);
+    const upserted = upsertInventoryProductFromCatalog(db, product, {
+      createdBy: "DataPlus",
+      createdMethod: "Product import",
+      createdSource: "Source catalog / data dump"
+    });
     if (upserted.item) changedItems.push(upserted.item);
     if (existed || upserted.existing) updated += 1;
     else created += 1;
@@ -21433,7 +21452,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/inventory") {
     if (postgres.isPostgresEnabled()) {
       const cacheQuery = url.searchParams.toString();
-      const cacheKey = `dataplus:products:v2:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const cacheKey = `dataplus:products:v3:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const fastPage = ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase());
@@ -26757,7 +26776,11 @@ async function handleApi(req, res) {
     if (!product) return notFound(res);
     const existing = await postgres.readProductByKey(product.sku || body.sku);
     const db = normalizeDb({ ...(await readDbFast({ skipInventory: true })), inventory: existing ? [existing] : [] });
-    const upserted = upsertInventoryProductFromCatalog(db, product);
+    const upserted = upsertInventoryProductFromCatalog(db, product, {
+      createdBy: String(body.user || "DataPlus").trim() || "DataPlus",
+      createdMethod: "Product import",
+      createdSource: "Source catalog / data dump"
+    });
     if (upserted.item) await postgres.upsertProductsFromState([upserted.item]);
     const summary = await postgres.readOperationalSummary();
     return sendJson(res, 200, { item: upserted.item, summary, existing: upserted.existing, state: publicState({ ...db, inventory: [] }, { lite: true }) });
@@ -26773,7 +26796,11 @@ async function handleApi(req, res) {
     const products = (await postgres.readVendorCatalogItemsBySkus(skus)).map(normalizeCatalogProductForInventory).filter(Boolean);
     const changedItems = [];
     for (const product of products) {
-      const upserted = upsertInventoryProductFromCatalog(db, product);
+      const upserted = upsertInventoryProductFromCatalog(db, product, {
+        createdBy: String(body.user || "DataPlus").trim() || "DataPlus",
+        createdMethod: "Bulk product import",
+        createdSource: "Source catalog / data dump"
+      });
       if (upserted.item) changedItems.push(upserted.item);
     }
     if (changedItems.length) await postgres.upsertProductsFromState(changedItems);
@@ -27265,7 +27292,12 @@ async function handleApi(req, res) {
     const found = new Set(products.map((product) => String(product.sku || "").toLowerCase()));
     const changedItems = [];
     for (const product of products) {
-      const upserted = upsertInventoryProductFromCatalog(db, product);
+      const upserted = upsertInventoryProductFromCatalog(db, product, {
+        createdBy: String(body.user || "DataPlus").trim() || "DataPlus",
+        createdMethod: "CSV product import",
+        createdSource: "CSV product import",
+        createdSourceDetail: String(body.fileName || "source-skus.csv")
+      });
       if (upserted.item) changedItems.push(upserted.item);
     }
     const missing = uniqueSkus.filter((sku) => !found.has(String(sku || "").toLowerCase()));
