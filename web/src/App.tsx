@@ -513,6 +513,7 @@ const catalogSidebarItems: Array<{ label: string; path: string; icon: React.Comp
 const warehouseSidebarItems: Array<{ label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
   { label: "Receiving", path: "/warehouse/receiving", icon: Archive },
   { label: "Warehouse Audits", path: "/warehouse/audits", icon: CheckCircle2 },
+  { label: "Bins", path: "/warehouse/bins", icon: Boxes },
   { label: "Fulfillment", path: "/fulfillment", icon: Truck },
 ]
 
