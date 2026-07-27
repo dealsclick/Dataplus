@@ -4508,14 +4508,27 @@ function workerJobLooksAbandoned(job = {}, workerStatus = {}) {
   if (!isExternalWorkerJob(job)) return false;
   const status = String(job.status || "").toLowerCase();
   if (status !== "running") return false;
-  if (workerStatus.online) return false;
   const updatedMs = Math.max(
     new Date(job.workerLastSeenAt || 0).getTime() || 0,
     new Date(job.updatedAt || 0).getTime() || 0,
     new Date(job.startedAt || 0).getTime() || 0
   );
+  const jobWorkerId = String(job.workerId || "").trim();
+  const currentWorkerId = String(workerStatus.workerId || "").trim();
+  const workerWasReplaced = Boolean(
+    workerStatus.online
+    && jobWorkerId
+    && currentWorkerId
+    && jobWorkerId !== currentWorkerId
+  );
+
+  // A healthy replacement worker cannot finish a job claimed by a previous
+  // worker process. Retire that stale claim promptly so Live activity is true.
+  if (workerStatus.online && !workerWasReplaced) return false;
   if (!updatedMs) return true;
-  const graceSeconds = Math.max(600, Number(workerStatus.staleAfterSeconds || 30) * 4);
+  const graceSeconds = workerWasReplaced
+    ? Math.max(90, Number(workerStatus.staleAfterSeconds || 30) * 3)
+    : Math.max(600, Number(workerStatus.staleAfterSeconds || 30) * 4);
   return Date.now() - updatedMs > graceSeconds * 1000;
 }
 
