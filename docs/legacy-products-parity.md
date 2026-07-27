@@ -10,6 +10,7 @@ Compared the legacy Products workspace in `public/index.html` and `public/app.js
 - Selected rows expose **Review Shopify launch** and **Launch Shopify**.
 - Each product row exposes the same two actions. A discontinued or already-linked product cannot be launched from the row menu.
 - The live action confirms scope and relies on the existing worker readiness checks to skip incomplete, linked, or discontinued SKUs.
+- Named saved views, hazardous/verified-brand filters, created/compliance/Shopify-sync columns, scoped Shopify link reviews, per-SKU status refresh, and filtered/selected CSV export are available in Products.
 
 ## Present in React
 
@@ -23,15 +24,15 @@ Compared the legacy Products workspace in `public/index.html` and `public/app.js
 
 ### Highest priority
 
-1. **Saved filters and table preferences stored per user.** Current density and columns use local browser storage; legacy-style named saved searches are still static presets.
+1. **Server-side saved views.** Saved views currently live in the browser because user-profile persistence is not yet part of the React application.
 2. **Full filter operators.** Add equals/not-equals, contains, empty/not-empty, numeric comparisons and ranges for price, cost, stock, readiness, and dates. Preserve chips and shareable URLs.
-3. **Product export workspace.** React needs the legacy field mapping/profile chooser, selected-versus-filtered scope, async job artifact, and completed-export notice.
+3. **Product export profiles.** The quick CSV export covers selected or filtered products; React still needs the full legacy field-mapping/profile chooser and reusable scheduled exports.
 4. **Import controls from Products.** Restore product CSV import and Shopify status CSV import as routed dialogs with mapping, import mode, validation report, and Jobs link.
-5. **Shopify status sync scope.** Make row, selection, filtered set, and full-catalog sync scope explicit instead of only offering the global operation.
+5. **Shopify status sync scope.** Per-SKU and whole-catalog status refresh exists; add selected/filtered background sync with a detailed report.
 
 ### Important operational parity
 
-6. **Shopify existing-variant link workflow from Products.** Offer dry run and apply for the current filters, with a result report showing the matched parent SKU and variant.
+6. **Shopify existing-variant link reporting.** Selected/filtered dry run and apply are available; deep-link the final report to each matched parent SKU and variant.
 7. **Review results inline.** Shopify/eBay create, link, status, and price jobs should deep-link from a product to the exact report row and resolution reason.
 8. **Readiness filters.** Add missing-field filtering such as no image, no verified main category, no package dimensions, no price, and no taxonomy mapping.
 9. **Row action consistency.** Add open detail, quick view, copy SKU, export one product, sync Shopify status, create marketplace shadow, and inventory detail. Keep mutations inside the action menu.
