@@ -12972,11 +12972,11 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
   job.originalFileName = path.basename(reportPath);
   job.fileName = path.basename(reportPath);
   finishImportJob(job, {
-    status: report.userErrors.length ? "warning" : "success",
+    status: report.userErrors.length || skipped.length ? "warning" : "success",
     phase: "complete",
     message: dryRun
-      ? `Shopify product create dry run prepared ${prepared.length.toLocaleString()} product${prepared.length === 1 ? "" : "s"} and ${report.variantsPrepared.toLocaleString()} variant${report.variantsPrepared === 1 ? "" : "s"}.`
-      : `Shopify product create made ${report.productsCreated.toLocaleString()} product${report.productsCreated === 1 ? "" : "s"} and ${report.variantsCreated.toLocaleString()} variant${report.variantsCreated === 1 ? "" : "s"}.`,
+      ? `Shopify product create dry run prepared ${prepared.length.toLocaleString()} product${prepared.length === 1 ? "" : "s"} and ${report.variantsPrepared.toLocaleString()} variant${report.variantsPrepared === 1 ? "" : "s"}; ${skipped.length.toLocaleString()} skipped.`
+      : `Shopify product create made ${report.productsCreated.toLocaleString()} product${report.productsCreated === 1 ? "" : "s"} and ${report.variantsCreated.toLocaleString()} variant${report.variantsCreated === 1 ? "" : "s"}; ${skipped.length.toLocaleString()} skipped.`,
     details: `${skipped.length.toLocaleString()} product${skipped.length === 1 ? "" : "s"} skipped; ${dryRun ? existingLinked.length.toLocaleString() + " existing Shopify link" + (existingLinked.length === 1 ? "" : "s") + " found" : existingLinked.length.toLocaleString() + " existing Shopify link" + (existingLinked.length === 1 ? "" : "s") + " backfilled"}; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
     totalRows: rawItems.length,
     processedRows: dryRun ? rawItems.length : prepared.length,
