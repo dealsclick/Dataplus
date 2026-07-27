@@ -9117,6 +9117,7 @@ function normalizeWarehouseBin(bin, index = 0) {
     type: String(bin.type || "Storage").trim(),
     section: String(bin.section || "Storage").trim(),
     aisle: String(bin.aisle || "").trim(),
+    nickname: String(bin.nickname || "").trim(),
     isDefault: Boolean(bin.isDefault),
     active: bin.active === undefined ? true : Boolean(bin.active),
     notes: String(bin.notes || "").trim()
@@ -24436,6 +24437,7 @@ async function handleApi(req, res) {
       type: body.type,
       section: body.section,
       aisle: body.aisle,
+      nickname: body.nickname,
       isDefault: body.isDefault,
       active: body.active === undefined ? true : body.active,
       notes: body.notes
@@ -24456,7 +24458,7 @@ async function handleApi(req, res) {
     warehouse.bins = Array.isArray(warehouse.bins) ? warehouse.bins : [];
     const bin = warehouse.bins.find((item) => item.id === parts[4]);
     if (!bin) return notFound(res);
-    for (const field of ["code", "name", "type", "section", "aisle", "notes"]) {
+    for (const field of ["code", "name", "type", "section", "aisle", "nickname", "notes"]) {
       if (body[field] !== undefined) bin[field] = String(body[field] ?? "").trim();
     }
     if (body.active !== undefined) bin.active = Boolean(body.active);
