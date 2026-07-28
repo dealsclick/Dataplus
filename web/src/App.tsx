@@ -7415,6 +7415,7 @@ function SettingsPage({
   const [testingAi, setTestingAi] = useState(false)
   const [aiUsage, setAiUsage] = useState<Record<string, unknown> | null>(null)
   const [loadingAiUsage, setLoadingAiUsage] = useState(false)
+  const [runtime, setRuntime] = useState<Record<string, number> | null>(null)
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const [activeTab, setActiveTab] = useState(requestedTab === "data-sources" ? "data-sources" : "operations")
   const value = (field: string) => draft[field] ?? settings[field]
@@ -7423,6 +7424,13 @@ function SettingsPage({
   const aiKeyField = aiProvider === "google-ai-studio" ? "geminiApiKey" : "openAiApiKey"
   const aiDefaultModel = aiProvider === "google-ai-studio" ? "gemini-3.6-flash" : "gpt-4o-mini"
   const aiKeyConfigured = aiProvider === "google-ai-studio" ? Boolean(settings.geminiApiKeyConfigured) : Boolean(settings.openAiApiKeyConfigured)
+  const productDumpProfile = String(value("productDumpResourceProfile") || "large")
+  const productDumpProfiles: Record<string, { heapMb: number; batchSize: number }> = {
+    conservative: { heapMb: 1024, batchSize: 50 },
+    standard: { heapMb: 2048, batchSize: 100 },
+    large: { heapMb: 3072, batchSize: 100 },
+  }
+  const productDumpResources = productDumpProfiles[productDumpProfile] || productDumpProfiles.large
   const aiToolScopeDefinitions = (Array.isArray(settings.aiToolScopeDefinitions) ? settings.aiToolScopeDefinitions : []) as Array<Record<string, unknown>>
   const aiToolScopes = () => (value("aiToolScopes") && typeof value("aiToolScopes") === "object" ? value("aiToolScopes") as Record<string, unknown> : {})
   const usageNumber = (field: string, period = "thirtyDays") => Number((aiUsage?.[period] as Record<string, unknown> | undefined)?.[field] || 0).toLocaleString()
@@ -7438,6 +7446,9 @@ function SettingsPage({
   }
 
   useEffect(() => { void loadAiUsage() }, [])
+  useEffect(() => {
+    void api<Record<string, number>>("/api/system/runtime").then(setRuntime).catch(() => setRuntime(null))
+  }, [])
 
   function update(field: string, next: unknown) {
     setDraft((current) => ({ ...current, [field]: next }))
@@ -7634,6 +7645,29 @@ function SettingsPage({
         </TabsContent>
         <TabsContent value="email"><Card><CardHeader><CardTitle className="text-base">SMTP delivery</CardTitle><CardDescription>Configure the outbound email transport used for supplier PO reminders. Credentials are stored in system settings and never displayed after save.</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><ToggleField label="Enable SMTP delivery" checked={boolValue("smtpEnabled")} disabled={!editing} onCheckedChange={(next) => update("smtpEnabled", next)} /><ToggleField label="Use TLS / SSL" checked={boolValue("smtpSecure")} disabled={!editing} onCheckedChange={(next) => update("smtpSecure", next)} /><Field label="SMTP host"><Input disabled={!editing} value={String(value("smtpHost") || "")} onChange={(event) => update("smtpHost", event.target.value)} placeholder="smtp.example.com" /></Field><Field label="SMTP port"><Input disabled={!editing} type="number" value={String(value("smtpPort") || 587)} onChange={(event) => update("smtpPort", Number(event.target.value || 587))} /></Field><Field label="Username"><Input disabled={!editing} value={String(value("smtpUsername") || "")} onChange={(event) => update("smtpUsername", event.target.value)} /></Field><Field label="Password"><Input disabled={!editing} type="password" value={String(draft.smtpPassword || "")} onChange={(event) => update("smtpPassword", event.target.value)} placeholder={settings.smtpPasswordConfigured ? "Configured (enter only to replace)" : "SMTP password or app password"} /></Field><Field label="Sender name"><Input disabled={!editing} value={String(value("smtpFromName") || "DataPlus")} onChange={(event) => update("smtpFromName", event.target.value)} /></Field><Field label="Sender email"><Input disabled={!editing} type="email" value={String(value("smtpFromEmail") || "")} onChange={(event) => update("smtpFromEmail", event.target.value)} placeholder="purchasing@yourcompany.com" /></Field><div className="md:col-span-2"><Button type="button" variant="outline" disabled={testingSmtp || !boolValue("smtpEnabled")} onClick={() => void sendSmtpTest()}>{testingSmtp ? <Loader2 className="size-4 animate-spin" /> : <Mail className="size-4" />} Send SMTP test</Button></div></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Overdue reminder schedule</CardTitle><CardDescription>The external worker scans overdue POs once daily and sends only enabled supplier reminders. A PO is never emailed twice on the same day.</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><ToggleField label="Run daily overdue reminder scan" checked={boolValue("smtpReminderScheduleEnabled")} disabled={!editing} onCheckedChange={(next) => update("smtpReminderScheduleEnabled", next)} /><Field label="Daily scan time"><Input disabled={!editing} type="time" value={String(value("smtpReminderScheduleTime") || "08:00")} onChange={(event) => update("smtpReminderScheduleTime", event.target.value)} /></Field></CardContent></Card></TabsContent>
         <TabsContent value="worker">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Datadump import resources</CardTitle>
+              <CardDescription>Safe server-side profiles for the large DataWarehouse product feed. The choice applies to the next run and cannot be changed while a datadump job is active.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+              <Field label="Resource profile">
+                <Select disabled={!editing} value={String(value("productDumpResourceProfile") || "large")} onValueChange={(next) => update("productDumpResourceProfile", next)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="conservative">Conservative - 1 GB / 50 rows</SelectItem>
+                    <SelectItem value="standard">Standard - 2 GB / 100 rows</SelectItem>
+                    <SelectItem value="large">Large datadump - 3 GB / 100 rows</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Detail label="Worker heap limit" value={`${productDumpResources.heapMb / 1024} GB`} />
+              <Detail label="Database batch size" value={`${productDumpResources.batchSize} records`} />
+              <Detail label="Server RAM" value={runtime ? `${(runtime.totalMemoryMb / 1024).toFixed(1)} GB total` : "Checking..."} />
+              <Detail label="Available memory" value={runtime ? `${(runtime.freeMemoryMb / 1024).toFixed(1)} GB available` : "Checking..."} />
+              <p className="text-xs text-muted-foreground md:col-span-2 xl:col-span-5">Large datadump is the recommended profile for this 8 GB Droplet. It reserves headroom for PostgreSQL, Redis, and the web app while allowing full BSON normalization.</p>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Worker health</CardTitle>

@@ -1241,10 +1241,11 @@ async function runVendorFeedImportJob(job) {
 
 async function runProductDumpImportJob(job) {
   const payload = job.workerPayload || {};
+  const resourceProfile = dataplus.productDumpResourceProfile(dataplus.readSystemSettingsStore({}));
   // The production Droplet has 8 GB RAM. Leave headroom for Postgres and the web app
   // while allowing BSON normalization enough working memory for the full supplier dump.
-  const dumpNodeHeapMB = Math.max(1024, Math.min(4096, Number(process.env.PRODUCT_DUMP_NODE_MAX_OLD_SPACE_MB || 3072) || 3072));
-  const dumpBatchSize = Math.max(25, Math.min(250, Number(payload.batchSize || 100) || 100));
+  const dumpNodeHeapMB = Math.max(1024, Math.min(4096, Number(process.env.PRODUCT_DUMP_NODE_MAX_OLD_SPACE_MB || resourceProfile.heapMb || 3072) || 3072));
+  const dumpBatchSize = Math.max(25, Math.min(250, Number(payload.batchSize || resourceProfile.batchSize || 100) || 100));
   const args = ["scripts/import-product-dump.js"];
   if (payload.path) args.push(String(payload.path));
   if (payload.downloadFtp === true) args.push("--ftp");
@@ -1257,7 +1258,7 @@ async function runProductDumpImportJob(job) {
     phase: "importing_product_dump",
     message: payload.postgresOnly === false
       ? "Worker is importing the product dump..."
-      : "Worker is streaming the product dump into PostgreSQL...",
+      : `Worker is streaming the product dump into PostgreSQL using the ${resourceProfile.label} resource profile...`,
     startedAt: job.startedAt || new Date().toISOString()
   });
   const output = [];

@@ -1,6 +1,7 @@
 const http = require("http");
 const https = require("https");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
@@ -797,6 +798,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   backgroundJobsMode: "inline",
   autoDataQualityScanAfterImports: true,
   dataQualityWorkerEnabled: true,
+  productDumpResourceProfile: "large",
   sourceCatalogDefaultImportMode: "new-and-update",
   trueValueSourceCategoryAsMainCategory: true,
   skuChangeTrackedFields: ["cost", "price", "list_price", "qty", "stock_status", "to_be_discontinued", "brand", "mfr_part_number", "vendor_sku", "category", "default_image"],
@@ -856,6 +858,12 @@ const DEFAULT_SYSTEM_SETTINGS = {
     { id: "admin", name: "Admin", permissions: ["catalog", "orders", "channels", "system"] },
     { id: "operator", name: "Operator", permissions: ["catalog", "orders"] }
   ]
+};
+
+const PRODUCT_DUMP_RESOURCE_PROFILES = {
+  conservative: { id: "conservative", label: "Conservative", heapMb: 1024, batchSize: 50, description: "For small servers or when other workloads need priority." },
+  standard: { id: "standard", label: "Standard", heapMb: 2048, batchSize: 100, description: "Balanced throughput and memory use." },
+  large: { id: "large", label: "Large datadump", heapMb: 3072, batchSize: 100, description: "For the 8 GB production server and the full DataWarehouse feed." }
 };
 
 function normalizeVendorFeedSchedule(feed = {}, index = 0) {
@@ -4283,6 +4291,9 @@ function normalizeSystemSettings(settings = {}) {
   if (!["inline", "worker"].includes(String(normalized.backgroundJobsMode || "").toLowerCase())) normalized.backgroundJobsMode = "inline";
   if (!["new-and-update", "new-only", "update-existing"].includes(String(normalized.sourceCatalogDefaultImportMode || "").toLowerCase())) normalized.sourceCatalogDefaultImportMode = "new-and-update";
   normalized.backgroundJobsMode = String(normalized.backgroundJobsMode || "inline").toLowerCase();
+  normalized.productDumpResourceProfile = Object.hasOwn(PRODUCT_DUMP_RESOURCE_PROFILES, String(normalized.productDumpResourceProfile || "").toLowerCase())
+    ? String(normalized.productDumpResourceProfile).toLowerCase()
+    : "large";
   normalized.sourceCatalogDefaultImportMode = String(normalized.sourceCatalogDefaultImportMode || "new-and-update").toLowerCase();
   normalized.shopifyDailyInventoryUpdateEnabled = normalized.shopifyDailyInventoryUpdateEnabled === true || String(normalized.shopifyDailyInventoryUpdateEnabled).toLowerCase() === "true";
   normalized.shopifyDailyInventoryUpdateMode = String(normalized.shopifyDailyInventoryUpdateMode || "dry-run").toLowerCase() === "apply" ? "apply" : "dry-run";
@@ -4359,6 +4370,11 @@ function normalizeSystemSettings(settings = {}) {
   return normalized;
 }
 
+function productDumpResourceProfile(settings = {}) {
+  const normalized = normalizeSystemSettings(settings);
+  return PRODUCT_DUMP_RESOURCE_PROFILES[normalized.productDumpResourceProfile] || PRODUCT_DUMP_RESOURCE_PROFILES.large;
+}
+
 function readSystemSettingsStore(fallback = {}) {
   if (postgres.isPostgresEnabled() && fallback && typeof fallback === "object" && Object.keys(fallback).length) {
     return normalizeSystemSettings(fallback);
@@ -4390,7 +4406,7 @@ function publicSystemSettings(settings = {}) {
   const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
   const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
   const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
-  return { ...normalized, vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
+  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
 }
 
 function hashWarehouseAuditAdminPin(pin, salt) {
@@ -26118,6 +26134,10 @@ async function handleApi(req, res) {
   if (req.method === "PATCH" && url.pathname === "/api/system-settings") {
     const body = await parseBody(req);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (body.productDumpResourceProfile !== undefined && String(body.productDumpResourceProfile || "") !== String(current.productDumpResourceProfile || "")) {
+      const activeImport = (await postgres.readOperationJobs(250)).find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && String(job.workerTask || job.raw?.workerTask || "") === "product-dump-import");
+      if (activeImport) return sendJson(res, 409, { error: `Cannot change the datadump resource profile while Job ${activeImport.id} is active.` });
+    }
     if (body.warehouseAuditAdminPin !== undefined && String(body.warehouseAuditAdminPin || "").trim()) {
       if (!/^\d{4,12}$/.test(String(body.warehouseAuditAdminPin).trim())) return sendJson(res, 400, { error: "Warehouse audit administrator PIN must be 4 to 12 digits." });
       current.warehouseAuditAdminPinSalt = crypto.randomBytes(16).toString("hex");
@@ -26143,6 +26163,15 @@ async function handleApi(req, res) {
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
     return sendJson(res, 200, { systemSettings: publicSystemSettings(systemSettings) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/system/runtime") {
+    return sendJson(res, 200, {
+      totalMemoryMb: Math.round(os.totalmem() / 1024 / 1024),
+      freeMemoryMb: Math.round(os.freemem() / 1024 / 1024),
+      processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      uptimeSeconds: Math.round(process.uptime())
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/user-preferences/table") {
@@ -32883,6 +32912,7 @@ module.exports = {
   readDbFast,
   readExportMappingsApiStore,
   readSystemSettingsStore,
+  productDumpResourceProfile,
   runEbayAccountSettingsSyncWorkerJob,
   runEbayCatalogImportWorkerJob,
   runEbayLocationWorkerJob,
