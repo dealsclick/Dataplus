@@ -1241,8 +1241,9 @@ async function runVendorFeedImportJob(job) {
 
 async function runProductDumpImportJob(job) {
   const payload = job.workerPayload || {};
-  // Keep the import below the 4 GB production Droplet's practical memory ceiling.
-  const dumpNodeHeapMB = Math.max(512, Math.min(1536, Number(process.env.PRODUCT_DUMP_NODE_MAX_OLD_SPACE_MB || 1024) || 1024));
+  // The production Droplet has 8 GB RAM. Leave headroom for Postgres and the web app
+  // while allowing BSON normalization enough working memory for the full supplier dump.
+  const dumpNodeHeapMB = Math.max(1024, Math.min(4096, Number(process.env.PRODUCT_DUMP_NODE_MAX_OLD_SPACE_MB || 3072) || 3072));
   const dumpBatchSize = Math.max(25, Math.min(250, Number(payload.batchSize || 100) || 100));
   const args = ["scripts/import-product-dump.js"];
   if (payload.path) args.push(String(payload.path));
