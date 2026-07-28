@@ -490,7 +490,10 @@ async function checkScheduledVendorFeedImports(force = false) {
   lastVendorFeedScheduleCheckAt = nowMs;
   const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
   const settings = dataplus.readSystemSettingsStore(docs.systemSettings || {});
-  const feeds = Array.isArray(settings.vendorFeedSchedules) ? settings.vendorFeedSchedules : [];
+  const feeds = [
+    ...(Array.isArray(settings.dataSourceFeeds) ? settings.dataSourceFeeds : []),
+    ...(Array.isArray(settings.vendorFeedSchedules) ? settings.vendorFeedSchedules : []).filter((feed) => String(feed.id || "") !== "product-datadump")
+  ];
   const enabledFeeds = feeds.filter((feed) => feed.enabled && feed.transport === "ftp" && ["bson-gzip", "csv"].includes(feed.fileFormat) && feed.ftpHost && feed.ftpUsername && feed.ftpPassword && feed.ftpRemotePath && (feed.fileFormat !== "csv" || feed.mappingProfile));
   if (!enabledFeeds.length) return false;
   const now = new Date(nowMs);

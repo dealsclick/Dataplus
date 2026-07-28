@@ -235,6 +235,7 @@ type Vendor = {
   pricingRules?: Record<string, unknown>
   variationRules?: Record<string, unknown>
   inventoryRules?: Record<string, unknown>
+  sourcePriority?: Record<string, unknown>
   channelRules?: Record<string, unknown>
 }
 
@@ -1286,7 +1287,7 @@ function MetricCard({
   )
 }
 
-function VendorFeedScheduleManager({ vendors, vendor }: { vendors: Vendor[]; vendor?: Vendor }) {
+function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: Vendor[]; vendor?: Vendor; dataSource?: boolean }) {
   const [feeds, setFeeds] = useState<VendorFeedSchedule[]>([])
   const [mappingTemplates, setMappingTemplates] = useState<Array<{ id: string; name: string; mode?: string }>>([])
   const [open, setOpen] = useState(false)
@@ -1295,7 +1296,7 @@ function VendorFeedScheduleManager({ vendors, vendor }: { vendors: Vendor[]; ven
 
   const loadFeeds = async () => {
     try {
-      const result = await api<{ feeds: VendorFeedSchedule[] }>("/api/vendor-feed-schedules")
+      const result = await api<{ feeds: VendorFeedSchedule[] }>(dataSource ? "/api/data-source-feeds" : "/api/vendor-feed-schedules")
       setFeeds(result.feeds || [])
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load vendor feeds.")
@@ -1316,7 +1317,7 @@ function VendorFeedScheduleManager({ vendors, vendor }: { vendors: Vendor[]; ven
       id: "",
       name: "",
       vendorId: vendor?.id || "",
-      vendorName: vendor?.name || "",
+      vendorName: dataSource ? "DataWarehouse" : (vendor?.name || ""),
       enabled: false,
       transport: "ftp",
       ftpPort: 21,
@@ -1339,7 +1340,7 @@ function VendorFeedScheduleManager({ vendors, vendor }: { vendors: Vendor[]; ven
     setSaving(true)
     try {
       const next = draft.id ? feeds.map((feed) => feed.id === draft.id ? draft : feed) : [...feeds, draft]
-      const result = await api<{ feeds: VendorFeedSchedule[] }>("/api/vendor-feed-schedules", { method: "PUT", body: JSON.stringify({ feeds: next }) })
+      const result = await api<{ feeds: VendorFeedSchedule[] }>(dataSource ? "/api/data-source-feeds" : "/api/vendor-feed-schedules", { method: "PUT", body: JSON.stringify({ feeds: next }) })
       setFeeds(result.feeds || [])
       setOpen(false)
       setDraft(null)
@@ -1353,7 +1354,7 @@ function VendorFeedScheduleManager({ vendors, vendor }: { vendors: Vendor[]; ven
 
   const runFeed = async (feed: VendorFeedSchedule) => {
     try {
-      const result = await api<{ message?: string }>(`/api/vendor-feed-schedules/${encodeURIComponent(feed.id)}/run`, { method: "POST" })
+      const result = await api<{ message?: string }>(`${dataSource ? "/api/data-source-feeds" : "/api/vendor-feed-schedules"}/${encodeURIComponent(feed.id)}/run`, { method: "POST" })
       toast.success(result.message || `${feed.name} queued.`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to queue vendor feed.")
@@ -1366,22 +1367,22 @@ function VendorFeedScheduleManager({ vendors, vendor }: { vendors: Vendor[]; ven
     <Card>
       <CardHeader className="border-b py-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div><CardTitle className="text-base">{vendor ? "Source catalog feed" : "Scheduled vendor feeds"}</CardTitle><CardDescription>{vendor ? "This supplier's FTP connection, mapping, and import timing. Jobs runs it automatically after it is enabled." : "A live register of vendor-owned scheduled feeds. Configure a connection from the supplier profile."}</CardDescription></div>
-          {vendor ? <Button size="sm" onClick={openNew}><Database className="size-4" /> Add feed</Button> : null}
+          <div><CardTitle className="text-base">{dataSource ? "Universal data sources" : vendor ? "Source catalog feed" : "Scheduled vendor feeds"}</CardTitle><CardDescription>{dataSource ? "Third-party feeds containing records for many suppliers. DataWarehouse belongs here, not on a vendor profile." : vendor ? "This supplier's FTP connection, mapping, and import timing. Jobs runs it automatically after it is enabled." : "A live register of vendor-owned scheduled feeds. Configure a connection from the supplier profile."}</CardDescription></div>
+          {(vendor || dataSource) ? <Button size="sm" onClick={openNew}><Database className="size-4" /> Add {dataSource ? "source" : "feed"}</Button> : null}
         </div>
       </CardHeader>
       <CardContent className="p-0">
         <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Feed</TableHead><TableHead>Supplier</TableHead><TableHead>Source</TableHead><TableHead>Mapping</TableHead><TableHead>Schedule</TableHead><TableHead>Status</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>
           {visibleFeeds.map((feed) => <TableRow key={feed.id}>
             <TableCell><p className="font-medium">{feed.name}</p><p className="text-xs text-muted-foreground">{feed.lastJobId ? `Last job ${feed.lastJobId.slice(0, 8)}` : "Not run yet"}</p></TableCell>
-            <TableCell>{feed.vendorName || "Unassigned"}</TableCell>
+            <TableCell>{dataSource ? (feed.vendorName || "DataWarehouse") : (feed.vendorName || "Unassigned")}</TableCell>
             <TableCell className="max-w-52 truncate text-sm">{feed.ftpHost ? `FTP ${feed.ftpHost}${feed.ftpRemotePath || ""}` : "Connection not configured"}</TableCell>
             <TableCell className="text-sm">{feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}</TableCell>
             <TableCell className="text-sm">{scheduleDescription(feed.scheduleType, feed.scheduleTimes, feed.scheduleEveryHours, "02:00")}</TableCell>
             <TableCell><Badge variant={feed.enabled ? "default" : "outline"}>{feed.enabled ? "Enabled" : "Disabled"}</Badge></TableCell>
-            <TableCell><div className="flex justify-end gap-2">{vendor ? <><Button size="sm" variant="outline" onClick={() => { setDraft({ ...feed, ftpPassword: "" }); setOpen(true) }}>Edit</Button><Button size="sm" onClick={() => void runFeed(feed)} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run now</Button></> : <Button size="sm" variant="outline" asChild><a href={feed.vendorId ? `/vendors/${encodeURIComponent(feed.vendorId)}` : "/vendors"}>Open supplier</a></Button>}</div></TableCell>
+            <TableCell><div className="flex justify-end gap-2">{(vendor || dataSource) ? <><Button size="sm" variant="outline" onClick={() => { setDraft({ ...feed, ftpPassword: "" }); setOpen(true) }}>Edit</Button><Button size="sm" onClick={() => void runFeed(feed)} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run now</Button></> : <Button size="sm" variant="outline" asChild><a href={feed.vendorId ? `/vendors/${encodeURIComponent(feed.vendorId)}` : "/settings?tab=data-sources"}>{feed.vendorId ? "Open supplier" : "Open source"}</a></Button>}</div></TableCell>
           </TableRow>)}
-          {!visibleFeeds.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">{vendor ? "No feed is configured for this supplier." : "No vendor feeds are scheduled. Open a supplier profile to configure its source-catalog feed."}</TableCell></TableRow>}
+          {!visibleFeeds.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">{dataSource ? "No universal source is configured." : vendor ? "No feed is configured for this supplier." : "No vendor feeds are scheduled. Open a supplier profile to configure its source-catalog feed."}</TableCell></TableRow>}
         </TableBody></Table></div>
       </CardContent>
 
@@ -1390,7 +1391,7 @@ function VendorFeedScheduleManager({ vendors, vendor }: { vendors: Vendor[]; ven
           <DialogHeader><DialogTitle>{draft?.id ? "Edit vendor feed" : "Add vendor feed"}</DialogTitle><DialogDescription>FTP credentials are stored server-side. Leave the password blank to keep the saved password.</DialogDescription></DialogHeader>
           {draft && <div className="grid gap-4 py-2 md:grid-cols-2">
             <div className="grid gap-2"><Label>Feed name</Label><Input value={draft.name} onChange={(event) => setDraftValue("name", event.target.value)} placeholder="Product datadump" /></div>
-            {vendor ? <div className="grid gap-2"><Label>Supplier</Label><Input value={vendor.name} disabled /></div> : <div className="grid gap-2"><Label>Supplier</Label><Select value={draft.vendorId || "none"} onValueChange={(value) => { const selectedVendor = vendors.find((item) => item.id === value); setDraft((current) => current ? { ...current, vendorId: value === "none" ? "" : value, vendorName: value === "none" ? "" : selectedVendor?.name || "" } : current) }}><SelectTrigger><SelectValue placeholder="Select supplier" /></SelectTrigger><SelectContent><SelectItem value="none">No supplier selected</SelectItem>{vendors.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>}
+            {dataSource ? <div className="grid gap-2"><Label>Source name</Label><Input value={draft.vendorName || "DataWarehouse"} onChange={(event) => setDraftValue("vendorName", event.target.value)} /></div> : vendor ? <div className="grid gap-2"><Label>Supplier</Label><Input value={vendor.name} disabled /></div> : <div className="grid gap-2"><Label>Supplier</Label><Select value={draft.vendorId || "none"} onValueChange={(value) => { const selectedVendor = vendors.find((item) => item.id === value); setDraft((current) => current ? { ...current, vendorId: value === "none" ? "" : value, vendorName: value === "none" ? "" : selectedVendor?.name || "" } : current) }}><SelectTrigger><SelectValue placeholder="Select supplier" /></SelectTrigger><SelectContent><SelectItem value="none">No supplier selected</SelectItem>{vendors.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>}
             <div className="grid gap-2"><Label>FTP host</Label><Input value={draft.ftpHost || ""} onChange={(event) => setDraftValue("ftpHost", event.target.value)} placeholder="ftp.vendor.com" /></div>
             <div className="grid gap-2"><Label>FTP port</Label><Input type="number" value={draft.ftpPort || 21} onChange={(event) => setDraftValue("ftpPort", Number(event.target.value || 21))} /></div>
             <div className="grid gap-2"><Label>FTP username</Label><Input value={draft.ftpUsername || ""} onChange={(event) => setDraftValue("ftpUsername", event.target.value)} /></div>
@@ -1562,6 +1563,7 @@ function JobsPage({
         </div>
 
         <TabsContent value="scheduled" className="mt-4">
+          <div className="mb-4"><VendorFeedScheduleManager vendors={[]} dataSource /></div>
           <div className="mb-4"><VendorFeedScheduleManager vendors={vendors} /></div>
           <Card>
             <CardHeader className="border-b py-3"><CardTitle className="text-base">Scheduled task register</CardTitle><CardDescription>One place to see every automated workflow, including manual-only jobs that are not yet scheduled.</CardDescription></CardHeader>
@@ -6857,6 +6859,7 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
   const pricingRules = vendor.pricingRules || {}
   const variationRules = vendor.variationRules || {}
   const purchaseOrderRules = (vendor as Vendor & { purchaseOrderRules?: Record<string, unknown> }).purchaseOrderRules || {}
+  const sourcePriority = vendor.sourcePriority || {}
 
   return (
     <div className="grid gap-4">
@@ -6978,7 +6981,17 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
           </div>
         </TabsContent>
         <TabsContent value="data-feed">
-          <VendorFeedScheduleManager vendors={[vendor]} vendor={vendor} />
+          <div className="grid gap-4">
+            <Card>
+              <CardHeader><CardTitle className="text-base">Source precedence</CardTitle><CardDescription>When this supplier has a direct feed, decide whether it overrides the universal DataWarehouse import for this supplier's records.</CardDescription></CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2">
+                <ToggleField label="Prefer direct vendor feed" checked={Boolean(draft["sourcePriority.directFeedPriorityEnabled"] ?? sourcePriority.directFeedPriorityEnabled)} disabled={!editing} onCheckedChange={(next) => update("sourcePriority.directFeedPriorityEnabled", next)} />
+                <Field label="When enabled"><Input disabled value="Direct vendor FTP takes precedence over DataWarehouse" /></Field>
+                <Field label="Priority note"><Input disabled={!editing} value={String(draft["sourcePriority.note"] ?? sourcePriority.note ?? "")} onChange={(event) => update("sourcePriority.note", event.target.value)} placeholder="Optional instruction for buyers or data operations" /></Field>
+              </CardContent>
+            </Card>
+            <VendorFeedScheduleManager vendors={[vendor]} vendor={vendor} />
+          </div>
         </TabsContent>
         <TabsContent value="categories">
           <Card>
@@ -7293,6 +7306,8 @@ function SettingsPage({
   const [testingAi, setTestingAi] = useState(false)
   const [aiUsage, setAiUsage] = useState<Record<string, unknown> | null>(null)
   const [loadingAiUsage, setLoadingAiUsage] = useState(false)
+  const requestedTab = new URLSearchParams(window.location.search).get("tab")
+  const [activeTab, setActiveTab] = useState(requestedTab === "data-sources" ? "data-sources" : "operations")
   const value = (field: string) => draft[field] ?? settings[field]
   const boolValue = (field: string) => Boolean(value(field))
   const aiProvider = String(value("aiProvider") || "openai") === "google-ai-studio" ? "google-ai-studio" : "openai"
@@ -7379,12 +7394,13 @@ function SettingsPage({
         ) : <Button onClick={() => setEditing(true)}>Edit</Button>}
       />
 
-      <Tabs defaultValue="operations">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="flex flex-wrap">
           <TabsTrigger value="operations">Operations</TabsTrigger>
           <TabsTrigger value="worker">Worker</TabsTrigger>
           <TabsTrigger value="backups">Backups</TabsTrigger>
           <TabsTrigger value="catalog">Catalog</TabsTrigger>
+          <TabsTrigger value="data-sources">Data sources</TabsTrigger>
           <TabsTrigger value="barcode">Barcode lookups</TabsTrigger>
           <TabsTrigger value="ai">AI integration</TabsTrigger>
           <TabsTrigger value="email">Email</TabsTrigger>
@@ -7421,6 +7437,7 @@ function SettingsPage({
             </CardContent>
           </Card>
         </TabsContent>
+        <TabsContent value="data-sources"><VendorFeedScheduleManager vendors={[]} dataSource /></TabsContent>
         <TabsContent value="barcode"><Card><CardHeader><CardTitle className="text-base">External barcode enrichment</CardTitle><CardDescription>DataPlus always searches the local catalog first. Enable this only when an unknown UPC may be sent to Open Food Facts for basic enrichment; it is not used for matching known catalog SKUs.</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><ToggleField label="Enable Open Food Facts for unknown UPCs" checked={boolValue("openFoodFactsLookupEnabled")} disabled={!editing} onCheckedChange={(next) => update("openFoodFactsLookupEnabled", next)} /><Field label="Open Food Facts API base URL"><Input disabled={!editing} value={String(value("openFoodFactsApiBaseUrl") || "https://world.openfoodfacts.org/api/v3")} onChange={(event) => update("openFoodFactsApiBaseUrl", event.target.value)} /></Field></CardContent></Card></TabsContent>
         <TabsContent value="ai" className="grid gap-4">
           <Card>
