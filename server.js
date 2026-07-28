@@ -807,6 +807,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   shopifyDailyInventoryUpdateTime: "06:00",
   shopifyDailyInventoryUpdateMode: "dry-run",
   shopifyDailyInventoryRequireSuccessfulDump: true,
+  vendorFeedSchedules: [],
   requireAdminConfirmationForDeletes: true,
   warehouseAuditAdminPinHash: "",
   warehouseAuditAdminPinSalt: "",
@@ -854,6 +855,39 @@ const DEFAULT_SYSTEM_SETTINGS = {
     { id: "operator", name: "Operator", permissions: ["catalog", "orders"] }
   ]
 };
+
+function normalizeVendorFeedSchedule(feed = {}, index = 0) {
+  const scheduleType = String(feed.scheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
+  const fileFormat = String(feed.fileFormat || "bson-gzip").toLowerCase();
+  return {
+    id: String(feed.id || crypto.randomUUID()),
+    name: sourceTextValue(feed.name || `Vendor feed ${index + 1}`),
+    vendorId: sourceTextValue(feed.vendorId || ""),
+    vendorName: sourceTextValue(feed.vendorName || ""),
+    enabled: feed.enabled === true || String(feed.enabled || "").toLowerCase() === "true",
+    transport: "ftp",
+    ftpHost: sourceTextValue(feed.ftpHost || ""),
+    ftpPort: Math.max(1, Math.min(65535, Number(feed.ftpPort || 21) || 21)),
+    ftpUsername: sourceTextValue(feed.ftpUsername || ""),
+    ftpPassword: String(feed.ftpPassword || ""),
+    ftpRemotePath: sourceTextValue(feed.ftpRemotePath || ""),
+    fileFormat: ["bson-gzip", "csv"].includes(fileFormat) ? fileFormat : "bson-gzip",
+    importTarget: sourceTextValue(feed.importTarget || "source-catalog") || "source-catalog",
+    mappingProfile: sourceTextValue(feed.mappingProfile || "source-catalog-standard") || "source-catalog-standard",
+    scheduleType,
+    scheduleTimes: [...new Set(String(feed.scheduleTimes || "02:00").split(/[,;\s]+/).map((value) => value.trim()).filter((value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value)))].join(",") || "02:00",
+    scheduleEveryHours: Math.max(1, Math.min(24, Number(feed.scheduleEveryHours || 24) || 24)),
+    lastQueuedAt: sourceTextValue(feed.lastQueuedAt || ""),
+    lastJobId: sourceTextValue(feed.lastJobId || ""),
+    createdAt: sourceTextValue(feed.createdAt || new Date().toISOString()),
+    updatedAt: sourceTextValue(feed.updatedAt || new Date().toISOString())
+  };
+}
+
+function publicVendorFeedSchedule(feed = {}) {
+  const normalized = normalizeVendorFeedSchedule(feed);
+  return { ...normalized, ftpPassword: "", ftpPasswordConfigured: Boolean(normalized.ftpPassword) };
+}
 
 const UOM_DEFINITIONS = {
   EA: "Each",
@@ -4202,6 +4236,9 @@ async function writeExportMappingsStore(exportMappings = []) {
 
 function normalizeSystemSettings(settings = {}) {
   const normalized = { ...DEFAULT_SYSTEM_SETTINGS, ...(settings && typeof settings === "object" ? settings : {}) };
+  normalized.vendorFeedSchedules = (Array.isArray(normalized.vendorFeedSchedules) ? normalized.vendorFeedSchedules : [])
+    .map((feed, index) => normalizeVendorFeedSchedule(feed, index))
+    .filter((feed) => feed.name);
   if (settings.backgroundJobsMode === undefined && process.env.DATAPLUS_BACKGROUND_JOBS_MODE) normalized.backgroundJobsMode = process.env.DATAPLUS_BACKGROUND_JOBS_MODE;
   if (settings.backupIncludeSourceCatalog === undefined && process.env.DATAPLUS_BACKUP_INCLUDE_SOURCE_CATALOG) normalized.backupIncludeSourceCatalog = ["1", "true", "yes"].includes(String(process.env.DATAPLUS_BACKUP_INCLUDE_SOURCE_CATALOG).toLowerCase());
   if (settings.backupRetentionDays === undefined && process.env.DATAPLUS_BACKUP_RETENTION_DAYS) normalized.backupRetentionDays = Number(process.env.DATAPLUS_BACKUP_RETENTION_DAYS || 30);
@@ -4317,7 +4354,7 @@ function publicSystemSettings(settings = {}) {
   const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
   const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
   const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
-  return { ...normalized, aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
+  return { ...normalized, vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
 }
 
 function hashWarehouseAuditAdminPin(pin, salt) {
@@ -10563,6 +10600,52 @@ function createImportJob(db, attrs = {}) {
   db.importJobs.unshift(job);
   db.importJobs = db.importJobs.slice(0, IMPORT_JOB_HISTORY_LIMIT);
   upsertImportJobStore(job);
+  return job;
+}
+
+function vendorFeedLocalPath(feed = {}) {
+  const safeId = String(feed.id || "vendor-feed").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "vendor-feed";
+  const extension = String(feed.fileFormat || "").toLowerCase() === "bson-gzip" ? ".bson.gz" : ".dat";
+  return path.join(DATA_DIR, "imports", "vendor-feeds", `${safeId}${extension}`);
+}
+
+function queueVendorFeedImportJob(db = {}, feed = {}, options = {}) {
+  const normalizedFeed = normalizeVendorFeedSchedule(feed);
+  const localPath = vendorFeedLocalPath(normalizedFeed);
+  const scheduled = options.scheduled === true;
+  const job = createImportJob(db, {
+    section: "Source Catalog",
+    category: "Vendor feed",
+    operation: `${scheduled ? "Scheduled " : ""}${normalizedFeed.name} import`,
+    direction: "import",
+    status: "queued",
+    fileName: path.basename(normalizedFeed.ftpRemotePath || localPath),
+    originalFileName: path.basename(normalizedFeed.ftpRemotePath || localPath),
+    totalRows: 0,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: normalizedFeed.fileFormat === "csv" ? "vendor-feed-import" : "product-dump-import",
+    workerPayload: {
+      path: localPath,
+      downloadFtp: true,
+      ftpHost: normalizedFeed.ftpHost,
+      ftpPort: normalizedFeed.ftpPort,
+      ftpUsername: normalizedFeed.ftpUsername,
+      ftpPassword: normalizedFeed.ftpPassword,
+      ftpRemotePath: normalizedFeed.ftpRemotePath,
+      feedId: normalizedFeed.id,
+      vendorId: normalizedFeed.vendorId,
+      vendorName: normalizedFeed.vendorName,
+      fileFormat: normalizedFeed.fileFormat,
+      importTarget: normalizedFeed.importTarget,
+      mappingProfile: normalizedFeed.mappingProfile,
+      templateId: normalizedFeed.mappingProfile,
+      postgresOnly: true,
+      batchSize: 5000
+    },
+    message: `${scheduled ? "Scheduled" : "Manual"} FTP import queued for ${normalizedFeed.name}.`
+  });
   return job;
 }
 
@@ -25769,6 +25852,53 @@ async function handleApi(req, res) {
       queued: true,
       job: { id: jobId, status: "queued" }
     });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/vendor-feed-schedules") {
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const vendorsById = new Map((db.vendors || []).map((vendor) => [String(vendor.id || ""), vendor]));
+    return sendJson(res, 200, {
+      feeds: settings.vendorFeedSchedules.map((feed) => {
+        const vendor = vendorsById.get(String(feed.vendorId || ""));
+        return publicVendorFeedSchedule({ ...feed, vendorName: feed.vendorName || vendor?.name || "" });
+      })
+    });
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/vendor-feed-schedules") {
+    const body = await parseBody(req);
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const existingById = new Map((current.vendorFeedSchedules || []).map((feed) => [String(feed.id || ""), feed]));
+    const submitted = Array.isArray(body.feeds) ? body.feeds.slice(0, 100) : [];
+    const feeds = submitted.map((candidate, index) => {
+      const existing = existingById.get(String(candidate?.id || "")) || {};
+      const merged = { ...existing, ...(candidate || {}) };
+      if (!String(candidate?.ftpPassword || "").trim()) merged.ftpPassword = existing.ftpPassword || "";
+      return normalizeVendorFeedSchedule({ ...merged, updatedAt: new Date().toISOString() }, index);
+    });
+    current.vendorFeedSchedules = feeds;
+    const systemSettings = writeSystemSettingsStore(current);
+    publicStateJsonCache = null;
+    if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    return sendJson(res, 200, { feeds: feeds.map(publicVendorFeedSchedule) });
+  }
+
+  const vendorFeedRunMatch = url.pathname.match(/^\/api\/vendor-feed-schedules\/([^/]+)\/run$/);
+  if (req.method === "POST" && vendorFeedRunMatch && postgres.isPostgresEnabled()) {
+    const feedId = decodeURIComponent(vendorFeedRunMatch[1] || "");
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const feed = (settings.vendorFeedSchedules || []).find((candidate) => String(candidate.id || "") === feedId);
+    if (!feed) return notFound(res);
+    if (!["bson-gzip", "csv"].includes(feed.fileFormat)) return sendJson(res, 400, { error: "Select a supported vendor file format before running this feed." });
+    if (feed.fileFormat === "csv" && !feed.mappingProfile) return sendJson(res, 400, { error: "Select a CSV import mapping before running this feed." });
+    if (!feed.ftpHost || !feed.ftpUsername || !feed.ftpPassword || !feed.ftpRemotePath) return sendJson(res, 400, { error: "Complete the FTP host, username, password, and remote file path before running this feed." });
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const existingJobs = await postgres.readOperationJobs(500).catch(() => []) || [];
+    const duplicate = existingJobs.find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && ["product-dump-import", "vendor-feed-import"].includes(String(job.workerTask || "")) && String(job.workerPayload?.feedId || "") === feed.id);
+    if (duplicate) return sendJson(res, 200, { queued: true, duplicate: true, job: normalizeImportJob(duplicate), message: `${feed.name} is already queued or running.` });
+    const job = queueVendorFeedImportJob(db, feed);
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/system-settings/smtp-test") {

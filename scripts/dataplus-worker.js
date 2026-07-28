@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
+const ftp = require("basic-ftp");
 const ROOT = path.join(__dirname, "..");
 const ENV_FILE = path.join(ROOT, ".env");
 const DATA_DIR = path.join(ROOT, "data");
@@ -53,13 +54,15 @@ const SUPPORTED_TASKS = [
   "ebay-catalog-sync",
   "ebay-account-settings-sync",
   "ebay-location-sync",
-  "product-dump-import"
+  "product-dump-import",
+  "vendor-feed-import"
 ];
 let lastHeartbeatAt = 0;
 let lastScheduleCheckAt = 0;
 let lastSkuMapScheduleCheckAt = 0;
 let lastOrderImportScheduleCheckAt = 0;
 let lastSupplierReminderScheduleCheckAt = 0;
+let lastVendorFeedScheduleCheckAt = 0;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -472,6 +475,85 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
     }
   }
   await postgres.writeStateDocuments({ channelInventorySchedules: scheduleState });
+  return queued;
+}
+
+function vendorFeedLocalPath(feed = {}) {
+  const safeId = String(feed.id || "vendor-feed").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "vendor-feed";
+  const extension = String(feed.fileFormat || "").toLowerCase() === "csv" ? ".csv" : ".bson.gz";
+  return path.join(DATA_DIR, "imports", "vendor-feeds", `${safeId}${extension}`);
+}
+
+async function checkScheduledVendorFeedImports(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastVendorFeedScheduleCheckAt < 60000) return false;
+  lastVendorFeedScheduleCheckAt = nowMs;
+  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const settings = dataplus.readSystemSettingsStore(docs.systemSettings || {});
+  const feeds = Array.isArray(settings.vendorFeedSchedules) ? settings.vendorFeedSchedules : [];
+  const enabledFeeds = feeds.filter((feed) => feed.enabled && feed.transport === "ftp" && ["bson-gzip", "csv"].includes(feed.fileFormat) && feed.ftpHost && feed.ftpUsername && feed.ftpPassword && feed.ftpRemotePath && (feed.fileFormat !== "csv" || feed.mappingProfile));
+  if (!enabledFeeds.length) return false;
+  const now = new Date(nowMs);
+  const today = localDateKey(now);
+  const scheduleState = docs.vendorFeedSchedules && typeof docs.vendorFeedSchedules === "object" ? docs.vendorFeedSchedules : {};
+  const jobs = await postgres.readOperationJobs(500).catch(() => []) || [];
+  let queued = false;
+  for (const feed of enabledFeeds) {
+    const slot = dueScheduleSlot(feed, "schedule", now);
+    if (!slot) continue;
+    const stateKey = `${feed.id}:${today}:${slot}`;
+    const previous = scheduleState[stateKey] || {};
+    if (previous.lastQueuedDate === today) continue;
+    const duplicate = jobs.find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase())
+      && ["product-dump-import", "vendor-feed-import"].includes(String(job.workerTask || ""))
+      && String(job.workerPayload?.feedId || "") === String(feed.id || ""));
+    if (duplicate) {
+      scheduleState[stateKey] = { ...previous, lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastJobId: duplicate.id, lastSkipReason: "An import for this vendor feed is already active." };
+      continue;
+    }
+    const localPath = vendorFeedLocalPath(feed);
+    const job = {
+      id: crypto.randomUUID(),
+      section: "Source Catalog",
+      category: "Vendor feed",
+      operation: `Scheduled ${feed.name} import`,
+      direction: "import",
+      status: "queued",
+      fileName: path.basename(feed.ftpRemotePath || localPath),
+      originalFileName: path.basename(feed.ftpRemotePath || localPath),
+      totalRows: 0,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      workerTask: feed.fileFormat === "csv" ? "vendor-feed-import" : "product-dump-import",
+      workerPayload: {
+        path: localPath,
+        downloadFtp: true,
+        ftpHost: feed.ftpHost,
+        ftpPort: Number(feed.ftpPort || 21),
+        ftpUsername: feed.ftpUsername,
+        ftpPassword: feed.ftpPassword,
+        ftpRemotePath: feed.ftpRemotePath,
+        feedId: feed.id,
+        vendorId: feed.vendorId || "",
+        vendorName: feed.vendorName || "",
+        fileFormat: feed.fileFormat,
+        importTarget: feed.importTarget || "source-catalog",
+        mappingProfile: feed.mappingProfile || "source-catalog-standard",
+        templateId: feed.mappingProfile || "",
+        postgresOnly: true,
+        batchSize: 5000
+      },
+      message: `Scheduled FTP import queued for ${feed.name}.`,
+      createdAt: new Date(nowMs).toISOString(),
+      updatedAt: new Date(nowMs).toISOString()
+    };
+    await postgres.upsertOperationJob(job);
+    scheduleState[stateKey] = { ...previous, lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastJobId: job.id, lastSkipReason: "" };
+    queued = true;
+    console.log(`[${WORKER_ID}] queued scheduled vendor feed ${feed.name} (${job.id})`);
+  }
+  await postgres.writeStateDocuments({ vendorFeedSchedules: scheduleState });
   return queued;
 }
 
@@ -1113,10 +1195,52 @@ async function runEbayLocationSyncJob(job) {
   return dataplus.runEbayLocationWorkerJob(job, job.workerPayload || {});
 }
 
+async function downloadVendorFeedFile(payload = {}) {
+  const destination = String(payload.path || "").trim();
+  if (!destination) throw new Error("Vendor feed download path is missing.");
+  if (!payload.ftpHost || !payload.ftpUsername || !payload.ftpPassword || !payload.ftpRemotePath) throw new Error("Vendor feed FTP credentials or remote path are incomplete.");
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const client = new ftp.Client(30000);
+  client.ftp.verbose = false;
+  try {
+    await client.access({
+      host: String(payload.ftpHost),
+      port: Number(payload.ftpPort || 21),
+      user: String(payload.ftpUsername),
+      password: String(payload.ftpPassword),
+      secure: false
+    });
+    await client.downloadTo(destination, String(payload.ftpRemotePath));
+  } finally {
+    client.close();
+  }
+  return destination;
+}
+
+async function runVendorFeedImportJob(job) {
+  const payload = job.workerPayload || {};
+  let current = await persistJob(job, {
+    status: "running",
+    phase: "downloading_vendor_feed",
+    message: `Downloading ${payload.vendorName || "vendor"} CSV feed from FTP...`,
+    startedAt: job.startedAt || new Date().toISOString()
+  });
+  const downloadedPath = await downloadVendorFeedFile(payload);
+  current = await persistJob(current, {
+    status: "running",
+    phase: "mapping_vendor_feed",
+    message: `Downloaded ${path.basename(downloadedPath)}. Applying ${payload.mappingProfile || "saved"} mapping...`,
+    originalFilePath: downloadedPath,
+    workerPayload: { ...payload, originalFilePath: downloadedPath, templateId: payload.templateId || payload.mappingProfile }
+  });
+  return dataplus.runMappedProductImportWorkerJob(current);
+}
+
 async function runProductDumpImportJob(job) {
   const payload = job.workerPayload || {};
   const args = ["scripts/import-product-dump.js"];
   if (payload.path) args.push(String(payload.path));
+  if (payload.downloadFtp === true) args.push("--ftp");
   args.push("--job-id", String(job.id));
   if (payload.postgresOnly !== false) args.push("--postgres-only");
   if (Number(payload.limit || 0) > 0) args.push("--limit", String(Number(payload.limit || 0)));
@@ -1139,6 +1263,13 @@ async function runProductDumpImportJob(job) {
       cwd: ROOT,
       env: {
         ...process.env,
+        ...(payload.downloadFtp === true ? {
+          PRODUCT_DUMP_FTP_HOST: String(payload.ftpHost || ""),
+          PRODUCT_DUMP_FTP_PORT: String(payload.ftpPort || 21),
+          PRODUCT_DUMP_FTP_USER: String(payload.ftpUsername || ""),
+          PRODUCT_DUMP_FTP_PASSWORD: String(payload.ftpPassword || ""),
+          PRODUCT_DUMP_FTP_REMOTE_PATH: String(payload.ftpRemotePath || "")
+        } : {}),
         NODE_OPTIONS: process.env.NODE_OPTIONS || "--max-old-space-size=16384"
       },
       windowsHide: true
@@ -1244,6 +1375,7 @@ async function runJob(job) {
   if (task === "ebay-catalog-sync") return runEbayCatalogSyncJob(job);
   if (task === "ebay-account-settings-sync") return runEbayAccountSettingsSyncJob(job);
   if (task === "ebay-location-sync") return runEbayLocationSyncJob(job);
+  if (task === "vendor-feed-import") return runVendorFeedImportJob(job);
   if (task === "product-dump-import") return runProductDumpImportJob(job);
   await persistJob(job, {
     status: "failed",
@@ -1258,6 +1390,7 @@ async function runJob(job) {
 
 async function tick() {
   await writeHeartbeat("idle");
+  await checkScheduledVendorFeedImports();
   await checkScheduledShopifyInventoryUpdate();
   await checkScheduledShopifySkuPairAudit();
   await checkScheduledShopifyOrderImport();

@@ -254,6 +254,29 @@ type SystemSettings = {
   [key: string]: unknown
 }
 
+type VendorFeedSchedule = {
+  id: string
+  name: string
+  vendorId?: string
+  vendorName?: string
+  enabled?: boolean
+  transport?: string
+  ftpHost?: string
+  ftpPort?: number
+  ftpUsername?: string
+  ftpPassword?: string
+  ftpPasswordConfigured?: boolean
+  ftpRemotePath?: string
+  fileFormat?: string
+  importTarget?: string
+  mappingProfile?: string
+  scheduleType?: string
+  scheduleTimes?: string
+  scheduleEveryHours?: number
+  lastQueuedAt?: string
+  lastJobId?: string
+}
+
 type LiteState = {
   connections?: ChannelConnection[]
   vendors?: Vendor[]
@@ -1063,6 +1086,7 @@ function App() {
                     activeJobs={activeJobs}
                     workerStatus={workerStatus}
                     channels={state.connections || []}
+                    vendors={state.vendors || []}
                     systemSettings={state.systemSettings || {}}
                     totalJobs={jobPageMeta.total}
                     page={jobPageMeta.page}
@@ -1248,7 +1272,7 @@ function MetricCard({
   icon: React.ComponentType<{ className?: string }>
 }) {
   return (
-    <Card>
+    <Card id="vendor-feed-schedules">
       <CardContent className="flex items-center justify-between gap-4 p-4">
         <div>
           <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{label}</p>
@@ -1262,11 +1286,134 @@ function MetricCard({
   )
 }
 
+function VendorFeedScheduleManager({ vendors }: { vendors: Vendor[] }) {
+  const [feeds, setFeeds] = useState<VendorFeedSchedule[]>([])
+  const [mappingTemplates, setMappingTemplates] = useState<Array<{ id: string; name: string; mode?: string }>>([])
+  const [open, setOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [draft, setDraft] = useState<VendorFeedSchedule | null>(null)
+
+  const loadFeeds = async () => {
+    try {
+      const result = await api<{ feeds: VendorFeedSchedule[] }>("/api/vendor-feed-schedules")
+      setFeeds(result.feeds || [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load vendor feeds.")
+    }
+  }
+
+  useEffect(() => {
+    void loadFeeds()
+    void api<{ exportMappings: Array<{ id: string; name: string; mode?: string }> }>("/api/export-mappings")
+      .then((result) => setMappingTemplates((result.exportMappings || []).filter((template) => ["import", "both"].includes(String(template.mode || "both").toLowerCase()))))
+      .catch(() => setMappingTemplates([]))
+  }, [])
+
+  const openNew = () => {
+    setDraft({
+      id: "",
+      name: "",
+      vendorId: "",
+      vendorName: "",
+      enabled: false,
+      transport: "ftp",
+      ftpPort: 21,
+      ftpHost: "",
+      ftpUsername: "",
+      ftpPassword: "",
+      ftpRemotePath: "",
+      fileFormat: "bson-gzip",
+      importTarget: "source-catalog",
+      mappingProfile: "source-catalog-standard",
+      scheduleType: "times",
+      scheduleTimes: "02:00",
+      scheduleEveryHours: 24,
+    })
+    setOpen(true)
+  }
+
+  const saveDraft = async () => {
+    if (!draft?.name?.trim()) return toast.error("Enter a name for this vendor feed.")
+    setSaving(true)
+    try {
+      const next = draft.id ? feeds.map((feed) => feed.id === draft.id ? draft : feed) : [...feeds, draft]
+      const result = await api<{ feeds: VendorFeedSchedule[] }>("/api/vendor-feed-schedules", { method: "PUT", body: JSON.stringify({ feeds: next }) })
+      setFeeds(result.feeds || [])
+      setOpen(false)
+      setDraft(null)
+      toast.success("Vendor feed saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save vendor feed.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const runFeed = async (feed: VendorFeedSchedule) => {
+    try {
+      const result = await api<{ message?: string }>(`/api/vendor-feed-schedules/${encodeURIComponent(feed.id)}/run`, { method: "POST" })
+      toast.success(result.message || `${feed.name} queued.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue vendor feed.")
+    }
+  }
+
+  const setDraftValue = (field: keyof VendorFeedSchedule, value: unknown) => setDraft((current) => current ? { ...current, [field]: value } : current)
+
+  return (
+    <Card>
+      <CardHeader className="border-b py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div><CardTitle className="text-base">Vendor FTP feeds</CardTitle><CardDescription>Connect supplier files once, choose their DataPlus mapping, then run on demand or automatically.</CardDescription></div>
+          <Button size="sm" onClick={openNew}><Database className="size-4" /> Add vendor feed</Button>
+        </div>
+      </CardHeader>
+      <CardContent className="p-0">
+        <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Feed</TableHead><TableHead>Supplier</TableHead><TableHead>Source</TableHead><TableHead>Mapping</TableHead><TableHead>Schedule</TableHead><TableHead>Status</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>
+          {feeds.map((feed) => <TableRow key={feed.id}>
+            <TableCell><p className="font-medium">{feed.name}</p><p className="text-xs text-muted-foreground">{feed.lastJobId ? `Last job ${feed.lastJobId.slice(0, 8)}` : "Not run yet"}</p></TableCell>
+            <TableCell>{feed.vendorName || "Unassigned"}</TableCell>
+            <TableCell className="max-w-52 truncate text-sm">{feed.ftpHost ? `FTP ${feed.ftpHost}${feed.ftpRemotePath || ""}` : "Connection not configured"}</TableCell>
+            <TableCell className="text-sm">{feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}</TableCell>
+            <TableCell className="text-sm">{scheduleDescription(feed.scheduleType, feed.scheduleTimes, feed.scheduleEveryHours, "02:00")}</TableCell>
+            <TableCell><Badge variant={feed.enabled ? "default" : "outline"}>{feed.enabled ? "Enabled" : "Disabled"}</Badge></TableCell>
+            <TableCell><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => { setDraft({ ...feed, ftpPassword: "" }); setOpen(true) }}>Edit</Button><Button size="sm" onClick={() => void runFeed(feed)} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run now</Button></div></TableCell>
+          </TableRow>)}
+          {!feeds.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No vendor FTP feeds are configured. Add the product datadump here to give it a run button and schedule.</TableCell></TableRow>}
+        </TableBody></Table></div>
+      </CardContent>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader><DialogTitle>{draft?.id ? "Edit vendor feed" : "Add vendor feed"}</DialogTitle><DialogDescription>FTP credentials are stored server-side. Leave the password blank to keep the saved password.</DialogDescription></DialogHeader>
+          {draft && <div className="grid gap-4 py-2 md:grid-cols-2">
+            <div className="grid gap-2"><Label>Feed name</Label><Input value={draft.name} onChange={(event) => setDraftValue("name", event.target.value)} placeholder="True Value product datadump" /></div>
+            <div className="grid gap-2"><Label>Supplier</Label><Select value={draft.vendorId || "none"} onValueChange={(value) => { const vendor = vendors.find((item) => item.id === value); setDraft((current) => current ? { ...current, vendorId: value === "none" ? "" : value, vendorName: value === "none" ? "" : vendor?.name || "" } : current) }}><SelectTrigger><SelectValue placeholder="Select supplier" /></SelectTrigger><SelectContent><SelectItem value="none">No supplier selected</SelectItem>{vendors.map((vendor) => <SelectItem key={vendor.id} value={vendor.id}>{vendor.name}</SelectItem>)}</SelectContent></Select></div>
+            <div className="grid gap-2"><Label>FTP host</Label><Input value={draft.ftpHost || ""} onChange={(event) => setDraftValue("ftpHost", event.target.value)} placeholder="ftp.vendor.com" /></div>
+            <div className="grid gap-2"><Label>FTP port</Label><Input type="number" value={draft.ftpPort || 21} onChange={(event) => setDraftValue("ftpPort", Number(event.target.value || 21))} /></div>
+            <div className="grid gap-2"><Label>FTP username</Label><Input value={draft.ftpUsername || ""} onChange={(event) => setDraftValue("ftpUsername", event.target.value)} /></div>
+            <div className="grid gap-2"><Label>FTP password {draft.ftpPasswordConfigured ? "(saved)" : ""}</Label><Input type="password" value={draft.ftpPassword || ""} onChange={(event) => setDraftValue("ftpPassword", event.target.value)} placeholder={draft.ftpPasswordConfigured ? "Leave blank to keep saved password" : "Enter password"} /></div>
+            <div className="grid gap-2 md:col-span-2"><Label>Remote file path</Label><Input value={draft.ftpRemotePath || ""} onChange={(event) => setDraftValue("ftpRemotePath", event.target.value)} placeholder="/exports/products.bson.gz" /></div>
+            <div className="grid gap-2"><Label>File format</Label><Select value={draft.fileFormat || "bson-gzip"} onValueChange={(value) => setDraft((current) => current ? { ...current, fileFormat: value, mappingProfile: value === "bson-gzip" ? "source-catalog-standard" : (mappingTemplates[0]?.id || "") } : current)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="bson-gzip">BSON product datadump (.bson.gz)</SelectItem><SelectItem value="csv">CSV supplier feed</SelectItem></SelectContent></Select><p className="text-xs text-muted-foreground">BSON uses the native Source Catalog import. CSV uses one of your saved import mappings.</p></div>
+            <div className="grid gap-2"><Label>DataPlus mapping</Label>{draft.fileFormat === "csv" ? <Select value={draft.mappingProfile || "none"} onValueChange={(value) => setDraftValue("mappingProfile", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Select import mapping" /></SelectTrigger><SelectContent><SelectItem value="none">Select a mapping</SelectItem>{mappingTemplates.map((template) => <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>)}</SelectContent></Select> : <Input value="Source catalog standard mapping" disabled />}</div>
+            <div className="grid gap-2"><Label>Import target</Label><Input value="Source Catalog" disabled /></div>
+            <div className="grid gap-2"><Label>Run mode</Label><Select value={draft.scheduleType || "times"} onValueChange={(value) => setDraftValue("scheduleType", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="times">Specific times</SelectItem><SelectItem value="interval">Every X hours</SelectItem></SelectContent></Select></div>
+            {draft.scheduleType === "interval" ? <div className="grid gap-2"><Label>Every hours</Label><Input type="number" min={1} max={24} value={draft.scheduleEveryHours || 24} onChange={(event) => setDraftValue("scheduleEveryHours", Number(event.target.value || 24))} /></div> : <div className="grid gap-2"><Label>Times (24-hour, comma separated)</Label><Input value={draft.scheduleTimes || "02:00"} onChange={(event) => setDraftValue("scheduleTimes", event.target.value)} placeholder="02:00,14:00" /></div>}
+            <div className="flex items-end gap-3"><Switch checked={Boolean(draft.enabled)} onCheckedChange={(value) => setDraftValue("enabled", value)} /><div><Label>Enable schedule</Label><p className="text-xs text-muted-foreground">Disabled feeds can still be run manually.</p></div></div>
+          </div>}
+          <DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button onClick={() => void saveDraft()} disabled={saving}>{saving ? "Saving..." : "Save feed"}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  )
+}
+
 function JobsPage({
   jobs,
   activeJobs,
   workerStatus,
   channels,
+  vendors,
   systemSettings,
   totalJobs,
   page,
@@ -1283,6 +1430,7 @@ function JobsPage({
   activeJobs: ImportJob[]
   workerStatus: WorkerStatus
   channels: ChannelConnection[]
+  vendors: Vendor[]
   systemSettings: SystemSettings
   totalJobs: number
   page: number
@@ -1300,12 +1448,13 @@ function JobsPage({
   const [tab, setTab] = useState("queue")
   const shopify = channels.find((channel) => String(channel.name || "").toLowerCase() === "shopify")
   const shopifySettings = shopify?.settings || {}
+  const vendorFeeds = Array.isArray(systemSettings.vendorFeedSchedules) ? systemSettings.vendorFeedSchedules as VendorFeedSchedule[] : []
   const scheduleRows = [
     { name: "Shopify inventory update", owner: "Shopify", enabled: Boolean(shopifySettings.inventoryScheduleEnabled), timing: scheduleDescription(shopifySettings.inventoryScheduleType, shopifySettings.inventoryScheduleTimes, shopifySettings.inventoryScheduleEveryHours, "03:00, 13:00"), behavior: String(shopifySettings.inventoryScheduleMode || "dry-run") === "apply" ? "Pushes inventory to Shopify" : "Runs a Shopify inventory dry run", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify SKU pair audit", owner: "Shopify", enabled: Boolean(shopifySettings.shopifySkuMapScheduleEnabled), timing: `Daily at ${String(shopifySettings.shopifySkuMapScheduleTime || "02:00")}`, behavior: "Checks the Shopify product and variant pair for every mapped SKU", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify order reconciliation", owner: "Shopify", enabled: Boolean(shopifySettings.shopifyOrderImportEnabled) && Boolean(shopifySettings.shopifyOrderImportScheduleEnabled), timing: scheduleDescription(shopifySettings.shopifyOrderImportScheduleType, shopifySettings.shopifyOrderImportScheduleTimes, shopifySettings.shopifyOrderImportScheduleEveryHours, "04:00, 16:00"), behavior: `Imports allowed sources: ${String(shopifySettings.shopifyOrderImportSources || "Online Store, Shop")}`, location: "/channels?tab=setup#shopify-order-import", managed: true },
     { name: "Overdue PO reminders", owner: "System", enabled: Boolean(systemSettings.smtpReminderScheduleEnabled), timing: `Daily at ${String(systemSettings.smtpReminderScheduleTime || "08:00")}`, behavior: "Emails enabled supplier reminders for overdue purchase orders", location: "/settings#email-schedule", managed: true },
-    { name: "Product datadump import", owner: "Catalog", enabled: false, timing: "Manual only", behavior: "Imports the supplier product datadump. Inventory schedules can require its latest successful run.", location: "/source-catalog", managed: false },
+    { name: "Vendor product-dump imports", owner: "Catalog", enabled: vendorFeeds.some((feed) => feed.enabled), timing: vendorFeeds.length ? `${vendorFeeds.filter((feed) => feed.enabled).length} of ${vendorFeeds.length} feeds scheduled` : "Not configured", behavior: "FTP product dumps stream into the Source Catalog using each feed's saved mapping profile.", location: "#vendor-feed-schedules", managed: true },
     { name: "Shopify price sync", owner: "Shopify", enabled: false, timing: "Manual only", behavior: "Pushes approved calculated prices to linked Shopify variants.", location: "/channels?tab=actions", managed: false },
     { name: "Shopify product/status/taxonomy sync", owner: "Shopify", enabled: false, timing: "Manual only", behavior: "Creates products and pushes status or taxonomy changes after review.", location: "/channels?tab=actions", managed: false },
   ]
@@ -1413,6 +1562,7 @@ function JobsPage({
         </div>
 
         <TabsContent value="scheduled" className="mt-4">
+          <div className="mb-4"><VendorFeedScheduleManager vendors={vendors} /></div>
           <Card>
             <CardHeader className="border-b py-3"><CardTitle className="text-base">Scheduled task register</CardTitle><CardDescription>One place to see every automated workflow, including manual-only jobs that are not yet scheduled.</CardDescription></CardHeader>
             <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Task</TableHead><TableHead>Owner</TableHead><TableHead>Schedule</TableHead><TableHead>Behavior</TableHead><TableHead>Status</TableHead><TableHead /></TableRow></TableHeader><TableBody>{scheduleRows.map((schedule) => <TableRow key={schedule.name}><TableCell className="font-medium">{schedule.name}</TableCell><TableCell>{schedule.owner}</TableCell><TableCell>{schedule.timing}</TableCell><TableCell className="max-w-96 text-sm text-muted-foreground">{schedule.behavior}</TableCell><TableCell><Badge variant={schedule.enabled ? "default" : "outline"}>{schedule.enabled ? "Enabled" : schedule.managed ? "Disabled" : "Manual"}</Badge></TableCell><TableCell><Button asChild size="sm" variant="outline"><a href={schedule.location}>Open {schedule.managed ? "setting" : "job"}</a></Button></TableCell></TableRow>)}</TableBody></Table></div></CardContent>
