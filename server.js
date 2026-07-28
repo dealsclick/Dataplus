@@ -889,6 +889,32 @@ function publicVendorFeedSchedule(feed = {}) {
   return { ...normalized, ftpPassword: "", ftpPasswordConfigured: Boolean(normalized.ftpPassword) };
 }
 
+function resolvedVendorFeedSchedules(settings = {}, vendors = []) {
+  const feeds = (Array.isArray(settings.vendorFeedSchedules) ? settings.vendorFeedSchedules : []).map((feed, index) => normalizeVendorFeedSchedule(feed, index));
+  if (feeds.some((feed) => feed.id === "product-datadump")) return feeds;
+  const trueValue = (vendors || []).find((vendor) => /true\s*value/i.test(String(vendor.name || "")) || /trv/i.test(String(vendor.code || "")));
+  const hasConfiguredDump = Boolean(process.env.PRODUCT_DUMP_FTP_HOST || process.env.PRODUCT_DUMP_FTP_USER || process.env.PRODUCT_DUMP_FTP_REMOTE_PATH);
+  if (!hasConfiguredDump && !trueValue) return feeds;
+  return [normalizeVendorFeedSchedule({
+    id: "product-datadump",
+    name: "Product datadump",
+    vendorId: trueValue?.id || "",
+    vendorName: trueValue?.name || "True Value",
+    enabled: false,
+    ftpHost: process.env.PRODUCT_DUMP_FTP_HOST || "",
+    ftpPort: Number(process.env.PRODUCT_DUMP_FTP_PORT || 21),
+    ftpUsername: process.env.PRODUCT_DUMP_FTP_USER || "",
+    ftpPassword: process.env.PRODUCT_DUMP_FTP_PASSWORD || "",
+    ftpRemotePath: process.env.PRODUCT_DUMP_FTP_REMOTE_PATH || "/dump/datawarehouse/products.bson.gz",
+    fileFormat: "bson-gzip",
+    importTarget: "source-catalog",
+    mappingProfile: "source-catalog-standard",
+    scheduleType: "times",
+    scheduleTimes: "02:00",
+    scheduleEveryHours: 24
+  }), ...feeds];
+}
+
 const UOM_DEFINITIONS = {
   EA: "Each",
   PL: "Pallet",
@@ -25859,7 +25885,7 @@ async function handleApi(req, res) {
     const db = normalizeDb(await readDbFast({ skipInventory: true }));
     const vendorsById = new Map((db.vendors || []).map((vendor) => [String(vendor.id || ""), vendor]));
     return sendJson(res, 200, {
-      feeds: settings.vendorFeedSchedules.map((feed) => {
+      feeds: resolvedVendorFeedSchedules(settings, db.vendors || []).map((feed) => {
         const vendor = vendorsById.get(String(feed.vendorId || ""));
         return publicVendorFeedSchedule({ ...feed, vendorName: feed.vendorName || vendor?.name || "" });
       })
@@ -25869,7 +25895,8 @@ async function handleApi(req, res) {
   if (req.method === "PUT" && url.pathname === "/api/vendor-feed-schedules") {
     const body = await parseBody(req);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
-    const existingById = new Map((current.vendorFeedSchedules || []).map((feed) => [String(feed.id || ""), feed]));
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const existingById = new Map(resolvedVendorFeedSchedules(current, db.vendors || []).map((feed) => [String(feed.id || ""), feed]));
     const submitted = Array.isArray(body.feeds) ? body.feeds.slice(0, 100) : [];
     const feeds = submitted.map((candidate, index) => {
       const existing = existingById.get(String(candidate?.id || "")) || {};
@@ -25888,16 +25915,16 @@ async function handleApi(req, res) {
   if (req.method === "POST" && vendorFeedRunMatch && postgres.isPostgresEnabled()) {
     const feedId = decodeURIComponent(vendorFeedRunMatch[1] || "");
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
-    const feed = (settings.vendorFeedSchedules || []).find((candidate) => String(candidate.id || "") === feedId);
+    const stateDb = normalizeDb(await readDbFast({ skipInventory: true }));
+    const feed = resolvedVendorFeedSchedules(settings, stateDb.vendors || []).find((candidate) => String(candidate.id || "") === feedId);
     if (!feed) return notFound(res);
     if (!["bson-gzip", "csv"].includes(feed.fileFormat)) return sendJson(res, 400, { error: "Select a supported vendor file format before running this feed." });
     if (feed.fileFormat === "csv" && !feed.mappingProfile) return sendJson(res, 400, { error: "Select a CSV import mapping before running this feed." });
     if (!feed.ftpHost || !feed.ftpUsername || !feed.ftpPassword || !feed.ftpRemotePath) return sendJson(res, 400, { error: "Complete the FTP host, username, password, and remote file path before running this feed." });
-    const db = normalizeDb(await readDbFast({ skipInventory: true }));
     const existingJobs = await postgres.readOperationJobs(500).catch(() => []) || [];
     const duplicate = existingJobs.find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && ["product-dump-import", "vendor-feed-import"].includes(String(job.workerTask || "")) && String(job.workerPayload?.feedId || "") === feed.id);
     if (duplicate) return sendJson(res, 200, { queued: true, duplicate: true, job: normalizeImportJob(duplicate), message: `${feed.name} is already queued or running.` });
-    const job = queueVendorFeedImportJob(db, feed);
+    const job = queueVendorFeedImportJob(stateDb, feed);
     return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
   }
 

@@ -1286,7 +1286,7 @@ function MetricCard({
   )
 }
 
-function VendorFeedScheduleManager({ vendors }: { vendors: Vendor[] }) {
+function VendorFeedScheduleManager({ vendors, vendor }: { vendors: Vendor[]; vendor?: Vendor }) {
   const [feeds, setFeeds] = useState<VendorFeedSchedule[]>([])
   const [mappingTemplates, setMappingTemplates] = useState<Array<{ id: string; name: string; mode?: string }>>([])
   const [open, setOpen] = useState(false)
@@ -1309,12 +1309,14 @@ function VendorFeedScheduleManager({ vendors }: { vendors: Vendor[] }) {
       .catch(() => setMappingTemplates([]))
   }, [])
 
+  const visibleFeeds = vendor ? feeds.filter((feed) => String(feed.vendorId || "") === vendor.id) : feeds
+
   const openNew = () => {
     setDraft({
       id: "",
       name: "",
-      vendorId: "",
-      vendorName: "",
+      vendorId: vendor?.id || "",
+      vendorName: vendor?.name || "",
       enabled: false,
       transport: "ftp",
       ftpPort: 21,
@@ -1364,22 +1366,22 @@ function VendorFeedScheduleManager({ vendors }: { vendors: Vendor[] }) {
     <Card>
       <CardHeader className="border-b py-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div><CardTitle className="text-base">Vendor FTP feeds</CardTitle><CardDescription>Connect supplier files once, choose their DataPlus mapping, then run on demand or automatically.</CardDescription></div>
-          <Button size="sm" onClick={openNew}><Database className="size-4" /> Add vendor feed</Button>
+          <div><CardTitle className="text-base">{vendor ? "Source catalog feed" : "Scheduled vendor feeds"}</CardTitle><CardDescription>{vendor ? "This supplier's FTP connection, mapping, and import timing. Jobs runs it automatically after it is enabled." : "A live register of vendor-owned scheduled feeds. Configure a connection from the supplier profile."}</CardDescription></div>
+          {vendor ? <Button size="sm" onClick={openNew}><Database className="size-4" /> Add feed</Button> : null}
         </div>
       </CardHeader>
       <CardContent className="p-0">
         <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Feed</TableHead><TableHead>Supplier</TableHead><TableHead>Source</TableHead><TableHead>Mapping</TableHead><TableHead>Schedule</TableHead><TableHead>Status</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>
-          {feeds.map((feed) => <TableRow key={feed.id}>
+          {visibleFeeds.map((feed) => <TableRow key={feed.id}>
             <TableCell><p className="font-medium">{feed.name}</p><p className="text-xs text-muted-foreground">{feed.lastJobId ? `Last job ${feed.lastJobId.slice(0, 8)}` : "Not run yet"}</p></TableCell>
             <TableCell>{feed.vendorName || "Unassigned"}</TableCell>
             <TableCell className="max-w-52 truncate text-sm">{feed.ftpHost ? `FTP ${feed.ftpHost}${feed.ftpRemotePath || ""}` : "Connection not configured"}</TableCell>
             <TableCell className="text-sm">{feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}</TableCell>
             <TableCell className="text-sm">{scheduleDescription(feed.scheduleType, feed.scheduleTimes, feed.scheduleEveryHours, "02:00")}</TableCell>
             <TableCell><Badge variant={feed.enabled ? "default" : "outline"}>{feed.enabled ? "Enabled" : "Disabled"}</Badge></TableCell>
-            <TableCell><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => { setDraft({ ...feed, ftpPassword: "" }); setOpen(true) }}>Edit</Button><Button size="sm" onClick={() => void runFeed(feed)} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run now</Button></div></TableCell>
+            <TableCell><div className="flex justify-end gap-2">{vendor ? <><Button size="sm" variant="outline" onClick={() => { setDraft({ ...feed, ftpPassword: "" }); setOpen(true) }}>Edit</Button><Button size="sm" onClick={() => void runFeed(feed)} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run now</Button></> : <Button size="sm" variant="outline" asChild><a href={feed.vendorId ? `/vendors/${encodeURIComponent(feed.vendorId)}` : "/vendors"}>Open supplier</a></Button>}</div></TableCell>
           </TableRow>)}
-          {!feeds.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No vendor FTP feeds are configured. Add the product datadump here to give it a run button and schedule.</TableCell></TableRow>}
+          {!visibleFeeds.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">{vendor ? "No feed is configured for this supplier." : "No vendor feeds are scheduled. Open a supplier profile to configure its source-catalog feed."}</TableCell></TableRow>}
         </TableBody></Table></div>
       </CardContent>
 
@@ -1387,8 +1389,8 @@ function VendorFeedScheduleManager({ vendors }: { vendors: Vendor[] }) {
         <DialogContent className="max-w-3xl">
           <DialogHeader><DialogTitle>{draft?.id ? "Edit vendor feed" : "Add vendor feed"}</DialogTitle><DialogDescription>FTP credentials are stored server-side. Leave the password blank to keep the saved password.</DialogDescription></DialogHeader>
           {draft && <div className="grid gap-4 py-2 md:grid-cols-2">
-            <div className="grid gap-2"><Label>Feed name</Label><Input value={draft.name} onChange={(event) => setDraftValue("name", event.target.value)} placeholder="True Value product datadump" /></div>
-            <div className="grid gap-2"><Label>Supplier</Label><Select value={draft.vendorId || "none"} onValueChange={(value) => { const vendor = vendors.find((item) => item.id === value); setDraft((current) => current ? { ...current, vendorId: value === "none" ? "" : value, vendorName: value === "none" ? "" : vendor?.name || "" } : current) }}><SelectTrigger><SelectValue placeholder="Select supplier" /></SelectTrigger><SelectContent><SelectItem value="none">No supplier selected</SelectItem>{vendors.map((vendor) => <SelectItem key={vendor.id} value={vendor.id}>{vendor.name}</SelectItem>)}</SelectContent></Select></div>
+            <div className="grid gap-2"><Label>Feed name</Label><Input value={draft.name} onChange={(event) => setDraftValue("name", event.target.value)} placeholder="Product datadump" /></div>
+            {vendor ? <div className="grid gap-2"><Label>Supplier</Label><Input value={vendor.name} disabled /></div> : <div className="grid gap-2"><Label>Supplier</Label><Select value={draft.vendorId || "none"} onValueChange={(value) => { const selectedVendor = vendors.find((item) => item.id === value); setDraft((current) => current ? { ...current, vendorId: value === "none" ? "" : value, vendorName: value === "none" ? "" : selectedVendor?.name || "" } : current) }}><SelectTrigger><SelectValue placeholder="Select supplier" /></SelectTrigger><SelectContent><SelectItem value="none">No supplier selected</SelectItem>{vendors.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>}
             <div className="grid gap-2"><Label>FTP host</Label><Input value={draft.ftpHost || ""} onChange={(event) => setDraftValue("ftpHost", event.target.value)} placeholder="ftp.vendor.com" /></div>
             <div className="grid gap-2"><Label>FTP port</Label><Input type="number" value={draft.ftpPort || 21} onChange={(event) => setDraftValue("ftpPort", Number(event.target.value || 21))} /></div>
             <div className="grid gap-2"><Label>FTP username</Label><Input value={draft.ftpUsername || ""} onChange={(event) => setDraftValue("ftpUsername", event.target.value)} /></div>
@@ -1448,13 +1450,11 @@ function JobsPage({
   const [tab, setTab] = useState("queue")
   const shopify = channels.find((channel) => String(channel.name || "").toLowerCase() === "shopify")
   const shopifySettings = shopify?.settings || {}
-  const vendorFeeds = Array.isArray(systemSettings.vendorFeedSchedules) ? systemSettings.vendorFeedSchedules as VendorFeedSchedule[] : []
   const scheduleRows = [
     { name: "Shopify inventory update", owner: "Shopify", enabled: Boolean(shopifySettings.inventoryScheduleEnabled), timing: scheduleDescription(shopifySettings.inventoryScheduleType, shopifySettings.inventoryScheduleTimes, shopifySettings.inventoryScheduleEveryHours, "03:00, 13:00"), behavior: String(shopifySettings.inventoryScheduleMode || "dry-run") === "apply" ? "Pushes inventory to Shopify" : "Runs a Shopify inventory dry run", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify SKU pair audit", owner: "Shopify", enabled: Boolean(shopifySettings.shopifySkuMapScheduleEnabled), timing: `Daily at ${String(shopifySettings.shopifySkuMapScheduleTime || "02:00")}`, behavior: "Checks the Shopify product and variant pair for every mapped SKU", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify order reconciliation", owner: "Shopify", enabled: Boolean(shopifySettings.shopifyOrderImportEnabled) && Boolean(shopifySettings.shopifyOrderImportScheduleEnabled), timing: scheduleDescription(shopifySettings.shopifyOrderImportScheduleType, shopifySettings.shopifyOrderImportScheduleTimes, shopifySettings.shopifyOrderImportScheduleEveryHours, "04:00, 16:00"), behavior: `Imports allowed sources: ${String(shopifySettings.shopifyOrderImportSources || "Online Store, Shop")}`, location: "/channels?tab=setup#shopify-order-import", managed: true },
     { name: "Overdue PO reminders", owner: "System", enabled: Boolean(systemSettings.smtpReminderScheduleEnabled), timing: `Daily at ${String(systemSettings.smtpReminderScheduleTime || "08:00")}`, behavior: "Emails enabled supplier reminders for overdue purchase orders", location: "/settings#email-schedule", managed: true },
-    { name: "Vendor product-dump imports", owner: "Catalog", enabled: vendorFeeds.some((feed) => feed.enabled), timing: vendorFeeds.length ? `${vendorFeeds.filter((feed) => feed.enabled).length} of ${vendorFeeds.length} feeds scheduled` : "Not configured", behavior: "FTP product dumps stream into the Source Catalog using each feed's saved mapping profile.", location: "#vendor-feed-schedules", managed: true },
     { name: "Shopify price sync", owner: "Shopify", enabled: false, timing: "Manual only", behavior: "Pushes approved calculated prices to linked Shopify variants.", location: "/channels?tab=actions", managed: false },
     { name: "Shopify product/status/taxonomy sync", owner: "Shopify", enabled: false, timing: "Manual only", behavior: "Creates products and pushes status or taxonomy changes after review.", location: "/channels?tab=actions", managed: false },
   ]
@@ -6778,11 +6778,12 @@ function SourceCatalogPage() {
 function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendor: (id: string, patch: Record<string, unknown>) => Promise<void> }) {
   const [query, setQuery] = useState("")
   const [selectedId, setSelectedId] = useState("")
+  const pathVendorId = decodeURIComponent((window.location.pathname.match(/^\/vendors\/([^/]+)/)?.[1] || ""))
   const filtered = vendors.filter((vendor) => `${vendor.name} ${vendor.code || ""} ${vendor.email || ""}`.toLowerCase().includes(query.toLowerCase()))
-  const selected = vendors.find((vendor) => vendor.id === selectedId) || filtered[0] || vendors[0]
+  const selected = vendors.find((vendor) => vendor.id === pathVendorId) || vendors.find((vendor) => vendor.id === selectedId) || filtered[0] || vendors[0]
 
   useEffect(() => {
-    if (!selectedId && selected?.id) setSelectedId(selected.id)
+    if (selected?.id && selectedId !== selected.id) setSelectedId(selected.id)
   }, [selected?.id, selectedId])
 
   return (
@@ -6883,6 +6884,7 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
           <TabsTrigger value="contact">Contact</TabsTrigger>
           <TabsTrigger value="rules">Rules</TabsTrigger>
           <TabsTrigger value="inventory">Inventory</TabsTrigger>
+          <TabsTrigger value="data-feed">Data feed</TabsTrigger>
           <TabsTrigger value="categories">Categories</TabsTrigger>
         </TabsList>
         <TabsContent value="summary" className="grid gap-4">
@@ -6974,6 +6976,9 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
               </CardContent>
             </Card>
           </div>
+        </TabsContent>
+        <TabsContent value="data-feed">
+          <VendorFeedScheduleManager vendors={[vendor]} vendor={vendor} />
         </TabsContent>
         <TabsContent value="categories">
           <Card>
