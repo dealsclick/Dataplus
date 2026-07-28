@@ -1422,7 +1422,7 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: V
       </CardContent>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent className="w-[calc(100%-2rem)] max-w-[calc(100%-2rem)] sm:max-w-4xl">
           <DialogHeader><DialogTitle>{draft?.id ? "Edit vendor feed" : "Add vendor feed"}</DialogTitle><DialogDescription>FTP credentials are stored server-side. Leave the password blank to keep the saved password.</DialogDescription></DialogHeader>
           {draft && <div className="grid gap-4 py-2 md:grid-cols-2">
             <div className="grid gap-2"><Label>Feed name</Label><Input value={draft.name} onChange={(event) => setDraftValue("name", event.target.value)} placeholder="Product datadump" /></div>
