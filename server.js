@@ -10366,6 +10366,9 @@ function normalizeImportJob(job = {}) {
     exportManifest: job.exportManifest && typeof job.exportManifest === "object" ? job.exportManifest : {},
     manifestFileName: job.manifestFileName || '',
     manifestFilePath: job.manifestFilePath || '',
+    operatorNotes: job.operatorNotes || job.raw?.operatorNotes || '',
+    notesUpdatedAt: job.notesUpdatedAt || job.raw?.notesUpdatedAt || '',
+    notesUpdatedBy: job.notesUpdatedBy || job.raw?.notesUpdatedBy || '',
     createdAt,
     startedAt: job.startedAt || createdAt,
     finishedAt,
@@ -25063,6 +25066,22 @@ async function handleApi(req, res) {
     const active = activeJobRecords.get(job.id);
     const merged = active ? { ...job, ...active, artifacts: active.artifacts?.length ? active.artifacts : job.artifacts } : job;
     return sendJson(res, 200, { job: clientImportJob(applyActiveJobProgress([merged])[0]) });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "import-jobs" && parts[2] && parts[3] === "notes" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const job = await postgres.readOperationJob(parts[2]);
+    if (!job) return notFound(res);
+    const operatorNotes = String(body.notes || "").trim().slice(0, 8000);
+    const updated = normalizeImportJob({
+      ...job,
+      operatorNotes,
+      notesUpdatedAt: new Date().toISOString(),
+      notesUpdatedBy: sourceTextValue(body.user || "Luis") || "Luis",
+      raw: { ...(job.raw || {}), operatorNotes, notesUpdatedAt: new Date().toISOString(), notesUpdatedBy: sourceTextValue(body.user || "Luis") || "Luis" }
+    });
+    await postgres.upsertOperationJob(updated);
+    return sendJson(res, 200, { job: clientImportJob(updated), message: operatorNotes ? "Job notes saved." : "Job notes cleared." });
   }
 
   if (req.method === "POST" && url.pathname === "/api/import-jobs/cleanup" && postgres.isPostgresEnabled()) {

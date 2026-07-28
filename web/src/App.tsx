@@ -126,6 +126,9 @@ type ImportJob = {
   updatedAt?: string
   workerId?: string
   workerTask?: string
+  operatorNotes?: string
+  notesUpdatedAt?: string
+  notesUpdatedBy?: string
 }
 
 type WorkerStatus = {
@@ -1641,7 +1644,7 @@ function JobsPage({
               </CardContent>
             </Card>
 
-            <JobDetail job={selectedJob} onRetry={onRetryJob} onStop={onStopJob} />
+            <JobDetail job={selectedJob} onRetry={onRetryJob} onStop={onStopJob} onUpdate={onSelectJob} />
           </div>
 
           <div className="mt-4 flex items-center justify-between">
@@ -1689,7 +1692,23 @@ function JobActionMenu({ job, onStop, onRetry }: { job: ImportJob; onStop: (job:
   )
 }
 
-function JobDetail({ job, onRetry, onStop }: { job?: ImportJob; onRetry: (job: ImportJob) => void; onStop: (job: ImportJob) => void }) {
+function JobDetail({ job, onRetry, onStop, onUpdate }: { job?: ImportJob; onRetry: (job: ImportJob) => void; onStop: (job: ImportJob) => void; onUpdate: (job: ImportJob) => void }) {
+  const [notes, setNotes] = useState("")
+  const [savingNotes, setSavingNotes] = useState(false)
+  useEffect(() => { setNotes(job?.operatorNotes || "") }, [job?.id, job?.operatorNotes])
+
+  const saveNotes = async () => {
+    if (!job) return
+    setSavingNotes(true)
+    try {
+      const result = await api<{ job: ImportJob; message?: string }>(`/api/import-jobs/${encodeURIComponent(job.id)}/notes`, { method: "PATCH", body: JSON.stringify({ notes }) })
+      toast.success(result.message || "Job notes saved.")
+      onUpdate(result.job)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save job notes.")
+    } finally { setSavingNotes(false) }
+  }
+
   if (!job) {
     return (
       <Card>
@@ -1744,6 +1763,11 @@ function JobDetail({ job, onRetry, onStop }: { job?: ImportJob; onRetry: (job: I
             <p className="mt-1 line-clamp-6 text-muted-foreground">{job.details}</p>
           </div>
         )}
+        <div className="rounded-md border bg-muted/20 p-3">
+          <div className="flex items-center justify-between gap-3"><p className="font-medium">Operator notes</p>{job.notesUpdatedAt ? <span className="text-xs text-muted-foreground">{job.notesUpdatedBy || "Operator"} · {dateLabel(job.notesUpdatedAt)}</span> : null}</div>
+          <Textarea className="mt-2 min-h-24" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Explain what this job does, its purpose, assumptions, or follow-up instructions." />
+          <div className="mt-2 flex justify-end"><Button size="sm" variant="outline" onClick={() => void saveNotes()} disabled={savingNotes}>{savingNotes ? "Saving..." : "Save notes"}</Button></div>
+        </div>
         {!!job.errors?.length && (
           <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3">
             <p className="font-medium text-destructive">Error preview</p>
