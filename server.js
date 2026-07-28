@@ -875,6 +875,7 @@ function normalizeVendorFeedSchedule(feed = {}, index = 0) {
     fileFormat: ["bson-gzip", "csv"].includes(fileFormat) ? fileFormat : "bson-gzip",
     importTarget: sourceTextValue(feed.importTarget || "source-catalog") || "source-catalog",
     mappingProfile: sourceTextValue(feed.mappingProfile || "source-catalog-standard") || "source-catalog-standard",
+    notes: sourceTextValue(feed.notes || ""),
     scheduleType,
     scheduleTimes: [...new Set(String(feed.scheduleTimes || "02:00").split(/[,;\s]+/).map((value) => value.trim()).filter((value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value)))].join(",") || "02:00",
     scheduleEveryHours: Math.max(1, Math.min(24, Number(feed.scheduleEveryHours || 24) || 24)),

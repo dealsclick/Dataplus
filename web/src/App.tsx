@@ -274,6 +274,7 @@ type VendorFeedSchedule = {
   fileFormat?: string
   importTarget?: string
   mappingProfile?: string
+  notes?: string
   scheduleType?: string
   scheduleTimes?: string
   scheduleEveryHours?: number
@@ -1296,6 +1297,8 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: V
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState<VendorFeedSchedule | null>(null)
+  const [notesFeed, setNotesFeed] = useState<VendorFeedSchedule | null>(null)
+  const [notesDraft, setNotesDraft] = useState("")
 
   const loadFeeds = async () => {
     try {
@@ -1331,6 +1334,7 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: V
       fileFormat: "bson-gzip",
       importTarget: "source-catalog",
       mappingProfile: "source-catalog-standard",
+      notes: "",
       scheduleType: "times",
       scheduleTimes: "02:00",
       scheduleEveryHours: 24,
@@ -1366,6 +1370,20 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: V
 
   const setDraftValue = (field: keyof VendorFeedSchedule, value: unknown) => setDraft((current) => current ? { ...current, [field]: value } : current)
 
+  const saveFeedNotes = async () => {
+    if (!notesFeed) return
+    setSaving(true)
+    try {
+      const next = feeds.map((feed) => feed.id === notesFeed.id ? { ...feed, notes: notesDraft } : feed)
+      const result = await api<{ feeds: VendorFeedSchedule[] }>(dataSource ? "/api/data-source-feeds" : "/api/vendor-feed-schedules", { method: "PUT", body: JSON.stringify({ feeds: next }) })
+      setFeeds(result.feeds || [])
+      setNotesFeed(null)
+      toast.success("Feed notes saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save feed notes.")
+    } finally { setSaving(false) }
+  }
+
   return (
     <Card>
       <CardHeader className="border-b py-3">
@@ -1380,10 +1398,10 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: V
             <TableCell><p className="font-medium">{feed.name}</p><p className="text-xs text-muted-foreground">{feed.lastJobId ? `Last job ${feed.lastJobId.slice(0, 8)}` : "Not run yet"}</p></TableCell>
             <TableCell>{dataSource ? (feed.vendorName || "DataWarehouse") : (feed.vendorName || "Unassigned")}</TableCell>
             <TableCell className="max-w-52 truncate text-sm">{feed.ftpHost ? `FTP ${feed.ftpHost}${feed.ftpRemotePath || ""}` : "Connection not configured"}</TableCell>
-            <TableCell className="text-sm">{feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}</TableCell>
+            <TableCell className="max-w-60 truncate text-sm" title={feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}>{feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}</TableCell>
             <TableCell className="text-sm">{scheduleDescription(feed.scheduleType, feed.scheduleTimes, feed.scheduleEveryHours, "02:00")}</TableCell>
             <TableCell><Badge variant={feed.enabled ? "default" : "outline"}>{feed.enabled ? "Enabled" : "Disabled"}</Badge></TableCell>
-            <TableCell><div className="flex justify-end gap-2">{(vendor || dataSource) ? <><Button size="sm" variant="outline" onClick={() => { setDraft({ ...feed, ftpPassword: "" }); setOpen(true) }}>Edit</Button><Button size="sm" onClick={() => void runFeed(feed)} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run now</Button></> : <Button size="sm" variant="outline" asChild><a href={feed.vendorId ? `/vendors/${encodeURIComponent(feed.vendorId)}` : "/settings?tab=data-sources"}>{feed.vendorId ? "Open supplier" : "Open source"}</a></Button>}</div></TableCell>
+            <TableCell><div className="flex justify-end gap-2"><Button size="icon" variant={feed.notes ? "secondary" : "ghost"} title="View feed notes" onClick={() => { setNotesFeed(feed); setNotesDraft(String(feed.notes || "")) }}><MessageSquare className="size-4" /></Button>{(vendor || dataSource) ? <><Button size="sm" variant="outline" onClick={() => { setDraft({ ...feed, ftpPassword: "" }); setOpen(true) }}>Edit</Button><Button size="sm" onClick={() => void runFeed(feed)} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run now</Button></> : <Button size="sm" variant="outline" asChild><a href={feed.vendorId ? `/vendors/${encodeURIComponent(feed.vendorId)}` : "/settings?tab=data-sources"}>{feed.vendorId ? "Open supplier" : "Open source"}</a></Button>}</div></TableCell>
           </TableRow>)}
           {!visibleFeeds.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">{dataSource ? "No universal source is configured." : vendor ? "No feed is configured for this supplier." : "No vendor feeds are scheduled. Open a supplier profile to configure its source-catalog feed."}</TableCell></TableRow>}
         </TableBody></Table></div>
@@ -1401,14 +1419,19 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: V
             <div className="grid gap-2"><Label>FTP password {draft.ftpPasswordConfigured ? "(saved)" : ""}</Label><Input type="password" value={draft.ftpPassword || ""} onChange={(event) => setDraftValue("ftpPassword", event.target.value)} placeholder={draft.ftpPasswordConfigured ? "Leave blank to keep saved password" : "Enter password"} /></div>
             <div className="grid gap-2 md:col-span-2"><Label>Remote file path</Label><Input value={draft.ftpRemotePath || ""} onChange={(event) => setDraftValue("ftpRemotePath", event.target.value)} placeholder="/exports/products.bson.gz" /></div>
             <div className="grid gap-2"><Label>File format</Label><Select value={draft.fileFormat || "bson-gzip"} onValueChange={(value) => setDraft((current) => current ? { ...current, fileFormat: value, mappingProfile: value === "bson-gzip" ? "source-catalog-standard" : (mappingTemplates[0]?.id || "") } : current)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="bson-gzip">BSON product datadump (.bson.gz)</SelectItem><SelectItem value="csv">CSV supplier feed</SelectItem></SelectContent></Select><p className="text-xs text-muted-foreground">BSON uses the native Source Catalog import. CSV uses one of your saved import mappings.</p></div>
-            <div className="grid gap-2"><Label>DataPlus mapping</Label>{draft.fileFormat === "csv" ? <Select value={draft.mappingProfile || "none"} onValueChange={(value) => setDraftValue("mappingProfile", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Select import mapping" /></SelectTrigger><SelectContent><SelectItem value="none">Select a mapping</SelectItem>{mappingTemplates.map((template) => <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>)}</SelectContent></Select> : <Input value="Source catalog standard mapping" disabled />}</div>
+            <div className="grid min-w-0 gap-2"><Label>DataPlus mapping</Label>{draft.fileFormat === "csv" ? <Select value={draft.mappingProfile || "none"} onValueChange={(value) => setDraftValue("mappingProfile", value === "none" ? "" : value)}><SelectTrigger className="w-full min-w-0 [&>span]:truncate"><SelectValue placeholder="Select import mapping" /></SelectTrigger><SelectContent><SelectItem value="none">Select a mapping</SelectItem>{mappingTemplates.map((template) => <SelectItem key={template.id} value={template.id} className="max-w-[20rem] truncate" title={template.name}>{template.name}</SelectItem>)}</SelectContent></Select> : <Input className="min-w-0" value="Source catalog standard mapping" disabled />}</div>
             <div className="grid gap-2"><Label>Import target</Label><Input value="Source Catalog" disabled /></div>
             <div className="grid gap-2"><Label>Run mode</Label><Select value={draft.scheduleType || "times"} onValueChange={(value) => setDraftValue("scheduleType", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="times">Specific times</SelectItem><SelectItem value="interval">Every X hours</SelectItem></SelectContent></Select></div>
             {draft.scheduleType === "interval" ? <div className="grid gap-2"><Label>Every hours</Label><Input type="number" min={1} max={24} value={draft.scheduleEveryHours || 24} onChange={(event) => setDraftValue("scheduleEveryHours", Number(event.target.value || 24))} /></div> : <div className="grid gap-2"><Label>Times (24-hour, comma separated)</Label><Input value={draft.scheduleTimes || "02:00"} onChange={(event) => setDraftValue("scheduleTimes", event.target.value)} placeholder="02:00,14:00" /></div>}
             <div className="flex items-end gap-3"><Switch checked={Boolean(draft.enabled)} onCheckedChange={(value) => setDraftValue("enabled", value)} /><div><Label>Enable schedule</Label><p className="text-xs text-muted-foreground">Disabled feeds can still be run manually.</p></div></div>
+            <div className="grid gap-2 md:col-span-2"><Label>Feed notes</Label><Textarea value={draft.notes || ""} onChange={(event) => setDraftValue("notes", event.target.value)} placeholder="Describe what this feed contains, update expectations, field assumptions, or operational follow-up." /></div>
           </div>}
           <DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button onClick={() => void saveDraft()} disabled={saving}>{saving ? "Saving..." : "Save feed"}</Button></DialogFooter>
         </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(notesFeed)} onOpenChange={(next) => { if (!next) setNotesFeed(null) }}>
+        <DialogContent className="max-w-xl"><DialogHeader><DialogTitle>{notesFeed?.name || "Feed"} notes</DialogTitle><DialogDescription>Use this for the purpose of the feed, source assumptions, field mapping context, and operational instructions.</DialogDescription></DialogHeader><Textarea className="min-h-44" value={notesDraft} onChange={(event) => setNotesDraft(event.target.value)} placeholder="No notes yet." /><DialogFooter><Button variant="outline" onClick={() => setNotesFeed(null)}>Cancel</Button><Button onClick={() => void saveFeedNotes()} disabled={saving}>{saving ? "Saving..." : "Save notes"}</Button></DialogFooter></DialogContent>
       </Dialog>
     </Card>
   )
