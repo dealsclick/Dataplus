@@ -10411,6 +10411,12 @@ function compactImportJobPayloadValue(value) {
   if (value && typeof value === "object") {
     const result = {};
     for (const [key, child] of Object.entries(value)) {
+      // Job detail is available to operational users. Never expose credentials
+      // embedded in a worker payload, even when a job is selected directly by ID.
+      if (/(password|secret|token|api[_-]?key|authorization)/i.test(key)) {
+        result[key] = child ? "[configured]" : "";
+        continue;
+      }
       result[key] = compactImportJobPayloadValue(child);
     }
     return result;
