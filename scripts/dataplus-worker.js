@@ -1325,6 +1325,22 @@ async function runProductDumpImportJob(job) {
   const finalProcessedRows = summaryMatch ? Number(summaryMatch[1]) + Number(summaryMatch[2]) : current.processedRows;
   const finalChanged = summaryMatch ? Number(summaryMatch[1]) : current.changed;
   const finalMissing = summaryMatch ? Number(summaryMatch[2]) : current.missingCount;
+  if (finalProcessedRows <= 0) {
+    return persistJob(current, {
+      status: "failed",
+      phase: "failed",
+      message: "Product dump import finished without processing any source records. No pricing, inventory, or source catalog products were updated.",
+      details: outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "),
+      totalRows: 0,
+      processedRows: 0,
+      changed: 0,
+      missingCount: 1,
+      errors: ["The product datadump produced zero records. Check for an interrupted worker, a changed feed format, or an empty source file."],
+      progressPercent: 0,
+      estimatedSecondsRemaining: 0,
+      finishedAt: new Date().toISOString()
+    });
+  }
   let analyzeResult = { tables: [] };
   if (payload.postgresOnly !== false && postgres.isPostgresEnabled()) {
     current = await persistJob(current, {
