@@ -591,6 +591,12 @@ function numberLabel(value?: number | string) {
   return Number(value || 0).toLocaleString()
 }
 
+function scheduleDescription(type: unknown, times: unknown, everyHours: unknown, fallback: string) {
+  if (String(type || "times").toLowerCase() === "interval") return `Every ${Math.max(1, Number(everyHours || 12))} hours`
+  const values = String(times || fallback).split(/[,;\s]+/).filter(Boolean)
+  return values.length ? `At ${values.join(", ")}` : "Not configured"
+}
+
 function moneyLabel(value?: number | string) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(value || 0))
 }
@@ -1056,6 +1062,8 @@ function App() {
                     jobs={jobs}
                     activeJobs={activeJobs}
                     workerStatus={workerStatus}
+                    channels={state.connections || []}
+                    systemSettings={state.systemSettings || {}}
                     totalJobs={jobPageMeta.total}
                     page={jobPageMeta.page}
                     pageSize={jobPageMeta.limit}
@@ -1258,6 +1266,8 @@ function JobsPage({
   jobs,
   activeJobs,
   workerStatus,
+  channels,
+  systemSettings,
   totalJobs,
   page,
   pageSize,
@@ -1272,6 +1282,8 @@ function JobsPage({
   jobs: ImportJob[]
   activeJobs: ImportJob[]
   workerStatus: WorkerStatus
+  channels: ChannelConnection[]
+  systemSettings: SystemSettings
   totalJobs: number
   page: number
   pageSize: number
@@ -1286,6 +1298,17 @@ function JobsPage({
   const [query, setQuery] = useState("")
   const [status, setStatus] = useState("all")
   const [tab, setTab] = useState("queue")
+  const shopify = channels.find((channel) => String(channel.name || "").toLowerCase() === "shopify")
+  const shopifySettings = shopify?.settings || {}
+  const scheduleRows = [
+    { name: "Shopify inventory update", owner: "Shopify", enabled: Boolean(shopifySettings.inventoryScheduleEnabled), timing: scheduleDescription(shopifySettings.inventoryScheduleType, shopifySettings.inventoryScheduleTimes, shopifySettings.inventoryScheduleEveryHours, "03:00, 13:00"), behavior: String(shopifySettings.inventoryScheduleMode || "dry-run") === "apply" ? "Pushes inventory to Shopify" : "Runs a Shopify inventory dry run", location: "/channels?tab=setup#shopify-schedules", managed: true },
+    { name: "Shopify SKU pair audit", owner: "Shopify", enabled: Boolean(shopifySettings.shopifySkuMapScheduleEnabled), timing: `Daily at ${String(shopifySettings.shopifySkuMapScheduleTime || "02:00")}`, behavior: "Checks the Shopify product and variant pair for every mapped SKU", location: "/channels?tab=setup#shopify-schedules", managed: true },
+    { name: "Shopify order reconciliation", owner: "Shopify", enabled: Boolean(shopifySettings.shopifyOrderImportEnabled) && Boolean(shopifySettings.shopifyOrderImportScheduleEnabled), timing: scheduleDescription(shopifySettings.shopifyOrderImportScheduleType, shopifySettings.shopifyOrderImportScheduleTimes, shopifySettings.shopifyOrderImportScheduleEveryHours, "04:00, 16:00"), behavior: `Imports allowed sources: ${String(shopifySettings.shopifyOrderImportSources || "Online Store, Shop")}`, location: "/channels?tab=setup#shopify-order-import", managed: true },
+    { name: "Overdue PO reminders", owner: "System", enabled: Boolean(systemSettings.smtpReminderScheduleEnabled), timing: `Daily at ${String(systemSettings.smtpReminderScheduleTime || "08:00")}`, behavior: "Emails enabled supplier reminders for overdue purchase orders", location: "/settings#email-schedule", managed: true },
+    { name: "Product datadump import", owner: "Catalog", enabled: false, timing: "Manual only", behavior: "Imports the supplier product datadump. Inventory schedules can require its latest successful run.", location: "/source-catalog", managed: false },
+    { name: "Shopify price sync", owner: "Shopify", enabled: false, timing: "Manual only", behavior: "Pushes approved calculated prices to linked Shopify variants.", location: "/channels?tab=actions", managed: false },
+    { name: "Shopify product/status/taxonomy sync", owner: "Shopify", enabled: false, timing: "Manual only", behavior: "Creates products and pushes status or taxonomy changes after review.", location: "/channels?tab=actions", managed: false },
+  ]
 
   const visibleJobs = tab === "logs"
     ? jobs.filter((job) => String(job.direction || job.type || "").toLowerCase().includes("api") || /shopify|ebay|api/i.test(`${job.operation || ""} ${job.fileName || ""}`))
@@ -1366,6 +1389,7 @@ function JobsPage({
           <TabsList>
             <TabsTrigger value="queue">Queue and history</TabsTrigger>
             <TabsTrigger value="logs">Channel logs</TabsTrigger>
+            <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
           </TabsList>
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative">
@@ -1388,7 +1412,14 @@ function JobsPage({
           </div>
         </div>
 
-        <TabsContent value={tab} className="mt-4">
+        <TabsContent value="scheduled" className="mt-4">
+          <Card>
+            <CardHeader className="border-b py-3"><CardTitle className="text-base">Scheduled task register</CardTitle><CardDescription>One place to see every automated workflow, including manual-only jobs that are not yet scheduled.</CardDescription></CardHeader>
+            <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Task</TableHead><TableHead>Owner</TableHead><TableHead>Schedule</TableHead><TableHead>Behavior</TableHead><TableHead>Status</TableHead><TableHead /></TableRow></TableHeader><TableBody>{scheduleRows.map((schedule) => <TableRow key={schedule.name}><TableCell className="font-medium">{schedule.name}</TableCell><TableCell>{schedule.owner}</TableCell><TableCell>{schedule.timing}</TableCell><TableCell className="max-w-96 text-sm text-muted-foreground">{schedule.behavior}</TableCell><TableCell><Badge variant={schedule.enabled ? "default" : "outline"}>{schedule.enabled ? "Enabled" : schedule.managed ? "Disabled" : "Manual"}</Badge></TableCell><TableCell><Button asChild size="sm" variant="outline"><a href={schedule.location}>Open {schedule.managed ? "setting" : "job"}</a></Button></TableCell></TableRow>)}</TableBody></Table></div></CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value={tab === "logs" ? "logs" : "queue"} className="mt-4">
           <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
             <Card>
               <CardHeader className="border-b py-3">
@@ -1690,6 +1721,8 @@ function ChannelDetail({
   const scheduleTimes = String(settings.inventoryScheduleTimes || "03:00,13:00").split(/[,;\s]+/).filter(Boolean)
   const orderImportScheduleTimes = String(settings.shopifyOrderImportScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
   const selectedWarehouseId = String(settings.shopifyInventoryWarehouseId || "")
+  const requestedTab = new URLSearchParams(window.location.search).get("tab")
+  const [activeTab, setActiveTab] = useState(requestedTab === "setup" || requestedTab === "actions" ? requestedTab : "overview")
 
   useEffect(() => {
     setDraft({})
@@ -1869,7 +1902,7 @@ function ChannelDetail({
         </CardHeader>
       </Card>
 
-      <Tabs defaultValue="overview">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="flex flex-wrap">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="setup">Setup</TabsTrigger>
@@ -1921,7 +1954,7 @@ function ChannelDetail({
           </Card>
         </TabsContent>
 
-        <TabsContent value="setup">
+        <TabsContent value="setup" id="shopify-schedules">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Connection and enabled features</CardTitle>
