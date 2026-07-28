@@ -1296,6 +1296,7 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: V
   const [mappingTemplates, setMappingTemplates] = useState<Array<{ id: string; name: string; mode?: string }>>([])
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
   const [draft, setDraft] = useState<VendorFeedSchedule | null>(null)
   const [notesFeed, setNotesFeed] = useState<VendorFeedSchedule | null>(null)
   const [notesDraft, setNotesDraft] = useState("")
@@ -1384,6 +1385,19 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: V
     } finally { setSaving(false) }
   }
 
+  const testConnection = async () => {
+    if (!draft) return
+    setTesting(true)
+    try {
+      const result = await api<{ message?: string }>(dataSource ? "/api/data-source-feeds/test" : "/api/vendor-feed-schedules/test", { method: "POST", body: JSON.stringify({ feed: draft }) })
+      toast.success(result.message || "FTP connection verified.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "FTP connection test failed.")
+    } finally {
+      setTesting(false)
+    }
+  }
+
   return (
     <Card>
       <CardHeader className="border-b py-3">
@@ -1426,7 +1440,7 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: V
             <div className="flex items-end gap-3"><Switch checked={Boolean(draft.enabled)} onCheckedChange={(value) => setDraftValue("enabled", value)} /><div><Label>Enable schedule</Label><p className="text-xs text-muted-foreground">Disabled feeds can still be run manually.</p></div></div>
             <div className="grid gap-2 md:col-span-2"><Label>Feed notes</Label><Textarea value={draft.notes || ""} onChange={(event) => setDraftValue("notes", event.target.value)} placeholder="Describe what this feed contains, update expectations, field assumptions, or operational follow-up." /></div>
           </div>}
-          <DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button onClick={() => void saveDraft()} disabled={saving}>{saving ? "Saving..." : "Save feed"}</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" onClick={() => void testConnection()} disabled={testing || !draft?.ftpHost || !draft?.ftpUsername || !(draft?.ftpPassword || draft?.ftpPasswordConfigured)}>{testing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test connection</Button><Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button><Button onClick={() => void saveDraft()} disabled={saving}>{saving ? "Saving..." : "Save feed"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
 

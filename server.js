@@ -7,6 +7,7 @@ const { spawn } = require("child_process");
 const readline = require("readline");
 const zlib = require("zlib");
 const nodemailer = require("nodemailer");
+const ftp = require("basic-ftp");
 const postgres = require("./db");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -10690,6 +10691,34 @@ function queueVendorFeedImportJob(db = {}, feed = {}, options = {}) {
     message: `${scheduled ? "Scheduled" : "Manual"} FTP import queued for ${normalizedFeed.name}.`
   });
   return job;
+}
+
+async function testVendorFeedConnection(feed = {}) {
+  const normalized = normalizeVendorFeedSchedule(feed);
+  if (!normalized.ftpHost || !normalized.ftpUsername || !normalized.ftpPassword || !normalized.ftpRemotePath) {
+    throw new Error("Complete the FTP host, username, password, and remote file path before testing the connection.");
+  }
+  const client = new ftp.Client(15000);
+  client.ftp.verbose = false;
+  try {
+    await client.access({
+      host: normalized.ftpHost,
+      port: normalized.ftpPort,
+      user: normalized.ftpUsername,
+      password: normalized.ftpPassword,
+      secure: false
+    });
+    const remoteFilePath = normalized.ftpRemotePath;
+    let size = null;
+    try {
+      size = await client.size(remoteFilePath);
+    } catch (error) {
+      throw new Error(`Connected and authenticated, but DataPlus could not access ${remoteFilePath}. Check the remote file path and permissions.`);
+    }
+    return { host: normalized.ftpHost, port: normalized.ftpPort, remoteFilePath, size };
+  } finally {
+    client.close();
+  }
 }
 
 async function findActiveDuplicateImportJob(db = {}, attrs = {}) {
@@ -25965,6 +25994,26 @@ async function handleApi(req, res) {
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
     return sendJson(res, 200, { feeds: feeds.map(publicVendorFeedSchedule) });
+  }
+
+  if (req.method === "POST" && (url.pathname === "/api/vendor-feed-schedules/test" || url.pathname === "/api/data-source-feeds/test")) {
+    const body = await parseBody(req);
+    const candidate = body.feed && typeof body.feed === "object" ? body.feed : body;
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const isDataSource = url.pathname === "/api/data-source-feeds/test";
+    const configuredFeeds = isDataSource
+      ? resolvedDataSourceFeeds(settings)
+      : resolvedVendorFeedSchedules(settings, (normalizeDb(await readDbFast({ skipInventory: true })).vendors || []));
+    const existing = configuredFeeds.find((feed) => String(feed.id || "") === String(candidate?.id || "")) || {};
+    const merged = { ...existing, ...(candidate || {}) };
+    if (!String(candidate?.ftpPassword || "").trim()) merged.ftpPassword = existing.ftpPassword || "";
+    try {
+      const result = await testVendorFeedConnection(merged);
+      const sizeLabel = Number.isFinite(result.size) ? ` Remote file found (${Number(result.size).toLocaleString()} bytes).` : " Remote file found.";
+      return sendJson(res, 200, { message: `FTP connection verified for ${result.host}:${result.port}.${sizeLabel}`, remoteFilePath: result.remoteFilePath, size: result.size });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message || "FTP connection test failed." });
+    }
   }
 
   const vendorFeedRunMatch = url.pathname.match(/^\/api\/vendor-feed-schedules\/([^/]+)\/run$/);
