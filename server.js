@@ -10371,6 +10371,13 @@ function normalizeImportJob(job = {}) {
     operatorNotes: job.operatorNotes || job.raw?.operatorNotes || '',
     notesUpdatedAt: job.notesUpdatedAt || job.raw?.notesUpdatedAt || '',
     notesUpdatedBy: job.notesUpdatedBy || job.raw?.notesUpdatedBy || '',
+    workerOutput: Array.isArray(job.workerOutput || job.raw?.workerOutput)
+      ? (job.workerOutput || job.raw?.workerOutput).slice(-400).map((entry) => ({
+        timestamp: String(entry?.timestamp || ''),
+        stream: String(entry?.stream || 'stdout'),
+        line: String(entry?.line || '').slice(0, 2000)
+      })).filter((entry) => entry.line)
+      : [],
     createdAt,
     startedAt: job.startedAt || createdAt,
     finishedAt,

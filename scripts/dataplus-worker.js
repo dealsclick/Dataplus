@@ -1260,6 +1260,17 @@ async function runProductDumpImportJob(job) {
     startedAt: job.startedAt || new Date().toISOString()
   });
   const output = [];
+  const appendWorkerOutput = (stream, text = "") => {
+    const timestamp = new Date().toISOString();
+    const entries = String(text)
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => ({ timestamp, stream, line }));
+    if (!entries.length) return;
+    const existing = Array.isArray(current.workerOutput) ? current.workerOutput : [];
+    current = normalizeJobPatch(current, { workerOutput: [...existing, ...entries].slice(-400) });
+  };
   let lastPersist = 0;
   await new Promise((resolve, reject) => {
     const heartbeatTimer = setInterval(() => {
@@ -1283,6 +1294,7 @@ async function runProductDumpImportJob(job) {
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
       output.push(text);
+      appendWorkerOutput("stdout", text);
       const lastLine = text.trim().split(/\r?\n/).filter(Boolean).pop();
       if (lastLine) {
         current = normalizeJobPatch(current, { status: "running", message: lastLine });
@@ -1292,6 +1304,7 @@ async function runProductDumpImportJob(job) {
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
       output.push(text);
+      appendWorkerOutput("stderr", text);
       const matches = [...text.matchAll(/Processed\s+(\d+)\s+records\s+\((\d+)\s+catalog products,\s+(\d+)\s+skipped\)/gi)];
       const match = matches[matches.length - 1];
       if (match) {

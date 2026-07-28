@@ -130,6 +130,7 @@ type ImportJob = {
   operatorNotes?: string
   notesUpdatedAt?: string
   notesUpdatedBy?: string
+  workerOutput?: Array<{ timestamp?: string; stream?: string; line?: string }>
 }
 
 type WorkerStatus = {
@@ -1833,6 +1834,20 @@ function JobDetail({ job, onRetry, onStop, onUpdate }: { job?: ImportJob; onRetr
             <p className="mt-1 line-clamp-6 text-muted-foreground">{job.details}</p>
           </div>
         )}
+        <div className="overflow-hidden rounded-md border bg-zinc-950 text-zinc-100">
+          <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
+            <p className="text-xs font-medium">Worker output</p>
+            <span className="text-[11px] text-zinc-400">Latest {Math.min(400, job.workerOutput?.length || 0)} lines</span>
+          </div>
+          <div className="max-h-64 overflow-auto p-3 font-mono text-[11px] leading-5">
+            {job.workerOutput?.length ? job.workerOutput.map((entry, index) => (
+              <p key={`${entry.timestamp || ""}-${index}`} className={entry.stream === "stderr" ? "text-amber-300" : "text-zinc-200"}>
+                <span className="mr-2 text-zinc-500">{entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : "--:--:--"}</span>
+                {entry.line}
+              </p>
+            )) : <p className="text-zinc-400">No worker output has been captured for this job yet.</p>}
+          </div>
+        </div>
         <div className="rounded-md border bg-muted/20 p-3">
           <div className="flex items-center justify-between gap-3"><p className="font-medium">Operator notes</p>{job.notesUpdatedAt ? <span className="text-xs text-muted-foreground">{job.notesUpdatedBy || "Operator"} · {dateLabel(job.notesUpdatedAt)}</span> : null}</div>
           <Textarea className="mt-2 min-h-24" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Explain what this job does, its purpose, assumptions, or follow-up instructions." />
