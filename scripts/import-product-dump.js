@@ -103,7 +103,8 @@ function parseArgs(argv) {
     leanRaw: false,
     snapshotOnly: false,
     jobId: "",
-    limit: 0
+    limit: 0,
+    batchSize: 100
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -129,6 +130,9 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--limit") {
       options.limit = Number(argv[index + 1] || 0);
+      index += 1;
+    } else if (arg === "--batch-size") {
+      options.batchSize = Number(argv[index + 1] || 100);
       index += 1;
     } else if (!options.source) {
       options.source = arg;
@@ -1085,6 +1089,7 @@ async function importCatalogStore(dumpPath, options) {
   }
   const seen = options.postgresOnly ? null : new Set();
   const vendorCatalogBatch = [];
+  const vendorCatalogBatchSize = Math.max(25, Math.min(250, Number(options.batchSize || 100) || 100));
   const flushVendorCatalogBatch = async () => {
     if (options.dryRun || !vendorCatalogBatch.length) return;
     const result = await upsertVendorCatalogItemsFromProducts(importId, vendorCatalogBatch.splice(0), {
@@ -1136,7 +1141,7 @@ async function importCatalogStore(dumpPath, options) {
       stats.importable += 1;
       if (seen) seen.add(product.sku.toLowerCase());
       vendorCatalogBatch.push(product);
-      if (vendorCatalogBatch.length >= 1000) await flushVendorCatalogBatch();
+      if (vendorCatalogBatch.length >= vendorCatalogBatchSize) await flushVendorCatalogBatch();
       if (writer) {
         await writeLine(writer, `${JSON.stringify({ id: product.sku, ...product })}\n`);
       }

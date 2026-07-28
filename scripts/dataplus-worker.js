@@ -1241,13 +1241,16 @@ async function runVendorFeedImportJob(job) {
 
 async function runProductDumpImportJob(job) {
   const payload = job.workerPayload || {};
+  // Keep the import below the 4 GB production Droplet's practical memory ceiling.
+  const dumpNodeHeapMB = Math.max(512, Math.min(1536, Number(process.env.PRODUCT_DUMP_NODE_MAX_OLD_SPACE_MB || 1024) || 1024));
+  const dumpBatchSize = Math.max(25, Math.min(250, Number(payload.batchSize || 100) || 100));
   const args = ["scripts/import-product-dump.js"];
   if (payload.path) args.push(String(payload.path));
   if (payload.downloadFtp === true) args.push("--ftp");
   args.push("--job-id", String(job.id));
   if (payload.postgresOnly !== false) args.push("--postgres-only");
   if (Number(payload.limit || 0) > 0) args.push("--limit", String(Number(payload.limit || 0)));
-  args.push("--batch-size", String(Math.max(1000, Math.min(10000, Number(payload.batchSize || 5000) || 5000))));
+  args.push("--batch-size", String(dumpBatchSize));
   let current = await persistJob(job, {
     status: "running",
     phase: "importing_product_dump",
@@ -1273,7 +1276,7 @@ async function runProductDumpImportJob(job) {
           PRODUCT_DUMP_FTP_PASSWORD: String(payload.ftpPassword || ""),
           PRODUCT_DUMP_FTP_REMOTE_PATH: String(payload.ftpRemotePath || "")
         } : {}),
-        NODE_OPTIONS: process.env.NODE_OPTIONS || "--max-old-space-size=16384"
+        NODE_OPTIONS: `--max-old-space-size=${dumpNodeHeapMB}`
       },
       windowsHide: true
     });
@@ -1314,9 +1317,14 @@ async function runProductDumpImportJob(job) {
       clearInterval(heartbeatTimer);
       reject(error);
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       clearInterval(heartbeatTimer);
-      if (code) reject(new Error(`Product dump import exited with code ${code}. ${output.join("").slice(-2000)}`));
+      if (signal || code !== 0) {
+        const failure = signal
+          ? `Product dump import was terminated by ${signal}. This usually indicates memory pressure; the worker heap is now limited to ${dumpNodeHeapMB} MB and uses ${dumpBatchSize}-record batches.`
+          : `Product dump import exited with code ${code}. ${output.join("").slice(-2000)}`;
+        reject(new Error(failure));
+      }
       else resolve();
     });
   });

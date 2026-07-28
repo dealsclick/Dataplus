@@ -9,6 +9,7 @@ import {
   Archive,
   Boxes,
   CheckCircle2,
+  Copy,
   Database,
   ExternalLink,
   FileDown,
@@ -1654,7 +1655,25 @@ function JobsPage({
                         <TableCell><Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge></TableCell>
                         <TableCell className="max-w-[360px]">
                           <p className="truncate font-medium">{job.operation || "Job"}</p>
-                          <p className="truncate text-xs text-muted-foreground">{job.fileName || job.message || job.id}</p>
+                          <div className="flex items-center gap-1">
+                            <span className="truncate font-mono text-[11px] text-muted-foreground">Job {job.id}</span>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="size-5 shrink-0"
+                              title="Copy job ID"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                void navigator.clipboard.writeText(job.id).then(
+                                  () => toast.success("Job ID copied."),
+                                  () => toast.error("Unable to copy the job ID."),
+                                )
+                              }}
+                            >
+                              <Copy className="size-3" />
+                            </Button>
+                          </div>
+                          <p className="truncate text-xs text-muted-foreground">{job.fileName || job.message || "-"}</p>
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">{jobCategory(job)}</TableCell>
                         <TableCell className="min-w-36">
@@ -1760,7 +1779,21 @@ function JobDetail({ job, onRetry, onStop, onUpdate }: { job?: ImportJob; onRetr
         <div className="flex items-start justify-between gap-3">
           <div>
             <CardTitle>{job.operation || "Job detail"}</CardTitle>
-            <CardDescription className="break-all">{job.id}</CardDescription>
+            <div className="flex items-center gap-1">
+              <CardDescription className="break-all">Job ID: {job.id}</CardDescription>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6 shrink-0"
+                title="Copy job ID"
+                onClick={() => void navigator.clipboard.writeText(job.id).then(
+                  () => toast.success("Job ID copied."),
+                  () => toast.error("Unable to copy the job ID."),
+                )}
+              >
+                <Copy className="size-3.5" />
+              </Button>
+            </div>
           </div>
           <Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge>
         </div>

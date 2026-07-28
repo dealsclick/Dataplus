@@ -10686,7 +10686,7 @@ function queueVendorFeedImportJob(db = {}, feed = {}, options = {}) {
       mappingProfile: normalizedFeed.mappingProfile,
       templateId: normalizedFeed.mappingProfile,
       postgresOnly: true,
-      batchSize: 5000
+      batchSize: 100
     },
     message: `${scheduled ? "Scheduled" : "Manual"} FTP import queued for ${normalizedFeed.name}.`
   });
@@ -27114,7 +27114,7 @@ async function handleApi(req, res) {
       progressPercent: 0,
       phase: "queued",
       workerTask: "product-dump-import",
-      workerPayload: { path: dumpPath, postgresOnly: true, batchSize: 5000, limit },
+      workerPayload: { path: dumpPath, postgresOnly: true, batchSize: 100, limit },
       message: limit
         ? `Product dump sample import queued for ${limit.toLocaleString()} rows. The dump will stream into PostgreSQL and SQL change events will be recorded.`
         : "Product dump import queued. The dump will stream into PostgreSQL and SQL change events will be recorded."
