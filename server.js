@@ -20567,7 +20567,12 @@ function orderLineSkuLookupKeys(lines = []) {
 async function enrichOrderDetail(order = {}) {
   const lines = Array.isArray(order.items) ? order.items : [];
   const keys = orderLineSkuLookupKeys(lines);
-  const products = postgres.isPostgresEnabled() ? await postgres.readProductsForOrderSkus(keys) : [];
+  const routePurchaseOrderIds = (order.fulfillmentRoutes || []).map((route) => String(route?.purchaseOrderId || "")).filter(Boolean);
+  const purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []).map((id) => String(id || "")).filter(Boolean), ...routePurchaseOrderIds])];
+  const [products, linkedPurchaseOrders] = await Promise.all([
+    postgres.isPostgresEnabled() ? postgres.readProductsForOrderSkus(keys) : [],
+    postgres.isPostgresEnabled() ? Promise.all(purchaseOrderIds.map((id) => postgres.readPurchaseOrderByKey(id))) : []
+  ]);
   const localByKey = new Map();
   for (const product of products) {
     for (const key of [
@@ -20637,6 +20642,20 @@ async function enrichOrderDetail(order = {}) {
   return {
     ...order,
     items: enrichedLines,
+    linkedPurchaseOrders: (linkedPurchaseOrders || []).filter(Boolean).map((po) => ({
+      id: po.id,
+      poNumber: po.poNumber,
+      supplier: po.supplier,
+      status: po.status,
+      createdAt: po.createdAt,
+      placedAt: po.placedAt || po.submittedAt || po.sentAt || "",
+      expectedAt: po.expectedAt || "",
+      warehouseName: po.warehouseName || "",
+      totalUnits: Number(po.totalUnits || 0),
+      estimatedCost: Number(po.estimatedCost || 0),
+      receivedUnits: (po.items || []).reduce((sum, line) => sum + Number(line.receivedQty || 0), 0),
+      lineCount: Array.isArray(po.items) ? po.items.length : 0
+    })),
     shippingAddressLabel: orderAddressLabel(order.address || {}),
     billingAddressLabel: orderAddressLabel(order.billingAddress || {}),
     profitLoss: {
@@ -22869,7 +22888,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
-    const cacheKey = `dataplus:order-detail:${parts[2]}:`;
+    const cacheKey = `dataplus:order-detail:v2:${parts[2]}:`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
     const [order, warehouses, returns] = await Promise.all([postgres.readOrderByKey(parts[2]), postgres.readStateField("warehouses"), postgres.readStateField("returns")]);
