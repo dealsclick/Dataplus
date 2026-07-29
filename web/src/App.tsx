@@ -3,6 +3,7 @@ import { createColumnHelper, flexRender, getCoreRowModel, getFilteredRowModel, u
 import { useChat } from "@ai-sdk/react"
 import { createChat } from "@shadcn/helpers/ai-sdk"
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai"
+import { useTheme } from "next-themes"
 import {
   Activity,
   AlertCircle,
@@ -20,6 +21,7 @@ import {
   Loader2,
   Mail,
   MessageSquare,
+  Moon,
   MoreHorizontal,
   PackageSearch,
   PanelRightOpen,
@@ -32,6 +34,7 @@ import {
   ShoppingBag,
   Square,
   Store,
+  Sun,
   Truck,
   Warehouse,
   Pencil,
@@ -849,6 +852,7 @@ function FloatingActions({
 }
 
 function App() {
+  const { resolvedTheme, setTheme } = useTheme()
   const [view, setView] = useState<AppView>(() => viewFromPath(window.location.pathname))
   const [state, setState] = useState<LiteState>({})
   const [jobs, setJobs] = useState<ImportJob[]>([])
@@ -1166,6 +1170,16 @@ function App() {
                 <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => setCommandOpen(true)} title="Search workspace (Ctrl+K)">
                   <Search className="size-4" /> Search
                   <kbd className="ml-2 rounded border bg-muted px-1 text-[10px] text-muted-foreground">Ctrl K</kbd>
+                </Button>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="rounded-full"
+                  onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+                  title={resolvedTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                  aria-label={resolvedTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                >
+                  {resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
                 </Button>
                 <Button variant="outline" size="icon" className="rounded-full" onClick={() => setDavidOpen(true)} title="Open David" aria-label="Open David">
                   <MessageSquare className="size-4" />
