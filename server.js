@@ -27870,6 +27870,14 @@ async function handleApi(req, res) {
     return publicState({ ...base, ...extra, inventory: [] }, { lite: true });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const db = await readOrderDraftWorkflowDb();
+    const draft = (db.orderDrafts || []).find((row) => String(row.id || "") === String(parts[2]) || String(row.draftNumber || "").toLowerCase() === String(parts[2]).toLowerCase());
+    if (!draft) return notFound(res);
+    await hydrateDraftLineCosts(db, draft);
+    return sendJson(res, 200, { draft: normalizeOrderDraft(db, draft), warehouses: db.warehouses || [] });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readOrderDraftWorkflowDb();
