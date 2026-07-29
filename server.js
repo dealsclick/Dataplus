@@ -27871,11 +27871,17 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
-    const db = await readOrderDraftWorkflowDb();
-    const draft = (db.orderDrafts || []).find((row) => String(row.id || "") === String(parts[2]) || String(row.draftNumber || "").toLowerCase() === String(parts[2]).toLowerCase());
-    if (!draft) return notFound(res);
-    await hydrateDraftLineCosts(db, draft);
-    return sendJson(res, 200, { draft: normalizeOrderDraft(db, draft), warehouses: db.warehouses || [] });
+    const [drafts, warehouses] = await Promise.all([
+      postgres.readStateField("orderDrafts").catch(() => []),
+      postgres.readStateField("warehouses").catch(() => [])
+    ]);
+    const rawDraft = (drafts || []).find((row) => String(row.id || "") === String(parts[2]) || String(row.draftNumber || "").toLowerCase() === String(parts[2]).toLowerCase());
+    if (!rawDraft) return notFound(res);
+    const skus = (Array.isArray(rawDraft.items) ? rawDraft.items : []).map((item) => item.sku).filter(Boolean);
+    const inventory = skus.length ? await postgres.readProductsByKeys(skus) : [];
+    const db = { inventory: inventory || [], warehouses: warehouses || [], sequence: {} };
+    const draft = normalizeOrderDraft(db, rawDraft);
+    return sendJson(res, 200, { draft, warehouses: db.warehouses });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2 && postgres.isPostgresEnabled()) {
