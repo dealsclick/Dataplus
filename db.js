@@ -708,6 +708,9 @@ async function readStateField(field) {
       order by position, entity_id
     `, [field]);
     if (entities.rows.length) return entities.rows.map((row) => row.data);
+    // Once relational documents are initialized, an empty entity collection is
+    // authoritative. Do not resurrect retired JSON-file fixtures from app_state.
+    if (await stateDocumentCount()) return [];
   }
   const doc = await client.query("select data from state_documents where doc_key = $1", [field]);
   if (doc.rows.length) return doc.rows[0].data;
