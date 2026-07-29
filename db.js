@@ -625,6 +625,18 @@ async function initRelationalSchema() {
     `);
     await client.query("alter table order_records add column if not exists channel_source text");
     await client.query("create index if not exists order_records_channel_source_idx on order_records (lower(channel_source), created_at desc)");
+    // Broad workspace searches use trigram indexes when the extension is available.
+    // A managed database can deny CREATE EXTENSION, which must not block startup.
+    try {
+      await client.query("create extension if not exists pg_trgm");
+      await client.query("create index if not exists products_title_trgm_idx on products using gin (lower(coalesce(title, '')) gin_trgm_ops)");
+      await client.query("create index if not exists products_marketplace_title_trgm_idx on products using gin (lower(coalesce(marketplace_title, '')) gin_trgm_ops)");
+      await client.query("create index if not exists order_records_buyer_trgm_idx on order_records using gin (lower(coalesce(buyer, '')) gin_trgm_ops)");
+      await client.query("create index if not exists order_records_buyer_email_trgm_idx on order_records using gin (lower(coalesce(buyer_email, '')) gin_trgm_ops)");
+      await client.query("create index if not exists purchase_order_supplier_trgm_idx on purchase_order_records using gin (lower(coalesce(supplier, '')) gin_trgm_ops)");
+    } catch (error) {
+      console.warn(`Postgres trigram search indexes were not enabled: ${error.message}`);
+    }
     await client.query(
       "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
       ["2026-05-26-core-catalog-ops"]

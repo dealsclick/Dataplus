@@ -157,6 +157,7 @@ type UniversalSearchResult = {
   id: string
   title: string
   subtitle?: string
+  matchLabel?: string
   href: string
 }
 
@@ -678,6 +679,15 @@ function moneyLabel(value?: number | string) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(value || 0))
 }
 
+function highlightSearchMatch(value: string, query: string) {
+  const text = String(value || "")
+  const needle = query.trim()
+  if (!needle) return text
+  const index = text.toLowerCase().indexOf(needle.toLowerCase())
+  if (index < 0) return text
+  return <>{text.slice(0, index)}<mark className="rounded bg-primary/15 px-0.5 text-inherit">{text.slice(index, index + needle.length)}</mark>{text.slice(index + needle.length)}</>
+}
+
 function jobStatusTone(status?: string) {
   const value = String(status || "").toLowerCase()
   if (value === "failed") return "destructive"
@@ -1186,7 +1196,7 @@ function App() {
                       const label = result.type === "purchase-order" ? "Purchase order" : result.type === "draft" ? "Draft quote" : result.type
                       return <CommandItem key={`${result.type}-${result.id}`} value={`${result.title} ${result.subtitle || ""}`} onSelect={() => { setCommandOpen(false); window.location.assign(result.href) }}>
                         <ResultIcon className="size-4 shrink-0 text-muted-foreground" />
-                        <div className="min-w-0 flex-1"><p className="truncate font-medium">{result.title}</p><p className="truncate text-xs text-muted-foreground">{result.subtitle || "No additional details"}</p></div>
+                        <div className="min-w-0 flex-1"><div className="flex min-w-0 items-center gap-2"><p className="truncate font-medium">{highlightSearchMatch(result.title, universalQuery)}</p>{result.matchLabel && <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px] font-medium">Matched {result.matchLabel}</Badge>}</div><p className="truncate text-xs text-muted-foreground">{highlightSearchMatch(result.subtitle || "No additional details", universalQuery)}</p></div>
                         <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
                       </CommandItem>
                     })}

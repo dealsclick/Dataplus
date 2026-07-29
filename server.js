@@ -21657,6 +21657,7 @@ async function handleApi(req, res) {
 
     const needle = query.toLowerCase();
     const includes = (value) => String(value || "").toLowerCase().includes(needle);
+    const matchedField = (fields) => fields.find(([, value]) => includes(value))?.[0] || "Record";
     let relational = { products: [], orders: [], purchaseOrders: [] };
     let drafts = [];
     if (postgres.isPostgresEnabled()) {
@@ -21681,6 +21682,7 @@ async function handleApi(req, res) {
         id: String(product.product_id || product.id || product.sku || ""),
         title: String(product.sku || "Untitled SKU"),
         subtitle: [product.title || product.marketplace_title, product.brand, product.supplier].filter(Boolean).join(" · "),
+        matchLabel: matchedField([["SKU", product.sku], ["UPC", product.barcode], ["Vendor SKU", product.vendor_sku || product.vendorSku], ["Part number", product.mfr_part_number || product.mfrPartNumber], ["Product title", product.title || product.marketplace_title]]),
         href: `/products/${encodeURIComponent(String(product.sku || product.product_id || ""))}`
       })),
       ...(relational.orders || []).map((order) => ({
@@ -21688,6 +21690,7 @@ async function handleApi(req, res) {
         id: String(order.order_id || order.id || ""),
         title: String(order.order_number || order.internal_order_number || order.marketplace_order_id || "Order"),
         subtitle: [order.buyer || order.buyer_email, order.tracking_number ? `Tracking ${order.tracking_number}` : "", order.channel_source || order.source].filter(Boolean).join(" · "),
+        matchLabel: matchedField([["Order number", order.order_number || order.orderNumber], ["Tracking", order.tracking_number || order.trackingNumber], ["Customer", order.buyer], ["Customer email", order.buyer_email || order.buyerEmail]]),
         href: `/orders/${encodeURIComponent(String(order.order_id || order.id || ""))}`
       })),
       ...(relational.purchaseOrders || []).map((po) => ({
@@ -21695,6 +21698,7 @@ async function handleApi(req, res) {
         id: String(po.po_id || po.id || ""),
         title: String(po.po_number || "Purchase order"),
         subtitle: [po.supplier, po.warehouse_name, po.status].filter(Boolean).join(" · "),
+        matchLabel: matchedField([["PO number", po.po_number || po.poNumber], ["Supplier", po.supplier]]),
         href: `/purchase-orders/${encodeURIComponent(String(po.po_id || po.id || ""))}`
       })),
       ...draftRows.map((draft) => ({
@@ -21702,6 +21706,7 @@ async function handleApi(req, res) {
         id: String(draft.id || ""),
         title: String(draft.draftNumber || draft.id || "Draft quote"),
         subtitle: [draft.buyer || draft.buyerEmail, draft.status || "draft"].filter(Boolean).join(" · "),
+        matchLabel: matchedField([["Quote", draft.draftNumber], ["Customer", draft.buyer], ["Customer email", draft.buyerEmail], ["SKU", (draft.items || []).map((item) => item.sku).join(" ")]]),
         href: `/drafts/${encodeURIComponent(String(draft.id || draft.draftNumber || ""))}`
       }))
     ].filter((result) => result.id && !result.href.endsWith("/"));
