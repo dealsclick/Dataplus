@@ -351,6 +351,8 @@ async function persistJob(job, patch = {}) {
   const next = normalizeJobPatch(job, {
     workerId: WORKER_ID,
     workerLastSeenAt: new Date().toISOString(),
+    processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    currentFile: patch.currentFile || job.currentFile || job.originalFileName || job.fileName || "",
     ...patch
   });
   await postgres.upsertOperationJob(next);
@@ -372,6 +374,7 @@ async function writeHeartbeat(status = "idle", job = null, force = false) {
       heartbeatMs: HEARTBEAT_MS,
       runOnce: RUN_ONCE,
       pid: process.pid,
+      processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
       lastSeenAt: new Date(now).toISOString()
     }
   });
@@ -1225,6 +1228,7 @@ async function runVendorFeedImportJob(job) {
   let current = await persistJob(job, {
     status: "running",
     phase: "downloading_vendor_feed",
+    currentFile: String(payload.ftpRemotePath || payload.path || ""),
     message: `Downloading ${payload.vendorName || "vendor"} CSV feed from FTP...`,
     startedAt: job.startedAt || new Date().toISOString()
   });
@@ -1232,6 +1236,7 @@ async function runVendorFeedImportJob(job) {
   current = await persistJob(current, {
     status: "running",
     phase: "mapping_vendor_feed",
+    currentFile: downloadedPath,
     message: `Downloaded ${path.basename(downloadedPath)}. Applying ${payload.mappingProfile || "saved"} mapping...`,
     originalFilePath: downloadedPath,
     workerPayload: { ...payload, originalFilePath: downloadedPath, templateId: payload.templateId || payload.mappingProfile }
@@ -1256,6 +1261,7 @@ async function runProductDumpImportJob(job) {
   let current = await persistJob(job, {
     status: "running",
     phase: "importing_product_dump",
+    currentFile: String(payload.path || payload.ftpRemotePath || "Product datadump"),
     message: payload.postgresOnly === false
       ? "Worker is importing the product dump..."
       : `Worker is streaming the product dump into PostgreSQL using the ${resourceProfile.label} resource profile...`,

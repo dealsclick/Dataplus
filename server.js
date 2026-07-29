@@ -10332,6 +10332,12 @@ function normalizeImportJob(job = {}) {
   const apiEndpoint = inferImportJobApiEndpoint({ ...job, errors, apiChannel });
   const apiStatus = inferImportJobApiStatus({ ...job, errors, apiChannel, apiEndpoint });
   const apiReason = inferImportJobApiReason({ ...job, errors, apiChannel, apiEndpoint, apiStatus });
+  const startedAtMs = new Date(job.startedAt || createdAt).getTime();
+  const observedAtMs = new Date(job.updatedAt || now).getTime();
+  const elapsedSeconds = Number.isFinite(startedAtMs) && Number.isFinite(observedAtMs)
+    ? Math.max(0, (observedAtMs - startedAtMs) / 1000)
+    : 0;
+  const processedRows = Number(job.processedRows ?? 0) || 0;
   return {
     id: job.id || crypto.randomUUID(),
     syncRunId: job.syncRunId || '',
@@ -10358,7 +10364,7 @@ function normalizeImportJob(job = {}) {
     message: job.message || '',
     details: job.details || '',
     totalRows: Number(job.totalRows ?? job.requested ?? job.rows ?? 0) || 0,
-    processedRows: Number(job.processedRows ?? 0) || 0,
+    processedRows,
     progressPercent: Number(job.progressPercent ?? 0) || 0,
     estimatedSecondsRemaining: Number(job.estimatedSecondsRemaining ?? 0) || 0,
     phase,
@@ -10377,6 +10383,11 @@ function normalizeImportJob(job = {}) {
     workerLastSeenAt: job.workerLastSeenAt || '',
     workerClaimedAt: job.workerClaimedAt || '',
     workerHealth: job.workerHealth || '',
+    currentFile: job.currentFile || job.raw?.currentFile || job.originalFileName || job.fileName || '',
+    processRssMb: Number(job.processRssMb ?? job.raw?.processRssMb ?? 0) || 0,
+    elapsedSeconds: Number(job.elapsedSeconds ?? elapsedSeconds) || 0,
+    rowsPerSecond: Number(job.rowsPerSecond ?? (elapsedSeconds > 0 && processedRows > 0 ? processedRows / elapsedSeconds : 0)) || 0,
+    retryOfJobId: job.retryOfJobId || job.raw?.retryOfJobId || '',
     duplicateOfActiveJob: Boolean(job.duplicateOfActiveJob),
     apiChannel,
     apiEndpoint,
@@ -12335,7 +12346,14 @@ function queueEbayLocationJob(db, body = {}) {
 }
 
 async function persistWorkerImportJob(job = {}, attrs = {}) {
-  Object.assign(job, normalizeImportJob({ ...job, ...attrs, updatedAt: new Date().toISOString() }));
+  const updatedAt = new Date().toISOString();
+  Object.assign(job, normalizeImportJob({
+    ...job,
+    ...attrs,
+    currentFile: attrs.currentFile || job.currentFile || job.originalFileName || job.fileName || "",
+    processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    updatedAt
+  }));
   await postgres.upsertOperationJob(job);
   return job;
 }
@@ -21651,7 +21669,7 @@ async function handleApi(req, res) {
     const query = String(url.searchParams.get("q") || "").trim();
     const limit = Math.max(1, Math.min(12, Number(url.searchParams.get("limit") || 6) || 6));
     if (query.length < 2) return sendJson(res, 200, { results: [] });
-    const cacheKey = `dataplus:universal-search:v1:${crypto.createHash("sha1").update(`${query.toLowerCase()}:${limit}`).digest("hex")}`;
+    const cacheKey = `dataplus:universal-search:v2:${crypto.createHash("sha1").update(`${query.toLowerCase()}:${limit}`).digest("hex")}`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
 
@@ -21660,10 +21678,14 @@ async function handleApi(req, res) {
     const matchedField = (fields) => fields.find(([, value]) => includes(value))?.[0] || "Record";
     let relational = { products: [], orders: [], purchaseOrders: [] };
     let drafts = [];
+    let vendors = [];
+    let returns = [];
     if (postgres.isPostgresEnabled()) {
-      [relational, drafts] = await Promise.all([
+      [relational, drafts, vendors, returns] = await Promise.all([
         postgres.searchUniversal(query, { limit }),
-        postgres.readStateField("orderDrafts")
+        postgres.readStateField("orderDrafts"),
+        postgres.readStateField("vendors"),
+        postgres.readStateField("returns")
       ]);
     } else {
       const db = await readDbFast();
@@ -21671,10 +21693,18 @@ async function handleApi(req, res) {
       relational.orders = (db.orders || []).filter((order) => [order.orderNumber, order.buyer, order.buyerEmail, order.trackingNumber].some(includes)).slice(0, limit);
       relational.purchaseOrders = (db.purchaseOrders || []).filter((po) => [po.poNumber, po.supplier].some(includes)).slice(0, limit);
       drafts = db.orderDrafts || [];
+      vendors = db.vendors || [];
+      returns = db.returns || [];
     }
     const draftRows = (Array.isArray(drafts) ? drafts : []).filter((draft) => (
       [draft.draftNumber, draft.buyer, draft.buyerEmail, draft.phone, draft.id].some(includes)
       || (Array.isArray(draft.items) && draft.items.some((item) => [item.sku, item.title].some(includes)))
+    )).slice(0, limit);
+    const vendorRows = (Array.isArray(vendors) ? vendors : []).filter((vendor) => (
+      [vendor.name, vendor.code, vendor.email, vendor.phone, vendor.website, vendor.id].some(includes)
+    )).slice(0, limit);
+    const returnRows = (Array.isArray(returns) ? returns : []).filter((record) => (
+      [record.returnNumber, record.orderNumber, record.sku, record.reason, record.source, record.buyer, record.customerName].some(includes)
     )).slice(0, limit);
     const results = [
       ...(relational.products || []).map((product) => ({
@@ -21708,6 +21738,22 @@ async function handleApi(req, res) {
         subtitle: [draft.buyer || draft.buyerEmail, draft.status || "draft"].filter(Boolean).join(" · "),
         matchLabel: matchedField([["Quote", draft.draftNumber], ["Customer", draft.buyer], ["Customer email", draft.buyerEmail], ["SKU", (draft.items || []).map((item) => item.sku).join(" ")]]),
         href: `/drafts/${encodeURIComponent(String(draft.id || draft.draftNumber || ""))}`
+      })),
+      ...vendorRows.map((vendor) => ({
+        type: "vendor",
+        id: String(vendor.id || vendor.vendorId || vendor.code || ""),
+        title: String(vendor.name || vendor.code || "Vendor"),
+        subtitle: [vendor.code, vendor.email, vendor.phone].filter(Boolean).join(" / "),
+        matchLabel: matchedField([["Supplier", vendor.name], ["Supplier code", vendor.code], ["Email", vendor.email], ["Phone", vendor.phone]]),
+        href: `/vendors/${encodeURIComponent(String(vendor.id || vendor.vendorId || vendor.code || ""))}`
+      })),
+      ...returnRows.map((record) => ({
+        type: "return",
+        id: String(record.id || record.returnNumber || ""),
+        title: String(record.returnNumber || "Return"),
+        subtitle: [record.orderNumber ? `Order ${record.orderNumber}` : "", record.sku, record.reason, record.status].filter(Boolean).join(" / "),
+        matchLabel: matchedField([["Return", record.returnNumber], ["Order", record.orderNumber], ["SKU", record.sku], ["Reason", record.reason], ["Customer", record.buyer || record.customerName]]),
+        href: "/returns"
       }))
     ].filter((result) => result.id && !result.href.endsWith("/"));
     const payload = { results: results.slice(0, limit * 4) };
@@ -25274,6 +25320,7 @@ async function handleApi(req, res) {
       errors: [],
       errorFileName: "",
       errorFilePath: "",
+      retryOfJobId: previous.id,
       workerPayload: nextPayload,
       createdAt: now,
       startedAt: now,
@@ -25334,6 +25381,7 @@ async function handleApi(req, res) {
       errors: [],
       errorFileName: "",
       errorFilePath: "",
+      retryOfJobId: previous.id,
       workerPayload: nextPayload,
       createdAt: now,
       startedAt: now,

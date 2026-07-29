@@ -128,6 +128,7 @@ type ImportJob = {
   totalRows?: number
   processedRows?: number
   progressPercent?: number
+  phase?: string
   changed?: number
   missingCount?: number
   created?: number
@@ -137,6 +138,11 @@ type ImportJob = {
   updatedAt?: string
   workerId?: string
   workerTask?: string
+  currentFile?: string
+  processRssMb?: number
+  elapsedSeconds?: number
+  rowsPerSecond?: number
+  retryOfJobId?: string
   operatorNotes?: string
   notesUpdatedAt?: string
   notesUpdatedBy?: string
@@ -153,7 +159,7 @@ type WorkerStatus = {
 }
 
 type UniversalSearchResult = {
-  type: "product" | "order" | "purchase-order" | "draft"
+  type: "product" | "order" | "purchase-order" | "draft" | "vendor" | "return"
   id: string
   title: string
   subtitle?: string
@@ -1189,10 +1195,10 @@ function App() {
                   </>}
                   {universalQuery.trim().length === 1 && <p className="px-3 py-6 text-center text-sm text-muted-foreground">Type at least two characters to search records.</p>}
                   {universalQuery.trim().length >= 2 && universalSearching && <p className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Searching DataPlus...</p>}
-                  {universalQuery.trim().length >= 2 && !universalSearching && universalResults.length === 0 && <CommandEmpty>No matching products, orders, customers, tracking numbers, POs, or quotes.</CommandEmpty>}
+                  {universalQuery.trim().length >= 2 && !universalSearching && universalResults.length === 0 && <CommandEmpty>No matching products, orders, customers, tracking numbers, POs, quotes, vendors, or returns.</CommandEmpty>}
                   {universalResults.length > 0 && <CommandGroup heading="Records">
                     {universalResults.map((result) => {
-                      const ResultIcon = result.type === "product" ? PackageSearch : result.type === "order" ? ShoppingBag : result.type === "purchase-order" ? Boxes : FileText
+                      const ResultIcon = result.type === "product" ? PackageSearch : result.type === "order" ? ShoppingBag : result.type === "purchase-order" ? Boxes : result.type === "vendor" ? Store : result.type === "return" ? Archive : FileText
                       const label = result.type === "purchase-order" ? "Purchase order" : result.type === "draft" ? "Draft quote" : result.type
                       return <CommandItem key={`${result.type}-${result.id}`} value={`${result.title} ${result.subtitle || ""}`} onSelect={() => { setCommandOpen(false); window.location.assign(result.href) }}>
                         <ResultIcon className="size-4 shrink-0 text-muted-foreground" />
@@ -1429,7 +1435,7 @@ function MetricCard({
   )
 }
 
-function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: Vendor[]; vendor?: Vendor; dataSource?: boolean }) {
+function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onSelectJob }: { vendors: Vendor[]; vendor?: Vendor; dataSource?: boolean; jobs?: ImportJob[]; onSelectJob?: (job: ImportJob) => void }) {
   const [feeds, setFeeds] = useState<VendorFeedSchedule[]>([])
   const [mappingTemplates, setMappingTemplates] = useState<Array<{ id: string; name: string; mode?: string }>>([])
   const [open, setOpen] = useState(false)
@@ -1456,6 +1462,7 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: V
   }, [])
 
   const visibleFeeds = vendor ? feeds.filter((feed) => String(feed.vendorId || "") === vendor.id) : feeds
+  const jobById = new Map(jobs.map((job) => [job.id, job]))
 
   const openNew = () => {
     setDraft({
@@ -1546,15 +1553,18 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource }: { vendors: V
       </CardHeader>
       <CardContent className="p-0">
         <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Feed</TableHead><TableHead>Supplier</TableHead><TableHead>Source</TableHead><TableHead>Mapping</TableHead><TableHead>Schedule</TableHead><TableHead>Status</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>
-          {visibleFeeds.map((feed) => <TableRow key={feed.id}>
+          {visibleFeeds.map((feed) => {
+            const lastJob = feed.lastJobId ? jobById.get(feed.lastJobId) : undefined
+            return <TableRow key={feed.id}>
             <TableCell><p className="font-medium">{feed.name}</p><p className="text-xs text-muted-foreground">{feed.lastJobId ? `Last job ${feed.lastJobId.slice(0, 8)}` : "Not run yet"}</p></TableCell>
             <TableCell>{dataSource ? (feed.vendorName || "DataWarehouse") : (feed.vendorName || "Unassigned")}</TableCell>
             <TableCell className="max-w-52 truncate text-sm">{feed.ftpHost ? `FTP ${feed.ftpHost}${feed.ftpRemotePath || ""}` : "Connection not configured"}</TableCell>
             <TableCell className="max-w-60 truncate text-sm" title={feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}>{feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}</TableCell>
             <TableCell className="text-sm">{scheduleDescription(feed.scheduleType, feed.scheduleTimes, feed.scheduleEveryHours, "02:00")}</TableCell>
-            <TableCell><Badge variant={feed.enabled ? "default" : "outline"}>{feed.enabled ? "Enabled" : "Disabled"}</Badge></TableCell>
+            <TableCell><div className="flex min-w-32 flex-col items-start gap-1"><Badge variant={feed.enabled ? "default" : "outline"}>{feed.enabled ? "Enabled" : "Disabled"}</Badge>{lastJob ? <button type="button" className="text-left text-xs text-muted-foreground hover:text-foreground hover:underline" onClick={() => onSelectJob?.(lastJob)} title={`Open job ${lastJob.id}`}><span className="capitalize">{lastJob.status || "queued"}</span> / {dateLabel(lastJob.finishedAt || lastJob.updatedAt || lastJob.startedAt)}</button> : feed.lastJobId ? <span className="text-xs text-muted-foreground">Latest run is outside this history page.</span> : null}</div></TableCell>
             <TableCell><div className="flex justify-end gap-2"><Button size="icon" variant={feed.notes ? "secondary" : "ghost"} title="View feed notes" onClick={() => { setNotesFeed(feed); setNotesDraft(String(feed.notes || "")) }}><MessageSquare className="size-4" /></Button>{(vendor || dataSource) ? <><Button size="sm" variant="outline" onClick={() => { setDraft({ ...feed, ftpPassword: "" }); setOpen(true) }}>Edit</Button><Button size="sm" onClick={() => void runFeed(feed)} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run now</Button></> : <Button size="sm" variant="outline" asChild><a href={feed.vendorId ? `/vendors/${encodeURIComponent(feed.vendorId)}` : "/settings?tab=data-sources"}>{feed.vendorId ? "Open supplier" : "Open source"}</a></Button>}</div></TableCell>
-          </TableRow>)}
+          </TableRow>
+          })}
           {!visibleFeeds.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">{dataSource ? "No universal source is configured." : vendor ? "No feed is configured for this supplier." : "No vendor feeds are scheduled. Open a supplier profile to configure its source-catalog feed."}</TableCell></TableRow>}
         </TableBody></Table></div>
       </CardContent>
@@ -1692,7 +1702,7 @@ function JobsPage({
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          {activeJobs.length ? <div className="divide-y">{activeJobs.map((job) => <button key={job.id} type="button" className="grid w-full grid-cols-[auto_minmax(0,1fr)_minmax(160px,260px)_auto] items-center gap-3 px-4 py-3 text-left hover:bg-muted/45" onClick={() => onSelectJob(job)}><Badge variant={jobStatusTone(job.status)}>{job.status || "running"}</Badge><div className="min-w-0"><p className="truncate text-sm font-medium">{job.operation || "Job"}</p><p className="truncate text-xs text-muted-foreground">{job.message || job.workerTask || job.id}</p></div><div className="hidden min-w-0 items-center gap-2 sm:flex"><Progress value={jobProgress(job)} className="h-1.5" /><span className="w-10 text-right text-xs text-muted-foreground">{jobProgress(job)}%</span></div><span className="text-xs text-muted-foreground">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</span></button>)}</div> : <div className="px-6 py-5 text-sm text-muted-foreground">New jobs will appear here the moment they are queued.</div>}
+          {activeJobs.length ? <div className="divide-y">{activeJobs.map((job) => <button key={job.id} type="button" className="grid w-full grid-cols-[auto_minmax(0,1fr)_minmax(160px,260px)_auto] items-center gap-3 px-4 py-3 text-left hover:bg-muted/45" onClick={() => onSelectJob(job)}><Badge variant={jobStatusTone(job.status)}>{job.status || "running"}</Badge><div className="min-w-0"><p className="truncate text-sm font-medium">{job.operation || "Job"}</p><p className="truncate text-xs text-muted-foreground">{job.message || job.workerTask || job.id}</p><p className="mt-1 truncate text-[11px] text-muted-foreground">{String(job.phase || "queued").replace(/_/g, " ")} · {job.rowsPerSecond ? `${job.rowsPerSecond.toFixed(1)} rows/sec` : "measuring"}{job.processRssMb ? ` · ${numberLabel(job.processRssMb)} MB RSS` : ""}</p></div><div className="hidden min-w-0 items-center gap-2 sm:flex"><Progress value={jobProgress(job)} className="h-1.5" /><span className="w-10 text-right text-xs text-muted-foreground">{jobProgress(job)}%</span></div><span className="text-xs text-muted-foreground">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</span></button>)}</div> : <div className="px-6 py-5 text-sm text-muted-foreground">New jobs will appear here the moment they are queued.</div>}
         </CardContent>
       </Card>
 
@@ -1742,8 +1752,8 @@ function JobsPage({
         </div>
 
         <TabsContent value="scheduled" className="mt-4">
-          <div className="mb-4"><VendorFeedScheduleManager vendors={[]} dataSource /></div>
-          <div className="mb-4"><VendorFeedScheduleManager vendors={vendors} /></div>
+          <div className="mb-4"><VendorFeedScheduleManager vendors={[]} dataSource jobs={jobs} onSelectJob={onSelectJob} /></div>
+          <div className="mb-4"><VendorFeedScheduleManager vendors={vendors} jobs={jobs} onSelectJob={onSelectJob} /></div>
           <Card>
             <CardHeader className="border-b py-3"><CardTitle className="text-base">Scheduled task register</CardTitle><CardDescription>One place to see every automated workflow, including manual-only jobs that are not yet scheduled.</CardDescription></CardHeader>
             <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Task</TableHead><TableHead>Owner</TableHead><TableHead>Schedule</TableHead><TableHead>Behavior</TableHead><TableHead>Status</TableHead><TableHead /></TableRow></TableHeader><TableBody>{scheduleRows.map((schedule) => <TableRow key={schedule.name}><TableCell className="font-medium">{schedule.name}</TableCell><TableCell>{schedule.owner}</TableCell><TableCell>{schedule.timing}</TableCell><TableCell className="max-w-96 text-sm text-muted-foreground">{schedule.behavior}</TableCell><TableCell><Badge variant={schedule.enabled ? "default" : "outline"}>{schedule.enabled ? "Enabled" : schedule.managed ? "Disabled" : "Manual"}</Badge></TableCell><TableCell><Button asChild size="sm" variant="outline"><a href={schedule.location}>Open {schedule.managed ? "setting" : "job"}</a></Button></TableCell></TableRow>)}</TableBody></Table></div></CardContent>
@@ -1964,7 +1974,12 @@ function JobDetail({ job, onRetry, onStop, onUpdate }: { job?: ImportJob; onRetr
           <Detail label="Processed" value={numberLabel(job.processedRows)} />
           <Detail label="Changed" value={numberLabel(job.changed)} />
           <Detail label="Missing" value={numberLabel(job.missingCount)} />
+          <Detail label="Stage" value={String(job.phase || "pending").replace(/_/g, " ")} />
+          <Detail label="Throughput" value={job.rowsPerSecond ? `${job.rowsPerSecond.toFixed(1)} rows/sec` : "Measuring"} />
+          <Detail label="Worker memory" value={job.processRssMb ? `${numberLabel(job.processRssMb)} MB RSS` : "Not reported"} />
+          <Detail label="Retry source" value={job.retryOfJobId ? `Job ${job.retryOfJobId.slice(0, 8)}` : "Original run"} />
         </div>
+        {job.currentFile && <div className="rounded-md border bg-muted/20 p-3"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Current file</p><p className="mt-1 break-all font-mono text-xs">{job.currentFile}</p></div>}
         {job.message && (
           <div className="rounded-md border bg-muted/45 p-3">
             <p className="font-medium">Status message</p>
