@@ -4157,6 +4157,11 @@ function OperationsPage() {
   async function load() {
     setLoading(true)
     try {
+      if (tab === "drafts") {
+        const drafts = await api<{ orderDrafts?: Array<Record<string, unknown>> }>("/api/order-drafts")
+        setData({ orderDrafts: drafts.orderDrafts || [] })
+        return
+      }
       const [orders, state] = await Promise.all([
         api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>> }>("/api/orders?limit=5000"),
         api<LiteState>("/api/state?lite=1"),
@@ -4167,7 +4172,7 @@ function OperationsPage() {
     catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load operations data.") }
     finally { setLoading(false) }
   }
-  useEffect(() => { void load() }, [])
+  useEffect(() => { void load() }, [tab])
   useEffect(() => {
     const handleAction = (event: Event) => {
       const action = (event as CustomEvent<{ action?: string }>).detail?.action

@@ -27870,6 +27870,12 @@ async function handleApi(req, res) {
     return publicState({ ...base, ...extra, inventory: [] }, { lite: true });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2 && postgres.isPostgresEnabled()) {
+    const drafts = await postgres.readStateField("orderDrafts").catch(() => []);
+    const orderDrafts = Array.isArray(drafts) ? drafts.sort((left, right) => new Date(right.updatedAt || right.createdAt || 0).getTime() - new Date(left.updatedAt || left.createdAt || 0).getTime()) : [];
+    return sendJson(res, 200, { orderDrafts, draftsLoaded: true, storage: "postgres" });
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const [drafts, warehouses] = await Promise.all([
       postgres.readStateField("orderDrafts").catch(() => []),
