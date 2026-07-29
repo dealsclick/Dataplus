@@ -7015,7 +7015,9 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0 }: { totalSkuCount?: number
     skuButtons.forEach((button) => {
       const sku = button.textContent?.trim()
       const container = button.parentElement
-      if (!sku || !container) return
+      const row = button.closest("tr")
+      const actionsCell = row?.querySelector<HTMLTableCellElement>("td:last-child")
+      if (!sku || !container || !actionsCell) return
       container.classList.add("group")
       button.onclick = (event) => {
         event.preventDefault()
@@ -7023,15 +7025,15 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0 }: { totalSkuCount?: number
         window.history.pushState({}, "", `/products/${encodeURIComponent(sku)}`)
         window.dispatchEvent(new PopStateEvent("popstate"))
       }
-      let quickView = container.querySelector<HTMLButtonElement>("[data-product-quick-view]")
+      let quickView = row?.querySelector<HTMLButtonElement>("[data-product-quick-view]")
       if (!quickView) {
         quickView = document.createElement("button")
         quickView.type = "button"
         quickView.dataset.productQuickView = "true"
-        quickView.className = "ml-1 hidden rounded border px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted group-hover:inline-flex"
+        quickView.className = "mr-1 inline-flex h-8 items-center rounded-md border border-input bg-background px-2 text-xs font-medium hover:bg-muted"
         quickView.textContent = "View"
         quickView.title = "Quick view"
-        container.appendChild(quickView)
+        actionsCell.prepend(quickView)
       }
       quickView.onclick = (event) => {
         event.preventDefault()
