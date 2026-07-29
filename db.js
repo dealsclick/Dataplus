@@ -1042,10 +1042,14 @@ async function writeStateDocuments(state = {}) {
   await initRelationalSchema();
   const rows = [];
   const entityRows = [];
+  const entityCollections = new Set();
   for (const key of STATE_DOCUMENT_KEYS) {
     if (state[key] === undefined) continue;
     const value = state[key];
     if (ENTITY_DOCUMENT_COLLECTIONS.has(key) && Array.isArray(value)) {
+      // An explicit empty array is a destructive update: clear the collection
+      // instead of falling back to stale app_state fixtures on the next read.
+      entityCollections.add(key);
       value.forEach((row, index) => {
         entityRows.push({
           collection: key,
@@ -1058,7 +1062,7 @@ async function writeStateDocuments(state = {}) {
       rows.push({ doc_key: key, data: value });
     }
   }
-  if (!rows.length && !entityRows.length) return true;
+  if (!rows.length && !entityRows.length && !entityCollections.size) return true;
   const batchSize = 250;
   await client.query("begin");
   try {
@@ -1074,8 +1078,8 @@ async function writeStateDocuments(state = {}) {
         `, [JSON.stringify(rows.slice(i, i + batchSize))]);
       }
     }
-    if (entityRows.length) {
-      const collections = [...new Set(entityRows.map((row) => row.collection))];
+    if (entityCollections.size) {
+      const collections = [...entityCollections];
       await client.query("delete from entity_documents where collection = any($1::text[])", [collections]);
       await client.query("delete from state_documents where doc_key = any($1::text[])", [collections]);
       for (let i = 0; i < entityRows.length; i += batchSize) {
