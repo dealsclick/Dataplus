@@ -27884,7 +27884,10 @@ async function handleApi(req, res) {
     const rawDraft = (drafts || []).find((row) => String(row.id || "") === String(parts[2]) || String(row.draftNumber || "").toLowerCase() === String(parts[2]).toLowerCase());
     if (!rawDraft) return notFound(res);
     const skus = (Array.isArray(rawDraft.items) ? rawDraft.items : []).map((item) => item.sku).filter(Boolean);
-    const inventory = skus.length ? await postgres.readProductsByKeys(skus) : [];
+    // Draft lines are matched like order lines: SKU, active aliases, and Shopify
+    // variant IDs. This stays index-backed even when a manually entered SKU has
+    // no catalog match, unlike the broad product-key resolver.
+    const inventory = skus.length ? await postgres.readProductsForOrderSkus(skus) : [];
     const db = { inventory: inventory || [], warehouses: warehouses || [], sequence: {} };
     const draft = normalizeOrderDraft(db, rawDraft);
     return sendJson(res, 200, { draft, warehouses: db.warehouses });
