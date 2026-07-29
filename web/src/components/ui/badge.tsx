@@ -33,22 +33,39 @@ const badgeVariants = cva(
   }
 )
 
+type BadgeVariant = VariantProps<typeof badgeVariants>["variant"]
+
+function statusVariant(children: React.ReactNode, fallback: BadgeVariant): BadgeVariant {
+  if (typeof children !== "string") return fallback
+  const value = children.toLowerCase()
+
+  if (/fail|error|exception|blocked|cancel|reject|void/.test(value)) return "destructive"
+  if (/paid|captured|success|complete|received|closed|shipped|fulfilled|ready|approved|enabled|active/.test(value)) return "success"
+  if (/waiting|review|hold|pending|draft|new|unassigned|partial|needs/.test(value)) return "warning"
+  if (/queue|process|pick|pack|allocat|submit|confirm|authoriz|running/.test(value)) return "info"
+  return fallback
+}
+
 function Badge({
   className,
   variant = "default",
   asChild = false,
+  children,
   ...props
 }: React.ComponentProps<"span"> &
   VariantProps<typeof badgeVariants> & { asChild?: boolean }) {
   const Comp = asChild ? Slot.Root : "span"
+  const resolvedVariant = statusVariant(children, variant)
 
   return (
     <Comp
       data-slot="badge"
-      data-variant={variant}
-      className={cn(badgeVariants({ variant }), className)}
+      data-variant={resolvedVariant}
+      className={cn(badgeVariants({ variant: resolvedVariant }), className)}
       {...props}
-    />
+    >
+      {children}
+    </Comp>
   )
 }
 
