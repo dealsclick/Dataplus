@@ -518,18 +518,39 @@ type ShopifyAuthCheck = {
   error?: string
 }
 
-const navItems: Array<{ id: AppView; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { id: "overview", label: "Overview", icon: Home },
-  { id: "jobs", label: "Jobs", icon: History },
-  { id: "channels", label: "Channels", icon: Store },
-  { id: "operations", label: "Orders", icon: ShoppingBag },
-  { id: "warehouse", label: "Warehouse", icon: Warehouse },
-  { id: "fulfillment", label: "Fulfillment", icon: Truck },
-  { id: "purchasing", label: "Purchasing", icon: Archive },
-  { id: "catalog", label: "Catalog", icon: PackageSearch },
-  { id: "vendors", label: "Vendors", icon: Warehouse },
-  { id: "ai-chat", label: "David", icon: MessageSquare },
-  { id: "settings", label: "Settings", icon: Settings },
+type NavigationItem = { id: AppView; label: string; icon: React.ComponentType<{ className?: string }> }
+
+const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
+  {
+    label: "Operations",
+    items: [
+      { id: "operations", label: "Orders", icon: ShoppingBag },
+      { id: "fulfillment", label: "Fulfillment", icon: Truck },
+      { id: "purchasing", label: "Purchasing", icon: Archive },
+      { id: "warehouse", label: "Warehouse", icon: Warehouse },
+    ],
+  },
+  {
+    label: "Catalog",
+    items: [
+      { id: "catalog", label: "Catalog", icon: PackageSearch },
+      { id: "vendors", label: "Vendors", icon: Warehouse },
+    ],
+  },
+  {
+    label: "Channels & Automation",
+    items: [
+      { id: "channels", label: "Channels", icon: Store },
+      { id: "jobs", label: "Jobs", icon: History },
+    ],
+  },
+  {
+    label: "Workspace",
+    items: [
+      { id: "overview", label: "Overview", icon: Home },
+      { id: "ai-chat", label: "David", icon: MessageSquare },
+    ],
+  },
 ]
 
 const catalogSidebarItems: Array<{ label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
@@ -1013,13 +1034,13 @@ function App() {
             </div>
           </SidebarHeader>
           <SidebarContent>
-            <SidebarGroup>
-              <SidebarGroupLabel>Workspace</SidebarGroupLabel>
+            {navGroups.map((group) => <SidebarGroup key={group.label}>
+              <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu>
-                  {navItems.map((item) => {
+                  {group.items.map((item) => {
                     const Icon = item.icon
-                    const catalogActive = item.id === "catalog" && (view === "catalog" || view === "product-detail" || view === "category-detail")
+                    const catalogActive = item.id === "catalog" && (view === "catalog" || view === "product-detail" || view === "category-detail" || view === "inventory-detail")
                     const warehouseActive = item.id === "warehouse" && view === "warehouse"
                     return <SidebarMenuItem key={item.id}>
                       <SidebarMenuButton isActive={view === item.id || catalogActive || warehouseActive} tooltip={item.label} onClick={() => navigateTo(item.id)}><Icon /><span>{item.label}</span></SidebarMenuButton>
@@ -1037,10 +1058,11 @@ function App() {
                   })}
                 </SidebarMenu>
               </SidebarGroupContent>
-            </SidebarGroup>
+            </SidebarGroup>)}
           </SidebarContent>
           <SidebarFooter className="p-3">
             <SidebarMenu>
+              <SidebarMenuItem><SidebarMenuButton isActive={view === "settings"} tooltip="Settings" onClick={() => navigateTo("settings")}><Settings /><span>Settings</span></SidebarMenuButton></SidebarMenuItem>
               <SidebarMenuItem><SidebarMenuButton tooltip="Old UI fallback" asChild><a href="/legacy" target="_blank" rel="noreferrer"><ExternalLink /><span>Old UI fallback</span></a></SidebarMenuButton></SidebarMenuItem>
             </SidebarMenu>
           </SidebarFooter>
