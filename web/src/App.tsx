@@ -700,9 +700,11 @@ function highlightSearchMatch(value: string, query: string) {
 function jobStatusTone(status?: string) {
   const value = String(status || "").toLowerCase()
   if (value === "failed") return "destructive"
-  if (value === "warning" || value === "queued" || value === "running") return "secondary"
+  if (value === "warning") return "warning"
+  if (value === "queued" || value === "running") return "info"
   if (value === "stopped") return "outline"
-  return "default"
+  if (["success", "done", "ok", "completed"].includes(value)) return "success"
+  return "secondary"
 }
 
 function jobProgress(job: ImportJob) {
@@ -1164,7 +1166,7 @@ function App() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <Badge variant={workerStatus.online ? "default" : "secondary"}>
+                <Badge variant={workerStatus.online ? "success" : "secondary"}>
                   {workerStatus.online ? "Worker online" : "Worker idle"}
                 </Badge>
                 <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => setCommandOpen(true)} title="Search workspace (Ctrl+K)">
@@ -1575,7 +1577,7 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onS
             <TableCell className="max-w-52 truncate text-sm">{feed.ftpHost ? `FTP ${feed.ftpHost}${feed.ftpRemotePath || ""}` : "Connection not configured"}</TableCell>
             <TableCell className="max-w-60 truncate text-sm" title={feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}>{feed.mappingProfile === "source-catalog-standard" ? "Source catalog standard" : mappingTemplates.find((template) => template.id === feed.mappingProfile)?.name || "Not selected"}</TableCell>
             <TableCell className="text-sm">{scheduleDescription(feed.scheduleType, feed.scheduleTimes, feed.scheduleEveryHours, "02:00")}</TableCell>
-            <TableCell><div className="flex min-w-32 flex-col items-start gap-1"><Badge variant={feed.enabled ? "default" : "outline"}>{feed.enabled ? "Enabled" : "Disabled"}</Badge>{lastJob ? <button type="button" className="text-left text-xs text-muted-foreground hover:text-foreground hover:underline" onClick={() => onSelectJob?.(lastJob)} title={`Open job ${lastJob.id}`}><span className="capitalize">{lastJob.status || "queued"}</span> / {dateLabel(lastJob.finishedAt || lastJob.updatedAt || lastJob.startedAt)}</button> : feed.lastJobId ? <span className="text-xs text-muted-foreground">Latest run is outside this history page.</span> : null}</div></TableCell>
+            <TableCell><div className="flex min-w-32 flex-col items-start gap-1"><Badge variant={feed.enabled ? "success" : "outline"}>{feed.enabled ? "Enabled" : "Disabled"}</Badge>{lastJob ? <button type="button" className="text-left text-xs text-muted-foreground hover:text-foreground hover:underline" onClick={() => onSelectJob?.(lastJob)} title={`Open job ${lastJob.id}`}><span className="capitalize">{lastJob.status || "queued"}</span> / {dateLabel(lastJob.finishedAt || lastJob.updatedAt || lastJob.startedAt)}</button> : feed.lastJobId ? <span className="text-xs text-muted-foreground">Latest run is outside this history page.</span> : null}</div></TableCell>
             <TableCell><div className="flex justify-end gap-2"><Button size="icon" variant={feed.notes ? "secondary" : "ghost"} title="View feed notes" onClick={() => { setNotesFeed(feed); setNotesDraft(String(feed.notes || "")) }}><MessageSquare className="size-4" /></Button>{(vendor || dataSource) ? <><Button size="sm" variant="outline" onClick={() => { setDraft({ ...feed, ftpPassword: "" }); setOpen(true) }}>Edit</Button><Button size="sm" onClick={() => void runFeed(feed)} disabled={!feed.ftpHost || !feed.ftpUsername || !feed.ftpPasswordConfigured}>Run now</Button></> : <Button size="sm" variant="outline" asChild><a href={feed.vendorId ? `/vendors/${encodeURIComponent(feed.vendorId)}` : "/settings?tab=data-sources"}>{feed.vendorId ? "Open supplier" : "Open source"}</a></Button>}</div></TableCell>
           </TableRow>
           })}
@@ -1698,7 +1700,7 @@ function JobsPage({
           <CardContent className="p-4">
             <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Worker</p>
             <div className="mt-2 flex items-center gap-2">
-              <Badge variant={workerStatus.online ? "default" : "secondary"}>{workerStatus.online ? "online" : "idle"}</Badge>
+              <Badge variant={workerStatus.online ? "success" : "secondary"}>{workerStatus.online ? "online" : "idle"}</Badge>
               <span className="truncate text-sm text-muted-foreground">{workerStatus.currentTask || workerStatus.workerId || "No task"}</span>
             </div>
           </CardContent>
@@ -1712,7 +1714,7 @@ function JobsPage({
               <CardTitle className="text-base">Live activity</CardTitle>
               <CardDescription>{activeJobs.length ? "Jobs currently queued or running. This section stays visible regardless of history filters." : "No jobs are queued or running."}</CardDescription>
             </div>
-            <Badge variant={activeJobs.length ? "default" : "outline"}>{activeJobs.length} active</Badge>
+            <Badge variant={activeJobs.length ? "info" : "outline"}>{activeJobs.length} active</Badge>
           </div>
         </CardHeader>
         <CardContent className="p-0">
@@ -2961,8 +2963,8 @@ function ProductDetailSheet({
           <div className="grid gap-5 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex flex-wrap gap-2">
-                <Badge variant={product.active === false ? "outline" : "default"}>{product.active === false ? "Inactive" : "Active"}</Badge>
-                <Badge variant={product.categoryVerified ? "default" : "outline"}>{product.categoryVerified ? "Category verified" : "Category needs review"}</Badge>
+                <Badge variant={product.active === false ? "outline" : "success"}>{product.active === false ? "Inactive" : "Active"}</Badge>
+                <Badge variant={product.categoryVerified ? "success" : "warning"}>{product.categoryVerified ? "Category verified" : "Category needs review"}</Badge>
                 {product.toBeDiscontinued && <Badge variant="destructive">Discontinued</Badge>}
               </div>
               <Button size="sm" variant={editing ? "outline" : "default"} onClick={() => { setEditing((current) => !current); if (!editing) initializeDraft(product) }}>
@@ -3226,7 +3228,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   </div>
 }
 
-function ProductReadinessPanel({ score, checks, discontinued }: { score: number; checks: ReadonlyArray<readonly [string, boolean]>; discontinued: boolean }) { const missing = checks.filter(([, ready]) => !ready).map(([label]) => label); const label = discontinued ? "Blocked" : score === 100 ? "Ready" : `${missing.length} item${missing.length === 1 ? "" : "s"} need attention`; return <Card className="order-first lg:absolute lg:right-5 lg:top-[72px] lg:z-10 lg:w-[44%]"><CardContent className="grid gap-3 p-4"><div className="flex items-center justify-between gap-3"><div><p className="text-sm font-semibold">Product readiness</p><p className="text-xs text-muted-foreground">{discontinued ? "Discontinued products cannot be published." : label}</p></div><Badge variant={discontinued ? "destructive" : score === 100 ? "default" : "outline"}>{discontinued ? "Blocked" : `${score}%`}</Badge></div><Progress value={score} className="h-2" /><div className="grid grid-cols-3 gap-x-3 gap-y-2 text-xs">{checks.map(([label, ready]) => <div key={label} className={ready ? "text-foreground" : "text-muted-foreground"}><span className={ready ? "mr-1 text-emerald-600" : "mr-1 text-amber-600"}>{ready ? "Ready" : "Needs"}</span>{label}</div>)}</div></CardContent></Card> }
+function ProductReadinessPanel({ score, checks, discontinued }: { score: number; checks: ReadonlyArray<readonly [string, boolean]>; discontinued: boolean }) { const missing = checks.filter(([, ready]) => !ready).map(([label]) => label); const label = discontinued ? "Blocked" : score === 100 ? "Ready" : `${missing.length} item${missing.length === 1 ? "" : "s"} need attention`; return <Card className="order-first lg:absolute lg:right-5 lg:top-[72px] lg:z-10 lg:w-[44%]"><CardContent className="grid gap-3 p-4"><div className="flex items-center justify-between gap-3"><div><p className="text-sm font-semibold">Product readiness</p><p className="text-xs text-muted-foreground">{discontinued ? "Discontinued products cannot be published." : label}</p></div><Badge variant={discontinued ? "destructive" : score === 100 ? "success" : "warning"}>{discontinued ? "Blocked" : `${score}%`}</Badge></div><Progress value={score} className="h-2" /><div className="grid grid-cols-3 gap-x-3 gap-y-2 text-xs">{checks.map(([label, ready]) => <div key={label} className={ready ? "text-foreground" : "text-muted-foreground"}><span className={ready ? "mr-1 text-emerald-600" : "mr-1 text-amber-600"}>{ready ? "Ready" : "Needs"}</span>{label}</div>)}</div></CardContent></Card> }
 
 function ProductChannelPanel({ channel, product, section, values }: { channel: ChannelConnection; product: ProductItem; section: (title: string, description: string, children: React.ReactNode) => React.ReactNode; values: (rows: Array<[string, string]>) => React.ReactNode }) {
   const name = String(channel.name || "Channel")
