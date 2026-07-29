@@ -439,6 +439,9 @@ async function initRelationalSchema() {
     create index if not exists order_records_customer_idx on order_records (customer_id, created_at desc);
     create index if not exists order_records_order_number_idx on order_records (lower(order_number));
     create index if not exists order_records_marketplace_order_idx on order_records (lower(marketplace_order_id));
+    create index if not exists order_records_tracking_number_idx on order_records (lower(tracking_number));
+    create index if not exists order_records_buyer_lookup_idx on order_records (lower(buyer));
+    create index if not exists order_records_buyer_email_lookup_idx on order_records (lower(buyer_email));
 
     create table if not exists order_line_items (
       line_id text primary key,
@@ -3824,6 +3827,116 @@ async function listPurchaseOrders(options = {}) {
   return result.rows.map((row) => purchaseOrderRowToState(row, byPo.get(row.po_id) || []));
 }
 
+async function searchUniversal(query, options = {}) {
+  const client = getPool();
+  const value = nullableString(query);
+  if (!client || !value) return { products: [], orders: [], purchaseOrders: [] };
+  await initRelationalSchema();
+
+  const limit = Math.max(1, Math.min(12, Number(options.limit || 6)));
+  const normalized = value.toLowerCase();
+  const contains = `%${normalized}%`;
+  const startsWith = `${normalized}%`;
+  const exactProduct = await client.query(`
+    select p.product_id, p.sku, p.title, p.marketplace_title, p.brand, p.supplier, p.barcode
+    from products p
+    where lower(p.sku) = $1
+       or lower(coalesce(p.barcode, '')) = $1
+       or lower(coalesce(p.vendor_sku, '')) = $1
+       or lower(coalesce(p.mfr_part_number, '')) = $1
+       or exists (
+         select 1 from product_aliases pa
+         where pa.product_id = p.product_id
+           and pa.active = true
+           and lower(pa.alias_sku) = $1
+       )
+    order by p.updated_at desc
+    limit $2
+  `, [normalized, limit]);
+  const exactIds = exactProduct.rows.map((row) => row.product_id);
+  const productRows = [...exactProduct.rows];
+  if (productRows.length < limit) {
+    const fuzzyProduct = await client.query(`
+      select p.product_id, p.sku, p.title, p.marketplace_title, p.brand, p.supplier, p.barcode
+      from products p
+      where (
+        lower(p.sku) like $1
+        or lower(coalesce(p.barcode, '')) like $1
+        or lower(coalesce(p.vendor_sku, '')) like $1
+        or lower(coalesce(p.mfr_part_number, '')) like $1
+        or lower(coalesce(p.title, '')) like $2
+        or lower(coalesce(p.marketplace_title, '')) like $2
+        or exists (
+          select 1 from product_aliases pa
+          where pa.product_id = p.product_id
+            and pa.active = true
+            and lower(pa.alias_sku) like $1
+        )
+      )
+        and (cardinality($3::text[]) = 0 or p.product_id <> all($3::text[]))
+      order by
+        case when lower(p.sku) like $1 then 0
+             when lower(coalesce(p.barcode, '')) like $1 then 1
+             when lower(coalesce(p.vendor_sku, '')) like $1 then 2
+             else 3 end,
+        p.updated_at desc
+      limit $4
+    `, [startsWith, contains, exactIds, limit - productRows.length]);
+    productRows.push(...fuzzyProduct.rows);
+  }
+
+  const [orders, purchaseOrders] = await Promise.all([
+    client.query(`
+      select o.order_id, o.order_number, o.internal_order_number, o.marketplace_order_id,
+        o.buyer, o.buyer_email, o.tracking_number, o.status, o.source, o.channel_source
+      from order_records o
+      where lower(coalesce(o.status, '')) <> 'deleted'
+        and (
+          lower(coalesce(o.order_number, '')) like $1
+          or lower(coalesce(o.internal_order_number, '')) like $1
+          or lower(coalesce(o.marketplace_order_id, '')) like $1
+          or lower(coalesce(o.tracking_number, '')) like $1
+          or lower(coalesce(o.buyer, '')) like $2
+          or lower(coalesce(o.buyer_email, '')) like $2
+          or exists (
+            select 1 from order_line_items oli
+            where oli.order_id = o.order_id
+              and (
+                lower(coalesce(oli.sku, '')) like $1
+                or lower(coalesce(oli.mapped_sku, '')) like $1
+                or lower(coalesce(oli.original_sku, '')) like $1
+              )
+          )
+        )
+      order by
+        case when lower(coalesce(o.order_number, '')) = $3 then 0
+             when lower(coalesce(o.tracking_number, '')) = $3 then 0
+             when lower(coalesce(o.buyer_email, '')) = $3 then 1
+             else 2 end,
+        coalesce(o.created_at, o.updated_at) desc
+      limit $4
+    `, [startsWith, contains, normalized, limit]),
+    client.query(`
+      select po.po_id, po.po_number, po.supplier, po.status, po.warehouse_name
+      from purchase_order_records po
+      where lower(coalesce(po.status, '')) <> 'deleted'
+        and (
+          lower(coalesce(po.po_number, '')) like $1
+          or lower(coalesce(po.supplier, '')) like $2
+          or exists (
+            select 1 from purchase_order_line_items poli
+            where poli.po_id = po.po_id and lower(coalesce(poli.sku, '')) like $1
+          )
+        )
+      order by case when lower(coalesce(po.po_number, '')) = $3 then 0 else 1 end,
+        coalesce(po.created_at, po.updated_at) desc
+      limit $4
+    `, [startsWith, contains, normalized, limit])
+  ]);
+
+  return { products: productRows, orders: orders.rows, purchaseOrders: purchaseOrders.rows };
+}
+
 async function readPurchaseOrderByKey(key) {
   const client = getPool();
   const value = nullableString(key);
@@ -6314,6 +6427,7 @@ module.exports = {
   readOperationalSummary,
   listOrders,
   listPurchaseOrders,
+  searchUniversal,
   readOrderByKey,
   readOrderCustomerSummary,
   readProductByKey,

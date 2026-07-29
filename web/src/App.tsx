@@ -152,6 +152,14 @@ type WorkerStatus = {
   ageSeconds?: number
 }
 
+type UniversalSearchResult = {
+  type: "product" | "order" | "purchase-order" | "draft"
+  id: string
+  title: string
+  subtitle?: string
+  href: string
+}
+
 type ChannelSettings = {
   defaultShadowStatus?: string
   defaultHandlingTimeDays?: number
@@ -837,6 +845,9 @@ function App() {
   const [selectedJobId, setSelectedJobId] = useState<string>("")
   const [davidOpen, setDavidOpen] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
+  const [universalQuery, setUniversalQuery] = useState("")
+  const [universalResults, setUniversalResults] = useState<UniversalSearchResult[]>([])
+  const [universalSearching, setUniversalSearching] = useState(false)
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -848,6 +859,24 @@ function App() {
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [])
+
+  useEffect(() => {
+    const query = universalQuery.trim()
+    if (!commandOpen || query.length < 2) {
+      setUniversalResults([])
+      setUniversalSearching(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      setUniversalSearching(true)
+      api<{ results?: UniversalSearchResult[] }>(`/api/search?q=${encodeURIComponent(query)}&limit=6`)
+        .then((result) => { if (!cancelled) setUniversalResults(result.results || []) })
+        .catch(() => { if (!cancelled) setUniversalResults([]) })
+        .finally(() => { if (!cancelled) setUniversalSearching(false) })
+    }, 180)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [commandOpen, universalQuery])
 
   async function loadJobs(next: Partial<typeof jobPageMeta> = {}, quiet = false) {
     const request = { ...jobPageMeta, ...next }
@@ -1133,20 +1162,35 @@ function App() {
             </div>
           </header>
 
-          <Dialog open={commandOpen} onOpenChange={setCommandOpen}>
+          <Dialog open={commandOpen} onOpenChange={(open) => { setCommandOpen(open); if (!open) setUniversalQuery("") }}>
             <DialogContent className="overflow-hidden p-0 sm:max-w-xl">
-              <DialogHeader className="sr-only"><DialogTitle>Search DataPlus</DialogTitle><DialogDescription>Navigate to a workspace or common operational workflow.</DialogDescription></DialogHeader>
-              <Command>
-                <CommandInput autoFocus placeholder="Search pages and workflows..." />
+              <DialogHeader className="sr-only"><DialogTitle>Search DataPlus</DialogTitle><DialogDescription>Search products, orders, customers, tracking numbers, purchase orders, and draft quotes.</DialogDescription></DialogHeader>
+              <Command shouldFilter={false}>
+                <CommandInput autoFocus value={universalQuery} onValueChange={setUniversalQuery} placeholder="Search SKU, UPC, customer, tracking, order, or PO..." />
                 <CommandList>
-                  <CommandEmpty>No workspace or action found.</CommandEmpty>
-                  <CommandGroup heading="Navigate">
-                    {[{ label: "Orders", view: "operations" as AppView, path: "/orders" }, { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" }, { label: "Purchasing", view: "purchasing" as AppView, path: "/purchasing" }, { label: "Products", view: "catalog" as AppView, path: "/products" }, { label: "Warehouse", view: "warehouse" as AppView, path: "/warehouse" }, { label: "Jobs", view: "jobs" as AppView, path: "/jobs" }, { label: "Channels", view: "channels" as AppView, path: "/channels" }, { label: "Settings", view: "settings" as AppView, path: "/settings" }].map((item) => <CommandItem key={item.label} value={item.label} onSelect={() => { setCommandOpen(false); window.history.pushState({}, "", item.path); setView(item.view) }}><Search className="size-4 text-muted-foreground" />{item.label}</CommandItem>)}
-                  </CommandGroup>
-                  <CommandGroup heading="Quick actions">
-                    <CommandItem value="Refresh workspace" onSelect={() => { setCommandOpen(false); void refreshData() }}><RefreshCw className="size-4 text-muted-foreground" />Refresh workspace</CommandItem>
-                    <CommandItem value="Ask David" onSelect={() => { setCommandOpen(false); setDavidOpen(true) }}><MessageSquare className="size-4 text-muted-foreground" />Ask David</CommandItem>
-                  </CommandGroup>
+                  {!universalQuery.trim() && <>
+                    <CommandGroup heading="Navigate">
+                      {[{ label: "Orders", view: "operations" as AppView, path: "/orders" }, { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" }, { label: "Purchasing", view: "purchasing" as AppView, path: "/purchasing" }, { label: "Products", view: "catalog" as AppView, path: "/products" }, { label: "Warehouse", view: "warehouse" as AppView, path: "/warehouse" }, { label: "Jobs", view: "jobs" as AppView, path: "/jobs" }, { label: "Channels", view: "channels" as AppView, path: "/channels" }, { label: "Settings", view: "settings" as AppView, path: "/settings" }].map((item) => <CommandItem key={item.label} value={item.label} onSelect={() => { setCommandOpen(false); window.history.pushState({}, "", item.path); setView(item.view) }}><Search className="size-4 text-muted-foreground" />{item.label}</CommandItem>)}
+                    </CommandGroup>
+                    <CommandGroup heading="Quick actions">
+                      <CommandItem value="Refresh workspace" onSelect={() => { setCommandOpen(false); void refreshData() }}><RefreshCw className="size-4 text-muted-foreground" />Refresh workspace</CommandItem>
+                      <CommandItem value="Ask David" onSelect={() => { setCommandOpen(false); setDavidOpen(true) }}><MessageSquare className="size-4 text-muted-foreground" />Ask David</CommandItem>
+                    </CommandGroup>
+                  </>}
+                  {universalQuery.trim().length === 1 && <p className="px-3 py-6 text-center text-sm text-muted-foreground">Type at least two characters to search records.</p>}
+                  {universalQuery.trim().length >= 2 && universalSearching && <p className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Searching DataPlus...</p>}
+                  {universalQuery.trim().length >= 2 && !universalSearching && universalResults.length === 0 && <CommandEmpty>No matching products, orders, customers, tracking numbers, POs, or quotes.</CommandEmpty>}
+                  {universalResults.length > 0 && <CommandGroup heading="Records">
+                    {universalResults.map((result) => {
+                      const ResultIcon = result.type === "product" ? PackageSearch : result.type === "order" ? ShoppingBag : result.type === "purchase-order" ? Boxes : FileText
+                      const label = result.type === "purchase-order" ? "Purchase order" : result.type === "draft" ? "Draft quote" : result.type
+                      return <CommandItem key={`${result.type}-${result.id}`} value={`${result.title} ${result.subtitle || ""}`} onSelect={() => { setCommandOpen(false); window.location.assign(result.href) }}>
+                        <ResultIcon className="size-4 shrink-0 text-muted-foreground" />
+                        <div className="min-w-0 flex-1"><p className="truncate font-medium">{result.title}</p><p className="truncate text-xs text-muted-foreground">{result.subtitle || "No additional details"}</p></div>
+                        <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
+                      </CommandItem>
+                    })}
+                  </CommandGroup>}
                 </CommandList>
               </Command>
             </DialogContent>

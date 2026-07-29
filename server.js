@@ -60,6 +60,7 @@ const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(60, Number(process.env.IMPORT_JO
 const IMPORT_JOB_HISTORY_LIMIT = Math.max(1000, Math.min(5000, Number(process.env.IMPORT_JOB_HISTORY_LIMIT || 1000) || 1000));
 const REDIS_CATALOG_CACHE_TTL_SECONDS = Math.max(15, Math.min(600, Number(process.env.REDIS_CATALOG_CACHE_TTL_SECONDS || 90) || 90));
 const REDIS_PRODUCTS_CACHE_TTL_SECONDS = Math.max(15, Math.min(300, Number(process.env.REDIS_PRODUCTS_CACHE_TTL_SECONDS || 45) || 45));
+const REDIS_UNIVERSAL_SEARCH_CACHE_TTL_SECONDS = Math.max(5, Math.min(120, Number(process.env.REDIS_UNIVERSAL_SEARCH_CACHE_TTL_SECONDS || 30) || 30));
 const REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS = Math.max(60, Math.min(3600, Number(process.env.REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS || 900) || 900));
 const REDIS_CATEGORY_REQUIREMENTS_CACHE_TTL_SECONDS = Math.max(300, Math.min(86400, Number(process.env.REDIS_CATEGORY_REQUIREMENTS_CACHE_TTL_SECONDS || 43200) || 43200));
 const SERVER_STARTED_AT = new Date();
@@ -21644,6 +21645,69 @@ async function handleApi(req, res) {
       if (rows.length < 1000) break;
     }
     return res.end();
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/search") {
+    const query = String(url.searchParams.get("q") || "").trim();
+    const limit = Math.max(1, Math.min(12, Number(url.searchParams.get("limit") || 6) || 6));
+    if (query.length < 2) return sendJson(res, 200, { results: [] });
+    const cacheKey = `dataplus:universal-search:v1:${crypto.createHash("sha1").update(`${query.toLowerCase()}:${limit}`).digest("hex")}`;
+    const cached = await redisCache.getJson(cacheKey);
+    if (cached) return sendJson(res, 200, { ...cached, cached: true });
+
+    const needle = query.toLowerCase();
+    const includes = (value) => String(value || "").toLowerCase().includes(needle);
+    let relational = { products: [], orders: [], purchaseOrders: [] };
+    let drafts = [];
+    if (postgres.isPostgresEnabled()) {
+      [relational, drafts] = await Promise.all([
+        postgres.searchUniversal(query, { limit }),
+        postgres.readStateField("orderDrafts")
+      ]);
+    } else {
+      const db = await readDbFast();
+      relational.products = (db.inventory || []).filter((item) => [item.sku, item.title, item.marketplaceTitle, item.barcode, item.vendorSku].some(includes)).slice(0, limit);
+      relational.orders = (db.orders || []).filter((order) => [order.orderNumber, order.buyer, order.buyerEmail, order.trackingNumber].some(includes)).slice(0, limit);
+      relational.purchaseOrders = (db.purchaseOrders || []).filter((po) => [po.poNumber, po.supplier].some(includes)).slice(0, limit);
+      drafts = db.orderDrafts || [];
+    }
+    const draftRows = (Array.isArray(drafts) ? drafts : []).filter((draft) => (
+      [draft.draftNumber, draft.buyer, draft.buyerEmail, draft.phone, draft.id].some(includes)
+      || (Array.isArray(draft.items) && draft.items.some((item) => [item.sku, item.title].some(includes)))
+    )).slice(0, limit);
+    const results = [
+      ...(relational.products || []).map((product) => ({
+        type: "product",
+        id: String(product.product_id || product.id || product.sku || ""),
+        title: String(product.sku || "Untitled SKU"),
+        subtitle: [product.title || product.marketplace_title, product.brand, product.supplier].filter(Boolean).join(" · "),
+        href: `/products/${encodeURIComponent(String(product.sku || product.product_id || ""))}`
+      })),
+      ...(relational.orders || []).map((order) => ({
+        type: "order",
+        id: String(order.order_id || order.id || ""),
+        title: String(order.order_number || order.internal_order_number || order.marketplace_order_id || "Order"),
+        subtitle: [order.buyer || order.buyer_email, order.tracking_number ? `Tracking ${order.tracking_number}` : "", order.channel_source || order.source].filter(Boolean).join(" · "),
+        href: `/orders/${encodeURIComponent(String(order.order_id || order.id || ""))}`
+      })),
+      ...(relational.purchaseOrders || []).map((po) => ({
+        type: "purchase-order",
+        id: String(po.po_id || po.id || ""),
+        title: String(po.po_number || "Purchase order"),
+        subtitle: [po.supplier, po.warehouse_name, po.status].filter(Boolean).join(" · "),
+        href: `/purchase-orders/${encodeURIComponent(String(po.po_id || po.id || ""))}`
+      })),
+      ...draftRows.map((draft) => ({
+        type: "draft",
+        id: String(draft.id || ""),
+        title: String(draft.draftNumber || draft.id || "Draft quote"),
+        subtitle: [draft.buyer || draft.buyerEmail, draft.status || "draft"].filter(Boolean).join(" · "),
+        href: `/drafts/${encodeURIComponent(String(draft.id || draft.draftNumber || ""))}`
+      }))
+    ].filter((result) => result.id && !result.href.endsWith("/"));
+    const payload = { results: results.slice(0, limit * 4) };
+    await redisCache.setJson(cacheKey, payload, REDIS_UNIVERSAL_SEARCH_CACHE_TTL_SECONDS);
+    return sendJson(res, 200, payload);
   }
 
   if (req.method === "GET" && url.pathname === "/api/inventory") {
