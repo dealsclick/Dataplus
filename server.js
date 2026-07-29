@@ -3093,10 +3093,10 @@ function validateKnowledgeArticleSettings(db, body = {}) {
 function normalizeDb(db) {
   let changed = false;
   db.sequence = db.sequence || {};
-  db.sequence.order = Number(db.sequence.order || 1000);
+  db.sequence.order = Number(db.sequence.order || 999);
   db.sequence.po = Number(db.sequence.po || 2000);
   db.sequence.vendor = Number(db.sequence.vendor || 3000);
-  db.sequence.draft = Number(db.sequence.draft || 0);
+  db.sequence.draft = Number(db.sequence.draft || 1000);
   db.inventoryLedger = Array.isArray(db.inventoryLedger) ? db.inventoryLedger : [];
   db.marketplaceTemplates = normalizeMarketplaceTemplates(db.marketplaceTemplates);
   db.exportMappings = normalizeExportMappings(db.exportMappings);
@@ -9044,8 +9044,8 @@ function reconcilePurchaseOrderLinks(db, orderIds = []) {
 
 function nextDraftNumber(db) {
   db.sequence = db.sequence || {};
-  db.sequence.draft = Number(db.sequence.draft || 0) + 1;
-  return `DRF-${String(db.sequence.draft).padStart(5, "0")}`;
+  db.sequence.draft = Number(db.sequence.draft || 1000) + 1;
+  return `D#${db.sequence.draft}`;
 }
 
 function nextDraftRevisionNumber(db, quoteGroupId) {
@@ -9064,8 +9064,8 @@ function nextReturnNumber(db) {
 
 function nextOrderNumber(db) {
   db.sequence = db.sequence || {};
-  db.sequence.order = Number(db.sequence.order || 1000) + 1;
-  return `${ORDER_PREFIX}-${String(db.sequence.order).padStart(6, "0")}`;
+  db.sequence.order = Number(db.sequence.order || 999) + 1;
+  return String(db.sequence.order);
 }
 
 function nextPoNumber(db) {
