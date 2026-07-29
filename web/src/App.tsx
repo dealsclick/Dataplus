@@ -42,10 +42,13 @@ import {
 import { Toaster, toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
+import { ButtonGroup } from "@/components/ui/button-group"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import {
   DropdownMenu,
@@ -56,8 +59,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
+import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group"
 import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
+import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
   SelectContent,
@@ -99,6 +105,8 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Field as FormField, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSeparator, FieldSet } from "@/components/ui/field"
+import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 
 type AppView = "overview" | "jobs" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "ai-chat" | "settings"
 
@@ -828,6 +836,18 @@ function App() {
   const [shopifyAuth, setShopifyAuth] = useState<ShopifyAuthCheck | null>(null)
   const [selectedJobId, setSelectedJobId] = useState<string>("")
   const [davidOpen, setDavidOpen] = useState(false)
+  const [commandOpen, setCommandOpen] = useState(false)
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault()
+        setCommandOpen((open) => !open)
+      }
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [])
 
   async function loadJobs(next: Partial<typeof jobPageMeta> = {}, quiet = false) {
     const request = { ...jobPageMeta, ...next }
@@ -1098,6 +1118,10 @@ function App() {
                 <Badge variant={workerStatus.online ? "default" : "secondary"}>
                   {workerStatus.online ? "Worker online" : "Worker idle"}
                 </Badge>
+                <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={() => setCommandOpen(true)} title="Search workspace (Ctrl+K)">
+                  <Search className="size-4" /> Search
+                  <kbd className="ml-2 rounded border bg-muted px-1 text-[10px] text-muted-foreground">Ctrl K</kbd>
+                </Button>
                 <Button variant="outline" size="icon" className="rounded-full" onClick={() => setDavidOpen(true)} title="Open David" aria-label="Open David">
                   <MessageSquare className="size-4" />
                 </Button>
@@ -1108,6 +1132,25 @@ function App() {
               </div>
             </div>
           </header>
+
+          <Dialog open={commandOpen} onOpenChange={setCommandOpen}>
+            <DialogContent className="overflow-hidden p-0 sm:max-w-xl">
+              <DialogHeader className="sr-only"><DialogTitle>Search DataPlus</DialogTitle><DialogDescription>Navigate to a workspace or common operational workflow.</DialogDescription></DialogHeader>
+              <Command>
+                <CommandInput autoFocus placeholder="Search pages and workflows..." />
+                <CommandList>
+                  <CommandEmpty>No workspace or action found.</CommandEmpty>
+                  <CommandGroup heading="Navigate">
+                    {[{ label: "Orders", view: "operations" as AppView, path: "/orders" }, { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" }, { label: "Purchasing", view: "purchasing" as AppView, path: "/purchasing" }, { label: "Products", view: "catalog" as AppView, path: "/products" }, { label: "Warehouse", view: "warehouse" as AppView, path: "/warehouse" }, { label: "Jobs", view: "jobs" as AppView, path: "/jobs" }, { label: "Channels", view: "channels" as AppView, path: "/channels" }, { label: "Settings", view: "settings" as AppView, path: "/settings" }].map((item) => <CommandItem key={item.label} value={item.label} onSelect={() => { setCommandOpen(false); window.history.pushState({}, "", item.path); setView(item.view) }}><Search className="size-4 text-muted-foreground" />{item.label}</CommandItem>)}
+                  </CommandGroup>
+                  <CommandGroup heading="Quick actions">
+                    <CommandItem value="Refresh workspace" onSelect={() => { setCommandOpen(false); void refreshData() }}><RefreshCw className="size-4 text-muted-foreground" />Refresh workspace</CommandItem>
+                    <CommandItem value="Ask David" onSelect={() => { setCommandOpen(false); setDavidOpen(true) }}><MessageSquare className="size-4 text-muted-foreground" />Ask David</CommandItem>
+                  </CommandGroup>
+                </CommandList>
+              </Command>
+            </DialogContent>
+          </Dialog>
 
           <div className="p-5">
             {loading ? (
@@ -1530,6 +1573,7 @@ function JobsPage({
   const [query, setQuery] = useState("")
   const [status, setStatus] = useState("all")
   const [tab, setTab] = useState("queue")
+  const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false)
   const shopify = channels.find((channel) => String(channel.name || "").toLowerCase() === "shopify")
   const shopifySettings = shopify?.settings || {}
   const scheduleRows = [
@@ -1562,7 +1606,7 @@ function JobsPage({
         description="Queue, history, API logs, artifacts, and worker health in one compact table."
         action={(
           <div className="flex gap-2">
-            <Button variant="outline" onClick={onCleanup}>Clean stale</Button>
+            <Button variant="outline" onClick={() => setCleanupConfirmOpen(true)}>Clean stale</Button>
             <Button onClick={onRefresh}><RefreshCw className="size-4" /> Refresh</Button>
           </div>
         )}
@@ -1623,10 +1667,10 @@ function JobsPage({
             <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
           </TabsList>
           <div className="flex flex-wrap items-center gap-2">
-            <div className="relative">
-              <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
-              <Input className="w-72 pl-8" placeholder="Search jobs, files, messages" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onLoadJobs({ page: 1, query, status }) }} />
-            </div>
+            <InputGroup className="w-72">
+              <InputGroupAddon><Search className="size-4" /></InputGroupAddon>
+              <InputGroupInput placeholder="Search jobs, files, messages" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onLoadJobs({ page: 1, query, status }) }} />
+            </InputGroup>
             <Button size="sm" variant="outline" onClick={() => onLoadJobs({ page: 1, query, status })}>Search</Button>
             <Select value={status} onValueChange={(value) => { setStatus(value); onLoadJobs({ page: 1, query, status: value }) }}>
               <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
@@ -1661,7 +1705,7 @@ function JobsPage({
                     <CardTitle className="text-base">{tab === "logs" ? "Channel Logs" : "Import Queue and History"}</CardTitle>
                     <CardDescription>{totalJobs ? `${(page - 1) * pageSize + 1}-${Math.min(page * pageSize, totalJobs)} of ${numberLabel(totalJobs)} jobs` : "No jobs found"}</CardDescription>
                   </div>
-                  <div className="flex gap-1">
+                  <ButtonGroup>
                     {[10, 25, 50, 100].map((size) => (
                       <Button
                         key={size}
@@ -1672,7 +1716,7 @@ function JobsPage({
                         {size}
                       </Button>
                     ))}
-                  </div>
+                  </ButtonGroup>
                 </div>
               </CardHeader>
               <CardContent className="p-0">
@@ -1752,6 +1796,12 @@ function JobsPage({
           </div>
         </TabsContent>
       </Tabs>
+      <AlertDialog open={cleanupConfirmOpen} onOpenChange={setCleanupConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader><AlertDialogTitle>Clean stale job records?</AlertDialogTitle><AlertDialogDescription>This removes expired job artifacts and retention-eligible history. Active jobs and their current worker output are not affected.</AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogFooter><AlertDialogCancel>Keep records</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { onCleanup(); setCleanupConfirmOpen(false) }}>Clean stale records</AlertDialogAction></AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
@@ -4633,6 +4683,7 @@ function FulfillmentPage() {
 
   const packageComplete = Object.values(packageDraft).every((value) => Number(value) > 0)
   const selectedReady = shown.filter((row) => selectedRouteIds.has(String(row.id)) && readinessFor(row).ready === true).length
+  const selectedWork = shown[0]
 
   return (
     <div className="grid gap-5">
@@ -4645,6 +4696,7 @@ function FulfillmentPage() {
       <PickListPanel onChanged={load} />
       <PickScanPanel onChanged={load} />
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><Detail label="Open work" value={numberLabel(rows.filter((row) => !["shipped", "canceled"].includes(String(row.status))).length)} /><Detail label="Ready to ship" value={numberLabel(rows.filter((row) => row.status === "ready_to_ship").length)} /><Detail label="Label-ready" value={numberLabel(rows.filter((row) => readinessFor(row).ready === true).length)} /><Detail label="Needs package data" value={numberLabel(rows.filter((row) => readinessFor(row).ready !== true).length)} /><Detail label="Selected label-ready" value={numberLabel(selectedReady)} /></div>
+      <Card className="overflow-hidden"><CardHeader className="border-b py-3"><CardTitle className="text-base">Fulfillment workstation</CardTitle><CardDescription>Review the next available work item without leaving the active queue.</CardDescription></CardHeader><CardContent className="p-0">{selectedWork ? <ResizablePanelGroup orientation="horizontal" className="min-h-44"><ResizablePanel defaultSize={58} minSize={35}><ScrollArea className="h-44 p-4"><p className="text-xs font-semibold uppercase text-muted-foreground">Next work item</p><p className="mt-1 text-lg font-semibold">{String(selectedWork.orderNumber || selectedWork.orderId)}</p><p className="text-sm text-muted-foreground">{String(selectedWork.customer || "Customer")} · {String(selectedWork.sku || "Missing SKU")} · {numberLabel(Number(selectedWork.qty || 0))} units</p><div className="mt-4 grid gap-2 text-sm"><div className="rounded-md border p-2"><span className="text-muted-foreground">Warehouse</span><p className="font-medium">{String(selectedWork.warehouseName || "Unassigned")}</p></div><div className="rounded-md border p-2"><span className="text-muted-foreground">Ship by</span><p className="font-medium">{String(selectedWork.shipBy || "Not set")}</p></div></div></ScrollArea></ResizablePanel><ResizableHandle withHandle /><ResizablePanel defaultSize={42} minSize={30}><ScrollArea className="h-44 p-4">{(() => { const readiness = readinessFor(selectedWork); const blockers = Array.isArray(readiness.blockers) ? readiness.blockers as string[] : []; const next = nextStage(String(selectedWork.status)); return <><p className="text-xs font-semibold uppercase text-muted-foreground">Readiness and action</p><Badge className="mt-2" variant={readiness.ready ? "default" : "destructive"}>{readiness.ready ? "Label-ready" : "Blocked"}</Badge><p className="mt-2 text-sm text-muted-foreground">{readiness.ready ? `${String(readiness.weight || 0)} lb · ${String(readiness.length || 0)} × ${String(readiness.width || 0)} × ${String(readiness.height || 0)} in` : blockers.join(" · ") || "Package data needs review."}</p><div className="mt-4 flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => editPackage(selectedWork)}>{readiness.ready ? "Edit package" : "Complete package"}</Button>{next && <Button size="sm" disabled={busy} onClick={() => void advance(selectedWork, next)}>Mark {next.replace(/_/g, " ")}</Button>}<Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(selectedWork.orderId))}`}>Open order</a></Button></div></> })()}</ScrollArea></ResizablePanel></ResizablePanelGroup> : <Empty className="min-h-44 border-0"><EmptyHeader><EmptyMedia variant="icon"><Warehouse className="size-4" /></EmptyMedia><EmptyTitle>No work in this view</EmptyTitle><EmptyDescription>Choose another fulfillment stage or clear the search to resume work.</EmptyDescription></EmptyHeader></Empty>}</CardContent></Card>
       <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => setStatus(stage)}>{stage === "all" ? "All work" : stage.replace(/_/g, " ")} <Badge variant="outline" className="ml-1">{numberLabel(stage === "all" ? rows.length : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>
       <Card><CardHeader className="border-b"><div className="relative max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, SKU, warehouse, or carrier" /></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible fulfillment work" checked={shown.length > 0 && shown.every((row) => selectedRouteIds.has(String(row.id)))} onCheckedChange={(checked) => setSelectedRouteIds(checked === true ? new Set(shown.map((row) => String(row.id))) : new Set())} /></TableHead><TableHead>Order / customer</TableHead><TableHead>SKU / quantity</TableHead><TableHead>Warehouse</TableHead><TableHead>Package / label readiness</TableHead><TableHead>Ship by</TableHead><TableHead>Stage</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{shown.map((row) => { const readiness = readinessFor(row); const blockers = Array.isArray(readiness.blockers) ? readiness.blockers as string[] : []; const next = nextStage(String(row.status)); return <TableRow key={String(row.id)}><TableCell><Checkbox aria-label={`Select ${String(row.orderNumber || row.orderId)}`} checked={selectedRouteIds.has(String(row.id))} onCheckedChange={(checked) => setSelectedRouteIds((current) => { const selected = new Set(current); if (checked === true) selected.add(String(row.id)); else selected.delete(String(row.id)); return selected })} /></TableCell><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="text-xs text-muted-foreground">{String(row.customer || "Customer")}</p></TableCell><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(row.sku || ""))}`}>{String(row.sku || "Missing SKU")}</a><p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell>{String(row.warehouseName || "Unassigned")}</TableCell><TableCell><button type="button" className={`w-full rounded-md border p-2 text-left transition-colors hover:bg-muted/50 ${readiness.ready ? "border-emerald-200 bg-emerald-50/50" : "border-destructive/50 bg-destructive/5"}`} onClick={() => editPackage(row)}><div className="flex items-center justify-between gap-2"><p className={`text-xs font-medium ${readiness.ready ? "text-emerald-800" : "text-destructive"}`}>{readiness.ready ? "Label-ready" : blockers[0] || "Needs package data"}</p><Pencil className="size-3.5 text-muted-foreground" /></div><p className="mt-1 text-xs text-muted-foreground">{String(readiness.weight || 0)} lb · {String(readiness.length || 0)} × {String(readiness.width || 0)} × {String(readiness.height || 0)} in</p></button></TableCell><TableCell>{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant={row.status === "exception" ? "destructive" : row.status === "ready_to_ship" ? "secondary" : "outline"}>{String(row.status || "new").replace(/_/g, " ")}</Badge></TableCell><TableCell className="text-right"><div className="flex justify-end gap-2">{readiness.ready ? <Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}>Get quotes</a></Button> : <Button size="sm" variant="outline" onClick={() => editPackage(row)}>Fix package</Button>}{next ? <Button size="sm" disabled={busy} onClick={() => void advance(row, next)}>Mark {next.replace(/_/g, " ")}</Button> : <Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}>Open order</a></Button>}</div></TableCell></TableRow> })}{!shown.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No fulfillment work matches this view.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
       <Dialog open={Boolean(packageRow)} onOpenChange={(open) => !open && setPackageRow(null)}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>Edit package</DialogTitle><DialogDescription>These values are checked before carrier quotes and label purchase. Saving them refreshes the fulfillment queue immediately.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Package length (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageLength} onChange={(event) => setPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Package width (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageWidth} onChange={(event) => setPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Package height (in)"><Input type="number" min="0" step="0.01" value={packageDraft.packageHeight} onChange={(event) => setPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setPackageRow(null)}>Cancel</Button><Button disabled={busy || !packageComplete} onClick={() => void savePackage()}>{busy && <Loader2 className="size-4 animate-spin" />} Save package</Button></DialogFooter></DialogContent></Dialog>
@@ -8011,6 +8063,10 @@ function SettingsPage({
   )
 }
 
+function DetailBreadcrumb({ items }: { items: Array<{ label: string; href?: string }> }) {
+  return <Breadcrumb><BreadcrumbList>{items.map((item, index) => <div key={`${item.label}-${index}`} className="contents"><BreadcrumbItem>{item.href ? <BreadcrumbLink asChild><a href={item.href}>{item.label}</a></BreadcrumbLink> : <BreadcrumbPage>{item.label}</BreadcrumbPage>}</BreadcrumbItem>{index < items.length - 1 && <BreadcrumbSeparator />}</div>)}</BreadcrumbList></Breadcrumb>
+}
+
 function PageHeader({
   eyebrow,
   title,
@@ -8025,6 +8081,7 @@ function PageHeader({
   return (
     <div className="flex flex-wrap items-end justify-between gap-3">
       <div>
+        <DetailBreadcrumb items={[{ label: "DataPlus", href: "/" }, { label: eyebrow }]} />
         <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{eyebrow}</p>
         <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
         <p className="text-sm text-muted-foreground">{description}</p>
