@@ -7400,7 +7400,6 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
         eyebrow="Catalog"
         title="Products"
         description="Approved SKUs for Shopify and connected channels. Fast paged results with legacy table controls restored."
-        action={<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={() => setFilterOpen(true)}><Search className="size-4" /> Filters{Object.keys(filters).length ? ` (${Object.keys(filters).length})` : ""}</Button><Button variant="outline" size="sm" onClick={() => load()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>}
       />
       <Card>
         <CardHeader className="grid gap-3 border-b">
@@ -7473,15 +7472,17 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                 ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
-            <Sheet open={filterOpen} onOpenChange={setFilterOpen}>
-              <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-xl">
-                <SheetHeader>
-                  <SheetTitle>Product filters</SheetTitle>
-                  <SheetDescription>Choose a field, then select one or more values. Channel filters first narrow the list to a marketplace.</SheetDescription>
-                </SheetHeader>
-                <div className="grid gap-4 py-6">
-                  <div className="grid gap-1">
-                    <Label className="text-xs">Filter field</Label>
+            <DropdownMenu open={filterOpen} onOpenChange={setFilterOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="outline">
+                  + Filter
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-[380px] p-3">
+                <div className="grid gap-3">
+                  <p className="text-xs font-semibold uppercase text-muted-foreground">
+                    Add product filter
+                  </p>
                   <Select
                     value={filterField}
                     onValueChange={(value) => {
@@ -7504,7 +7505,6 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                       )}
                     </SelectContent>
                   </Select>
-                  </div>
                   {filterField === "channelStatus" ? (
                     <div className="grid gap-1">
                       <Label className="text-xs">Channel</Label>
@@ -7529,8 +7529,8 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                       </p>
                     </div>
                   ) : null}
-                  <div className="grid gap-1"><Label className="text-xs">Operator</Label><Input value="Is any of" disabled /></div>
-                  <div className="grid gap-1"><Label className="text-xs">Search values</Label><div className="relative">
+                  <Input value="Is any of" disabled />
+                  <div className="relative">
                     <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
                     <Input
                       className="pl-8"
@@ -7538,7 +7538,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                       value={filterSearch}
                       onChange={(event) => setFilterSearch(event.target.value)}
                     />
-                  </div></div>
+                  </div>
                   <div className="max-h-52 overflow-y-auto rounded-md border">
                     {matchingValues.map((value) => (
                       <label
@@ -7559,10 +7559,25 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                       </label>
                     ))}
                   </div>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setFilterOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={applyFilter}
+                      disabled={!filterSelection.length}
+                    >
+                      Apply filter
+                    </Button>
+                  </div>
                 </div>
-                <SheetFooter><Button variant="outline" onClick={() => setFilterOpen(false)}>Cancel</Button><Button onClick={applyFilter} disabled={!filterSelection.length}>Apply filter</Button></SheetFooter>
-              </SheetContent>
-            </Sheet>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <div className="flex items-center gap-1 rounded-md border px-2 py-1">
               <Input
                 aria-label="Created from"
@@ -8370,6 +8385,10 @@ function SourceCatalogPage() {
   const [filters, setFilters] = useState<SourceCatalogFilters>(defaultFilters)
   const [filterDraft, setFilterDraft] = useState<SourceCatalogFilters>(defaultFilters)
   const [filterOpen, setFilterOpen] = useState(false)
+  const [quickFilterOpen, setQuickFilterOpen] = useState(false)
+  const [quickFilterField, setQuickFilterField] = useState("suppliers")
+  const [quickFilterSearch, setQuickFilterSearch] = useState("")
+  const [quickFilterSelection, setQuickFilterSelection] = useState<string[]>([])
   const [facets, setFacets] = useState<SourceCatalogFacets>({})
   const [facetsLoading, setFacetsLoading] = useState(false)
   const [supplierSearch, setSupplierSearch] = useState("")
@@ -8401,6 +8420,19 @@ function SourceCatalogPage() {
   const pageSkus = rows.map((item) => item.sku || "").filter(Boolean)
   const pageSelected = pageSkus.length > 0 && (allFiltered || pageSkus.every((sku) => selectedSkus.has(sku)))
   const selectedCount = allFiltered ? total : selectedSkus.size
+  const quickFilterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string; multiple?: boolean }> = {
+    suppliers: { label: "Supplier", values: facets.suppliers || [], display: (value) => value, multiple: true },
+    productMembership: { label: "Catalog membership", values: ["in-products", "not-in-products"], display: (value) => value === "in-products" ? "Already in Products" : "Source only" },
+    hasStock: { label: "Stock", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
+    toBeDiscontinued: { label: "Lifecycle", values: ["false", "true"], display: (value) => value === "true" ? "Discontinued / closeout" : "Current" },
+    active: { label: "Record status", values: ["true", "false"], display: (value) => value === "true" ? "Active" : "Inactive" },
+    hazardous: { label: "Hazardous", values: ["true", "false"], display: (value) => value === "true" ? "Hazardous" : "Not hazardous" },
+    stockStatus: { label: "Stock status", values: facets.stockStatuses || [], display: (value) => value },
+    brand: { label: "Brand", values: facets.brands || [], display: (value) => value },
+    category: { label: "Category", values: facets.categories || [], display: (value) => value },
+  }
+  const quickDefinition = quickFilterDefinitions[quickFilterField]
+  const quickValues = quickDefinition.values.filter((value) => quickDefinition.display(value).toLowerCase().includes(quickFilterSearch.toLowerCase())).slice(0, 250)
 
   function updateUrl(nextQuery = query, nextFilters = filters, nextLimit = pageSize) {
     const next = new URLSearchParams()
@@ -8458,7 +8490,7 @@ function SourceCatalogPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageSize])
 
-  useEffect(() => { if (filterOpen) void loadFacets() }, [filterOpen])
+  useEffect(() => { if (filterOpen || quickFilterOpen) void loadFacets() }, [filterOpen, quickFilterOpen])
 
   useEffect(() => {
     if (promotionOpen) void openPromotion(promotionScope, promotionSkus, importMode)
@@ -8492,6 +8524,22 @@ function SourceCatalogPage() {
     setLatestCursorStack([""])
     setSelectedSkus(new Set())
     setAllFiltered(false)
+    void loadCatalog(1, "", query, next)
+  }
+
+  function applyQuickFilter() {
+    if (!quickFilterSelection.length) return
+    const next = { ...filters }
+    if (quickFilterField === "suppliers") next.suppliers = quickFilterSelection
+    else next[quickFilterField as Exclude<keyof SourceCatalogFilters, "suppliers">] = quickFilterSelection[quickFilterSelection.length - 1]
+    setFilters(next)
+    setFilterDraft(next)
+    setLatestCursorStack([""])
+    setSelectedSkus(new Set())
+    setAllFiltered(false)
+    setQuickFilterOpen(false)
+    setQuickFilterSelection([])
+    setQuickFilterSearch("")
     void loadCatalog(1, "", query, next)
   }
 
@@ -8562,7 +8610,7 @@ function SourceCatalogPage() {
   const suppliers = (facets.suppliers || []).filter((supplier) => supplier.toLowerCase().includes(supplierSearch.toLowerCase())).slice(0, 250)
 
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Catalog" title="Source Catalog" description="Supplier feed records. Filter and review here before intentionally promoting a SKU into the approved catalog." action={<div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => setMaintenanceOpen(true)}><Settings className="size-4" /> Maintenance</Button><Button variant="outline" size="sm" onClick={() => { setFilterDraft(filters); setFilterOpen(true) }}><Search className="size-4" /> Filters{filterCount ? ` (${filterCount})` : ""}</Button></div>} />
+    <PageHeader eyebrow="Catalog" title="Source Catalog" description="Supplier feed records. Filter and review here before intentionally promoting a SKU into the approved catalog." action={<div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => setMaintenanceOpen(true)}><Settings className="size-4" /> Maintenance</Button><DropdownMenu open={quickFilterOpen} onOpenChange={setQuickFilterOpen}><DropdownMenuTrigger asChild><Button variant="outline" size="sm"><Search className="size-4" /> + Filter{filterCount ? ` (${filterCount})` : ""}</Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-[380px] p-3"><div className="grid gap-3"><p className="text-xs font-semibold uppercase text-muted-foreground">Add source catalog filter</p><div className="grid gap-1"><Label className="text-xs">Field</Label><Select value={quickFilterField} onValueChange={(value) => { setQuickFilterField(value); setQuickFilterSelection([]); setQuickFilterSearch("") }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.entries(quickFilterDefinitions).map(([key, definition]) => <SelectItem key={key} value={key}>{definition.label}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">Operator</Label><Input value="Is any of" disabled /></div><div className="grid gap-1"><Label className="text-xs">Value</Label><div className="relative"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="pl-8" placeholder="Search values" value={quickFilterSearch} onChange={(event) => setQuickFilterSearch(event.target.value)} /></div></div><div className="max-h-52 overflow-y-auto rounded-md border">{quickValues.map((value) => <label key={value} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted"><Checkbox checked={quickFilterSelection.includes(value)} onCheckedChange={() => setQuickFilterSelection((current) => { if (quickDefinition.multiple) return current.includes(value) ? current.filter((item) => item !== value) : [...current, value]; return current.includes(value) ? [] : [value] })} />{quickDefinition.display(value)}</label>)}{!quickValues.length && <p className="p-3 text-sm text-muted-foreground">No values found.</p>}</div><div className="flex justify-between gap-2"><Button variant="ghost" size="sm" onClick={() => { setFilterDraft(filters); setFilterOpen(true); setQuickFilterOpen(false) }}>More filters</Button><div className="flex gap-2"><Button size="sm" variant="ghost" onClick={() => setQuickFilterOpen(false)}>Cancel</Button><Button size="sm" onClick={applyQuickFilter} disabled={!quickFilterSelection.length}>Apply filter</Button></div></div></div></DropdownMenuContent></DropdownMenu><Button variant="outline" size="sm" onClick={() => { setFilterDraft(filters); setFilterOpen(true) }}>More filters</Button></div>} />
     <Card>
       <CardHeader className="gap-3 border-b">
         <div className="flex flex-wrap items-center justify-between gap-3"><div className="relative"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="w-[420px] max-w-[72vw] pl-8" placeholder="Search SKU, title, brand, supplier, category" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { setLatestCursorStack([""]); void loadCatalog(1) } }} /></div><div className="flex items-center gap-2"><Button size="sm" onClick={() => { setLatestCursorStack([""]); void loadCatalog(1) }} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button><Select value={String(pageSize)} onValueChange={(value) => setPageSize(Number(value))}><SelectTrigger className="w-28"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="10">10 rows</SelectItem><SelectItem value="25">25 rows</SelectItem><SelectItem value="50">50 rows</SelectItem><SelectItem value="100">100 rows</SelectItem></SelectContent></Select></div></div>
