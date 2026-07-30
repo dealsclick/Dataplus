@@ -20113,9 +20113,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
 }
 
 async function importShopifyOrders(limit = 250, filters = {}) {
-  // Order and shipping fields are sufficient for DataPlus imports. Requesting the separate
-  // customer object would unnecessarily require Shopify's read_customers permission.
-  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
+  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const imported = []; let after = null;
   while (imported.length < limit) {
     const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, limit - imported.length), after }, { operation: "Import Shopify orders" });
@@ -20130,7 +20128,7 @@ async function importShopifyOrders(limit = 250, filters = {}) {
 }
 
 function shopifyOrderWebhookQuery() {
-  return `query DataPlusOrderWebhook($id: ID!) { order(id: $id) { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } }`;
+  return `query DataPlusOrderWebhook($id: ID!) { order(id: $id) { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } }`;
 }
 
 async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}) {
@@ -28557,7 +28555,7 @@ async function handleApi(req, res) {
       }
     `, {}, { operation: "Check Shopify auth" });
     const scopes = tokenState.scopes || [];
-    const requiredOrderScopes = ["read_orders"];
+    const requiredOrderScopes = ["read_orders", "read_customers"];
     const missingOrderScopes = requiredOrderScopes.filter((scope) => !scopes.includes(scope));
     return sendJson(res, 200, {
       ok: missingOrderScopes.length === 0,
@@ -28568,6 +28566,7 @@ async function handleApi(req, res) {
       expiresAt: tokenState.expiresAt || "",
       hasReadShipping: scopes.includes("read_shipping"),
       hasReadOrders: scopes.includes("read_orders"),
+      hasReadCustomers: scopes.includes("read_customers"),
       missingOrderScopes,
       shop: shop.shop || {},
       message: missingOrderScopes.length

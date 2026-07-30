@@ -539,6 +539,7 @@ type ShopifyAuthCheck = {
   expiresAt?: string
   hasReadShipping?: boolean
   hasReadOrders?: boolean
+  hasReadCustomers?: boolean
   missingOrderScopes?: string[]
   shop?: {
     name?: string
@@ -2373,7 +2374,7 @@ function ChannelDetail({
                 <Detail label="API version" value={channel.shopifyConfig?.apiVersion || "2026-04"} />
                 <Detail label="Token source" value={auth?.tokenSource || "Configured"} />
                 <Detail label="read_shipping" value={auth?.hasReadShipping ? "Active" : auth ? "Missing" : "Unchecked"} />
-                <Detail label="Order import scope" value={auth ? auth.hasReadOrders ? "Active" : `Missing: ${(auth.missingOrderScopes || []).join(", ")}` : "Unchecked"} />
+                <Detail label="Order import scopes" value={auth ? auth.hasReadOrders && auth.hasReadCustomers ? "Active" : `Missing: ${(auth.missingOrderScopes || []).join(", ")}` : "Unchecked"} />
               </CardContent>
             </Card>
           )}
