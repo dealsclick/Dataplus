@@ -26435,9 +26435,9 @@ async function handleApi(req, res) {
     if (!feed.ftpHost || !feed.ftpUsername || !feed.ftpPassword || !feed.ftpRemotePath) return sendJson(res, 400, { error: "Complete the FTP host, username, password, and remote file path before running this feed." });
     const existingJobs = await postgres.readOperationJobs(500).catch(() => []) || [];
     const duplicate = existingJobs.find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && ["product-dump-import", "vendor-feed-import"].includes(String(job.workerTask || "")) && String(job.workerPayload?.feedId || "") === feed.id);
-    if (duplicate) return sendJson(res, 200, { queued: true, duplicate: true, job: normalizeImportJob(duplicate), message: `${feed.name} is already queued or running.` });
+    if (duplicate) return sendJson(res, 200, { queued: true, duplicate: true, job: clientImportJob(duplicate), message: `${feed.name} is already queued or running.` });
     const job = queueVendorFeedImportJob(stateDb, feed);
-    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
+    return sendJson(res, 202, { queued: true, job: clientImportJob(job), message: job.message });
   }
 
   const dataSourceRunMatch = url.pathname.match(/^\/api\/data-source-feeds\/([^/]+)\/run$/);
@@ -26450,9 +26450,9 @@ async function handleApi(req, res) {
     const db = normalizeDb(await readDbFast({ skipInventory: true }));
     const existingJobs = await postgres.readOperationJobs(500).catch(() => []) || [];
     const duplicate = existingJobs.find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && ["product-dump-import", "vendor-feed-import"].includes(String(job.workerTask || "")) && String(job.workerPayload?.feedId || "") === feed.id);
-    if (duplicate) return sendJson(res, 200, { queued: true, duplicate: true, job: normalizeImportJob(duplicate), message: `${feed.name} is already queued or running.` });
+    if (duplicate) return sendJson(res, 200, { queued: true, duplicate: true, job: clientImportJob(duplicate), message: `${feed.name} is already queued or running.` });
     const job = queueVendorFeedImportJob(db, feed);
-    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
+    return sendJson(res, 202, { queued: true, job: clientImportJob(job), message: job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/system-settings/smtp-test") {
