@@ -2774,20 +2774,26 @@ function ChannelLogo({ channel }: { channel: ChannelConnection }) {
   )
 }
 
-function CatalogChannelMarks({ item, channels }: { item: ProductItem; channels: ChannelConnection[] }) {
+function catalogChannelState(item: ProductItem, channel: ChannelConnection) {
+  const key = `${channel.id} ${channel.name}`.toLowerCase()
+  const isShopify = key.includes("shopify")
+  const isEbay = key.includes("ebay")
+  const ebayStatus = String(item.ebayListing?.status || "").toLowerCase()
+  const state: "live" | "attention" | "disabled" = isShopify
+    ? item.shopifyId && item.shopifyPublished ? "live" : item.shopifyId ? "attention" : "disabled"
+    : isEbay
+      ? item.ebayListing?.listingId || ["active", "live"].includes(ebayStatus) ? "live" : item.ebayListing?.offerId ? "attention" : "disabled"
+      : "disabled"
+  const filter = isShopify ? state === "live" ? "shopify-live" : state === "attention" ? "shopify-unpublished" : "shopify-missing" : isEbay ? state === "live" ? "ebay-live" : state === "attention" ? "ebay-offer" : "ebay-missing" : ""
+  return { isShopify, isEbay, state, filter }
+}
+
+function CatalogChannelMarks({ item, channels, onFilter }: { item: ProductItem; channels: ChannelConnection[]; onFilter?: (filter: string) => void }) {
   const enabled = channels.filter((channel) => channel.connected && String(channel.status || "active").toLowerCase() !== "inactive")
   if (!enabled.length) return <span className="text-xs text-muted-foreground">No channels enabled</span>
   return <div className="flex min-w-28 items-center gap-1.5">
     {enabled.map((channel) => {
-      const key = `${channel.id} ${channel.name}`.toLowerCase()
-      const isShopify = key.includes("shopify")
-      const isEbay = key.includes("ebay")
-      const ebayStatus = String(item.ebayListing?.status || "").toLowerCase()
-      const state = isShopify
-        ? item.shopifyId && item.shopifyPublished ? "live" : item.shopifyId ? "attention" : "disabled"
-        : isEbay
-          ? item.ebayListing?.listingId || ["active", "live"].includes(ebayStatus) ? "live" : item.ebayListing?.offerId ? "attention" : "disabled"
-          : "disabled"
+      const { isShopify, isEbay, state, filter } = catalogChannelState(item, channel)
       const stateLabel = state === "live" ? "Live" : state === "attention" ? "Needs attention" : "Not enabled for this SKU"
       const src = channel.logoDataUrl || channel.logoUrl
       const fallback = isShopify ? "S" : isEbay ? "e" : String(channel.name || "?").slice(0, 1).toUpperCase()
@@ -2796,7 +2802,7 @@ function CatalogChannelMarks({ item, channels }: { item: ProductItem; channels: 
         : state === "attention"
           ? "border-rose-500/45 bg-rose-500/15 text-rose-700 dark:text-rose-300"
           : "border-muted-foreground/25 bg-muted/70 text-muted-foreground grayscale opacity-70"
-      return <Tooltip key={channel.id || channel.name}><TooltipTrigger asChild><span className={`grid size-7 shrink-0 cursor-default place-items-center overflow-hidden rounded-md border ${color}`}>{src ? <img src={src} alt="" className="size-full object-contain p-1" /> : <span className="text-xs font-bold">{fallback}</span>}</span></TooltipTrigger><TooltipContent>{channel.name}: {stateLabel}</TooltipContent></Tooltip>
+      return <Tooltip key={channel.id || channel.name}><TooltipTrigger asChild><button type="button" disabled={!filter} onClick={() => filter && onFilter?.(filter)} className={`grid size-7 shrink-0 place-items-center overflow-hidden rounded-md border transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default ${color}`} aria-label={`Filter ${channel.name}: ${stateLabel}`}>{src ? <img src={src} alt="" className="size-full object-contain p-1" /> : <span className="text-xs font-bold">{fallback}</span>}</button></TooltipTrigger><TooltipContent>{channel.name}: {stateLabel}. Click to filter.</TooltipContent></Tooltip>
     })}
   </div>
 }
@@ -7332,6 +7338,23 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
     const score = Math.round((checks.filter(Boolean).length / checks.length) * 100)
     return { score, missing: [!checks[0] && "title", !checks[1] && "category", !checks[2] && "price", !checks[3] && "image", !checks[4] && "stock"].filter(Boolean).join(", ") }
   }
+  const applyChannelFilter = (channelStatus: string) => {
+    const next = { ...filters, channelStatus }
+    setFilters(next)
+    setAllFiltered(false)
+    setSelectedIds(new Set())
+    load(1, next)
+  }
+  const channelHealth = channels
+    .filter((channel) => channel.connected && String(channel.status || "active").toLowerCase() !== "inactive")
+    .map((channel) => {
+      const key = `${channel.id} ${channel.name}`.toLowerCase()
+      if (!key.includes("shopify") && !key.includes("ebay")) return null
+      const counts = { live: 0, attention: 0, disabled: 0 }
+      rows.forEach((item) => { counts[catalogChannelState(item, channel).state] += 1 })
+      return { channel, counts }
+    })
+    .filter((entry): entry is { channel: ChannelConnection; counts: { live: number; attention: number; disabled: number } } => Boolean(entry))
   const cellCount = 4 + columns.filter(([key]) => visible[key]).length
 
   useEffect(() => { if (autoAlternates && rows.length) loadAlternates() }, [autoAlternates, rows])
@@ -7594,6 +7617,21 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
               </Button>
             </div>
           </div>
+          {channelHealth.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/35 px-3 py-2">
+              <span className="text-xs font-semibold text-foreground">Channels on this page</span>
+              {channelHealth.map(({ channel, counts }) => {
+                const key = `${channel.id} ${channel.name}`.toLowerCase()
+                const prefix = key.includes("shopify") ? "shopify" : "ebay"
+                return <div key={channel.id || channel.name} className="flex items-center gap-1 border-l pl-2 first:border-l-0 first:pl-0">
+                  <span className="text-xs font-medium text-muted-foreground">{channel.name}</span>
+                  <Button size="sm" variant="ghost" className="h-6 px-1.5 text-xs text-emerald-700 hover:bg-emerald-500/15 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200" onClick={() => applyChannelFilter(`${prefix}-live`)}>{counts.live} live</Button>
+                  <Button size="sm" variant="ghost" className="h-6 px-1.5 text-xs text-rose-700 hover:bg-rose-500/15 hover:text-rose-800 dark:text-rose-300 dark:hover:text-rose-200" onClick={() => applyChannelFilter(prefix === "shopify" ? "shopify-unpublished" : "ebay-offer")}>{counts.attention} attention</Button>
+                  <Button size="sm" variant="ghost" className="h-6 px-1.5 text-xs text-muted-foreground hover:bg-muted" onClick={() => applyChannelFilter(`${prefix}-missing`)}>{counts.disabled} not enabled</Button>
+                </div>
+              })}
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span>
               {numberLabel(total || totalSkuCount)} filtered |{" "}
@@ -7948,7 +7986,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                             )}
                           </TableCell>
                         )}
-                        {visible.channels && <TableCell><CatalogChannelMarks item={item} channels={channels} /></TableCell>}
+                        {visible.channels && <TableCell><CatalogChannelMarks item={item} channels={channels} onFilter={applyChannelFilter} /></TableCell>}
                         {visible.images && <TableCell>{imageCount}</TableCell>}
                         {visible.updated && (
                           <TableCell>
