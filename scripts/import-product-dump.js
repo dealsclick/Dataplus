@@ -128,7 +128,7 @@ function parseArgs(argv) {
       options.snapshotOnly = true;
     } else if (arg === "--sync-mode") {
       const value = String(argv[index + 1] || "split").trim().toLowerCase();
-      options.syncMode = ["split", "catalog", "reconciliation"].includes(value) ? value : "split";
+      options.syncMode = ["full", "split", "catalog", "reconciliation"].includes(value) ? value : "split";
       index += 1;
     } else if (arg === "--job-id") {
       options.jobId = String(argv[index + 1] || "").trim();

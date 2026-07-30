@@ -1546,8 +1546,8 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
   }
   const source = nullableString(options.source) || "vendor_feed";
   const requestedSyncMode = String(options.syncMode || "split").trim().toLowerCase();
-  const syncMode = ["split", "catalog", "reconciliation"].includes(requestedSyncMode) ? requestedSyncMode : "split";
-  const dynamicOnly = syncMode !== "catalog";
+  const syncMode = ["full", "split", "catalog", "reconciliation"].includes(requestedSyncMode) ? requestedSyncMode : "split";
+  const dynamicOnly = ["split", "reconciliation"].includes(syncMode);
   const catalogOnly = syncMode === "catalog";
   const reconciliationOnly = syncMode === "reconciliation";
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
@@ -1650,7 +1650,31 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
       }
       const mainConflictClause = catalogOnly
         ? "on conflict (vendor_id, source_sku) do nothing"
-        : `on conflict (vendor_id, source_sku) do update set
+        : syncMode === "full"
+          ? `on conflict (vendor_id, source_sku) do update set
+          internal_sku = excluded.internal_sku,
+          vendor_sku = excluded.vendor_sku,
+          title = excluded.title,
+          brand = excluded.brand,
+          manufacturer = excluded.manufacturer,
+          mfr_part_number = excluded.mfr_part_number,
+          barcode = excluded.barcode,
+          category = excluded.category,
+          source_category = excluded.source_category,
+          cost = excluded.cost,
+          price = excluded.price,
+          list_price = excluded.list_price,
+          qty = excluded.qty,
+          stock_status = excluded.stock_status,
+          uom = excluded.uom,
+          uom_qty = excluded.uom_qty,
+          to_be_discontinued = excluded.to_be_discontinued,
+          default_image = excluded.default_image,
+          raw = excluded.raw,
+          last_feed_run_id = excluded.last_feed_run_id,
+          last_seen_at = now(),
+          updated_at = now()`
+          : `on conflict (vendor_id, source_sku) do update set
           cost = excluded.cost,
           price = excluded.price,
           list_price = excluded.list_price,

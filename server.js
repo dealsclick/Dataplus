@@ -887,7 +887,15 @@ function normalizeVendorFeedSchedule(feed = {}, index = 0) {
     fileFormat: ["bson-gzip", "csv"].includes(fileFormat) ? fileFormat : "bson-gzip",
     importTarget: sourceTextValue(feed.importTarget || "source-catalog") || "source-catalog",
     mappingProfile: sourceTextValue(feed.mappingProfile || "source-catalog-standard") || "source-catalog-standard",
-    syncMode: ["split", "catalog", "reconciliation"].includes(requestedSyncMode) ? requestedSyncMode : "split",
+    syncMode: ["full", "split", "catalog", "reconciliation"].includes(requestedSyncMode) ? requestedSyncMode : "split",
+    refreshEnabled: feed.refreshEnabled === undefined ? (feed.enabled === true || String(feed.enabled || "").toLowerCase() === "true") : (feed.refreshEnabled === true || String(feed.refreshEnabled || "").toLowerCase() === "true"),
+    refreshScheduleType: String(feed.refreshScheduleType || scheduleType).toLowerCase() === "interval" ? "interval" : "times",
+    refreshScheduleTimes: [...new Set(String(feed.refreshScheduleTimes || feed.scheduleTimes || "02:00").split(/[,;\s]+/).map((value) => value.trim()).filter((value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value)))].join(",") || "02:00",
+    refreshScheduleEveryHours: Math.max(1, Math.min(24, Number(feed.refreshScheduleEveryHours || feed.scheduleEveryHours || 24) || 24)),
+    fullImportEnabled: feed.fullImportEnabled === true || String(feed.fullImportEnabled || "").toLowerCase() === "true",
+    fullImportScheduleType: String(feed.fullImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times",
+    fullImportScheduleTimes: [...new Set(String(feed.fullImportScheduleTimes || "01:00").split(/[,;\s]+/).map((value) => value.trim()).filter((value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value)))].join(",") || "01:00",
+    fullImportScheduleEveryHours: Math.max(1, Math.min(24, Number(feed.fullImportScheduleEveryHours || 24) || 24)),
     notes: sourceTextValue(feed.notes || ""),
     postImportInventoryMode: ["disabled", "dry-run", "apply"].includes(String(feed.postImportInventoryMode || "dry-run").toLowerCase()) ? String(feed.postImportInventoryMode || "dry-run").toLowerCase() : "dry-run",
     postImportPriceMode: ["disabled", "dry-run", "apply"].includes(String(feed.postImportPriceMode || "dry-run").toLowerCase()) ? String(feed.postImportPriceMode || "dry-run").toLowerCase() : "dry-run",
@@ -10774,10 +10782,13 @@ function queueVendorFeedImportJob(db = {}, feed = {}, options = {}) {
   const normalizedFeed = normalizeVendorFeedSchedule(feed);
   const localPath = vendorFeedLocalPath(normalizedFeed);
   const scheduled = options.scheduled === true;
+  const requestedSyncMode = String(options.syncMode || normalizedFeed.syncMode || "split").toLowerCase();
+  const syncMode = ["full", "split", "catalog", "reconciliation"].includes(requestedSyncMode) ? requestedSyncMode : "split";
+  const jobLabel = String(options.jobLabel || `${normalizedFeed.name || "Vendor feed"} import`).trim();
   const job = createImportJob(db, {
     section: "Source Catalog",
     category: "Vendor feed",
-    operation: `${scheduled ? "Scheduled " : ""}${normalizedFeed.name} import`,
+    operation: `${scheduled ? "Scheduled " : ""}${jobLabel}`,
     direction: "import",
     status: "queued",
     fileName: path.basename(normalizedFeed.ftpRemotePath || localPath),
@@ -10804,11 +10815,11 @@ function queueVendorFeedImportJob(db = {}, feed = {}, options = {}) {
       templateId: normalizedFeed.mappingProfile,
       postImportInventoryMode: normalizedFeed.postImportInventoryMode,
       postImportPriceMode: normalizedFeed.postImportPriceMode,
-      syncMode: normalizedFeed.syncMode,
+      syncMode,
       postgresOnly: true,
       batchSize: 100
     },
-    message: `${scheduled ? "Scheduled" : "Manual"} FTP import queued for ${normalizedFeed.name}.`
+    message: `${scheduled ? "Scheduled" : "Manual"} ${syncMode === "full" ? "full catalog import" : syncMode === "reconciliation" ? "catalog refresh" : "FTP import"} queued for ${normalizedFeed.name}.`
   });
   return job;
 }
@@ -26481,7 +26492,12 @@ async function handleApi(req, res) {
     const existingJobs = await postgres.readOperationJobs(500).catch(() => []) || [];
     const duplicate = existingJobs.find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && ["product-dump-import", "vendor-feed-import"].includes(String(job.workerTask || "")) && String(job.workerPayload?.feedId || "") === feed.id);
     if (duplicate) return sendJson(res, 200, { queued: true, duplicate: true, job: clientImportJob(duplicate), message: `${feed.name} is already queued or running.` });
-    const job = queueVendorFeedImportJob(db, feed);
+    const requestedMode = String(url.searchParams.get("mode") || "refresh").toLowerCase();
+    const syncMode = requestedMode === "full" ? "full" : "reconciliation";
+    const job = queueVendorFeedImportJob(db, feed, {
+      syncMode,
+      jobLabel: `${feed.name} ${syncMode === "full" ? "full catalog import" : "refresh"}`
+    });
     return sendJson(res, 202, { queued: true, job: clientImportJob(job), message: job.message });
   }
 

@@ -494,35 +494,55 @@ async function checkScheduledVendorFeedImports(force = false) {
   const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
   const settings = dataplus.readSystemSettingsStore(docs.systemSettings || {});
   const feeds = [
-    ...(Array.isArray(settings.dataSourceFeeds) ? settings.dataSourceFeeds : []),
-    ...(Array.isArray(settings.vendorFeedSchedules) ? settings.vendorFeedSchedules : []).filter((feed) => String(feed.id || "") !== "product-datadump")
+    ...(Array.isArray(settings.dataSourceFeeds) ? settings.dataSourceFeeds : []).map((feed) => ({ ...feed, dataSourceFeed: true })),
+    ...(Array.isArray(settings.vendorFeedSchedules) ? settings.vendorFeedSchedules : []).filter((feed) => String(feed.id || "") !== "product-datadump").map((feed) => ({ ...feed, dataSourceFeed: false }))
   ];
-  const enabledFeeds = feeds.filter((feed) => feed.enabled && feed.transport === "ftp" && ["bson-gzip", "csv"].includes(feed.fileFormat) && feed.ftpHost && feed.ftpUsername && feed.ftpPassword && feed.ftpRemotePath && (feed.fileFormat !== "csv" || feed.mappingProfile));
-  if (!enabledFeeds.length) return false;
+  const configuredFeeds = feeds.filter((feed) => feed.transport === "ftp" && ["bson-gzip", "csv"].includes(feed.fileFormat) && feed.ftpHost && feed.ftpUsername && feed.ftpPassword && feed.ftpRemotePath && (feed.fileFormat !== "csv" || feed.mappingProfile));
+  if (!configuredFeeds.length) return false;
   const now = new Date(nowMs);
   const today = localDateKey(now);
   const scheduleState = docs.vendorFeedSchedules && typeof docs.vendorFeedSchedules === "object" ? docs.vendorFeedSchedules : {};
   const jobs = await postgres.readOperationJobs(500).catch(() => []) || [];
   let queued = false;
-  for (const feed of enabledFeeds) {
-    const slot = dueScheduleSlot(feed, "schedule", now);
-    if (!slot) continue;
-    const stateKey = `${feed.id}:${today}:${slot}`;
-    const previous = scheduleState[stateKey] || {};
-    if (previous.lastQueuedDate === today) continue;
-    const duplicate = jobs.find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase())
-      && ["product-dump-import", "vendor-feed-import"].includes(String(job.workerTask || ""))
-      && String(job.workerPayload?.feedId || "") === String(feed.id || ""));
-    if (duplicate) {
-      scheduleState[stateKey] = { ...previous, lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastJobId: duplicate.id, lastSkipReason: "An import for this vendor feed is already active." };
-      continue;
-    }
-    const localPath = vendorFeedLocalPath(feed);
-    const job = {
+  for (const feed of configuredFeeds) {
+    const scheduledJobs = feed.dataSourceFeed
+      ? [
+          {
+            key: "refresh",
+            enabled: feed.refreshEnabled === undefined ? Boolean(feed.enabled) : Boolean(feed.refreshEnabled),
+            label: "refresh",
+            syncMode: "reconciliation",
+            schedule: { scheduleType: feed.refreshScheduleType || feed.scheduleType, scheduleTimes: feed.refreshScheduleTimes || feed.scheduleTimes, scheduleEveryHours: feed.refreshScheduleEveryHours || feed.scheduleEveryHours }
+          },
+          {
+            key: "full",
+            enabled: Boolean(feed.fullImportEnabled),
+            label: "full catalog import",
+            syncMode: "full",
+            schedule: { scheduleType: feed.fullImportScheduleType, scheduleTimes: feed.fullImportScheduleTimes, scheduleEveryHours: feed.fullImportScheduleEveryHours }
+          }
+        ]
+      : [{ key: "import", enabled: Boolean(feed.enabled), label: "import", syncMode: feed.syncMode || "split", schedule: feed }];
+    for (const scheduledJob of scheduledJobs) {
+      if (!scheduledJob.enabled) continue;
+      const slot = dueScheduleSlot(scheduledJob.schedule, "schedule", now);
+      if (!slot) continue;
+      const stateKey = `${feed.id}:${scheduledJob.key}:${today}:${slot}`;
+      const previous = scheduleState[stateKey] || {};
+      if (previous.lastQueuedDate === today) continue;
+      const duplicate = jobs.find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase())
+        && ["product-dump-import", "vendor-feed-import"].includes(String(job.workerTask || ""))
+        && String(job.workerPayload?.feedId || "") === String(feed.id || ""));
+      if (duplicate) {
+        scheduleState[stateKey] = { ...previous, lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastJobId: duplicate.id, lastSkipReason: "An import for this feed is already active." };
+        continue;
+      }
+      const localPath = vendorFeedLocalPath(feed);
+      const job = {
       id: crypto.randomUUID(),
       section: "Source Catalog",
       category: "Vendor feed",
-      operation: `Scheduled ${feed.name} import`,
+      operation: `Scheduled ${feed.name} ${scheduledJob.label}`,
       direction: "import",
       status: "queued",
       fileName: path.basename(feed.ftpRemotePath || localPath),
@@ -549,18 +569,19 @@ async function checkScheduledVendorFeedImports(force = false) {
         templateId: feed.mappingProfile || "",
         postImportInventoryMode: feed.postImportInventoryMode || "dry-run",
         postImportPriceMode: feed.postImportPriceMode || "dry-run",
-        syncMode: feed.syncMode || "split",
+        syncMode: scheduledJob.syncMode,
         postgresOnly: true,
         batchSize: 5000
       },
-      message: `Scheduled FTP import queued for ${feed.name}.`,
+      message: `Scheduled ${scheduledJob.label} queued for ${feed.name}.`,
       createdAt: new Date(nowMs).toISOString(),
       updatedAt: new Date(nowMs).toISOString()
-    };
-    await postgres.upsertOperationJob(job);
-    scheduleState[stateKey] = { ...previous, lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastJobId: job.id, lastSkipReason: "" };
-    queued = true;
-    console.log(`[${WORKER_ID}] queued scheduled vendor feed ${feed.name} (${job.id})`);
+      };
+      await postgres.upsertOperationJob(job);
+      scheduleState[stateKey] = { ...previous, lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastJobId: job.id, lastSkipReason: "" };
+      queued = true;
+      console.log(`[${WORKER_ID}] queued scheduled ${scheduledJob.label} for ${feed.name} (${job.id})`);
+    }
   }
   await postgres.writeStateDocuments({ vendorFeedSchedules: scheduleState });
   return queued;
@@ -1261,7 +1282,7 @@ async function runProductDumpImportJob(job) {
   if (payload.postgresOnly !== false) args.push("--postgres-only");
   if (Number(payload.limit || 0) > 0) args.push("--limit", String(Number(payload.limit || 0)));
   args.push("--batch-size", String(dumpBatchSize));
-  args.push("--sync-mode", ["split", "catalog", "reconciliation"].includes(String(payload.syncMode || "").toLowerCase()) ? String(payload.syncMode).toLowerCase() : "split");
+  args.push("--sync-mode", ["full", "split", "catalog", "reconciliation"].includes(String(payload.syncMode || "").toLowerCase()) ? String(payload.syncMode).toLowerCase() : "split");
   let current = await persistJob(job, {
     status: "running",
     phase: "importing_product_dump",
