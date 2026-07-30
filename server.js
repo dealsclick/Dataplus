@@ -8980,9 +8980,56 @@ function createPurchaseOrderFromOrders(db, orderIds, options = {}) {
   return po;
 }
 
+function ensurePurchaseRequirementsForOrders(db, orders, options = {}) {
+  const created = [];
+  for (const order of orders || []) {
+    const createdForOrder = [];
+    const lines = orderLineItems(order);
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      const line = lines[lineIndex] || {};
+      const activeRoutes = (order.fulfillmentRoutes || []).filter((route) => {
+        if (Number(route.lineIndex) !== lineIndex) return false;
+        return !["canceled", "received", "closed", "shipped", "delivered"].includes(String(route.status || "").toLowerCase());
+      });
+      const remaining = openLineQuantity(line, activeRoutes);
+      if (!remaining) continue;
+
+      // An explicit purchaser action is allowed to recover a route missing from an
+      // imported order. Keep it vendor-bound so it can still be safely split into POs.
+      const vendorName = String(line.vendor || options.supplier || "").trim();
+      const vendor = findVendorByName(db, vendorName);
+      if (!vendorName && !vendor) continue;
+      const route = createWorkflowRoute(order, {
+        type: "purchase",
+        status: "new",
+        lineIndex,
+        sku: line.sku || "",
+        title: line.title || line.sku || "Untitled item",
+        qty: remaining,
+        vendorId: vendor?.id || "",
+        vendorName: vendor?.name || vendorName,
+        source: "manual_po_recovery"
+      });
+      created.push(route);
+      createdForOrder.push(route);
+    }
+    if (createdForOrder.length) {
+      recalculateOrderOperationalStatus(order);
+      addOrderWorkflowEvent(order, {
+        step: "purchase_requirements_created",
+        title: "Purchase requirements prepared",
+        message: "Missing supplier purchase requirements were created from unassigned order lines.",
+        user: options.user || "Luis"
+      });
+    }
+  }
+  return created;
+}
+
 function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   const orders = (orderIds || []).map((id) => (db.orders || []).find((order) => order.id === id)).filter(Boolean);
   if (!orders.length) throw new Error("No matching orders found for purchase order.");
+  ensurePurchaseRequirementsForOrders(db, orders, options);
   const groups = new Map();
   for (const order of orders) {
     const routes = (order.fulfillmentRoutes || []).filter((route) => {
