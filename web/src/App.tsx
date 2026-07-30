@@ -7907,6 +7907,8 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                       alternateCounts[String(item.sku || "").toLowerCase()] ??
                       Number(item.alternateVendorCount || 0);
                     const stock = Number(item.qty ?? item.stockQty ?? 0);
+                    const productTitle = item.marketplaceTitle || item.title || "Untitled product";
+                    const compactTitle = productTitle.length > 30 ? `${productTitle.slice(0, 30)}...` : productTitle;
                     const readinessClass =
                       ready.score === 100
                         ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
@@ -7933,7 +7935,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                         <TableCell className="min-w-72 max-w-96">
                           <div className="flex min-w-0 items-center gap-2">
                             <div className="grid size-9 shrink-0 place-items-center overflow-hidden rounded-md border bg-muted">{item.defaultImage ? <img src={item.defaultImage} alt="" className="max-h-full max-w-full object-contain" /> : <Boxes className="size-4 text-muted-foreground" />}</div>
-                            <p className="line-clamp-1 font-medium" title={item.marketplaceTitle || item.title || ""}>{item.marketplaceTitle || item.title || "Untitled product"}</p>
+                            <p className="line-clamp-1 font-medium" title={productTitle}>{compactTitle}</p>
                           </div>
                         </TableCell>
                         {visible.readiness && (
