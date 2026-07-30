@@ -2828,27 +2828,25 @@ function OrderItemsProfitLoss({ lines, pnl }: { lines: Array<Record<string, unkn
 }
 
 function OrderFulfillmentItemRows({ lines, remaining }: { lines: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number }) {
-  return <>{lines.map((line, index) => {
+  return <div className="overflow-x-auto rounded-md border"><Table className="min-w-[860px]"><TableHeader><TableRow><TableHead>Title</TableHead><TableHead>Status</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit price</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">P&amp;L</TableHead><TableHead className="text-right">Remaining</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => {
     const local = (line.localProduct || {}) as Record<string, unknown>
     const variant = (line.variant || {}) as Record<string, unknown>
     const sku = String(line.sku || "-")
     const title = String(line.title || local.title || sku)
+    const displayTitle = title.length > 30 ? `${title.slice(0, 30).trimEnd()}...` : title
     const image = String(local.defaultImage || "")
     const quantity = Number(line.qty || 0)
     const unfulfilled = remaining(line, index)
-    return <div key={`${sku}-${index}`} className="grid gap-3 rounded-md border p-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
-      <div className="flex min-w-0 items-center gap-3">
-        {image ? <CatalogImage src={image} alt={title} className="size-14 shrink-0" imageClassName="p-1" /> : <div className="grid size-14 shrink-0 place-items-center rounded-md border bg-muted text-xs text-muted-foreground">--</div>}
-        <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="truncate font-medium">{title}</p><Badge variant={unfulfilled > 0 ? "secondary" : "default"}>{unfulfilled > 0 ? "Unfulfilled" : "Fulfilled"}</Badge></div><p className="flex flex-wrap items-center gap-1 text-sm text-muted-foreground">{local.sku ? <a className="font-mono text-foreground hover:underline" href={`/products/${encodeURIComponent(String(local.sku))}`}>{sku}</a> : <><span className="font-mono">{sku}</span><AlertCircle className="size-3.5 text-amber-700" aria-label="No local catalog match" /></>}<span>/ Qty {numberLabel(quantity)}</span>{variant.sku ? <span>/ {String(variant.label || "Variant")}</span> : null}</p></div>
-      </div>
-      <div className="grid grid-cols-2 gap-x-5 gap-y-2 text-right text-sm sm:grid-cols-4 lg:min-w-[28rem]">
-        <div><p className="text-xs text-muted-foreground">Unit price</p><p className="font-medium">{moneyLabel(Number(line.price || 0))}</p></div>
-        <div><p className="text-xs text-muted-foreground">Unit cost</p><p>{moneyLabel(Number(line.unitCost || 0))}</p></div>
-        <div><p className="text-xs text-muted-foreground">Profit</p><p className={Number(line.grossProfit || 0) < 0 ? "text-destructive" : "font-medium"}>{moneyLabel(Number(line.grossProfit || 0))}</p></div>
-        <div><p className="text-xs text-muted-foreground">Remaining</p><p>{numberLabel(unfulfilled)} <span className="text-xs text-muted-foreground">({Number(line.grossMarginPercent || 0).toFixed(1)}%)</span></p></div>
-      </div>
-    </div>
-  })}</>
+    return <TableRow key={`${sku}-${index}`}>
+      <TableCell className="min-w-80"><div className="flex min-w-0 items-center gap-3">{image ? <CatalogImage src={image} alt={title} className="size-12 shrink-0" imageClassName="p-1" /> : <div className="grid size-12 shrink-0 place-items-center rounded-md border bg-muted text-xs text-muted-foreground">--</div>}<div className="min-w-0"><p className="font-medium" title={title}>{displayTitle}</p><p className="flex items-center gap-1 text-xs text-muted-foreground">{local.sku ? <a className="font-mono text-foreground hover:underline" href={`/products/${encodeURIComponent(String(local.sku))}`}>{sku}</a> : <><span className="font-mono">{sku}</span><AlertCircle className="size-3.5 text-amber-700" aria-label="No local catalog match" /></>}{variant.sku ? <span>· {String(variant.label || "Variant")}</span> : null}</p></div></div></TableCell>
+      <TableCell><Badge variant={unfulfilled > 0 ? "secondary" : "default"}>{unfulfilled > 0 ? "Unfulfilled" : "Fulfilled"}</Badge></TableCell>
+      <TableCell className="text-right">{numberLabel(quantity)}</TableCell>
+      <TableCell className="text-right font-medium">{moneyLabel(Number(line.price || 0))}</TableCell>
+      <TableCell className="text-right">{moneyLabel(Number(line.unitCost || 0))}</TableCell>
+      <TableCell className="text-right"><p className={Number(line.grossProfit || 0) < 0 ? "text-destructive" : "font-medium"}>{moneyLabel(Number(line.grossProfit || 0))}</p><p className="text-xs text-muted-foreground">{Number(line.grossMarginPercent || 0).toFixed(1)}%</p></TableCell>
+      <TableCell className="text-right">{numberLabel(unfulfilled)}</TableCell>
+    </TableRow>
+  })}</TableBody></Table></div>
 }
 
 function ActionTile({
