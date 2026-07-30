@@ -7400,6 +7400,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
         eyebrow="Catalog"
         title="Products"
         description="Approved SKUs for Shopify and connected channels. Fast paged results with legacy table controls restored."
+        action={<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={() => setFilterOpen(true)}><Search className="size-4" /> Filters{Object.keys(filters).length ? ` (${Object.keys(filters).length})` : ""}</Button><Button variant="outline" size="sm" onClick={() => load()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>}
       />
       <Card>
         <CardHeader className="grid gap-3 border-b">
@@ -7472,17 +7473,15 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                 ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
-            <DropdownMenu open={filterOpen} onOpenChange={setFilterOpen}>
-              <DropdownMenuTrigger asChild>
-                <Button size="sm" variant="outline">
-                  + Filter
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-[380px] p-3">
-                <div className="grid gap-3">
-                  <p className="text-xs font-semibold uppercase text-muted-foreground">
-                    Add product filter
-                  </p>
+            <Sheet open={filterOpen} onOpenChange={setFilterOpen}>
+              <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-xl">
+                <SheetHeader>
+                  <SheetTitle>Product filters</SheetTitle>
+                  <SheetDescription>Choose a field, then select one or more values. Channel filters first narrow the list to a marketplace.</SheetDescription>
+                </SheetHeader>
+                <div className="grid gap-4 py-6">
+                  <div className="grid gap-1">
+                    <Label className="text-xs">Filter field</Label>
                   <Select
                     value={filterField}
                     onValueChange={(value) => {
@@ -7505,6 +7504,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                       )}
                     </SelectContent>
                   </Select>
+                  </div>
                   {filterField === "channelStatus" ? (
                     <div className="grid gap-1">
                       <Label className="text-xs">Channel</Label>
@@ -7529,8 +7529,8 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                       </p>
                     </div>
                   ) : null}
-                  <Input value="Is any of" disabled />
-                  <div className="relative">
+                  <div className="grid gap-1"><Label className="text-xs">Operator</Label><Input value="Is any of" disabled /></div>
+                  <div className="grid gap-1"><Label className="text-xs">Search values</Label><div className="relative">
                     <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
                     <Input
                       className="pl-8"
@@ -7538,7 +7538,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                       value={filterSearch}
                       onChange={(event) => setFilterSearch(event.target.value)}
                     />
-                  </div>
+                  </div></div>
                   <div className="max-h-52 overflow-y-auto rounded-md border">
                     {matchingValues.map((value) => (
                       <label
@@ -7559,25 +7559,10 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                       </label>
                     ))}
                   </div>
-                  <div className="flex justify-end gap-2">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setFilterOpen(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={applyFilter}
-                      disabled={!filterSelection.length}
-                    >
-                      Apply filter
-                    </Button>
-                  </div>
                 </div>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                <SheetFooter><Button variant="outline" onClick={() => setFilterOpen(false)}>Cancel</Button><Button onClick={applyFilter} disabled={!filterSelection.length}>Apply filter</Button></SheetFooter>
+              </SheetContent>
+            </Sheet>
             <div className="flex items-center gap-1 rounded-md border px-2 py-1">
               <Input
                 aria-label="Created from"
