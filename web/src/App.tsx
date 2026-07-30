@@ -10,6 +10,7 @@ import {
   Archive,
   Boxes,
   CheckCircle2,
+  CalendarDays,
   Copy,
   Database,
   ExternalLink,
@@ -50,9 +51,12 @@ import { Badge } from "@/components/ui/badge"
 import { ButtonGroup } from "@/components/ui/button-group"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Calendar } from "@/components/ui/calendar"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from "@/components/ui/drawer"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -65,6 +69,7 @@ import { Input } from "@/components/ui/input"
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group"
 import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -107,7 +112,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
-import { TooltipProvider } from "@/components/ui/tooltip"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Field as FormField, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSeparator, FieldSet } from "@/components/ui/field"
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
@@ -4402,13 +4407,13 @@ function OrderListPreview({ order, orderId, reference, itemCount, hasPo, queue }
   const destination = [shipping.city, shipping.state || shipping.province, shipping.postalCode || shipping.zip].filter(Boolean).join(", ")
   const financialStatus = String(order.financialStatus || order.paymentStatus || "Unpaid")
 
-  return <Popover>
-    <PopoverTrigger asChild>
-      <Button size="icon" variant="ghost" className="size-7 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100" title={`Preview ${reference}`} aria-label={`Preview ${reference}`}>
+  return <HoverCard openDelay={180} closeDelay={120}>
+    <Tooltip><TooltipTrigger asChild><HoverCardTrigger asChild>
+      <Button size="icon" variant="ghost" className="size-7 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100" aria-label={`Preview ${reference}`}>
         <PackageSearch className="size-4" />
       </Button>
-    </PopoverTrigger>
-    <PopoverContent align="start" className="w-80 gap-3 p-3">
+    </HoverCardTrigger></TooltipTrigger><TooltipContent>Preview order</TooltipContent></Tooltip>
+    <HoverCardContent align="start">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0"><p className="font-semibold">{reference}</p><p className="truncate text-xs text-muted-foreground">{String(order.buyer || order.customerName || order.customerEmail || "No customer")}</p></div>
         <Badge variant={financialStatus.toLowerCase() === "paid" ? "secondary" : "outline"}>{financialStatus}</Badge>
@@ -4419,10 +4424,10 @@ function OrderListPreview({ order, orderId, reference, itemCount, hasPo, queue }
         <div><p className="text-muted-foreground">Total</p><p className="mt-0.5 font-medium">{moneyLabel(Number(order.total || 0))}</p></div>
         <div><p className="text-muted-foreground">Supplier PO</p><p className="mt-0.5 font-medium">{hasPo ? "Linked" : "Not created"}</p></div>
       </div>
-      <div className="grid gap-1 text-xs text-muted-foreground"><p>{String(order.channelSource || order.salesChannel || order.source || "Unclassified channel")}</p>{destination && <p>Ship to {destination}</p>}{Boolean(order.shipBy) && <p>Ship by {String(order.shipBy)}</p>}</div>
+      <Collapsible className="text-xs text-muted-foreground"><CollapsibleTrigger asChild><Button className="h-auto px-0 py-0 text-xs text-muted-foreground hover:bg-transparent hover:text-foreground" variant="ghost">More order context</Button></CollapsibleTrigger><CollapsibleContent className="grid gap-1 pt-2"><p>{String(order.channelSource || order.salesChannel || order.source || "Unclassified channel")}</p>{destination && <p>Ship to {destination}</p>}{Boolean(order.shipBy) && <p>Ship by {String(order.shipBy)}</p>}</CollapsibleContent></Collapsible>
       <Button size="sm" className="w-full" asChild><a href={`/orders/${encodeURIComponent(orderId || reference)}`}>Open full order</a></Button>
-    </PopoverContent>
-  </Popover>
+    </HoverCardContent>
+  </HoverCard>
 }
 
 function OperationsPage() {
@@ -4435,6 +4440,7 @@ function OperationsPage() {
   const [queue, setQueue] = useState("all")
   const [status, setStatus] = useState("all")
   const [source, setSource] = useState("all")
+  const [orderDate, setOrderDate] = useState("")
   const [sort, setSort] = useState("created-desc")
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [selected, setSelected] = useState<Record<string, unknown> | null>(null)
@@ -4599,6 +4605,7 @@ function OperationsPage() {
     .filter((row) => tab !== "orders" || queue === "all" || queueFor(row) === queue)
     .filter((row) => status === "all" || String(row.status || row.returnStatus || "") === status)
     .filter((row) => source === "all" || String(row.source || row.channelSource || "") === source)
+    .filter((row) => !orderDate || String(row.createdAt || row.updatedAt || "").slice(0, 10) === orderDate)
     .sort((left, right) => {
       const leftValue = sort.startsWith("total") ? Number(left.total || left.refundAmount || 0) : sort.startsWith("customer") ? String(left.buyer || left.customerName || "") : new Date(String(left.createdAt || left.updatedAt || 0)).getTime()
       const rightValue = sort.startsWith("total") ? Number(right.total || right.refundAmount || 0) : sort.startsWith("customer") ? String(right.buyer || right.customerName || "") : new Date(String(right.createdAt || right.updatedAt || 0)).getTime()
@@ -4618,11 +4625,12 @@ function OperationsPage() {
     {tab === "orders" && <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{queueDefinitions.map(([id, label, description]) => <Button key={id} size="sm" variant={queue === id ? "secondary" : "ghost"} className="shrink-0" title={description} onClick={() => setQueue(id)}>{label}<Badge variant="outline" className="ml-1.5">{numberLabel(counts[id])}</Badge></Button>)}</div>}
     <Card>
       <CardHeader className="gap-3 border-b">
-        <div className="grid gap-2 lg:grid-cols-[minmax(260px,1fr)_180px_180px_180px]">
+        <div className="grid gap-2 xl:grid-cols-[minmax(260px,1fr)_180px_180px_180px_170px]">
           <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search order, customer, address, SKU, or channel" /></div>
           <Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue placeholder="All statuses" /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem>{statusValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
           <Select value={source} onValueChange={setSource}><SelectTrigger><SelectValue placeholder="All sources" /></SelectTrigger><SelectContent><SelectItem value="all">All sources</SelectItem>{sourceValues.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
           <Select value={sort} onValueChange={setSort}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest first</SelectItem><SelectItem value="created-asc">Oldest first</SelectItem><SelectItem value="total-desc">Highest total</SelectItem><SelectItem value="total-asc">Lowest total</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
+          <Popover><PopoverTrigger asChild><Button variant="outline" className="justify-start font-normal"><CalendarDays className="size-4" />{orderDate ? new Date(`${orderDate}T12:00:00`).toLocaleDateString() : "Any date"}</Button></PopoverTrigger><PopoverContent align="end" className="w-auto p-0"><Calendar mode="single" selected={orderDate ? new Date(`${orderDate}T12:00:00`) : undefined} onSelect={(date) => setOrderDate(date ? date.toISOString().slice(0, 10) : "")} /><div className="border-t p-2"><Button size="sm" variant="ghost" className="w-full" disabled={!orderDate} onClick={() => setOrderDate("")}>Clear date</Button></div></PopoverContent></Popover>
         </div>
         <CardDescription>{numberLabel(filtered.length)} records shown. Select rows for bulk actions; the order number opens the full operational record.</CardDescription>
       </CardHeader>
@@ -7978,6 +7986,19 @@ function DavidConversation({
 }
 
 function DavidChatDrawer({ open, onOpenChange, settings, onOpenSettings, onOpenFull }: { open: boolean; onOpenChange: (open: boolean) => void; settings: SystemSettings; onOpenSettings: () => void; onOpenFull: () => void }) {
+  const [mobile, setMobile] = useState(() => window.matchMedia("(max-width: 639px)").matches)
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 639px)")
+    const sync = () => setMobile(media.matches)
+    sync(); media.addEventListener("change", sync)
+    return () => media.removeEventListener("change", sync)
+  }, [])
+  if (mobile) return <Drawer open={open} onOpenChange={onOpenChange} repositionInputs={false}>
+    <DrawerContent className="h-[88dvh]">
+      <DrawerHeader className="sr-only"><DrawerTitle>David</DrawerTitle><DrawerDescription>DataPlus operational assistant</DrawerDescription></DrawerHeader>
+      <div className="min-h-0 flex-1"><DavidConversation compact settings={settings} onOpenSettings={onOpenSettings} onOpenFull={onOpenFull} /></div>
+    </DrawerContent>
+  </Drawer>
   return <Sheet open={open} onOpenChange={onOpenChange}>
     <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-[440px]">
       <DavidConversation compact settings={settings} onOpenSettings={onOpenSettings} onOpenFull={onOpenFull} />
