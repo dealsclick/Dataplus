@@ -20298,7 +20298,7 @@ async function registerShopifyOrderWebhooks() {
   // ORDERS_UPDATED also arrives after financial changes, including refunds. Some
   // shops reject REFUNDS_CREATE even when order access is granted, so it must not
   // prevent the rest of the order synchronization subscriptions from registering.
-  const topics = ["ORDERS_CREATE", "ORDERS_UPDATED", "ORDERS_CANCELLED", "FULFILLMENTS_CREATE", "FULFILLMENTS_UPDATE", "REFUNDS_CREATE"];
+  const topics = ["ORDERS_CREATE", "ORDERS_UPDATED", "ORDERS_CANCELLED", "ORDERS_PARTIALLY_FULFILLED", "ORDERS_FULFILLED", "REFUNDS_CREATE"];
   const current = await shopifyGraphqlRequestAuto(`query DataPlusWebhookSubscriptions { webhookSubscriptions(first: 100) { nodes { id topic callbackUrl } } }`, {}, { operation: "Inspect Shopify order webhooks" });
   const existing = current?.webhookSubscriptions?.nodes || [];
   const created = [];
