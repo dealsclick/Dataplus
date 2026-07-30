@@ -51,6 +51,7 @@ const SHOPIFY_TAXONOMY_INDEX_FILE = path.join(DATA_DIR, "channel-taxonomies", "s
 const CHANNEL_API_LOG_FILE = path.join(DATA_DIR, "channel-api-log.ndjson");
 const CHANNEL_API_LOG_RETENTION_DAYS = Math.max(60, Number(process.env.CHANNEL_API_LOG_RETENTION_DAYS || 60) || 60);
 const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
+const ORDER_ATTACHMENT_DIR = path.join(DATA_DIR, "order-attachments");
 const IMPORT_JOB_STORE_FILE = path.join(DATA_DIR, "import-jobs.json");
 const CONNECTOR_STATE_FILE = path.join(DATA_DIR, "connectors.json");
 const ENV_FILE = path.join(ROOT, ".env");
@@ -10981,6 +10982,23 @@ function startPricingInventoryRefreshJob(jobId, options = {}) {
 function safeImportFileName(fileName, fallback = "import.csv") {
   const base = path.basename(String(fileName || fallback)).replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").trim();
   return base || fallback;
+}
+
+function safeOrderAttachmentName(fileName, fallback = "attachment") {
+  return safeImportFileName(fileName, fallback).slice(0, 180);
+}
+
+function orderAttachmentMimeType(value = "") {
+  const mime = String(value || "").toLowerCase().trim();
+  const allowed = new Set(["application/pdf", "text/plain", "text/csv", "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
+  return allowed.has(mime) ? mime : "application/octet-stream";
+}
+
+function orderAttachmentExtension(fileName = "", mimeType = "") {
+  const extension = path.extname(safeOrderAttachmentName(fileName)).replace(/[^a-z0-9.]/gi, "").toLowerCase();
+  const allowedExtensions = new Set([".pdf", ".txt", ".csv", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"]);
+  if (allowedExtensions.has(extension)) return extension;
+  return { "application/pdf": ".pdf", "text/plain": ".txt", "text/csv": ".csv", "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/heic": ".heic", "image/heif": ".heif" }[mimeType] || ".bin";
 }
 
 function attachImportJobOriginalFile(job, content = "", fileName = "") {
@@ -23298,6 +23316,66 @@ async function handleApi(req, res) {
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     return sendJson(res, 201, { order, document });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "attachments" && parts[4] && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const attachment = (order.documents || []).find((document) => String(document.id || "") === String(parts[4]) && document.storage === "local");
+    if (!attachment || !attachment.storageKey) return notFound(res);
+    const storageKey = path.basename(String(attachment.storageKey || ""));
+    const filePath = path.join(ORDER_ATTACHMENT_DIR, storageKey);
+    if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: "The attachment file is no longer available." });
+    res.writeHead(200, {
+      "Content-Type": orderAttachmentMimeType(attachment.mimeType),
+      "Content-Length": fs.statSync(filePath).size,
+      "Content-Disposition": `${String(attachment.mimeType || "").startsWith("image/") || attachment.mimeType === "application/pdf" ? "inline" : "attachment"}; filename=\"${safeOrderAttachmentName(attachment.name, "attachment").replace(/\"/g, "")}\"`,
+      "Cache-Control": "private, max-age=3600"
+    });
+    return fs.createReadStream(filePath).pipe(res);
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "attachments" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const name = safeOrderAttachmentName(body.name || body.fileName || "attachment");
+    const mimeType = orderAttachmentMimeType(body.mimeType);
+    const encoded = String(body.contentBase64 || "").replace(/^data:[^;]+;base64,/, "").trim();
+    if (!encoded) return sendJson(res, 400, { error: "Choose a file to upload." });
+    let content;
+    try { content = Buffer.from(encoded, "base64"); } catch { return sendJson(res, 400, { error: "The attachment could not be read." }); }
+    if (!content.length || content.length > 15 * 1024 * 1024) return sendJson(res, 400, { error: "Attachments must be between 1 byte and 15 MB." });
+    if (mimeType === "application/octet-stream") return sendJson(res, 400, { error: "Only PDF, CSV, text, JPEG, PNG, WebP, HEIC, and HEIF attachments are supported." });
+    fs.mkdirSync(ORDER_ATTACHMENT_DIR, { recursive: true });
+    const attachmentId = crypto.randomUUID();
+    const storageKey = `${attachmentId}${orderAttachmentExtension(name, mimeType)}`;
+    fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), content);
+    order.documents = Array.isArray(order.documents) ? order.documents : [];
+    const document = { id: attachmentId, name, type: String(body.type || "other").trim() || "other", note: String(body.note || "").trim(), mimeType, size: content.length, storage: "local", storageKey, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: new Date().toISOString(), createdBy: String(body.user || "Luis") };
+    order.documents.unshift(document);
+    addOrderTimeline(order, { type: "document", title: "Attachment uploaded", message: `${name} attached to this order.`, user: document.createdBy });
+    order.updatedAt = document.createdAt;
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 201, { order, document });
+  }
+
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "attachments" && parts[4] && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const document = (order.documents || []).find((entry) => String(entry.id || "") === String(parts[4]));
+    if (!document) return notFound(res);
+    order.documents = (order.documents || []).filter((entry) => String(entry.id || "") !== String(parts[4]));
+    if (document.storage === "local" && document.storageKey) {
+      const filePath = path.join(ORDER_ATTACHMENT_DIR, path.basename(String(document.storageKey)));
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+    addOrderTimeline(order, { type: "document", title: "Attachment removed", message: `${document.name || "Attachment"} removed from this order.`, user: "Luis" });
+    order.updatedAt = new Date().toISOString();
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 200, { order, message: "Attachment removed." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "notes" && postgres.isPostgresEnabled()) {
