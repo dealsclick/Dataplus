@@ -14656,10 +14656,14 @@ function publicInventoryListItem(item = {}, context = {}) {
   const cost = sourceCatalogCost(item);
   const pricedItem = { ...item, cost, sourceCost: cost };
   const sellUnitCost = productSellUnitCost(pricedItem, rulesDb);
+  const systemVariants = systemProductVariants(pricedItem, rulesDb);
+  const primaryVariant = systemVariants[0] || {};
   const uomInfo = productUomInfo(item);
   const shippingClassification = productShippingClassification(item);
   const listPrice = isClearanceItem(item) ? Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0)) : 0;
-  const websitePrice = websitePriceFromRule(item, sellUnitCost || cost, SHOPIFY_PRICE_MARKUP_PERCENT, {}, rulesDb);
+  // The catalog headline always represents the primary sellable variant (normally Each),
+  // exactly like the SKU detail page. Pack pricing stays on its own variant row.
+  const websitePrice = shopifyVariantWebsitePrice(pricedItem, primaryVariant, SHOPIFY_PRICE_MARKUP_PERCENT, rulesDb);
   const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
   const images = Array.isArray(item.images) ? item.images : [];
   const warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
@@ -14710,7 +14714,7 @@ function publicInventoryListItem(item = {}, context = {}) {
     uomQty: item.uomQty,
     uomDisplay: uomInfo.display,
     isMultiUnit: uomInfo.isMultiUnit,
-    systemVariants: systemProductVariants(pricedItem, rulesDb),
+    systemVariants,
     qty: onHand,
     stockQty: Number(item.stockQty || 0),
     reserved,
