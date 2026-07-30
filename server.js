@@ -20295,18 +20295,26 @@ async function registerShopifyOrderWebhooks() {
   const baseUrl = configuredShopifyAppUrl().replace(/\/+$/, "");
   if (!/^https:\/\//i.test(baseUrl)) throw new Error("Set SHOPIFY_APP_URL to the public HTTPS DataPlus URL before registering webhooks.");
   const uri = `${baseUrl}/api/webhooks/shopify/orders`;
-  const topics = ["ORDERS_CREATE", "ORDERS_UPDATED", "ORDERS_CANCELLED", "FULFILLMENTS_CREATE", "REFUNDS_CREATE"];
-  const current = await shopifyGraphqlRequestAuto(`query DataPlusWebhookSubscriptions { webhookSubscriptions(first: 100) { nodes { id topic uri } } }`, {}, { operation: "Inspect Shopify order webhooks" });
+  // ORDERS_UPDATED also arrives after financial changes, including refunds. Some
+  // shops reject REFUNDS_CREATE even when order access is granted, so it must not
+  // prevent the rest of the order synchronization subscriptions from registering.
+  const topics = ["ORDERS_CREATE", "ORDERS_UPDATED", "ORDERS_CANCELLED", "FULFILLMENTS_CREATE", "FULFILLMENTS_UPDATE", "REFUNDS_CREATE"];
+  const current = await shopifyGraphqlRequestAuto(`query DataPlusWebhookSubscriptions { webhookSubscriptions(first: 100) { nodes { id topic callbackUrl } } }`, {}, { operation: "Inspect Shopify order webhooks" });
   const existing = current?.webhookSubscriptions?.nodes || [];
   const created = [];
+  const failed = [];
   for (const topic of topics) {
-    if (existing.some((entry) => String(entry.topic || "") === topic && String(entry.uri || "") === uri)) continue;
-    const data = await shopifyGraphqlRequestAuto(`mutation DataPlusWebhookCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) { webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) { webhookSubscription { id topic uri } userErrors { field message } } }`, { topic, webhookSubscription: { uri } }, { operation: `Register Shopify webhook ${topic}` });
-    const errors = data?.webhookSubscriptionCreate?.userErrors || [];
-    if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not register the webhook.").join("; "));
-    created.push(data?.webhookSubscriptionCreate?.webhookSubscription || { topic });
+    if (existing.some((entry) => String(entry.topic || "") === topic && String(entry.callbackUrl || "") === uri)) continue;
+    try {
+      const data = await shopifyGraphqlRequestAuto(`mutation DataPlusWebhookCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) { webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) { webhookSubscription { id topic callbackUrl } userErrors { field message } } }`, { topic, webhookSubscription: { callbackUrl: uri } }, { operation: `Register Shopify webhook ${topic}` });
+      const errors = data?.webhookSubscriptionCreate?.userErrors || [];
+      if (errors.length) throw new Error(errors.map((entry) => entry.message || "Shopify could not register the webhook.").join("; "));
+      created.push(data?.webhookSubscriptionCreate?.webhookSubscription || { topic });
+    } catch (error) {
+      failed.push({ topic, message: error.message || "Shopify could not register the webhook." });
+    }
   }
-  return { uri, created, existing: topics.length - created.length };
+  return { uri, created, existing: topics.length - created.length - failed.length, failed };
 }
 
 async function cancelShopifyOrder(order = {}, options = {}) {
