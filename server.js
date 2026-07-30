@@ -9055,7 +9055,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
     const openCommitment = (db.purchaseOrders || []).filter((existing) => String(existing.vendorId || "") === String(group.vendor?.id || "") && !["received", "closed", "canceled", "rejected"].includes(String(existing.status || "").toLowerCase())).reduce((sum, existing) => sum + Number(existing.estimatedCost || 0), 0);
     const budgetExceeded = budgetLimit > 0 && openCommitment + estimatedCost > budgetLimit;
     const approvalRequired = budgetExceeded || (group.vendor?.purchaseOrderRules?.requireBuyerApproval !== false && estimatedCost >= Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)));
-    const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: approvalRequired ? "awaiting_approval" : "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), estimatedCost, approval: { required: approvalRequired, threshold: Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)), budgetLimit, budgetExceeded, status: approvalRequired ? "awaiting_approval" : "not_required" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
+    const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: approvalRequired ? "awaiting_approval" : "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), unitCost: Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0), estimatedUnitCost: Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), estimatedCost, approval: { required: approvalRequired, threshold: Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)), budgetLimit, budgetExceeded, status: approvalRequired ? "awaiting_approval" : "not_required" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
     db.purchaseOrders = db.purchaseOrders || []; db.purchaseOrders.unshift(po); created.push(po);
     for (const route of group.routes) { const linkedRoute = (route.order.fulfillmentRoutes || []).find((candidate) => candidate.id === route.id); if (linkedRoute) { linkedRoute.purchaseOrderId = po.id; linkedRoute.purchaseOrderNumber = po.poNumber; linkedRoute.purchaseGroupId = purchaseGroupId; linkedRoute.status = "buyer_review"; linkedRoute.updatedAt = po.updatedAt; } }
     for (const order of group.orders) { order.purchaseGroupId = purchaseGroupId; order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), po.id])]; order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), po.poNumber])]; recalculateOrderOperationalStatus(order); addOrderWorkflowEvent(order, { step: "purchase_order_created", title: "Purchase order created", message: `${po.poNumber} created for ${po.supplier}.`, user: options.user || "System" }); }
@@ -20773,6 +20773,16 @@ async function enrichOrderDetail(order = {}) {
   };
 }
 
+async function hydrateOrderLocalCosts(order = {}) {
+  const enriched = await enrichOrderDetail(order);
+  order.items = (order.items || []).map((line, index) => {
+    const enrichedLine = enriched.items?.[index] || {};
+    const unitCost = Number(enrichedLine.unitCost || line.unitCost || line.cost || 0);
+    return { ...line, localSku: enrichedLine.localSku || line.localSku || "", unitCost, cost: unitCost };
+  });
+  return order;
+}
+
 function shopifyRestRequestWithToken(method, resourcePath, body = null, accessToken = "", options = {}) {
   const config = shopifyAdminConfig();
   if (!config.shop || !accessToken) {
@@ -23242,6 +23252,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "purchase-orders" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
+    await hydrateOrderLocalCosts(order);
     const db = await readDbFast({ skipInventory: true }); db.orders = (db.orders || []).map((row) => row.id === order.id ? order : row);
     const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { warehouseId: body.warehouseId, supplier: body.supplier, user: body.user || "Luis" });
     for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
@@ -23635,6 +23646,9 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     try {
       if (body.groupBySupplier === true) {
+        const selectedOrders = (await Promise.all((body.orderIds || []).map((id) => postgres.readOrderByKey(id)))).filter(Boolean);
+        for (const order of selectedOrders) await hydrateOrderLocalCosts(order);
+        if (selectedOrders.length) db.orders = (db.orders || []).map((row) => selectedOrders.find((order) => order.id === row.id) || row);
         const result = createSupplierPurchaseOrdersFromOrders(db, body.orderIds || [], { warehouseId: body.warehouseId, supplier: body.supplier, user: body.user || "Luis" });
         for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
         for (const order of result.orders) await postgres.saveOrder(order);
