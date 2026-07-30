@@ -7134,6 +7134,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
   const [facets, setFacets] = useState<{ suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] }>({})
   const [rows, setRows] = useState<ProductItem[]>([])
   const [total, setTotal] = useState(0)
+  const [totalQty, setTotalQty] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(false)
@@ -7177,9 +7178,10 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
     try {
       const params = new URLSearchParams({ q: query, page: String(nextPage), limit: String(nextPageSize), fastPage: "true", includeTotal: "true", sort: nextSort.key, sortDirection: nextSort.direction })
       Object.entries(nextFilters).forEach(([key, value]) => { if (value) params.set(key, value) })
-      const result = await api<{ inventory?: ProductItem[]; total?: number; page?: number; hasMore?: boolean }>(`/api/inventory?${params}`)
+      const result = await api<{ inventory?: ProductItem[]; total?: number; totalQty?: number; page?: number; hasMore?: boolean }>(`/api/inventory?${params}`)
       setRows(result.inventory || [])
       setTotal(Number(result.total || 0))
+      setTotalQty(Number(result.totalQty || 0))
       setHasMore(Boolean(result.hasMore))
       setPage(Number(result.page || nextPage))
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load products.") } finally { setLoading(false) }
@@ -7197,6 +7199,11 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
     : activeDefinition.values
   const matchingValues = filterValues.filter((value) => activeDefinition.display(value).toLowerCase().includes(filterSearch.toLowerCase())).slice(0, 250)
   const selectionCount = allFiltered ? total : selectedIds.size
+  const selectedQty = allFiltered
+    ? totalQty
+    : rows
+      .filter((row) => selectedIds.has(String(row.id || row.sku || "")))
+      .reduce((sum, row) => sum + Number(row.qty ?? row.stockQty ?? 0), 0)
   const pageIds = rows.map((row) => String(row.id || row.sku || "")).filter(Boolean)
   const pageSelected = pageIds.length > 0 && pageIds.every((id) => allFiltered || selectedIds.has(id))
   const setDensity = (next: boolean) => { setCompact(next); window.localStorage.setItem("dataplus-products-density", next ? "compact" : "regular") }
@@ -7750,11 +7757,27 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
           </div>
           {selectionCount > 0 && (
             <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 p-2">
-              <p className="mr-auto text-sm font-medium">
+              <p className="text-sm font-medium">
                 {allFiltered
                   ? `${numberLabel(selectionCount)} filtered products selected`
                   : `${numberLabel(selectionCount)} selected`}
               </p>
+              {!allFiltered && total > selectedIds.size ? (
+                <Button
+                  size="sm"
+                  variant="link"
+                  className="h-auto px-0 text-sm"
+                  onClick={() => {
+                    setSelectedIds(new Set());
+                    setAllFiltered(true);
+                  }}
+                >
+                  Select all {numberLabel(total)} results
+                </Button>
+              ) : null}
+              <span className="mr-auto text-sm text-muted-foreground">
+                Total qty: <span className="font-medium text-foreground">{numberLabel(selectedQty)}</span>
+              </span>
               <Button
                 size="sm"
                 variant="ghost"

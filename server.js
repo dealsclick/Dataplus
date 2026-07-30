@@ -21977,7 +21977,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/inventory") {
     if (postgres.isPostgresEnabled()) {
       const cacheQuery = url.searchParams.toString();
-      const cacheKey = `dataplus:products:v3:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const cacheKey = `dataplus:products:v4:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const fastPage = ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase());
@@ -22003,6 +22003,7 @@ async function handleApi(req, res) {
           inventory: (result.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, sourceFallbackMap, systemSettings })),
           inventoryLoaded: true,
           total: result.total,
+          totalQty: result.totalQty,
           page: result.page,
           limit: result.limit,
           hasMore: Boolean(result.hasMore),

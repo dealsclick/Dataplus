@@ -5625,7 +5625,13 @@ async function listProducts(options = {}) {
     created: "created_at"
   };
   const orderBy = sortableColumns[sortKey] || "sku";
-  const countResult = fastPage && !includeTotal ? null : await client.query(`select count(*)::int as total from products ${whereSql}`, params);
+  const countResult = fastPage && !includeTotal ? null : await client.query(`
+    select
+      count(*)::int as total,
+      coalesce(sum(${stockQtyExpression}), 0)::numeric as total_qty
+    from products
+    ${whereSql}
+  `, params);
   params.push(fastPage ? limit + 1 : limit, offset);
   const result = await client.query(`
     select *
@@ -5641,6 +5647,7 @@ async function listProducts(options = {}) {
   return {
     inventory,
     total: countResult?.rows[0]?.total || 0,
+    totalQty: Number(countResult?.rows[0]?.total_qty || 0),
     page,
     limit,
     hasMore
