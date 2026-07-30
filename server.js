@@ -23352,7 +23352,7 @@ async function handleApi(req, res) {
     const storageKey = `${attachmentId}${orderAttachmentExtension(name, mimeType)}`;
     fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), content);
     order.documents = Array.isArray(order.documents) ? order.documents : [];
-    const document = { id: attachmentId, name, type: String(body.type || "other").trim() || "other", note: String(body.note || "").trim(), mimeType, size: content.length, storage: "local", storageKey, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: new Date().toISOString(), createdBy: String(body.user || "Luis") };
+    const document = { id: attachmentId, name, type: String(body.type || "other").trim() || "other", note: String(body.note || "").trim(), noteId: String(body.noteId || "").trim(), mimeType, size: content.length, storage: "local", storageKey, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: new Date().toISOString(), createdBy: String(body.user || "Luis") };
     order.documents.unshift(document);
     addOrderTimeline(order, { type: "document", title: "Attachment uploaded", message: `${name} attached to this order.`, user: document.createdBy });
     order.updatedAt = document.createdAt;
