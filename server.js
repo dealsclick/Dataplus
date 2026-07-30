@@ -20743,6 +20743,7 @@ async function enrichOrderDetail(order = {}) {
   const total = Number(order.total || 0);
   return {
     ...order,
+    timeline: normalizeOrderTimeline(order),
     items: enrichedLines,
     linkedPurchaseOrders: (linkedPurchaseOrders || []).filter(Boolean).map((po) => ({
       id: po.id,
@@ -23295,6 +23296,22 @@ async function handleApi(req, res) {
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     return sendJson(res, 201, { order, document });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "notes" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const text = String(body.text || "").trim();
+    if (!text) return sendJson(res, 400, { error: "A note is required." });
+    order.orderNotes = Array.isArray(order.orderNotes) ? order.orderNotes : [];
+    const note = { id: crypto.randomUUID(), text, visibility: "internal", createdAt: new Date().toISOString(), createdBy: String(body.user || "Luis") };
+    order.orderNotes.unshift(note);
+    addOrderTimeline(order, { type: "note", title: "Internal note added", message: text, user: note.createdBy });
+    order.updatedAt = note.createdAt;
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 201, { order, note });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2] && postgres.isPostgresEnabled()) {
