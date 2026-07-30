@@ -2828,7 +2828,7 @@ function OrderItemsProfitLoss({ lines, pnl }: { lines: Array<Record<string, unkn
 }
 
 function OrderFulfillmentItemRows({ lines, remaining }: { lines: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number }) {
-  return <div className="overflow-x-auto rounded-md border"><Table className="min-w-[860px]"><TableHeader><TableRow><TableHead>Title</TableHead><TableHead>Status</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit price</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">P&amp;L</TableHead><TableHead className="text-right">Remaining</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => {
+  return <div className="overflow-x-auto rounded-md border"><Table className="min-w-[1100px]"><TableHeader><TableRow><TableHead>Title</TableHead><TableHead>Status</TableHead><TableHead>SKU</TableHead><TableHead>Supplier</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit price</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">P&amp;L</TableHead><TableHead className="text-right">Remaining</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => {
     const local = (line.localProduct || {}) as Record<string, unknown>
     const variant = (line.variant || {}) as Record<string, unknown>
     const sku = String(line.sku || "-")
@@ -2838,8 +2838,10 @@ function OrderFulfillmentItemRows({ lines, remaining }: { lines: Array<Record<st
     const quantity = Number(line.qty || 0)
     const unfulfilled = remaining(line, index)
     return <TableRow key={`${sku}-${index}`}>
-      <TableCell className="min-w-80"><div className="flex min-w-0 items-center gap-3">{image ? <CatalogImage src={image} alt={title} className="size-12 shrink-0" imageClassName="p-1" /> : <div className="grid size-12 shrink-0 place-items-center rounded-md border bg-muted text-xs text-muted-foreground">--</div>}<div className="min-w-0"><p className="font-medium" title={title}>{displayTitle}</p><p className="flex items-center gap-1 text-xs text-muted-foreground">{local.sku ? <a className="font-mono text-foreground hover:underline" href={`/products/${encodeURIComponent(String(local.sku))}`}>{sku}</a> : <><span className="font-mono">{sku}</span><AlertCircle className="size-3.5 text-amber-700" aria-label="No local catalog match" /></>}{variant.sku ? <span>· {String(variant.label || "Variant")}</span> : null}</p></div></div></TableCell>
+      <TableCell className="min-w-72"><div className="flex min-w-0 items-center gap-3">{image ? <CatalogImage src={image} alt={title} className="size-12 shrink-0" imageClassName="p-1" /> : <div className="grid size-12 shrink-0 place-items-center rounded-md border bg-muted text-xs text-muted-foreground">--</div>}<div className="min-w-0"><p className="font-medium" title={title}>{displayTitle}</p>{variant.sku ? <p className="text-xs text-muted-foreground">{String(variant.label || "Variant")}</p> : null}</div></div></TableCell>
       <TableCell><Badge variant={unfulfilled > 0 ? "secondary" : "default"}>{unfulfilled > 0 ? "Unfulfilled" : "Fulfilled"}</Badge></TableCell>
+      <TableCell className="font-mono text-xs">{local.sku ? <a className="text-foreground hover:underline" href={`/products/${encodeURIComponent(String(local.sku))}`}>{sku}</a> : <span className="inline-flex items-center gap-1">{sku}<AlertCircle className="size-3.5 text-amber-700" aria-label="No local catalog match" /></span>}</TableCell>
+      <TableCell>{String(line.vendor || local.supplier || "-")}</TableCell>
       <TableCell className="text-right">{numberLabel(quantity)}</TableCell>
       <TableCell className="text-right font-medium">{moneyLabel(Number(line.price || 0))}</TableCell>
       <TableCell className="text-right">{moneyLabel(Number(line.unitCost || 0))}</TableCell>
