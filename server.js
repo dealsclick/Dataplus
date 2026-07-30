@@ -20624,8 +20624,10 @@ async function enrichOrderDetail(order = {}) {
     const directProduct = lineKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
     const product = directProduct || fallbackKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
     const matchedVariant = product?.systemVariants?.find((variant) => lineKeys.includes(String(variant.sku || "").toLowerCase())) || null;
-    const sellUnitQty = Number(matchedVariant?.uomQty || product?.uomQty || 1) || 1;
-    const sourceUnitCost = matchedVariant?.unitCost ?? (product ? Number(product.cost || 0) * sellUnitQty : line.cost);
+    // A base SKU is sold as one each. Only an explicitly matched UOM variant
+    // (for example BUS101275TRV-6PC) may apply its pack multiplier.
+    const sellUnitQty = Number(matchedVariant?.uomQty || 1) || 1;
+    const sourceUnitCost = matchedVariant?.unitCost ?? (product ? productEachUnitCost(product) : line.cost);
     const unitCost = Number(sourceUnitCost || 0);
     const quantity = Number(line.qty || 0);
     const revenue = Number(line.price || 0) * quantity;
