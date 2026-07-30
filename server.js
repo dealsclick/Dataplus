@@ -20642,6 +20642,7 @@ async function enrichOrderDetail(order = {}) {
       localProduct: product ? {
         sku: product.sku,
         title: product.marketplaceTitle || product.title || "",
+        defaultImage: productImageUrl(product),
         supplier: product.supplier || "",
         uom: product.uom || "EA",
         uomQty: Number(product.uomQty || 1),

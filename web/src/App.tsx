@@ -1328,8 +1328,9 @@ function App() {
           onOpenFull={() => { setDavidOpen(false); navigateTo("ai-chat") }}
           onOpenSettings={() => { setDavidOpen(false); navigateTo("settings") }}
         />
-      </SidebarProvider>
-      <Toaster richColors closeButton />
+        </SidebarProvider>
+        <CatalogImagePreviewLayer />
+        <Toaster richColors closeButton />
     </TooltipProvider>
   )
 }
@@ -2739,6 +2740,57 @@ function ChannelLogo({ channel }: { channel: ChannelConnection }) {
       {src ? <img src={src} alt="" className="max-h-full max-w-full object-contain p-2" /> : <ShoppingBag className="size-7 text-muted-foreground" />}
     </div>
   )
+}
+
+function CatalogImage({ src, alt, className = "", imageClassName = "" }: { src?: string; alt: string; className?: string; imageClassName?: string }) {
+  const [open, setOpen] = useState(false)
+  if (!src) return <div className={`grid place-items-center overflow-hidden rounded-md border bg-muted ${className}`}><Boxes className="size-4 text-muted-foreground" /></div>
+  return <>
+    <button type="button" data-catalog-image-viewer className={`group relative grid place-items-center overflow-hidden rounded-md border bg-muted transition-colors hover:border-primary/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${className}`} title={`Enlarge ${alt}`} aria-label={`Enlarge ${alt}`} onClick={() => setOpen(true)}>
+      <img src={src} alt={alt} className={`max-h-full max-w-full object-contain ${imageClassName}`} />
+      <span className="pointer-events-none absolute inset-0 grid place-items-center bg-background/60 text-xs font-medium opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">View image</span>
+    </button>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent className="max-h-[92vh] max-w-[96vw] overflow-hidden p-3 sm:max-w-4xl">
+        <DialogHeader className="sr-only"><DialogTitle>{alt}</DialogTitle></DialogHeader>
+        <div className="grid max-h-[84vh] place-items-center overflow-auto rounded-md bg-muted/40 p-2">
+          <img src={src} alt={alt} className="max-h-[80vh] max-w-full object-contain" />
+        </div>
+      </DialogContent>
+    </Dialog>
+  </>
+}
+
+function CatalogImagePreviewLayer() {
+  const [activeImage, setActiveImage] = useState<{ src: string; alt: string } | null>(null)
+  useEffect(() => {
+    const openPreview = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target.closest("img") : null
+      if (!(target instanceof HTMLImageElement) || !target.currentSrc || !target.closest("main") || target.closest("[data-no-image-preview], [data-catalog-image-viewer]")) return
+      event.preventDefault()
+      event.stopPropagation()
+      setActiveImage({ src: target.currentSrc, alt: target.alt || "Catalog image" })
+    }
+    document.addEventListener("click", openPreview, true)
+    return () => document.removeEventListener("click", openPreview, true)
+  }, [])
+  return <Dialog open={Boolean(activeImage)} onOpenChange={(open) => !open && setActiveImage(null)}>
+    <DialogContent className="max-h-[92vh] max-w-[96vw] overflow-hidden p-3 sm:max-w-4xl">
+      <DialogHeader className="sr-only"><DialogTitle>{activeImage?.alt || "Catalog image"}</DialogTitle></DialogHeader>
+      <div className="grid max-h-[84vh] place-items-center overflow-auto rounded-md bg-muted/40 p-2">
+        {activeImage && <img src={activeImage.src} alt={activeImage.alt} className="max-h-[80vh] max-w-full object-contain" data-no-image-preview />}
+      </div>
+    </DialogContent>
+  </Dialog>
+}
+
+function OrderCatalogImages({ lines }: { lines: Array<Record<string, unknown>> }) {
+  const catalogLines = lines.map((line, index) => {
+    const local = (line.localProduct || {}) as Record<string, unknown>
+    return { key: `${String(line.sku || "item")}-${index}`, sku: String(local.sku || line.sku || ""), title: String(line.title || local.title || line.sku || "Order item"), qty: Number(line.qty || 0), image: String(local.defaultImage || "") }
+  }).filter((line) => line.image)
+  if (!catalogLines.length) return null
+  return <div className="flex flex-wrap gap-3">{catalogLines.map((line) => <div key={line.key} className="flex min-w-52 items-center gap-3 rounded-md border bg-card p-2"><CatalogImage src={line.image} alt={line.title} className="size-14 shrink-0" imageClassName="p-1" /><div className="min-w-0"><p className="truncate text-sm font-medium">{line.title}</p><p className="font-mono text-xs text-muted-foreground">{line.sku} / Qty {numberLabel(line.qty)}</p></div></div>)}</div>
 }
 
 function ActionTile({
@@ -4177,7 +4229,7 @@ function OrderDetailWorkspace() {
   }
   if (loading) return <div className="grid gap-4"><Skeleton className="h-24" /><Skeleton className="h-44" /><Skeleton className="h-72" /></div>
   if (!order) return <Card><CardContent className="p-8 text-center text-muted-foreground">This order was not found.</CardContent></Card>
-  return <div className="grid gap-5">
+  return <div className="grid gap-5"><OrderCatalogImages lines={lines} />
     <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button><OrderActionsMenu order={order} busy={saving} onAction={runOrderAction} onRefresh={() => void load()} onCreatePurchaseOrders={() => void createPurchaseOrders()} /></div>} />
     <div className="flex flex-wrap items-center gap-2 text-sm"><Badge variant="outline">{String(order.financialStatus || "Unpaid")}</Badge><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge><Badge variant={hasPurchaseOrders ? "secondary" : "outline"} className={hasPurchaseOrders ? "gap-1 text-emerald-700" : "gap-1 text-muted-foreground"}>{hasPurchaseOrders ? <CheckCircle2 className="size-3.5" /> : <AlertCircle className="size-3.5" />}{hasPurchaseOrders ? "Has PO" : "No PO"}</Badge><span className="text-muted-foreground">{dateLabel(String(order.createdAt || order.importedAt || ""))} from {String(order.channelSource || order.source || "channel")}</span></div>
     <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(280px,0.9fr)]"><Card><CardHeader className="gap-3 border-b"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{String(order.fulfillmentWarehouseName || "Staten Island warehouse")}</Badge></div><div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{String(order.shippingService || "Shipping service will be selected with the label")}</p><p className="mt-1 text-muted-foreground">{String(order.shippingAddressLabel || "Delivery address")}</p></div></CardHeader><CardContent className="grid gap-3 p-4">{lines.map((line, index) => { const local = (line.localProduct || {}) as Record<string, unknown>; const sku = String(line.sku || "-"); return <div key={`${sku}-${index}`} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"><div><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{String(line.title || line.sku || "Order item")}</p><Badge variant={remaining(line, index) > 0 ? "secondary" : "default"}>{remaining(line, index) > 0 ? "Unfulfilled" : "Fulfilled"}</Badge></div><p className="flex items-center gap-1 text-sm text-muted-foreground">{local.sku ? <a className="font-mono text-foreground hover:underline" href={`/products/${encodeURIComponent(String(local.sku))}`}>{sku}</a> : <><span className="font-mono">{sku}</span><AlertCircle className="size-3.5 text-amber-700" aria-label="No local catalog match" /></>}<span>/ Qty {numberLabel(Number(line.qty || 0))}</span></p></div><div className="text-right"><p className="font-medium">{moneyLabel(Number(line.price || 0))}</p><p className="text-xs text-muted-foreground">{numberLabel(remaining(line, index))} remaining</p></div></div>})}<div className="flex flex-wrap justify-end gap-2 border-t pt-3"><Button size="sm" variant="outline" onClick={() => openFulfill(true)}>Mark as fulfilled</Button>{String(order.source || "").toLowerCase() === "shopify" && <Button size="sm" onClick={openShippingLabel}><Truck className="size-4" /> Create shipping label</Button>}</div></CardContent></Card><div className="grid content-start gap-4"><Card><CardHeader className="pb-3"><CardTitle className="text-sm">Customer</CardTitle><CardDescription>{String(order.buyer || order.buyerEmail || "Customer")}</CardDescription></CardHeader><CardContent className="grid gap-3 text-sm"><div><p className="font-medium">Contact information</p><p className="mt-1 text-muted-foreground">{String(order.buyerEmail || "No email")}</p><p className="text-muted-foreground">{String(order.phone || "No phone")}</p></div><div><p className="font-medium">Shipping address</p><p className="mt-1 whitespace-pre-line text-muted-foreground">{addressText(order.address)}</p></div></CardContent></Card><Card><CardHeader className="pb-3"><CardTitle className="text-sm">Payment</CardTitle></CardHeader><CardContent className="grid gap-2 text-sm"><div className="flex justify-between"><span>Items</span><span>{moneyLabel(Number(pnl.itemRevenue || order.total || 0))}</span></div><div className="flex justify-between"><span>Shipping</span><span>{moneyLabel(Number(pnl.shippingCollected || 0))}</span></div><div className="flex justify-between border-t pt-2 font-medium"><span>Total</span><span>{moneyLabel(Number(order.total || 0))}</span></div></CardContent></Card></div></div>
