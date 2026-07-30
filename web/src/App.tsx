@@ -538,6 +538,9 @@ type ShopifyAuthCheck = {
   scopes?: string[]
   expiresAt?: string
   hasReadShipping?: boolean
+  hasReadOrders?: boolean
+  hasReadCustomers?: boolean
+  missingOrderScopes?: string[]
   shop?: {
     name?: string
     myshopifyDomain?: string
@@ -962,7 +965,8 @@ function App() {
         body: JSON.stringify({}),
       })
       setShopifyAuth(result)
-      toast.success(result.message || "Shopify connection is working.")
+      if (result.ok) toast.success(result.message || "Shopify connection is working.")
+      else toast.error(result.message || "Shopify is connected, but required import scopes are missing.")
     } catch (error) {
       const result = { ok: false, message: error instanceof Error ? error.message : "Shopify connection failed." }
       setShopifyAuth(result)
@@ -2365,11 +2369,12 @@ function ChannelDetail({
                   Check connection
                 </Button>
               </CardHeader>
-              <CardContent className="grid gap-3 md:grid-cols-4">
+              <CardContent className="grid gap-3 md:grid-cols-5">
                 <Detail label="Store" value={channel.shopifyConfig?.shop || auth?.shop?.myshopifyDomain || "Missing"} />
                 <Detail label="API version" value={channel.shopifyConfig?.apiVersion || "2026-04"} />
                 <Detail label="Token source" value={auth?.tokenSource || "Configured"} />
                 <Detail label="read_shipping" value={auth?.hasReadShipping ? "Active" : auth ? "Missing" : "Unchecked"} />
+                <Detail label="Order import scopes" value={auth ? auth.hasReadOrders && auth.hasReadCustomers ? "Active" : `Missing: ${(auth.missingOrderScopes || []).join(", ")}` : "Unchecked"} />
               </CardContent>
             </Card>
           )}

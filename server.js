@@ -28555,16 +28555,23 @@ async function handleApi(req, res) {
       }
     `, {}, { operation: "Check Shopify auth" });
     const scopes = tokenState.scopes || [];
+    const requiredOrderScopes = ["read_orders", "read_customers"];
+    const missingOrderScopes = requiredOrderScopes.filter((scope) => !scopes.includes(scope));
     return sendJson(res, 200, {
-      ok: true,
+      ok: missingOrderScopes.length === 0,
       tokenSource: tokenState.tokenSource || "",
       hasToken: Boolean(tokenState.hasToken),
       scope: tokenState.scope || "",
       scopes,
       expiresAt: tokenState.expiresAt || "",
       hasReadShipping: scopes.includes("read_shipping"),
+      hasReadOrders: scopes.includes("read_orders"),
+      hasReadCustomers: scopes.includes("read_customers"),
+      missingOrderScopes,
       shop: shop.shop || {},
-      message: "Shopify Admin API connection is working."
+      message: missingOrderScopes.length
+        ? `Shopify is reachable, but order import is blocked until the app token includes ${missingOrderScopes.join(", ")}. Update the app scopes, release the version, then request a new token.`
+        : "Shopify Admin API and order-import scopes are working."
     });
   }
 
