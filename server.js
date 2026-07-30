@@ -20065,6 +20065,37 @@ async function shopifyGraphqlRequestAuto(query, variables = {}, options = {}) {
   throw new Error("Shopify GraphQL request failed after throttle retries.");
 }
 
+// Shopify's client-credentials response can occasionally omit scopes that the
+// installed app can in fact use. Verify the protected fields themselves for
+// connection health instead of treating the response metadata as authoritative.
+async function verifyShopifyOrderAccess() {
+  try {
+    await shopifyGraphqlRequestAuto(`
+      query DataPlusOrderAccessProbe {
+        orders(first: 1) {
+          nodes {
+            id
+            customer { id }
+          }
+        }
+      }
+    `, {}, { operation: "Verify Shopify order access", retryOnThrottle: false });
+    return { ok: true, hasReadOrders: true, hasReadCustomers: true, missingOrderScopes: [] };
+  } catch (error) {
+    const message = String(error?.message || error || "");
+    const missingOrderScopes = [];
+    if (/read_orders|orders field/i.test(message)) missingOrderScopes.push("read_orders");
+    if (/read_customers|customer field/i.test(message)) missingOrderScopes.push("read_customers");
+    return {
+      ok: false,
+      hasReadOrders: !missingOrderScopes.includes("read_orders"),
+      hasReadCustomers: !missingOrderScopes.includes("read_customers"),
+      missingOrderScopes,
+      message
+    };
+  }
+}
+
 function shopifySalesChannelName(sourceName = "") {
   const value = String(sourceName || "").trim();
   const lookup = { web: "Online Store", shop: "Shop", pos: "Point of Sale", draft_order: "Draft Order" };
@@ -28532,15 +28563,16 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/shopify/token-refresh") {
     const tokenState = await refreshShopifyAdminAccessToken({ operation: "Refresh Shopify token" });
+    const orderAccess = await verifyShopifyOrderAccess();
     const hasReadShipping = tokenState.scopes.includes("read_shipping");
-    const hasReadOrders = tokenState.scopes.includes("read_orders");
     return sendJson(res, 200, {
       ...tokenState,
       hasReadShipping,
-      hasReadOrders,
-      message: hasReadOrders
-        ? "Shopify token refreshed with read_orders."
-        : "Shopify token refreshed, but read_orders is not present. Confirm it is a required Admin API scope in the released app version, then reinstall or reauthorize the app."
+      ...orderAccess,
+      scopeMetadataIncomplete: orderAccess.ok && !tokenState.scopes.includes("read_orders"),
+      message: orderAccess.ok
+        ? "Shopify token refreshed and live order/customer access verified."
+        : `Shopify token refreshed, but order access is blocked${orderAccess.missingOrderScopes.length ? ` until the app token includes ${orderAccess.missingOrderScopes.join(", ")}` : ""}. ${orderAccess.message || "Confirm the released app scopes, then reinstall or reauthorize the app."}`
     });
   }
 
@@ -28555,23 +28587,21 @@ async function handleApi(req, res) {
       }
     `, {}, { operation: "Check Shopify auth" });
     const scopes = tokenState.scopes || [];
-    const requiredOrderScopes = ["read_orders", "read_customers"];
-    const missingOrderScopes = requiredOrderScopes.filter((scope) => !scopes.includes(scope));
+    const orderAccess = await verifyShopifyOrderAccess();
     return sendJson(res, 200, {
-      ok: missingOrderScopes.length === 0,
+      ok: orderAccess.ok,
       tokenSource: tokenState.tokenSource || "",
       hasToken: Boolean(tokenState.hasToken),
       scope: tokenState.scope || "",
       scopes,
       expiresAt: tokenState.expiresAt || "",
       hasReadShipping: scopes.includes("read_shipping"),
-      hasReadOrders: scopes.includes("read_orders"),
-      hasReadCustomers: scopes.includes("read_customers"),
-      missingOrderScopes,
+      ...orderAccess,
+      scopeMetadataIncomplete: orderAccess.ok && !scopes.includes("read_orders"),
       shop: shop.shop || {},
-      message: missingOrderScopes.length
-        ? `Shopify is reachable, but order import is blocked until the app token includes ${missingOrderScopes.join(", ")}. Update the app scopes, release the version, then request a new token.`
-        : "Shopify Admin API and order-import scopes are working."
+      message: orderAccess.ok
+        ? "Shopify Admin API and live order/customer access are working."
+        : `Shopify is reachable, but order import is blocked${orderAccess.missingOrderScopes.length ? ` until the app token includes ${orderAccess.missingOrderScopes.join(", ")}` : ""}. ${orderAccess.message || "Update the app scopes, release the version, then request a new token."}`
     });
   }
 
