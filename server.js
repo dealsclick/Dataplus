@@ -6443,7 +6443,7 @@ function titleLooksLikeSku(value = "", sku = "") {
   return Boolean(title && key && title === key);
 }
 
-function mergeSourceCatalogExportFallback(item = {}, sourceItem = null) {
+function mergeSourceCatalogExportFallback(item = {}, sourceItem = null, options = {}) {
   if (!sourceItem) return item;
   const source = normalizeCatalogProductForInventory(sourceItem);
   if (!source?.sku) return item;
@@ -6462,13 +6462,16 @@ function mergeSourceCatalogExportFallback(item = {}, sourceItem = null) {
   for (const field of ["stockQty", "qty", "toBeDiscontinued", "closeoutEligible"]) {
     if (source[field] !== undefined && source[field] !== null && source[field] !== "") merged[field] = source[field];
   }
-  for (const field of [
+  const pricingFields = [
     "cost", "sourceCost", "sellUnitCost", "price", "websitePrice", "vendorWebsitePrice",
-    "minimumAllowedPrice", "fobPrice", "listPrice", "msrp",
+    "minimumAllowedPrice", "fobPrice", "listPrice", "msrp"
+  ];
+  const measurementFields = [
     "itemHeight", "itemLength", "itemWeight", "itemWidth",
     "packageHeight", "packageLength", "packageWeight", "packageWidth",
     "dimensionalWeight"
-  ]) {
+  ];
+  for (const field of [...(options.includePricing === false ? [] : pricingFields), ...measurementFields]) {
     if (!(Number(sourceNumberValue(merged[field])) > 0) && Number(sourceNumberValue(source[field])) > 0) {
       merged[field] = source[field];
     }
@@ -14467,7 +14470,7 @@ function publicInventoryItem(item = {}, context = {}) {
   item = sourceEnrichedItem(item, context.sourceEnrichmentMap || {});
   item = withShopifyStatus(item, context.shopifyStatusMap || {}, rulesDb);
   const fallback = context.sourceFallbackMap?.get?.(sourceTextValue(item.sku).toLowerCase()) || null;
-  item = mergeSourceCatalogExportFallback(item, fallback);
+  item = mergeSourceCatalogExportFallback(item, fallback, { includePricing: context.sourceFallbackPricing !== false });
   item = applySourceCategoryMainPromotion(item, context.systemSettings || readSystemSettingsStore(dbCache.data?.systemSettings || {}));
   const cost = sourceCatalogCost(item);
   const pricedItem = { ...item, cost, sourceCost: cost };
@@ -14643,7 +14646,9 @@ function publicInventoryListItem(item = {}, context = {}) {
   item = sourceEnrichedItem(item, context.sourceEnrichmentMap || {});
   item = withShopifyStatus(item, context.shopifyStatusMap || {}, rulesDb);
   const fallback = context.sourceFallbackMap?.get?.(sourceTextValue(item.sku).toLowerCase()) || null;
-  item = mergeSourceCatalogExportFallback(item, fallback);
+  // Source records can fill descriptive gaps in the compact grid, but their historical
+  // price fields must not override the same pricing-rule calculation used by SKU detail.
+  item = mergeSourceCatalogExportFallback(item, fallback, { includePricing: false });
   item = applySourceCategoryMainPromotion(
     item,
     context.systemSettings || readSystemSettingsStore(dbCache.data?.systemSettings || {})
