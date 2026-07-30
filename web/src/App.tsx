@@ -4130,13 +4130,37 @@ function OrderOperationsPanel({ orderId, order, onUpdated }: { orderId: string; 
 }
 
 function OrderActivityTimeline({ order }: { order: Record<string, unknown> }) {
+  const [filter, setFilter] = useState("all")
   const workflow = Array.isArray(order.workflowHistory) ? order.workflowHistory as Array<Record<string, unknown>> : []
   const timeline = Array.isArray(order.timeline) ? order.timeline as Array<Record<string, unknown>> : []
   const events = [...workflow, ...timeline].filter((event, index, all) => {
     const id = String(event.id || `${event.createdAt}-${event.title}-${event.message}`)
     return all.findIndex((candidate) => String(candidate.id || `${candidate.createdAt}-${candidate.title}-${candidate.message}`) === id) === index
   }).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
-  return <div className="grid gap-3">{events.map((event) => <div key={String(event.id || `${event.createdAt}-${event.title}`)} className="grid grid-cols-[10px_minmax(0,1fr)] gap-3"><div className="mt-1.5 size-2.5 rounded-full bg-primary ring-4 ring-primary/10" /><div className="rounded-md border p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><p className="font-medium">{String(event.title || event.step || event.type || "Order event")}</p><span className="text-xs text-muted-foreground">{dateLabel(String(event.createdAt || ""))}</span></div><p className="mt-1 text-muted-foreground">{String(event.message || "")}</p>{Boolean(event.user) && <p className="mt-2 text-xs text-muted-foreground">{String(event.user)}</p>}</div></div>)}{!events.length && <Card><CardContent className="p-5 text-sm text-muted-foreground">No operational activity recorded yet.</CardContent></Card>}</div>
+  const eventKind = (event: Record<string, unknown>) => {
+    const value = String(event.type || event.step || "workflow").toLowerCase()
+    if (value.includes("note")) return "Notes"
+    if (value.includes("purchase") || value.includes("po_")) return "Purchasing"
+    if (value.includes("fulfill") || value.includes("shipment") || value.includes("pick") || value.includes("shipping")) return "Fulfillment"
+    if (value.includes("payment") || value.includes("refund")) return "Finance"
+    if (value.includes("channel") || value.includes("sync") || value.includes("import") || value === "created") return "Channel"
+    return "Workflow"
+  }
+  const kinds = ["all", ...Array.from(new Set(events.map(eventKind)))]
+  const visibleEvents = filter === "all" ? events : events.filter((event) => eventKind(event) === filter)
+  const dayLabel = (value: unknown) => {
+    const date = new Date(String(value || ""))
+    return Number.isNaN(date.getTime()) ? "Undated activity" : date.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", year: "numeric" })
+  }
+  const grouped = visibleEvents.reduce<Array<{ day: string; events: Array<Record<string, unknown>> }>>((groups, event) => {
+    const day = dayLabel(event.createdAt)
+    const group = groups.find((entry) => entry.day === day)
+    if (group) group.events.push(event)
+    else groups.push({ day, events: [event] })
+    return groups
+  }, [])
+  const tone = (kind: string) => kind === "Notes" ? "bg-amber-500" : kind === "Purchasing" ? "bg-violet-500" : kind === "Fulfillment" ? "bg-emerald-500" : kind === "Finance" ? "bg-sky-500" : kind === "Channel" ? "bg-primary" : "bg-slate-500"
+  return <div className="grid gap-4"><Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><div><p className="font-medium">Order activity</p><p className="text-sm text-muted-foreground">A permanent record of imports, operational decisions, fulfillment, purchasing, and notes.</p></div><Badge variant="outline">{numberLabel(events.length)} event{events.length === 1 ? "" : "s"}</Badge></CardContent></Card><div className="flex flex-wrap gap-2">{kinds.map((kind) => <Button key={kind} size="sm" variant={filter === kind ? "default" : "outline"} onClick={() => setFilter(kind)}>{kind === "all" ? `All (${events.length})` : kind}</Button>)}</div><div className="grid gap-5">{grouped.map((group) => <section key={group.day}><p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{group.day}</p><div className="relative grid gap-3 before:absolute before:bottom-3 before:left-[5px] before:top-3 before:w-px before:bg-border">{group.events.map((event) => { const kind = eventKind(event); return <div key={String(event.id || `${event.createdAt}-${event.title}`)} className="relative grid grid-cols-[12px_minmax(0,1fr)] gap-3"><div className={`z-10 mt-4 size-2.5 rounded-full ring-4 ring-background ${tone(kind)}`} /><div className="rounded-md border bg-card p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex min-w-0 items-center gap-2"><p className="truncate font-medium">{String(event.title || event.step || event.type || "Order event")}</p><Badge variant="outline" className="shrink-0 text-[10px]">{kind}</Badge></div><span className="shrink-0 text-xs text-muted-foreground">{dateLabel(String(event.createdAt || ""))}</span></div>{Boolean(event.message) && <p className="mt-1 text-muted-foreground">{String(event.message)}</p>}{Boolean(event.user) && <p className="mt-2 text-xs text-muted-foreground">By {String(event.user)}</p>}</div></div> })}</div></section>)}{!visibleEvents.length && <Card><CardContent className="p-5 text-sm text-muted-foreground">No {filter === "all" ? "operational activity" : filter.toLowerCase()} events recorded yet.</CardContent></Card>}</div></div>
 }
 
 function OrderNotesPanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
