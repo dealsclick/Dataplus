@@ -28535,12 +28535,14 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/shopify/token-refresh") {
     const tokenState = await refreshShopifyAdminAccessToken({ operation: "Refresh Shopify token" });
     const hasReadShipping = tokenState.scopes.includes("read_shipping");
+    const hasReadOrders = tokenState.scopes.includes("read_orders");
     return sendJson(res, 200, {
       ...tokenState,
       hasReadShipping,
-      message: hasReadShipping
-        ? "Shopify token refreshed with read_shipping."
-        : "Shopify token refreshed, but read_shipping is not present yet. Reauthorize or reinstall the Shopify app so the store accepts the updated scope."
+      hasReadOrders,
+      message: hasReadOrders
+        ? "Shopify token refreshed with read_orders."
+        : "Shopify token refreshed, but read_orders is not present. Confirm it is a required Admin API scope in the released app version, then reinstall or reauthorize the app."
     });
   }
 
@@ -28555,7 +28557,7 @@ async function handleApi(req, res) {
       }
     `, {}, { operation: "Check Shopify auth" });
     const scopes = tokenState.scopes || [];
-    const requiredOrderScopes = ["read_orders", "read_customers"];
+    const requiredOrderScopes = ["read_orders"];
     const missingOrderScopes = requiredOrderScopes.filter((scope) => !scopes.includes(scope));
     return sendJson(res, 200, {
       ok: missingOrderScopes.length === 0,
@@ -28566,7 +28568,6 @@ async function handleApi(req, res) {
       expiresAt: tokenState.expiresAt || "",
       hasReadShipping: scopes.includes("read_shipping"),
       hasReadOrders: scopes.includes("read_orders"),
-      hasReadCustomers: scopes.includes("read_customers"),
       missingOrderScopes,
       shop: shop.shop || {},
       message: missingOrderScopes.length
