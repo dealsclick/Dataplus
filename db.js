@@ -1532,22 +1532,34 @@ async function finishVendorFeedRun(feedRunId, attrs = {}) {
 }
 
 async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], options = {}) {
-  const client = getPool();
-  if (!client) return { enabled: false, items: 0, changes: 0 };
+  const pool = getPool();
+  if (!pool) return { enabled: false, items: 0, changes: 0 };
   await initRelationalSchema();
+  const client = await pool.connect();
   const sourceProducts = Array.isArray(products) ? products : [];
   const records = sourceProducts.map((item) => vendorCatalogRecordFromProduct(item, feedRunId, options)).filter(Boolean);
   const commercialRecords = sourceProducts.map((item) => productDumpCommercialRecordFromProduct(item)).filter(Boolean);
   const systemRecords = sourceProducts.map((item) => productDumpSystemRecordFromProduct(item)).filter(Boolean);
-  if (!records.length) return { enabled: true, items: 0, changes: 0 };
+  if (!records.length) {
+    client.release();
+    return { enabled: true, items: 0, changes: 0 };
+  }
   const source = nullableString(options.source) || "vendor_feed";
+  const requestedSyncMode = String(options.syncMode || "split").trim().toLowerCase();
+  const syncMode = ["split", "catalog", "reconciliation"].includes(requestedSyncMode) ? requestedSyncMode : "split";
+  const dynamicOnly = syncMode !== "catalog";
+  const catalogOnly = syncMode === "catalog";
+  const reconciliationOnly = syncMode === "reconciliation";
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
   let changes = 0;
-  for (let i = 0; i < records.length; i += batchSize) {
-    const batch = records.slice(i, i + batchSize);
-    await client.query("begin");
-    try {
-      if (!options.currentOnly) {
+  try {
+    for (let i = 0; i < records.length; i += batchSize) {
+      const batch = records.slice(i, i + batchSize);
+      const maxAttempts = 4;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        await client.query("begin");
+        try {
+      if (!options.currentOnly && !options.skipSnapshots) {
         await client.query(`
           insert into vendor_catalog_snapshots (
             feed_run_id, vendor_id, source_sku, cost, price, list_price, qty,
@@ -1568,6 +1580,8 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
             to_be_discontinued = excluded.to_be_discontinued,
             raw = excluded.raw
         `, [JSON.stringify(batch)]);
+      }
+      if (!options.currentOnly && !catalogOnly) {
         const changeResult = await client.query(`
           with incoming as (
             select *
@@ -1608,9 +1622,13 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
                 ('mfr_part_number', current.mfr_part_number, incoming.mfr_part_number),
                 ('vendor_sku', current.vendor_sku, incoming.vendor_sku),
                 ('category', current.category, incoming.category),
-                ('default_image', current.default_image, incoming.default_image)
+              ('default_image', current.default_image, incoming.default_image)
             ) as field(field_name, old_value, new_value)
             where coalesce(field.old_value, '') is distinct from coalesce(field.new_value, '')
+              and (
+                $3::boolean = false
+                or field.field_name = any(array['cost', 'price', 'list_price', 'qty', 'stock_status', 'to_be_discontinued'])
+              )
           )
           insert into product_change_events (sku, field_name, old_value, new_value, source, job_id, raw)
           select
@@ -1627,9 +1645,28 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
               'raw', raw
             )
           from changed
-        `, [JSON.stringify(batch), source]);
+        `, [JSON.stringify(batch), source, dynamicOnly]);
         changes += changeResult.rowCount || 0;
       }
+      const mainConflictClause = catalogOnly
+        ? "on conflict (vendor_id, source_sku) do nothing"
+        : `on conflict (vendor_id, source_sku) do update set
+          cost = excluded.cost,
+          price = excluded.price,
+          list_price = excluded.list_price,
+          qty = excluded.qty,
+          stock_status = excluded.stock_status,
+          to_be_discontinued = excluded.to_be_discontinued,
+          last_feed_run_id = excluded.last_feed_run_id,
+          last_seen_at = now(),
+          updated_at = now()
+          where row(
+            vendor_catalog_items.cost, vendor_catalog_items.price, vendor_catalog_items.list_price,
+            vendor_catalog_items.qty, vendor_catalog_items.stock_status, vendor_catalog_items.to_be_discontinued
+          ) is distinct from row(
+            excluded.cost, excluded.price, excluded.list_price,
+            excluded.qty, excluded.stock_status, excluded.to_be_discontinued
+          )`;
       await client.query(`
         insert into vendor_catalog_items (
           vendor_id, source_sku, internal_sku, vendor_sku, title, brand, manufacturer,
@@ -1648,30 +1685,15 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
           qty numeric, stock_status text, uom text, uom_qty numeric, to_be_discontinued boolean,
           default_image text, raw jsonb
         )
-        on conflict (vendor_id, source_sku) do update set
-          internal_sku = excluded.internal_sku,
-          vendor_sku = excluded.vendor_sku,
-          title = excluded.title,
-          brand = excluded.brand,
-          manufacturer = excluded.manufacturer,
-          mfr_part_number = excluded.mfr_part_number,
-          barcode = excluded.barcode,
-          category = excluded.category,
-          source_category = excluded.source_category,
-          cost = excluded.cost,
-          price = excluded.price,
-          list_price = excluded.list_price,
-          qty = excluded.qty,
-          stock_status = excluded.stock_status,
-          uom = excluded.uom,
-          uom_qty = excluded.uom_qty,
-          to_be_discontinued = excluded.to_be_discontinued,
-          default_image = excluded.default_image,
-          raw = excluded.raw,
-          last_feed_run_id = excluded.last_feed_run_id,
-          last_seen_at = now(),
-          updated_at = now()
-      `, [JSON.stringify(batch)]);
+        where $2::boolean = false
+          or exists (
+            select 1
+            from vendor_catalog_items existing
+            where existing.vendor_id = x.vendor_id
+              and lower(existing.source_sku) = lower(x.source_sku)
+          )
+        ${mainConflictClause}
+      `, [JSON.stringify(batch), reconciliationOnly]);
       const commercialBatch = commercialRecords.slice(i, i + batchSize);
       if (commercialBatch.length) {
         await client.query(`
@@ -1705,6 +1727,13 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
             bulk_prices jsonb, trusted_brand text, keywords text, sub_brand text,
             replacement_sku text, icons text, raw jsonb
           )
+          where exists (
+            select 1
+            from vendor_catalog_items current
+            where current.vendor_id = x.vendor_id
+              and lower(current.source_sku) = lower(x.source_sku)
+              and current.last_feed_run_id = $2
+          )
           on conflict (vendor_id, source_sku) do update set
             alt_sku = excluded.alt_sku,
             minimum_allowed_price = excluded.minimum_allowed_price,
@@ -1737,7 +1766,7 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
             icons = excluded.icons,
             raw = excluded.raw,
             updated_at = now()
-        `, [JSON.stringify(commercialBatch)]);
+        `, [JSON.stringify(commercialBatch), feedRunId]);
       }
       const systemBatch = systemRecords.slice(i, i + batchSize);
       if (systemBatch.length) {
@@ -1769,6 +1798,13 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
             max_quantity numeric, minimum_quantity numeric, notes text, u_key text,
             updated_by text, weight numeric, source text, raw jsonb
           )
+          where exists (
+            select 1
+            from vendor_catalog_items current
+            where current.vendor_id = x.vendor_id
+              and lower(current.source_sku) = lower(x.source_sku)
+              and current.last_feed_run_id = $2
+          )
           on conflict (vendor_id, source_sku) do update set
             add_tags = excluded.add_tags,
             remove_tags = excluded.remove_tags,
@@ -1796,13 +1832,20 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
             source = excluded.source,
             raw = excluded.raw,
             updated_at = now()
-        `, [JSON.stringify(systemBatch)]);
+        `, [JSON.stringify(systemBatch), feedRunId]);
       }
-      await client.query("commit");
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
+          await client.query("commit");
+          break;
+        } catch (error) {
+          await client.query("rollback").catch(() => {});
+          const retryable = ["40P01", "40001"].includes(String(error?.code || ""));
+          if (!retryable || attempt === maxAttempts) throw error;
+          await sleep(150 * attempt * attempt);
+        }
+      }
     }
+  } finally {
+    client.release();
   }
   return { enabled: true, items: records.length, changes };
 }

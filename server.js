@@ -871,6 +871,7 @@ const PRODUCT_DUMP_RESOURCE_PROFILES = {
 function normalizeVendorFeedSchedule(feed = {}, index = 0) {
   const scheduleType = String(feed.scheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   const fileFormat = String(feed.fileFormat || "bson-gzip").toLowerCase();
+  const requestedSyncMode = String(feed.syncMode || "split").toLowerCase();
   return {
     id: String(feed.id || crypto.randomUUID()),
     name: sourceTextValue(feed.name || `Vendor feed ${index + 1}`),
@@ -886,6 +887,7 @@ function normalizeVendorFeedSchedule(feed = {}, index = 0) {
     fileFormat: ["bson-gzip", "csv"].includes(fileFormat) ? fileFormat : "bson-gzip",
     importTarget: sourceTextValue(feed.importTarget || "source-catalog") || "source-catalog",
     mappingProfile: sourceTextValue(feed.mappingProfile || "source-catalog-standard") || "source-catalog-standard",
+    syncMode: ["split", "catalog", "reconciliation"].includes(requestedSyncMode) ? requestedSyncMode : "split",
     notes: sourceTextValue(feed.notes || ""),
     postImportInventoryMode: ["disabled", "dry-run", "apply"].includes(String(feed.postImportInventoryMode || "dry-run").toLowerCase()) ? String(feed.postImportInventoryMode || "dry-run").toLowerCase() : "dry-run",
     postImportPriceMode: ["disabled", "dry-run", "apply"].includes(String(feed.postImportPriceMode || "dry-run").toLowerCase()) ? String(feed.postImportPriceMode || "dry-run").toLowerCase() : "dry-run",
@@ -946,6 +948,7 @@ function resolvedDataSourceFeeds(settings = {}) {
     fileFormat: "bson-gzip",
     importTarget: "source-catalog",
     mappingProfile: "source-catalog-standard",
+    syncMode: "split",
     postImportInventoryMode: "dry-run",
     postImportPriceMode: "dry-run",
     scheduleType: "times",
@@ -10801,6 +10804,7 @@ function queueVendorFeedImportJob(db = {}, feed = {}, options = {}) {
       templateId: normalizedFeed.mappingProfile,
       postImportInventoryMode: normalizedFeed.postImportInventoryMode,
       postImportPriceMode: normalizedFeed.postImportPriceMode,
+      syncMode: normalizedFeed.syncMode,
       postgresOnly: true,
       batchSize: 100
     },

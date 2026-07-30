@@ -549,6 +549,7 @@ async function checkScheduledVendorFeedImports(force = false) {
         templateId: feed.mappingProfile || "",
         postImportInventoryMode: feed.postImportInventoryMode || "dry-run",
         postImportPriceMode: feed.postImportPriceMode || "dry-run",
+        syncMode: feed.syncMode || "split",
         postgresOnly: true,
         batchSize: 5000
       },
@@ -1260,6 +1261,7 @@ async function runProductDumpImportJob(job) {
   if (payload.postgresOnly !== false) args.push("--postgres-only");
   if (Number(payload.limit || 0) > 0) args.push("--limit", String(Number(payload.limit || 0)));
   args.push("--batch-size", String(dumpBatchSize));
+  args.push("--sync-mode", ["split", "catalog", "reconciliation"].includes(String(payload.syncMode || "").toLowerCase()) ? String(payload.syncMode).toLowerCase() : "split");
   let current = await persistJob(job, {
     status: "running",
     phase: "importing_product_dump",

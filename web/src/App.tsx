@@ -312,6 +312,7 @@ type VendorFeedSchedule = {
   fileFormat?: string
   importTarget?: string
   mappingProfile?: string
+  syncMode?: string
   notes?: string
   postImportInventoryMode?: string
   postImportPriceMode?: string
@@ -1511,6 +1512,7 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onS
       fileFormat: "bson-gzip",
       importTarget: "source-catalog",
       mappingProfile: "source-catalog-standard",
+      syncMode: "split",
       notes: "",
       scheduleType: "times",
       scheduleTimes: "02:00",
@@ -1615,6 +1617,7 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onS
             <div className="grid min-w-0 gap-2"><Label>DataPlus mapping</Label>{draft.fileFormat === "csv" ? <Select value={draft.mappingProfile || "none"} onValueChange={(value) => setDraftValue("mappingProfile", value === "none" ? "" : value)}><SelectTrigger className="w-full min-w-0 [&>span]:truncate"><SelectValue placeholder="Select import mapping" /></SelectTrigger><SelectContent><SelectItem value="none">Select a mapping</SelectItem>{mappingTemplates.map((template) => <SelectItem key={template.id} value={template.id} className="max-w-[20rem] truncate" title={template.name}>{template.name}</SelectItem>)}</SelectContent></Select> : <Input className="min-w-0" value="Source catalog standard mapping" disabled />}</div>
             <div className="grid gap-2"><Label>Import target</Label><Input value="Source Catalog" disabled /></div>
             <div className="grid gap-2"><Label>Run mode</Label><Select value={draft.scheduleType || "times"} onValueChange={(value) => setDraftValue("scheduleType", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="times">Specific times</SelectItem><SelectItem value="interval">Every X hours</SelectItem></SelectContent></Select></div>
+            {draft.fileFormat === "bson-gzip" ? <div className="grid gap-2 md:col-span-2"><Label>Data refresh mode</Label><Select value={draft.syncMode || "split"} onValueChange={(value) => setDraftValue("syncMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="split">New SKUs plus changed price, inventory, and discontinuation</SelectItem><SelectItem value="catalog">New SKUs only</SelectItem><SelectItem value="reconciliation">Existing SKU price, inventory, and discontinuation only</SelectItem></SelectContent></Select><p className="text-xs text-muted-foreground">Split is the recommended daily mode. Existing catalog details stay intact unless the supplier data reports a commercial or availability change.</p></div> : null}
             <div className="grid gap-2"><Label>After import: Shopify inventory</Label><Select value={draft.postImportInventoryMode || "dry-run"} onValueChange={(value) => setDraftValue("postImportInventoryMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="disabled">Do not queue</SelectItem><SelectItem value="dry-run">Queue review dry run</SelectItem><SelectItem value="apply">Queue live update</SelectItem></SelectContent></Select></div>
             <div className="grid gap-2"><Label>After import: Shopify pricing</Label><Select value={draft.postImportPriceMode || "dry-run"} onValueChange={(value) => setDraftValue("postImportPriceMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="disabled">Do not queue</SelectItem><SelectItem value="dry-run">Queue review dry run</SelectItem><SelectItem value="apply">Queue live push</SelectItem></SelectContent></Select></div>
             {draft.scheduleType === "interval" ? <div className="grid gap-2"><Label>Every hours</Label><Input type="number" min={1} max={24} value={draft.scheduleEveryHours || 24} onChange={(event) => setDraftValue("scheduleEveryHours", Number(event.target.value || 24))} /></div> : <div className="grid gap-2"><Label>Times (24-hour, comma separated)</Label><Input value={draft.scheduleTimes || "02:00"} onChange={(event) => setDraftValue("scheduleTimes", event.target.value)} placeholder="02:00,14:00" /></div>}
