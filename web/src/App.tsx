@@ -1309,7 +1309,7 @@ function App() {
                 {view === "po-detail" && <PurchaseOrderDetailPage />}
                 {view === "order-detail" && <OrderDetailWorkspace />}
                 {view === "draft-detail" && <DraftQuoteFieldDetailPage />}
-                {view === "catalog" && <CatalogPage />}
+                {view === "catalog" && <CatalogPage channels={state.connections || []} />}
                 {view === "product-detail" && <StandaloneProductPage />}
                 {view === "inventory-detail" && <InventorySkuDetailPage />}
                 {view === "category-detail" && <StandaloneCategoryPage />}
@@ -2772,6 +2772,33 @@ function ChannelLogo({ channel }: { channel: ChannelConnection }) {
       {src ? <img src={src} alt="" className="max-h-full max-w-full object-contain p-2" /> : <ShoppingBag className="size-7 text-muted-foreground" />}
     </div>
   )
+}
+
+function CatalogChannelMarks({ item, channels }: { item: ProductItem; channels: ChannelConnection[] }) {
+  const enabled = channels.filter((channel) => channel.connected && String(channel.status || "active").toLowerCase() !== "inactive")
+  if (!enabled.length) return <span className="text-xs text-muted-foreground">No channels enabled</span>
+  return <div className="flex min-w-28 items-center gap-1.5">
+    {enabled.map((channel) => {
+      const key = `${channel.id} ${channel.name}`.toLowerCase()
+      const isShopify = key.includes("shopify")
+      const isEbay = key.includes("ebay")
+      const ebayStatus = String(item.ebayListing?.status || "").toLowerCase()
+      const state = isShopify
+        ? item.shopifyId && item.shopifyPublished ? "live" : item.shopifyId ? "attention" : "disabled"
+        : isEbay
+          ? item.ebayListing?.listingId || ["active", "live"].includes(ebayStatus) ? "live" : item.ebayListing?.offerId ? "attention" : "disabled"
+          : "disabled"
+      const stateLabel = state === "live" ? "Live" : state === "attention" ? "Needs attention" : "Not enabled for this SKU"
+      const src = channel.logoDataUrl || channel.logoUrl
+      const fallback = isShopify ? "S" : isEbay ? "e" : String(channel.name || "?").slice(0, 1).toUpperCase()
+      const color = state === "live"
+        ? "border-emerald-500/45 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+        : state === "attention"
+          ? "border-rose-500/45 bg-rose-500/15 text-rose-700 dark:text-rose-300"
+          : "border-muted-foreground/25 bg-muted/70 text-muted-foreground grayscale opacity-70"
+      return <Tooltip key={channel.id || channel.name}><TooltipTrigger asChild><span className={`grid size-7 shrink-0 cursor-default place-items-center overflow-hidden rounded-md border ${color}`}>{src ? <img src={src} alt="" className="size-full object-contain p-1" /> : <span className="text-xs font-bold">{fallback}</span>}</span></TooltipTrigger><TooltipContent>{channel.name}: {stateLabel}</TooltipContent></Tooltip>
+    })}
+  </div>
 }
 
 function CatalogImage({ src, alt, className = "", imageClassName = "" }: { src?: string; alt: string; className?: string; imageClassName?: string }) {
@@ -7060,7 +7087,7 @@ function InventoryWorkspace() {
   </div>
 }
 
-function AdvancedMainCatalogPage({ totalSkuCount = 0 }: { totalSkuCount?: number }) {
+function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSkuCount?: number; channels?: ChannelConnection[] }) {
   const [query, setQuery] = useState("")
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [savedViews, setSavedViews] = useState<Array<{ name: string; query: string; filters: Record<string, string>; sort: { key: string; direction: "asc" | "desc" } }>>(() => {
@@ -7086,11 +7113,11 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0 }: { totalSkuCount?: number
   const [autoAlternates, setAutoAlternates] = useState(() => window.localStorage.getItem("dataplus-products-auto-alternates") === "true")
   const [compact, setCompact] = useState(() => window.localStorage.getItem("dataplus-products-density") === "compact")
   const [visible, setVisible] = useState<Record<string, boolean>>(() => {
-    const defaults = { readiness: true, stock: true, price: true, brand: true, category: true, shopify: true, ebay: true, images: true, updated: true, created: false, verified: false, hazardous: false, shopifySynced: false, alternates: false, manufacturer: false, vendorSku: false, status: false, shadows: false, uom: false, shipping: true }
+    const defaults = { readiness: true, stock: true, price: true, brand: true, category: true, channels: true, images: true, updated: true, created: false, verified: false, hazardous: false, shopifySynced: false, alternates: false, manufacturer: false, vendorSku: false, status: false, shadows: false, uom: false, shipping: true }
     try { return { ...defaults, ...JSON.parse(window.localStorage.getItem("dataplus-products-columns") || "{}") } } catch { return defaults }
   })
   const columns = [
-    ["readiness", "Readiness"], ["stock", "Stock"], ["price", "Price"], ["brand", "Brand"], ["category", "Category"], ["shopify", "Shopify"], ["ebay", "eBay"], ["images", "Images"], ["updated", "Updated"], ["created", "Created"], ["verified", "Category verified"], ["hazardous", "Hazardous"], ["shopifySynced", "Shopify synced"], ["alternates", "Alternates"], ["manufacturer", "Manufacturer"], ["vendorSku", "Vendor SKU"], ["status", "Status"], ["shadows", "Shadows"], ["uom", "UOM"], ["shipping", "Shipping"],
+    ["readiness", "Readiness"], ["stock", "Stock"], ["price", "Price"], ["brand", "Brand"], ["category", "Category"], ["channels", "Channels"], ["images", "Images"], ["updated", "Updated"], ["created", "Created"], ["verified", "Category verified"], ["hazardous", "Hazardous"], ["shopifySynced", "Shopify synced"], ["alternates", "Alternates"], ["manufacturer", "Manufacturer"], ["vendorSku", "Vendor SKU"], ["status", "Status"], ["shadows", "Shadows"], ["uom", "UOM"], ["shipping", "Shipping"],
   ] as const
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
     channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-missing"], display: (value) => value.replace(/^(shopify|ebay)-/, "$1 ").replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) },
@@ -7133,7 +7160,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0 }: { totalSkuCount?: number
   const setDensity = (next: boolean) => { setCompact(next); window.localStorage.setItem("dataplus-products-density", next ? "compact" : "regular") }
   const toggleColumn = (key: string) => setVisible((current) => { const next = { ...current, [key]: !current[key] }; window.localStorage.setItem("dataplus-products-columns", JSON.stringify(next)); return next })
   const resetColumns = () => {
-    const defaults = { readiness: true, stock: true, price: true, brand: true, category: true, shopify: true, ebay: true, images: true, updated: true, created: false, verified: false, hazardous: false, shopifySynced: false, alternates: false, manufacturer: false, vendorSku: false, status: false, shadows: false, uom: false, shipping: true }
+    const defaults = { readiness: true, stock: true, price: true, brand: true, category: true, channels: true, images: true, updated: true, created: false, verified: false, hazardous: false, shopifySynced: false, alternates: false, manufacturer: false, vendorSku: false, status: false, shadows: false, uom: false, shipping: true }
     setVisible(defaults)
     window.localStorage.setItem("dataplus-products-columns", JSON.stringify(defaults))
   }
@@ -7305,35 +7332,913 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0 }: { totalSkuCount?: number
     const score = Math.round((checks.filter(Boolean).length / checks.length) * 100)
     return { score, missing: [!checks[0] && "title", !checks[1] && "category", !checks[2] && "price", !checks[3] && "image", !checks[4] && "stock"].filter(Boolean).join(", ") }
   }
-  const cellCount = 3 + columns.filter(([key]) => visible[key]).length
+  const cellCount = 4 + columns.filter(([key]) => visible[key]).length
 
   useEffect(() => { if (autoAlternates && rows.length) loadAlternates() }, [autoAlternates, rows])
-  return <div className="grid gap-5">
-    <PageHeader eyebrow="Catalog" title="Products" description="Approved SKUs for Shopify and connected channels. Fast paged results with legacy table controls restored." />
-    <Card>
-      <CardHeader className="grid gap-3 border-b">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="w-[360px] max-w-[70vw] pl-8" placeholder="Search SKU, title, brand, category" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { setAllFiltered(false); setSelectedIds(new Set()); load(1) } }} /></div>
-          <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline">Saved views</Button></DropdownMenuTrigger><DropdownMenuContent align="start"><DropdownMenuLabel>Quick filters</DropdownMenuLabel><DropdownMenuItem onSelect={() => applySavedFilter({ channelStatus: "shopify-live" })}>Shopify live</DropdownMenuItem><DropdownMenuItem onSelect={() => applySavedFilter({ hasStock: "true" })}>In stock</DropdownMenuItem><DropdownMenuItem onSelect={() => applySavedFilter({ channelStatus: "shopify-missing" })}>Missing from Shopify</DropdownMenuItem>{savedViews.length ? <><DropdownMenuSeparator /><DropdownMenuLabel>My saved views</DropdownMenuLabel>{savedViews.map((view) => <DropdownMenuItem key={view.name} onSelect={() => applySavedView(view)}>{view.name}</DropdownMenuItem>)}</> : null}<DropdownMenuSeparator /><DropdownMenuItem onSelect={saveCurrentView}>Save current view...</DropdownMenuItem>{savedViews.length ? <DropdownMenuItem onSelect={removeSavedView}>Remove saved view...</DropdownMenuItem> : null}</DropdownMenuContent></DropdownMenu>
-          <DropdownMenu open={filterOpen} onOpenChange={setFilterOpen}><DropdownMenuTrigger asChild><Button size="sm" variant="outline">+ Filter</Button></DropdownMenuTrigger><DropdownMenuContent align="start" className="w-[380px] p-3"><div className="grid gap-3"><p className="text-xs font-semibold uppercase text-muted-foreground">Add product filter</p><Select value={filterField} onValueChange={(value) => { setFilterField(value); setFilterSelection([]); setFilterSearch("") }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.entries(filterDefinitions).map(([key, definition]) => <SelectItem key={key} value={key}>{definition.label}</SelectItem>)}</SelectContent></Select><Input value="Is any of" disabled /><div className="relative"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="pl-8" placeholder="Search values" value={filterSearch} onChange={(event) => setFilterSearch(event.target.value)} /></div><div className="max-h-52 overflow-y-auto rounded-md border">{matchingValues.map((value) => <label key={value} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted"><Checkbox checked={filterSelection.includes(value)} onCheckedChange={() => setFilterSelection((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value])} />{activeDefinition.display(value)}</label>)}</div><div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setFilterOpen(false)}>Cancel</Button><Button size="sm" onClick={applyFilter} disabled={!filterSelection.length}>Apply filter</Button></div></div></DropdownMenuContent></DropdownMenu>
-          <div className="flex items-center gap-1 rounded-md border px-2 py-1"><Input aria-label="Created from" className="h-7 w-32 border-0 p-0 text-xs shadow-none focus-visible:ring-0" type="date" value={filters.createdFrom || ""} onChange={(event) => { const next = { ...filters, createdFrom: event.target.value }; setFilters(next); setAllFiltered(false); setSelectedIds(new Set()); void load(1, next) }} /><span className="text-xs text-muted-foreground">to</span><Input aria-label="Created to" className="h-7 w-32 border-0 p-0 text-xs shadow-none focus-visible:ring-0" type="date" value={filters.createdTo || ""} onChange={(event) => { const next = { ...filters, createdTo: event.target.value }; setFilters(next); setAllFiltered(false); setSelectedIds(new Set()); void load(1, next) }} /></div>
-          <Button size="sm" variant="ghost" onClick={resetFilters} disabled={!Object.keys(filters).length && !query}>Clear</Button>
-          <Button size="sm" variant="outline" onClick={() => void exportProducts()}><FileDown className="size-4" /> Export</Button>
-          <Button size="sm" variant="outline" onClick={loadAlternates} disabled={loadingAlternates || !rows.length}>{loadingAlternates ? "Loading alternates" : "Load alternates"}</Button>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground"><Switch checked={autoAlternates} onCheckedChange={toggleAutoAlternates} /> Auto alternates</label>
-          <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline">Columns</Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-52">{columns.map(([key, label]) => <DropdownMenuItem key={key} onSelect={(event) => { event.preventDefault(); toggleColumn(key) }}><Checkbox checked={visible[key]} /> {label}</DropdownMenuItem>)}<DropdownMenuSeparator /><DropdownMenuItem onSelect={resetColumns}>Reset default columns</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
-          <div className="ml-auto flex items-center gap-1 rounded-md border p-1"><Button size="sm" variant={!compact ? "secondary" : "ghost"} onClick={() => setDensity(false)}>Regular</Button><Button size="sm" variant={compact ? "secondary" : "ghost"} onClick={() => setDensity(true)}>Compact</Button></div>
+  return (
+    <div className="grid gap-5">
+      <PageHeader
+        eyebrow="Catalog"
+        title="Products"
+        description="Approved SKUs for Shopify and connected channels. Fast paged results with legacy table controls restored."
+      />
+      <Card>
+        <CardHeader className="grid gap-3 border-b">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
+              <Input
+                className="w-[360px] max-w-[70vw] pl-8"
+                placeholder="Search SKU, title, brand, category"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    setAllFiltered(false);
+                    setSelectedIds(new Set());
+                    load(1);
+                  }
+                }}
+              />
+            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="outline">
+                  Saved views
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuLabel>Quick filters</DropdownMenuLabel>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    applySavedFilter({ channelStatus: "shopify-live" })
+                  }
+                >
+                  Shopify live
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() => applySavedFilter({ hasStock: "true" })}
+                >
+                  In stock
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    applySavedFilter({ channelStatus: "shopify-missing" })
+                  }
+                >
+                  Missing from Shopify
+                </DropdownMenuItem>
+                {savedViews.length ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel>My saved views</DropdownMenuLabel>
+                    {savedViews.map((view) => (
+                      <DropdownMenuItem
+                        key={view.name}
+                        onSelect={() => applySavedView(view)}
+                      >
+                        {view.name}
+                      </DropdownMenuItem>
+                    ))}
+                  </>
+                ) : null}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={saveCurrentView}>
+                  Save current view...
+                </DropdownMenuItem>
+                {savedViews.length ? (
+                  <DropdownMenuItem onSelect={removeSavedView}>
+                    Remove saved view...
+                  </DropdownMenuItem>
+                ) : null}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <DropdownMenu open={filterOpen} onOpenChange={setFilterOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="outline">
+                  + Filter
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-[380px] p-3">
+                <div className="grid gap-3">
+                  <p className="text-xs font-semibold uppercase text-muted-foreground">
+                    Add product filter
+                  </p>
+                  <Select
+                    value={filterField}
+                    onValueChange={(value) => {
+                      setFilterField(value);
+                      setFilterSelection([]);
+                      setFilterSearch("");
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Object.entries(filterDefinitions).map(
+                        ([key, definition]) => (
+                          <SelectItem key={key} value={key}>
+                            {definition.label}
+                          </SelectItem>
+                        ),
+                      )}
+                    </SelectContent>
+                  </Select>
+                  <Input value="Is any of" disabled />
+                  <div className="relative">
+                    <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
+                    <Input
+                      className="pl-8"
+                      placeholder="Search values"
+                      value={filterSearch}
+                      onChange={(event) => setFilterSearch(event.target.value)}
+                    />
+                  </div>
+                  <div className="max-h-52 overflow-y-auto rounded-md border">
+                    {matchingValues.map((value) => (
+                      <label
+                        key={value}
+                        className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-muted"
+                      >
+                        <Checkbox
+                          checked={filterSelection.includes(value)}
+                          onCheckedChange={() =>
+                            setFilterSelection((current) =>
+                              current.includes(value)
+                                ? current.filter((item) => item !== value)
+                                : [...current, value],
+                            )
+                          }
+                        />
+                        {activeDefinition.display(value)}
+                      </label>
+                    ))}
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setFilterOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={applyFilter}
+                      disabled={!filterSelection.length}
+                    >
+                      Apply filter
+                    </Button>
+                  </div>
+                </div>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <div className="flex items-center gap-1 rounded-md border px-2 py-1">
+              <Input
+                aria-label="Created from"
+                className="h-7 w-32 border-0 p-0 text-xs shadow-none focus-visible:ring-0"
+                type="date"
+                value={filters.createdFrom || ""}
+                onChange={(event) => {
+                  const next = { ...filters, createdFrom: event.target.value };
+                  setFilters(next);
+                  setAllFiltered(false);
+                  setSelectedIds(new Set());
+                  void load(1, next);
+                }}
+              />
+              <span className="text-xs text-muted-foreground">to</span>
+              <Input
+                aria-label="Created to"
+                className="h-7 w-32 border-0 p-0 text-xs shadow-none focus-visible:ring-0"
+                type="date"
+                value={filters.createdTo || ""}
+                onChange={(event) => {
+                  const next = { ...filters, createdTo: event.target.value };
+                  setFilters(next);
+                  setAllFiltered(false);
+                  setSelectedIds(new Set());
+                  void load(1, next);
+                }}
+              />
+            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={resetFilters}
+              disabled={!Object.keys(filters).length && !query}
+            >
+              Clear
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void exportProducts()}
+            >
+              <FileDown className="size-4" /> Export
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={loadAlternates}
+              disabled={loadingAlternates || !rows.length}
+            >
+              {loadingAlternates ? "Loading alternates" : "Load alternates"}
+            </Button>
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Switch
+                checked={autoAlternates}
+                onCheckedChange={toggleAutoAlternates}
+              />{" "}
+              Auto alternates
+            </label>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="outline">
+                  Columns
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-52">
+                {columns.map(([key, label]) => (
+                  <DropdownMenuItem
+                    key={key}
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      toggleColumn(key);
+                    }}
+                  >
+                    <Checkbox checked={visible[key]} /> {label}
+                  </DropdownMenuItem>
+                ))}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={resetColumns}>
+                  Reset default columns
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <div className="ml-auto flex items-center gap-1 rounded-md border p-1">
+              <Button
+                size="sm"
+                variant={!compact ? "secondary" : "ghost"}
+                onClick={() => setDensity(false)}
+              >
+                Regular
+              </Button>
+              <Button
+                size="sm"
+                variant={compact ? "secondary" : "ghost"}
+                onClick={() => setDensity(true)}
+              >
+                Compact
+              </Button>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span>
+              {numberLabel(total || totalSkuCount)} filtered |{" "}
+              {rows.length
+                ? `${numberLabel((page - 1) * pageSize + 1)}-${numberLabel((page - 1) * pageSize + rows.length)}`
+                : "0"}{" "}
+              shown | page {page}
+            </span>
+            {Object.entries(filters).map(([key, value]) => (
+              <Badge
+                key={key}
+                variant="outline"
+                className="gap-1 border-primary/35 bg-primary/5 text-primary"
+              >
+                {key === "createdFrom"
+                  ? `Created on or after ${value}`
+                  : key === "createdTo"
+                    ? `Created on or before ${value}`
+                    : filterDefinitions[key]?.label
+                      ? `${filterDefinitions[key].label} is ${value
+                          .split("|")
+                          .map(
+                            (item) =>
+                              filterDefinitions[key]?.display(item) || item,
+                          )
+                          .join(", ")}`
+                      : `Creation source is ${value}`}
+                <button className="ml-1" onClick={() => removeFilter(key)}>
+                  x
+                </button>
+              </Badge>
+            ))}
+          </div>
+          {selectionCount > 0 && (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 p-2">
+              <p className="mr-auto text-sm font-medium">
+                {allFiltered
+                  ? `${numberLabel(selectionCount)} filtered products selected`
+                  : `${numberLabel(selectionCount)} selected`}
+              </p>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setSelectedIds(new Set());
+                  setAllFiltered(false);
+                }}
+              >
+                Clear
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void exportProducts()}
+              >
+                <FileDown className="size-4" /> Export selection
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void runShopifyLaunch(false)}
+              >
+                <ShoppingBag className="size-4" /> Review Shopify
+              </Button>
+              <Button size="sm" onClick={() => void runShopifyLaunch(true)}>
+                <ShoppingBag className="size-4" /> Launch Shopify
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void runShopifyLink(false)}
+              >
+                Review Shopify links
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void runShopifyLink(true)}
+              >
+                Link existing Shopify
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => runBulk("set-active")}
+              >
+                Set active
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => runBulk("set-inactive")}
+              >
+                Set inactive
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => runBulk("set-discontinued")}
+              >
+                Discontinue
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => runEbayLaunch()}
+              >
+                Launch eBay
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={() => runBulk("delete")}
+              >
+                Delete
+              </Button>
+            </div>
+          )}
+        </CardHeader>
+        <CardContent className="p-0">
+          {loading ? (
+            <div className="grid gap-2 p-4">
+              <Skeleton className="h-12" />
+              <Skeleton className="h-12" />
+              <Skeleton className="h-12" />
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table className={compact ? "text-xs" : ""}>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-10">
+                      <Checkbox
+                        aria-label="Select current page"
+                        checked={pageSelected}
+                        onCheckedChange={(checked) =>
+                          togglePage(checked === true)
+                        }
+                      />
+                    </TableHead>
+                    <TableHead>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => changeSort("sku")}
+                      >
+                        SKU
+                      </Button>
+                    </TableHead>
+                    <TableHead>Title</TableHead>
+                    {visible.readiness && <TableHead>Readiness</TableHead>}
+                    {visible.stock && (
+                      <TableHead>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => changeSort("stock")}
+                        >
+                          Stock
+                        </Button>
+                      </TableHead>
+                    )}
+                    {visible.price && (
+                      <TableHead>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => changeSort("price")}
+                        >
+                          Price
+                        </Button>
+                      </TableHead>
+                    )}
+                    {visible.brand && (
+                      <TableHead>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => changeSort("brand")}
+                        >
+                          Brand
+                        </Button>
+                      </TableHead>
+                    )}
+                    {visible.category && (
+                      <TableHead>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => changeSort("category")}
+                        >
+                          Category
+                        </Button>
+                      </TableHead>
+                    )}
+                    {visible.channels && <TableHead>Channels</TableHead>}
+                    {visible.images && <TableHead>Images</TableHead>}
+                    {visible.updated && (
+                      <TableHead>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => changeSort("updated")}
+                        >
+                          Updated
+                        </Button>
+                      </TableHead>
+                    )}
+                    {visible.created && (
+                      <TableHead>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => changeSort("created")}
+                        >
+                          Created
+                        </Button>
+                      </TableHead>
+                    )}
+                    {visible.verified && <TableHead>Category</TableHead>}
+                    {visible.hazardous && <TableHead>Hazmat</TableHead>}
+                    {visible.shopifySynced && (
+                      <TableHead>Shopify sync</TableHead>
+                    )}
+                    {visible.alternates && <TableHead>Alts</TableHead>}
+                    {visible.manufacturer && (
+                      <TableHead>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => changeSort("manufacturer")}
+                        >
+                          Manufacturer
+                        </Button>
+                      </TableHead>
+                    )}
+                    {visible.vendorSku && (
+                      <TableHead>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => changeSort("vendorSku")}
+                        >
+                          Vendor SKU
+                        </Button>
+                      </TableHead>
+                    )}
+                    {visible.status && (
+                      <TableHead>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => changeSort("status")}
+                        >
+                          Status
+                        </Button>
+                      </TableHead>
+                    )}
+                    {visible.shadows && <TableHead>Shadows</TableHead>}
+                    {visible.uom && <TableHead>UOM</TableHead>}
+                    {visible.shipping && <TableHead>Shipping</TableHead>}
+                    <TableHead />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((item) => {
+                    const id = String(item.id || item.sku || "");
+                    const ready = readiness(item);
+                    const imageCount = Number(
+                      item.imageCount || (item.defaultImage ? 1 : 0),
+                    );
+                    const alternateCount =
+                      alternateCounts[String(item.sku || "").toLowerCase()] ??
+                      Number(item.alternateVendorCount || 0);
+                    const stock = Number(item.qty ?? item.stockQty ?? 0);
+                    const readinessClass =
+                      ready.score === 100
+                        ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                        : ready.score >= 60
+                          ? "border-amber-500/35 bg-amber-500/10 text-amber-800 dark:text-amber-300"
+                          : "border-rose-500/35 bg-rose-500/10 text-rose-700 dark:text-rose-300";
+                    return (
+                      <TableRow key={id} className={compact ? "h-10" : ""}>
+                        <TableCell>
+                          <Checkbox
+                            aria-label={`Select ${item.sku}`}
+                            checked={allFiltered || selectedIds.has(id)}
+                            onCheckedChange={(checked) =>
+                              toggleRow(id, checked === true)
+                            }
+                          />
+                        </TableCell>
+                        <TableCell className="min-w-36">
+                          <div className="group flex items-center gap-1">
+                            <a className="font-mono text-xs font-semibold hover:text-primary hover:underline" href={`/products/${encodeURIComponent(item.sku || "")}`}>{item.sku}</a>
+                            <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100" onClick={() => setSelected(item)} aria-label={`Quick view ${item.sku}`}><Eye className="size-3.5" /></Button></TooltipTrigger><TooltipContent>Quick view</TooltipContent></Tooltip>
+                          </div>
+                        </TableCell>
+                        <TableCell className="min-w-72 max-w-96">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <div className="grid size-9 shrink-0 place-items-center overflow-hidden rounded-md border bg-muted">{item.defaultImage ? <img src={item.defaultImage} alt="" className="max-h-full max-w-full object-contain" /> : <Boxes className="size-4 text-muted-foreground" />}</div>
+                            <p className="line-clamp-1 font-medium" title={item.marketplaceTitle || item.title || ""}>{item.marketplaceTitle || item.title || "Untitled product"}</p>
+                          </div>
+                        </TableCell>
+                        {visible.readiness && (
+                          <TableCell>
+                            <Badge variant="outline" className={readinessClass}>
+                              {ready.score}%
+                            </Badge>
+                            {!compact && ready.missing && (
+                              <p className="mt-1 max-w-28 truncate text-xs text-muted-foreground">
+                                {ready.missing}
+                              </p>
+                            )}
+                          </TableCell>
+                        )}
+                        {visible.stock && (
+                          <TableCell
+                            className={
+                              stock > 0
+                                ? "font-medium text-emerald-700 dark:text-emerald-300"
+                                : "font-medium text-destructive"
+                            }
+                          >
+                            {numberLabel(stock)}
+                          </TableCell>
+                        )}
+                        {visible.price && (
+                          <TableCell className="font-medium">
+                            {moneyLabel(item.websitePrice ?? item.price)}
+                          </TableCell>
+                        )}
+                        {visible.brand && (
+                          <TableCell>{item.brand || "No brand"}</TableCell>
+                        )}
+                        {visible.category && (
+                          <TableCell className="max-w-64">
+                            <p
+                              className="truncate"
+                              title={item.mainCategory || item.category || ""}
+                            >
+                              {item.mainCategory ||
+                                item.category ||
+                                "Uncategorized"}
+                            </p>
+                            {!compact && (
+                              <p className="truncate text-xs text-muted-foreground">
+                                {item.vendorCategory ||
+                                  item.sourceCategory ||
+                                  "No vendor category"}
+                              </p>
+                            )}
+                          </TableCell>
+                        )}
+                        {visible.channels && <TableCell><CatalogChannelMarks item={item} channels={channels} /></TableCell>}
+                        {visible.images && <TableCell>{imageCount}</TableCell>}
+                        {visible.updated && (
+                          <TableCell>
+                            {item.updatedAt
+                              ? new Date(item.updatedAt).toLocaleDateString()
+                              : "-"}
+                          </TableCell>
+                        )}
+                        {visible.created && (
+                          <TableCell>
+                            {item.createdAt
+                              ? new Date(item.createdAt).toLocaleDateString()
+                              : "-"}
+                          </TableCell>
+                        )}
+                        {visible.verified && (
+                          <TableCell>
+                            <Badge
+                              variant={
+                                item.categoryVerified ? "default" : "outline"
+                              }
+                            >
+                              {item.categoryVerified ? "Verified" : "Review"}
+                            </Badge>
+                          </TableCell>
+                        )}
+                        {visible.hazardous && (
+                          <TableCell>
+                            {item.hazardous ? (
+                              <Badge variant="destructive">Hazardous</Badge>
+                            ) : (
+                              "-"
+                            )}
+                          </TableCell>
+                        )}
+                        {visible.shopifySynced && (
+                          <TableCell>
+                            {item.shopifySyncedAt
+                              ? new Date(
+                                  item.shopifySyncedAt,
+                                ).toLocaleDateString()
+                              : "-"}
+                          </TableCell>
+                        )}
+                        {visible.alternates && (
+                          <TableCell>{numberLabel(alternateCount)}</TableCell>
+                        )}
+                        {visible.manufacturer && (
+                          <TableCell>{item.manufacturer || "-"}</TableCell>
+                        )}
+                        {visible.vendorSku && (
+                          <TableCell>{item.vendorSku || "-"}</TableCell>
+                        )}
+                        {visible.status && (
+                          <TableCell>
+                            <Badge
+                              variant={
+                                item.active === false ? "outline" : "secondary"
+                              }
+                            >
+                              {item.status ||
+                                (item.active === false ? "Inactive" : "Active")}
+                            </Badge>
+                          </TableCell>
+                        )}
+                        {visible.shadows && (
+                          <TableCell>
+                            {numberLabel(item.shadowSkuCount)}
+                          </TableCell>
+                        )}
+                        {visible.uom && (
+                          <TableCell>
+                            {item.uomDisplay ||
+                              [item.uomQty, item.uom]
+                                .filter(Boolean)
+                                .join(" ") ||
+                              "Each"}
+                          </TableCell>
+                        )}
+                        {visible.shipping && (
+                          <TableCell>
+                            <Badge
+                              variant={
+                                item.shippingClass === "ltl"
+                                  ? "destructive"
+                                  : "outline"
+                              }
+                            >
+                              {item.shippingMethod ||
+                                item.shippingClass ||
+                                "Unclassified"}
+                            </Badge>
+                          </TableCell>
+                        )}
+                        <TableCell>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                title="Product actions"
+                              >
+                                <MoreHorizontal className="size-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem
+                                onClick={() => setSelected(item)}
+                              >
+                                Quick view
+                              </DropdownMenuItem>
+                              <DropdownMenuItem asChild>
+                                <a
+                                  href={`/products/${encodeURIComponent(item.sku || "")}`}
+                                >
+                                  Open product page
+                                </a>
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() => void syncShopifyStatus(item)}
+                              >
+                                Refresh Shopify status
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  void runShopifyLaunch(false, [
+                                    String(item.sku || ""),
+                                  ])
+                                }
+                              >
+                                Review Shopify launch
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                disabled={Boolean(
+                                  item.toBeDiscontinued || item.shopifyId,
+                                )}
+                                onClick={() =>
+                                  void runShopifyLaunch(true, [
+                                    String(item.sku || ""),
+                                  ])
+                                }
+                              >
+                                Launch Shopify
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() => runEbayLaunch([id])}
+                              >
+                                Launch eBay
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                onClick={() => runBulkRow(id, "set-active")}
+                              >
+                                Set active
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() => runBulkRow(id, "set-inactive")}
+                              >
+                                Set inactive
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  runBulkRow(id, "set-discontinued")
+                                }
+                              >
+                                Discontinue
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  window.open(
+                                    `/legacy/products?sku=${encodeURIComponent(item.sku || "")}`,
+                                    "_blank",
+                                  )
+                                }
+                              >
+                                Open legacy product
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                  {!rows.length && (
+                    <TableRow>
+                      <TableCell
+                        colSpan={cellCount}
+                        className="h-28 text-center text-muted-foreground"
+                      >
+                        No approved products match these filters.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t p-3">
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => togglePage(true)}
+              disabled={!pageIds.length}
+            >
+              Select page
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setSelectedIds(new Set());
+                setAllFiltered(true);
+              }}
+              disabled={!total}
+            >
+              Select all filtered
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Select value={String(pageSize)} onValueChange={setPageLimit}>
+              <SelectTrigger className="h-8 w-20 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="25">25</SelectItem>
+                <SelectItem value="50">50</SelectItem>
+                <SelectItem value="100">100</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={loading || page <= 1}
+              onClick={() => load(page - 1)}
+            >
+              Previous
+            </Button>
+            {total > 0 &&
+              Array.from(
+                { length: Math.min(5, Math.ceil(total / pageSize)) },
+                (_, index) => {
+                  const totalPages = Math.ceil(total / pageSize);
+                  const start = Math.min(
+                    Math.max(1, page - 2),
+                    Math.max(1, totalPages - 4),
+                  );
+                  const number = start + index;
+                  return (
+                    <Button
+                      key={number}
+                      size="sm"
+                      variant={number === page ? "secondary" : "outline"}
+                      onClick={() => load(number)}
+                    >
+                      {number}
+                    </Button>
+                  );
+                },
+              )}
+            {total > 0 && Math.ceil(total / pageSize) > 5 && (
+              <span className="text-xs text-muted-foreground">
+                of {numberLabel(Math.ceil(total / pageSize))}
+              </span>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={
+                loading ||
+                (total ? page >= Math.ceil(total / pageSize) : !hasMore)
+              }
+              onClick={() => load(page + 1)}
+            >
+              Next
+            </Button>
+          </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{numberLabel(total || totalSkuCount)} filtered | {rows.length ? `${numberLabel((page - 1) * pageSize + 1)}-${numberLabel((page - 1) * pageSize + rows.length)}` : "0"} shown | page {page}</span>{Object.entries(filters).map(([key, value]) => <Badge key={key} variant="outline" className="gap-1 border-primary/35 bg-primary/5 text-primary">{key === "createdFrom" ? `Created on or after ${value}` : key === "createdTo" ? `Created on or before ${value}` : filterDefinitions[key]?.label ? `${filterDefinitions[key].label} is ${value.split("|").map((item) => filterDefinitions[key]?.display(item) || item).join(", ")}` : `Creation source is ${value}`}<button className="ml-1" onClick={() => removeFilter(key)}>x</button></Badge>)}</div>
-        {selectionCount > 0 && <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 p-2"><p className="mr-auto text-sm font-medium">{allFiltered ? `${numberLabel(selectionCount)} filtered products selected` : `${numberLabel(selectionCount)} selected`}</p><Button size="sm" variant="ghost" onClick={() => { setSelectedIds(new Set()); setAllFiltered(false) }}>Clear</Button><Button size="sm" variant="outline" onClick={() => void exportProducts()}><FileDown className="size-4" /> Export selection</Button><Button size="sm" variant="outline" onClick={() => void runShopifyLaunch(false)}><ShoppingBag className="size-4" /> Review Shopify</Button><Button size="sm" onClick={() => void runShopifyLaunch(true)}><ShoppingBag className="size-4" /> Launch Shopify</Button><Button size="sm" variant="outline" onClick={() => void runShopifyLink(false)}>Review Shopify links</Button><Button size="sm" variant="outline" onClick={() => void runShopifyLink(true)}>Link existing Shopify</Button><Button size="sm" variant="outline" onClick={() => runBulk("set-active")}>Set active</Button><Button size="sm" variant="outline" onClick={() => runBulk("set-inactive")}>Set inactive</Button><Button size="sm" variant="outline" onClick={() => runBulk("set-discontinued")}>Discontinue</Button><Button size="sm" variant="outline" onClick={() => runEbayLaunch()}>Launch eBay</Button><Button size="sm" variant="destructive" onClick={() => runBulk("delete")}>Delete</Button></div>}
-      </CardHeader>
-      <CardContent className="p-0">
-        {loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table className={compact ? "text-xs" : ""}><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select current page" checked={pageSelected} onCheckedChange={(checked) => togglePage(checked === true)} /></TableHead><TableHead><Button variant="ghost" size="sm" onClick={() => changeSort("sku")}>Product</Button></TableHead>{visible.readiness && <TableHead>Readiness</TableHead>}{visible.stock && <TableHead><Button variant="ghost" size="sm" onClick={() => changeSort("stock")}>Stock</Button></TableHead>}{visible.price && <TableHead><Button variant="ghost" size="sm" onClick={() => changeSort("price")}>Price</Button></TableHead>}{visible.brand && <TableHead><Button variant="ghost" size="sm" onClick={() => changeSort("brand")}>Brand</Button></TableHead>}{visible.category && <TableHead><Button variant="ghost" size="sm" onClick={() => changeSort("category")}>Category</Button></TableHead>}{visible.shopify && <TableHead>Shopify</TableHead>}{visible.ebay && <TableHead>eBay</TableHead>}{visible.images && <TableHead>Images</TableHead>}{visible.updated && <TableHead><Button variant="ghost" size="sm" onClick={() => changeSort("updated")}>Updated</Button></TableHead>}{visible.created && <TableHead><Button variant="ghost" size="sm" onClick={() => changeSort("created")}>Created</Button></TableHead>}{visible.verified && <TableHead>Category</TableHead>}{visible.hazardous && <TableHead>Hazmat</TableHead>}{visible.shopifySynced && <TableHead>Shopify sync</TableHead>}{visible.alternates && <TableHead>Alts</TableHead>}{visible.manufacturer && <TableHead><Button variant="ghost" size="sm" onClick={() => changeSort("manufacturer")}>Manufacturer</Button></TableHead>}{visible.vendorSku && <TableHead><Button variant="ghost" size="sm" onClick={() => changeSort("vendorSku")}>Vendor SKU</Button></TableHead>}{visible.status && <TableHead><Button variant="ghost" size="sm" onClick={() => changeSort("status")}>Status</Button></TableHead>}{visible.shadows && <TableHead>Shadows</TableHead>}{visible.uom && <TableHead>UOM</TableHead>}{visible.shipping && <TableHead>Shipping</TableHead>}<TableHead /></TableRow></TableHeader><TableBody>{rows.map((item) => { const id = String(item.id || item.sku || ""); const ready = readiness(item); const imageCount = Number(item.imageCount || (item.defaultImage ? 1 : 0)); const alternateCount = alternateCounts[String(item.sku || "").toLowerCase()] ?? Number(item.alternateVendorCount || 0); const ebay = item.ebayListing?.listingId ? "Live" : item.ebayListing?.offerId ? "Offer" : item.ebayListing?.status || "Not listed"; const stock = Number(item.qty ?? item.stockQty ?? 0); const shopifyStatus = item.shopifyId ? (item.shopifyPublished ? "Live" : item.shopifyStatus || "Linked") : "Not linked"; const readinessClass = ready.score === 100 ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : ready.score >= 60 ? "border-amber-500/35 bg-amber-500/10 text-amber-800 dark:text-amber-300" : "border-rose-500/35 bg-rose-500/10 text-rose-700 dark:text-rose-300"; const channelClass = (status: string) => status === "Live" ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : status === "Not linked" || status === "Not listed" ? "border-muted-foreground/30 bg-muted text-muted-foreground" : "border-sky-500/35 bg-sky-500/10 text-sky-800 dark:text-sky-300"; return <TableRow key={id} className={compact ? "h-10" : ""}><TableCell><Checkbox aria-label={`Select ${item.sku}`} checked={allFiltered || selectedIds.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} /></TableCell><TableCell className="min-w-64"><div className="flex items-center gap-2"><div className="grid size-9 shrink-0 place-items-center overflow-hidden rounded-md border bg-muted">{item.defaultImage ? <img src={item.defaultImage} alt="" className="max-h-full max-w-full object-contain" /> : <Boxes className="size-4 text-muted-foreground" />}</div><div className="group min-w-0"><div className="flex items-center gap-1"><a className="truncate font-semibold hover:text-primary hover:underline" href={`/products/${encodeURIComponent(item.sku || "")}`}>{item.sku}</a><Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100" onClick={() => setSelected(item)} aria-label={`Quick view ${item.sku}`}><Eye className="size-3.5" /></Button></TooltipTrigger><TooltipContent>Quick view</TooltipContent></Tooltip></div>{!compact && <p className="line-clamp-1 text-xs text-muted-foreground">{item.marketplaceTitle || item.title || "Untitled product"}</p>}</div></div></TableCell>{visible.readiness && <TableCell><Badge variant="outline" className={readinessClass}>{ready.score}%</Badge>{!compact && ready.missing && <p className="mt-1 max-w-28 truncate text-xs text-muted-foreground">{ready.missing}</p>}</TableCell>}{visible.stock && <TableCell className={stock > 0 ? "font-medium text-emerald-700 dark:text-emerald-300" : "font-medium text-destructive"}>{numberLabel(stock)}</TableCell>}{visible.price && <TableCell className="font-medium">{moneyLabel(item.websitePrice ?? item.price)}</TableCell>}{visible.brand && <TableCell>{item.brand || "No brand"}</TableCell>}{visible.category && <TableCell className="max-w-64"><p className="truncate" title={item.mainCategory || item.category || ""}>{item.mainCategory || item.category || "Uncategorized"}</p>{!compact && <p className="truncate text-xs text-muted-foreground">{item.vendorCategory || item.sourceCategory || "No vendor category"}</p>}</TableCell>}{visible.shopify && <TableCell><Badge variant="outline" className={channelClass(shopifyStatus)}>{shopifyStatus}</Badge></TableCell>}{visible.ebay && <TableCell><Badge variant="outline" className={channelClass(ebay)}>{ebay}</Badge></TableCell>}{visible.images && <TableCell>{imageCount}</TableCell>}{visible.updated && <TableCell>{item.updatedAt ? new Date(item.updatedAt).toLocaleDateString() : "-"}</TableCell>}{visible.created && <TableCell>{item.createdAt ? new Date(item.createdAt).toLocaleDateString() : "-"}</TableCell>}{visible.verified && <TableCell><Badge variant={item.categoryVerified ? "default" : "outline"}>{item.categoryVerified ? "Verified" : "Review"}</Badge></TableCell>}{visible.hazardous && <TableCell>{item.hazardous ? <Badge variant="destructive">Hazardous</Badge> : "-"}</TableCell>}{visible.shopifySynced && <TableCell>{item.shopifySyncedAt ? new Date(item.shopifySyncedAt).toLocaleDateString() : "-"}</TableCell>}{visible.alternates && <TableCell>{numberLabel(alternateCount)}</TableCell>}{visible.manufacturer && <TableCell>{item.manufacturer || "-"}</TableCell>}{visible.vendorSku && <TableCell>{item.vendorSku || "-"}</TableCell>}{visible.status && <TableCell><Badge variant={item.active === false ? "outline" : "secondary"}>{item.status || (item.active === false ? "Inactive" : "Active")}</Badge></TableCell>}{visible.shadows && <TableCell>{numberLabel(item.shadowSkuCount)}</TableCell>}{visible.uom && <TableCell>{item.uomDisplay || [item.uomQty, item.uom].filter(Boolean).join(" ") || "Each"}</TableCell>}{visible.shipping && <TableCell><Badge variant={item.shippingClass === "ltl" ? "destructive" : "outline"}>{item.shippingMethod || item.shippingClass || "Unclassified"}</Badge></TableCell>}<TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" title="Product actions"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => setSelected(item)}>Quick view</DropdownMenuItem><DropdownMenuItem asChild><a href={`/products/${encodeURIComponent(item.sku || "")}`}>Open product page</a></DropdownMenuItem><DropdownMenuItem onClick={() => void syncShopifyStatus(item)}>Refresh Shopify status</DropdownMenuItem><DropdownMenuItem onClick={() => void runShopifyLaunch(false, [String(item.sku || "")])}>Review Shopify launch</DropdownMenuItem><DropdownMenuItem disabled={Boolean(item.toBeDiscontinued || item.shopifyId)} onClick={() => void runShopifyLaunch(true, [String(item.sku || "")])}>Launch Shopify</DropdownMenuItem><DropdownMenuItem onClick={() => runEbayLaunch([id])}>Launch eBay</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => runBulkRow(id, "set-active")}>Set active</DropdownMenuItem><DropdownMenuItem onClick={() => runBulkRow(id, "set-inactive")}>Set inactive</DropdownMenuItem><DropdownMenuItem onClick={() => runBulkRow(id, "set-discontinued")}>Discontinue</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => window.open(`/legacy/products?sku=${encodeURIComponent(item.sku || "")}`, "_blank")}>Open legacy product</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow> })}{!rows.length && <TableRow><TableCell colSpan={cellCount} className="h-28 text-center text-muted-foreground">No approved products match these filters.</TableCell></TableRow>}</TableBody></Table></div>}
-      </CardContent>
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t p-3"><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => togglePage(true)} disabled={!pageIds.length}>Select page</Button><Button size="sm" variant="outline" onClick={() => { setSelectedIds(new Set()); setAllFiltered(true) }} disabled={!total}>Select all filtered</Button></div><div className="flex flex-wrap items-center justify-end gap-2"><Select value={String(pageSize)} onValueChange={setPageLimit}><SelectTrigger className="h-8 w-20 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="25">25</SelectItem><SelectItem value="50">50</SelectItem><SelectItem value="100">100</SelectItem></SelectContent></Select><Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => load(page - 1)}>Previous</Button>{total > 0 && Array.from({ length: Math.min(5, Math.ceil(total / pageSize)) }, (_, index) => { const totalPages = Math.ceil(total / pageSize); const start = Math.min(Math.max(1, page - 2), Math.max(1, totalPages - 4)); const number = start + index; return <Button key={number} size="sm" variant={number === page ? "secondary" : "outline"} onClick={() => load(number)}>{number}</Button> })}{total > 0 && Math.ceil(total / pageSize) > 5 && <span className="text-xs text-muted-foreground">of {numberLabel(Math.ceil(total / pageSize))}</span>}<Button size="sm" variant="outline" disabled={loading || (total ? page >= Math.ceil(total / pageSize) : !hasMore)} onClick={() => load(page + 1)}>Next</Button></div></div>
-    </Card>
-    <ProductDetailSheet sourceItem={selected} open={Boolean(selected)} onOpenChange={(open) => { if (!open) setSelected(null) }} />
-  </div>
+      </Card>
+      <ProductDetailSheet
+        sourceItem={selected}
+        open={Boolean(selected)}
+        onOpenChange={(open) => {
+          if (!open) setSelected(null);
+        }}
+      />
+    </div>
+  );
 
   async function runBulkRow(id: string, action: "set-active" | "set-inactive" | "set-discontinued") {
     try {
@@ -7349,7 +8254,7 @@ function CatalogTemplatesPage() {
   return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title="Templates" description="Download structured templates for category maintenance and catalog review." /><div className="grid gap-3 sm:grid-cols-2">{templates.map(([title, href, description]) => <Card key={href}><CardHeader><CardTitle className="text-sm">{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader><CardContent><Button variant="outline" size="sm" asChild><a href={href}><FileDown className="size-4" /> Download CSV</a></Button></CardContent></Card>)}</div></div>
 }
 
-function CatalogPage() {
+function CatalogPage({ channels = [] }: { channels?: ChannelConnection[] }) {
   const [tab, setTab] = useState<CatalogWorkspaceTab>(catalogWorkspaceTabFromPath)
   const [workspaceCounts, setWorkspaceCounts] = useState<Record<string, number>>({})
   useEffect(() => {
@@ -7363,7 +8268,7 @@ function CatalogPage() {
     const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", source: "/source-catalog", review: "/import-review", changes: "/sku-changes", categories: "/categories", mappings: "/vendor-category-mappings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
     window.history.replaceState({}, "", paths[selected])
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} />}{tab === "source" && <SourceCatalogPage />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
+  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} />}{tab === "source" && <SourceCatalogPage />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
 }
 
 function SourceCatalogPage() {
