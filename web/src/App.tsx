@@ -7142,6 +7142,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
   const [allFiltered, setAllFiltered] = useState(false)
   const [filterOpen, setFilterOpen] = useState(false)
   const [filterField, setFilterField] = useState("supplier")
+  const [channelFilterScope, setChannelFilterScope] = useState("shopify")
   const [filterSearch, setFilterSearch] = useState("")
   const [filterSelection, setFilterSelection] = useState<string[]>([])
   const [pageSize, setPageSize] = useState(() => Number(window.localStorage.getItem("dataplus-products-page-size") || 25))
@@ -7191,7 +7192,10 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
   }, [])
 
   const activeDefinition = filterDefinitions[filterField]
-  const matchingValues = activeDefinition.values.filter((value) => activeDefinition.display(value).toLowerCase().includes(filterSearch.toLowerCase())).slice(0, 250)
+  const filterValues = filterField === "channelStatus"
+    ? activeDefinition.values.filter((value) => value.startsWith(`${channelFilterScope}-`))
+    : activeDefinition.values
+  const matchingValues = filterValues.filter((value) => activeDefinition.display(value).toLowerCase().includes(filterSearch.toLowerCase())).slice(0, 250)
   const selectionCount = allFiltered ? total : selectedIds.size
   const pageIds = rows.map((row) => String(row.id || row.sku || "")).filter(Boolean)
   const pageSelected = pageIds.length > 0 && pageIds.every((id) => allFiltered || selectedIds.has(id))
@@ -7429,7 +7433,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                     applySavedFilter({ channelStatus: "shopify-live" })
                   }
                 >
-                  Shopify live
+                  Shopify storefront live
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onSelect={() => applySavedFilter({ hasStock: "true" })}
@@ -7441,7 +7445,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                     applySavedFilter({ channelStatus: "shopify-missing" })
                   }
                 >
-                  Missing from Shopify
+                  Not in Shopify catalog
                 </DropdownMenuItem>
                 {savedViews.length ? (
                   <>
@@ -7483,6 +7487,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                     value={filterField}
                     onValueChange={(value) => {
                       setFilterField(value);
+                      if (value === "channelStatus") setChannelFilterScope("shopify");
                       setFilterSelection([]);
                       setFilterSearch("");
                     }}
@@ -7500,6 +7505,30 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                       )}
                     </SelectContent>
                   </Select>
+                  {filterField === "channelStatus" ? (
+                    <div className="grid gap-1">
+                      <Label className="text-xs">Channel</Label>
+                      <Select
+                        value={channelFilterScope}
+                        onValueChange={(value) => {
+                          setChannelFilterScope(value);
+                          setFilterSelection([]);
+                          setFilterSearch("");
+                        }}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="shopify">Shopify</SelectItem>
+                          <SelectItem value="ebay">eBay</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Choose a channel, then select the catalog, storefront, readiness, or price state to filter.
+                      </p>
+                    </div>
+                  ) : null}
                   <Input value="Is any of" disabled />
                   <div className="relative">
                     <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
