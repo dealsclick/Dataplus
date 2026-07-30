@@ -766,7 +766,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyOrderImportEnabled: false,
   shopifyOrderWebhookEnabled: false,
   shopifyOrderImportLimit: 250,
-  shopifyOrderImportSources: "All Shopify sources",
+  shopifyOrderImportSources: "Native Shopify sources",
   shopifyOrderImportIncludeCanceled: false,
   shopifyOrderImportScheduleEnabled: false,
   shopifyOrderImportScheduleType: "times",
@@ -3746,8 +3746,8 @@ function normalizeChannel(channel = {}) {
   settings.shopifyOrderImportScheduleType = String(settings.shopifyOrderImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.shopifyOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.shopifyOrderImportScheduleEveryHours || 12) || 12));
   settings.shopifyOrderImportScheduleTimes = normalizeChannelScheduleTimes(settings.shopifyOrderImportScheduleTimes || DEFAULT_CHANNEL_SETTINGS.shopifyOrderImportScheduleTimes);
-  if (isShopify && String(settings.shopifyOrderImportSources || "").trim().toLowerCase() === "online store, shop") {
-    settings.shopifyOrderImportSources = "All Shopify sources";
+  if (isShopify && ["online store, shop", "all shopify sources"].includes(String(settings.shopifyOrderImportSources || "").trim().toLowerCase())) {
+    settings.shopifyOrderImportSources = "Native Shopify sources";
   }
   settings.shopifySkuMapScheduleTime = normalizeChannelScheduleTimes(settings.shopifySkuMapScheduleTime || DEFAULT_CHANNEL_SETTINGS.shopifySkuMapScheduleTime).split(",")[0];
   settings.shopifyShippingProfiles = normalizeShopifyShippingProfiles(settings.shopifyShippingProfiles);
@@ -3999,7 +3999,7 @@ async function queueShopifyOrderImportJob(db, body = {}, options = {}) {
     throw error;
   }
   const limit = Math.max(1, Math.min(1000, Number(body.limit || settings.shopifyOrderImportLimit || 250)));
-  const sources = String(body.sources ?? settings.shopifyOrderImportSources ?? "All Shopify sources").trim() || "All Shopify sources";
+  const sources = String(body.sources ?? settings.shopifyOrderImportSources ?? "Native Shopify sources").trim() || "Native Shopify sources";
   const includeCanceled = body.includeCanceled ?? settings.shopifyOrderImportIncludeCanceled === true;
   const workerPayload = {
     limit,
@@ -14161,7 +14161,7 @@ async function runShopifyStatusImportWorkerJob(job = {}) {
 async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
   const limit = Math.max(1, Math.min(1000, Number(payload.limit || job.totalRows || 250)));
-  const sources = String(payload.sources || "All Shopify sources");
+  const sources = String(payload.sources || "Native Shopify sources");
   const startedAt = job.startedAt || new Date().toISOString();
   job = await persistWorkerImportJob(job, {
     status: "running",
@@ -20113,11 +20113,14 @@ function shopifyOrderSource(sourceName = "") {
   return { sourceKey, ...(lookup[sourceKey] || { channel: sourceKey || "Unknown Shopify source", type: sourceKey ? "third_party" : "online" }) };
 }
 
-function shopifySourceIsAllowed(order = {}, configuredSources = "All Shopify sources") {
-  const allowed = String(configuredSources || "All Shopify sources").split(/[,;]+/).map((value) => value.trim().toLowerCase()).filter(Boolean);
+function shopifySourceIsAllowed(order = {}, configuredSources = "Native Shopify sources") {
+  const allowed = String(configuredSources || "Native Shopify sources").split(/[,;]+/).map((value) => value.trim().toLowerCase()).filter(Boolean);
   if (!allowed.length || allowed.some((value) => ["all", "*", "all sources", "all shopify sources"].includes(value))) return true;
   const raw = String(order.shopifySourceName || "").trim().toLowerCase();
   const display = String(order.channelSource || "").trim().toLowerCase();
+  if (allowed.some((value) => ["native", "native shopify", "native shopify sources"].includes(value))) {
+    return ["web", "shop", "pos", "draft_order", "shopify_draft_order", "mobile_app", "api"].includes(raw);
+  }
   return allowed.includes(raw) || allowed.includes(display);
 }
 
@@ -20172,7 +20175,7 @@ async function importShopifyOrders(limit = 250, filters = {}) {
     const connection = data?.orders || {}; imported.push(...(connection.edges || []).map((edge) => shopifyOrderToDataPlusOrder(edge.node)).filter((order) => order.id));
     if (!connection.pageInfo?.hasNextPage || !connection.pageInfo?.endCursor) break; after = connection.pageInfo.endCursor;
   }
-  const sources = String(filters.sources || "All Shopify sources");
+  const sources = String(filters.sources || "Native Shopify sources");
   const filtered = imported.filter((order) => (filters.includeCanceled || order.status !== "canceled") && shopifySourceIsAllowed(order, sources));
   await postgres.upsertOrdersFromState(filtered, { replace: false });
   clearOrderApiCache();
