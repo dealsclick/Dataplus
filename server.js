@@ -20633,7 +20633,9 @@ async function syncShopifyOrderAddress(order = {}) {
 
 function clearOrderApiCache(orderId = "") {
   redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
-  if (orderId) redisCache.deleteByPrefix(`dataplus:order-detail:${orderId}:`).catch(() => {});
+  // Detail cache keys are versioned. Clear the detail namespace on writes so every
+  // order action immediately returns the saved record rather than a stale snapshot.
+  if (orderId) redisCache.deleteByPrefix("dataplus:order-detail:").catch(() => {});
 }
 
 function orderAddressLabel(address = {}) {
@@ -23001,7 +23003,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
-    const cacheKey = `dataplus:order-detail:v2:${parts[2]}:`;
+    const cacheKey = `dataplus:order-detail:v3:${parts[2]}:`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
     const [order, warehouses, returns] = await Promise.all([postgres.readOrderByKey(parts[2]), postgres.readStateField("warehouses"), postgres.readStateField("returns")]);
