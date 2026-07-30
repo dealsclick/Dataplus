@@ -547,6 +547,8 @@ async function checkScheduledVendorFeedImports(force = false) {
         importTarget: feed.importTarget || "source-catalog",
         mappingProfile: feed.mappingProfile || "source-catalog-standard",
         templateId: feed.mappingProfile || "",
+        postImportInventoryMode: feed.postImportInventoryMode || "dry-run",
+        postImportPriceMode: feed.postImportPriceMode || "dry-run",
         postgresOnly: true,
         batchSize: 5000
       },
@@ -1383,11 +1385,29 @@ async function runProductDumpImportJob(job) {
       analyzeResult = { tables: [], error: error.message || "Planner statistics refresh failed." };
     }
   }
+  const followOn = [];
+  const inventoryMode = String(payload.postImportInventoryMode || "disabled").toLowerCase();
+  const priceMode = String(payload.postImportPriceMode || "disabled").toLowerCase();
+  if (["dry-run", "apply"].includes(inventoryMode) || ["dry-run", "apply"].includes(priceMode)) {
+    const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+    if (["dry-run", "apply"].includes(inventoryMode)) {
+      try {
+        const result = await dataplus.queueShopifyInventoryUpdateJob(stateDb, { apply: inventoryMode === "apply", dryRun: inventoryMode !== "apply" }, { scheduled: true, operation: `Post-import Shopify inventory ${inventoryMode === "apply" ? "update" : "review"}`, sourceJobId: current.id });
+        followOn.push(result.duplicate ? "Shopify inventory follow-on was already active." : `Shopify inventory ${inventoryMode === "apply" ? "update" : "dry run"} queued as Job ${result.job.id}.`);
+      } catch (error) { followOn.push(`Shopify inventory follow-on skipped: ${error.message || error}`); }
+    }
+    if (["dry-run", "apply"].includes(priceMode)) {
+      try {
+        const result = await dataplus.queueShopifyVariantPricePushJob(stateDb, { apply: priceMode === "apply", dryRun: priceMode !== "apply" }, { scheduled: true, operation: `Post-import Shopify price ${priceMode === "apply" ? "push" : "review"}`, sourceJobId: current.id });
+        followOn.push(result.duplicate ? "Shopify price follow-on was already active." : `Shopify price ${priceMode === "apply" ? "push" : "dry run"} queued as Job ${result.job.id}.`);
+      } catch (error) { followOn.push(`Shopify price follow-on skipped: ${error.message || error}`); }
+    }
+  }
   return persistJob(current, {
     status: "success",
     phase: "complete",
     message: "Product dump import finished.",
-    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
+    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", ...followOn].filter(Boolean).join(" "),
     totalRows: finalProcessedRows || current.totalRows || 0,
     processedRows: finalProcessedRows || current.processedRows || 0,
     changed: finalChanged || current.changed || 0,

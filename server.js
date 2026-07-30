@@ -887,6 +887,8 @@ function normalizeVendorFeedSchedule(feed = {}, index = 0) {
     importTarget: sourceTextValue(feed.importTarget || "source-catalog") || "source-catalog",
     mappingProfile: sourceTextValue(feed.mappingProfile || "source-catalog-standard") || "source-catalog-standard",
     notes: sourceTextValue(feed.notes || ""),
+    postImportInventoryMode: ["disabled", "dry-run", "apply"].includes(String(feed.postImportInventoryMode || "dry-run").toLowerCase()) ? String(feed.postImportInventoryMode || "dry-run").toLowerCase() : "dry-run",
+    postImportPriceMode: ["disabled", "dry-run", "apply"].includes(String(feed.postImportPriceMode || "dry-run").toLowerCase()) ? String(feed.postImportPriceMode || "dry-run").toLowerCase() : "dry-run",
     scheduleType,
     scheduleTimes: [...new Set(String(feed.scheduleTimes || "02:00").split(/[,;\s]+/).map((value) => value.trim()).filter((value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value)))].join(",") || "02:00",
     scheduleEveryHours: Math.max(1, Math.min(24, Number(feed.scheduleEveryHours || 24) || 24)),
@@ -900,6 +902,24 @@ function normalizeVendorFeedSchedule(feed = {}, index = 0) {
 function publicVendorFeedSchedule(feed = {}) {
   const normalized = normalizeVendorFeedSchedule(feed);
   return { ...normalized, ftpPassword: "", ftpPasswordConfigured: Boolean(normalized.ftpPassword) };
+}
+
+async function queueShopifyVariantPricePushJob(db, body = {}, options = {}) {
+  const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))];
+  const dryRun = body.apply === true ? false : body.dryRun !== false;
+  const filters = body.filters || {};
+  const query = String(body.query || "");
+  const productTotal = requestedSkus.length || await postgres.countProducts({ q: query, filters }).catch(() => 0);
+  const variantTotal = await postgres.countShopifyVariantStatuses({ skus: requestedSkus, liveOnly: requestedSkus.length ? false : shopifyPricePushUsesLiveVariantTotal(filters) }).catch(() => 0);
+  const totalRows = variantTotal || productTotal;
+  const workerPayload = { skus: requestedSkus, query, filters, templateId: body.templateId || "", dryRun, apply: !dryRun, scheduled: options.scheduled === true, sourceJobId: String(options.sourceJobId || "") };
+  const operation = options.operation || (dryRun ? "Shopify price push dry run" : "Shopify price push");
+  const duplicate = await findActiveDuplicateImportJob(db, { section: "Products", operation, direction: "sync", fileName: dryRun ? "shopify-price-push-dry-run.json" : "shopify-price-push-report.json", workerTask: "shopify-variant-price-push", workerPayload });
+  if (duplicate) return { duplicate: true, job: duplicate, workerPayload };
+  const job = createImportJob(db, { section: "Products", operation, direction: "sync", status: "queued", fileName: dryRun ? "shopify-price-push-dry-run.json" : "shopify-price-push-report.json", totalRows, processedRows: 0, progressPercent: 0, rowLabel: variantTotal ? "variant SKUs" : "products", progressLabel: variantTotal ? "Queued Shopify variant SKU update" : "Queued Shopify product scan", estimatedVariantRows: variantTotal, estimatedProductRows: productTotal, phase: "queued", workerTask: "shopify-variant-price-push", workerPayload, message: `${options.scheduled ? "Scheduled " : ""}${dryRun ? "Shopify price review" : "Shopify price push"} queued from a verified source import for ${Number(totalRows || 0).toLocaleString()} ${variantTotal ? "variant SKU" : "product"}${Number(totalRows || 0) === 1 ? "" : "s"}.` });
+  upsertImportJobStore(job);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  return { duplicate: false, job, workerPayload };
 }
 
 function resolvedVendorFeedSchedules(settings = {}, vendors = []) {
@@ -926,6 +946,8 @@ function resolvedDataSourceFeeds(settings = {}) {
     fileFormat: "bson-gzip",
     importTarget: "source-catalog",
     mappingProfile: "source-catalog-standard",
+    postImportInventoryMode: "dry-run",
+    postImportPriceMode: "dry-run",
     scheduleType: "times",
     scheduleTimes: "02:00",
     scheduleEveryHours: 24
@@ -10777,6 +10799,8 @@ function queueVendorFeedImportJob(db = {}, feed = {}, options = {}) {
       importTarget: normalizedFeed.importTarget,
       mappingProfile: normalizedFeed.mappingProfile,
       templateId: normalizedFeed.mappingProfile,
+      postImportInventoryMode: normalizedFeed.postImportInventoryMode,
+      postImportPriceMode: normalizedFeed.postImportPriceMode,
       postgresOnly: true,
       batchSize: 100
     },
@@ -20251,16 +20275,17 @@ function shopifyOrderWebhookQuery() {
   return `query DataPlusOrderWebhook($id: ID!) { order(id: $id) { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } }`;
 }
 
-async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}) {
+async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}, webhook = {}) {
   if (!orderId.startsWith("gid://shopify/Order/")) throw new Error("Webhook payload did not include a Shopify order ID.");
   const data = await shopifyGraphqlRequestAuto(shopifyOrderWebhookQuery(), { id: orderId }, { operation: `Refresh Shopify order webhook ${orderId}` });
   const incoming = shopifyOrderToDataPlusOrder(data?.order || {});
   if (!incoming.id) throw new Error("Shopify could not load the order referenced by this webhook.");
   if (!shopifySourceIsAllowed(incoming, settings.shopifyOrderImportSources)) return { skipped: true, reason: `Sales channel ${incoming.channelSource || "Unknown"} is not enabled for Shopify order imports.` };
   const existing = await postgres.readOrderByKey(incoming.id);
-  const preservedKeys = ["shipments", "fulfillmentLines", "inventoryAllocations", "backorderLines", "workflowHistory", "timeline", "documents", "notifications", "returnWarehouseId", "returnWarehouseName", "fulfillmentStage", "notes", "localFlags"];
+  const preservedKeys = ["shipments", "fulfillmentLines", "inventoryAllocations", "backorderLines", "workflowHistory", "timeline", "documents", "notifications", "returnWarehouseId", "returnWarehouseName", "fulfillmentStage", "notes", "orderNotes", "shippingLabelPurchases", "selectedShippingQuote", "selectedDeliveryOption", "localFlags"];
   const preserved = Object.fromEntries(preservedKeys.filter((key) => existing?.[key] !== undefined).map((key) => [key, existing[key]]));
   const merged = { ...incoming, ...preserved, updatedAt: new Date().toISOString(), importedAt: new Date().toISOString() };
+  addOrderTimeline(merged, { type: "channel_sync", title: "Shopify webhook applied", message: `${String(webhook.topic || "orders/update")} refreshed the local order record.`, user: "Shopify" });
   await postgres.saveOrder(merged);
   clearOrderApiCache(merged.id);
   return { order: merged, created: !existing };
@@ -21348,6 +21373,8 @@ async function handleApi(req, res) {
     const digest = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
     const valid = Boolean(secret && signature && signature.length === digest.length && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest)));
     if (!valid) return sendJson(res, 401, { error: "Invalid Shopify webhook signature." });
+    const webhookId = String(req.headers["x-shopify-webhook-id"] || "").trim();
+    if (webhookId && await redisCache.getJson(`dataplus:shopify:webhook:${webhookId}`)) return sendJson(res, 200, { accepted: true, duplicate: true, message: "Shopify webhook was already processed." });
     const db = await readDbFast({ skipInventory: true });
     const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
     if (!settings.shopifyOrderWebhookEnabled || !settings.shopifyOrderImportEnabled) return sendJson(res, 202, { accepted: true, message: "Shopify order webhook received while order webhooks are disabled." });
@@ -21356,7 +21383,9 @@ async function handleApi(req, res) {
     const orderId = String(payload.admin_graphql_api_id || (numericId ? `gid://shopify/Order/${numericId}` : "")).trim();
     const startedAt = Date.now();
     try {
-      const result = await refreshShopifyOrderFromWebhook(orderId, settings);
+      const topic = String(req.headers["x-shopify-topic"] || "orders/update");
+      const result = await refreshShopifyOrderFromWebhook(orderId, settings, { topic, webhookId });
+      if (webhookId) await redisCache.setJson(`dataplus:shopify:webhook:${webhookId}`, { receivedAt: new Date().toISOString(), topic }, 60 * 60 * 24);
       appendChannelApiLog({ channel: "Shopify", transport: "webhook", method: "POST", path: url.pathname, operation: String(req.headers["x-shopify-topic"] || "orders/update"), statusCode: 200, ok: true, durationMs: Date.now() - startedAt, message: result.skipped ? result.reason : `Order ${result.order?.orderNumber || orderId} refreshed from webhook.` });
       return sendJson(res, 200, { accepted: true, ...result });
     } catch (error) {
@@ -33293,6 +33322,7 @@ module.exports = {
   normalizeShopifyStatus,
   normalizeShopifyVariantGid,
   queueShopifyInventoryUpdateJob,
+  queueShopifyVariantPricePushJob,
   queueShopifyOrderImportJob,
   queueShopifySkuMapSyncJob,
   readDbFast,
