@@ -7540,6 +7540,28 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
                     />
                   </div>
                   <div className="max-h-52 overflow-y-auto rounded-md border">
+                    <div className="flex items-center justify-between gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
+                      <span>{matchingValues.length} shown</span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2 text-xs"
+                        disabled={!matchingValues.length}
+                        onClick={() =>
+                          setFilterSelection((current) => {
+                            const allShownSelected = matchingValues.every((value) => current.includes(value));
+                            return allShownSelected
+                              ? current.filter((value) => !matchingValues.includes(value))
+                              : Array.from(new Set([...current, ...matchingValues]));
+                          })
+                        }
+                      >
+                        {matchingValues.length && matchingValues.every((value) => filterSelection.includes(value))
+                          ? "Clear shown"
+                          : "Select all shown"}
+                      </Button>
+                    </div>
                     {matchingValues.map((value) => (
                       <label
                         key={value}
