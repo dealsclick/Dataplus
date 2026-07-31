@@ -802,6 +802,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   dataQualityWorkerEnabled: true,
   productDumpResourceProfile: "large",
   sourceCatalogDefaultImportMode: "new-and-update",
+  sourceCatalogImportBatchLimit: 25000,
   trueValueSourceCategoryAsMainCategory: true,
   skuChangeTrackedFields: ["cost", "price", "list_price", "qty", "stock_status", "to_be_discontinued", "brand", "mfr_part_number", "vendor_sku", "category", "default_image"],
   backupIncludeSourceCatalog: false,
@@ -4333,6 +4334,7 @@ function normalizeSystemSettings(settings = {}) {
     ? String(normalized.productDumpResourceProfile).toLowerCase()
     : "large";
   normalized.sourceCatalogDefaultImportMode = String(normalized.sourceCatalogDefaultImportMode || "new-and-update").toLowerCase();
+  normalized.sourceCatalogImportBatchLimit = Math.max(1000, Math.min(250000, Number(normalized.sourceCatalogImportBatchLimit || 25000) || 25000));
   normalized.shopifyDailyInventoryUpdateEnabled = normalized.shopifyDailyInventoryUpdateEnabled === true || String(normalized.shopifyDailyInventoryUpdateEnabled).toLowerCase() === "true";
   normalized.shopifyDailyInventoryUpdateMode = String(normalized.shopifyDailyInventoryUpdateMode || "dry-run").toLowerCase() === "apply" ? "apply" : "dry-run";
   normalized.shopifyDailyInventoryRequireSuccessfulDump = normalized.shopifyDailyInventoryRequireSuccessfulDump !== false;
@@ -4411,6 +4413,11 @@ function normalizeSystemSettings(settings = {}) {
 function productDumpResourceProfile(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
   return PRODUCT_DUMP_RESOURCE_PROFILES[normalized.productDumpResourceProfile] || PRODUCT_DUMP_RESOURCE_PROFILES.large;
+}
+
+function sourceCatalogImportBatchLimit(settings = {}) {
+  const normalized = normalizeSystemSettings(settings);
+  return Math.max(1000, Math.min(250000, Number(normalized.sourceCatalogImportBatchLimit || 25000) || 25000));
 }
 
 function readSystemSettingsStore(fallback = {}) {
@@ -19243,9 +19250,12 @@ function normalizeSourceImportMode(value = "") {
   return "new-and-update";
 }
 
-async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query = "", filters = {}, limit = 25000, db = null, importMode = "" } = {}) {
+async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query = "", filters = {}, limit = 0, db = null, importMode = "" } = {}) {
   if (!postgres.isPostgresEnabled()) return { matched: 0, requested: 0, importable: 0, existing: 0, newProducts: 0, closeouts: 0, limited: false, skus: [] };
-  const mode = normalizeSourceImportMode(importMode || readSystemSettingsStore(db?.systemSettings || {}).sourceCatalogDefaultImportMode);
+  const settings = readSystemSettingsStore(db?.systemSettings || {});
+  const mode = normalizeSourceImportMode(importMode || settings.sourceCatalogDefaultImportMode);
+  const batchLimit = sourceCatalogImportBatchLimit(settings);
+  const effectiveLimit = Math.max(1, Math.min(batchLimit, Number(limit || batchLimit)));
   let sourceRows = [];
   let matched = skus.length;
   let limited = false;
@@ -19253,7 +19263,7 @@ async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query
     const collected = await postgres.collectVendorCatalogItems({
       query,
       filters: catalogFiltersWithIndexedSupplierKeys(filters),
-      limit: Math.max(1, Math.min(25000, Number(limit || 25000))),
+      limit: effectiveLimit,
       includeCount: false
     });
     sourceRows = collected?.items || [];
@@ -19285,6 +19295,7 @@ async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query
     skippedNew: mode === "update-existing" ? importSkus.filter((sku) => !existingKeys.has(String(sku || "").toLowerCase())).length : 0,
     closeouts,
     limited,
+    batchLimit,
     importMode: mode,
     skus: filteredImportSkus,
     sourceRows
@@ -19360,7 +19371,7 @@ async function queueSourceCatalogImportJob(db, body = {}, impact = {}) {
     details: [
       body.allFiltered ? "Scope: all filtered source catalog results." : "Scope: selected source catalog rows.",
       impact.importMode ? `Import mode: ${impact.importMode}.` : "",
-      impact.limited ? "Limited to first 25,000 matches." : ""
+      impact.limited ? `Limited to first ${Number(impact.batchLimit || 25000).toLocaleString()} matches.` : ""
     ].filter(Boolean).join(" ")
   };
   const duplicate = await findActiveDuplicateImportJob(db, attrs);
@@ -19429,7 +19440,7 @@ async function runSourceCatalogImportWorkerJob(job = {}, body = {}) {
   finishImportJob(job, {
     status,
     message,
-    details: [job.details, impact.limited ? "Only the first 25,000 filtered matches were imported." : "", analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
+    details: [job.details, impact.limited ? `Only the first ${Number(impact.batchLimit || 25000).toLocaleString()} filtered matches were imported.` : "", analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
     totalRows: result.requested,
     processedRows: result.changed,
     changed: result.changed,
@@ -19501,7 +19512,7 @@ function startSourceCatalogImportJob(jobId, body = {}) {
       finishImportJob(job, {
         status,
         message,
-        details: [job.details, impact.limited ? "Only the first 25,000 filtered matches were imported." : "", analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
+        details: [job.details, impact.limited ? `Only the first ${Number(impact.batchLimit || 25000).toLocaleString()} filtered matches were imported.` : "", analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
         totalRows: result.requested,
         processedRows: result.changed,
         changed: result.changed,
@@ -27635,7 +27646,8 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/catalog/import-impact" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const skus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, 25000);
+    const batchLimit = sourceCatalogImportBatchLimit(readSystemSettingsStore(dbCache.data?.systemSettings || {}));
+    const skus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, batchLimit);
     const allFiltered = body.allFiltered === true || String(body.allFiltered || "").toLowerCase() === "true";
     if (!skus.length && !allFiltered) return sendJson(res, 400, { error: "Select source catalog products first." });
     const impact = await sourceCatalogImportImpact({
@@ -27643,7 +27655,7 @@ async function handleApi(req, res) {
       allFiltered,
       query: body.query || "",
       filters: body.filters || {},
-      limit: Math.max(1, Math.min(25000, Number(body.limit || 25000))),
+      limit: Math.max(1, Math.min(batchLimit, Number(body.limit || batchLimit))),
       importMode: body.importMode || body.sourceImportMode || ""
     });
     const { sourceRows, ...publicImpact } = impact;
@@ -27653,8 +27665,9 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/catalog/bulk" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const action = String(body.action || "");
+    const batchLimit = sourceCatalogImportBatchLimit(readSystemSettingsStore(dbCache.data?.systemSettings || {}));
     const allFiltered = body.allFiltered === true || String(body.allFiltered || "").toLowerCase() === "true";
-    let skus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, 25000);
+    let skus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, batchLimit);
     if (!skus.length && !allFiltered) return sendJson(res, 400, { error: "Select source catalog products first." });
     if (action === "add-active") {
       const db = normalizeDb(await readDbFast({ skipInventory: true }));
@@ -27663,7 +27676,7 @@ async function handleApi(req, res) {
         allFiltered,
         query: body.query || "",
         filters: body.filters || {},
-        limit: Math.max(1, Math.min(25000, Number(body.limit || 25000))),
+        limit: Math.max(1, Math.min(batchLimit, Number(body.limit || batchLimit))),
         importMode: body.importMode || body.sourceImportMode || "",
         db
       });
@@ -27677,7 +27690,7 @@ async function handleApi(req, res) {
           message: "No source catalog products matched this import."
         });
       }
-      const job = await queueSourceCatalogImportJob(db, { ...body, skus, limit: Math.max(1, Math.min(25000, Number(body.limit || 25000))) }, impact);
+      const job = await queueSourceCatalogImportJob(db, { ...body, skus, limit: Math.max(1, Math.min(batchLimit, Number(body.limit || batchLimit))) }, impact);
       return sendJson(res, 202, {
         queued: true,
         job: normalizeImportJob(job),
@@ -27700,7 +27713,7 @@ async function handleApi(req, res) {
         allFiltered: true,
         query: body.query || "",
         filters: body.filters || {},
-        limit: Math.max(1, Math.min(25000, Number(body.limit || 25000)))
+        limit: Math.max(1, Math.min(batchLimit, Number(body.limit || batchLimit)))
       });
       skus = [...new Set((impact.sourceRows || []).map((row) => String(row.sku || "").trim()).filter(Boolean))];
     }

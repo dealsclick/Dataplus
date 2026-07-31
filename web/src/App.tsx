@@ -289,6 +289,7 @@ type SystemSettings = {
   backupRetentionDays?: number
   jobsRetentionDays?: number
   jobsRetentionAutoCleanupEnabled?: boolean
+  sourceCatalogImportBatchLimit?: number
   trueValueSourceCategoryAsMainCategory?: boolean
   requireAdminConfirmationForDeletes?: boolean
   shopifyDailyInventoryUpdateEnabled?: boolean
@@ -8596,7 +8597,7 @@ function SourceCatalogPage() {
     setPromotionOpen(true)
     setPromotionLoading(true)
     try {
-      const result = await api<{ matched?: number; importable?: number; newProducts?: number; existing?: number; limited?: boolean }>("/api/catalog/import-impact", { method: "POST", body: JSON.stringify({ skus, allFiltered: scope === "filtered", query, filters: filterPayload, importMode: mode }) })
+      const result = await api<{ matched?: number; importable?: number; newProducts?: number; existing?: number; limited?: boolean; batchLimit?: number }>("/api/catalog/import-impact", { method: "POST", body: JSON.stringify({ skus, allFiltered: scope === "filtered", query, filters: filterPayload, importMode: mode }) })
       setPromotionImpact(result)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to calculate source catalog import impact.")
@@ -9499,10 +9500,14 @@ function SettingsPage({
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Catalog behavior</CardTitle>
-              <CardDescription>True Value source categories can seed the main category list.</CardDescription>
+              <CardDescription>Category defaults and source-catalog promotion safeguards.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2">
               <ToggleField label="True Value source category as main category" checked={boolValue("trueValueSourceCategoryAsMainCategory")} disabled={!editing} onCheckedChange={(next) => update("trueValueSourceCategoryAsMainCategory", next)} />
+              <Field label="Source catalog import limit per job">
+                <Input disabled={!editing} type="number" min="1000" max="250000" step="1000" value={String(value("sourceCatalogImportBatchLimit") || 25000)} onChange={(event) => update("sourceCatalogImportBatchLimit", Number(event.target.value || 25000))} />
+                <p className="mt-1 text-xs text-muted-foreground">Maximum source SKUs promoted in one background import. Allowed range: 1,000 to 250,000.</p>
+              </Field>
               <Button variant="outline" onClick={() => api("/api/categories/summary-index/rebuild", { method: "POST", body: JSON.stringify({ scope: "both" }) }).then(() => toast.success("Category summary index rebuild queued/completed.")).catch((error) => toast.error(error.message))}>Rebuild category index</Button>
             </CardContent>
           </Card>
