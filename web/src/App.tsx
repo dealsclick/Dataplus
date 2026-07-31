@@ -5475,6 +5475,7 @@ function WarehouseAuditPanel({
   const [auditOwner, setAuditOwner] = useState("Luis");
   const [auditReviewer, setAuditReviewer] = useState("");
   const [activeBin, setActiveBin] = useState("");
+  const [auditWarehouses, setAuditWarehouses] = useState<Array<{ id?: string; name?: string; code?: string; bins?: Array<{ id?: string; code?: string; name?: string; nickname?: string; active?: boolean; isDefault?: boolean }> }>>([]);
   const [cameraMode, setCameraMode] = useState<"product" | "bin">("product");
   const [offlineScanCount, setOfflineScanCount] = useState(0);
   const [syncingOfflineScans, setSyncingOfflineScans] = useState(false);
@@ -5538,10 +5539,12 @@ function WarehouseAuditPanel({
     } catch { /* Audio feedback is optional. */ }
   };
   const load = async () => {
-    const result = await api<{ audits?: Array<Record<string, unknown>> }>(
-      "/api/warehouse-audits",
-    );
+    const [result, state] = await Promise.all([
+      api<{ audits?: Array<Record<string, unknown>> }>("/api/warehouse-audits"),
+      api<LiteState>("/api/state?lite=1"),
+    ]);
     setAudits(result.audits || []);
+    setAuditWarehouses((state.warehouses || []) as typeof auditWarehouses);
   };
   const resumedAudit =
     active ||
@@ -5573,6 +5576,16 @@ function WarehouseAuditPanel({
     if (!resumedAudit?.id) return;
     setOfflineScanCount(readOfflineScans().filter((scan) => scan.auditId === String(resumedAudit.id)).length);
   }, [resumedAudit?.id]);
+  const selectedAuditWarehouse = auditWarehouses.find((warehouse) =>
+    String(warehouse.id || "") === String(resumedAudit?.warehouseId || "") ||
+    String(warehouse.name || "").trim().toLowerCase() === String(resumedAudit?.warehouseName || "").trim().toLowerCase(),
+  );
+  const activeAuditBins = (selectedAuditWarehouse?.bins || []).filter((bin) => bin.active !== false && String(bin.code || "").trim());
+  useEffect(() => {
+    if (activeBin || !activeAuditBins.length) return;
+    const preferred = activeAuditBins.find((bin) => bin.isDefault) || activeAuditBins[0];
+    setActiveBin(String(preferred.code || ""));
+  }, [resumedAudit?.id, activeAuditBins.length]);
   useEffect(() => {
     if (!cameraOpen || !videoRef.current) return;
     const video = videoRef.current;
@@ -6175,9 +6188,21 @@ function WarehouseAuditPanel({
               </div>
             )}
             <div className="flex flex-wrap items-end gap-2 rounded-md border bg-muted/20 p-3">
-              <Field label="Current bin / location"><Input value={activeBin} disabled={auditStatus !== "in_progress"} onChange={(event) => setActiveBin(event.target.value)} placeholder="Scan bin or enter location" /></Field>
+              <Field label="Current bin / location">
+                {activeAuditBins.length ? (
+                  <Select value={activeBin || "__unassigned"} disabled={auditStatus !== "in_progress"} onValueChange={(value) => setActiveBin(value === "__unassigned" ? "" : value)}>
+                    <SelectTrigger className="min-w-64"><SelectValue placeholder="Select bin" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__unassigned">No bin selected</SelectItem>
+                      {activeAuditBins.map((bin) => <SelectItem key={String(bin.id || bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.nickname ? ` - ${String(bin.nickname)}` : bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input value={activeBin} disabled={auditStatus !== "in_progress"} onChange={(event) => setActiveBin(event.target.value)} placeholder="Enter location" />
+                )}
+              </Field>
               {activeBin && <Button size="sm" variant="ghost" disabled={auditStatus !== "in_progress"} onClick={() => setActiveBin("")}>Clear bin</Button>}
-              <p className="pb-2 text-xs text-muted-foreground">The selected bin is saved against each new count line.</p>
+              <p className="max-w-sm pb-2 text-xs text-muted-foreground">{activeAuditBins.length ? "Choose a configured bin before scanning. The selection is saved against each new count line." : "No active bins are configured for this warehouse. Enter a location manually; the selection is saved against each new count line."}</p>
             </div>
             <div className="flex gap-2">
               <Input
