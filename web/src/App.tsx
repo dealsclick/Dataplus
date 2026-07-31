@@ -5516,6 +5516,7 @@ function WarehouseAuditPanel({
   const photoVideoRef = useRef<HTMLVideoElement | null>(null);
   const manualSkuRef = useRef<HTMLInputElement | null>(null);
   const scanRef = useRef(false);
+  const submitScanRef = useRef<(value: string) => Promise<void>>(async () => undefined);
   const lastCameraScanRef = useRef({ value: "", at: 0 });
   const offlineQueueKey = "dataplus.warehouse-audit.offline-scans.v1";
   const readOfflineScans = () => {
@@ -5655,6 +5656,23 @@ function WarehouseAuditPanel({
             ).then((lookup) => {
               const matched = lookup.matched === true;
               const product = lookup.product || null;
+              if (cameraMode === "bin") {
+                setCameraMessage(`Selecting bin ${value}...`);
+                return submitScanRef.current(value).then(() => {
+                  scanRef.current = false;
+                  lastCameraScanRef.current = { value: "", at: 0 };
+                });
+              }
+              if (matched) {
+                setCameraMessage(`Adding ${product?.sku || value}...`);
+                scannerFeedback("success");
+                return submitScanRef.current(value).then(() => {
+                  setLastScan(null);
+                  scanRef.current = false;
+                  lastCameraScanRef.current = { value: "", at: 0 };
+                  setCameraMessage(activeBin ? `Count saved. Counting in bin ${activeBin}. Point at the next product barcode.` : "Count saved. Point at the next product barcode.");
+                });
+              }
               setLastScan({
                 barcode: value,
                 matched,
@@ -5662,8 +5680,8 @@ function WarehouseAuditPanel({
                 sku: product?.sku,
                 title: product?.title,
               });
-              setCameraMessage(matched ? "Scan ready to add." : "Product not found. You can add it or cancel this scan.");
-              scannerFeedback(matched ? "success" : "unknown");
+              setCameraMessage("Product not found. You can add it or cancel this scan.");
+              scannerFeedback("unknown");
             }).catch((error) => {
               const message = error instanceof Error ? error.message : "Unable to look up this barcode.";
               setCameraMessage(message);
@@ -5837,6 +5855,7 @@ function WarehouseAuditPanel({
       setBusy(false);
     }
   };
+  submitScanRef.current = submit;
   const resetCameraScan = () => {
     setLastScan(null);
     setBarcode("");
