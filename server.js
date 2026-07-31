@@ -22670,6 +22670,39 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { line, product: product ? { sku: product.sku, title: product.marketplaceTitle || product.title || "", qty: product.qty, reserved: product.reserved, lastInventoryAuditAt: product.lastInventoryAuditAt || "", lastInventoryAuditId: product.lastInventoryAuditId || "" } : null, movements });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "count" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress") return sendJson(res, 400, { error: "Counts can be corrected only while the audit is in progress." });
+    const lineKey = decodeURIComponent(parts[4]);
+    const line = (audit.lines || []).find((entry) => String(entry.id || `${entry.productId || entry.sku}::${entry.locationBin || ""}`) === lineKey);
+    if (!line) return sendJson(res, 404, { error: "Audit line not found." });
+    const countedQty = Number(body.countedQty);
+    if (!Number.isInteger(countedQty) || countedQty < 0) return sendJson(res, 400, { error: "The corrected count must be a whole number of zero or more." });
+    const previousCountedQty = Number(line.countedQty || 0);
+    if (previousCountedQty === countedQty) return sendJson(res, 200, { audit, line, message: "Count was unchanged." });
+    const now = new Date().toISOString();
+    const adjustedBy = String(body.user || "Warehouse user").trim() || "Warehouse user";
+    const adjustment = {
+      id: crypto.randomUUID(),
+      previousCountedQty,
+      countedQty,
+      note: String(body.note || "").trim(),
+      adjustedBy,
+      adjustedAt: now
+    };
+    line.countedQty = countedQty;
+    line.lastAdjustedAt = now;
+    line.lastAdjustedBy = adjustedBy;
+    line.reviewStatus = "unreviewed";
+    line.countAdjustments = [...(Array.isArray(line.countAdjustments) ? line.countAdjustments : []), adjustment].slice(-50);
+    audit.updatedAt = now;
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 200, { audit, line, message: `${line.sku || "Audit line"} count changed from ${previousCountedQty} to ${countedQty}.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "review" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];

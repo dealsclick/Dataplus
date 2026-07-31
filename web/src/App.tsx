@@ -5497,11 +5497,16 @@ function WarehouseAuditPanel({
   const [photoCameraState, setPhotoCameraState] = useState<"opening" | "ready" | "permission" | "error">("opening");
   const [photoCameraAttempt, setPhotoCameraAttempt] = useState(0);
   const [photoAnalysisBusy, setPhotoAnalysisBusy] = useState(false);
+  const [photoAnalysisStatus, setPhotoAnalysisStatus] = useState<"idle" | "analyzing" | "ready" | "error">("idle");
   const [upcResearchBusy, setUpcResearchBusy] = useState(false);
   const [upcResearch, setUpcResearch] = useState<Record<
     string,
     unknown
   > | null>(null);
+  const [countEditLine, setCountEditLine] = useState<Record<string, unknown> | null>(null);
+  const [countEditValue, setCountEditValue] = useState("");
+  const [countEditNote, setCountEditNote] = useState("");
+  const [countEditBusy, setCountEditBusy] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const photoVideoRef = useRef<HTMLVideoElement | null>(null);
   const manualSkuRef = useRef<HTMLInputElement | null>(null);
@@ -5977,6 +5982,7 @@ function WarehouseAuditPanel({
   const analyzeManualPhoto = async (photoDataUrl: string) => {
     if (photoAnalysisBusy) return;
     setPhotoAnalysisBusy(true);
+    setPhotoAnalysisStatus("analyzing");
     try {
       const result = await api<{ suggestion?: Record<string, unknown> }>(
         "/api/warehouse/photo-suggestions",
@@ -6011,7 +6017,9 @@ function WarehouseAuditPanel({
       toast.success(
         "Package details suggested. Review them before creating the SKU.",
       );
+      setPhotoAnalysisStatus("ready");
     } catch (error) {
+      setPhotoAnalysisStatus("error");
       toast.error(
         error instanceof Error
           ? error.message
@@ -6027,6 +6035,7 @@ function WarehouseAuditPanel({
     setManualUnknown((entry) =>
       entry && !entry.photoDataUrl ? { ...entry, photoDataUrl } : entry,
     );
+    setPhotoAnalysisStatus("analyzing");
     void analyzeManualPhoto(photoDataUrl);
   };
   const removeManualPhoto = (index: number) => {
@@ -6159,6 +6168,34 @@ function WarehouseAuditPanel({
     }
   };
   const auditLineKey = (line: Record<string, unknown>) => String(line.id || `${String(line.productId || line.sku || "")}::${String(line.locationBin || "")}`);
+  const openCountEdit = (line: Record<string, unknown>) => {
+    setCountEditLine(line);
+    setCountEditValue(String(Math.max(0, Number(line.countedQty || 0))));
+    setCountEditNote("");
+  };
+  const saveCountEdit = async () => {
+    if (!resumedAudit || !countEditLine) return;
+    const countedQty = Number(countEditValue);
+    if (!Number.isInteger(countedQty) || countedQty < 0) {
+      toast.error("Enter a whole-number count of zero or more.");
+      return;
+    }
+    setCountEditBusy(true);
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lines/${encodeURIComponent(auditLineKey(countEditLine))}/count`,
+        { method: "POST", body: JSON.stringify({ countedQty, note: countEditNote, user: "Luis" }) },
+      );
+      applyAuditUpdate(result.audit || resumedAudit);
+      setCountEditLine(null);
+      toast.success(result.message || "Audit count adjusted.");
+      void load().catch(() => undefined);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to adjust the count.");
+    } finally {
+      setCountEditBusy(false);
+    }
+  };
   const openLineReview = async (line: Record<string, unknown>) => {
     if (!resumedAudit) return;
     setReviewLine(line);
@@ -6566,6 +6603,7 @@ function WarehouseAuditPanel({
                     />
                   </Field>
                   <Field label="Product photo">
+                    <div className="grid gap-2">
                     <div className="flex gap-2">
                       <Button
                         type="button"
@@ -6588,6 +6626,22 @@ function WarehouseAuditPanel({
                           readManualPhotos(event.target.files)
                         }
                       />
+                    </div>
+                    {photoAnalysisBusy || photoAnalysisStatus === "analyzing" ? (
+                      <p className="flex items-center gap-2 text-xs font-medium text-primary">
+                        <Loader2 className="size-3.5 animate-spin" />
+                        David is reading the photo and suggesting product details...
+                      </p>
+                    ) : photoAnalysisStatus === "ready" ? (
+                      <p className="flex items-center gap-2 text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                        <CheckCircle2 className="size-3.5" />
+                        AI suggestions are ready to review.
+                      </p>
+                    ) : photoAnalysisStatus === "error" ? (
+                      <p className="text-xs text-amber-700 dark:text-amber-400">
+                        AI could not read this photo. You can still complete the SKU manually.
+                      </p>
+                    ) : null}
                     </div>
                   </Field>
                 </div>
@@ -6671,6 +6725,8 @@ function WarehouseAuditPanel({
                       {photoCameraState !== "ready" && <div className="absolute inset-0 grid place-items-center bg-black/80 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{photoCameraState === "opening" ? "Starting camera..." : photoCameraState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{photoCameraState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{photoCameraState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setPhotoCameraState("opening"); setPhotoCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
                     </div>
                     <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Point the camera at the item, barcode, or package details. Tap <span className="font-medium text-foreground">Capture photo</span> after each shot; the camera stays open for the next one.</div>
+                    {(photoAnalysisBusy || photoAnalysisStatus === "analyzing") && <div className="flex items-center gap-2 rounded-md border border-primary/25 bg-primary/10 p-3 text-sm font-medium text-primary"><Loader2 className="size-4 animate-spin" /> David is analyzing the captured photo and preparing editable product suggestions.</div>}
+                    {!photoAnalysisBusy && photoAnalysisStatus === "ready" && <div className="flex items-center gap-2 rounded-md border border-emerald-300 bg-emerald-50 p-3 text-sm font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"><CheckCircle2 className="size-4" /> Product suggestions are ready. Capture another photo or use the photo{manualPhotoUrls.length === 1 ? "" : "s"}.</div>}
                     {manualPhotoUrls.length > 0 && <div className="flex gap-2 overflow-x-auto pb-1">{manualPhotoUrls.map((photo, index) => <img key={`${photo.slice(-24)}-${index}`} src={photo} alt={`Captured product photo ${index + 1}`} className="size-16 shrink-0 rounded-md border object-cover" />)}</div>}
                   </div>
                 </div>
@@ -6719,7 +6775,10 @@ function WarehouseAuditPanel({
                       <TableCell>{String(line.title || "-")}</TableCell>
                       <TableCell>{String(line.locationBin || "-")}</TableCell>
                       <TableCell>
-                        {numberLabel(Number(line.countedQty || 0))}
+                        <div className="flex items-center gap-1.5">
+                          <span>{numberLabel(Number(line.countedQty || 0))}</span>
+                          {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Adjust counted quantity" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
+                        </div>
                       </TableCell>
                       <TableCell>-</TableCell>
                       <TableCell>-</TableCell>
@@ -6757,6 +6816,20 @@ function WarehouseAuditPanel({
                 </TableBody>
               </Table>
             </div>
+            <Dialog open={Boolean(countEditLine)} onOpenChange={(open) => !open && setCountEditLine(null)}>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle>Adjust counted quantity</DialogTitle>
+                  <DialogDescription>Correct an overscan or missed count before this audit is submitted. DataPlus retains the previous count and your reason in the audit history.</DialogDescription>
+                </DialogHeader>
+                <div className="grid gap-4">
+                  <div className="rounded-md border bg-muted/30 p-3 text-sm"><p className="font-medium">{String(countEditLine?.sku || "Audit line")}</p><p className="mt-1 text-muted-foreground">{String(countEditLine?.title || "")}</p><p className="mt-2 text-xs text-muted-foreground">Current count: {numberLabel(Number(countEditLine?.countedQty || 0))}{countEditLine?.locationBin ? ` in ${String(countEditLine.locationBin)}` : ""}</p></div>
+                  <Field label="Correct counted quantity"><Input autoFocus type="number" min="0" step="1" value={countEditValue} onChange={(event) => setCountEditValue(event.target.value)} /></Field>
+                  <Field label="Reason"><Textarea value={countEditNote} onChange={(event) => setCountEditNote(event.target.value)} placeholder="Example: carton was scanned twice" /></Field>
+                </div>
+                <DialogFooter><Button variant="outline" onClick={() => setCountEditLine(null)}>Cancel</Button><Button disabled={countEditBusy} onClick={() => void saveCountEdit()}>{countEditBusy && <Loader2 className="size-4 animate-spin" />} Save corrected count</Button></DialogFooter>
+              </DialogContent>
+            </Dialog>
             <Dialog open={Boolean(reviewLine)} onOpenChange={(open) => !open && setReviewLine(null)}>
               <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
                 <DialogHeader><DialogTitle>Review variance: {String(reviewLine?.sku || "Audit line")}</DialogTitle><DialogDescription>Approve this count, exclude it from the inventory adjustment, or return the audit to counting for a recount.</DialogDescription></DialogHeader>
