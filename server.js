@@ -803,6 +803,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   productDumpResourceProfile: "large",
   sourceCatalogDefaultImportMode: "new-and-update",
   sourceCatalogImportBatchLimit: 25000,
+  shopifyProductLaunchBatchLimit: 1000,
   trueValueSourceCategoryAsMainCategory: true,
   skuChangeTrackedFields: ["cost", "price", "list_price", "qty", "stock_status", "to_be_discontinued", "brand", "mfr_part_number", "vendor_sku", "category", "default_image"],
   backupIncludeSourceCatalog: false,
@@ -4335,6 +4336,7 @@ function normalizeSystemSettings(settings = {}) {
     : "large";
   normalized.sourceCatalogDefaultImportMode = String(normalized.sourceCatalogDefaultImportMode || "new-and-update").toLowerCase();
   normalized.sourceCatalogImportBatchLimit = Math.max(1000, Math.min(250000, Number(normalized.sourceCatalogImportBatchLimit || 25000) || 25000));
+  normalized.shopifyProductLaunchBatchLimit = Math.max(100, Math.min(25000, Number(normalized.shopifyProductLaunchBatchLimit || 1000) || 1000));
   normalized.shopifyDailyInventoryUpdateEnabled = normalized.shopifyDailyInventoryUpdateEnabled === true || String(normalized.shopifyDailyInventoryUpdateEnabled).toLowerCase() === "true";
   normalized.shopifyDailyInventoryUpdateMode = String(normalized.shopifyDailyInventoryUpdateMode || "dry-run").toLowerCase() === "apply" ? "apply" : "dry-run";
   normalized.shopifyDailyInventoryRequireSuccessfulDump = normalized.shopifyDailyInventoryRequireSuccessfulDump !== false;
@@ -4418,6 +4420,11 @@ function productDumpResourceProfile(settings = {}) {
 function sourceCatalogImportBatchLimit(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
   return Math.max(1000, Math.min(250000, Number(normalized.sourceCatalogImportBatchLimit || 25000) || 25000));
+}
+
+function shopifyProductLaunchBatchLimit(settings = {}) {
+  const normalized = normalizeSystemSettings(settings);
+  return Math.max(100, Math.min(25000, Number(normalized.shopifyProductLaunchBatchLimit || 1000) || 1000));
 }
 
 function readSystemSettingsStore(fallback = {}) {
@@ -13110,11 +13117,11 @@ async function shopifyProductCreateCandidateProducts(db, payload = {}) {
   const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
     .map((sku) => String(sku || "").trim())
     .filter(Boolean))];
-  if (requestedSkus.length) return postgres.readProductsByKeys(requestedSkus);
+  const limit = Math.max(1, Math.min(25000, Number(payload.limit || 100) || 100));
+  if (requestedSkus.length) return postgres.readProductsByKeys(requestedSkus.slice(0, limit));
   const filters = Object.keys(payload.filters || {}).length
     ? payload.filters
     : (payload.allowDraftIncomplete ? { channelStatus: "shopify-missing" } : { channelStatusAll: "shopify-missing|shopify-ready" });
-  const limit = Math.max(1, Math.min(1000, Number(payload.limit || 100) || 100));
   const result = await postgres.listProducts({ q: payload.query || "", filters, page: 1, limit });
   return result?.items || result?.inventory || [];
 }
@@ -21222,13 +21229,15 @@ async function queueShopifyProductCreateJob(payload = {}) {
     .filter(Boolean))];
   const dryRun = payload.apply === true ? false : payload.dryRun !== false;
   const query = String(payload.query || "");
-  const limit = Math.max(1, Math.min(1000, Number(payload.limit || 100) || 100));
+  const db = await readDbFast({ skipInventory: true });
+  const launchBatchLimit = shopifyProductLaunchBatchLimit(readSystemSettingsStore(db?.systemSettings || {}));
+  const limit = Math.max(1, Math.min(launchBatchLimit, Number(payload.limit || launchBatchLimit) || launchBatchLimit));
+  const limitedSkus = requestedSkus.slice(0, limit);
   const allowDraftIncomplete = payload.allowDraftIncomplete === true;
   const filters = payload.filters && Object.keys(payload.filters || {}).length
     ? payload.filters
     : (allowDraftIncomplete ? { channelStatus: "shopify-missing" } : { channelStatusAll: "shopify-missing|shopify-ready" });
-  const db = await readDbFast({ skipInventory: true });
-  const productTotal = requestedSkus.length || limit;
+  const productTotal = limitedSkus.length || limit;
   const job = createImportJob(db, {
     section: "Products",
     operation: dryRun ? "Shopify product create dry run" : "Shopify product create",
@@ -21241,7 +21250,7 @@ async function queueShopifyProductCreateJob(payload = {}) {
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : "shopify-product-create",
     workerPayload: shouldRunJobsInline() ? {} : {
-      skus: requestedSkus,
+      skus: limitedSkus,
       query,
       filters,
       limit,
@@ -21256,7 +21265,7 @@ async function queueShopifyProductCreateJob(payload = {}) {
   upsertImportJobStore(job);
   if (shouldRunJobsInline()) {
     setTimeout(() => runShopifyProductCreateWorkerJob(job, {
-      skus: requestedSkus,
+      skus: limitedSkus,
       query,
       filters,
       limit,
@@ -28979,13 +28988,15 @@ async function handleApi(req, res) {
       .filter(Boolean))];
     const dryRun = body.apply === true ? false : body.dryRun !== false;
     const query = String(body.query || "");
-    const limit = Math.max(1, Math.min(1000, Number(body.limit || 100) || 100));
+    const db = await readDbFast({ skipInventory: true });
+    const launchBatchLimit = shopifyProductLaunchBatchLimit(readSystemSettingsStore(db?.systemSettings || {}));
+    const limit = Math.max(1, Math.min(launchBatchLimit, Number(body.limit || launchBatchLimit) || launchBatchLimit));
+    const limitedSkus = requestedSkus.slice(0, limit);
     const allowDraftIncomplete = body.allowDraftIncomplete === true;
     const filters = body.filters && Object.keys(body.filters || {}).length
       ? body.filters
       : (allowDraftIncomplete ? { channelStatus: "shopify-missing" } : { channelStatusAll: "shopify-missing|shopify-ready" });
-    const db = await readDbFast({ skipInventory: true });
-    const productTotal = requestedSkus.length || limit;
+    const productTotal = limitedSkus.length || limit;
     const job = createImportJob(db, {
       section: "Products",
       operation: dryRun ? "Shopify product create dry run" : "Shopify product create",
@@ -28998,7 +29009,7 @@ async function handleApi(req, res) {
       phase: "queued",
       workerTask: shouldRunJobsInline() ? "" : "shopify-product-create",
       workerPayload: shouldRunJobsInline() ? {} : {
-        skus: requestedSkus,
+        skus: limitedSkus,
         query,
         filters,
         limit,
@@ -29013,7 +29024,7 @@ async function handleApi(req, res) {
     upsertImportJobStore(job);
     if (shouldRunJobsInline()) {
       setTimeout(() => runShopifyProductCreateWorkerJob(job, {
-        skus: requestedSkus,
+        skus: limitedSkus,
         query,
         filters,
         limit,

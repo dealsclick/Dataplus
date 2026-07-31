@@ -290,6 +290,7 @@ type SystemSettings = {
   jobsRetentionDays?: number
   jobsRetentionAutoCleanupEnabled?: boolean
   sourceCatalogImportBatchLimit?: number
+  shopifyProductLaunchBatchLimit?: number
   trueValueSourceCategoryAsMainCategory?: boolean
   requireAdminConfirmationForDeletes?: boolean
   shopifyDailyInventoryUpdateEnabled?: boolean
@@ -1310,7 +1311,7 @@ function App() {
                 {view === "po-detail" && <PurchaseOrderDetailPage />}
                 {view === "order-detail" && <OrderDetailWorkspace />}
                 {view === "draft-detail" && <DraftQuoteFieldDetailPage />}
-                {view === "catalog" && <CatalogPage channels={state.connections || []} />}
+                {view === "catalog" && <CatalogPage channels={state.connections || []} systemSettings={state.systemSettings || {}} />}
                 {view === "product-detail" && <StandaloneProductPage />}
                 {view === "inventory-detail" && <InventorySkuDetailPage />}
                 {view === "category-detail" && <StandaloneCategoryPage />}
@@ -7126,7 +7127,7 @@ function InventoryWorkspace() {
   </div>
 }
 
-function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSkuCount?: number; channels?: ChannelConnection[] }) {
+function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSettings = {} }: { totalSkuCount?: number; channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
   const [query, setQuery] = useState("")
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [savedViews, setSavedViews] = useState<Array<{ name: string; query: string; filters: Record<string, string>; sort: { key: string; direction: "asc" | "desc" } }>>(() => {
@@ -7305,14 +7306,19 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [] }: { totalSk
     const isFilteredBatch = allFiltered && !requestedSkus
     if (!isFilteredBatch && !skus.length) return
     const count = isFilteredBatch ? total : skus.length
-    const scope = isFilteredBatch ? `up to 1,000 filtered products` : `${numberLabel(count)} selected product${count === 1 ? "" : "s"}`
-    if (apply && !window.confirm(`Create ${scope} in live Shopify? DataPlus will skip discontinued, linked, and not-ready SKUs. Review the dry-run job first.`)) return
+    const launchLimit = Math.max(100, Math.min(25000, Number(systemSettings.shopifyProductLaunchBatchLimit || 1000) || 1000))
+    const queuedCount = Math.min(count, launchLimit)
+    const scope = queuedCount === count
+      ? `${numberLabel(queuedCount)} selected product${queuedCount === 1 ? "" : "s"}`
+      : `${numberLabel(queuedCount)} of ${numberLabel(count)} selected products`
+    const remainder = count - queuedCount
+    if (apply && !window.confirm(`Create ${scope} in live Shopify? DataPlus will skip discontinued, linked, and not-ready SKUs.${remainder > 0 ? ` The remaining ${numberLabel(remainder)} stay selected for a later launch job.` : ""} Review the dry-run job first.`)) return
     try {
       const result = await api<{ job?: ImportJob; message?: string }>("/api/shopify/product-create", {
         method: "POST",
         body: JSON.stringify(isFilteredBatch
-          ? { query, filters, limit: 1000, apply, dryRun: !apply }
-          : { skus, limit: Math.min(1000, skus.length), apply, dryRun: !apply }),
+          ? { query, filters, limit: launchLimit, apply, dryRun: !apply }
+          : { skus, limit: Math.min(launchLimit, skus.length), apply, dryRun: !apply }),
       })
       toast.success(result.message || `Shopify ${apply ? "product creation" : "create dry run"} queued.`)
       if (apply) { setSelectedIds(new Set()); setAllFiltered(false) }
@@ -8401,7 +8407,7 @@ function CatalogTemplatesPage() {
   return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title="Templates" description="Download structured templates for category maintenance and catalog review." /><div className="grid gap-3 sm:grid-cols-2">{templates.map(([title, href, description]) => <Card key={href}><CardHeader><CardTitle className="text-sm">{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader><CardContent><Button variant="outline" size="sm" asChild><a href={href}><FileDown className="size-4" /> Download CSV</a></Button></CardContent></Card>)}</div></div>
 }
 
-function CatalogPage({ channels = [] }: { channels?: ChannelConnection[] }) {
+function CatalogPage({ channels = [], systemSettings = {} }: { channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
   const [tab, setTab] = useState<CatalogWorkspaceTab>(catalogWorkspaceTabFromPath)
   const [workspaceCounts, setWorkspaceCounts] = useState<Record<string, number>>({})
   useEffect(() => {
@@ -8415,7 +8421,7 @@ function CatalogPage({ channels = [] }: { channels?: ChannelConnection[] }) {
     const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", source: "/source-catalog", review: "/import-review", changes: "/sku-changes", categories: "/categories", mappings: "/vendor-category-mappings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
     window.history.replaceState({}, "", paths[selected])
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} />}{tab === "source" && <SourceCatalogPage />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
+  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "source" && <SourceCatalogPage />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
 }
 
 function SourceCatalogPage() {
@@ -9507,6 +9513,10 @@ function SettingsPage({
               <Field label="Source catalog import limit per job">
                 <Input disabled={!editing} type="number" min="1000" max="250000" step="1000" value={String(value("sourceCatalogImportBatchLimit") || 25000)} onChange={(event) => update("sourceCatalogImportBatchLimit", Number(event.target.value || 25000))} />
                 <p className="mt-1 text-xs text-muted-foreground">Maximum source SKUs promoted in one background import. Allowed range: 1,000 to 250,000.</p>
+              </Field>
+              <Field label="Shopify product launch limit per job">
+                <Input disabled={!editing} type="number" min="100" max="25000" step="100" value={String(value("shopifyProductLaunchBatchLimit") || 1000)} onChange={(event) => update("shopifyProductLaunchBatchLimit", Number(event.target.value || 1000))} />
+                <p className="mt-1 text-xs text-muted-foreground">Maximum catalog products queued for creation in Shopify per job. Keep this lower for shorter, easier-to-review launches. Allowed range: 100 to 25,000.</p>
               </Field>
               <Button variant="outline" onClick={() => api("/api/categories/summary-index/rebuild", { method: "POST", body: JSON.stringify({ scope: "both" }) }).then(() => toast.success("Category summary index rebuild queued/completed.")).catch((error) => toast.error(error.message))}>Rebuild category index</Button>
             </CardContent>
