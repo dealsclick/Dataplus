@@ -4464,8 +4464,10 @@ async function readOperationJobsPage(options = {}) {
   const client = getPool();
   if (!client) return { jobs: [], total: 0, page: 1, limit: 10 };
   await initRelationalSchema();
-  const limit = Math.max(1, Math.min(100, Number(options.limit || 10)));
-  const page = Math.max(1, Number(options.page || 1));
+  const requestedLimit = Number(options.limit);
+  const requestedPage = Number(options.page);
+  const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(100, Math.floor(requestedLimit))) : 10;
+  const page = Number.isFinite(requestedPage) ? Math.max(1, Math.floor(requestedPage)) : 1;
   const conditions = [];
   const values = [];
   if (options.status && options.status !== "all") {
@@ -4490,7 +4492,8 @@ async function readOperationJobsPage(options = {}) {
     ${where}
     order by
       case lower(status) when 'running' then 0 when 'queued' then 1 else 2 end,
-      updated_at desc
+      case when lower(status) in ('running', 'queued') then updated_at else coalesce(started_at, created_at, updated_at) end desc,
+      job_id desc
     limit $${values.length - 1} offset $${values.length}
   `, values);
   return { jobs: result.rows.map(operationJobFromRow), total: Number(countResult.rows[0]?.total || 0), page, limit };
