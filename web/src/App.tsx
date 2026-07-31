@@ -159,6 +159,7 @@ type ImportJob = {
   operatorNotes?: string
   notesUpdatedAt?: string
   notesUpdatedBy?: string
+  workerPayload?: Record<string, unknown>
   workerOutput?: Array<{ timestamp?: string; stream?: string; line?: string }>
   artifacts?: Array<{ kind?: string; fileName?: string; filePath?: string; contentType?: string; rowCount?: number; byteSize?: number }>
 }
@@ -765,6 +766,37 @@ function isShopifyInventoryJob(job: ImportJob) {
 
 function jobCategory(job: ImportJob) {
   return job.category || job.section || "Operations"
+}
+
+function jobSettingsHref(job: ImportJob) {
+  const payload = job.workerPayload || {}
+  const vendorId = String(payload.vendorId || payload.vendor_id || "").trim()
+  const text = `${job.operation || ""} ${job.workerTask || ""} ${job.fileName || ""} ${job.category || ""} ${job.section || ""}`.toLowerCase()
+
+  if (vendorId && /feed|ftp|import/.test(text) && !/datawarehouse|datadump/.test(text)) {
+    return `/vendors/${encodeURIComponent(vendorId)}`
+  }
+  if (/datadump|datawarehouse|product dump|source catalog|bson|vendor feed|ftp/.test(text)) {
+    return "/settings?tab=data-sources"
+  }
+  if (/sku.*pair|pair.*audit|sku.*map/.test(text)) {
+    return "/channels?tab=setup#shopify-schedules"
+  }
+  if (/shopify/.test(text) && /inventory/.test(text)) {
+    return "/channels?tab=setup#shopify-schedules"
+  }
+  if (/shopify/.test(text) && /order/.test(text)) {
+    return "/channels?tab=setup#shopify-order-import"
+  }
+  if (/shopify/.test(text) && /price|product|status|taxonomy|publish/.test(text)) {
+    return "/channels?tab=actions"
+  }
+  return "/settings"
+}
+
+function openJobSettings(job: ImportJob) {
+  window.history.pushState({}, "", jobSettingsHref(job))
+  window.dispatchEvent(new PopStateEvent("popstate"))
 }
 
 function FloatingActions({
@@ -1969,6 +2001,7 @@ function JobActionMenu({ job, onStop, onRetry, onOpenFull }: { job: ImportJob; o
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={() => onOpenFull(job)}><Eye className="size-4" /> Open full detail</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => openJobSettings(job)}><Settings className="size-4" /> Open job settings</DropdownMenuItem>
         <DropdownMenuItem onClick={() => onRetry(job)} disabled={!job.workerTask || isActiveJob(job)}>
           <RotateCcw className="size-4" />
           Retry
