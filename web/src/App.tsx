@@ -5581,12 +5581,23 @@ function WarehouseAuditPanel({
     String(warehouse.id || "") === String(resumedAudit?.warehouseId || "") ||
     String(warehouse.name || "").trim().toLowerCase() === String(resumedAudit?.warehouseName || "").trim().toLowerCase(),
   );
+  const selectedCreateWarehouse = auditWarehouses.find((item) =>
+    String(item.id || "") === String(warehouse) ||
+    String(item.name || "").trim().toLowerCase() === String(warehouse).trim().toLowerCase(),
+  );
   const activeAuditBins = (selectedAuditWarehouse?.bins || []).filter((bin) => bin.active !== false && String(bin.code || "").trim());
   useEffect(() => {
     if (activeBin || !activeAuditBins.length) return;
     const preferred = activeAuditBins.find((bin) => bin.isDefault) || activeAuditBins[0];
     setActiveBin(String(preferred.code || ""));
   }, [resumedAudit?.id, activeAuditBins.length]);
+  useEffect(() => {
+    if (!createOnly || warehouse !== "Staten Island" || !auditWarehouses.length) return;
+    const physicalWarehouse = auditWarehouses.find(
+      (item) => String(item.name || "").trim().toLowerCase() === "staten island 2",
+    );
+    if (physicalWarehouse?.id) setWarehouse(String(physicalWarehouse.id));
+  }, [createOnly, auditWarehouses, warehouse]);
   useEffect(() => {
     if (!cameraOpen || !videoRef.current) return;
     const video = videoRef.current;
@@ -5661,7 +5672,12 @@ function WarehouseAuditPanel({
         message?: string;
       }>("/api/warehouse-audits", {
         method: "POST",
-        body: JSON.stringify({ warehouseName: warehouse, user: auditOwner, reviewer: auditReviewer }),
+        body: JSON.stringify({
+          warehouseId: selectedCreateWarehouse?.id || "",
+          warehouseName: selectedCreateWarehouse?.name || warehouse,
+          user: auditOwner,
+          reviewer: auditReviewer,
+        }),
       });
       setActive(result.audit || null);
       toast.success(result.message || "Warehouse audit started.");
@@ -6081,11 +6097,29 @@ function WarehouseAuditPanel({
         </CardHeader>
         <CardContent className="flex flex-wrap items-end gap-3">
           <Field label="Warehouse">
-            <Input
-              value={warehouse}
-              onChange={(event) => setWarehouse(event.target.value)}
-              placeholder="Staten Island"
-            />
+            {auditWarehouses.length ? (
+              <Select
+                value={String(selectedCreateWarehouse?.id || warehouse)}
+                onValueChange={setWarehouse}
+              >
+                <SelectTrigger className="min-w-56">
+                  <SelectValue placeholder="Select warehouse" />
+                </SelectTrigger>
+                <SelectContent>
+                  {auditWarehouses.map((item) => (
+                    <SelectItem key={String(item.id || item.name)} value={String(item.id || item.name || "")}>
+                      {String(item.name || "Warehouse")}{item.code ? ` (${String(item.code)})` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <Input
+                value={warehouse}
+                onChange={(event) => setWarehouse(event.target.value)}
+                placeholder="Staten Island"
+              />
+            )}
           </Field>
           <Field label="Assigned counter">
             <Input
@@ -6492,9 +6526,7 @@ function WarehouseAuditPanel({
                     <TableHead>UPC / SKU</TableHead>
                     <TableHead>Product</TableHead>
                     <TableHead>Bin</TableHead>
-                    <TableHead>Expected</TableHead>
                     <TableHead>Counted</TableHead>
-                    <TableHead>Variance</TableHead>
                     <TableHead>Created SKU</TableHead>
                     <TableHead>Created by</TableHead>
                     <TableHead className="text-right">Review</TableHead>
@@ -6503,7 +6535,11 @@ function WarehouseAuditPanel({
                 <TableBody>
                   {lines.map((line) => (
                     <TableRow key={`${String(line.productId || line.sku)}-${String(line.locationBin || "")}`}>
-                      <TableCell><Badge variant="secondary">Matched</Badge></TableCell>
+                      <TableCell>
+                        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
+                          <CheckCircle2 className="size-3.5" /> Matched
+                        </span>
+                      </TableCell>
                       <TableCell className="font-medium">
                         {line.sku ? (
                           <a
@@ -6520,25 +6556,7 @@ function WarehouseAuditPanel({
                       <TableCell>{String(line.title || "-")}</TableCell>
                       <TableCell>{String(line.locationBin || "-")}</TableCell>
                       <TableCell>
-                        {numberLabel(Number(line.expectedQty || 0))}
-                      </TableCell>
-                      <TableCell>
                         {numberLabel(Number(line.countedQty || 0))}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant={
-                            Number(line.countedQty || 0) ===
-                            Number(line.expectedQty || 0)
-                              ? "outline"
-                              : "secondary"
-                          }
-                        >
-                          {numberLabel(
-                            Number(line.countedQty || 0) -
-                              Number(line.expectedQty || 0),
-                          )}
-                        </Badge>
                       </TableCell>
                       <TableCell>-</TableCell>
                       <TableCell>-</TableCell>
@@ -6549,13 +6567,15 @@ function WarehouseAuditPanel({
                   ))}
                   {unknowns.map((item) => (
                     <TableRow key={`unknown-${String(item.barcode)}-${String(item.locationBin || "")}`}>
-                      <TableCell><Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-900">Unknown</Badge></TableCell>
+                      <TableCell>
+                        <span className="inline-flex items-center gap-1 rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-800 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300">
+                          <X className="size-3.5" /> Not found
+                        </span>
+                      </TableCell>
                       <TableCell className="font-mono font-medium">{String(item.barcode || "-")}</TableCell>
                       <TableCell>{String(item.manualTitle || "Unresolved UPC")}</TableCell>
                       <TableCell>{String(item.locationBin || "-")}</TableCell>
-                      <TableCell>-</TableCell>
                       <TableCell>{numberLabel(Number(item.count || 0))}</TableCell>
-                      <TableCell>-</TableCell>
                       <TableCell>{item.createdProductSku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(item.createdProductSku))}`} target="_blank" rel="noreferrer">{String(item.createdProductSku)}</a> : "-"}</TableCell>
                       <TableCell>{String(item.createdProductBy || "-")}</TableCell>
                       <TableCell className="text-right"><Badge variant={item.createdProductSku ? "secondary" : "outline"}>{item.createdProductSku ? "SKU created" : "Needs details"}</Badge></TableCell>
@@ -6564,7 +6584,7 @@ function WarehouseAuditPanel({
                   {!lines.length && !unknowns.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={10}
+                        colSpan={8}
                         className="h-20 text-center text-muted-foreground"
                       >
                         Scan the first UPC to begin counting.
