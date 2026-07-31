@@ -10441,6 +10441,7 @@ function normalizeImportJob(job = {}) {
   const processedRows = Number(job.processedRows ?? 0) || 0;
   return {
     id: job.id || crypto.randomUUID(),
+    jobNumber: Number(job.jobNumber ?? job.job_number ?? job.raw?.jobNumber ?? 0) || undefined,
     syncRunId: job.syncRunId || '',
     section: job.section || job.source || 'System',
     operation: job.operation || job.type || 'Import',
