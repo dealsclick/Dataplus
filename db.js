@@ -498,6 +498,7 @@ async function initRelationalSchema() {
 
     create table if not exists operations_jobs (
       job_id text primary key,
+      job_number bigint,
       job_type text,
       category text,
       status text not null,
@@ -623,6 +624,10 @@ async function initRelationalSchema() {
     create index if not exists product_quality_rows_discontinued_idx on product_quality_rows (to_be_discontinued);
     create index if not exists product_quality_rows_issue_types_idx on product_quality_rows using gin (issue_types);
     `);
+    await client.query("create sequence if not exists operations_job_number_seq start with 1000");
+    await client.query("alter table operations_jobs add column if not exists job_number bigint");
+    await client.query("update operations_jobs set job_number = nextval('operations_job_number_seq') where job_number is null");
+    await client.query("create unique index if not exists operations_jobs_job_number_idx on operations_jobs (job_number) where job_number is not null");
     await client.query("alter table order_records add column if not exists channel_source text");
     await client.query("create index if not exists order_records_channel_source_idx on order_records (lower(channel_source), created_at desc)");
     // Broad workspace searches use trigram indexes when the extension is available.
@@ -4244,6 +4249,7 @@ function jobRecordFromState(job = {}) {
   const status = nullableString(job.status) || "queued";
   return {
     job_id: id,
+    job_number: nullableNumber(job.jobNumber ?? job.job_number),
     job_type: nullableString(job.type || job.jobType),
     category: nullableString(job.category || job.section),
     status,
@@ -4351,16 +4357,20 @@ async function upsertOperationJob(job = {}) {
   await initRelationalSchema();
   const record = jobRecordFromState(job);
   if (!record) return false;
+  if (!record.job_number) {
+    const existing = await client.query("select job_number from operations_jobs where job_id = $1", [record.job_id]);
+    record.job_number = existing.rows[0]?.job_number || Number((await client.query("select nextval('operations_job_number_seq') as value")).rows[0]?.value || 0);
+  }
   await client.query(`
     insert into operations_jobs (
-      job_id, job_type, category, status, name, message, total_rows, processed_rows,
+      job_id, job_number, job_type, category, status, name, message, total_rows, processed_rows,
       changed_rows, missing_rows, progress, eta_seconds, source, output_path,
       error_path, created_at, started_at, ended_at, raw, updated_at
     )
     values (
-      $1, $2, $3, $4, $5, $6, $7::int, $8::int, $9::int, $10::int, $11::numeric,
-      $12::int, $13, $14, $15, coalesce($16::timestamptz, now()),
-      $17::timestamptz, $18::timestamptz, $19::jsonb, now()
+      $1, $2::bigint, $3, $4, $5, $6, $7, $8::int, $9::int, $10::int, $11::int, $12::numeric,
+      $13::int, $14, $15, $16, coalesce($17::timestamptz, now()),
+      $18::timestamptz, $19::timestamptz, $20::jsonb, now()
     )
     on conflict (job_id) do update set
       job_type = coalesce(excluded.job_type, operations_jobs.job_type),
@@ -4382,8 +4392,8 @@ async function upsertOperationJob(job = {}) {
       raw = operations_jobs.raw || excluded.raw,
       updated_at = now()
   `, [
-    record.job_id, record.job_type, record.category, record.status, record.name,
-    record.message, record.total_rows, record.processed_rows, record.changed_rows,
+    record.job_id, record.job_number, record.job_type, record.category, record.status,
+    record.name, record.message, record.total_rows, record.processed_rows, record.changed_rows,
     record.missing_rows, record.progress, record.eta_seconds, record.source,
     record.output_path, record.error_path, record.created_at, record.started_at,
     record.ended_at, JSON.stringify(record.raw)
@@ -4395,6 +4405,7 @@ function operationJobFromRow(row = {}) {
   return {
     ...(row.raw || {}),
     id: row.job_id,
+    jobNumber: Number(row.job_number || row.raw?.jobNumber || 0) || undefined,
     type: row.job_type || row.raw?.type || "",
     category: row.category || row.raw?.category || "",
     status: row.status || row.raw?.status || "queued",
@@ -4476,14 +4487,14 @@ async function readOperationJobsPage(options = {}) {
   }
   if (String(options.query || "").trim()) {
     values.push(`%${String(options.query).trim()}%`);
-    conditions.push(`(job_id ilike $${values.length} or name ilike $${values.length} or message ilike $${values.length} or source ilike $${values.length})`);
+    conditions.push(`(job_id ilike $${values.length} or cast(job_number as text) ilike $${values.length} or name ilike $${values.length} or message ilike $${values.length} or source ilike $${values.length})`);
   }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
   const countResult = await client.query(`select count(*)::int as total from operations_jobs ${where}`, values);
   values.push(limit, (page - 1) * limit);
   const result = await client.query(`
     select
-      job_id, job_type, category, status, name, message, total_rows, processed_rows,
+      job_id, job_number, job_type, category, status, name, message, total_rows, processed_rows,
       changed_rows, missing_rows, progress, eta_seconds, source, output_path,
       error_path, created_at, started_at, ended_at, updated_at,
       raw - 'errors' - 'details' - 'workerPayload' - 'artifacts' as raw,
@@ -4504,7 +4515,7 @@ async function readOperationJob(jobId = "") {
   if (!client || !jobId) return null;
   await initRelationalSchema();
   const result = await client.query(`
-    select job_id, job_type, category, status, name, message, total_rows, processed_rows,
+    select job_id, job_number, job_type, category, status, name, message, total_rows, processed_rows,
       changed_rows, missing_rows, progress, eta_seconds, source, output_path,
       error_path, created_at, started_at, ended_at, updated_at, raw
     from operations_jobs
@@ -4521,7 +4532,7 @@ async function readOperationJobs(limit = 250) {
   await initRelationalSchema();
   const result = await client.query(`
     select
-      job_id, job_type, category, status, name, message, total_rows, processed_rows,
+      job_id, job_number, job_type, category, status, name, message, total_rows, processed_rows,
       changed_rows, missing_rows, progress, eta_seconds, source, output_path,
       error_path, created_at, started_at, ended_at, updated_at, raw
     from operations_jobs

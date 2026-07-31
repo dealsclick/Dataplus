@@ -124,6 +124,7 @@ type AppView = "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "op
 
 type ImportJob = {
   id: string
+  jobNumber?: number
   section?: string
   category?: string
   operation?: string
@@ -1892,16 +1893,16 @@ function JobsPage({
                         <TableCell className="max-w-[360px]">
                           <p className="truncate font-medium">{job.operation || "Job"}</p>
                           <div className="flex items-center gap-1">
-                            <span className="truncate font-mono text-[11px] text-muted-foreground">Job {job.id}</span>
+                            <span className="truncate font-mono text-[11px] text-muted-foreground">{jobReference(job)}</span>
                             <Button
                               variant="ghost"
                               size="icon"
                               className="size-5 shrink-0"
-                              title="Copy job ID"
+                              title="Copy internal job ID"
                               onClick={(event) => {
                                 event.stopPropagation()
                                 void navigator.clipboard.writeText(job.id).then(
-                                  () => toast.success("Job ID copied."),
+                                  () => toast.success("Internal job ID copied."),
                                   () => toast.error("Unable to copy the job ID."),
                                 )
                               }}
@@ -2003,12 +2004,16 @@ function JobDetailPage({ job, onBack, onRetry, onStop, onUpdate }: { job?: Impor
       <PageHeader
         eyebrow="Operations / Job"
         title={job?.operation || "Job detail"}
-        description={job ? `Job ID ${job.id}` : "Loading job details..."}
+        description={job ? `${jobReference(job)} · Internal ID ${job.id}` : "Loading job details..."}
         action={<Button variant="outline" onClick={onBack}>Back to Jobs</Button>}
       />
       <JobDetail job={job} onRetry={onRetry} onStop={onStop} onUpdate={onUpdate} fullPage />
     </div>
   )
+}
+
+function jobReference(job: ImportJob) {
+  return job.jobNumber ? `JOB-${job.jobNumber}` : `Job ${job.id.slice(0, 8)}`
 }
 
 function JobArtifactDownloads({ job }: { job: ImportJob }) {
@@ -2059,14 +2064,14 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
           <div>
             <CardTitle>{job.operation || "Job detail"}</CardTitle>
             <div className="flex items-center gap-1">
-              <CardDescription className="break-all">Job ID: {job.id}</CardDescription>
+              <CardDescription>{jobReference(job)}</CardDescription>
               <Button
                 variant="ghost"
                 size="icon"
                 className="size-6 shrink-0"
-                title="Copy job ID"
+                title="Copy internal job ID"
                 onClick={() => void navigator.clipboard.writeText(job.id).then(
-                  () => toast.success("Job ID copied."),
+                  () => toast.success("Internal job ID copied."),
                   () => toast.error("Unable to copy the job ID."),
                 )}
               >
@@ -9188,7 +9193,7 @@ function DavidConversation({
       const reply = result.message || `${proposal.sku || "SKU"} is queued for Shopify launch.`
       setMessages((current) => appendDavidExchange(current, `Approve Shopify launch for ${proposal.sku}.`, reply))
       setProposal(null)
-      toast.success(result.job?.id ? `Shopify launch job ${result.job.id.slice(0, 8)} queued.` : reply)
+      toast.success(result.job?.id ? `Shopify launch ${jobReference(result.job)} queued.` : reply)
     } catch (requestError) {
       const reply = requestError instanceof Error ? requestError.message : "Unable to queue the Shopify launch."
       setMessages((current) => appendDavidExchange(current, `Approve Shopify launch for ${proposal.sku}.`, reply))
