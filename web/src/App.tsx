@@ -5502,6 +5502,8 @@ function WarehouseAuditPanel({
   > | null>(null);
   const [manualPhotoUrls, setManualPhotoUrls] = useState<string[]>([]);
   const [photoCameraOpen, setPhotoCameraOpen] = useState(false);
+  const [photoCameraState, setPhotoCameraState] = useState<"opening" | "ready" | "permission" | "error">("opening");
+  const [photoCameraAttempt, setPhotoCameraAttempt] = useState(0);
   const [photoAnalysisBusy, setPhotoAnalysisBusy] = useState(false);
   const [upcResearchBusy, setUpcResearchBusy] = useState(false);
   const [upcResearch, setUpcResearch] = useState<Record<
@@ -5667,6 +5669,7 @@ function WarehouseAuditPanel({
     };
   }, [cameraOpen, resumedAudit?.id]);
   useEffect(() => {
+    if (!photoCameraOpen) return;
     let stream: MediaStream | null = null;
     let canceled = false;
     let retryTimer: number | undefined;
@@ -5680,8 +5683,13 @@ function WarehouseAuditPanel({
         return;
       }
       try {
+        setPhotoCameraState("opening");
         const next = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" } },
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
           audio: false,
         });
         if (canceled) {
@@ -5691,10 +5699,11 @@ function WarehouseAuditPanel({
         stream = next;
         video.srcObject = next;
         await video.play();
-      } catch {
+        setPhotoCameraState("ready");
+      } catch (error) {
         if (!canceled) {
-          toast.error("Camera access was not available for the product photo.");
-          setPhotoCameraOpen(false);
+          const name = error instanceof DOMException ? error.name : "";
+          setPhotoCameraState(name === "NotAllowedError" || name === "SecurityError" ? "permission" : "error");
         }
       }
     };
@@ -5704,7 +5713,7 @@ function WarehouseAuditPanel({
       if (retryTimer) window.clearTimeout(retryTimer);
       stream?.getTracks().forEach((track) => track.stop());
     };
-  }, [photoCameraOpen]);
+  }, [photoCameraOpen, photoCameraAttempt]);
   const create = async () => {
     setBusy(true);
     try {
@@ -6486,7 +6495,11 @@ function WarehouseAuditPanel({
                         type="button"
                         size="sm"
                         variant="outline"
-                        onClick={() => setPhotoCameraOpen(true)}
+                        onClick={() => {
+                          setPhotoCameraState("opening");
+                          setPhotoCameraAttempt((attempt) => attempt + 1);
+                          setPhotoCameraOpen(true);
+                        }}
                       >
                         Take photo
                       </Button>
@@ -6577,14 +6590,17 @@ function WarehouseAuditPanel({
                 </DialogHeader>
                 <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-0">
                   <div className="grid gap-3">
-                    <video ref={photoVideoRef} className="max-h-[58dvh] w-full rounded-md bg-black object-contain" autoPlay muted playsInline />
+                    <div className="relative overflow-hidden rounded-md bg-black">
+                      <video ref={photoVideoRef} className="max-h-[58dvh] w-full bg-black object-contain" autoPlay muted playsInline />
+                      {photoCameraState !== "ready" && <div className="absolute inset-0 grid place-items-center bg-black/80 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{photoCameraState === "opening" ? "Starting camera..." : photoCameraState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{photoCameraState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{photoCameraState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setPhotoCameraState("opening"); setPhotoCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
+                    </div>
                     <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Point the camera at the item, barcode, or package details. Tap <span className="font-medium text-foreground">Capture photo</span> after each shot; the camera stays open for the next one.</div>
                     {manualPhotoUrls.length > 0 && <div className="flex gap-2 overflow-x-auto pb-1">{manualPhotoUrls.map((photo, index) => <img key={`${photo.slice(-24)}-${index}`} src={photo} alt={`Captured product photo ${index + 1}`} className="size-16 shrink-0 rounded-md border object-cover" />)}</div>}
                   </div>
                 </div>
                 <DialogFooter className="shrink-0 px-4 pb-[calc(max(1rem,env(safe-area-inset-bottom))+0.3125rem)] sm:px-0 sm:pb-0">
                   <Button variant="outline" onClick={() => setPhotoCameraOpen(false)}>Cancel</Button>
-                  <Button onClick={captureManualPhoto}>Capture photo</Button>
+                  <Button disabled={photoCameraState !== "ready"} onClick={captureManualPhoto}>Capture photo</Button>
                   <Button disabled={!manualPhotoUrls.length} onClick={() => setPhotoCameraOpen(false)}>Use {manualPhotoUrls.length || ""} photo{manualPhotoUrls.length === 1 ? "" : "s"}</Button>
                 </DialogFooter>
               </DialogContent>
