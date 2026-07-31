@@ -800,7 +800,7 @@ function openJobSettings(job: ImportJob) {
   window.dispatchEvent(new PopStateEvent("popstate"))
 }
 
-function FloatingActions({
+export function FloatingActions({
   view,
   shopify,
   onNavigate,
@@ -1398,16 +1398,6 @@ function App() {
             )}
           </div>
         </SidebarInset>
-        <FloatingActions
-          view={view}
-          shopify={shopify}
-          onNavigate={navigateTo}
-          onRefresh={() => refreshData()}
-          onCheckShopify={checkShopifyConnection}
-          onRefreshShopifyToken={refreshShopifyToken}
-          onRunShopifyAction={runShopifyAction}
-          onCleanupJobs={() => mutateJob("/api/import-jobs/cleanup", "Jobs cleaned.")}
-        />
         <DavidChatDrawer
           open={davidOpen}
           onOpenChange={setDavidOpen}
