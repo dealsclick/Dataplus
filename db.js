@@ -4267,6 +4267,31 @@ function jobRecordFromState(job = {}) {
 
 function artifactRecordFromState(job = {}, kind = "original") {
   const jobId = nullableString(job.id || job.jobId);
+  const customArtifact = !["original", "error", "errors", "manifest"].includes(kind)
+    ? (Array.isArray(job.artifacts) ? job.artifacts.find((artifact) => String(artifact.kind || artifact.artifactKind || "") === String(kind)) : null)
+    : null;
+  if (customArtifact) {
+    const filePath = nullableString(customArtifact.filePath);
+    if (!jobId || !filePath) return null;
+    const fileName = nullableString(customArtifact.fileName || path.basename(filePath));
+    let byteSize = nullableNumber(customArtifact.byteSize);
+    try {
+      if (fs.existsSync(filePath)) byteSize = fs.statSync(filePath).size;
+    } catch {
+      byteSize = null;
+    }
+    return {
+      artifact_id: `${jobId}:${String(kind).replace(/[^a-z0-9_-]+/gi, "-")}:${crypto.createHash("sha1").update(filePath).digest("hex").slice(0, 16)}`,
+      job_id: jobId,
+      artifact_kind: String(kind),
+      file_name: fileName || null,
+      file_path: filePath,
+      content_type: nullableString(customArtifact.contentType) || "text/csv",
+      row_count: nullableNumber(customArtifact.rowCount ?? customArtifact.rows),
+      byte_size: byteSize,
+      raw: customArtifact
+    };
+  }
   const isError = kind === "error" || kind === "errors";
   const isManifest = kind === "manifest";
   const filePath = nullableString(isManifest ? job.manifestFilePath : isError ? (job.errorFilePath || job.errorPath) : (job.originalFilePath || job.filePath || job.outputPath));

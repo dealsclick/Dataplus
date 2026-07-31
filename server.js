@@ -13294,7 +13294,24 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
   fs.mkdirSync(jobDir, { recursive: true });
   const reportPath = path.join(jobDir, safeImportFileName(dryRun ? "shopify-product-create-dry-run.json" : "shopify-product-create-report.json", "shopify-product-create-report.json"));
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
-  if (skipped.length) fs.writeFileSync(path.join(jobDir, "shopify-product-create-skipped.csv"), csvRecordsToText(skipped));
+  job.artifacts = Array.isArray(job.artifacts) ? job.artifacts : [];
+  const addArtifact = (kind, fileName, rows) => {
+    if (!rows.length) return;
+    const filePath = path.join(jobDir, fileName);
+    fs.writeFileSync(filePath, csvRecordsToText(rows));
+    job.artifacts.push({ kind, fileName, filePath, contentType: "text/csv; charset=utf-8", rowCount: rows.length, byteSize: fs.statSync(filePath).size });
+  };
+  const createdRows = report.created.flatMap((product) => (product.variants || []).map((variant) => ({
+    sku: variant.sku || product.sku || "",
+    parent_sku: product.sku || "",
+    shopify_product_id: product.productId || "",
+    shopify_variant_id: variant.variantId || "",
+    shopify_handle: product.handle || "",
+    live_price: variant.price || ""
+  })));
+  addArtifact("shopify-created-skus", "shopify-product-create-created.csv", createdRows);
+  addArtifact("shopify-skipped-skus", "shopify-product-create-skipped.csv", skipped);
+  addArtifact("shopify-api-errors", "shopify-product-create-errors.csv", report.userErrors);
   job.originalFilePath = reportPath;
   job.originalFileName = path.basename(reportPath);
   job.fileName = path.basename(reportPath);
@@ -13319,6 +13336,7 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
   });
   await postgres.upsertOperationJob(job);
   await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+  await Promise.all(job.artifacts.map((artifact) => postgres.upsertOperationArtifact(job, artifact.kind).catch(() => {})));
   publicStateJsonCache = null;
   return job;
 }

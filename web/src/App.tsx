@@ -159,6 +159,7 @@ type ImportJob = {
   notesUpdatedAt?: string
   notesUpdatedBy?: string
   workerOutput?: Array<{ timestamp?: string; stream?: string; line?: string }>
+  artifacts?: Array<{ kind?: string; fileName?: string; filePath?: string; contentType?: string; rowCount?: number; byteSize?: number }>
 }
 
 type WorkerStatus = {
@@ -1952,6 +1953,13 @@ function JobActionMenu({ job, onStop, onRetry }: { job: ImportJob; onStop: (job:
           <FileDown className="size-4" />
           Errors CSV
         </DropdownMenuItem>
+        {(job.artifacts || []).some((artifact) => !["original", "errors", "manifest"].includes(String(artifact.kind || ""))) && <>
+          <DropdownMenuSeparator />
+          {(job.artifacts || []).map((artifact, index) => ({ artifact, index })).filter(({ artifact }) => !["original", "errors", "manifest"].includes(String(artifact.kind || ""))).map(({ artifact, index }) => <DropdownMenuItem key={`${artifact.kind}-${artifact.fileName}-${index}`} onClick={() => window.open(`/api/import-jobs/${encodeURIComponent(job.id)}/artifacts/${index}`, "_blank")}>
+            <FileDown className="size-4" />
+            {artifact.kind === "shopify-created-skus" ? "Created Shopify SKUs" : artifact.kind === "shopify-skipped-skus" ? "Skipped Shopify SKUs" : artifact.kind === "shopify-api-errors" ? "Shopify API errors" : artifact.fileName || "Job artifact"}
+          </DropdownMenuItem>)}
+        </>}
       </DropdownMenuContent>
     </DropdownMenu>
   )
