@@ -120,7 +120,7 @@ import { Field as FormField, FieldDescription, FieldGroup, FieldLabel, FieldLege
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 
-type AppView = "overview" | "jobs" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "ai-chat" | "settings"
+type AppView = "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "ai-chat" | "settings"
 
 type ImportJob = {
   id: string
@@ -637,6 +637,7 @@ const operationsSidebarItems: Array<{ label: string; path: string; icon: React.C
 const viewPaths: Record<AppView, string> = {
   overview: "/",
   jobs: "/jobs",
+  "job-detail": "/jobs",
   channels: "/channels",
   catalog: "/products",
   operations: "/orders",
@@ -656,6 +657,7 @@ const viewPaths: Record<AppView, string> = {
 
 function viewFromPath(pathname = "/"): AppView {
   const path = pathname.replace(/\/+$/, "") || "/"
+  if (/^\/jobs\/[^/]+$/.test(path)) return "job-detail"
   if (path.startsWith("/jobs")) return "jobs"
   if (path.startsWith("/channels")) return "channels"
   if (path.startsWith("/orders/")) return "order-detail"
@@ -674,6 +676,11 @@ function viewFromPath(pathname = "/"): AppView {
   if (path.startsWith("/ai")) return "ai-chat"
   if (path.startsWith("/settings")) return "settings"
   return "overview"
+}
+
+function jobIdFromPath(pathname = window.location.pathname) {
+  const match = pathname.replace(/\/+$/, "").match(/^\/jobs\/([^/]+)$/)
+  return match ? decodeURIComponent(match[1]) : ""
 }
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -959,6 +966,12 @@ function App() {
     }
   }
 
+  async function openJobDetail(job: ImportJob) {
+    await loadJobDetail(job)
+    window.history.pushState({}, "", `/jobs/${encodeURIComponent(job.id)}`)
+    setView("job-detail")
+  }
+
   async function refreshData({ quiet = false } = {}) {
     if (!quiet) setLoading(true)
     try {
@@ -1123,13 +1136,20 @@ function App() {
     return () => window.removeEventListener("popstate", onPopState)
   }, [])
 
+  useEffect(() => {
+    if (view !== "job-detail") return
+    const jobId = jobIdFromPath()
+    if (!jobId) return
+    void loadJobDetail({ id: jobId })
+  }, [view])
+
   const shopify = useMemo(
     () => (state.connections || []).find((connection) => connection.name?.toLowerCase() === "shopify"),
     [state.connections],
   )
   const attentionJobs = jobs.filter(isAttentionJob)
   const shopifyInventoryJobs = jobs.filter(isShopifyInventoryJob)
-  const selectedJob = jobs.find((job) => job.id === selectedJobId) || attentionJobs[0] || jobs[0]
+  const selectedJob = jobs.find((job) => job.id === selectedJobId) || (selectedJobId ? undefined : attentionJobs[0] || jobs[0])
 
   return (
     <TooltipProvider>
@@ -1284,11 +1304,21 @@ function App() {
                     pageSize={jobPageMeta.limit}
                     selectedJob={selectedJob}
                     onSelectJob={loadJobDetail}
+                    onOpenJobDetail={openJobDetail}
                     onLoadJobs={(next) => loadJobs(next)}
                     onStopJob={(job) => mutateJob(`/api/import-jobs/${encodeURIComponent(job.id)}/stop`, "Job stopped.")}
                     onRetryJob={(job) => mutateJob(`/api/import-jobs/${encodeURIComponent(job.id)}/retry`, "Retry queued.")}
                     onCleanup={() => mutateJob("/api/import-jobs/cleanup", "Jobs cleaned.")}
                     onRefresh={() => refreshData()}
+                  />
+                )}
+                {view === "job-detail" && (
+                  <JobDetailPage
+                    job={selectedJob}
+                    onBack={() => navigateTo("jobs")}
+                    onRetry={(job) => mutateJob(`/api/import-jobs/${encodeURIComponent(job.id)}/retry`, "Retry queued.")}
+                    onStop={(job) => mutateJob(`/api/import-jobs/${encodeURIComponent(job.id)}/stop`, "Job stopped.")}
+                    onUpdate={loadJobDetail}
                   />
                 )}
                 {view === "channels" && (
@@ -1667,6 +1697,7 @@ function JobsPage({
   pageSize,
   selectedJob,
   onSelectJob,
+  onOpenJobDetail,
   onLoadJobs,
   onStopJob,
   onRetryJob,
@@ -1684,6 +1715,7 @@ function JobsPage({
   pageSize: number
   selectedJob?: ImportJob
   onSelectJob: (job: ImportJob) => void
+  onOpenJobDetail: (job: ImportJob) => void
   onLoadJobs: (next: { page?: number; limit?: number; status?: string; query?: string }) => void
   onStopJob: (job: ImportJob) => void
   onRetryJob: (job: ImportJob) => void
@@ -1890,7 +1922,7 @@ function JobsPage({
                         <TableCell className="text-sm text-muted-foreground">{dateLabel(job.startedAt || job.createdAt)}</TableCell>
                         <TableCell className="max-w-40 truncate text-sm text-muted-foreground">{job.workerId || job.workerTask || "n/a"}</TableCell>
                         <TableCell>
-                          <JobActionMenu job={job} onStop={onStopJob} onRetry={onRetryJob} />
+                          <JobActionMenu job={job} onStop={onStopJob} onRetry={onRetryJob} onOpenFull={onOpenJobDetail} />
                         </TableCell>
                       </TableRow>
                     ))}
@@ -1926,7 +1958,7 @@ function JobsPage({
   )
 }
 
-function JobActionMenu({ job, onStop, onRetry }: { job: ImportJob; onStop: (job: ImportJob) => void; onRetry: (job: ImportJob) => void }) {
+function JobActionMenu({ job, onStop, onRetry, onOpenFull }: { job: ImportJob; onStop: (job: ImportJob) => void; onRetry: (job: ImportJob) => void; onOpenFull: (job: ImportJob) => void }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -1935,7 +1967,7 @@ function JobActionMenu({ job, onStop, onRetry }: { job: ImportJob; onStop: (job:
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={() => window.open(`/legacy/jobs?job=${encodeURIComponent(job.id)}`, "_blank")}>Open full detail</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onOpenFull(job)}><Eye className="size-4" /> Open full detail</DropdownMenuItem>
         <DropdownMenuItem onClick={() => onRetry(job)} disabled={!job.workerTask || isActiveJob(job)}>
           <RotateCcw className="size-4" />
           Retry
@@ -1965,7 +1997,37 @@ function JobActionMenu({ job, onStop, onRetry }: { job: ImportJob; onStop: (job:
   )
 }
 
-function JobDetail({ job, onRetry, onStop, onUpdate }: { job?: ImportJob; onRetry: (job: ImportJob) => void; onStop: (job: ImportJob) => void; onUpdate: (job: ImportJob) => void }) {
+function JobDetailPage({ job, onBack, onRetry, onStop, onUpdate }: { job?: ImportJob; onBack: () => void; onRetry: (job: ImportJob) => void; onStop: (job: ImportJob) => void; onUpdate: (job: ImportJob) => void }) {
+  return (
+    <div className="mx-auto grid max-w-7xl gap-5">
+      <PageHeader
+        eyebrow="Operations / Job"
+        title={job?.operation || "Job detail"}
+        description={job ? `Job ID ${job.id}` : "Loading job details..."}
+        action={<Button variant="outline" onClick={onBack}>Back to Jobs</Button>}
+      />
+      <JobDetail job={job} onRetry={onRetry} onStop={onStop} onUpdate={onUpdate} fullPage />
+    </div>
+  )
+}
+
+function JobArtifactDownloads({ job }: { job: ImportJob }) {
+  const artifacts = job.artifacts || []
+  const customArtifacts = artifacts.map((artifact, index) => ({ artifact, index })).filter(({ artifact }) => !["original", "errors", "manifest"].includes(String(artifact.kind || "")))
+  const download = (path: string) => window.open(path, "_blank", "noreferrer")
+  return (
+    <div className="rounded-md border bg-muted/20 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Files and results</p><p className="text-xs text-muted-foreground">Download the source, error report, and outcome CSVs generated by this run.</p></div><Badge variant="outline">{artifacts.length + 2} available</Badge></div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        <Button size="sm" variant="outline" className="justify-start" onClick={() => download(`/api/import-jobs/${encodeURIComponent(job.id)}/original?inline=1`)}><FileDown className="size-4" /> Original input</Button>
+        <Button size="sm" variant="outline" className="justify-start" onClick={() => download(`/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv?inline=1`)}><FileWarning className="size-4" /> Errors CSV</Button>
+        {customArtifacts.map(({ artifact, index }) => <Button key={`${artifact.kind}-${artifact.fileName}-${index}`} size="sm" variant="outline" className="justify-start" onClick={() => download(`/api/import-jobs/${encodeURIComponent(job.id)}/artifacts/${index}`)}><FileDown className="size-4" /> <span className="truncate">{artifact.kind === "shopify-created-skus" ? "Created Shopify SKUs" : artifact.kind === "shopify-skipped-skus" ? "Skipped Shopify SKUs" : artifact.kind === "shopify-api-errors" ? "Shopify API errors" : artifact.fileName || "Job artifact"}{artifact.rowCount ? ` (${numberLabel(artifact.rowCount)})` : ""}</span></Button>)}
+      </div>
+    </div>
+  )
+}
+
+function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?: ImportJob; onRetry: (job: ImportJob) => void; onStop: (job: ImportJob) => void; onUpdate: (job: ImportJob) => void; fullPage?: boolean }) {
   const [notes, setNotes] = useState("")
   const [savingNotes, setSavingNotes] = useState(false)
   useEffect(() => { setNotes(job?.operatorNotes || "") }, [job?.id, job?.operatorNotes])
@@ -1991,7 +2053,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate }: { job?: ImportJob; onRetr
   }
 
   return (
-    <Card className="xl:sticky xl:top-20">
+    <Card className={fullPage ? "" : "xl:sticky xl:top-20"}>
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -2023,9 +2085,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate }: { job?: ImportJob; onRetr
           <Button size="sm" variant="outline" onClick={() => onStop(job)} disabled={!isActiveJob(job)}>
             <Square className="size-4" /> Stop
           </Button>
-          <Button size="sm" variant="outline" asChild>
-            <a href={`/legacy/jobs?job=${encodeURIComponent(job.id)}`} target="_blank" rel="noreferrer">Full detail</a>
-          </Button>
+          {!fullPage && <Button size="sm" variant="outline" onClick={() => { window.history.pushState({}, "", `/jobs/${encodeURIComponent(job.id)}`); window.dispatchEvent(new PopStateEvent("popstate")) }}><Eye className="size-4" /> Full detail</Button>}
         </div>
         <Progress value={jobProgress(job)} />
         <div className="grid grid-cols-2 gap-2">
@@ -2055,6 +2115,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate }: { job?: ImportJob; onRetr
             <p className="mt-1 line-clamp-6 text-muted-foreground">{job.details}</p>
           </div>
         )}
+        <JobArtifactDownloads job={job} />
         <div className="overflow-hidden rounded-md border bg-zinc-950 text-zinc-100">
           <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
             <p className="text-xs font-medium">Worker output</p>
