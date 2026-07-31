@@ -6591,7 +6591,7 @@ function WarehouseAuditPanel({
                     <p className="self-center text-xs text-muted-foreground">{manualPhotoUrls.length} photo{manualPhotoUrls.length === 1 ? "" : "s"} will be saved with this SKU.</p>
                   </div>
                 )}
-                <div className="flex justify-end gap-2">
+                <div className="sticky bottom-0 z-10 -mx-3 flex flex-wrap justify-end gap-2 border-t bg-background/95 px-3 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-3 backdrop-blur sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:p-0 sm:backdrop-blur-none">
                   <Button
                     size="sm"
                     variant="outline"
@@ -6630,10 +6630,10 @@ function WarehouseAuditPanel({
                     {manualPhotoUrls.length > 0 && <div className="flex gap-2 overflow-x-auto pb-1">{manualPhotoUrls.map((photo, index) => <img key={`${photo.slice(-24)}-${index}`} src={photo} alt={`Captured product photo ${index + 1}`} className="size-16 shrink-0 rounded-md border object-cover" />)}</div>}
                   </div>
                 </div>
-                <DialogFooter className="shrink-0 px-4 pb-[calc(max(1rem,env(safe-area-inset-bottom))+0.3125rem)] sm:px-0 sm:pb-0">
+                <DialogFooter className="grid shrink-0 grid-cols-2 gap-2 border-t bg-background px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-3 sm:flex sm:px-0 sm:pb-0 sm:pt-4">
                   <Button variant="outline" onClick={() => setPhotoCameraOpen(false)}>Cancel</Button>
                   <Button disabled={photoCameraState !== "ready"} onClick={captureManualPhoto}>Capture photo</Button>
-                  <Button disabled={!manualPhotoUrls.length} onClick={() => setPhotoCameraOpen(false)}>Use {manualPhotoUrls.length || ""} photo{manualPhotoUrls.length === 1 ? "" : "s"}</Button>
+                  <Button className="col-span-2 sm:col-auto" disabled={!manualPhotoUrls.length} onClick={() => setPhotoCameraOpen(false)}>Use {manualPhotoUrls.length || ""} photo{manualPhotoUrls.length === 1 ? "" : "s"}</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
