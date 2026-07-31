@@ -5667,24 +5667,43 @@ function WarehouseAuditPanel({
     };
   }, [cameraOpen, resumedAudit?.id]);
   useEffect(() => {
-    if (!photoCameraOpen || !photoVideoRef.current) return;
-    const video = photoVideoRef.current;
     let stream: MediaStream | null = null;
-    void navigator.mediaDevices
-      .getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
-        audio: false,
-      })
-      .then(async (next) => {
+    let canceled = false;
+    let retryTimer: number | undefined;
+    const start = async (attempt = 0) => {
+      if (!photoCameraOpen || canceled) return;
+      const video = photoVideoRef.current;
+      // Dialog content is portal-mounted. Safari can run this effect a frame
+      // before the video exists, so wait briefly instead of abandoning capture.
+      if (!video) {
+        if (attempt < 8) retryTimer = window.setTimeout(() => void start(attempt + 1), 40);
+        return;
+      }
+      try {
+        const next = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+        if (canceled) {
+          next.getTracks().forEach((track) => track.stop());
+          return;
+        }
         stream = next;
         video.srcObject = next;
         await video.play();
-      })
-      .catch(() => {
-        toast.error("Camera access was not available for the product photo.");
-        setPhotoCameraOpen(false);
-      });
-    return () => stream?.getTracks().forEach((track) => track.stop());
+      } catch {
+        if (!canceled) {
+          toast.error("Camera access was not available for the product photo.");
+          setPhotoCameraOpen(false);
+        }
+      }
+    };
+    void start();
+    return () => {
+      canceled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      stream?.getTracks().forEach((track) => track.stop());
+    };
   }, [photoCameraOpen]);
   const create = async () => {
     setBusy(true);
@@ -6274,7 +6293,7 @@ function WarehouseAuditPanel({
                   {!lastScan && <div className="absolute inset-x-4 bottom-5 rounded-md bg-black/70 px-3 py-2 text-center text-sm font-medium text-white">{cameraLookupBusy ? "Looking up barcode..." : cameraMessage}</div>}
                   {lastScan && <div className={`absolute inset-x-4 bottom-5 rounded-xl border p-4 shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-red-300 bg-red-50 text-red-950"}`}><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-emerald-600" /> : <X className="mt-0.5 size-6 shrink-0 text-red-600" />}<div><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Not found in catalog"}</p><p className="mt-1 font-mono text-sm">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 text-sm">{lastScan.title}</p>}{!lastScan.matched && <p className="mt-1 text-sm">Choose Next to add this as an unresolved UPC and create the SKU from the audit workspace.</p>}</div></div></div>}
                 </div>
-                <DialogFooter className="grid shrink-0 grid-cols-3 gap-2 border-t border-white/15 bg-black px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:flex sm:justify-between">
+                <DialogFooter className="grid shrink-0 grid-cols-3 gap-2 border-t border-white/15 bg-black px-4 pb-[calc(max(1rem,env(safe-area-inset-bottom))+0.3125rem)] pt-3 sm:flex sm:justify-between">
                   <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={closeCameraScanner}>Back</Button>
                   <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" disabled={!lastScan || cameraLookupBusy} onClick={resetCameraScan}>Cancel scan</Button>
                   <Button className="bg-emerald-600 text-white hover:bg-emerald-700" disabled={!lastScan || cameraLookupBusy || busy} onClick={() => void confirmCameraScan()}>{cameraLookupBusy || busy ? <Loader2 className="size-4 animate-spin" /> : null} Next</Button>
@@ -6558,12 +6577,12 @@ function WarehouseAuditPanel({
                 </DialogHeader>
                 <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-0">
                   <div className="grid gap-3">
-                    <video ref={photoVideoRef} className="max-h-[58dvh] w-full rounded-md bg-black object-contain" muted playsInline />
+                    <video ref={photoVideoRef} className="max-h-[58dvh] w-full rounded-md bg-black object-contain" autoPlay muted playsInline />
                     <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Point the camera at the item, barcode, or package details. Tap <span className="font-medium text-foreground">Capture photo</span> after each shot; the camera stays open for the next one.</div>
                     {manualPhotoUrls.length > 0 && <div className="flex gap-2 overflow-x-auto pb-1">{manualPhotoUrls.map((photo, index) => <img key={`${photo.slice(-24)}-${index}`} src={photo} alt={`Captured product photo ${index + 1}`} className="size-16 shrink-0 rounded-md border object-cover" />)}</div>}
                   </div>
                 </div>
-                <DialogFooter className="shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:px-0 sm:pb-0">
+                <DialogFooter className="shrink-0 px-4 pb-[calc(max(1rem,env(safe-area-inset-bottom))+0.3125rem)] sm:px-0 sm:pb-0">
                   <Button variant="outline" onClick={() => setPhotoCameraOpen(false)}>Cancel</Button>
                   <Button onClick={captureManualPhoto}>Capture photo</Button>
                   <Button disabled={!manualPhotoUrls.length} onClick={() => setPhotoCameraOpen(false)}>Use {manualPhotoUrls.length || ""} photo{manualPhotoUrls.length === 1 ? "" : "s"}</Button>
