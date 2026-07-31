@@ -5507,6 +5507,7 @@ function WarehouseAuditPanel({
   > | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const photoVideoRef = useRef<HTMLVideoElement | null>(null);
+  const manualSkuRef = useRef<HTMLInputElement | null>(null);
   const scanRef = useRef(false);
   // The camera decoder remains alive across renders, so it must call the latest
   // submit handler instead of the closure from the moment the camera was opened.
@@ -5967,6 +5968,13 @@ function WarehouseAuditPanel({
       setBusy(false);
     }
   };
+  const startManualSkuCreation = () => {
+    setUpcResearch(null);
+    window.setTimeout(() => {
+      manualSkuRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      manualSkuRef.current?.focus();
+    }, 0);
+  };
   const submitForReview = async () => {
     if (!resumedAudit) return;
     setBusy(true);
@@ -6245,9 +6253,7 @@ function WarehouseAuditPanel({
                 <div>
                   <p className="font-medium">Resolve unmatched UPC</p>
                   <p className="text-xs text-muted-foreground">
-                    DataPlus checked the local catalog first. Research is sent
-                    online only when requested, and every suggested field stays
-                    editable before a draft SKU is created.
+                    DataPlus checked the local catalog first. You can create the SKU manually now; AI research is optional and only suggests editable details.
                   </p>
                 </div>
                 <div className="grid gap-2 rounded-md border bg-background/70 p-3 text-sm md:grid-cols-[minmax(0,1fr)_auto]">
@@ -6260,14 +6266,20 @@ function WarehouseAuditPanel({
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
                       size="sm"
+                      onClick={startManualSkuCreation}
+                    >
+                      Create manually
+                    </Button>
+                    <Button
+                      size="sm"
                       variant="outline"
                       disabled={upcResearchBusy || busy}
                       onClick={() => void researchUnknownUpc()}
                     >
                       {upcResearchBusy && <Loader2 className="size-4 animate-spin" />}
-                      2. Ask AI to research online
+                      Ask AI to research online
                     </Button>
-                    <Badge variant="outline">3. Create manually below</Badge>
+                    <Badge variant="outline">AI is optional</Badge>
                   </div>
                 </div>
                 {upcResearch && (
@@ -6315,6 +6327,7 @@ function WarehouseAuditPanel({
                   </Field>
                   <Field label="SKU">
                     <Input
+                      ref={manualSkuRef}
                       value={manualUnknown.sku}
                       onChange={(event) =>
                         setManualUnknown((entry) =>
