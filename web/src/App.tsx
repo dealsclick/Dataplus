@@ -5485,6 +5485,8 @@ function WarehouseAuditPanel({
   const [reviewBusy, setReviewBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraStreamState, setCameraStreamState] = useState<"opening" | "ready" | "permission" | "error">("opening");
+  const [cameraAttempt, setCameraAttempt] = useState(0);
   const [cameraMessage, setCameraMessage] = useState(
     "Camera ready. Point it at the next barcode.",
   );
@@ -5599,17 +5601,33 @@ function WarehouseAuditPanel({
     if (physicalWarehouse?.id) setWarehouse(String(physicalWarehouse.id));
   }, [createOnly, auditWarehouses, warehouse]);
   useEffect(() => {
-    if (!cameraOpen || !videoRef.current) return;
-    const video = videoRef.current;
+    if (!cameraOpen) return;
     let controls: { stop: () => void } | null = null;
     let canceled = false;
-    const start = async () => {
+    let retryTimer: number | undefined;
+    const start = async (attempt = 0) => {
+      if (canceled || !cameraOpen) return;
+      const video = videoRef.current;
+      // The full-screen Dialog mounts through a portal. On Safari, the effect
+      // can run just before this video is attached to the DOM.
+      if (!video) {
+        if (attempt < 8) retryTimer = window.setTimeout(() => void start(attempt + 1), 40);
+        return;
+      }
       try {
         if (!resumedAudit) return;
+        setCameraStreamState("opening");
         const { BrowserMultiFormatReader } = await import("@zxing/browser");
         const reader = new BrowserMultiFormatReader();
         controls = await reader.decodeFromConstraints(
-          { audio: false, video: { facingMode: { ideal: "environment" } } },
+          {
+            audio: false,
+            video: {
+              facingMode: { ideal: "environment" },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+            },
+          },
           video,
           (result) => {
             const value = String(result?.getText() || "");
@@ -5655,19 +5673,21 @@ function WarehouseAuditPanel({
             }).finally(() => setCameraLookupBusy(false));
           },
         );
-      } catch {
-        toast.error(
-          "Camera access was not available. Allow camera access in Safari, then try again.",
-        );
-        setCameraOpen(false);
+        setCameraStreamState("ready");
+      } catch (error) {
+        if (!canceled) {
+          const name = error instanceof DOMException ? error.name : "";
+          setCameraStreamState(name === "NotAllowedError" || name === "SecurityError" ? "permission" : "error");
+        }
       }
     };
     void start();
     return () => {
       canceled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
       controls?.stop();
     };
-  }, [cameraOpen, resumedAudit?.id]);
+  }, [cameraOpen, cameraAttempt, resumedAudit?.id]);
   useEffect(() => {
     if (!photoCameraOpen) return;
     let stream: MediaStream | null = null;
@@ -6273,6 +6293,8 @@ function WarehouseAuditPanel({
                     setCameraMode("product");
                     setLastScan(null);
                     scanRef.current = false;
+                    setCameraStreamState("opening");
+                    setCameraAttempt((attempt) => attempt + 1);
                     setCameraMessage(
                       activeBin ? `Counting in bin ${activeBin}. Point at the next product barcode.` : "Camera ready. Point it at the next product barcode.",
                     );
@@ -6281,7 +6303,7 @@ function WarehouseAuditPanel({
                 >
                   Use phone camera
                 </Button>
-                {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}>Scan bin</Button>}
+                {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}>Scan bin</Button>}
                 {auditStatus === "in_progress" && <Button size="sm" disabled={busy || !lines.length} onClick={() => void submitForReview()}>Submit for review</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" disabled={busy} onClick={() => void complete()}>Approve & apply counts</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}>Return to count</Button>}
@@ -6297,7 +6319,8 @@ function WarehouseAuditPanel({
                   <DialogDescription className="text-white/70">{lastScan ? "Review this scan before adding it to the audit." : "Hold the barcode inside the guide. DataPlus will look it up automatically."}</DialogDescription>
                 </DialogHeader>
                 <div className="relative min-h-0 flex-1 bg-black">
-                  <video ref={videoRef} className="size-full object-contain" muted playsInline />
+                  <video ref={videoRef} className="size-full object-contain" autoPlay muted playsInline />
+                  {cameraStreamState !== "ready" && !lastScan && <div className="absolute inset-0 grid place-items-center bg-black/85 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{cameraStreamState === "opening" ? "Starting camera..." : cameraStreamState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{cameraStreamState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{cameraStreamState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
                   {!lastScan && <div className="pointer-events-none absolute inset-x-[11%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,1)]" /><div className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this guide" : "Align barcode with this guide"}</div></div>}
                   {!lastScan && <div className="absolute inset-x-4 bottom-5 rounded-md bg-black/70 px-3 py-2 text-center text-sm font-medium text-white">{cameraLookupBusy ? "Looking up barcode..." : cameraMessage}</div>}
                   {lastScan && <div className={`absolute inset-x-4 bottom-5 rounded-xl border p-4 shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-red-300 bg-red-50 text-red-950"}`}><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-emerald-600" /> : <X className="mt-0.5 size-6 shrink-0 text-red-600" />}<div><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Not found in catalog"}</p><p className="mt-1 font-mono text-sm">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 text-sm">{lastScan.title}</p>}{!lastScan.matched && <p className="mt-1 text-sm">Choose Next to add this as an unresolved UPC and create the SKU from the audit workspace.</p>}</div></div></div>}
