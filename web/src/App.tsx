@@ -6488,18 +6488,22 @@ function WarehouseAuditPanel({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>SKU</TableHead>
+                    <TableHead>Scan status</TableHead>
+                    <TableHead>UPC / SKU</TableHead>
                     <TableHead>Product</TableHead>
                     <TableHead>Bin</TableHead>
                     <TableHead>Expected</TableHead>
                     <TableHead>Counted</TableHead>
                     <TableHead>Variance</TableHead>
+                    <TableHead>Created SKU</TableHead>
+                    <TableHead>Created by</TableHead>
                     <TableHead className="text-right">Review</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {lines.map((line) => (
                     <TableRow key={`${String(line.productId || line.sku)}-${String(line.locationBin || "")}`}>
+                      <TableCell><Badge variant="secondary">Matched</Badge></TableCell>
                       <TableCell className="font-medium">
                         {line.sku ? (
                           <a
@@ -6536,15 +6540,31 @@ function WarehouseAuditPanel({
                           )}
                         </Badge>
                       </TableCell>
+                      <TableCell>-</TableCell>
+                      <TableCell>-</TableCell>
                       <TableCell className="text-right">
                         {Number(line.countedQty || 0) !== Number(line.expectedQty || 0) ? <Button size="sm" variant="outline" disabled={auditStatus !== "pending_review"} onClick={() => void openLineReview(line)}>{String(line.reviewStatus || "unreviewed").replace(/_/g, " ")}</Button> : <Badge variant="outline">Matched</Badge>}
                       </TableCell>
                     </TableRow>
                   ))}
-                  {!lines.length && (
+                  {unknowns.map((item) => (
+                    <TableRow key={`unknown-${String(item.barcode)}-${String(item.locationBin || "")}`}>
+                      <TableCell><Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-900">Unknown</Badge></TableCell>
+                      <TableCell className="font-mono font-medium">{String(item.barcode || "-")}</TableCell>
+                      <TableCell>{String(item.manualTitle || "Unresolved UPC")}</TableCell>
+                      <TableCell>{String(item.locationBin || "-")}</TableCell>
+                      <TableCell>-</TableCell>
+                      <TableCell>{numberLabel(Number(item.count || 0))}</TableCell>
+                      <TableCell>-</TableCell>
+                      <TableCell>{item.createdProductSku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(item.createdProductSku))}`} target="_blank" rel="noreferrer">{String(item.createdProductSku)}</a> : "-"}</TableCell>
+                      <TableCell>{String(item.createdProductBy || "-")}</TableCell>
+                      <TableCell className="text-right"><Badge variant={item.createdProductSku ? "secondary" : "outline"}>{item.createdProductSku ? "SKU created" : "Needs details"}</Badge></TableCell>
+                    </TableRow>
+                  ))}
+                  {!lines.length && !unknowns.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={7}
+                        colSpan={10}
                         className="h-20 text-center text-muted-foreground"
                       >
                         Scan the first UPC to begin counting.
@@ -6554,53 +6574,6 @@ function WarehouseAuditPanel({
                 </TableBody>
               </Table>
             </div>
-            {unknowns.length > 0 && (
-              <div className="overflow-x-auto rounded-md border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Unmatched UPC</TableHead>
-                      <TableHead>Created SKU</TableHead>
-                      <TableHead>Product</TableHead>
-                      <TableHead>Location</TableHead>
-                      <TableHead>Created by</TableHead>
-                      <TableHead className="text-right">Quantity</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {unknowns.map((item) => (
-                      <TableRow key={`${String(item.barcode)}-${String(item.locationBin || "")}`}>
-                        <TableCell className="font-mono">
-                          {String(item.barcode || "-")}
-                        </TableCell>
-                        <TableCell>
-                          {item.createdProductSku ? (
-                            <a
-                              className="font-medium hover:underline"
-                              href={`/products/${encodeURIComponent(String(item.createdProductSku))}`}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              {String(item.createdProductSku)}
-                            </a>
-                          ) : (
-                            "-"
-                          )}
-                        </TableCell>
-                        <TableCell>{String(item.manualTitle || "-")}</TableCell>
-                        <TableCell>{String(item.locationBin || "-")}</TableCell>
-                        <TableCell>
-                          {String(item.createdProductBy || "-")}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {numberLabel(Number(item.count || 0))}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            )}
             <Dialog open={Boolean(reviewLine)} onOpenChange={(open) => !open && setReviewLine(null)}>
               <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
                 <DialogHeader><DialogTitle>Review variance: {String(reviewLine?.sku || "Audit line")}</DialogTitle><DialogDescription>Approve this count, exclude it from the inventory adjustment, or return the audit to counting for a recount.</DialogDescription></DialogHeader>
