@@ -1924,8 +1924,7 @@ function JobsPage({
         </TabsContent>
 
         {tab !== "scheduled" && <div className="mt-4">
-          <ResizablePanelGroup orientation="horizontal" className="min-h-[34rem] overflow-hidden rounded-md border">
-            <ResizablePanel defaultSize={68} minSize={45}>
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
             <Card>
               <CardHeader className="border-b py-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2013,12 +2012,8 @@ function JobsPage({
                 </ScrollArea>
               </CardContent>
             </Card>
-            </ResizablePanel>
-            <ResizableHandle withHandle />
-            <ResizablePanel defaultSize={32} minSize={25} maxSize={45}>
-              <ScrollArea className="h-full p-4"><JobDetail job={selectedJob} onRetry={onRetryJob} onStop={onStopJob} onUpdate={onSelectJob} /></ScrollArea>
-            </ResizablePanel>
-          </ResizablePanelGroup>
+            <JobDetail job={selectedJob} onRetry={onRetryJob} onStop={onStopJob} onUpdate={onSelectJob} />
+          </div>
 
           <div className="mt-3 flex items-center justify-between">
             <p className="text-sm text-muted-foreground">Page {page} of {totalPages}</p>
