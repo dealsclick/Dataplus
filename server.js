@@ -22747,9 +22747,13 @@ async function handleApi(req, res) {
     if (!sku) return sendJson(res, 400, { error: "SKU is required to create a catalog item." });
     if (!title) return sendJson(res, 400, { error: "Product name is required to create a catalog item." });
     if (!Number.isFinite(quantity) || quantity <= 0) return sendJson(res, 400, { error: "Quantity must be greater than zero." });
-    const photoDataUrl = String(body.photoDataUrl || "");
-    if (photoDataUrl && (!/^data:image\/(png|jpe?g|webp);base64,/i.test(photoDataUrl) || photoDataUrl.length > 4.25 * 1024 * 1024)) {
-      return sendJson(res, 400, { error: "Use a PNG, JPG, or WebP photo smaller than 3 MB." });
+    const suppliedPhotos = Array.isArray(body.photoDataUrls) ? body.photoDataUrls : [body.photoDataUrl];
+    const photoDataUrls = suppliedPhotos
+      .map((value) => String(value || ""))
+      .filter(Boolean)
+      .slice(0, 8);
+    if (photoDataUrls.some((photo) => !/^data:image\/(png|jpe?g|webp);base64,/i.test(photo) || photo.length > 4.25 * 1024 * 1024)) {
+      return sendJson(res, 400, { error: "Use up to 8 PNG, JPG, or WebP photos smaller than 3 MB each." });
     }
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
@@ -22768,7 +22772,7 @@ async function handleApi(req, res) {
       category: "", mainCategory: "", sourceCategory: String(body.category || "").trim(), suggestedPackageCategory: String(body.category || "").trim(), supplier: "", brand: String(body.brand || "").trim(), manufacturer: String(body.manufacturer || "").trim(), mfrPartNumber: String(body.mfrPartNumber || "").trim(), vendorSku: String(body.vendorSku || "").trim(), shortDescription: String(body.shortDescription || "").trim(), packageQuantity: String(body.packQuantity || "").trim(), cost: 0, price: 0,
       locationBin: String(body.locationBin || "").trim(),
       warehouseStock: [normalizeWarehouseStockRow({ warehouseId: auditWarehouse?.id || audit.warehouseId || "", warehouseName: auditWarehouse?.name || audit.warehouseName || "Warehouse", locationBin: String(body.locationBin || "").trim(), qty: quantity, reserved: 0 }, auditWarehouse)],
-      images: photoDataUrl ? [photoDataUrl] : [], defaultImage: photoDataUrl,
+      images: photoDataUrls, defaultImage: photoDataUrls[0] || "",
       createdAt: now, updatedAt: now, createdBy, createdMethod: "Manual product creation", createdSource: "Warehouse audit", createdSourceDetail: audit.auditNumber, createdAuditId: audit.id, createdAuditNumber: audit.auditNumber,
       packagePhotoAnalysis: { confidence: Math.max(0, Math.min(100, Number(body.analysisConfidence || 0))), visibleText: String(body.analysisVisibleText || "").trim(), analyzedAt: now }
     };

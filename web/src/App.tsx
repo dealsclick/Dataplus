@@ -41,6 +41,7 @@ import {
   Sun,
   Truck,
   Warehouse,
+  X,
   Pencil,
   Save,
   SendHorizontal,
@@ -5495,6 +5496,7 @@ function WarehouseAuditPanel({
     string,
     string
   > | null>(null);
+  const [manualPhotoUrls, setManualPhotoUrls] = useState<string[]>([]);
   const [photoCameraOpen, setPhotoCameraOpen] = useState(false);
   const [photoAnalysisBusy, setPhotoAnalysisBusy] = useState(false);
   const [upcResearchBusy, setUpcResearchBusy] = useState(false);
@@ -5718,6 +5720,7 @@ function WarehouseAuditPanel({
           locationBin: "",
           qty: "1",
         });
+        setManualPhotoUrls([]);
         setCameraOpen(false);
       }
       scannerFeedback(matched ? "success" : "unknown");
@@ -5879,19 +5882,34 @@ function WarehouseAuditPanel({
       setPhotoAnalysisBusy(false);
     }
   };
-  const readManualPhoto = (file?: File) => {
-    if (!file) return;
-    if (file.size > 3 * 1024 * 1024) {
-      toast.error("Choose a photo smaller than 3 MB.");
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const photoDataUrl = String(reader.result || "");
-      setManualUnknown((entry) => (entry ? { ...entry, photoDataUrl } : entry));
-      if (photoDataUrl) void analyzeManualPhoto(photoDataUrl);
-    };
-    reader.readAsDataURL(file);
+  const saveManualPhoto = (photoDataUrl: string) => {
+    if (!photoDataUrl) return;
+    setManualPhotoUrls((photos) => [...photos, photoDataUrl].slice(-8));
+    setManualUnknown((entry) =>
+      entry && !entry.photoDataUrl ? { ...entry, photoDataUrl } : entry,
+    );
+    void analyzeManualPhoto(photoDataUrl);
+  };
+  const removeManualPhoto = (index: number) => {
+    setManualPhotoUrls((photos) => {
+      const next = photos.filter((_, photoIndex) => photoIndex !== index);
+      setManualUnknown((entry) =>
+        entry ? { ...entry, photoDataUrl: next[0] || "" } : entry,
+      );
+      return next;
+    });
+  };
+  const readManualPhotos = (files?: FileList | null) => {
+    if (!files?.length) return;
+    Array.from(files).slice(0, 8).forEach((file) => {
+      if (file.size > 3 * 1024 * 1024) {
+        toast.error(`${file.name} is larger than 3 MB and was skipped.`);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => saveManualPhoto(String(reader.result || ""));
+      reader.readAsDataURL(file);
+    });
   };
   const captureManualPhoto = () => {
     const video = photoVideoRef.current;
@@ -5904,9 +5922,8 @@ function WarehouseAuditPanel({
       .getContext("2d")
       ?.drawImage(video, 0, 0, canvas.width, canvas.height);
     const photoDataUrl = canvas.toDataURL("image/jpeg", 0.82);
-    setManualUnknown((entry) => (entry ? { ...entry, photoDataUrl } : entry));
-    setPhotoCameraOpen(false);
-    void analyzeManualPhoto(photoDataUrl);
+    saveManualPhoto(photoDataUrl);
+    toast.success("Photo added. Capture another product side or close when finished.");
   };
   const saveManualUnknown = async () => {
     if (!resumedAudit || !manualUnknown) return;
@@ -5919,11 +5936,12 @@ function WarehouseAuditPanel({
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/manual-item`,
         {
           method: "POST",
-          body: JSON.stringify({ ...manualUnknown, user: "Luis" }),
+          body: JSON.stringify({ ...manualUnknown, photoDataUrls: manualPhotoUrls, user: "Luis" }),
         },
       );
       applyAuditUpdate(result.audit || resumedAudit);
       setManualUnknown(null);
+      setManualPhotoUrls([]);
       toast.success(result.message || "Catalog SKU created from audit.");
       void load().catch(() => undefined);
     } catch (error) {
@@ -6330,11 +6348,12 @@ function WarehouseAuditPanel({
                         Take photo
                       </Button>
                       <Input
-                        className="max-w-36"
+                        className="max-w-44"
                         type="file"
                         accept="image/*"
+                        multiple
                         onChange={(event) =>
-                          readManualPhoto(event.target.files?.[0])
+                          readManualPhotos(event.target.files)
                         }
                       />
                     </div>
@@ -6364,34 +6383,25 @@ function WarehouseAuditPanel({
                     <Input value={manualUnknown.shortDescription || ""} onChange={(event) => setManualUnknown((entry) => entry ? { ...entry, shortDescription: event.target.value } : entry)} placeholder="Optional" />
                   </div>
                 </div>
-                {photoCameraOpen && (
-                  <div className="grid gap-2 rounded-md border p-3">
-                    <video
-                      ref={photoVideoRef}
-                      className="max-h-72 w-full rounded-md bg-black object-contain"
-                      muted
-                      playsInline
-                    />
-                    <div className="flex justify-end gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setPhotoCameraOpen(false)}
-                      >
-                        Cancel
-                      </Button>
-                      <Button size="sm" onClick={captureManualPhoto}>
-                        Use photo
-                      </Button>
-                    </div>
+                {manualPhotoUrls.length > 0 && (
+                  <div className="flex flex-wrap gap-2 rounded-md border bg-background/70 p-2">
+                    {manualPhotoUrls.map((photo, index) => (
+                      <div key={`${photo.slice(-24)}-${index}`} className="group relative">
+                        <img src={photo} alt={`New product photo ${index + 1}`} className="size-20 rounded-md border object-cover" />
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="secondary"
+                          className="absolute -right-2 -top-2 size-6 rounded-full opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                          title={`Remove photo ${index + 1}`}
+                          onClick={() => removeManualPhoto(index)}
+                        >
+                          <X className="size-3" />
+                        </Button>
+                      </div>
+                    ))}
+                    <p className="self-center text-xs text-muted-foreground">{manualPhotoUrls.length} photo{manualPhotoUrls.length === 1 ? "" : "s"} will be saved with this SKU.</p>
                   </div>
-                )}
-                {manualUnknown.photoDataUrl && (
-                  <img
-                    src={manualUnknown.photoDataUrl}
-                    alt="New product"
-                    className="h-20 w-20 rounded-md border object-cover"
-                  />
                 )}
                 <div className="flex justify-end gap-2">
                   <Button
@@ -6416,6 +6426,26 @@ function WarehouseAuditPanel({
                 </div>
               </div>
             )}
+            <Dialog open={photoCameraOpen} onOpenChange={setPhotoCameraOpen}>
+              <DialogContent className="inset-0 h-[100dvh] max-w-none translate-x-0 translate-y-0 rounded-none p-0 sm:inset-auto sm:h-auto sm:max-h-[90vh] sm:max-w-2xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-xl sm:p-5" showCloseButton={false}>
+                <DialogHeader className="shrink-0 border-b px-4 py-3 sm:px-0 sm:py-0 sm:pb-3">
+                  <DialogTitle>Capture product photos</DialogTitle>
+                  <DialogDescription>Take the front, barcode, packaging, and label photos you need. Each capture is added to this SKU’s gallery.</DialogDescription>
+                </DialogHeader>
+                <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-0">
+                  <div className="grid gap-3">
+                    <video ref={photoVideoRef} className="max-h-[58dvh] w-full rounded-md bg-black object-contain" muted playsInline />
+                    <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Point the camera at the item, barcode, or package details. Tap <span className="font-medium text-foreground">Capture photo</span> after each shot; the camera stays open for the next one.</div>
+                    {manualPhotoUrls.length > 0 && <div className="flex gap-2 overflow-x-auto pb-1">{manualPhotoUrls.map((photo, index) => <img key={`${photo.slice(-24)}-${index}`} src={photo} alt={`Captured product photo ${index + 1}`} className="size-16 shrink-0 rounded-md border object-cover" />)}</div>}
+                  </div>
+                </div>
+                <DialogFooter className="shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:px-0 sm:pb-0">
+                  <Button variant="outline" onClick={() => setPhotoCameraOpen(false)}>Cancel</Button>
+                  <Button onClick={captureManualPhoto}>Capture photo</Button>
+                  <Button disabled={!manualPhotoUrls.length} onClick={() => setPhotoCameraOpen(false)}>Use {manualPhotoUrls.length || ""} photo{manualPhotoUrls.length === 1 ? "" : "s"}</Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
             <div className="overflow-x-auto rounded-md border">
               <Table>
                 <TableHeader>
