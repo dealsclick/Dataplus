@@ -1757,7 +1757,11 @@ function JobsPage({
 }) {
   const [query, setQuery] = useState("")
   const [status, setStatus] = useState("all")
-  const [tab, setTab] = useState("queue")
+  const [tab, setTab] = useState("all")
+  const [advancedFiltersOpen, setAdvancedFiltersOpen] = useState(false)
+  const [quickFilterOpen, setQuickFilterOpen] = useState(false)
+  const [startedAfter, setStartedAfter] = useState("")
+  const [startedBefore, setStartedBefore] = useState("")
   const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false)
   const shopify = channels.find((channel) => String(channel.name || "").toLowerCase() === "shopify")
   const shopifySettings = shopify?.settings || {}
@@ -1770,9 +1774,18 @@ function JobsPage({
     { name: "Shopify product/status/taxonomy sync", owner: "Shopify", enabled: false, timing: "Manual only", behavior: "Creates products and pushes status or taxonomy changes after review.", location: "/channels?tab=actions", managed: false },
   ]
 
-  const visibleJobs = tab === "logs"
-    ? jobs.filter((job) => String(job.direction || job.type || "").toLowerCase().includes("api") || /shopify|ebay|api/i.test(`${job.operation || ""} ${job.fileName || ""}`))
-    : jobs
+  const visibleJobs = jobs.filter((job) => {
+    const isChannelLog = String(job.direction || job.type || "").toLowerCase().includes("api") || /shopify|ebay|temu|tiktok|api/i.test(`${job.operation || ""} ${job.fileName || ""}`)
+    const normalizedStatus = String(job.status || "").toLowerCase()
+    const started = String(job.startedAt || job.createdAt || "").slice(0, 10)
+    if (tab === "active" && !isActiveJob(job)) return false
+    if (tab === "review" && !isAttentionJob(job)) return false
+    if (tab === "completed" && !["success", "done", "ok", "warning"].includes(normalizedStatus)) return false
+    if (tab === "logs" && !isChannelLog) return false
+    if (startedAfter && (!started || started < startedAfter)) return false
+    if (startedBefore && (!started || started > startedBefore)) return false
+    return true
+  })
   const totalPages = Math.max(1, Math.ceil(totalJobs / pageSize))
   const issueGroups = useMemo(() => {
     const groups = new Map<string, number>()
@@ -1847,7 +1860,10 @@ function JobsPage({
       <Tabs value={tab} onValueChange={(value) => { setTab(value); onLoadJobs({ page: 1 }) }}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <TabsList>
-            <TabsTrigger value="queue">Queue and history</TabsTrigger>
+            <TabsTrigger value="all">All <Badge variant="secondary" className="ml-1 px-1.5 py-0 text-[10px]">{numberLabel(totalJobs)}</Badge></TabsTrigger>
+            <TabsTrigger value="active">Active <Badge variant={activeJobs.length ? "info" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{activeJobs.length}</Badge></TabsTrigger>
+            <TabsTrigger value="review">Needs review <Badge variant={jobs.filter(isAttentionJob).length ? "destructive" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{jobs.filter(isAttentionJob).length}</Badge></TabsTrigger>
+            <TabsTrigger value="completed">Completed</TabsTrigger>
             <TabsTrigger value="logs">Channel logs</TabsTrigger>
             <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
           </TabsList>
@@ -1857,6 +1873,25 @@ function JobsPage({
               <InputGroupInput placeholder="Search jobs, files, messages" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onLoadJobs({ page: 1, query, status }) }} />
             </InputGroup>
             <Button size="sm" variant="outline" onClick={() => onLoadJobs({ page: 1, query, status })}>Search</Button>
+            <Popover open={quickFilterOpen} onOpenChange={setQuickFilterOpen}>
+              <PopoverTrigger asChild><Button size="sm" variant="outline">Quick filter</Button></PopoverTrigger>
+              <PopoverContent align="end" className="w-72 p-0">
+                <Command>
+                  <CommandInput placeholder="Find a job view..." />
+                  <CommandList>
+                    <CommandEmpty>No view found.</CommandEmpty>
+                    <CommandGroup heading="Job views">
+                      <CommandItem onSelect={() => { setTab("all"); setQuickFilterOpen(false) }}>All jobs</CommandItem>
+                      <CommandItem onSelect={() => { setTab("active"); setQuickFilterOpen(false) }}>Active jobs</CommandItem>
+                      <CommandItem onSelect={() => { setTab("review"); setStatus("failed"); onLoadJobs({ page: 1, query, status: "failed" }); setQuickFilterOpen(false) }}>Failed jobs</CommandItem>
+                      <CommandItem onSelect={() => { setTab("review"); setStatus("warning"); onLoadJobs({ page: 1, query, status: "warning" }); setQuickFilterOpen(false) }}>Warnings</CommandItem>
+                      <CommandItem onSelect={() => { setTab("logs"); setQuickFilterOpen(false) }}>Channel activity</CommandItem>
+                      <CommandItem onSelect={() => { setTab("scheduled"); setQuickFilterOpen(false) }}>Schedules</CommandItem>
+                    </CommandGroup>
+                  </CommandList>
+                </Command>
+              </PopoverContent>
+            </Popover>
             <Select value={status} onValueChange={(value) => { setStatus(value); onLoadJobs({ page: 1, query, status: value }) }}>
               <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -1869,6 +1904,13 @@ function JobsPage({
                 <SelectItem value="warning">Warning</SelectItem>
               </SelectContent>
             </Select>
+            <Collapsible open={advancedFiltersOpen} onOpenChange={setAdvancedFiltersOpen}>
+              <CollapsibleTrigger asChild><Button size="sm" variant={advancedFiltersOpen || startedAfter || startedBefore ? "secondary" : "outline"}>Date range</Button></CollapsibleTrigger>
+              <CollapsibleContent className="absolute right-0 z-20 mt-2 w-[min(30rem,calc(100vw-2rem))] rounded-md border bg-popover p-3 shadow-md">
+                <div className="grid gap-3 sm:grid-cols-2"><Field label="Started on or after"><Input type="date" value={startedAfter} onChange={(event) => setStartedAfter(event.target.value)} /></Field><Field label="Started on or before"><Input type="date" value={startedBefore} onChange={(event) => setStartedBefore(event.target.value)} /></Field></div>
+                <div className="mt-3 flex justify-end"><Button size="sm" variant="ghost" onClick={() => { setStartedAfter(""); setStartedBefore("") }}>Clear dates</Button></div>
+              </CollapsibleContent>
+            </Collapsible>
           </div>
         </div>
 
@@ -1881,14 +1923,15 @@ function JobsPage({
           </Card>
         </TabsContent>
 
-        <TabsContent value={tab === "logs" ? "logs" : "queue"} className="mt-4">
-          <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
+        {tab !== "scheduled" && <div className="mt-4">
+          <ResizablePanelGroup orientation="horizontal" className="min-h-[34rem] overflow-hidden rounded-md border">
+            <ResizablePanel defaultSize={selectedJob ? 68 : 100} minSize={45}>
             <Card>
               <CardHeader className="border-b py-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <CardTitle className="text-base">{tab === "logs" ? "Channel Logs" : "Import Queue and History"}</CardTitle>
-                    <CardDescription>{totalJobs ? `${(page - 1) * pageSize + 1}-${Math.min(page * pageSize, totalJobs)} of ${numberLabel(totalJobs)} jobs` : "No jobs found"}</CardDescription>
+                    <CardTitle className="text-base">{tab === "logs" ? "Channel logs" : tab === "active" ? "Active jobs" : tab === "review" ? "Jobs needing review" : tab === "completed" ? "Completed jobs" : "All jobs"}</CardTitle>
+                    <CardDescription>{totalJobs ? `${numberLabel(visibleJobs.length)} shown on this page · ${(page - 1) * pageSize + 1}-${Math.min(page * pageSize, totalJobs)} of ${numberLabel(totalJobs)} jobs` : "No jobs found"}</CardDescription>
                   </div>
                   <ButtonGroup>
                     {[10, 25, 50, 100].map((size) => (
@@ -1905,6 +1948,7 @@ function JobsPage({
                 </div>
               </CardHeader>
               <CardContent className="p-0">
+                <ScrollArea className="h-[29rem]">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -1921,7 +1965,7 @@ function JobsPage({
                   <TableBody>
                     {visibleJobs.map((job) => (
                       <TableRow key={job.id} className="cursor-pointer" onClick={() => onSelectJob(job)}>
-                        <TableCell><Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge></TableCell>
+                        <TableCell><HoverCard><HoverCardTrigger asChild><Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge></HoverCardTrigger><HoverCardContent className="w-72"><p className="font-medium">{String(job.status || "done").replace(/_/g, " ")}</p><p className="mt-1 text-xs text-muted-foreground">{job.message || job.details || "No additional status detail was recorded."}</p></HoverCardContent></HoverCard></TableCell>
                         <TableCell className="max-w-[360px]">
                           <p className="truncate font-medium">{job.operation || "Job"}</p>
                           <div className="flex items-center gap-1">
@@ -1966,20 +2010,21 @@ function JobsPage({
                     )}
                   </TableBody>
                 </Table>
+                </ScrollArea>
               </CardContent>
             </Card>
+            </ResizablePanel>
+            {selectedJob && <><ResizableHandle withHandle /><ResizablePanel defaultSize={32} minSize={25} maxSize={45}><ScrollArea className="h-full p-4"><JobDetail job={selectedJob} onRetry={onRetryJob} onStop={onStopJob} onUpdate={onSelectJob} /></ScrollArea></ResizablePanel></>}
+          </ResizablePanelGroup>
 
-            <JobDetail job={selectedJob} onRetry={onRetryJob} onStop={onStopJob} onUpdate={onSelectJob} />
-          </div>
-
-          <div className="mt-4 flex items-center justify-between">
+          <div className="mt-3 flex items-center justify-between">
             <p className="text-sm text-muted-foreground">Page {page} of {totalPages}</p>
             <div className="flex gap-2">
               <Button variant="outline" disabled={page <= 1} onClick={() => onLoadJobs({ page: Math.max(1, page - 1), query, status })}>Previous</Button>
               <Button variant="outline" disabled={page >= totalPages} onClick={() => onLoadJobs({ page: Math.min(totalPages, page + 1), query, status })}>Next</Button>
             </div>
           </div>
-        </TabsContent>
+        </div>}
       </Tabs>
       <AlertDialog open={cleanupConfirmOpen} onOpenChange={setCleanupConfirmOpen}>
         <AlertDialogContent>
