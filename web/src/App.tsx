@@ -5492,7 +5492,10 @@ function WarehouseAuditPanel({
     barcode: string;
     matched: boolean;
     message: string;
+    sku?: string;
+    title?: string;
   } | null>(null);
+  const [cameraLookupBusy, setCameraLookupBusy] = useState(false);
   const [manualUnknown, setManualUnknown] = useState<Record<
     string,
     string
@@ -5509,11 +5512,6 @@ function WarehouseAuditPanel({
   const photoVideoRef = useRef<HTMLVideoElement | null>(null);
   const manualSkuRef = useRef<HTMLInputElement | null>(null);
   const scanRef = useRef(false);
-  // The camera decoder remains alive across renders, so it must call the latest
-  // submit handler instead of the closure from the moment the camera was opened.
-  const submitScanRef = useRef<(value: string) => Promise<void>>(
-    async () => undefined,
-  );
   const lastCameraScanRef = useRef({ value: "", at: 0 });
   const offlineQueueKey = "dataplus.warehouse-audit.offline-scans.v1";
   const readOfflineScans = () => {
@@ -5626,9 +5624,33 @@ function WarehouseAuditPanel({
             lastCameraScanRef.current = { value, at: now };
             setBarcode(value);
             setCameraMessage(`Looking up ${value}...`);
-            void submitScanRef.current(value).finally(() => {
+            setCameraLookupBusy(true);
+            void api<{
+              matched?: boolean;
+              message?: string;
+              product?: { sku?: string; title?: string } | null;
+            }>(
+              `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lookup`,
+              { method: "POST", body: JSON.stringify({ barcode: value }) },
+            ).then((lookup) => {
+              const matched = lookup.matched === true;
+              const product = lookup.product || null;
+              setLastScan({
+                barcode: value,
+                matched,
+                message: lookup.message || (matched ? "Catalog item found." : "No catalog item found."),
+                sku: product?.sku,
+                title: product?.title,
+              });
+              setCameraMessage(matched ? "Scan ready to add." : "Product not found. You can add it or cancel this scan.");
+              scannerFeedback(matched ? "success" : "unknown");
+            }).catch((error) => {
+              const message = error instanceof Error ? error.message : "Unable to look up this barcode.";
+              setCameraMessage(message);
+              scannerFeedback("error");
+              toast.error(message);
               scanRef.current = false;
-            });
+            }).finally(() => setCameraLookupBusy(false));
           },
         );
       } catch {
@@ -5767,7 +5789,35 @@ function WarehouseAuditPanel({
       setBusy(false);
     }
   };
-  submitScanRef.current = submit;
+  const resetCameraScan = () => {
+    setLastScan(null);
+    setBarcode("");
+    setCameraLookupBusy(false);
+    scanRef.current = false;
+    lastCameraScanRef.current = { value: "", at: 0 };
+    setCameraMessage(
+      cameraMode === "bin"
+        ? "Camera ready. Point at the next bin label."
+        : activeBin
+          ? `Counting in bin ${activeBin}. Point at the next product barcode.`
+          : "Camera ready. Point at the next product barcode.",
+    );
+  };
+  const closeCameraScanner = () => {
+    setCameraOpen(false);
+    resetCameraScan();
+  };
+  const confirmCameraScan = async () => {
+    if (!lastScan || cameraLookupBusy) return;
+    const candidate = lastScan;
+    setCameraLookupBusy(true);
+    try {
+      await submit(candidate.barcode);
+      if (candidate.matched) resetCameraScan();
+    } finally {
+      setCameraLookupBusy(false);
+    }
+  };
   const flushOfflineScans = async () => {
     if (!resumedAudit?.id || !navigator.onLine || syncingOfflineScans) return;
     const all = readOfflineScans();
@@ -6193,13 +6243,15 @@ function WarehouseAuditPanel({
                   disabled={busy || auditStatus !== "in_progress"}
                   onClick={() => {
                     setCameraMode("product");
+                    setLastScan(null);
+                    scanRef.current = false;
                     setCameraMessage(
                       activeBin ? `Counting in bin ${activeBin}. Point at the next product barcode.` : "Camera ready. Point it at the next product barcode.",
                     );
-                    setCameraOpen((value) => !value);
+                    setCameraOpen(true);
                   }}
                 >
-                  {cameraOpen ? "Stop camera" : "Use phone camera"}
+                  Use phone camera
                 </Button>
                 {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}>Scan bin</Button>}
                 {auditStatus === "in_progress" && <Button size="sm" disabled={busy || !lines.length} onClick={() => void submitForReview()}>Submit for review</Button>}
@@ -6210,25 +6262,25 @@ function WarehouseAuditPanel({
             </div>
             {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Review required before inventory changes</p><p className="text-muted-foreground">This audit contains {numberLabel(varianceLines.length)} SKU variance lines and {numberLabel(unresolvedUnknowns.length)} unresolved UPCs. Approving it posts the counted quantities to {String(current.warehouseName)}.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
             {auditStatus === "in_progress" && Boolean(current.returnNote) && <div className="rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Returned for recount</p><p className="mt-1 text-muted-foreground">Reviewer note: {String(current.returnNote)}</p></div>}
-            {cameraOpen && (
-              <div className="relative overflow-hidden rounded-md bg-black">
-                <video
-                  ref={videoRef}
-                  className="max-h-72 w-full object-contain"
-                  muted
-                  playsInline
-                />
-                <div className="pointer-events-none absolute inset-x-[12%] top-1/2 -translate-y-1/2" aria-hidden="true">
-                  <div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_14px_rgba(74,222,128,0.95)]" />
-                  <div className="mx-auto mt-2 w-fit rounded-full bg-black/75 px-3 py-1 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this line" : "Align product barcode with this line"}</div>
+            <Dialog open={cameraOpen} onOpenChange={(open) => { if (!open) closeCameraScanner(); }}>
+              <DialogContent className="!inset-0 !flex !h-[100dvh] !max-w-none !translate-x-0 !translate-y-0 flex-col overflow-hidden rounded-none bg-black p-0 text-white sm:!inset-auto sm:!h-[90vh] sm:!max-w-3xl sm:!-translate-x-1/2 sm:!-translate-y-1/2 sm:rounded-xl" showCloseButton={false}>
+                <DialogHeader className="shrink-0 border-b border-white/15 px-4 py-3 text-white">
+                  <DialogTitle className="text-white">{cameraMode === "bin" ? "Scan bin" : "Scan product barcode"}</DialogTitle>
+                  <DialogDescription className="text-white/70">{lastScan ? "Review this scan before adding it to the audit." : "Hold the barcode inside the guide. DataPlus will look it up automatically."}</DialogDescription>
+                </DialogHeader>
+                <div className="relative min-h-0 flex-1 bg-black">
+                  <video ref={videoRef} className="size-full object-contain" muted playsInline />
+                  {!lastScan && <div className="pointer-events-none absolute inset-x-[11%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,1)]" /><div className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this guide" : "Align barcode with this guide"}</div></div>}
+                  {!lastScan && <div className="absolute inset-x-4 bottom-5 rounded-md bg-black/70 px-3 py-2 text-center text-sm font-medium text-white">{cameraLookupBusy ? "Looking up barcode..." : cameraMessage}</div>}
+                  {lastScan && <div className={`absolute inset-x-4 bottom-5 rounded-xl border p-4 shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-red-300 bg-red-50 text-red-950"}`}><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-emerald-600" /> : <X className="mt-0.5 size-6 shrink-0 text-red-600" />}<div><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Not found in catalog"}</p><p className="mt-1 font-mono text-sm">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 text-sm">{lastScan.title}</p>}{!lastScan.matched && <p className="mt-1 text-sm">Choose Next to add this as an unresolved UPC and create the SKU from the audit workspace.</p>}</div></div></div>}
                 </div>
-                <div
-                  className={`absolute inset-x-3 bottom-3 rounded-md px-3 py-2 text-sm font-medium shadow ${lastScan?.matched ? "bg-emerald-600 text-white" : lastScan && !lastScan.matched ? "bg-amber-500 text-black" : "bg-black/70 text-white"}`}
-                >
-                  {cameraMessage}
-                </div>
-              </div>
-            )}
+                <DialogFooter className="grid shrink-0 grid-cols-3 gap-2 border-t border-white/15 bg-black px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:flex sm:justify-between">
+                  <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={closeCameraScanner}>Back</Button>
+                  <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" disabled={!lastScan || cameraLookupBusy} onClick={resetCameraScan}>Cancel scan</Button>
+                  <Button className="bg-emerald-600 text-white hover:bg-emerald-700" disabled={!lastScan || cameraLookupBusy || busy} onClick={() => void confirmCameraScan()}>{cameraLookupBusy || busy ? <Loader2 className="size-4 animate-spin" /> : null} Next</Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
             <div className="flex flex-wrap items-end gap-2 rounded-md border bg-muted/20 p-3">
               <Field label="Current bin / location">
                 {activeAuditBins.length ? (

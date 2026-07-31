@@ -22464,6 +22464,27 @@ async function handleApi(req, res) {
     return sendJson(res, 201, { audit, message: `${audit.auditNumber} started.` });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lookup" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
+    if (!barcode) return sendJson(res, 400, { error: "Scan a UPC or SKU first." });
+    const lookup = await resolveScannedCatalogBarcode(barcode);
+    const product = lookup.product || null;
+    return sendJson(res, 200, {
+      matched: Boolean(product),
+      product: product ? {
+        sku: product.sku,
+        title: product.marketplaceTitle || product.title || product.sku,
+        image: Array.isArray(product.images) ? product.images[0] : product.image || ""
+      } : null,
+      message: product ? `${product.sku} found in the catalog.` : `No catalog item was found for ${barcode}.`
+    });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "scan" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
