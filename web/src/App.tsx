@@ -6427,7 +6427,7 @@ function WarehouseAuditPanel({
               </div>
             )}
             <Dialog open={photoCameraOpen} onOpenChange={setPhotoCameraOpen}>
-              <DialogContent className="inset-0 h-[100dvh] max-w-none translate-x-0 translate-y-0 rounded-none p-0 sm:inset-auto sm:h-auto sm:max-h-[90vh] sm:max-w-2xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-xl sm:p-5" showCloseButton={false}>
+              <DialogContent className="!inset-0 !flex !h-[100dvh] !max-w-none !translate-x-0 !translate-y-0 flex-col rounded-none p-0 sm:!inset-auto sm:!grid sm:!h-auto sm:max-h-[90vh] sm:!max-w-2xl sm:!-translate-x-1/2 sm:!-translate-y-1/2 sm:rounded-xl sm:p-5" showCloseButton={false}>
                 <DialogHeader className="shrink-0 border-b px-4 py-3 sm:px-0 sm:py-0 sm:pb-3">
                   <DialogTitle>Capture product photos</DialogTitle>
                   <DialogDescription>Take the front, barcode, packaging, and label photos you need. Each capture is added to this SKU’s gallery.</DialogDescription>
