@@ -5825,7 +5825,9 @@ function WarehouseAuditPanel({
           barcode: String(value),
           sku: "",
           title: "",
-          locationBin: "",
+          // A manual SKU belongs to the same physical bin the counter is
+          // currently working in unless they intentionally choose another.
+          locationBin: activeBin,
           qty: "1",
         });
         setManualPhotoUrls([]);
@@ -6496,18 +6498,60 @@ function WarehouseAuditPanel({
                       placeholder="Required product name"
                     />
                   </Field>
-                  <Field label="Location">
-                    <Input
-                      value={manualUnknown.locationBin}
-                      onChange={(event) =>
-                        setManualUnknown((entry) =>
-                          entry
-                            ? { ...entry, locationBin: event.target.value }
-                            : entry,
-                        )
-                      }
-                      placeholder="Bin or area"
-                    />
+                  <Field label="Bin / location">
+                    {activeAuditBins.length ? (
+                      <Select
+                        value={manualUnknown.locationBin || "__unassigned"}
+                        onValueChange={(value) =>
+                          setManualUnknown((entry) =>
+                            entry
+                              ? {
+                                  ...entry,
+                                  locationBin:
+                                    value === "__unassigned" ? "" : value,
+                                }
+                              : entry,
+                          )
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select bin" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__unassigned">
+                            No bin selected
+                          </SelectItem>
+                          {activeAuditBins.map((bin) => (
+                            <SelectItem
+                              key={String(bin.id || bin.code)}
+                              value={String(bin.code)}
+                            >
+                              {String(bin.code)}
+                              {bin.nickname
+                                ? ` - ${String(bin.nickname)}`
+                                : bin.name
+                                  ? ` - ${String(bin.name)}`
+                                  : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <Input
+                        value={manualUnknown.locationBin}
+                        onChange={(event) =>
+                          setManualUnknown((entry) =>
+                            entry
+                              ? {
+                                  ...entry,
+                                  locationBin: event.target.value,
+                                }
+                              : entry,
+                          )
+                        }
+                        placeholder="Bin or area"
+                      />
+                    )}
                   </Field>
                   <Field label="Quantity">
                     <Input
