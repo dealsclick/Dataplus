@@ -919,7 +919,12 @@ function publicVendorFeedSchedule(feed = {}) {
 async function queueShopifyVariantPricePushJob(db, body = {}, options = {}) {
   const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))];
   const dryRun = body.apply === true ? false : body.dryRun !== false;
-  const filters = body.filters || {};
+  const suppliedFilters = body.filters && typeof body.filters === "object" ? body.filters : {};
+  // A broad price review is only meaningful for catalog records that are already live in Shopify.
+  // This also prevents scheduled reviews from walking every approved product by default.
+  const filters = requestedSkus.length || String(body.query || "").trim() || Object.keys(suppliedFilters).length
+    ? suppliedFilters
+    : { channelStatus: "shopify-live" };
   const query = String(body.query || "");
   const productTotal = requestedSkus.length || await postgres.countProducts({ q: query, filters }).catch(() => 0);
   const variantTotal = await postgres.countShopifyVariantStatuses({ skus: requestedSkus, liveOnly: requestedSkus.length ? false : shopifyPricePushUsesLiveVariantTotal(filters) }).catch(() => 0);
@@ -12680,9 +12685,13 @@ function moneyStringOrBlank(value = "") {
   return amount.toFixed(2);
 }
 
-function shopifyVariantPricePushRows(records = []) {
+function shopifyVariantPricePushRows(records = [], options = {}) {
   const prepared = [];
   const skipped = [];
+  const unchanged = [];
+  const statusMap = options.statusMap && typeof options.statusMap === "object"
+    ? options.statusMap
+    : {};
   for (const record of Array.isArray(records) ? records : []) {
     const sku = String(record["Variant SKU"] || record.SKU || "").trim();
     const productId = normalizeShopifyProductGid(record.ID || record["Product ID"] || record["Shopify ID"] || "");
@@ -12699,11 +12708,18 @@ function shopifyVariantPricePushRows(records = []) {
       });
       continue;
     }
+    const linked = statusMap[String(sku || "").toLowerCase()] || {};
+    const livePrice = moneyStringOrBlank(linked.shopifyVariantPrice || linked.price || "");
+    const liveCompareAtPrice = moneyStringOrBlank(linked.shopifyVariantCompareAtPrice || linked.compareAtPrice || "");
+    if (livePrice && livePrice === price && liveCompareAtPrice === compareAtPrice) {
+      unchanged.push({ sku, productId, variantId, price, compareAtPrice, issue: "Live Shopify price already matches" });
+      continue;
+    }
     const variant = { id: variantId, price };
     if (compareAtPrice) variant.compareAtPrice = compareAtPrice;
     prepared.push({ sku, productId, variantId, price, compareAtPrice, variant });
   }
-  return { prepared, skipped };
+  return { prepared, skipped, unchanged };
 }
 
 function shopifyProductCreateReadiness(db, item = {}) {
@@ -12936,7 +12952,10 @@ async function runShopifyVariantPricePushWorkerJob(job = {}, attrs = {}) {
     .map((sku) => String(sku || "").trim())
     .filter(Boolean))];
   const query = String(payload.query || "");
-  const filters = payload.filters || {};
+  const suppliedFilters = payload.filters && typeof payload.filters === "object" ? payload.filters : {};
+  const filters = requestedSkus.length || query || Object.keys(suppliedFilters).length
+    ? suppliedFilters
+    : { channelStatus: "shopify-live" };
   const liveVariantEstimate = await postgres.countShopifyVariantStatuses({
     skus: requestedSkus,
     liveOnly: requestedSkus.length ? false : shopifyPricePushUsesLiveVariantTotal(filters)
@@ -12967,17 +12986,17 @@ async function runShopifyVariantPricePushWorkerJob(job = {}, attrs = {}) {
     skus: requestedSkus,
     query,
     filters,
-    includeBlockedShopifyProducts: true,
+    includeBlockedShopifyProducts: false,
     progress: (patch = {}) => {
       const estimatedTotalRows = liveVariantEstimate || patch.totalRows || job.totalRows || 0;
       persistWorkerImportJob(job, {
         status: "running",
         phase: patch.phase || "building_shopify_price_rows",
-        totalRows: estimatedTotalRows,
-        processedRows: liveVariantEstimate ? 0 : patch.processedRows || job.processedRows || 0,
-        rowLabel: liveVariantEstimate ? "variant SKUs" : "products",
+        totalRows: patch.totalRows || job.totalRows || estimatedTotalRows,
+        processedRows: patch.processedRows || job.processedRows || 0,
+        rowLabel: "products",
         progressLabel: liveVariantEstimate
-          ? `${Number(liveVariantEstimate || 0).toLocaleString()} Shopify variant SKU${Number(liveVariantEstimate || 0) === 1 ? "" : "s"} estimated; scanning products`
+          ? `Scanning Shopify-linked products for ${Number(liveVariantEstimate || 0).toLocaleString()} variant SKU${Number(liveVariantEstimate || 0) === 1 ? "" : "s"}`
           : "Scanning products",
         progressPercent: Math.min(40, Math.round((Number(patch.processedRows || 0) / Math.max(1, Number(patch.totalRows || 1))) * 40)),
         estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, patch.processedRows || 0, patch.totalRows || 0)
@@ -12986,7 +13005,9 @@ async function runShopifyVariantPricePushWorkerJob(job = {}, attrs = {}) {
   });
   const csv = fs.readFileSync(written.filePath, "utf8");
   const records = parseCsv(csv);
-  const { prepared, skipped } = shopifyVariantPricePushRows(records);
+  const { prepared, skipped, unchanged } = shopifyVariantPricePushRows(records, {
+    statusMap: readShopifyStatusMapSync()
+  });
   const byProduct = new Map();
   for (const row of prepared) {
     if (!byProduct.has(row.productId)) byProduct.set(row.productId, []);
@@ -12999,6 +13020,7 @@ async function runShopifyVariantPricePushWorkerJob(job = {}, attrs = {}) {
     productsPrepared: byProduct.size,
     variantsPrepared: prepared.length,
     variantsSkipped: skipped.length,
+    variantsUnchanged: unchanged.length,
     variantsApplied: 0,
     userErrors: [],
     skipped: skipped.slice(0, 500),
@@ -13022,8 +13044,8 @@ async function runShopifyVariantPricePushWorkerJob(job = {}, attrs = {}) {
     estimatedVariantRows: prepared.length,
     progressPercent: dryRun ? 80 : 45,
     message: dryRun
-      ? `Dry run prepared ${prepared.length.toLocaleString()} Shopify variant price update${prepared.length === 1 ? "" : "s"}.`
-      : `Sending ${prepared.length.toLocaleString()} Shopify variant price update${prepared.length === 1 ? "" : "s"}...`
+      ? `Dry run prepared ${prepared.length.toLocaleString()} Shopify variant price update${prepared.length === 1 ? "" : "s"}; ${unchanged.length.toLocaleString()} already match.`
+      : `Sending ${prepared.length.toLocaleString()} changed Shopify variant price update${prepared.length === 1 ? "" : "s"}; ${unchanged.length.toLocaleString()} already match.`
   });
   if (!dryRun && prepared.length) {
     const mutation = `
@@ -13087,8 +13109,8 @@ async function runShopifyVariantPricePushWorkerJob(job = {}, attrs = {}) {
     message: dryRun
       ? `Shopify price push dry run prepared ${prepared.length.toLocaleString()} variant${prepared.length === 1 ? "" : "s"} from ${Number(written.productCount || 0).toLocaleString()} product${Number(written.productCount || 0) === 1 ? "" : "s"}.`
       : `Shopify price push applied ${report.variantsApplied.toLocaleString()} variant price update${report.variantsApplied === 1 ? "" : "s"}.`,
-    details: `${skipped.length.toLocaleString()} row${skipped.length === 1 ? "" : "s"} skipped; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
-    totalRows: prepared.length + skipped.length,
+    details: `${unchanged.length.toLocaleString()} unchanged; ${skipped.length.toLocaleString()} row${skipped.length === 1 ? "" : "s"} skipped; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
+    totalRows: prepared.length + skipped.length + unchanged.length,
     processedRows: prepared.length,
     changed: dryRun ? prepared.length : report.variantsApplied,
     missingCount: skipped.length + report.userErrors.length,
@@ -28995,8 +29017,11 @@ async function handleApi(req, res) {
       .map((sku) => String(sku || "").trim())
       .filter(Boolean))];
     const dryRun = body.apply === true ? false : body.dryRun !== false;
-    const filters = body.filters || {};
     const query = String(body.query || "");
+    const suppliedFilters = body.filters && typeof body.filters === "object" ? body.filters : {};
+    const filters = requestedSkus.length || query || Object.keys(suppliedFilters).length
+      ? suppliedFilters
+      : { channelStatus: "shopify-live" };
     const db = await readDbFast({ skipInventory: true });
     const productTotal = requestedSkus.length || await postgres.countProducts({ q: query, filters }).catch(() => 0);
     const variantTotal = await postgres.countShopifyVariantStatuses({
