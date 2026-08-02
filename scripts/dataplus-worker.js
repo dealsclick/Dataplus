@@ -44,6 +44,7 @@ const SUPPORTED_TASKS = [
   "shopify-status-import",
   "shopify-order-import",
   "shopify-sku-map-sync",
+  "shopify-shipping-eligibility-sync",
   "shopify-variant-price-push",
   "shopify-product-create",
   "shopify-existing-variant-link",
@@ -1054,6 +1055,10 @@ async function runShopifySkuMapSyncJob(job) {
   return dataplus.runShopifySkuMapSyncWorkerJob(job, job.workerPayload || {});
 }
 
+async function runShopifyShippingEligibilitySyncJob(job) {
+  return dataplus.runShopifyShippingEligibilitySyncWorkerJob(job, job.workerPayload || {});
+}
+
 async function runShopifyVariantPricePushJob(job) {
   return dataplus.runShopifyVariantPricePushWorkerJob(job, job.workerPayload || {});
 }
@@ -1456,6 +1461,7 @@ async function runJob(job) {
   if (task === "shopify-status-import") return runShopifyStatusImportJob(job);
   if (task === "shopify-order-import") return runShopifyOrderImportJob(job);
   if (task === "shopify-sku-map-sync") return runShopifySkuMapSyncJob(job);
+  if (task === "shopify-shipping-eligibility-sync") return runShopifyShippingEligibilitySyncJob(job);
   if (task === "shopify-variant-price-push") return runShopifyVariantPricePushJob(job);
   if (task === "shopify-product-create") return runShopifyProductCreateJob(job);
   if (task === "shopify-existing-variant-link") return runShopifyExistingVariantLinkJob(job);

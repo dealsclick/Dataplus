@@ -792,7 +792,15 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifySkuMapScheduleEnabled: true,
   shopifySkuMapScheduleTime: "02:00",
   shopifyShippingProfiles: [],
-  shopifyShippingProfilesSyncedAt: ""
+  shopifyShippingProfilesSyncedAt: "",
+  shopifyShippingEligibilityEnabled: true,
+  shopifyFreeShippingTag: "shipping-free",
+  shopifyPaidShippingTag: "shipping-paid",
+  shopifyFreightShippingTag: "shipping-freight",
+  shopifyFreeShippingProfileId: "",
+  shopifyPaidShippingProfileId: "",
+  shopifyFreightShippingProfileId: "",
+  shopifyFreightShippingRate: 240
 };
 
 const DEFAULT_SYSTEM_SETTINGS = {
@@ -937,6 +945,32 @@ async function queueShopifyVariantPricePushJob(db, body = {}, options = {}) {
   upsertImportJobStore(job);
   if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
   return { duplicate: false, job, workerPayload };
+}
+
+async function queueShopifyShippingEligibilitySyncJob(db, body = {}) {
+  const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))];
+  const dryRun = body.apply === true ? false : body.dryRun !== false;
+  const limit = Math.max(1, Math.min(25000, Number(body.limit || 1000) || 1000));
+  const workerPayload = { skus: requestedSkus, dryRun, apply: !dryRun, limit };
+  const totalRows = requestedSkus.length || await postgres.countProducts({ filters: { channelStatus: "shopify-linked" } }).catch(() => limit);
+  const job = createImportJob(db, {
+    section: "Products",
+    operation: dryRun ? "Shopify shipping eligibility dry run" : "Shopify shipping eligibility sync",
+    direction: "sync",
+    status: "queued",
+    fileName: dryRun ? "shopify-shipping-eligibility-dry-run.json" : "shopify-shipping-eligibility-report.json",
+    totalRows: Math.min(totalRows || limit, limit),
+    processedRows: 0,
+    progressPercent: 0,
+    rowLabel: "Shopify products",
+    phase: "queued",
+    workerTask: "shopify-shipping-eligibility-sync",
+    workerPayload,
+    message: `${dryRun ? "Shipping eligibility review" : "Shipping eligibility sync"} queued for up to ${Math.min(totalRows || limit, limit).toLocaleString()} Shopify-linked product${Math.min(totalRows || limit, limit) === 1 ? "" : "s"}.`
+  });
+  upsertImportJobStore(job);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  return { job, workerPayload };
 }
 
 function resolvedVendorFeedSchedules(settings = {}, vendors = []) {
@@ -3771,10 +3805,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -5293,7 +5327,40 @@ function productBlockedFromShopifyWebsite(item = {}, db = null) {
   return productIsCloseout(item) && productSellableQty(item, db) <= 0;
 }
 
-function productExportTags(item = {}) {
+function shopifyShippingEligibility(item = {}, settings = {}) {
+  const override = String(item.shippingEligibility ?? item.shipping_eligibility ?? item.raw?.shippingEligibility ?? item.raw?.shipping_eligibility ?? "").trim().toLowerCase();
+  const normalizedOverride = {
+    free: "free",
+    "free-shipping": "free",
+    paid: "paid",
+    parcel: "paid",
+    freight: "freight",
+    ltl: "freight",
+    review: "review"
+  }[override] || "";
+  const tags = sourceListValue(item.tags || []).map((tag) => String(tag || "").trim().toLowerCase());
+  if (normalizedOverride) return { key: normalizedOverride, reason: "Manual shipping eligibility override." };
+  if (tags.includes("free-shipping") || tags.includes("shipping-free")) return { key: "free", reason: "Existing free-shipping tag." };
+  if (tags.includes("freight-required") || tags.includes("shipping-ltl") || tags.includes("shipping-freight")) return { key: "freight", reason: "Existing freight shipping tag." };
+  if (!productHasShippingMeasurements(item)) return { key: "review", reason: "Package dimensions or weight are missing; excluded from free shipping." };
+  const classification = productShippingClassification(item);
+  if (classification.shippingClass === "ltl") return { key: "freight", reason: classification.shippingClassReason };
+  if (classification.shippingClass === "oversize_parcel") return { key: "paid", reason: classification.shippingClassReason };
+  return { key: "free", reason: "Parcel dimensions and weight qualify for free shipping." };
+}
+
+function shopifyShippingEligibilityTags(item = {}, settings = {}) {
+  const eligibility = shopifyShippingEligibility(item, settings);
+  const configuredTags = {
+    free: String(settings.shopifyFreeShippingTag || "shipping-free").trim() || "shipping-free",
+    paid: String(settings.shopifyPaidShippingTag || "shipping-paid").trim() || "shipping-paid",
+    freight: String(settings.shopifyFreightShippingTag || "shipping-freight").trim() || "shipping-freight"
+  };
+  const tag = eligibility.key === "review" ? configuredTags.paid : configuredTags[eligibility.key];
+  return { ...eligibility, tag, configuredTags };
+}
+
+function productExportTags(item = {}, settings = {}) {
   const tags = sourceListValue(item.tags || []).map((tag) => String(tag || "").trim()).filter(Boolean);
   if (productIsCloseout(item)) {
     tags.push("closeout", "to-be-discontinued");
@@ -5304,8 +5371,12 @@ function productExportTags(item = {}) {
     if (shipping.shippingClass === "oversize_parcel") tags.push("shipping-oversize-parcel", "oversize-parcel");
     if (shipping.shippingClass === "parcel") tags.push("shipping-parcel", "ground-eligible");
   }
+  const eligibility = shopifyShippingEligibilityTags(item, settings);
+  const existingEligibilityTags = Object.values(eligibility.configuredTags).map((tag) => tag.toLowerCase());
+  const retained = tags.filter((tag) => !existingEligibilityTags.includes(tag.toLowerCase()));
+  retained.push(eligibility.tag);
   const seen = new Set();
-  return tags.filter((tag) => {
+  return retained.filter((tag) => {
     const key = tag.toLowerCase();
     if (!key || seen.has(key)) return false;
     seen.add(key);
@@ -12773,7 +12844,7 @@ function shopifyProductCreatePayload(db, item = {}, options = {}) {
     vendor: sourceTextValue(item.vendor || item.supplier || item.brand),
     productType: shopifyProductTypeForProduct(db, item),
     status: safeStatus,
-    tags: productExportTags(item),
+    tags: productExportTags(item, settings),
     productOptions: [{ name: optionName, values: optionValues.map((name) => ({ name })) }],
     metafields: [
       {
@@ -12942,6 +13013,85 @@ async function createShopifyProductFromPayload(payload = {}, options = {}) {
     variants: Array.isArray(variantResult.productVariants) ? variantResult.productVariants : [],
     userErrors: Array.isArray(variantResult.userErrors) ? variantResult.userErrors : []
   };
+}
+
+async function runShopifyShippingEligibilitySyncWorkerJob(job = {}, attrs = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const dryRun = payload.apply === true ? false : payload.dryRun !== false;
+  const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))];
+  const limit = Math.max(1, Math.min(25000, Number(payload.limit || 1000) || 1000));
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const channel = findChannelByName(db, "Shopify");
+  if (!channel) throw new Error("Shopify channel was not found.");
+  const settings = channel.settings || DEFAULT_CHANNEL_SETTINGS;
+  if (!settings.shopifyShippingEligibilityEnabled) throw new Error("Enable Shopify shipping eligibility in Channel Rules before running this job.");
+  const products = requestedSkus.length
+    ? await postgres.readProductsByKeys(requestedSkus.slice(0, limit))
+    : (await postgres.listProducts({ filters: { channelStatus: "shopify-linked" }, page: 1, limit, fastPage: true }))?.items || [];
+  job = await persistWorkerImportJob(job, {
+    status: "running", phase: "classifying_shipping", startedAt, totalRows: products.length,
+    processedRows: 0, rowLabel: "Shopify products", progressLabel: "Classifying delivery eligibility",
+    message: `Checking parcel, paid shipping, and freight eligibility for ${products.length.toLocaleString()} Shopify-linked product${products.length === 1 ? "" : "s"}.`
+  });
+  const report = { dryRun, freightRate: Number(settings.shopifyFreightShippingRate || 240), reviewed: 0, tagged: 0, profileAssigned: 0, profileSkipped: 0, errors: [], rows: [] };
+  const profileFields = { free: "shopifyFreeShippingProfileId", paid: "shopifyPaidShippingProfileId", freight: "shopifyFreightShippingProfileId" };
+  for (const item of products) {
+    const eligibility = shopifyShippingEligibilityTags(item, settings);
+    const variants = shopifyPurchaseVariants(item, db);
+    const productId = normalizeShopifyProductGid(variants.find((variant) => variant.shopifyId)?.shopifyId || item.shopifyId || "");
+    const variantIds = [...new Set(variants.map((variant) => normalizeShopifyVariantGid(variant.shopifyVariantId || "")).filter(Boolean))];
+    const profileId = String(settings[profileFields[eligibility.key]] || "").trim();
+    const row = { sku: item.sku, title: item.title || item.name || "", eligibility: eligibility.key, tag: eligibility.tag, reason: eligibility.reason, productId, variantCount: variantIds.length, profileId: profileId || "", result: "reviewed" };
+    if (!productId) {
+      row.result = "skipped";
+      row.reason = "No linked Shopify product was found.";
+      report.errors.push(row);
+    } else if (!dryRun) {
+      try {
+        const allEligibilityTags = Object.values(eligibility.configuredTags);
+        await shopifyGraphqlRequestAuto(`mutation DataPlusShippingTagsRemove($id: ID!, $tags: [String!]!) { tagsRemove(id: $id, tags: $tags) { userErrors { message } } }`, { id: productId, tags: allEligibilityTags }, { jobId: job.id, operation: "Remove Shopify shipping eligibility tags" });
+        const tagsData = await shopifyGraphqlRequestAuto(`mutation DataPlusShippingTagsAdd($id: ID!, $tags: [String!]!) { tagsAdd(id: $id, tags: $tags) { userErrors { message } } }`, { id: productId, tags: [eligibility.tag] }, { jobId: job.id, operation: "Set Shopify shipping eligibility tag" });
+        const tagErrors = tagsData.tagsAdd?.userErrors || [];
+        if (tagErrors.length) throw new Error(tagErrors.map((error) => error.message).join("; "));
+        report.tagged += 1;
+        row.result = "tagged";
+        if (profileId && variantIds.length && eligibility.key !== "review") {
+          const profileData = await shopifyGraphqlRequestAuto(`mutation DataPlusDeliveryProfileAssign($id: ID!, $profile: DeliveryProfileInput!) { deliveryProfileUpdate(id: $id, profile: $profile) { profile { id name } userErrors { message } } }`, { id: profileId, profile: { variantsToAssociate: variantIds } }, { jobId: job.id, operation: "Assign Shopify delivery profile" });
+          const profileErrors = profileData.deliveryProfileUpdate?.userErrors || [];
+          if (profileErrors.length) throw new Error(profileErrors.map((error) => error.message).join("; "));
+          report.profileAssigned += variantIds.length;
+          row.result = "tagged and profile assigned";
+        } else if (eligibility.key !== "review") {
+          report.profileSkipped += 1;
+          row.result = "tagged; profile not configured";
+        }
+      } catch (error) {
+        row.result = "error";
+        row.error = error.message || String(error);
+        report.errors.push(row);
+      }
+    }
+    report.reviewed += 1;
+    report.rows.push(row);
+    await persistWorkerImportJob(job, { status: "running", phase: dryRun ? "preparing_shipping_report" : "syncing_shipping_eligibility", totalRows: products.length, processedRows: report.reviewed, changed: dryRun ? report.reviewed : report.tagged, missingCount: report.errors.length, progressPercent: Math.min(95, Math.round((report.reviewed / Math.max(1, products.length)) * 95)), estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, report.reviewed, products.length), message: `${dryRun ? "Reviewed" : "Synced"} ${report.reviewed.toLocaleString()} of ${products.length.toLocaleString()} Shopify product${products.length === 1 ? "" : "s"}.` });
+  }
+  const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "shopify-shipping-eligibility"));
+  fs.mkdirSync(jobDir, { recursive: true });
+  const reportPath = path.join(jobDir, dryRun ? "shopify-shipping-eligibility-dry-run.json" : "shopify-shipping-eligibility-report.json");
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  const csvPath = path.join(jobDir, "shopify-shipping-eligibility-results.csv");
+  fs.writeFileSync(csvPath, csvRecordsToText(report.rows));
+  job.originalFilePath = reportPath;
+  job.originalFileName = path.basename(reportPath);
+  job.fileName = path.basename(reportPath);
+  job.artifacts = [{ kind: "shipping-eligibility-results", fileName: path.basename(csvPath), filePath: csvPath, contentType: "text/csv; charset=utf-8", rowCount: report.rows.length, byteSize: fs.statSync(csvPath).size }];
+  finishImportJob(job, { status: report.errors.length ? "warning" : "success", phase: "complete", message: dryRun ? `Shipping eligibility dry run reviewed ${report.reviewed.toLocaleString()} product${report.reviewed === 1 ? "" : "s"}.` : `Shipping eligibility sync tagged ${report.tagged.toLocaleString()} Shopify product${report.tagged === 1 ? "" : "s"}.`, details: `Freight products use the configured $${Number(settings.shopifyFreightShippingRate || 240).toFixed(2)} profile rate. ${report.profileAssigned.toLocaleString()} variant profile assignment${report.profileAssigned === 1 ? "" : "s"}; ${report.profileSkipped.toLocaleString()} product${report.profileSkipped === 1 ? "" : "s"} skipped profile assignment.`, totalRows: products.length, processedRows: report.reviewed, changed: dryRun ? report.reviewed : report.tagged, missingCount: report.errors.length, errors: report.errors.slice(0, 50).map((row) => `${row.sku || "Shopify product"}: ${row.error || row.reason}`), progressPercent: 100, estimatedSecondsRemaining: 0, finishedAt: new Date().toISOString() });
+  await postgres.upsertOperationJob(job);
+  await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+  for (const artifact of job.artifacts) await postgres.upsertOperationArtifact(job, artifact.kind).catch(() => {});
+  publicStateJsonCache = null;
+  return job;
 }
 
 async function runShopifyVariantPricePushWorkerJob(job = {}, attrs = {}) {
@@ -28951,6 +29101,13 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/shopify/shipping-eligibility/sync" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const result = await queueShopifyShippingEligibilitySyncJob(db, body);
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(result.job), state: await postgresLiteState({ importJobs: [result.job] }), message: result.job.message });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/shopify/token-refresh") {
     const tokenState = await refreshShopifyAdminAccessToken({ operation: "Refresh Shopify token" });
     const orderAccess = await verifyShopifyOrderAccess();
@@ -33504,6 +33661,7 @@ module.exports = {
   normalizeShopifyStatus,
   normalizeShopifyVariantGid,
   queueShopifyInventoryUpdateJob,
+  queueShopifyShippingEligibilitySyncJob,
   queueShopifyVariantPricePushJob,
   queueShopifyOrderImportJob,
   queueShopifySkuMapSyncJob,
@@ -33520,6 +33678,7 @@ module.exports = {
   runShopifyOrderImportWorkerJob,
   runShopifyProductCreateWorkerJob,
   runShopifyProductTypeCollectionSyncWorkerJob,
+  runShopifyShippingEligibilitySyncWorkerJob,
   runShopifyTaxonomyPushWorkerJob,
   runShopifyVariantPricePushWorkerJob,
   runShopifySkuMapSyncWorkerJob,

@@ -228,6 +228,14 @@ type ChannelSettings = {
   shopifySkuMapScheduleTime?: string
   shopifyShippingProfiles?: Array<{ id?: string; name?: string; default?: boolean }>
   shopifyShippingProfilesSyncedAt?: string
+  shopifyShippingEligibilityEnabled?: boolean
+  shopifyFreeShippingTag?: string
+  shopifyPaidShippingTag?: string
+  shopifyFreightShippingTag?: string
+  shopifyFreeShippingProfileId?: string
+  shopifyPaidShippingProfileId?: string
+  shopifyFreightShippingProfileId?: string
+  shopifyFreightShippingRate?: number
   roundingRule?: string
   [key: string]: unknown
 }
@@ -2482,6 +2490,17 @@ function ChannelDetail({
         confirmMessage: "Push Shopify taxonomy updates to live products now?",
         successMessage: "Shopify taxonomy push queued.",
       },
+      shippingEligibilityDryRun: {
+        path: "/api/shopify/shipping-eligibility/sync",
+        body: { apply: false, dryRun: true, limit: 1000 },
+        successMessage: "Shopify shipping eligibility review queued.",
+      },
+      shippingEligibilityApply: {
+        path: "/api/shopify/shipping-eligibility/sync",
+        body: { apply: true, dryRun: false, limit: 1000 },
+        confirmMessage: "Apply Shopify shipping eligibility tags and delivery-profile assignments now? Review the dry run first. Products without complete measurements remain paid/review instead of becoming free shipping.",
+        successMessage: "Shopify shipping eligibility sync queued.",
+      },
     }
     const action = actionMap[kind]
     if (!action) return
@@ -2717,6 +2736,22 @@ function ChannelDetail({
                   />
                 </CardContent>
               </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Checkout shipping eligibility</CardTitle>
+                  <CardDescription>Classifies linked Shopify products as free shipping, paid parcel, or freight. The dry run exports every decision; applying updates tags and the delivery profiles selected in Rules.</CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-3 md:grid-cols-2">
+                  <ActionTile
+                    title="Shipping eligibility"
+                    description={`Freight products use the configured $${Number(settings.shopifyFreightShippingRate || 240).toFixed(2)} checkout rate. Missing measurements never qualify for free shipping.`}
+                    dryRunLabel="Review eligibility"
+                    applyLabel="Apply profiles"
+                    onDryRun={() => queueShopifyAction("shippingEligibilityDryRun")}
+                    onApply={() => queueShopifyAction("shippingEligibilityApply", true)}
+                  />
+                </CardContent>
+              </Card>
             </div>
           ) : (
             <Card>
@@ -2757,6 +2792,25 @@ function ChannelDetail({
                 <Field label="Inventory policy"><Select disabled={!editing} value={String(settings.shopifyInventoryPolicy || "deny")} onValueChange={(value) => update("shopifyInventoryPolicy", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="deny">Deny oversell</SelectItem><SelectItem value="continue">Continue selling</SelectItem></SelectContent></Select></Field>
                 <Field label="Fulfillment service"><Input disabled={!editing} value={String(settings.shopifyFulfillmentService || "manual")} onChange={(event) => update("shopifyFulfillmentService", event.target.value)} /></Field>
                 <Field label="Publish scope"><Select disabled={!editing} value={String(settings.shopifyPublishScope || "global")} onValueChange={(value) => update("shopifyPublishScope", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="global">Global</SelectItem><SelectItem value="web">Web</SelectItem></SelectContent></Select></Field>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Checkout shipping eligibility</p><p className="pt-1 text-xs text-muted-foreground">DataPlus tags products for visibility, then assigns Shopify variants to the selected delivery profiles. Create the profiles and their rates in Shopify first, import them here, then run a dry review.</p></div>
+                <div className="col-span-full flex flex-wrap items-center justify-between gap-3 rounded-md border border-sky-200 bg-sky-50/60 p-3 text-sm dark:border-sky-900 dark:bg-sky-950/30">
+                  <div><p className="font-medium">Free / paid / freight policy</p><p className="text-xs text-muted-foreground">Parcel products with complete measurements qualify for free shipping. Oversize and missing measurements stay paid. LTL/freight uses the configured freight profile.</p></div>
+                  <ToggleField label="Enable policy" checked={Boolean(settings.shopifyShippingEligibilityEnabled)} disabled={!editing} onCheckedChange={(value) => update("shopifyShippingEligibilityEnabled", value)} />
+                </div>
+                <Field label="Free-shipping profile">
+                  <Select disabled={!editing || !shippingProfiles.length} value={String(settings.shopifyFreeShippingProfileId || "none")} onValueChange={(value) => update("shopifyFreeShippingProfileId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Import profiles first" /></SelectTrigger><SelectContent><SelectItem value="none">No profile selected</SelectItem>{shippingProfiles.map((profile) => <SelectItem key={`free-${profile.id || profile.name}`} value={profile.id || profile.name || ""}>{profile.name || profile.id}</SelectItem>)}</SelectContent></Select>
+                </Field>
+                <Field label="Paid parcel profile">
+                  <Select disabled={!editing || !shippingProfiles.length} value={String(settings.shopifyPaidShippingProfileId || "none")} onValueChange={(value) => update("shopifyPaidShippingProfileId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Import profiles first" /></SelectTrigger><SelectContent><SelectItem value="none">No profile selected</SelectItem>{shippingProfiles.map((profile) => <SelectItem key={`paid-${profile.id || profile.name}`} value={profile.id || profile.name || ""}>{profile.name || profile.id}</SelectItem>)}</SelectContent></Select>
+                </Field>
+                <Field label="Freight profile">
+                  <Select disabled={!editing || !shippingProfiles.length} value={String(settings.shopifyFreightShippingProfileId || "none")} onValueChange={(value) => update("shopifyFreightShippingProfileId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Import profiles first" /></SelectTrigger><SelectContent><SelectItem value="none">No profile selected</SelectItem>{shippingProfiles.map((profile) => <SelectItem key={`freight-${profile.id || profile.name}`} value={profile.id || profile.name || ""}>{profile.name || profile.id}</SelectItem>)}</SelectContent></Select>
+                </Field>
+                <Field label="Freight checkout rate"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(settings.shopifyFreightShippingRate ?? 240)} onChange={(event) => update("shopifyFreightShippingRate", Number(event.target.value || 240))} /></Field>
+                <Field label="Free shipping tag"><Input disabled={!editing} value={String(settings.shopifyFreeShippingTag || "shipping-free")} onChange={(event) => update("shopifyFreeShippingTag", event.target.value)} /></Field>
+                <Field label="Paid shipping tag"><Input disabled={!editing} value={String(settings.shopifyPaidShippingTag || "shipping-paid")} onChange={(event) => update("shopifyPaidShippingTag", event.target.value)} /></Field>
+                <Field label="Freight shipping tag"><Input disabled={!editing} value={String(settings.shopifyFreightShippingTag || "shipping-freight")} onChange={(event) => update("shopifyFreightShippingTag", event.target.value)} /></Field>
+                <div className="col-span-full flex flex-wrap items-center gap-2 rounded-md border p-3"><Button type="button" size="sm" variant="outline" onClick={syncShippingProfiles}><RefreshCw className="size-4" />Import Shopify delivery profiles</Button><span className="text-xs text-muted-foreground">{settings.shopifyShippingProfilesSyncedAt ? `Imported ${new Date(String(settings.shopifyShippingProfilesSyncedAt)).toLocaleString()}` : "No profiles imported yet."}</span></div>
               </>}
               <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Pricing rules</p></div>
               <Field label="Price markup percent">
