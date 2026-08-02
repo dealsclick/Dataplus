@@ -5541,6 +5541,7 @@ function WarehouseAuditPanel({
     sku?: string;
     title?: string;
   } | null>(null);
+  const [cameraScanQuantity, setCameraScanQuantity] = useState("1");
   const [cameraLookupBusy, setCameraLookupBusy] = useState(false);
   const [manualUnknown, setManualUnknown] = useState<Record<
     string,
@@ -5565,16 +5566,16 @@ function WarehouseAuditPanel({
   const photoVideoRef = useRef<HTMLVideoElement | null>(null);
   const manualSkuRef = useRef<HTMLInputElement | null>(null);
   const scanRef = useRef(false);
-  const submitScanRef = useRef<(value: string) => Promise<void>>(async () => undefined);
+  const submitScanRef = useRef<(value: string, quantity?: number) => Promise<void>>(async () => undefined);
   const lastCameraScanRef = useRef({ value: "", at: 0 });
   const offlineQueueKey = "dataplus.warehouse-audit.offline-scans.v1";
   const readOfflineScans = () => {
     try {
       const saved = JSON.parse(window.localStorage.getItem(offlineQueueKey) || "[]");
-      return Array.isArray(saved) ? saved as Array<{ auditId: string; barcode: string; locationBin: string; queuedAt: string }> : [];
+      return Array.isArray(saved) ? saved as Array<{ auditId: string; barcode: string; locationBin: string; quantity?: number; queuedAt: string }> : [];
     } catch { return []; }
   };
-  const writeOfflineScans = (scans: Array<{ auditId: string; barcode: string; locationBin: string; queuedAt: string }>) => {
+  const writeOfflineScans = (scans: Array<{ auditId: string; barcode: string; locationBin: string; quantity?: number; queuedAt: string }>) => {
     try { window.localStorage.setItem(offlineQueueKey, JSON.stringify(scans.slice(-500))); } catch { /* A full browser store should not block scanning. */ }
   };
   const scannerFeedback = (kind: "success" | "unknown" | "error") => {
@@ -5713,14 +5714,11 @@ function WarehouseAuditPanel({
                 });
               }
               if (matched) {
-                setCameraMessage(`Adding ${product?.sku || value}...`);
+                setLastScan({ barcode: value, matched: true, message: lookup.message || "Catalog item found.", sku: product?.sku, title: product?.title });
+                setCameraScanQuantity("1");
+                setCameraMessage(`${product?.sku || value} matched. Enter the quantity you counted, then tap Next.`);
                 scannerFeedback("success");
-                return submitScanRef.current(value).then(() => {
-                  setLastScan(null);
-                  scanRef.current = false;
-                  lastCameraScanRef.current = { value: "", at: 0 };
-                  setCameraMessage(activeBin ? `Count saved. Counting in bin ${activeBin}. Point at the next product barcode.` : "Count saved. Point at the next product barcode.");
-                });
+                return;
               }
               setLastScan({
                 barcode: value,
@@ -5835,7 +5833,7 @@ function WarehouseAuditPanel({
       setBusy(false);
     }
   };
-  const submit = async (value = barcode) => {
+  const submit = async (value = barcode, quantity = 1) => {
     if (!resumedAudit || !String(value).trim()) return;
     if (cameraMode === "bin") {
       const bin = String(value).trim();
@@ -5848,7 +5846,7 @@ function WarehouseAuditPanel({
       return;
     }
     if (!navigator.onLine) {
-      const queued = [...readOfflineScans(), { auditId: String(resumedAudit.id), barcode: String(value).trim(), locationBin: activeBin, queuedAt: new Date().toISOString() }];
+      const queued = [...readOfflineScans(), { auditId: String(resumedAudit.id), barcode: String(value).trim(), locationBin: activeBin, quantity, queuedAt: new Date().toISOString() }];
       writeOfflineScans(queued);
       setOfflineScanCount(queued.filter((scan) => scan.auditId === String(resumedAudit.id)).length);
       setLastScan({ barcode: String(value), matched: true, message: "Saved offline. It will sync when this phone reconnects." });
@@ -5866,7 +5864,7 @@ function WarehouseAuditPanel({
         message?: string;
       }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/scan`,
-        { method: "POST", body: JSON.stringify({ barcode: value, locationBin: activeBin }) },
+        { method: "POST", body: JSON.stringify({ barcode: value, locationBin: activeBin, quantity }) },
       );
       const matched = result.matched === true;
       const message =
@@ -5911,6 +5909,7 @@ function WarehouseAuditPanel({
     setLastScan(null);
     setBarcode("");
     setCameraLookupBusy(false);
+    setCameraScanQuantity("1");
     scanRef.current = false;
     lastCameraScanRef.current = { value: "", at: 0 };
     setCameraMessage(
@@ -5927,10 +5926,15 @@ function WarehouseAuditPanel({
   };
   const confirmCameraScan = async () => {
     if (!lastScan || cameraLookupBusy) return;
+    const quantity = Math.max(1, Math.min(100000, Math.floor(Number(cameraScanQuantity) || 0)));
+    if (!(quantity > 0)) {
+      toast.error("Enter a quantity of at least 1.");
+      return;
+    }
     const candidate = lastScan;
     setCameraLookupBusy(true);
     try {
-      await submit(candidate.barcode);
+      await submit(candidate.barcode, quantity);
       if (candidate.matched) resetCameraScan();
     } finally {
       setCameraLookupBusy(false);
@@ -5948,7 +5952,7 @@ function WarehouseAuditPanel({
       for (let index = 0; index < mine.length; index += 1) {
         const scan = mine[index];
         try {
-          const result = await api<{ audit?: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(scan.auditId)}/scan`, { method: "POST", body: JSON.stringify({ barcode: scan.barcode, locationBin: scan.locationBin }) });
+          const result = await api<{ audit?: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(scan.auditId)}/scan`, { method: "POST", body: JSON.stringify({ barcode: scan.barcode, locationBin: scan.locationBin, quantity: scan.quantity || 1 }) });
           if (result.audit) applyAuditUpdate(result.audit);
           synced += 1;
         } catch {
@@ -6394,6 +6398,7 @@ function WarehouseAuditPanel({
                   onClick={() => {
                     setCameraMode("product");
                     setLastScan(null);
+                    setCameraScanQuantity("1");
                     scanRef.current = false;
                     setCameraStreamState("opening");
                     setCameraAttempt((attempt) => attempt + 1);
@@ -6425,7 +6430,7 @@ function WarehouseAuditPanel({
                   {cameraStreamState !== "ready" && !lastScan && <div className="absolute inset-0 grid place-items-center bg-black/85 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{cameraStreamState === "opening" ? "Starting camera..." : cameraStreamState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{cameraStreamState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{cameraStreamState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
                   {!lastScan && <div className="pointer-events-none absolute inset-x-[11%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,1)]" /><div className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this guide" : "Align barcode with this guide"}</div></div>}
                   {!lastScan && <div className="absolute inset-x-4 bottom-5 rounded-md bg-black/70 px-3 py-2 text-center text-sm font-medium text-white">{cameraLookupBusy ? "Looking up barcode..." : cameraMessage}</div>}
-                  {lastScan && <div className={`absolute inset-x-4 bottom-5 rounded-xl border p-4 shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-red-300 bg-red-50 text-red-950"}`}><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-emerald-600" /> : <X className="mt-0.5 size-6 shrink-0 text-red-600" />}<div><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Not found in catalog"}</p><p className="mt-1 font-mono text-sm">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 text-sm">{lastScan.title}</p>}{!lastScan.matched && <p className="mt-1 text-sm">Choose Next to add this as an unresolved UPC and create the SKU from the audit workspace.</p>}</div></div></div>}
+                  {lastScan && <div className={`absolute inset-x-4 bottom-5 rounded-xl border p-4 shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-red-300 bg-red-50 text-red-950"}`}><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-emerald-600" /> : <X className="mt-0.5 size-6 shrink-0 text-red-600" />}<div className="min-w-0 flex-1"><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Not found in catalog"}</p><p className="mt-1 font-mono text-sm">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 text-sm">{lastScan.title}</p>}{lastScan.matched ? <div className="mt-3 flex items-center gap-3"><Label htmlFor="camera-scan-quantity" className="shrink-0 text-sm font-medium">Counted quantity</Label><Input id="camera-scan-quantity" className="h-10 max-w-32 bg-white text-base" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmCameraScan(); } }} /></div> : <p className="mt-1 text-sm">Choose Next to add this as an unresolved UPC and create the SKU from the audit workspace.</p>}</div></div></div>}
                 </div>
                 <DialogFooter className="grid shrink-0 grid-cols-3 gap-2 border-t border-white/15 bg-black px-4 pb-[calc(max(1rem,env(safe-area-inset-bottom))+0.3125rem)] pt-3 sm:flex sm:justify-between">
                   <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={closeCameraScanner}>Back</Button>
