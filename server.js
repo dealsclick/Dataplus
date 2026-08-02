@@ -5338,10 +5338,7 @@ function shopifyShippingEligibility(item = {}, settings = {}) {
     ltl: "freight",
     review: "review"
   }[override] || "";
-  const tags = sourceListValue(item.tags || []).map((tag) => String(tag || "").trim().toLowerCase());
   if (normalizedOverride) return { key: normalizedOverride, reason: "Manual shipping eligibility override." };
-  if (tags.includes("free-shipping") || tags.includes("shipping-free")) return { key: "free", reason: "Existing free-shipping tag." };
-  if (tags.includes("freight-required") || tags.includes("shipping-ltl") || tags.includes("shipping-freight")) return { key: "freight", reason: "Existing freight shipping tag." };
   if (!productHasShippingMeasurements(item)) return { key: "review", reason: "Package dimensions or weight are missing; excluded from free shipping." };
   const classification = productShippingClassification(item);
   if (classification.shippingClass === "ltl") return { key: "freight", reason: classification.shippingClassReason };
