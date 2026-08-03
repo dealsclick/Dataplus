@@ -5531,6 +5531,8 @@ function WarehouseAuditPanel({
   const [cameraOpen, setCameraOpen] = useState(false);
   const [cameraStreamState, setCameraStreamState] = useState<"opening" | "ready" | "permission" | "error">("opening");
   const [cameraAttempt, setCameraAttempt] = useState(0);
+  const [cameraDevices, setCameraDevices] = useState<Array<{ id: string; label: string }>>([]);
+  const [selectedCameraId, setSelectedCameraId] = useState("");
   const [cameraMessage, setCameraMessage] = useState(
     "Camera ready. Point it at the next barcode.",
   );
@@ -5591,6 +5593,19 @@ function WarehouseAuditPanel({
       gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.13);
       oscillator.connect(gain).connect(context.destination); oscillator.start(); oscillator.stop(context.currentTime + 0.14);
     } catch { /* Audio feedback is optional. */ }
+  };
+  const refreshCameraDevices = async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const devices = (await navigator.mediaDevices.enumerateDevices())
+        .filter((device) => device.kind === "videoinput")
+        .map((device, index) => ({ id: device.deviceId, label: device.label || `Camera ${index + 1}` }));
+      setCameraDevices(devices);
+      setSelectedCameraId((current) => {
+        if (current && devices.some((device) => device.id === current)) return current;
+        return devices.find((device) => /back|rear|environment|world/i.test(device.label))?.id || current;
+      });
+    } catch { /* Camera selection remains optional. */ }
   };
   const load = async () => {
     const [result, state] = await Promise.all([
@@ -5673,11 +5688,9 @@ function WarehouseAuditPanel({
         controls = await reader.decodeFromConstraints(
           {
             audio: false,
-            video: {
-              facingMode: { ideal: "environment" },
-              width: { ideal: 1920 },
-              height: { ideal: 1080 },
-            },
+            video: selectedCameraId
+              ? { deviceId: { exact: selectedCameraId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+              : { facingMode: { exact: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
           },
           video,
           (result) => {
@@ -5738,6 +5751,7 @@ function WarehouseAuditPanel({
             }).finally(() => setCameraLookupBusy(false));
           },
         );
+        void refreshCameraDevices();
         setCameraStreamState("ready");
       } catch (error) {
         if (!canceled) {
@@ -5752,7 +5766,7 @@ function WarehouseAuditPanel({
       if (retryTimer) window.clearTimeout(retryTimer);
       controls?.stop();
     };
-  }, [cameraOpen, cameraAttempt, resumedAudit?.id]);
+  }, [cameraOpen, cameraAttempt, resumedAudit?.id, selectedCameraId]);
   useEffect(() => {
     if (!photoCameraOpen) return;
     let stream: MediaStream | null = null;
@@ -5770,11 +5784,9 @@ function WarehouseAuditPanel({
       try {
         setPhotoCameraState("opening");
         const next = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
+          video: selectedCameraId
+            ? { deviceId: { exact: selectedCameraId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+            : { facingMode: { exact: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
           audio: false,
         });
         if (canceled) {
@@ -5784,6 +5796,7 @@ function WarehouseAuditPanel({
         stream = next;
         video.srcObject = next;
         await video.play();
+        void refreshCameraDevices();
         setPhotoCameraState("ready");
       } catch (error) {
         if (!canceled) {
@@ -5798,7 +5811,7 @@ function WarehouseAuditPanel({
       if (retryTimer) window.clearTimeout(retryTimer);
       stream?.getTracks().forEach((track) => track.stop());
     };
-  }, [photoCameraOpen, photoCameraAttempt]);
+  }, [photoCameraOpen, photoCameraAttempt, selectedCameraId]);
   const create = async () => {
     setBusy(true);
     try {
@@ -6422,8 +6435,10 @@ function WarehouseAuditPanel({
             <Dialog open={cameraOpen} onOpenChange={(open) => { if (!open) closeCameraScanner(); }}>
               <DialogContent className="!inset-0 !flex !h-[100dvh] !max-w-none !translate-x-0 !translate-y-0 flex-col overflow-hidden rounded-none bg-black p-0 text-white sm:!inset-auto sm:!h-[90vh] sm:!max-w-3xl sm:!-translate-x-1/2 sm:!-translate-y-1/2 sm:rounded-xl" showCloseButton={false}>
                 <DialogHeader className="shrink-0 border-b border-white/15 px-4 py-3 text-white">
-                  <DialogTitle className="text-white">{cameraMode === "bin" ? "Scan bin" : "Scan product barcode"}</DialogTitle>
-                  <DialogDescription className="text-white/70">{lastScan ? "Review this scan before adding it to the audit." : "Hold the barcode inside the guide. DataPlus will look it up automatically."}</DialogDescription>
+                  <div className="flex items-start justify-between gap-3">
+                    <div><DialogTitle className="text-white">{cameraMode === "bin" ? "Scan bin" : "Scan product barcode"}</DialogTitle><DialogDescription className="text-white/70">{lastScan ? "Review this scan before adding it to the audit." : "Hold the barcode inside the guide. DataPlus will look it up automatically."}</DialogDescription></div>
+                    {cameraDevices.length > 1 && <Select value={selectedCameraId} onValueChange={(value) => { setSelectedCameraId(value); setCameraAttempt((attempt) => attempt + 1); }}><SelectTrigger className="h-9 w-36 border-white/30 bg-white/10 text-xs text-white"><SelectValue placeholder="Back camera" /></SelectTrigger><SelectContent>{cameraDevices.map((device) => <SelectItem key={device.id} value={device.id}>{/back|rear|environment|world/i.test(device.label) ? `Back: ${device.label}` : device.label}</SelectItem>)}</SelectContent></Select>}
+                  </div>
                 </DialogHeader>
                 <div className="relative min-h-0 flex-1 bg-black">
                   <video ref={videoRef} className="size-full object-contain" autoPlay muted playsInline />
@@ -6774,8 +6789,7 @@ function WarehouseAuditPanel({
             <Dialog open={photoCameraOpen} onOpenChange={setPhotoCameraOpen}>
               <DialogContent className="!inset-0 !flex !h-[100dvh] !max-w-none !translate-x-0 !translate-y-0 flex-col rounded-none p-0 sm:!inset-auto sm:!grid sm:!h-auto sm:max-h-[90vh] sm:!max-w-2xl sm:!-translate-x-1/2 sm:!-translate-y-1/2 sm:rounded-xl sm:p-5" showCloseButton={false}>
                 <DialogHeader className="shrink-0 border-b px-4 py-3 sm:px-0 sm:py-0 sm:pb-3">
-                  <DialogTitle>Capture product photos</DialogTitle>
-                  <DialogDescription>Take the front, barcode, packaging, and label photos you need. Each capture is added to this SKU’s gallery.</DialogDescription>
+                  <div className="flex items-start justify-between gap-3"><div><DialogTitle>Capture product photos</DialogTitle><DialogDescription>Take the front, barcode, packaging, and label photos you need. Each capture is added to this SKU’s gallery.</DialogDescription></div>{cameraDevices.length > 1 && <Select value={selectedCameraId} onValueChange={(value) => { setSelectedCameraId(value); setPhotoCameraAttempt((attempt) => attempt + 1); }}><SelectTrigger className="h-9 w-36 text-xs"><SelectValue placeholder="Back camera" /></SelectTrigger><SelectContent>{cameraDevices.map((device) => <SelectItem key={device.id} value={device.id}>{/back|rear|environment|world/i.test(device.label) ? `Back: ${device.label}` : device.label}</SelectItem>)}</SelectContent></Select>}</div>
                 </DialogHeader>
                 <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-0">
                   <div className="grid gap-3">
