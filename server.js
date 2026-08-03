@@ -76,6 +76,8 @@ let shopifyAccessTokenCache = { token: "", expiresAt: 0, scope: "" };
 let shopifyStatusMapCache = { mtimeMs: 0, data: null };
 let productSourceEnrichmentCache = { mtimeMs: 0, data: null };
 const normalizedCategorySettingsCache = new WeakMap();
+const categoryMappingIndexCache = new WeakMap();
+const vendorProfileLookupCache = new WeakMap();
 let channelApiLogPruneLastRun = 0;
 
 const SOURCES = ["Shopify", "Temu", "eBay", "Whatnot", "TikTok Shop"];
@@ -1066,8 +1068,23 @@ function productSupplierTokens(item = {}) {
 function vendorProfileForProduct(db = null, item = {}) {
   const vendors = Array.isArray(db?.vendors) ? db.vendors : [];
   if (!vendors.length) return null;
-  const tokens = new Set(productSupplierTokens(item).map((value) => value.toLowerCase()).filter(Boolean));
-  if (!tokens.size) return null;
+  const tokens = productSupplierTokens(item).map((value) => value.toLowerCase()).filter(Boolean);
+  if (!tokens.length) return null;
+  let lookup = vendorProfileLookupCache.get(db);
+  if (!lookup) {
+    lookup = new Map();
+    for (const vendor of vendors) {
+      for (const token of [vendor.id, vendor.vendor_id, vendor.code, vendor.vendorCode, vendor.vendorNumber, vendor.name]) {
+        const key = sourceTextValue(token).toLowerCase();
+        if (key && !lookup.has(key)) lookup.set(key, vendor);
+      }
+    }
+    vendorProfileLookupCache.set(db, lookup);
+  }
+  for (const token of tokens) {
+    if (lookup.has(token)) return lookup.get(token);
+  }
+  const tokenSet = new Set(tokens);
   return vendors.find((vendor) => {
     const vendorTokens = [
       vendor.id,
@@ -1077,7 +1094,7 @@ function vendorProfileForProduct(db = null, item = {}) {
       vendor.vendorNumber,
       vendor.name
     ].map(sourceTextValue).map((value) => value.toLowerCase()).filter(Boolean);
-    return vendorTokens.some((value) => tokens.has(value) || (value && [...tokens].some((token) => token.includes(value) || value.includes(token))));
+    return vendorTokens.some((value) => tokenSet.has(value) || (value && tokens.some((token) => token.includes(value) || value.includes(token))));
   }) || null;
 }
 
@@ -1310,14 +1327,15 @@ function normalizeSystemVariant(variant = {}, parent = {}, db = null) {
 }
 
 function systemProductVariants(item = {}, db = null) {
+  if (item.__systemVariantsCache && item.__systemVariantsCache.db === db) return item.__systemVariantsCache.variants;
+  let variants;
   if (productRequiresUomOnlyVariants(item, db)) {
-    return [normalizeSystemVariant({
+    variants = [normalizeSystemVariant({
       sku: variantBaseSku(item),
       note: "Single vendor UOM sell unit from vendor variation rules. No generated UOM SKU suffix."
     }, item, db)];
-  }
-  if (productRequiresEachAndUomVariants(item, db)) {
-    return [
+  } else if (productRequiresEachAndUomVariants(item, db)) {
+    variants = [
       normalizeSystemVariant({
         key: "each",
         optionName: "Purchase Unit",
@@ -1335,17 +1353,22 @@ function systemProductVariants(item = {}, db = null) {
         note: "Vendor UOM sell unit generated from vendor variation rules."
       }, item, db)
     ];
+  } else {
+    const explicit = Array.isArray(item.systemVariants) ? item.systemVariants : [];
+    const generated = normalizeSystemVariant({}, item, db);
+    const manual = explicit.filter((variant) => variant.generated === false || String(variant.source || "").toLowerCase() === "manual").map((variant) => normalizeSystemVariant(variant, item, db));
+    const seen = new Set();
+    variants = [generated, ...manual].filter((variant) => {
+      const key = String(variant.sku || "").trim().toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
-  const explicit = Array.isArray(item.systemVariants) ? item.systemVariants : [];
-  const generated = normalizeSystemVariant({}, item, db);
-  const manual = explicit.filter((variant) => variant.generated === false || String(variant.source || "").toLowerCase() === "manual").map((variant) => normalizeSystemVariant(variant, item, db));
-  const seen = new Set();
-  return [generated, ...manual].filter((variant) => {
-    const key = String(variant.sku || "").trim().toLowerCase();
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
+  Object.defineProperty(item, "__systemVariantsCache", {
+    value: { db, variants }, enumerable: false, configurable: true
   });
+  return variants;
 }
 
 function pricedFromCost(cost, markupPercent = DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent) {
@@ -4821,7 +4844,17 @@ function categoryMappingForProduct(db, item, channel = "shopify") {
   const category = effectiveMainCategoryName(item, readSystemSettingsStore(db.systemSettings || {})).toLowerCase();
   if (!category) return null;
   const settings = normalizeCategorySettings(db.categorySettings);
-  const match = settings.find((row) => formatCategoryName(row.name || "").toLowerCase() === category || String(row.categoryId || "").trim().toLowerCase() === category);
+  let index = categoryMappingIndexCache.get(settings);
+  if (!index) {
+    index = new Map();
+    for (const row of settings) {
+      for (const key of [formatCategoryName(row.name || "").toLowerCase(), String(row.categoryId || "").trim().toLowerCase()]) {
+        if (key && !index.has(key)) index.set(key, row);
+      }
+    }
+    categoryMappingIndexCache.set(settings, index);
+  }
+  const match = index.get(category);
   return match?.mappings?.[channel] || null;
 }
 
