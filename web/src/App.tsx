@@ -8007,13 +8007,13 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                 ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
-            <DropdownMenu open={filterOpen} onOpenChange={setFilterOpen}>
-              <DropdownMenuTrigger asChild>
+            <Popover open={filterOpen} onOpenChange={(open) => { setFilterOpen(open); if (open) { setFilterSelection(String(filters[filterField] || "").split("|").filter(Boolean)); setFilterSearch(""); } }}>
+              <PopoverTrigger asChild>
                 <Button size="sm" variant="outline">
                   + Filter
                 </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-[380px] p-3">
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-[380px] p-3">
                 <div className="grid gap-3">
                   <p className="text-xs font-semibold uppercase text-muted-foreground">
                     Add product filter
@@ -8023,7 +8023,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                     onValueChange={(value) => {
                       setFilterField(value);
                       if (value === "channelStatus") setChannelFilterScope("shopify");
-                      setFilterSelection([]);
+                      setFilterSelection(String(filters[value] || "").split("|").filter(Boolean));
                       setFilterSearch("");
                     }}
                   >
@@ -8047,7 +8047,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                         value={channelFilterScope}
                         onValueChange={(value) => {
                           setChannelFilterScope(value);
-                          setFilterSelection([]);
+                          setFilterSelection(String(filters.channelStatus || "").split("|").filter(Boolean));
                           setFilterSearch("");
                         }}
                       >
@@ -8133,8 +8133,8 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                     </Button>
                   </div>
                 </div>
-              </DropdownMenuContent>
-            </DropdownMenu>
+              </PopoverContent>
+            </Popover>
             <div className="flex items-center gap-1 rounded-md border px-2 py-1">
               <Input
                 aria-label="Created from"
