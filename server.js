@@ -75,6 +75,7 @@ let operationalSummaryCache = { value: null, refreshedAt: 0, pending: null };
 let shopifyAccessTokenCache = { token: "", expiresAt: 0, scope: "" };
 let shopifyStatusMapCache = { mtimeMs: 0, data: null };
 let productSourceEnrichmentCache = { mtimeMs: 0, data: null };
+const normalizedCategorySettingsCache = new WeakMap();
 let channelApiLogPruneLastRun = 0;
 
 const SOURCES = ["Shopify", "Temu", "eBay", "Whatnot", "TikTok Shop"];
@@ -7028,7 +7029,10 @@ function findProductForShopifyRecord(record, maps) {
   return { item: null, payload, matchBy: "" };
 }
 function normalizeCategorySettings(settings = []) {
-  return (Array.isArray(settings) ? settings : []).map((category) => {
+  const source = Array.isArray(settings) ? settings : [];
+  const cached = normalizedCategorySettingsCache.get(source);
+  if (cached) return cached;
+  const normalized = source.map((category) => {
     const name = formatCategoryName(category.name || "Uncategorized");
     return {
       id: category.id || crypto.randomUUID(),
@@ -7061,6 +7065,8 @@ function normalizeCategorySettings(settings = []) {
       createdAt: category.createdAt || new Date().toISOString()
     };
   });
+  normalizedCategorySettingsCache.set(source, normalized);
+  return normalized;
 }
 
 function categoryIdentity(value, scope = "source") {
