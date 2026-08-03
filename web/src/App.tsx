@@ -7684,6 +7684,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
     channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
+    hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
     brand: { label: "Brand", values: facets.brands || [], display: (value) => value },
     manufacturer: { label: "Manufacturer", values: facets.manufacturers || [], display: (value) => value },

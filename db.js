@@ -5311,6 +5311,16 @@ async function listProducts(options = {}) {
   if (hasStockValues.length === 1) {
     where.push(hasStockValues[0] ? `coalesce(qty, 0) > 0` : `coalesce(qty, 0) <= 0`);
   }
+  const hasImageValues = [...new Set(splitFilterValues(filters.hasImage).map(parseFilterBoolean))];
+  if (hasImageValues.length === 1) {
+    const hasImageExpression = `(
+      coalesce(raw ->> 'image', raw ->> 'imageUrl', raw ->> 'defaultImage', raw ->> 'primaryImage', raw ->> 'thumbnailUrl', '') <> ''
+      or jsonb_array_length(case when jsonb_typeof(raw -> 'images') = 'array' then raw -> 'images' else '[]'::jsonb end) > 0
+      or jsonb_array_length(case when jsonb_typeof(raw -> 'productImages') = 'array' then raw -> 'productImages' else '[]'::jsonb end) > 0
+      or jsonb_array_length(case when jsonb_typeof(raw -> 'shopifyImages') = 'array' then raw -> 'shopifyImages' else '[]'::jsonb end) > 0
+    )`;
+    where.push(hasImageValues[0] ? hasImageExpression : `not ${hasImageExpression}`);
+  }
   const discontinuedValues = [...new Set(splitFilterValues(filters.toBeDiscontinued).map(parseFilterBoolean))];
   if (discontinuedValues.length === 1) {
     params.push(discontinuedValues[0]);
