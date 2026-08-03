@@ -7668,6 +7668,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   const [channelFilterScope, setChannelFilterScope] = useState("shopify")
   const [filterSearch, setFilterSearch] = useState("")
   const [filterSelection, setFilterSelection] = useState<string[]>([])
+  const [pendingFilters, setPendingFilters] = useState<Record<string, string[]>>({})
   const [pageSize, setPageSize] = useState(() => Number(window.localStorage.getItem("dataplus-products-page-size") || 25))
   const [sort, setSort] = useState<{ key: string; direction: "asc" | "desc" }>({ key: "", direction: "asc" })
   const [alternateCounts, setAlternateCounts] = useState<Record<string, number>>({})
@@ -7721,6 +7722,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
     ? activeDefinition.values.filter((value) => value.startsWith(`${channelFilterScope}-`))
     : activeDefinition.values
   const matchingValues = filterValues.filter((value) => activeDefinition.display(value).toLowerCase().includes(filterSearch.toLowerCase())).slice(0, 250)
+  const pendingSelections = Object.entries(pendingFilters).flatMap(([key, values]) => values.map((value) => ({ key, value, label: `${filterDefinitions[key]?.label || key}: ${filterDefinitions[key]?.display(value) || value}` })))
   const selectionCount = allFiltered ? total : selectedIds.size
   const selectedQty = allFiltered
     ? totalQty
@@ -7766,9 +7768,14 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
     window.localStorage.setItem("dataplus-products-auto-alternates", String(checked))
   }
   const applyFilter = () => {
-    if (!filterSelection.length) return
-    const next = { ...filters, [filterField]: filterSelection.join("|") }
-    setFilters(next); setFilterOpen(false); setFilterSelection([]); setFilterSearch(""); setAllFiltered(false); setSelectedIds(new Set()); load(1, next)
+    if (!pendingSelections.length) return
+    const next = { ...filters }
+    Object.entries(pendingFilters).forEach(([key, values]) => {
+      if (!filterDefinitions[key]) return
+      if (values.length) next[key] = values.join("|")
+      else delete next[key]
+    })
+    setFilters(next); setFilterOpen(false); setFilterSelection([]); setPendingFilters({}); setFilterSearch(""); setAllFiltered(false); setSelectedIds(new Set()); load(1, next)
   }
   const removeFilter = (key: string) => { const next = { ...filters }; delete next[key]; setFilters(next); setAllFiltered(false); setSelectedIds(new Set()); load(1, next) }
   const resetFilters = () => { setFilters({}); setQuery(""); setAllFiltered(false); setSelectedIds(new Set()); load(1, {}) }
@@ -8007,7 +8014,25 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                 ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
-            <Popover open={filterOpen} onOpenChange={(open) => { setFilterOpen(open); if (open) { setFilterSelection(String(filters[filterField] || "").split("|").filter(Boolean)); setFilterSearch(""); } }}>
+            <Popover
+              open={filterOpen}
+              onOpenChange={(open) => {
+                setFilterOpen(open)
+                if (!open) return
+
+                const nextPending = Object.fromEntries(
+                  Object.entries(filters)
+                    .filter(([key]) => Boolean(filterDefinitions[key]))
+                    .map(([key, value]) => [
+                      key,
+                      String(value || "").split("|").filter(Boolean),
+                    ]),
+                )
+                setPendingFilters(nextPending)
+                setFilterSelection(nextPending[filterField] || [])
+                setFilterSearch("")
+              }}
+            >
               <PopoverTrigger asChild>
                 <Button size="sm" variant="outline">
                   + Filter
@@ -8023,7 +8048,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                     onValueChange={(value) => {
                       setFilterField(value);
                       if (value === "channelStatus") setChannelFilterScope("shopify");
-                      setFilterSelection(String(filters[value] || "").split("|").filter(Boolean));
+                      setFilterSelection(pendingFilters[value] || []);
                       setFilterSearch("");
                     }}
                   >
@@ -8047,7 +8072,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                         value={channelFilterScope}
                         onValueChange={(value) => {
                           setChannelFilterScope(value);
-                          setFilterSelection(String(filters.channelStatus || "").split("|").filter(Boolean));
+                          setFilterSelection(pendingFilters.channelStatus || []);
                           setFilterSearch("");
                         }}
                       >
@@ -8086,9 +8111,11 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                         onClick={() =>
                           setFilterSelection((current) => {
                             const allShownSelected = matchingValues.every((value) => current.includes(value));
-                            return allShownSelected
+                            const next = allShownSelected
                               ? current.filter((value) => !matchingValues.includes(value))
                               : Array.from(new Set([...current, ...matchingValues]));
+                            setPendingFilters((pending) => ({ ...pending, [filterField]: next }));
+                            return next;
                           })
                         }
                       >
@@ -8104,18 +8131,51 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                       >
                         <Checkbox
                           checked={filterSelection.includes(value)}
-                          onCheckedChange={() =>
-                            setFilterSelection((current) =>
-                              current.includes(value)
+                          onCheckedChange={() => {
+                            setFilterSelection((current) => {
+                              const next = current.includes(value)
                                 ? current.filter((item) => item !== value)
-                                : [...current, value],
-                            )
-                          }
+                                : [...current, value]
+                              setPendingFilters((pending) => ({
+                                ...pending,
+                                [filterField]: next,
+                              }))
+                              return next
+                            })
+                          }}
                         />
                         {activeDefinition.display(value)}
                       </label>
                     ))}
                   </div>
+                  {pendingSelections.length > 0 ? (
+                    <div className="flex flex-wrap gap-1 border-t pt-3">
+                      {pendingSelections.map((selection) => (
+                        <Button
+                          key={`${selection.key}-${selection.value}`}
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          className="h-7 max-w-full gap-1 px-2 text-xs"
+                          onClick={() => {
+                            const next = (pendingFilters[selection.key] || []).filter(
+                              (value) => value !== selection.value,
+                            )
+                            setPendingFilters((current) => ({
+                              ...current,
+                              [selection.key]: next,
+                            }))
+                            if (selection.key === filterField) {
+                              setFilterSelection(next)
+                            }
+                          }}
+                        >
+                          <span className="truncate">{selection.label}</span>
+                          <X className="size-3 shrink-0" />
+                        </Button>
+                      ))}
+                    </div>
+                  ) : null}
                   <div className="flex justify-end gap-2">
                     <Button
                       size="sm"
@@ -8127,7 +8187,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                     <Button
                       size="sm"
                       onClick={applyFilter}
-                      disabled={!filterSelection.length}
+                      disabled={!pendingSelections.length}
                     >
                       Apply filter
                     </Button>
