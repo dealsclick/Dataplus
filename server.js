@@ -22482,9 +22482,13 @@ async function handleApi(req, res) {
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
     if (!settings.aiEnabled) return sendJson(res, 403, { error: "AI integration is disabled. Verify and enable it in System Settings before using package-photo suggestions." });
     if (!settings.warehouseImageAnalysisEnabled) return sendJson(res, 403, { error: "Package-photo suggestions are disabled in AI Integration settings." });
-    const photoDataUrl = String(body.photoDataUrl || "");
-    if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(photoDataUrl) || photoDataUrl.length > 4.25 * 1024 * 1024) {
-      return sendJson(res, 400, { error: "Use a PNG, JPG, or WebP product photo smaller than 3 MB." });
+    const suppliedPhotos = Array.isArray(body.photoDataUrls) ? body.photoDataUrls : [body.photoDataUrl];
+    const photoDataUrls = suppliedPhotos
+      .map((photo) => String(photo || ""))
+      .filter(Boolean)
+      .slice(0, 8);
+    if (!photoDataUrls.length || photoDataUrls.some((photo) => !/^data:image\/(png|jpe?g|webp);base64,/i.test(photo) || photo.length > 4.25 * 1024 * 1024)) {
+      return sendJson(res, 400, { error: "Use up to 8 PNG, JPG, or WebP product photos smaller than 3 MB each." });
     }
     const aiConfig = getAiRuntimeConfig(settings);
     if (!aiConfig.apiKey) return sendJson(res, 503, { error: `AI integration is enabled, but no ${aiConfig.provider === "google-ai-studio" ? "Google AI Studio" : "OpenAI"} API key is configured.` });
@@ -22497,20 +22501,20 @@ async function handleApi(req, res) {
       }
     };
     try {
-      const instruction = "Extract only information clearly visible on this product package. Do not invent information. Return empty strings for fields that are not legible or cannot be confidently inferred. Use a short, customer-friendly product title and a concise category path only when the package makes it clear. Create editable catalog-field suggestions from this package photo.";
-      const imageMatch = photoDataUrl.match(/^data:(image\/(?:png|jpe?g|webp));base64,(.+)$/i);
+      const instruction = `Review all ${photoDataUrls.length} product-package photo${photoDataUrls.length === 1 ? "" : "s"} together. Extract only information clearly visible across the complete set. Do not invent information. Return empty strings for fields that are not legible or cannot be confidently inferred. Use a short, customer-friendly product title and a concise category path only when the package makes it clear. Create editable catalog-field suggestions from this complete package-photo set.`;
+      const imageMatches = photoDataUrls.map((photo) => photo.match(/^data:(image\/(?:png|jpe?g|webp));base64,(.+)$/i));
       const response = aiConfig.provider === "google-ai-studio"
         ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
           method: "POST",
           headers: { "x-goog-api-key": aiConfig.apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" },
           signal: AbortSignal.timeout(20000),
-          body: JSON.stringify({ model: aiConfig.model, store: false, input: [{ type: "text", text: instruction }, { type: "image", data: imageMatch?.[2] || "", mime_type: imageMatch?.[1] || "image/jpeg" }], response_format: { type: "text", mime_type: "application/json", schema } })
+          body: JSON.stringify({ model: aiConfig.model, store: false, input: [{ type: "text", text: instruction }, ...imageMatches.map((imageMatch) => ({ type: "image", data: imageMatch?.[2] || "", mime_type: imageMatch?.[1] || "image/jpeg" }))], response_format: { type: "text", mime_type: "application/json", schema } })
         })
         : await fetch("https://api.openai.com/v1/responses", {
           method: "POST",
           headers: { Authorization: `Bearer ${aiConfig.apiKey}`, "Content-Type": "application/json" },
           signal: AbortSignal.timeout(20000),
-          body: JSON.stringify({ model: aiConfig.model, input: [{ role: "developer", content: [{ type: "input_text", text: instruction }] }, { role: "user", content: [{ type: "input_image", image_url: photoDataUrl, detail: "high" }] }], max_output_tokens: 600, text: { format: { type: "json_schema", name: "warehouse_product_suggestion", strict: true, schema } } })
+          body: JSON.stringify({ model: aiConfig.model, input: [{ role: "developer", content: [{ type: "input_text", text: instruction }] }, { role: "user", content: photoDataUrls.map((photoDataUrl) => ({ type: "input_image", image_url: photoDataUrl, detail: "high" })) }], max_output_tokens: 600, text: { format: { type: "json_schema", name: "warehouse_product_suggestion", strict: true, schema } } })
         });
       const payload = await response.json();
       if (!response.ok) throw new Error(String(payload?.error?.message || "The image-analysis request was rejected."));
