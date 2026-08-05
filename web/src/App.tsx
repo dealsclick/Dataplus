@@ -3329,7 +3329,7 @@ function ProductDetailSheet({
 
   const content = (
     <>
-        <SheetHeader className="border-b pr-12">
+        <SheetHeader className="sticky top-0 z-20 border-b bg-background/95 pr-12 backdrop-blur supports-[backdrop-filter]:bg-background/80">
           <div className="flex items-start gap-3">
             <div className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-md border bg-muted">
               {sourceItem?.defaultImage ? <img src={sourceItem.defaultImage} alt="" className="max-h-full max-w-full object-contain" /> : <Boxes className="size-5 text-muted-foreground" />}
@@ -3337,10 +3337,11 @@ function ProductDetailSheet({
             <div className="min-w-0">
               {standalone ? <><h2 className="truncate text-lg font-semibold">{sku || "Product"}</h2><p className="line-clamp-2 text-sm text-muted-foreground">{product?.title || sourceItem?.title || "Source catalog product"}</p></> : <><SheetTitle className="truncate">{sku || "Product"}</SheetTitle><SheetDescription className="line-clamp-2">{product?.title || sourceItem?.title || "Source catalog product"}</SheetDescription></>}
             </div>
-            {!standalone && <Button size="sm" variant="outline" className="ml-auto shrink-0" onClick={openStandalone}><ExternalLink className="size-4" /> Open page</Button>}
+            {!standalone && <Button size="sm" variant="outline" className="ml-auto shrink-0 max-sm:size-9 max-sm:px-0" onClick={openStandalone} title="Open full product page"><ExternalLink className="size-4" /><span className="max-sm:sr-only">Open page</span></Button>}
           </div>
         </SheetHeader>
 
+        <div className={standalone ? "" : "min-h-0 flex-1 overflow-y-auto overscroll-contain"}>
         {loading && <div className="grid gap-3 p-4"><Skeleton className="h-20" /><Skeleton className="h-52" /><Skeleton className="h-52" /></div>}
 
         {!loading && !product && (
@@ -3374,16 +3375,16 @@ function ProductDetailSheet({
             </div>
 
             <Tabs value={detailTab} onValueChange={setDetailTab}>
-              <TabsList className="w-full justify-start overflow-x-auto">
-                <TabsTrigger value="overview">Overview</TabsTrigger>
-                <TabsTrigger value="content">Content</TabsTrigger>
-                <TabsTrigger value="identifiers">Identifiers</TabsTrigger>
-                <TabsTrigger value="commerce">Commerce</TabsTrigger>
-                <TabsTrigger value="shipping">Shipping</TabsTrigger>
-                <TabsTrigger value="media">Media</TabsTrigger>
-                <TabsTrigger value="replenishable">Replenishable</TabsTrigger>
-                <TabsTrigger value="shopify">Shopify</TabsTrigger>
-                <TabsTrigger value="alternates">Alternates</TabsTrigger>
+              <TabsList className="h-auto w-full justify-start overflow-x-auto rounded-md p-1">
+                <TabsTrigger className="shrink-0" value="overview">Overview</TabsTrigger>
+                <TabsTrigger className="shrink-0" value="content">Content</TabsTrigger>
+                <TabsTrigger className="shrink-0" value="identifiers">Identifiers</TabsTrigger>
+                <TabsTrigger className="shrink-0" value="commerce">Commerce</TabsTrigger>
+                <TabsTrigger className="shrink-0" value="shipping">Shipping</TabsTrigger>
+                <TabsTrigger className="shrink-0" value="media">Media</TabsTrigger>
+                <TabsTrigger className="shrink-0" value="replenishable">Replenishable</TabsTrigger>
+                <TabsTrigger className="shrink-0" value="shopify">Shopify</TabsTrigger>
+                <TabsTrigger className="shrink-0" value="alternates">Alternates</TabsTrigger>
               </TabsList>
               <TabsContent value="overview" className="grid gap-4 pt-3">
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -3469,12 +3470,13 @@ function ProductDetailSheet({
             </Tabs>
           </div>
         )}
-        {product && editing && <SheetFooter className="border-t"><Button onClick={save} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save SKU settings</Button></SheetFooter>}
+        </div>
+        {product && editing && <SheetFooter className="sticky bottom-0 z-20 border-t bg-background/95 pb-[calc(1rem+env(safe-area-inset-bottom))] backdrop-blur supports-[backdrop-filter]:bg-background/80"><Button onClick={save} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save SKU settings</Button></SheetFooter>}
     </>
   )
 
   if (standalone) return <div className="mx-auto max-w-7xl">{content}</div>
-  return <Sheet open={open} onOpenChange={onOpenChange}><SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-5xl">{content}</SheetContent></Sheet>
+  return <Sheet open={open} onOpenChange={onOpenChange}><SheetContent side="right" className="h-[100dvh] w-screen max-w-none overflow-hidden p-0 sm:w-full sm:max-w-5xl">{content}</SheetContent></Sheet>
 }
 
 type InventoryOperationOrder = { id?: string; orderNumber?: string; buyer?: string; source?: string; status?: string; createdAt?: string; shippedAt?: string; fulfilledAt?: string; inventoryQuantity?: number; inventoryFulfilledQty?: number; inventoryAllocations?: Array<{ id?: string; warehouseName?: string; warehouseId?: string; qty?: number; status?: string; assignedAt?: string }> }
