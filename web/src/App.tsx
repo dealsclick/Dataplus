@@ -1245,7 +1245,7 @@ function App() {
         </Sidebar>
 
         <SidebarInset className="min-w-0 bg-muted/35 text-foreground">
-          <header className="sticky top-0 z-10 border-b bg-background/85 px-5 py-3 backdrop-blur">
+          <header className="sticky top-0 z-10 border-b bg-background/85 px-3 py-3 backdrop-blur sm:px-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <SidebarTrigger className="size-8" />
@@ -1317,7 +1317,7 @@ function App() {
             </DialogContent>
           </Dialog>
 
-          <div className="p-5">
+          <div className="min-w-0 p-3 sm:p-5">
             {loading ? (
               <LoadingState />
             ) : (
@@ -6396,7 +6396,7 @@ function WarehouseAuditPanel({
           </div>
         ) : (
           <>
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-3">
+            <div className="flex flex-col items-stretch gap-3 rounded-md border bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <p className="font-medium">{String(current.auditNumber)}</p>
                 <p className="text-xs text-muted-foreground">
@@ -6411,7 +6411,7 @@ function WarehouseAuditPanel({
                   {auditStatus === "pending_review" && <span className="text-xs text-muted-foreground">{numberLabel(varianceLines.length)} variance lines · {numberLabel(unresolvedUnknowns.length)} unresolved UPCs</span>}
                 </div>
               </div>
-              <div className="flex gap-2">
+              <div className="grid grid-cols-2 gap-2 sm:flex sm:w-auto">
                 <Button
                   size="sm"
                   variant="outline"
@@ -6435,7 +6435,7 @@ function WarehouseAuditPanel({
                 {auditStatus === "in_progress" && <Button size="sm" disabled={busy || !lines.length} onClick={() => void submitForReview()}>Submit for review</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" disabled={busy} onClick={() => void complete()}>Approve & apply counts</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}>Return to count</Button>}
-                <Button size="sm" variant="ghost" asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export</a></Button>
+                <Button size="sm" variant="ghost" className="col-span-2 sm:col-span-1" asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export</a></Button>
               </div>
             </div>
             {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Review required before inventory changes</p><p className="text-muted-foreground">This audit contains {numberLabel(varianceLines.length)} SKU variance lines and {numberLabel(unresolvedUnknowns.length)} unresolved UPCs. Approving it posts the counted quantities to {String(current.warehouseName)}.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
@@ -6462,11 +6462,11 @@ function WarehouseAuditPanel({
                 </DialogFooter>
               </DialogContent>
             </Dialog>
-            <div className="flex flex-wrap items-end gap-2 rounded-md border bg-muted/20 p-3">
+            <div className="flex flex-col gap-3 rounded-md border bg-muted/20 p-3 sm:flex-row sm:flex-wrap sm:items-end sm:gap-2">
               <Field label="Current bin / location">
                 {activeAuditBins.length ? (
                   <Select value={activeBin || "__unassigned"} disabled={auditStatus !== "in_progress"} onValueChange={(value) => setActiveBin(value === "__unassigned" ? "" : value)}>
-                    <SelectTrigger className="min-w-64"><SelectValue placeholder="Select bin" /></SelectTrigger>
+                    <SelectTrigger className="w-full min-w-0 sm:w-64"><SelectValue placeholder="Select bin" /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__unassigned">No bin selected</SelectItem>
                       {activeAuditBins.map((bin) => <SelectItem key={String(bin.id || bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.nickname ? ` - ${String(bin.nickname)}` : bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}
@@ -6476,10 +6476,10 @@ function WarehouseAuditPanel({
                   <Input value={activeBin} disabled={auditStatus !== "in_progress"} onChange={(event) => setActiveBin(event.target.value)} placeholder="Enter location" />
                 )}
               </Field>
-              {activeBin && <Button size="sm" variant="ghost" disabled={auditStatus !== "in_progress"} onClick={() => setActiveBin("")}>Clear bin</Button>}
-              <p className="max-w-sm pb-2 text-xs text-muted-foreground">{activeAuditBins.length ? "Choose a configured bin before scanning. The selection is saved against each new count line." : "No active bins are configured for this warehouse. Enter a location manually; the selection is saved against each new count line."}</p>
+              {activeBin && <Button size="sm" variant="ghost" className="w-full sm:w-auto" disabled={auditStatus !== "in_progress"} onClick={() => setActiveBin("")}>Clear bin</Button>}
+              <p className="max-w-sm text-xs text-muted-foreground sm:pb-2">{activeAuditBins.length ? "Choose a configured bin before scanning. The selection is saved against each new count line." : "No active bins are configured for this warehouse. Enter a location manually; the selection is saved against each new count line."}</p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-col gap-2 sm:flex-row">
               <Input
                 autoFocus
                 disabled={auditStatus !== "in_progress"}
@@ -6494,6 +6494,7 @@ function WarehouseAuditPanel({
                 placeholder="Scan or enter UPC, then press Enter"
               />
               <Button
+                className="w-full sm:w-auto"
                 disabled={busy || auditStatus !== "in_progress" || !barcode.trim()}
                 onClick={() => void submit()}
               >
@@ -6686,7 +6687,7 @@ function WarehouseAuditPanel({
                   </Field>
                   <Field label="Product photo">
                     <div className="grid gap-2">
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap gap-2">
                       <Button
                         type="button"
                         size="sm"
@@ -6780,7 +6781,7 @@ function WarehouseAuditPanel({
                     <p className="self-center text-xs text-muted-foreground">{manualPhotoUrls.length} photo{manualPhotoUrls.length === 1 ? "" : "s"} will be saved with this SKU. Add all sides before using AI suggestions.</p>
                   </div>
                 )}
-                <div className="sticky bottom-0 z-10 -mx-3 flex w-[calc(100%+1.5rem)] flex-wrap justify-center gap-2 border-t bg-background/95 px-3 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-3 backdrop-blur sm:static sm:mx-0 sm:w-auto sm:justify-end sm:border-0 sm:bg-transparent sm:p-0 sm:backdrop-blur-none">
+                <div className="sticky bottom-0 z-10 flex w-full flex-wrap justify-center gap-2 border-t bg-background/95 px-3 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-3 backdrop-blur sm:static sm:justify-end sm:border-0 sm:bg-transparent sm:p-0 sm:backdrop-blur-none">
                   <Button
                     size="sm"
                     variant="outline"
@@ -8383,7 +8384,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
               <span className="mr-auto text-sm text-muted-foreground">
                 Total qty: <span className="font-medium text-foreground">{numberLabel(selectedQty)}</span>
               </span>
-              <Button
+              <Button className="w-full sm:w-auto"
                 size="sm"
                 variant="ghost"
                 onClick={() => {
@@ -10152,14 +10153,14 @@ function PageHeader({
   action?: React.ReactNode
 }) {
   return (
-    <div className="flex flex-wrap items-end justify-between gap-3">
-      <div>
+    <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
+      <div className="min-w-0">
         <DetailBreadcrumb items={[{ label: "DataPlus", href: "/" }, { label: eyebrow }]} />
         <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{eyebrow}</p>
         <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
-        <p className="text-sm text-muted-foreground">{description}</p>
+        <p className="max-w-3xl text-sm text-muted-foreground">{description}</p>
       </div>
-      {action}
+      {action && <div className="w-full sm:w-auto">{action}</div>}
     </div>
   )
 }
