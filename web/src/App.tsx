@@ -5581,15 +5581,15 @@ function WarehouseAuditPanel({
   const writeOfflineScans = (scans: Array<{ auditId: string; barcode: string; locationBin: string; quantity?: number; queuedAt: string }>) => {
     try { window.localStorage.setItem(offlineQueueKey, JSON.stringify(scans.slice(-500))); } catch { /* A full browser store should not block scanning. */ }
   };
-  const scannerFeedback = (kind: "success" | "unknown" | "error") => {
-    try { navigator.vibrate?.(kind === "success" ? [35] : kind === "unknown" ? [35, 55, 35] : [80, 45, 80]); } catch { /* Browsers may block haptics. */ }
+  const scannerFeedback = (kind: "pending" | "success" | "unknown" | "error") => {
+    try { navigator.vibrate?.(kind === "pending" ? 18 : kind === "success" ? [35] : kind === "unknown" ? [35, 55, 35] : [80, 45, 80]); } catch { /* Browsers may block haptics. */ }
     try {
       const Audio = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!Audio) return;
       const context = new Audio();
       const oscillator = context.createOscillator();
       const gain = context.createGain();
-      oscillator.frequency.value = kind === "success" ? 880 : kind === "unknown" ? 520 : 260;
+      oscillator.frequency.value = kind === "pending" ? 660 : kind === "success" ? 880 : kind === "unknown" ? 520 : 260;
       gain.gain.setValueAtTime(0.045, context.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.13);
       oscillator.connect(gain).connect(context.destination); oscillator.start(); oscillator.stop(context.currentTime + 0.14);
@@ -5870,6 +5870,9 @@ function WarehouseAuditPanel({
       toast.success("Scan saved on this phone and queued for sync.");
       return;
     }
+    // Trigger a light acknowledgement while this keyboard-wedge or typed UPC is
+    // still a user gesture. Some Android browsers block later haptic calls.
+    scannerFeedback("pending");
     setBusy(true);
     try {
       const result = await api<{
@@ -6501,6 +6504,11 @@ function WarehouseAuditPanel({
                 Add scan
               </Button>
             </div>
+            {busy && barcode.trim() && auditStatus === "in_progress" && (
+              <div className="flex items-center gap-2 rounded-md border border-primary/25 bg-primary/10 px-3 py-2 text-sm font-medium text-primary" role="status" aria-live="polite">
+                <Loader2 className="size-4 animate-spin" /> Looking up {barcode.trim()} in the catalog...
+              </div>
+            )}
             {lastScan && (
               <div
                 className={`rounded-md border p-3 text-sm ${lastScan.matched ? "border-emerald-200 bg-emerald-50 text-emerald-950" : "border-amber-200 bg-amber-50 text-amber-950"}`}
