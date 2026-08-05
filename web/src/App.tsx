@@ -5564,6 +5564,7 @@ function WarehouseAuditPanel({
   const [countEditValue, setCountEditValue] = useState("");
   const [countEditNote, setCountEditNote] = useState("");
   const [countEditBusy, setCountEditBusy] = useState(false);
+  const [scannerSettings, setScannerSettings] = useState<SystemSettings>({});
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const photoVideoRef = useRef<HTMLVideoElement | null>(null);
   const manualSkuRef = useRef<HTMLInputElement | null>(null);
@@ -5582,17 +5583,30 @@ function WarehouseAuditPanel({
     try { window.localStorage.setItem(offlineQueueKey, JSON.stringify(scans.slice(-500))); } catch { /* A full browser store should not block scanning. */ }
   };
   const scannerFeedback = (kind: "pending" | "success" | "unknown" | "error") => {
-    try { navigator.vibrate?.(kind === "pending" ? 18 : kind === "success" ? [35] : kind === "unknown" ? [35, 55, 35] : [80, 45, 80]); } catch { /* Browsers may block haptics. */ }
-    try {
+    const vibrationIntensity = String(scannerSettings.warehouseScannerVibrationIntensity || "medium").toLowerCase();
+    const soundIntensity = String(scannerSettings.warehouseScannerSoundIntensity || "medium").toLowerCase();
+    const vibrationScale = vibrationIntensity === "low" ? 0.55 : vibrationIntensity === "high" ? 1.55 : 1;
+    const soundGain = soundIntensity === "low" ? 0.02 : soundIntensity === "high" ? 0.075 : 0.045;
+    const soundDuration = soundIntensity === "low" ? 0.09 : soundIntensity === "high" ? 0.18 : 0.13;
+    const vibration = kind === "pending" ? 18 : kind === "success" ? [35] : kind === "unknown" ? [35, 55, 35] : [80, 45, 80];
+    if (scannerSettings.warehouseScannerVibrationEnabled !== false) {
+      try {
+        const scaled = Array.isArray(vibration)
+          ? vibration.map((duration) => Math.max(1, Math.round(duration * vibrationScale)))
+          : Math.max(1, Math.round(vibration * vibrationScale));
+        navigator.vibrate?.(scaled);
+      } catch { /* Browsers may block haptics. */ }
+    }
+    if (scannerSettings.warehouseScannerSoundEnabled !== false) try {
       const Audio = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!Audio) return;
       const context = new Audio();
       const oscillator = context.createOscillator();
       const gain = context.createGain();
       oscillator.frequency.value = kind === "pending" ? 660 : kind === "success" ? 880 : kind === "unknown" ? 520 : 260;
-      gain.gain.setValueAtTime(0.045, context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.13);
-      oscillator.connect(gain).connect(context.destination); oscillator.start(); oscillator.stop(context.currentTime + 0.14);
+      gain.gain.setValueAtTime(soundGain, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + soundDuration);
+      oscillator.connect(gain).connect(context.destination); oscillator.start(); oscillator.stop(context.currentTime + soundDuration + 0.01);
     } catch { /* Audio feedback is optional. */ }
   };
   const refreshCameraDevices = async () => {
@@ -5615,6 +5629,7 @@ function WarehouseAuditPanel({
     ]);
     setAudits(result.audits || []);
     setAuditWarehouses((state.warehouses || []) as typeof auditWarehouses);
+    setScannerSettings(state.systemSettings || {});
   };
   const resumedAudit =
     active ||
@@ -9972,7 +9987,22 @@ function SettingsPage({
           </Card>
         </TabsContent>
         <TabsContent value="data-sources"><VendorFeedScheduleManager vendors={[]} dataSource /></TabsContent>
-        <TabsContent value="barcode"><Card><CardHeader><CardTitle className="text-base">External barcode enrichment</CardTitle><CardDescription>DataPlus always searches the local catalog first. Enable this only when an unknown UPC may be sent to Open Food Facts for basic enrichment; it is not used for matching known catalog SKUs.</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><ToggleField label="Enable Open Food Facts for unknown UPCs" checked={boolValue("openFoodFactsLookupEnabled")} disabled={!editing} onCheckedChange={(next) => update("openFoodFactsLookupEnabled", next)} /><Field label="Open Food Facts API base URL"><Input disabled={!editing} value={String(value("openFoodFactsApiBaseUrl") || "https://world.openfoodfacts.org/api/v3")} onChange={(event) => update("openFoodFactsApiBaseUrl", event.target.value)} /></Field></CardContent></Card></TabsContent>
+        <TabsContent value="barcode" className="grid gap-4">
+          <Card>
+            <CardHeader><CardTitle className="text-base">External barcode enrichment</CardTitle><CardDescription>DataPlus always searches the local catalog first. Enable this only when an unknown UPC may be sent to Open Food Facts for basic enrichment; it is not used for matching known catalog SKUs.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2"><ToggleField label="Enable Open Food Facts for unknown UPCs" checked={boolValue("openFoodFactsLookupEnabled")} disabled={!editing} onCheckedChange={(next) => update("openFoodFactsLookupEnabled", next)} /><Field label="Open Food Facts API base URL"><Input disabled={!editing} value={String(value("openFoodFactsApiBaseUrl") || "https://world.openfoodfacts.org/api/v3")} onChange={(event) => update("openFoodFactsApiBaseUrl", event.target.value)} /></Field></CardContent>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle className="text-base">Warehouse scanner feedback</CardTitle><CardDescription>Control the sound and haptic confirmation after each scan. Visual matched and not-found feedback remains available on every device.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2">
+              <ToggleField label="Enable scanner sound" checked={boolValue("warehouseScannerSoundEnabled")} disabled={!editing} onCheckedChange={(next) => update("warehouseScannerSoundEnabled", next)} />
+              <Field label="Sound intensity"><Select disabled={!editing || !boolValue("warehouseScannerSoundEnabled")} value={String(value("warehouseScannerSoundIntensity") || "medium")} onValueChange={(next) => update("warehouseScannerSoundIntensity", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="low">Low</SelectItem><SelectItem value="medium">Medium</SelectItem><SelectItem value="high">High</SelectItem></SelectContent></Select></Field>
+              <ToggleField label="Enable scanner vibration" checked={boolValue("warehouseScannerVibrationEnabled")} disabled={!editing} onCheckedChange={(next) => update("warehouseScannerVibrationEnabled", next)} />
+              <Field label="Vibration intensity"><Select disabled={!editing || !boolValue("warehouseScannerVibrationEnabled")} value={String(value("warehouseScannerVibrationIntensity") || "medium")} onValueChange={(next) => update("warehouseScannerVibrationIntensity", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="low">Low</SelectItem><SelectItem value="medium">Medium</SelectItem><SelectItem value="high">High</SelectItem></SelectContent></Select></Field>
+              <p className="text-sm text-muted-foreground md:col-span-2">Vibration is applied only when the device browser supports it. iPhone Safari generally uses the on-screen confirmation and scanner sound instead.</p>
+            </CardContent>
+          </Card>
+        </TabsContent>
         <TabsContent value="ai" className="grid gap-4">
           <Card>
             <CardHeader>

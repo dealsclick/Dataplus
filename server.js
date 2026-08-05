@@ -843,6 +843,10 @@ const DEFAULT_SYSTEM_SETTINGS = {
   smtpReminderScheduleTime: "08:00",
   openFoodFactsLookupEnabled: false,
   openFoodFactsApiBaseUrl: "https://world.openfoodfacts.org/api/v3",
+  warehouseScannerSoundEnabled: true,
+  warehouseScannerSoundIntensity: "medium",
+  warehouseScannerVibrationEnabled: true,
+  warehouseScannerVibrationIntensity: "medium",
   aiEnabled: false,
   aiProvider: "openai",
   aiApiKey: "",
@@ -4423,6 +4427,14 @@ function normalizeSystemSettings(settings = {}) {
   normalized.smtpReminderScheduleTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(normalized.smtpReminderScheduleTime || "")) ? String(normalized.smtpReminderScheduleTime) : "08:00";
   normalized.openFoodFactsLookupEnabled = normalized.openFoodFactsLookupEnabled === true || String(normalized.openFoodFactsLookupEnabled).toLowerCase() === "true";
   normalized.openFoodFactsApiBaseUrl = String(normalized.openFoodFactsApiBaseUrl || "https://world.openfoodfacts.org/api/v3").replace(/\/+$/, "");
+  normalized.warehouseScannerSoundEnabled = normalized.warehouseScannerSoundEnabled !== false && String(normalized.warehouseScannerSoundEnabled).toLowerCase() !== "false";
+  normalized.warehouseScannerSoundIntensity = ["low", "medium", "high"].includes(String(normalized.warehouseScannerSoundIntensity || "").toLowerCase())
+    ? String(normalized.warehouseScannerSoundIntensity).toLowerCase()
+    : "medium";
+  normalized.warehouseScannerVibrationEnabled = normalized.warehouseScannerVibrationEnabled !== false && String(normalized.warehouseScannerVibrationEnabled).toLowerCase() !== "false";
+  normalized.warehouseScannerVibrationIntensity = ["low", "medium", "high"].includes(String(normalized.warehouseScannerVibrationIntensity || "").toLowerCase())
+    ? String(normalized.warehouseScannerVibrationIntensity).toLowerCase()
+    : "medium";
   normalized.aiEnabled = normalized.aiEnabled === true || String(normalized.aiEnabled).toLowerCase() === "true";
   normalized.aiProvider = ["openai", "google-ai-studio"].includes(String(normalized.aiProvider || "").toLowerCase()) ? String(normalized.aiProvider).toLowerCase() : "openai";
   const legacyAiKey = String(normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || "").trim();
