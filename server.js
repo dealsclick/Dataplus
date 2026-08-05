@@ -22730,7 +22730,7 @@ async function handleApi(req, res) {
     const now = new Date().toISOString();
     if (product) {
       const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku) && String(entry.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase());
-      if (line) { line.countedQty = Number(line.countedQty || 0) + quantity; line.lastScannedAt = now; line.reviewStatus = "unreviewed"; } else (audit.lines || (audit.lines = [])).push({ id: crypto.randomUUID(), productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, barcode, locationBin: resolvedLocationBin, expectedQty: auditExpectedQuantity(product, audit, resolvedLocationBin), countedQty: quantity, firstScannedAt: now, lastScannedAt: now, reviewStatus: "unreviewed" });
+      if (line) { line.countedQty = Number(line.countedQty || 0) + quantity; line.image = line.image || productImageUrl(product); line.lastScannedAt = now; line.reviewStatus = "unreviewed"; } else (audit.lines || (audit.lines = [])).push({ id: crypto.randomUUID(), productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, image: productImageUrl(product), barcode, locationBin: resolvedLocationBin, expectedQty: auditExpectedQuantity(product, audit, resolvedLocationBin), countedQty: quantity, firstScannedAt: now, lastScannedAt: now, reviewStatus: "unreviewed" });
       audit.updatedAt = now;
       await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
       return sendJson(res, 200, { audit, product, matched: true, message: `${product.sku} counted: ${quantity}.` });

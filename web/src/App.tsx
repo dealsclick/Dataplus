@@ -5565,6 +5565,7 @@ function WarehouseAuditPanel({
   const [countEditNote, setCountEditNote] = useState("");
   const [countEditBusy, setCountEditBusy] = useState(false);
   const [scannerSettings, setScannerSettings] = useState<SystemSettings>({});
+  const [quickPreviewItem, setQuickPreviewItem] = useState<CatalogItem | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const photoVideoRef = useRef<HTMLVideoElement | null>(null);
   const manualSkuRef = useRef<HTMLInputElement | null>(null);
@@ -6855,9 +6856,8 @@ function WarehouseAuditPanel({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Scan status</TableHead>
+                    <TableHead className="w-14">Scan</TableHead>
                     <TableHead>UPC / SKU</TableHead>
-                    <TableHead>Product</TableHead>
                     <TableHead>Bin</TableHead>
                     <TableHead>Counted</TableHead>
                     <TableHead>Created SKU</TableHead>
@@ -6869,24 +6869,15 @@ function WarehouseAuditPanel({
                   {lines.map((line) => (
                     <TableRow key={`${String(line.productId || line.sku)}-${String(line.locationBin || "")}`}>
                       <TableCell>
-                        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
-                          <CheckCircle2 className="size-3.5" /> Matched
-                        </span>
+                        {String(line.image || "") ? <button type="button" className="relative block size-10 overflow-hidden rounded-md border bg-muted" title="Open product image"><img src={String(line.image)} alt={String(line.sku || "Catalog item")} className="size-full object-cover" /><span className="absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-emerald-600 text-white shadow"><CheckCircle2 className="size-3" /></span></button> : <span className="grid size-8 place-items-center rounded-full border border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300" title="Catalog item matched"><CheckCircle2 className="size-4" /></span>}
                       </TableCell>
                       <TableCell className="font-medium">
                         {line.sku ? (
-                          <a
-                            className="hover:underline"
-                            href={`/products/${encodeURIComponent(String(line.sku))}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            title={`Open ${String(line.sku)} in a new tab`}
-                          >
+                          <button className="font-medium hover:underline" onClick={() => setQuickPreviewItem({ sku: String(line.sku), title: String(line.title || line.sku), defaultImage: String(line.image || "") })} title={`Preview ${String(line.sku)}`}>
                             {String(line.sku)}
-                          </a>
+                          </button>
                         ) : "-"}
                       </TableCell>
-                      <TableCell>{String(line.title || "-")}</TableCell>
                       <TableCell>{String(line.locationBin || "-")}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1.5">
@@ -6904,12 +6895,9 @@ function WarehouseAuditPanel({
                   {unknowns.map((item) => (
                     <TableRow key={`unknown-${String(item.barcode)}-${String(item.locationBin || "")}`}>
                       <TableCell>
-                        <span className="inline-flex items-center gap-1 rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-800 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300">
-                          <X className="size-3.5" /> Not found
-                        </span>
+                        <span className="grid size-8 place-items-center rounded-full border border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300" title="Not found in the catalog"><X className="size-4" /></span>
                       </TableCell>
                       <TableCell className="font-mono font-medium">{String(item.barcode || "-")}</TableCell>
-                      <TableCell>{String(item.manualTitle || "Unresolved UPC")}</TableCell>
                       <TableCell>{String(item.locationBin || "-")}</TableCell>
                       <TableCell>{numberLabel(Number(item.count || 0))}</TableCell>
                       <TableCell>{item.createdProductSku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(item.createdProductSku))}`} target="_blank" rel="noreferrer">{String(item.createdProductSku)}</a> : "-"}</TableCell>
@@ -6920,7 +6908,7 @@ function WarehouseAuditPanel({
                   {!lines.length && !unknowns.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={8}
+                        colSpan={7}
                         className="h-20 text-center text-muted-foreground"
                       >
                         Scan the first UPC to begin counting.
@@ -6930,6 +6918,7 @@ function WarehouseAuditPanel({
                 </TableBody>
               </Table>
             </div>
+            <ProductDetailSheet sourceItem={quickPreviewItem} open={Boolean(quickPreviewItem)} onOpenChange={(open) => !open && setQuickPreviewItem(null)} />
             <Dialog open={Boolean(countEditLine)} onOpenChange={(open) => !open && setCountEditLine(null)}>
               <DialogContent className="sm:max-w-md">
                 <DialogHeader>
