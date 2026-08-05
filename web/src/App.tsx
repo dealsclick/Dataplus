@@ -2335,10 +2335,14 @@ function ChannelDetail({
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [credentials, setCredentials] = useState<{ shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; clientIdPreview?: string; clientSecretPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean } | null>(null)
+  const [ebayCredentials, setEbayCredentials] = useState<{ environment?: string; ruName?: string; scope?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; hasSellerAuthorization?: boolean; clientIdPreview?: string; clientSecretPreview?: string; refreshTokenPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean; configured?: boolean } | null>(null)
   const [credentialsOpen, setCredentialsOpen] = useState(false)
+  const [ebayCredentialsOpen, setEbayCredentialsOpen] = useState(false)
   const [credentialSaving, setCredentialSaving] = useState(false)
   const [credentialDraft, setCredentialDraft] = useState({ storeDomain: "", apiVersion: "", clientId: "", clientSecret: "", accessToken: "" })
+  const [ebayCredentialDraft, setEbayCredentialDraft] = useState({ environment: "production", ruName: "", scope: "", clientId: "", clientSecret: "", refreshToken: "", accessToken: "" })
   const isShopify = channel.name?.toLowerCase() === "shopify"
+  const isEbay = channel.name?.toLowerCase() === "ebay"
   const settings = { ...(channel.settings || {}), ...draft }
   const shippingProfiles = Array.isArray(channel.settings?.shopifyShippingProfiles) ? channel.settings.shopifyShippingProfiles : []
   const scheduleTimes = String(settings.inventoryScheduleTimes || "03:00,13:00").split(/[,;\s]+/).filter(Boolean)
@@ -2358,6 +2362,13 @@ function ChannelDetail({
       .then((result) => setCredentials(result.credentials || null))
       .catch(() => setCredentials(null))
   }, [isShopify])
+
+  useEffect(() => {
+    if (!isEbay) return
+    api<{ credentials?: typeof ebayCredentials }>("/api/ebay/credentials")
+      .then((result) => setEbayCredentials(result.credentials || null))
+      .catch(() => setEbayCredentials(null))
+  }, [isEbay])
 
   function update(field: string, value: unknown) {
     setDraft((current) => ({ ...current, [field]: value }))
@@ -2398,6 +2409,40 @@ function ChannelDetail({
       toast.success(result.message || "Shopify credentials updated.")
       onRefreshData()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update Shopify credentials.") } finally { setCredentialSaving(false) }
+  }
+
+  function openEbayCredentials() {
+    setEbayCredentialDraft({ environment: String(ebayCredentials?.environment || "production"), ruName: String(ebayCredentials?.ruName || ""), scope: String(ebayCredentials?.scope || ""), clientId: "", clientSecret: "", refreshToken: "", accessToken: "" })
+    setEbayCredentialsOpen(true)
+  }
+
+  async function saveEbayCredentials() {
+    setCredentialSaving(true)
+    try {
+      const result = await api<{ credentials?: typeof ebayCredentials; message?: string }>("/api/ebay/credentials", { method: "PUT", body: JSON.stringify(ebayCredentialDraft) })
+      setEbayCredentials(result.credentials || null)
+      setEbayCredentialDraft((current) => ({ ...current, clientId: "", clientSecret: "", refreshToken: "", accessToken: "" }))
+      setEbayCredentialsOpen(false)
+      toast.success(result.message || "eBay credentials updated.")
+      onRefreshData()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update eBay credentials.") } finally { setCredentialSaving(false) }
+  }
+
+  async function runEbayAction(kind: "authorize" | "account" | "catalog") {
+    try {
+      if (kind === "authorize") {
+        const popup = window.open("", "_blank")
+        const result = await api<{ authUrl?: string }>("/api/ebay/auth-url")
+        if (!result.authUrl) throw new Error("eBay did not return an authorization URL.")
+        if (popup) popup.location.href = result.authUrl
+        else window.location.assign(result.authUrl)
+        return
+      }
+      const path = kind === "account" ? "/api/ebay/account-settings/sync" : "/api/ebay/catalog-import"
+      const result = await api<{ message?: string }>(path, { method: "POST", body: JSON.stringify({}) })
+      toast.success(result.message || (kind === "account" ? "eBay account sync queued." : "eBay catalog sync queued."))
+      onRefreshData()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to run eBay action.") }
   }
 
   function queueShopifyAction(kind: string, apply = false) {
@@ -2573,6 +2618,26 @@ function ChannelDetail({
               </CardContent>
             </Card>
           )}
+          {isEbay && (
+            <Card className={ebayCredentials?.hasSellerAuthorization ? "border-emerald-300" : "border-amber-300"}>
+              <CardHeader className="flex flex-row items-start justify-between gap-4">
+                <div>
+                  <CardTitle className="flex items-center gap-2">
+                    {ebayCredentials?.hasSellerAuthorization ? <CheckCircle2 className="size-5 text-emerald-600" /> : <ShieldCheck className="size-5" />}
+                    eBay connection health
+                  </CardTitle>
+                  <CardDescription>{ebayCredentials?.hasSellerAuthorization ? "Seller authorization is ready for eBay syncs." : "Add credentials, then authorize the eBay seller account."}</CardDescription>
+                </div>
+                <Button variant="outline" onClick={openEbayCredentials}>Update API credentials</Button>
+              </CardHeader>
+              <CardContent className="grid gap-3 md:grid-cols-4">
+                <Detail label="Environment" value={ebayCredentials?.environment || "Production"} />
+                <Detail label="Client credentials" value={ebayCredentials?.hasClientCredentials ? "Configured" : "Missing"} />
+                <Detail label="Redirect URI name" value={ebayCredentials?.ruName || "Missing"} />
+                <Detail label="Seller authorization" value={ebayCredentials?.hasSellerAuthorization ? "Connected" : "Required"} />
+              </CardContent>
+            </Card>
+          )}
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Channel defaults</CardTitle>
@@ -2635,6 +2700,18 @@ function ChannelDetail({
                 <Field label="Reconcile every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings.shopifyOrderImportScheduleEveryHours ?? 12)} onChange={(event) => update("shopifyOrderImportScheduleEveryHours", Number(event.target.value || 12))} /></Field>
                 <ToggleField label="Schedule Shopify order reconciliation" checked={Boolean(settings.shopifyOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.shopifyOrderImportEnabled)} onCheckedChange={(value) => update("shopifyOrderImportScheduleEnabled", value)} />
               </>}
+              {isEbay && <>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay Sell API</p></div>
+                <div className="col-span-full flex flex-wrap items-center justify-between gap-3 rounded-md border p-4">
+                  <div className="text-sm"><p className="font-medium">eBay credentials</p><p className="text-muted-foreground">{ebayCredentials?.environment || "production"} / Redirect URI: {ebayCredentials?.ruName || "not configured"}</p><p className="pt-1 text-xs text-muted-foreground">Client credentials: {ebayCredentials?.hasClientCredentials ? "configured" : "missing"} / Seller authorization: {ebayCredentials?.hasSellerAuthorization ? "connected" : "required"}</p></div>
+                  <Button size="sm" variant="outline" onClick={openEbayCredentials}>Update API credentials</Button>
+                </div>
+                <Field label="Marketplace"><Select disabled={!editing} value={String(settings.ebayMarketplaceId || "EBAY_US")} onValueChange={(value) => update("ebayMarketplaceId", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EBAY_US">United States</SelectItem><SelectItem value="EBAY_CA">Canada</SelectItem><SelectItem value="EBAY_GB">United Kingdom</SelectItem><SelectItem value="EBAY_AU">Australia</SelectItem></SelectContent></Select></Field>
+                <Field label="Merchant location key"><Input disabled={!editing} value={String(settings.ebayMerchantLocationKey || "")} placeholder="eBay merchant location key" onChange={(event) => update("ebayMerchantLocationKey", event.target.value)} /></Field>
+                <ToggleField label="Enable eBay catalog sync" checked={settings.ebayCatalogSyncEnabled !== false} disabled={!editing} onCheckedChange={(value) => update("ebayCatalogSyncEnabled", value)} />
+                <ToggleField label="Auto-publish to eBay" checked={Boolean(settings.ebayAutoPublish)} disabled={!editing} onCheckedChange={(value) => update("ebayAutoPublish", value)} />
+                <ToggleField label="Require image before listing" checked={Boolean(settings.ebayRequireImage)} disabled={!editing} onCheckedChange={(value) => update("ebayRequireImage", value)} />
+              </>}
             </CardContent>
           </Card>
           <Dialog open={credentialsOpen} onOpenChange={setCredentialsOpen}>
@@ -2648,6 +2725,21 @@ function ChannelDetail({
                 <div className="sm:col-span-2"><Field label="Admin access token"><Input type="password" autoComplete="new-password" value={credentialDraft.accessToken} placeholder={credentials?.accessTokenPreview || "shpat_..."} onChange={(event) => setCredentialDraft({ ...credentialDraft, accessToken: event.target.value })} /><p className="mt-1 text-xs text-muted-foreground">{credentials?.accessTokenPreview ? `Current: ${credentials.accessTokenPreview}. Enter a value only to replace it.` : "Not configured. Client credentials are used when available."}</p></Field></div>
               </div>
               <DialogFooter><Button variant="outline" onClick={() => setCredentialsOpen(false)}>Cancel</Button><Button disabled={credentialSaving} onClick={() => void saveCredentials()}>{credentialSaving ? "Updating..." : "Update credentials"}</Button></DialogFooter>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={ebayCredentialsOpen} onOpenChange={setEbayCredentialsOpen}>
+            <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+              <DialogHeader><DialogTitle>Update eBay API credentials</DialogTitle><DialogDescription>Credentials remain server-side and are masked after saving. Leave a secret blank to keep its current value. The Redirect URI name must be registered in eBay’s developer portal for this application.</DialogDescription></DialogHeader>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="Environment"><Select value={ebayCredentialDraft.environment} onValueChange={(value) => setEbayCredentialDraft({ ...ebayCredentialDraft, environment: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="production">Production</SelectItem><SelectItem value="sandbox">Sandbox</SelectItem></SelectContent></Select></Field>
+                <Field label="Redirect URI name (RuName)"><Input value={ebayCredentialDraft.ruName} placeholder="Your eBay RuName" onChange={(event) => setEbayCredentialDraft({ ...ebayCredentialDraft, ruName: event.target.value })} /></Field>
+                <div className="sm:col-span-2"><Field label="OAuth scopes"><Input value={ebayCredentialDraft.scope} placeholder="https://api.ebay.com/oauth/api_scope ..." onChange={(event) => setEbayCredentialDraft({ ...ebayCredentialDraft, scope: event.target.value })} /><p className="mt-1 text-xs text-muted-foreground">Current scopes are preloaded. Change these only when updating eBay app permissions.</p></Field></div>
+                <Field label="Client ID"><Input value={ebayCredentialDraft.clientId} placeholder={ebayCredentials?.clientIdPreview || "eBay client ID"} onChange={(event) => setEbayCredentialDraft({ ...ebayCredentialDraft, clientId: event.target.value })} /><p className="mt-1 text-xs text-muted-foreground">{ebayCredentials?.clientIdPreview ? `Current: ${ebayCredentials.clientIdPreview}` : "Not configured."}</p></Field>
+                <Field label="Client secret"><Input type="password" autoComplete="new-password" value={ebayCredentialDraft.clientSecret} placeholder={ebayCredentials?.clientSecretPreview || "eBay client secret"} onChange={(event) => setEbayCredentialDraft({ ...ebayCredentialDraft, clientSecret: event.target.value })} /><p className="mt-1 text-xs text-muted-foreground">{ebayCredentials?.clientSecretPreview ? `Current: ${ebayCredentials.clientSecretPreview}` : "Not configured."}</p></Field>
+                <Field label="Refresh token (optional)"><Input type="password" autoComplete="new-password" value={ebayCredentialDraft.refreshToken} placeholder={ebayCredentials?.refreshTokenPreview || "Paste only to replace"} onChange={(event) => setEbayCredentialDraft({ ...ebayCredentialDraft, refreshToken: event.target.value })} /></Field>
+                <Field label="Access token (optional)"><Input type="password" autoComplete="new-password" value={ebayCredentialDraft.accessToken} placeholder={ebayCredentials?.accessTokenPreview || "Paste only to replace"} onChange={(event) => setEbayCredentialDraft({ ...ebayCredentialDraft, accessToken: event.target.value })} /></Field>
+              </div>
+              <DialogFooter><Button variant="outline" onClick={() => setEbayCredentialsOpen(false)}>Cancel</Button><Button disabled={credentialSaving} onClick={() => void saveEbayCredentials()}>{credentialSaving ? "Updating..." : "Update credentials"}</Button></DialogFooter>
             </DialogContent>
           </Dialog>
         </TabsContent>
@@ -2750,6 +2842,32 @@ function ChannelDetail({
                     onDryRun={() => queueShopifyAction("shippingEligibilityDryRun")}
                     onApply={() => queueShopifyAction("shippingEligibilityApply", true)}
                   />
+                </CardContent>
+              </Card>
+            </div>
+          ) : isEbay ? (
+            <div className="grid gap-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">eBay connection and sync</CardTitle>
+                  <CardDescription>Authorize the seller account, then pull eBay policies, locations, offers, and inventory into DataPlus.</CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-wrap gap-2">
+                  <Button onClick={() => void runEbayAction("authorize")} disabled={!ebayCredentials?.configured}>Authorize eBay seller</Button>
+                  <Button variant="outline" onClick={openEbayCredentials}>Update API credentials</Button>
+                  <Button variant="outline" onClick={() => void runEbayAction("account")} disabled={!ebayCredentials?.hasSellerAuthorization}>Sync policies and locations</Button>
+                  <Button variant="outline" onClick={() => void runEbayAction("catalog")} disabled={!ebayCredentials?.hasSellerAuthorization}>Sync eBay catalog</Button>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">What eBay sync imports</CardTitle>
+                  <CardDescription>Account sync refreshes marketplace policies and merchant locations. Catalog sync imports listing offers and inventory so DataPlus can identify existing eBay SKUs before you create new listings.</CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-3 md:grid-cols-3">
+                  <Detail label="Seller authorization" value={ebayCredentials?.hasSellerAuthorization ? "Connected" : "Authorize first"} />
+                  <Detail label="Marketplace" value={String(settings.ebayMarketplaceId || "EBAY_US")} />
+                  <Detail label="Catalog sync" value={settings.ebayCatalogSyncEnabled === false ? "Disabled in Setup" : "Enabled"} />
                 </CardContent>
               </Card>
             </div>

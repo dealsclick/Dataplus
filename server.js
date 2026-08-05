@@ -56,6 +56,7 @@ const IMPORT_JOB_STORE_FILE = path.join(DATA_DIR, "import-jobs.json");
 const CONNECTOR_STATE_FILE = path.join(DATA_DIR, "connectors.json");
 const ENV_FILE = path.join(ROOT, ".env");
 const SHOPIFY_RUNTIME_CREDENTIALS_FILE = path.join(DATA_DIR, "shopify-runtime-credentials.json");
+const EBAY_RUNTIME_CREDENTIALS_FILE = path.join(DATA_DIR, "ebay-runtime-credentials.json");
 const BACKGROUND_EXPORT_PAGE_SIZE = 100;
 const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(60, Number(process.env.IMPORT_JOB_FILE_RETENTION_DAYS || 60) || 60);
 const IMPORT_JOB_HISTORY_LIMIT = Math.max(1000, Math.min(5000, Number(process.env.IMPORT_JOB_HISTORY_LIMIT || 1000) || 1000));
@@ -70,6 +71,7 @@ const activeJobRecords = new Map();
 const davidActionProposals = new Map();
 let dbCache = { mtimeMs: 0, data: null };
 let shopifyRuntimeCredentialsCache = { mtimeMs: 0, value: {} };
+let ebayRuntimeCredentialsCache = { mtimeMs: 0, value: {} };
 let publicStateJsonCache = null;
 let operationalSummaryCache = { value: null, refreshedAt: 0, pending: null };
 let shopifyAccessTokenCache = { token: "", expiresAt: 0, scope: "" };
@@ -16142,7 +16144,8 @@ async function importTemuOrders(db) {
 }
 
 function getEbayConfig(db = {}) {
-  const environment = String(process.env.EBAY_ENVIRONMENT || "production").toLowerCase() === "sandbox" ? "sandbox" : "production";
+  const runtime = readEbayRuntimeCredentials();
+  const environment = String(runtime.environment || process.env.EBAY_ENVIRONMENT || "production").toLowerCase() === "sandbox" ? "sandbox" : "production";
   const apiBase = environment === "sandbox" ? "https://api.sandbox.ebay.com" : "https://api.ebay.com";
   const authBase = environment === "sandbox" ? "https://auth.sandbox.ebay.com/oauth2/authorize" : "https://auth.ebay.com/oauth2/authorize";
   const connectorState = mergedConnectorState(db);
@@ -16151,15 +16154,15 @@ function getEbayConfig(db = {}) {
     apiBase,
     authBase,
     tokenUrl: `${apiBase}/identity/v1/oauth2/token`,
-    clientId: process.env.EBAY_CLIENT_ID || "",
-    clientSecret: process.env.EBAY_CLIENT_SECRET || "",
-    ruName: process.env.EBAY_RUNAME || "",
-    scope: process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly",
-    appScope: process.env.EBAY_APP_SCOPE || "https://api.ebay.com/oauth/api_scope",
-    appAccessToken: connectorState.ebayAppAccessToken || process.env.EBAY_APP_ACCESS_TOKEN || "",
+    clientId: runtime.clientId || process.env.EBAY_CLIENT_ID || "",
+    clientSecret: runtime.clientSecret || process.env.EBAY_CLIENT_SECRET || "",
+    ruName: runtime.ruName || process.env.EBAY_RUNAME || "",
+    scope: runtime.scope || process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly",
+    appScope: runtime.appScope || process.env.EBAY_APP_SCOPE || "https://api.ebay.com/oauth/api_scope",
+    appAccessToken: connectorState.ebayAppAccessToken || runtime.appAccessToken || process.env.EBAY_APP_ACCESS_TOKEN || "",
     appAccessTokenExpiresAt: connectorState.ebayAppAccessTokenExpiresAt || "",
-    accessToken: connectorState.ebayAccessToken || process.env.EBAY_ACCESS_TOKEN || "",
-    refreshToken: connectorState.ebayRefreshToken || process.env.EBAY_REFRESH_TOKEN || "",
+    accessToken: connectorState.ebayAccessToken || runtime.accessToken || process.env.EBAY_ACCESS_TOKEN || "",
+    refreshToken: connectorState.ebayRefreshToken || runtime.refreshToken || process.env.EBAY_REFRESH_TOKEN || "",
     accessTokenExpiresAt: connectorState.ebayAccessTokenExpiresAt || "",
     pageSize: Number(process.env.EBAY_ORDER_PAGE_SIZE || 50),
     lookbackDays: Number(process.env.EBAY_ORDER_LOOKBACK_DAYS || 90)
@@ -16250,7 +16253,7 @@ function ebayConsentUrl(db) {
   const config = getEbayConfig(db);
   const missing = missingEbayConfig(config, { requireToken: false });
   if (missing.length) {
-    throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them to .env and restart the app.`);
+    throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them in Channels > eBay > Setup, then try again.`);
   }
   db.connectorState = db.connectorState || {};
   const stateToken = crypto.randomBytes(18).toString("hex");
@@ -16268,7 +16271,7 @@ async function ebayTokenRequest(db, body, options = {}) {
   const config = getEbayConfig(db);
   const missing = missingEbayConfig(config, { requireToken: false, requireRuName: options.requireRuName !== false });
   if (missing.length) {
-    throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them to .env and restart the app.`);
+    throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them in Channels > eBay > Setup, then try again.`);
   }
   const response = await fetch(config.tokenUrl, {
     method: "POST",
@@ -16353,7 +16356,7 @@ async function refreshEbayAccessToken(db) {
   const config = getEbayConfig(db);
   const missing = missingEbayConfig(config, { requireToken: true });
   if (missing.length) {
-    throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them to .env and restart the app.`);
+    throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them in Channels > eBay > Setup, then try again.`);
   }
   if (!config.refreshToken) throw new Error("eBay refresh token is missing. Connect eBay again from the Channels page.");
   const scopedBody = new URLSearchParams({
@@ -20012,6 +20015,55 @@ function writeShopifyRuntimeCredentials(patch = {}) {
   return next;
 }
 
+function readEbayRuntimeCredentials() {
+  try {
+    const stats = fs.statSync(EBAY_RUNTIME_CREDENTIALS_FILE);
+    if (ebayRuntimeCredentialsCache.mtimeMs === stats.mtimeMs) return ebayRuntimeCredentialsCache.value;
+    const parsed = JSON.parse(fs.readFileSync(EBAY_RUNTIME_CREDENTIALS_FILE, "utf8"));
+    ebayRuntimeCredentialsCache = { mtimeMs: stats.mtimeMs, value: parsed && typeof parsed === "object" ? parsed : {} };
+  } catch {
+    ebayRuntimeCredentialsCache = { mtimeMs: 0, value: {} };
+  }
+  return ebayRuntimeCredentialsCache.value;
+}
+
+function writeEbayRuntimeCredentials(patch = {}) {
+  const current = readEbayRuntimeCredentials();
+  const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
+  fs.mkdirSync(path.dirname(EBAY_RUNTIME_CREDENTIALS_FILE), { recursive: true });
+  const temporary = `${EBAY_RUNTIME_CREDENTIALS_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, EBAY_RUNTIME_CREDENTIALS_FILE);
+  ebayRuntimeCredentialsCache = { mtimeMs: 0, value: next };
+  return next;
+}
+
+function credentialPreview(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "";
+  if (normalized.length <= 8) return `${normalized.slice(0, 2)}${"*".repeat(Math.max(2, normalized.length - 2))}`;
+  return `${normalized.slice(0, 4)}${"*".repeat(Math.min(12, Math.max(6, normalized.length - 8)))}${normalized.slice(-4)}`;
+}
+
+function publicEbayConfigStatus(db = {}) {
+  const config = getEbayConfig(db);
+  const runtime = readEbayRuntimeCredentials();
+  return {
+    environment: config.environment,
+    ruName: config.ruName,
+    scope: config.scope,
+    hasClientCredentials: Boolean(config.clientId && config.clientSecret),
+    hasSellerAuthorization: Boolean(config.refreshToken),
+    hasAccessToken: Boolean(config.accessToken),
+    clientIdPreview: credentialPreview(config.clientId),
+    clientSecretPreview: credentialPreview(config.clientSecret),
+    refreshTokenPreview: credentialPreview(config.refreshToken),
+    accessTokenPreview: credentialPreview(config.accessToken),
+    runtimeManaged: Boolean(Object.keys(runtime).length),
+    configured: Boolean(config.clientId && config.clientSecret && config.ruName),
+  };
+}
+
 function shopifyAdminConfig() {
   const runtime = readShopifyRuntimeCredentials();
   const shop = String(runtime.storeDomain || process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOPIFY_SHOP_DOMAIN || process.env.SHOPIFY_STORE || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/g, "");
@@ -20025,20 +20077,14 @@ function shopifyAdminConfig() {
 function publicShopifyConfigStatus() {
   const config = shopifyAdminConfig();
   const runtime = readShopifyRuntimeCredentials();
-  const previewCredential = (value) => {
-    const normalized = String(value || "").trim();
-    if (!normalized) return "";
-    if (normalized.length <= 8) return `${normalized.slice(0, 2)}${"*".repeat(Math.max(2, normalized.length - 2))}`;
-    return `${normalized.slice(0, 4)}${"*".repeat(Math.min(12, Math.max(6, normalized.length - 8)))}${normalized.slice(-4)}`;
-  };
   return {
     shop: config.shop,
     apiVersion: config.apiVersion,
     hasAccessToken: Boolean(config.accessToken),
     hasClientCredentials: Boolean(config.clientId && config.clientSecret),
-    clientIdPreview: previewCredential(config.clientId),
-    clientSecretPreview: previewCredential(config.clientSecret),
-    accessTokenPreview: previewCredential(config.accessToken),
+    clientIdPreview: credentialPreview(config.clientId),
+    clientSecretPreview: credentialPreview(config.clientSecret),
+    accessTokenPreview: credentialPreview(config.accessToken),
     runtimeManaged: Boolean(Object.keys(runtime).length),
     configured: Boolean(config.shop && (config.accessToken || (config.clientId && config.clientSecret)))
   };
@@ -21745,6 +21791,37 @@ async function handleApi(req, res) {
       shopifyAccessTokenCache = { token: "", expiresAt: 0, scope: "" };
       appendChannelApiLog({ channel: "Shopify", transport: "configuration", method: "PUT", path: url.pathname, operation: "Update Shopify credentials", statusCode: 200, ok: true, message: `Updated ${Object.keys(patch).filter((key) => !["clientSecret", "accessToken"].includes(key)).join(", ") || "secret credentials"}.` });
       return sendJson(res, 200, { credentials: publicShopifyConfigStatus(), message: "Shopify credentials updated. Existing secrets remain masked." });
+    }
+  }
+
+  if (url.pathname === "/api/ebay/credentials") {
+    if (req.method === "GET") return sendJson(res, 200, { credentials: publicEbayConfigStatus(db) });
+    if (req.method === "PUT") {
+      const body = await parseBody(req);
+      const patch = {};
+      const environment = String(body.environment || "").trim().toLowerCase();
+      if (environment) {
+        if (!["production", "sandbox"].includes(environment)) return sendJson(res, 400, { error: "Choose either production or sandbox for the eBay environment." });
+        patch.environment = environment;
+      }
+      for (const [field, key] of [["ruName", "ruName"], ["scope", "scope"], ["appScope", "appScope"], ["clientId", "clientId"], ["clientSecret", "clientSecret"], ["refreshToken", "refreshToken"], ["accessToken", "accessToken"]]) {
+        const value = String(body[field] || "").trim();
+        if (value) patch[key] = value;
+      }
+      if (!Object.keys(patch).length) return sendJson(res, 400, { error: "Enter at least one eBay configuration value to update." });
+      writeEbayRuntimeCredentials(patch);
+      Object.assign(process.env, {
+        ...(patch.environment ? { EBAY_ENVIRONMENT: patch.environment } : {}),
+        ...(patch.ruName ? { EBAY_RUNAME: patch.ruName } : {}),
+        ...(patch.scope ? { EBAY_SCOPE: patch.scope } : {}),
+        ...(patch.appScope ? { EBAY_APP_SCOPE: patch.appScope } : {}),
+        ...(patch.clientId ? { EBAY_CLIENT_ID: patch.clientId } : {}),
+        ...(patch.clientSecret ? { EBAY_CLIENT_SECRET: patch.clientSecret } : {}),
+        ...(patch.refreshToken ? { EBAY_REFRESH_TOKEN: patch.refreshToken } : {}),
+        ...(patch.accessToken ? { EBAY_ACCESS_TOKEN: patch.accessToken } : {})
+      });
+      appendChannelApiLog({ channel: "eBay", transport: "configuration", method: "PUT", path: url.pathname, operation: "Update eBay credentials", statusCode: 200, ok: true, message: `Updated ${Object.keys(patch).filter((key) => !["clientSecret", "refreshToken", "accessToken"].includes(key)).join(", ") || "secret credentials"}.` });
+      return sendJson(res, 200, { credentials: publicEbayConfigStatus(db), message: "eBay credentials updated. Existing secrets remain masked." });
     }
   }
 
