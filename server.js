@@ -5828,6 +5828,30 @@ function productImageUrls(item = {}) {
   return [...new Set(images.map((image) => String(image || "").trim()).filter((image) => /^https?:\/\//i.test(image)))];
 }
 
+function auditProductImageUrl(product = {}, sourceItem = {}) {
+  const images = [
+    product.defaultImage,
+    product.default_image,
+    product.image,
+    product.imageUrl,
+    product.primaryImage,
+    product.checkedImageUrl,
+    product.originalImage,
+    ...(Array.isArray(product.images) ? product.images : parseList(product.images)),
+    sourceItem.defaultImage,
+    sourceItem.default_image,
+    sourceItem.image,
+    sourceItem.imageUrl,
+    sourceItem.primaryImage,
+    sourceItem.checkedImageUrl,
+    sourceItem.originalImage,
+    ...(Array.isArray(sourceItem.images) ? sourceItem.images : parseList(sourceItem.images))
+  ];
+  return images
+    .map((image) => String(image || "").trim())
+    .find((image) => /^(?:https?:\/\/|data:image\/)/i.test(image)) || "";
+}
+
 function productTimestamp(item = {}) {
   for (const value of [
     item.updatedAt,
@@ -22639,7 +22663,25 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []);
-    return sendJson(res, 200, { audits: Array.isArray(audits) ? audits : [] });
+    const hydratedAudits = (Array.isArray(audits) ? audits : []).map((audit) => {
+      const sourceMatches = new Map();
+      for (const unknown of Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []) {
+        const source = unknown?.sourceMatch || {};
+        for (const key of [unknown?.createdProductSku, unknown?.createdSku, unknown?.manualSku, source.sku, source.id, source.internalSku, source.vendorSku]) {
+          if (key) sourceMatches.set(String(key).trim().toLowerCase(), source);
+        }
+      }
+      return {
+        ...audit,
+        lines: (Array.isArray(audit.lines) ? audit.lines : []).map((line) => {
+          if (String(line?.image || "").trim()) return line;
+          const source = sourceMatches.get(String(line?.sku || line?.productId || "").trim().toLowerCase()) || {};
+          const image = auditProductImageUrl({}, source);
+          return image ? { ...line, image } : line;
+        })
+      };
+    });
+    return sendJson(res, 200, { audits: hydratedAudits });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lock" && postgres.isPostgresEnabled()) {
@@ -22703,7 +22745,7 @@ async function handleApi(req, res) {
       product: product ? {
         sku: product.sku,
         title: product.marketplaceTitle || product.title || product.sku,
-        image: Array.isArray(product.images) ? product.images[0] : product.image || ""
+        image: auditProductImageUrl(product, lookup.sourceItem)
       } : null,
       message: product ? `${product.sku} found in the catalog.` : `No catalog item was found for ${barcode}.`
     });
@@ -22727,10 +22769,11 @@ async function handleApi(req, res) {
     const resolvedLocationBin = binCheck.value || locationBin;
     const lookup = await resolveScannedCatalogBarcode(barcode);
     const product = lookup.product;
+    const auditImage = auditProductImageUrl(product || {}, lookup.sourceItem || {});
     const now = new Date().toISOString();
     if (product) {
       const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku) && String(entry.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase());
-      if (line) { line.countedQty = Number(line.countedQty || 0) + quantity; line.image = line.image || productImageUrl(product); line.lastScannedAt = now; line.reviewStatus = "unreviewed"; } else (audit.lines || (audit.lines = [])).push({ id: crypto.randomUUID(), productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, image: productImageUrl(product), barcode, locationBin: resolvedLocationBin, expectedQty: auditExpectedQuantity(product, audit, resolvedLocationBin), countedQty: quantity, firstScannedAt: now, lastScannedAt: now, reviewStatus: "unreviewed" });
+      if (line) { line.countedQty = Number(line.countedQty || 0) + quantity; line.image = line.image || auditImage; line.lastScannedAt = now; line.reviewStatus = "unreviewed"; } else (audit.lines || (audit.lines = [])).push({ id: crypto.randomUUID(), productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, image: auditImage, barcode, locationBin: resolvedLocationBin, expectedQty: auditExpectedQuantity(product, audit, resolvedLocationBin), countedQty: quantity, firstScannedAt: now, lastScannedAt: now, reviewStatus: "unreviewed" });
       audit.updatedAt = now;
       await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
       return sendJson(res, 200, { audit, product, matched: true, message: `${product.sku} counted: ${quantity}.` });
