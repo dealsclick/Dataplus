@@ -2336,6 +2336,16 @@ tr:last-child td {
   font-size: 0.92rem;
 }
 
+.channel-action-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.channel-action-stack .button {
+  justify-content: center;
+  width: 100%;
+}
+
 .channel-location-form {
   display: grid;
   gap: 9px;

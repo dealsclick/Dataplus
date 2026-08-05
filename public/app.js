@@ -17042,6 +17042,8 @@ function renderChannelProfile() {
   const settings = channel.settings || {};
   const isEbay = String(channel.name || "").toLowerCase() === "ebay";
   const isShopify = String(channel.name || "").toLowerCase() === "shopify";
+  const ebayAuthorized = Boolean(state.connectorState?.ebayAuthorized);
+  const ebayCredentialsConfigured = Boolean(state.connectorState?.ebayCredentialsConfigured);
   const channelShadows = allShadowRows().filter((row) => String(row.shadow.marketplace || "").toLowerCase() === String(channel.name || "").toLowerCase());
   const optionRows = (rows = [], valueKey = "id", labelKey = "name", current = "") => rows.map((row) => {
     const value = row[valueKey] || "";
@@ -17132,6 +17134,15 @@ function renderChannelProfile() {
               </div>
             </div>
             <aside class="channel-settings-aside">
+              <div class="channel-sync-panel">
+                <strong>eBay Connection</strong>
+                <p class="muted">${ebayCredentialsConfigured ? "API credentials are loaded from .env / DigitalOcean. Authorize the seller account to save OAuth tokens." : "Add EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, and EBAY_RUNAME to the server environment, then restart."}</p>
+                <div class="channel-action-stack">
+                  <a class="button ${ebayAuthorized ? "secondary" : ""}" href="/auth/ebay/start">${withIcon("external-link", ebayAuthorized ? "Reconnect eBay" : "Connect eBay")}</a>
+                  <button class="button secondary" type="button" data-sync-source="eBay" ${ebayAuthorized ? "" : "disabled"}>${withIcon("download", "Import eBay orders")}</button>
+                  <button class="button secondary" type="button" data-run-ebay-catalog-import ${ebayAuthorized ? "" : "disabled"}>${withIcon("refresh-cw", "Sync active listings")}</button>
+                </div>
+              </div>
               <div class="channel-sync-panel">
                 <strong>Account Sync</strong>
                 <p class="muted">${settings.ebayAccountSettingsSyncedAt ? `Last sync ${dateLabel(settings.ebayAccountSettingsSyncedAt)}.` : "Sync after reconnecting eBay with Sell Account and Sell Inventory permissions."}</p>

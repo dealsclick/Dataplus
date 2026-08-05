@@ -15062,6 +15062,7 @@ function publicState(db, options = {}) {
       temuMallId: connectorState.temuMallId || "",
       temuLastOrderSync: connectorState.temuLastOrderSync || null,
       ebayAuthorized: Boolean(connectorState.ebayAccessToken || connectorState.ebayRefreshToken),
+      ebayCredentialsConfigured: Boolean(process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET && process.env.EBAY_RUNAME),
       ebayEnvironment: process.env.EBAY_ENVIRONMENT || "production",
       ebayLastOrderSync: connectorState.ebayLastOrderSync || null,
       ebayListingDefaults: {
