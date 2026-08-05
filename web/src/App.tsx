@@ -6780,7 +6780,7 @@ function WarehouseAuditPanel({
                     <p className="self-center text-xs text-muted-foreground">{manualPhotoUrls.length} photo{manualPhotoUrls.length === 1 ? "" : "s"} will be saved with this SKU. Add all sides before using AI suggestions.</p>
                   </div>
                 )}
-                <div className="sticky bottom-0 z-10 -mx-3 flex flex-wrap justify-end gap-2 border-t bg-background/95 px-3 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-3 backdrop-blur sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:p-0 sm:backdrop-blur-none">
+                <div className="sticky bottom-0 z-10 -mx-3 flex w-[calc(100%+1.5rem)] flex-wrap justify-center gap-2 border-t bg-background/95 px-3 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-3 backdrop-blur sm:static sm:mx-0 sm:w-auto sm:justify-end sm:border-0 sm:bg-transparent sm:p-0 sm:backdrop-blur-none">
                   <Button
                     size="sm"
                     variant="outline"
