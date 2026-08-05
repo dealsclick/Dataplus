@@ -21795,7 +21795,7 @@ async function handleApi(req, res) {
   }
 
   if (url.pathname === "/api/ebay/credentials") {
-    if (req.method === "GET") return sendJson(res, 200, { credentials: publicEbayConfigStatus(db) });
+    if (req.method === "GET") return sendJson(res, 200, { credentials: publicEbayConfigStatus() });
     if (req.method === "PUT") {
       const body = await parseBody(req);
       const patch = {};
@@ -21821,7 +21821,7 @@ async function handleApi(req, res) {
         ...(patch.accessToken ? { EBAY_ACCESS_TOKEN: patch.accessToken } : {})
       });
       appendChannelApiLog({ channel: "eBay", transport: "configuration", method: "PUT", path: url.pathname, operation: "Update eBay credentials", statusCode: 200, ok: true, message: `Updated ${Object.keys(patch).filter((key) => !["clientSecret", "refreshToken", "accessToken"].includes(key)).join(", ") || "secret credentials"}.` });
-      return sendJson(res, 200, { credentials: publicEbayConfigStatus(db), message: "eBay credentials updated. Existing secrets remain masked." });
+      return sendJson(res, 200, { credentials: publicEbayConfigStatus(), message: "eBay credentials updated. Existing secrets remain masked." });
     }
   }
 
