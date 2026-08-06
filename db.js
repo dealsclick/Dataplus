@@ -153,6 +153,12 @@ async function initRelationalSchema() {
     create index if not exists products_supplier_idx on products (lower(supplier));
     create index if not exists products_category_idx on products (category);
     create index if not exists products_discontinued_idx on products (to_be_discontinued);
+    create index if not exists products_temu_direct_presence_idx on products (product_id)
+      where raw ?| array['temuId', 'temuProductId', 'temuListingId', 'temuOfferId', 'temuSku'];
+    create index if not exists products_temu_source_presence_idx on products (product_id)
+      where (raw -> 'sources') ?| array['Temu', 'temu'];
+    create index if not exists products_temu_status_presence_idx on products (product_id)
+      where (raw -> 'channelStatuses') ?| array['Temu', 'temu'];
 
     create table if not exists product_identifiers (
       product_id text not null references products(product_id) on delete cascade,
@@ -5572,11 +5578,19 @@ async function listProducts(options = {}) {
     coalesce(raw ->> 'ebayId', raw #>> '{ebayListing,listingId}', raw #>> '{ebayListing,offerId}', '') <> ''
     or lower(${ebayListingStatusExpression}) in ('live', 'active', 'offer', 'draft', 'unpublished', 'published')
   )`;
+  const hasTemuMarker = `(
+    raw ?| array['temuId', 'temuProductId', 'temuListingId', 'temuOfferId', 'temuSku']
+    or (raw -> 'sources') ?| array['Temu', 'temu']
+    or (raw -> 'channelStatuses') ?| array['Temu', 'temu']
+  )`;
   const hasTemuDetected = `(
-    coalesce(raw ->> 'temuId', raw ->> 'temuProductId', raw ->> 'temuListingId', raw ->> 'temuOfferId', raw ->> 'temuSku', '') <> ''
-    or coalesce(raw #>> '{sources,Temu}', raw #>> '{sources,temu}', '') <> ''
-    or coalesce(raw #>> '{channelStatuses,Temu,id}', raw #>> '{channelStatuses,temu,id}', raw #>> '{channelStatuses,Temu,productId}', raw #>> '{channelStatuses,temu,productId}', raw #>> '{channelStatuses,Temu,listingId}', raw #>> '{channelStatuses,temu,listingId}', raw #>> '{channelStatuses,Temu,offerId}', raw #>> '{channelStatuses,temu,offerId}', '') <> ''
-    or lower(coalesce(raw #>> '{channelStatuses,Temu,status}', raw #>> '{channelStatuses,temu,status}', raw #>> '{channelStatuses,Temu,state}', raw #>> '{channelStatuses,temu,state}', '')) in ('live', 'active', 'offer', 'draft', 'unpublished', 'published')
+    ${hasTemuMarker}
+    and (
+      coalesce(raw ->> 'temuId', raw ->> 'temuProductId', raw ->> 'temuListingId', raw ->> 'temuOfferId', raw ->> 'temuSku', '') <> ''
+      or coalesce(raw #>> '{sources,Temu}', raw #>> '{sources,temu}', '') <> ''
+      or coalesce(raw #>> '{channelStatuses,Temu,id}', raw #>> '{channelStatuses,temu,id}', raw #>> '{channelStatuses,Temu,productId}', raw #>> '{channelStatuses,temu,productId}', raw #>> '{channelStatuses,Temu,listingId}', raw #>> '{channelStatuses,temu,listingId}', raw #>> '{channelStatuses,Temu,offerId}', raw #>> '{channelStatuses,temu,offerId}', '') <> ''
+      or lower(coalesce(raw #>> '{channelStatuses,Temu,status}', raw #>> '{channelStatuses,temu,status}', raw #>> '{channelStatuses,Temu,state}', raw #>> '{channelStatuses,temu,state}', '')) in ('live', 'active', 'offer', 'draft', 'unpublished', 'published')
+    )
   )`;
   const numericEbayPriceExpression = `coalesce(
     case when coalesce(raw #>> '{ebayListing,price}', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw #>> '{ebayListing,price}')::numeric end,
