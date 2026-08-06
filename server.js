@@ -20031,6 +20031,7 @@ function catalogFilterParams(searchParams) {
     replenishable: searchParams.get("replenishable") || "",
     warehouse: searchParams.get("warehouse") || "",
     vendorScope: searchParams.get("vendorScope") || "",
+    includedSuppliers: searchParams.get("includedSuppliers") || "",
     excludedSuppliers: searchParams.get("excludedSuppliers") || ""
   };
 }
@@ -20049,15 +20050,15 @@ function vendorCatalogAliases(vendor = {}) {
 function applyVendorCatalogScope(filters = {}, vendors = []) {
   const scope = String(filters.vendorScope || "enabled").trim().toLowerCase();
   if (scope === "all") return { ...filters };
-  const disabledSupplierAliases = [...new Set((vendors || [])
-    .filter((vendor) => vendor?.catalogSettings?.enabled === false)
+  const enabledSupplierAliases = [...new Set((vendors || [])
+    .filter((vendor) => vendor?.catalogSettings?.enabled !== false)
     .flatMap(vendorCatalogAliases))];
-  if (!disabledSupplierAliases.length) return { ...filters };
+  if (!enabledSupplierAliases.length) return { ...filters, includedSuppliers: "__no_enabled_supplier__" };
   return {
     ...filters,
-    excludedSuppliers: [...new Set([
-      ...catalogFilterValues(filters.excludedSuppliers),
-      ...disabledSupplierAliases
+    includedSuppliers: [...new Set([
+      ...catalogFilterValues(filters.includedSuppliers),
+      ...enabledSupplierAliases
     ])].join("|")
   };
 }
@@ -24122,10 +24123,17 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/inventory/facets") {
     if (postgres.isPostgresEnabled()) {
-      const cacheKey = "dataplus:products:facets:v2";
+      const catalogVendors = await postgres.readStateField("vendors").catch(() => []);
+      const scopedFilters = applyVendorCatalogScope(
+        { vendorScope: url.searchParams.get("vendorScope") || "enabled" },
+        Array.isArray(catalogVendors) ? catalogVendors : []
+      );
+      const includedSuppliers = catalogFilterValues(scopedFilters.includedSuppliers);
+      const scopeHash = crypto.createHash("sha1").update(includedSuppliers.sort().join("|")).digest("hex").slice(0, 12);
+      const cacheKey = `dataplus:products:facets:v3:${scopeHash}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
-      const facets = await postgres.productFacets();
+      const facets = await postgres.productFacets({ includedSuppliers });
       if (facets) {
         const payload = { facets };
         await redisCache.setJson(cacheKey, payload, REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS);
@@ -28010,6 +28018,16 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "vendors" && parts[2] === "marketplace-summary" && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const cacheKey = "dataplus:vendor-marketplace-summary:v1";
+    const cached = await redisCache.getJson(cacheKey);
+    if (cached) return sendJson(res, 200, { ...cached, cached: true });
+    const rows = await postgres.listVendorMarketplaceSummary();
+    const payload = { rows, generatedAt: new Date().toISOString() };
+    await redisCache.setJson(cacheKey, payload, 300);
+    return sendJson(res, 200, payload);
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const name = String(body.name || "").trim();
@@ -28175,7 +28193,12 @@ async function handleApi(req, res) {
     const vendorIndex = (db.vendors || []).findIndex((entry) => entry.id === vendor.id);
     if (vendorIndex >= 0) db.vendors[vendorIndex] = normalizedVendor;
     await postgres.writeStateDocuments({ vendors: db.vendors || [] });
-    if (changes.some((change) => change.startsWith("catalogSettings."))) await redisCache.deleteByPrefix("dataplus:products:");
+    if (changes.some((change) => change.startsWith("catalogSettings."))) {
+      await Promise.all([
+        redisCache.deleteByPrefix("dataplus:products:"),
+        redisCache.deleteByPrefix("dataplus:vendor-marketplace-summary:")
+      ]);
+    }
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { vendor: normalizedVendor, state: publicState(stateDb, { lite: true }) });
   }

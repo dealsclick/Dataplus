@@ -347,6 +347,20 @@ type Vendor = {
   channelRules?: Record<string, unknown>
 }
 
+type VendorMarketplaceSummary = {
+  supplierKey: string
+  supplier: string
+  productCount: number
+  activeProductCount: number
+  shopifyLive: number
+  ebayLive: number
+  marketplaceLive: number
+}
+
+type VendorMarketplaceCoverage = Omit<VendorMarketplaceSummary, "supplierKey" | "supplier"> & {
+  matchedSuppliers: string[]
+}
+
 type SystemSettings = {
   backgroundJobsMode?: string
   autoDataQualityScanAfterImports?: boolean
@@ -11663,12 +11677,78 @@ export function SourceCatalogPage() {
   </div>
 }
 
+const emptyVendorMarketplaceCoverage: VendorMarketplaceCoverage = {
+  productCount: 0,
+  activeProductCount: 0,
+  shopifyLive: 0,
+  ebayLive: 0,
+  marketplaceLive: 0,
+  matchedSuppliers: []
+}
+
+function vendorMarketplaceCoverage(vendor: Vendor, rowsBySupplier: Map<string, VendorMarketplaceSummary>): VendorMarketplaceCoverage {
+  const configuredAliases = Array.isArray(vendor.catalogSettings?.supplierAliases) ? vendor.catalogSettings.supplierAliases : []
+  const aliases = [...new Set([vendor.name, vendor.code, ...configuredAliases]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean))]
+  const seen = new Set<string>()
+  const coverage = { ...emptyVendorMarketplaceCoverage, matchedSuppliers: [] as string[] }
+  for (const alias of aliases) {
+    const row = rowsBySupplier.get(alias)
+    if (!row || seen.has(row.supplierKey)) continue
+    seen.add(row.supplierKey)
+    coverage.productCount += Number(row.productCount || 0)
+    coverage.activeProductCount += Number(row.activeProductCount || 0)
+    coverage.shopifyLive += Number(row.shopifyLive || 0)
+    coverage.ebayLive += Number(row.ebayLive || 0)
+    coverage.marketplaceLive += Number(row.marketplaceLive || 0)
+    coverage.matchedSuppliers.push(row.supplier)
+  }
+  return coverage
+}
+
 function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendor: (id: string, patch: Record<string, unknown>) => Promise<void> }) {
   const [query, setQuery] = useState("")
+  const [catalogFilter, setCatalogFilter] = useState("all")
+  const [marketplaceFilter, setMarketplaceFilter] = useState("all")
   const [selectedId, setSelectedId] = useState("")
+  const [marketplaceRows, setMarketplaceRows] = useState<VendorMarketplaceSummary[]>([])
+  const [marketplaceLoading, setMarketplaceLoading] = useState(true)
   const pathVendorId = decodeURIComponent((window.location.pathname.match(/^\/vendors\/([^/]+)/)?.[1] || ""))
-  const filtered = vendors.filter((vendor) => `${vendor.name} ${vendor.code || ""} ${vendor.email || ""}`.toLowerCase().includes(query.toLowerCase()))
+
+  useEffect(() => {
+    let cancelled = false
+    void api<{ rows?: VendorMarketplaceSummary[] }>("/api/vendors/marketplace-summary")
+      .then((result) => {
+        if (!cancelled) setMarketplaceRows(result.rows || [])
+      })
+      .catch(() => {
+        if (!cancelled) setMarketplaceRows([])
+      })
+      .finally(() => {
+        if (!cancelled) setMarketplaceLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  const marketplaceBySupplier = useMemo(() => new Map(marketplaceRows.map((row) => [String(row.supplierKey || "").toLowerCase(), row])), [marketplaceRows])
+  const coverageByVendor = useMemo(() => new Map(vendors.map((vendor) => [vendor.id, vendorMarketplaceCoverage(vendor, marketplaceBySupplier)])), [vendors, marketplaceBySupplier])
+  const catalogEnabled = (vendor: Vendor) => vendor.catalogSettings?.enabled !== false
+  const filtered = vendors.filter((vendor) => {
+    const coverage = coverageByVendor.get(vendor.id) || emptyVendorMarketplaceCoverage
+    const matchesQuery = `${vendor.name} ${vendor.code || ""} ${vendor.email || ""} ${coverage.matchedSuppliers.join(" ")}`.toLowerCase().includes(query.toLowerCase())
+    const matchesCatalog = catalogFilter === "all" || (catalogFilter === "included" ? catalogEnabled(vendor) : !catalogEnabled(vendor))
+    const matchesMarketplace = marketplaceFilter === "all"
+      || (marketplaceFilter === "shopify-live" && coverage.shopifyLive > 0)
+      || (marketplaceFilter === "ebay-live" && coverage.ebayLive > 0)
+      || (marketplaceFilter === "any-live" && coverage.marketplaceLive > 0)
+      || (marketplaceFilter === "no-live" && coverage.marketplaceLive === 0)
+    return matchesQuery && matchesCatalog && matchesMarketplace
+  })
   const selected = vendors.find((vendor) => vendor.id === pathVendorId) || vendors.find((vendor) => vendor.id === selectedId) || filtered[0] || vendors[0]
+  const enabledCount = vendors.filter(catalogEnabled).length
+  const shopifyVendorCount = vendors.filter((vendor) => (coverageByVendor.get(vendor.id)?.shopifyLive || 0) > 0).length
+  const ebayVendorCount = vendors.filter((vendor) => (coverageByVendor.get(vendor.id)?.ebayLive || 0) > 0).length
 
   useEffect(() => {
     if (selected?.id && selectedId !== selected.id) setSelectedId(selected.id)
@@ -11678,43 +11758,84 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
     <div className="grid gap-5">
       <PageHeader
         eyebrow="Suppliers"
-        title="Vendor Settings"
-        description="Contacts, payment terms, pricing rules, variation rules, replenishable inventory, and category mapping entry points."
+        title="Vendors"
+        description="Choose which supplier feeds participate in the managed catalog, then review their current Shopify and eBay coverage."
         action={<Button asChild variant="outline"><a href="/legacy/vendors" target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Advanced vendors</a></Button>}
       />
-      <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Vendors</CardTitle>
+      <div className="grid gap-3 md:grid-cols-3">
+        <MetricCard label="Catalog enabled" value={`${enabledCount} / ${vendors.length}`} icon={CheckCircle2} />
+        <MetricCard label="Shopify suppliers" value={marketplaceLoading ? "Loading" : shopifyVendorCount} icon={ShoppingBag} />
+        <MetricCard label="eBay suppliers" value={marketplaceLoading ? "Loading" : ebayVendorCount} icon={Store} />
+      </div>
+      <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
+        <Card className="h-fit">
+          <CardHeader className="gap-3 border-b">
+            <div>
+              <CardTitle className="text-base">Supplier profiles</CardTitle>
+              <CardDescription>Filter by catalog participation or marketplace coverage.</CardDescription>
+            </div>
             <div className="relative">
               <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
-              <Input className="pl-8" placeholder="Search vendors" value={query} onChange={(event) => setQuery(event.target.value)} />
+              <Input className="pl-8" placeholder="Search vendor, code, or feed name" value={query} onChange={(event) => setQuery(event.target.value)} />
             </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Select value={catalogFilter} onValueChange={setCatalogFilter}>
+                <SelectTrigger><SelectValue placeholder="Catalog" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All catalog states</SelectItem>
+                  <SelectItem value="included">Included in catalog</SelectItem>
+                  <SelectItem value="excluded">Excluded from catalog</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select value={marketplaceFilter} onValueChange={setMarketplaceFilter}>
+                <SelectTrigger><SelectValue placeholder="Marketplace" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All marketplace coverage</SelectItem>
+                  <SelectItem value="any-live">Any marketplace live</SelectItem>
+                  <SelectItem value="shopify-live">Shopify live</SelectItem>
+                  <SelectItem value="ebay-live">eBay live</SelectItem>
+                  <SelectItem value="no-live">No marketplace live SKUs</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {(query || catalogFilter !== "all" || marketplaceFilter !== "all") && <Button variant="ghost" size="sm" className="w-fit" onClick={() => { setQuery(""); setCatalogFilter("all"); setMarketplaceFilter("all") }}>Clear filters</Button>}
           </CardHeader>
-          <CardContent className="grid max-h-[680px] gap-2 overflow-auto">
-            {filtered.map((vendor) => (
-              <Button
+          <CardContent className="grid max-h-[660px] gap-2 overflow-auto p-3">
+            <p className="px-1 text-xs text-muted-foreground">{filtered.length} of {vendors.length} supplier profile{vendors.length === 1 ? "" : "s"}</p>
+            {filtered.map((vendor) => {
+              const coverage = coverageByVendor.get(vendor.id) || emptyVendorMarketplaceCoverage
+              const included = catalogEnabled(vendor)
+              return <Button
                 key={vendor.id}
                 variant={selected?.id === vendor.id ? "secondary" : "ghost"}
-                className="h-auto justify-between gap-3 py-3"
+                className="h-auto items-start justify-between gap-3 px-3 py-3 text-left"
                 onClick={() => setSelectedId(vendor.id)}
               >
-                <span className="min-w-0 text-left">
+                <span className="min-w-0">
                   <span className="block truncate font-medium">{vendor.name}</span>
                   <span className="block text-xs text-muted-foreground">{vendor.code || vendor.type || "Supplier"}</span>
+                  <span className="mt-2 flex flex-wrap gap-1">
+                    <Badge variant={included ? "success" : "outline"}>{included ? "Catalog" : "Excluded"}</Badge>
+                    {marketplaceLoading ? <Badge variant="outline">Checking markets</Badge> : <>
+                      {coverage.shopifyLive > 0 && <Badge variant="success">Shopify {numberLabel(coverage.shopifyLive)}</Badge>}
+                      {coverage.ebayLive > 0 && <Badge variant="info">eBay {numberLabel(coverage.ebayLive)}</Badge>}
+                      {coverage.marketplaceLive === 0 && <Badge variant="outline">No live SKUs</Badge>}
+                    </>}
+                  </span>
                 </span>
                 <Badge variant={String(vendor.status || "active").toLowerCase() === "active" ? "default" : "outline"}>{vendor.status || "active"}</Badge>
               </Button>
-            ))}
+            })}
+            {!filtered.length && <p className="p-4 text-sm text-muted-foreground">No supplier profiles match those filters.</p>}
           </CardContent>
         </Card>
-        {selected ? <VendorDetail vendor={selected} onSave={onSaveVendor} /> : <Card><CardContent className="p-6 text-muted-foreground">No vendors found.</CardContent></Card>}
+        {selected ? <VendorDetail vendor={selected} onSave={onSaveVendor} marketplaceCoverage={coverageByVendor.get(selected.id) || emptyVendorMarketplaceCoverage} marketplaceLoading={marketplaceLoading} /> : <Card><CardContent className="p-6 text-muted-foreground">No vendors found.</CardContent></Card>}
       </div>
     </div>
   )
 }
 
-function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string, patch: Record<string, unknown>) => Promise<void> }) {
+function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketplaceCoverage, marketplaceLoading = false }: { vendor: Vendor; onSave: (id: string, patch: Record<string, unknown>) => Promise<void>; marketplaceCoverage?: VendorMarketplaceCoverage; marketplaceLoading?: boolean }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
@@ -11758,6 +11879,14 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
             <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Vendor profile</p>
             <CardTitle>{vendor.name}</CardTitle>
             <CardDescription>{vendor.code || vendor.type || "Supplier"} / {vendor.status || "active"}</CardDescription>
+            <div className="mt-3 flex flex-wrap gap-1">
+              <Badge variant={catalogSettings.enabled !== false ? "success" : "outline"}>{catalogSettings.enabled !== false ? "Included in catalog" : "Excluded from catalog"}</Badge>
+              {marketplaceLoading ? <Badge variant="outline">Checking marketplace coverage</Badge> : <>
+                {marketplaceCoverage.shopifyLive > 0 && <Badge variant="success">Shopify {numberLabel(marketplaceCoverage.shopifyLive)} live</Badge>}
+                {marketplaceCoverage.ebayLive > 0 && <Badge variant="info">eBay {numberLabel(marketplaceCoverage.ebayLive)} live</Badge>}
+                {marketplaceCoverage.marketplaceLive === 0 && <Badge variant="outline">No live marketplace SKUs</Badge>}
+              </>}
+            </div>
           </div>
           <div className="flex gap-2">
             {editing ? (
@@ -11776,7 +11905,7 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
           <TabsTrigger value="contact">Contact</TabsTrigger>
           <TabsTrigger value="rules">Rules</TabsTrigger>
           <TabsTrigger value="inventory">Inventory</TabsTrigger>
-          <TabsTrigger value="data-feed">Data feed</TabsTrigger>
+          <TabsTrigger value="data-feed">Catalog & data</TabsTrigger>
           <TabsTrigger value="categories">Categories</TabsTrigger>
         </TabsList>
         <TabsContent value="summary" className="grid gap-4">
@@ -11874,10 +12003,16 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Catalog participation</CardTitle>
-                <CardDescription>Controls whether this supplier appears in the fast managed catalog. Disabled supplier records stay available in the source archive and can be included temporarily with the catalog filter.</CardDescription>
+                <CardDescription>Only included supplier profiles load into the fast managed catalog. Disabled supplier records remain in the database and can be reviewed from their profile.</CardDescription>
               </CardHeader>
               <CardContent className="grid gap-4 md:grid-cols-2">
-                <ToggleField label="Include supplier in catalog" checked={Boolean(draft["catalogSettings.enabled"] ?? (catalogSettings.enabled ?? true))} disabled={!editing} onCheckedChange={(next) => update("catalogSettings.enabled", next)} />
+                <div className="md:col-span-2 grid gap-3 sm:grid-cols-4">
+                  <Detail label="Catalog SKUs" value={marketplaceLoading ? "Checking" : numberLabel(marketplaceCoverage.productCount)} />
+                  <Detail label="Active catalog SKUs" value={marketplaceLoading ? "Checking" : numberLabel(marketplaceCoverage.activeProductCount)} />
+                  <Detail label="Shopify live" value={marketplaceLoading ? "Checking" : numberLabel(marketplaceCoverage.shopifyLive)} />
+                  <Detail label="eBay live" value={marketplaceLoading ? "Checking" : numberLabel(marketplaceCoverage.ebayLive)} />
+                </div>
+                <ToggleField label="Include supplier in catalog" checked={Boolean(draft["catalogSettings.enabled"] ?? (catalogSettings.enabled !== false))} disabled={!editing} onCheckedChange={(next) => update("catalogSettings.enabled", next)} />
                 <Field label="Supplier aliases">
                   <Input disabled={!editing} value={catalogAliases} onChange={(event) => update("catalogSettings.supplierAliases", event.target.value.split(/[|,\n]/).map((entry) => entry.trim()).filter(Boolean))} placeholder="True Value | TRV" />
                   <p className="text-xs text-muted-foreground">Use the names found in incoming feeds. They ensure this setting matches supplier records reliably.</p>

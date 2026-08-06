@@ -5391,6 +5391,16 @@ async function listProducts(options = {}) {
     params.push(excludedSupplierValues);
     where.push(`not (lower(coalesce(supplier, '')) = any($${params.length}))`);
   }
+  const includedSupplierValues = splitFilterValues(filters.includedSuppliers).map((value) => value.toLowerCase());
+  if (includedSupplierValues.length) {
+    params.push(includedSupplierValues);
+    // Manual and warehouse-created SKUs do not always have a supplier profile yet.
+    // Keep them visible while using the vendor allowlist to avoid loading every feed.
+    where.push(`(
+      lower(coalesce(supplier, '')) = any($${params.length})
+      or coalesce(trim(supplier), '') = ''
+    )`);
+  }
   const activeValues = [...new Set(splitFilterValues(filters.active).map(parseFilterBoolean))];
   if (activeValues.length === 1) {
     params.push(activeValues[0]);
@@ -5911,18 +5921,25 @@ async function hydrateProductsWithInventoryLevels(items = []) {
   });
 }
 
-async function productFacets() {
+async function productFacets(filters = {}) {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
+  const includedSuppliers = Array.isArray(filters.includedSuppliers)
+    ? filters.includedSuppliers.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+    : [];
+  const params = includedSuppliers.length ? [includedSuppliers] : [];
+  const scopeWhere = includedSuppliers.length
+    ? "where (lower(coalesce(supplier, '')) = any($1::text[]) or coalesce(trim(supplier), '') = '')"
+    : "";
   // The catalog filter dialog only needs human-selectable product dimensions.
   // Channel status choices are a fixed product contract in the UI, so avoid
   // scanning every Shopify/eBay status row just to rebuild a dropdown.
   const [suppliers, brands, manufacturers, categories] = await Promise.all([
-    client.query("select distinct supplier as value from products where coalesce(supplier, '') <> '' order by supplier limit 500"),
-    client.query("select distinct brand as value from products where coalesce(brand, '') <> '' order by brand limit 1000"),
-    client.query("select distinct coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName') as value from products where coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName', '') <> '' order by 1 limit 1000"),
-    client.query("select distinct category as value from products where coalesce(category, '') <> '' order by category limit 2000")
+    client.query(`select distinct supplier as value from products ${scopeWhere}${scopeWhere ? " and" : " where"} coalesce(supplier, '') <> '' order by supplier limit 500`, params),
+    client.query(`select distinct brand as value from products ${scopeWhere}${scopeWhere ? " and" : " where"} coalesce(brand, '') <> '' order by brand limit 1000`, params),
+    client.query(`select distinct coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName') as value from products ${scopeWhere}${scopeWhere ? " and" : " where"} coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName', '') <> '' order by 1 limit 1000`, params),
+    client.query(`select distinct category as value from products ${scopeWhere}${scopeWhere ? " and" : " where"} coalesce(category, '') <> '' order by category limit 2000`, params)
   ]);
   return {
     suppliers: suppliers.rows.map((row) => row.value),
@@ -5935,6 +5952,85 @@ async function productFacets() {
     shopifyLiveProducts: 0,
     shopifyLiveVariants: 0
   };
+}
+
+async function listVendorMarketplaceSummary() {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+
+  // Keep Shopify's live definition in one place: an Active product that is
+  // actually published. Grouping status rows first prevents variants from
+  // inflating a supplier's product count.
+  const result = await client.query(`
+    with shopify_live_by_product as (
+      select
+        product_id,
+        bool_or(
+          coalesce(shopify_id, '') <> ''
+          and lower(coalesce(shopify_status, '')) = 'active'
+          and coalesce(shopify_published, false) = true
+        ) as is_live
+      from shopify_product_statuses
+      where product_id is not null
+      group by product_id
+    ),
+    shopify_live_by_sku as (
+      select
+        lower(sku) as sku_key,
+        bool_or(
+          coalesce(shopify_id, '') <> ''
+          and lower(coalesce(shopify_status, '')) = 'active'
+          and coalesce(shopify_published, false) = true
+        ) as is_live
+      from shopify_product_statuses
+      where coalesce(sku, '') <> ''
+      group by lower(sku)
+    ),
+    product_marketplaces as (
+      select
+        p.product_id,
+        p.supplier,
+        p.active,
+        (
+          (
+            coalesce(p.raw ->> 'shopifyId', '') <> ''
+            and lower(coalesce(p.raw ->> 'shopifyStatus', '')) = 'active'
+            and lower(coalesce(p.raw ->> 'shopifyPublished', 'false')) in ('true', '1', 'yes', 'y')
+          )
+          or coalesce(shopify_by_product.is_live, false)
+          or coalesce(shopify_by_sku.is_live, false)
+        ) as shopify_live,
+        (
+          coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> ''
+          or lower(coalesce(p.raw #>> '{ebayListing,ebayStatus}', p.raw #>> '{ebayListing,status}', '')) = 'live'
+        ) as ebay_live
+      from products p
+      left join shopify_live_by_product shopify_by_product on shopify_by_product.product_id = p.product_id
+      left join shopify_live_by_sku shopify_by_sku on shopify_by_sku.sku_key = lower(p.sku)
+      where coalesce(trim(p.supplier), '') <> ''
+    )
+    select
+      lower(supplier) as "supplierKey",
+      min(supplier) as supplier,
+      count(*)::int as "productCount",
+      count(*) filter (where coalesce(active, true))::int as "activeProductCount",
+      count(*) filter (where shopify_live)::int as "shopifyLive",
+      count(*) filter (where ebay_live)::int as "ebayLive",
+      count(*) filter (where shopify_live or ebay_live)::int as "marketplaceLive"
+    from product_marketplaces
+    group by lower(supplier)
+    order by "marketplaceLive" desc, "productCount" desc, supplier
+  `);
+  return result.rows.map((row) => ({
+    supplierKey: String(row.supplierKey || "").toLowerCase(),
+    supplier: String(row.supplier || ""),
+    productCount: Number(row.productCount || 0),
+    activeProductCount: Number(row.activeProductCount || 0),
+    shopifyLive: Number(row.shopifyLive || 0),
+    ebayLive: Number(row.ebayLive || 0),
+    marketplaceLive: Number(row.marketplaceLive || 0)
+  }));
 }
 
 async function hydrateProductsWithShopifyStatuses(items = []) {
@@ -6757,6 +6853,7 @@ module.exports = {
   listProducts,
   findBarcodeMatches,
   productFacets,
+  listVendorMarketplaceSummary,
   listVendorCatalogItems,
   listVendorCategoryMappingSources,
   applyVendorCategoryMainMapping,
