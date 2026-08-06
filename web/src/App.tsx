@@ -2366,7 +2366,7 @@ function ChannelDetail({
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [credentials, setCredentials] = useState<{ shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; clientIdPreview?: string; clientSecretPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean } | null>(null)
-  const [ebayCredentials, setEbayCredentials] = useState<{ environment?: string; ruName?: string; scope?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; hasSellerAuthorization?: boolean; clientIdPreview?: string; clientSecretPreview?: string; refreshTokenPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean; configured?: boolean } | null>(null)
+  const [ebayCredentials, setEbayCredentials] = useState<{ environment?: string; ruName?: string; scope?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; hasSellerAuthorization?: boolean; sellerAuthorizedAt?: string; accessTokenExpiresAt?: string; clientIdPreview?: string; clientSecretPreview?: string; refreshTokenPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean; configured?: boolean } | null>(null)
   const [credentialsOpen, setCredentialsOpen] = useState(false)
   const [ebayCredentialsOpen, setEbayCredentialsOpen] = useState(false)
   const [credentialSaving, setCredentialSaving] = useState(false)
@@ -2408,6 +2408,28 @@ function ChannelDetail({
       .then((result) => setEbayCredentials(result.credentials || null))
       .catch(() => setEbayCredentials(null))
   }, [isEbay])
+
+  useEffect(() => {
+    if (!isEbay) return
+    function onEbayAuthorization(event: MessageEvent) {
+      if (event.origin !== window.location.origin || !event.data || typeof event.data !== "object") return
+      const payload = event.data as { type?: string; message?: string }
+      if (payload.type === "dataplus:ebay-authorized") {
+        api<{ credentials?: typeof ebayCredentials }>("/api/ebay/credentials")
+          .then((result) => {
+            setEbayCredentials(result.credentials || null)
+            toast.success("eBay seller account connected.")
+            onRefreshData()
+          })
+          .catch(() => toast.error("eBay connected, but DataPlus could not refresh its connection status."))
+      }
+      if (payload.type === "dataplus:ebay-authorization-error") {
+        toast.error(payload.message || "eBay authorization did not complete.")
+      }
+    }
+    window.addEventListener("message", onEbayAuthorization)
+    return () => window.removeEventListener("message", onEbayAuthorization)
+  }, [isEbay, onRefreshData])
 
   function update(field: string, value: unknown) {
     setDraft((current) => ({ ...current, [field]: value }))
@@ -2470,11 +2492,11 @@ function ChannelDetail({
   async function runEbayAction(kind: "authorize" | "account" | "catalog") {
     try {
       if (kind === "authorize") {
-        const popup = window.open("", "_blank")
-        const result = await api<{ authUrl?: string }>("/api/ebay/auth-url")
-        if (!result.authUrl) throw new Error("eBay did not return an authorization URL.")
-        if (popup) popup.location.href = result.authUrl
-        else window.location.assign(result.authUrl)
+        const returnTo = `${window.location.pathname}${window.location.search}`
+        const authPath = `/auth/ebay/start?returnTo=${encodeURIComponent(returnTo)}`
+        const popup = window.open(authPath, "dataplus-ebay-auth", "popup,width=760,height=820")
+        if (!popup) window.location.assign(authPath)
+        else toast.message("Continue with eBay in the sign-in window.")
         return
       }
       const path = kind === "account" ? "/api/ebay/account-settings/sync" : "/api/ebay/catalog-import"
@@ -2697,13 +2719,17 @@ function ChannelDetail({
                   </CardTitle>
                   <CardDescription>{ebayCredentials?.hasSellerAuthorization ? "Seller authorization is ready for eBay syncs." : "Add credentials, then authorize the eBay seller account."}</CardDescription>
                 </div>
-                <Button variant="outline" onClick={openEbayCredentials}>Update API credentials</Button>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button onClick={() => void runEbayAction("authorize")} disabled={!ebayCredentials?.configured}>{ebayCredentials?.hasSellerAuthorization ? "Reconnect eBay account" : "Sign in with eBay"}</Button>
+                  <Button variant="outline" onClick={openEbayCredentials}>Update API credentials</Button>
+                </div>
               </CardHeader>
               <CardContent className="grid gap-3 md:grid-cols-4">
                 <Detail label="Environment" value={ebayCredentials?.environment || "Production"} />
                 <Detail label="Client credentials" value={ebayCredentials?.hasClientCredentials ? "Configured" : "Missing"} />
                 <Detail label="Redirect URI name" value={ebayCredentials?.ruName || "Missing"} />
                 <Detail label="Seller authorization" value={ebayCredentials?.hasSellerAuthorization ? "Connected" : "Required"} />
+                <Detail label="Connected" value={ebayCredentials?.sellerAuthorizedAt ? new Date(ebayCredentials.sellerAuthorizedAt).toLocaleString() : "Not yet"} />
               </CardContent>
             </Card>
           )}
@@ -2933,7 +2959,7 @@ function ChannelDetail({
                   <CardDescription>Authorize the seller account, then sync business policies, merchant locations, active listings, and orders into DataPlus.</CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-wrap gap-2">
-                  <Button onClick={() => void runEbayAction("authorize")} disabled={!ebayCredentials?.configured}>Authorize eBay seller</Button>
+                  <Button onClick={() => void runEbayAction("authorize")} disabled={!ebayCredentials?.configured}>{ebayCredentials?.hasSellerAuthorization ? "Reconnect eBay account" : "Sign in with eBay"}</Button>
                   <Button variant="outline" onClick={openEbayCredentials}>Update API credentials</Button>
                   <Button variant="outline" onClick={() => void runEbayAction("account")} disabled={!ebayCredentials?.hasSellerAuthorization}>Sync policies and locations</Button>
                   <Button variant="outline" onClick={() => void runEbayAction("catalog")} disabled={!ebayCredentials?.hasSellerAuthorization || settings.ebayCatalogSyncEnabled === false}>Sync eBay offers & listing status</Button>

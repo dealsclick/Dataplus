@@ -2006,9 +2006,8 @@ function writeConnectorStateSync(state) {
 }
 
 function mergedConnectorState(db = {}) {
-  if (postgres.isPostgresEnabled() && db.connectorState && Object.keys(db.connectorState || {}).length) {
-    return { ...readConnectorStateSync(), ...(db.connectorState || {}) };
-  }
+  // The connector-state file is written synchronously during OAuth callbacks.
+  // Let it win over a potentially stale Postgres state document until that write catches up.
   return { ...(db.connectorState || {}), ...readConnectorStateSync() };
 }
 
@@ -16660,7 +16659,35 @@ function ebayRawRequest(urlString, options = {}) {
   });
 }
 
-function ebayConsentUrl(db) {
+const EBAY_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+function normalizeEbayOAuthReturnTo(value) {
+  const path = String(value || "").trim();
+  if (!path || !path.startsWith("/") || path.startsWith("//") || path.includes("\\")) return "/channels";
+  return path;
+}
+
+function clearEbayOAuthState(connectorState = {}) {
+  delete connectorState.ebayOauthState;
+  delete connectorState.ebayOauthStateExpiresAt;
+  delete connectorState.ebayOauthReturnTo;
+  delete connectorState.ebayOauthStartedAt;
+}
+
+function validateEbayOAuthState(connectorState = {}, suppliedState) {
+  const expectedState = String(connectorState.ebayOauthState || "").trim();
+  const receivedState = String(suppliedState || "").trim();
+  const expiresAt = Date.parse(String(connectorState.ebayOauthStateExpiresAt || ""));
+  if (!expectedState || !receivedState || receivedState !== expectedState) {
+    throw new Error("The eBay callback state did not match. Start the connection again from DataPlus.");
+  }
+  if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) {
+    throw new Error("This eBay sign-in link expired. Start the connection again from DataPlus.");
+  }
+  return normalizeEbayOAuthReturnTo(connectorState.ebayOauthReturnTo);
+}
+
+function ebayConsentUrl(db, options = {}) {
   const config = getEbayConfig(db);
   const missing = missingEbayConfig(config, { requireToken: false });
   if (missing.length) {
@@ -16668,14 +16695,37 @@ function ebayConsentUrl(db) {
   }
   db.connectorState = db.connectorState || {};
   const stateToken = crypto.randomBytes(18).toString("hex");
+  const returnTo = normalizeEbayOAuthReturnTo(options.returnTo);
   db.connectorState.ebayOauthState = stateToken;
+  db.connectorState.ebayOauthStateExpiresAt = new Date(Date.now() + EBAY_OAUTH_STATE_TTL_MS).toISOString();
+  db.connectorState.ebayOauthReturnTo = returnTo;
+  db.connectorState.ebayOauthStartedAt = new Date().toISOString();
   const url = new URL(config.authBase);
   url.searchParams.set("client_id", config.clientId);
   url.searchParams.set("redirect_uri", config.ruName);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", config.scope);
   url.searchParams.set("state", stateToken);
+  if (options.forceLogin !== false) url.searchParams.set("prompt", "login");
   return url.toString();
+}
+
+async function beginEbayAuthorization(db, options = {}) {
+  const authUrl = ebayConsentUrl(db, options);
+  const pendingState = {
+    ebayOauthState: db.connectorState?.ebayOauthState,
+    ebayOauthStateExpiresAt: db.connectorState?.ebayOauthStateExpiresAt,
+    ebayOauthReturnTo: db.connectorState?.ebayOauthReturnTo,
+    ebayOauthStartedAt: db.connectorState?.ebayOauthStartedAt
+  };
+  db.connectorState = {
+    ...(db.connectorState || {}),
+    ...readConnectorStateSync(),
+    ...pendingState
+  };
+  writeConnectorStateSync(db.connectorState);
+  if (!postgres.isPostgresEnabled()) await writeDb(db);
+  return authUrl;
 }
 
 async function ebayTokenRequest(db, body, options = {}) {
@@ -16736,16 +16786,18 @@ async function exchangeEbayCode(db, code, options = {}) {
     throw new Error(`eBay token exchange did not return an access token: ${JSON.stringify(payload).slice(0, 240)}`);
   }
   saveEbayTokenPayload(db, payload);
-  delete db.connectorState.ebayOauthState;
+  clearEbayOAuthState(db.connectorState);
+  const connectorState = { ...readConnectorStateSync(), ...(db.connectorState || {}) };
+  clearEbayOAuthState(connectorState);
+  db.connectorState = connectorState;
   if (options.connectorOnly) {
-    const existing = readConnectorStateSync();
     writeConnectorStateSync({
-      ...existing,
-      ...db.connectorState,
+      ...connectorState,
       ebayAuthorizedAt: new Date().toISOString()
     });
     return { authorized: true, environment: config.environment };
   }
+  writeConnectorStateSync(connectorState);
   const connection = db.connections.find((item) => item.name === "eBay");
   if (connection) {
     connection.connected = true;
@@ -18281,7 +18333,7 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
 }
 
 async function importEbayOrders(db, options = {}) {
-  db.connectorState = { ...mergedConnectorState(db), ...(db.connectorState || {}) };
+  db.connectorState = { ...(db.connectorState || {}), ...mergedConnectorState(db) };
   const config = getEbayConfig(db);
   const pageSize = Math.min(200, Math.max(1, config.pageSize || 50));
   const now = await ebayServerDate(config);
@@ -20519,13 +20571,16 @@ function credentialPreview(value) {
 function publicEbayConfigStatus(db = {}) {
   const config = getEbayConfig(db);
   const runtime = readEbayRuntimeCredentials();
+  const connectorState = mergedConnectorState(db);
   return {
     environment: config.environment,
     ruName: config.ruName,
     scope: config.scope,
     hasClientCredentials: Boolean(config.clientId && config.clientSecret),
-    hasSellerAuthorization: Boolean(config.refreshToken),
+    hasSellerAuthorization: Boolean(config.refreshToken || config.accessToken),
     hasAccessToken: Boolean(config.accessToken),
+    sellerAuthorizedAt: connectorState.ebayAuthorizedAt || connectorState.ebayTokenCreatedAt || "",
+    accessTokenExpiresAt: config.accessTokenExpiresAt || "",
     clientIdPreview: credentialPreview(config.clientId),
     clientSecretPreview: credentialPreview(config.clientSecret),
     refreshTokenPreview: credentialPreview(config.refreshToken),
@@ -30171,8 +30226,10 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/ebay/auth-url" && postgres.isPostgresEnabled()) {
     const db = await readDbFast({ skipInventory: true });
-    const authUrl = ebayConsentUrl(db);
-    await writeDb(normalizeDb({ ...db, inventory: [] }));
+    const authUrl = await beginEbayAuthorization(db, {
+      returnTo: url.searchParams.get("returnTo"),
+      forceLogin: true
+    });
     return sendJson(res, 200, { authUrl });
   }
 
@@ -31383,8 +31440,10 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/ebay/auth-url") {
-    const authUrl = ebayConsentUrl(db);
-    await writeDb(db);
+    const authUrl = await beginEbayAuthorization(db, {
+      returnTo: url.searchParams.get("returnTo"),
+      forceLogin: true
+    });
     return sendJson(res, 200, { authUrl });
   }
 
@@ -34102,16 +34161,14 @@ async function handleTemuCallback(req, res) {
 
 async function handleEbayStart(req, res) {
   try {
-    if (postgres.isPostgresEnabled()) {
-      const db = { connectorState: {} };
-      const authUrl = ebayConsentUrl(db);
-      res.writeHead(302, { Location: authUrl });
-      res.end();
-      return;
-    }
-    const db = await readDb({ skipInventory: postgres.isPostgresEnabled() });
-    const authUrl = ebayConsentUrl(db);
-    await writeDb(db);
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const db = postgres.isPostgresEnabled()
+      ? { connectorState: readConnectorStateSync() }
+      : await readDb({ skipInventory: false });
+    const authUrl = await beginEbayAuthorization(db, {
+      returnTo: url.searchParams.get("returnTo"),
+      forceLogin: true
+    });
     res.writeHead(302, { Location: authUrl });
     res.end();
   } catch (error) {
@@ -34128,99 +34185,71 @@ async function handleEbayStart(req, res) {
   }
 }
 
+function ebayAuthorizationResultHtml(options = {}) {
+  const success = options.success === true;
+  const returnTo = normalizeEbayOAuthReturnTo(options.returnTo);
+  const title = success ? "eBay Connected" : "eBay Authorization Failed";
+  const heading = success ? "eBay connected" : "eBay authorization failed";
+  const message = success
+    ? `Seller authorization saved for ${String(options.environment || "eBay")}. You can close this window or return to DataPlus.`
+    : String(options.message || "DataPlus could not connect the eBay seller account.");
+  const eventPayload = JSON.stringify({
+    type: success ? "dataplus:ebay-authorized" : "dataplus:ebay-authorization-error",
+    message,
+    returnTo
+  }).replace(/</g, "\\u003c");
+  return `
+    <!doctype html>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${title}</title>
+    <body style="font-family:system-ui;padding:32px;line-height:1.5;max-width:560px;margin:0 auto">
+      <h1>${heading}</h1>
+      <p>${escapeHtml(message)}</p>
+      <p><a href="${escapeHtml(returnTo)}">Return to DataPlus</a></p>
+      <script>
+        (() => {
+          const payload = ${eventPayload};
+          if (window.opener && !window.opener.closed) window.opener.postMessage(payload, window.location.origin);
+          window.setTimeout(() => window.location.replace(payload.returnTo), 1500);
+        })();
+      </script>
+    </body>
+  `;
+}
+
 async function handleEbayCallback(req, res) {
-  if (postgres.isPostgresEnabled()) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const code = url.searchParams.get("code");
-    const error = url.searchParams.get("error") || url.searchParams.get("error_description");
-
-    if (error) {
-      return sendHtml(res, 400, `
-        <!doctype html>
-        <title>eBay Authorization Failed</title>
-        <body style="font-family:system-ui;padding:32px">
-          <h1>eBay authorization failed</h1>
-          <p>${escapeHtml(error)}</p>
-          <p><a href="/">Return to DataPlus</a></p>
-        </body>
-      `);
-    }
-
-    try {
-      const result = await exchangeEbayCode({ connectorState: readConnectorStateSync() }, code, { connectorOnly: true });
-      return sendHtml(res, 200, `
-        <!doctype html>
-        <title>eBay Connected</title>
-        <body style="font-family:system-ui;padding:32px">
-          <h1>eBay connected</h1>
-          <p>Access token saved for ${escapeHtml(result.environment)}.</p>
-          <p><a href="/">Return to DataPlus</a></p>
-        </body>
-      `);
-    } catch (exchangeError) {
-      return sendHtml(res, 500, `
-        <!doctype html>
-        <title>eBay Token Exchange Failed</title>
-        <body style="font-family:system-ui;padding:32px">
-          <h1>eBay token exchange failed</h1>
-          <p>${escapeHtml(exchangeError.message)}</p>
-          <p><a href="/">Return to DataPlus</a></p>
-        </body>
-      `);
-    }
-  }
-
-  const db = await readDb({ skipInventory: postgres.isPostgresEnabled() });
   const url = new URL(req.url, `http://${req.headers.host}`);
   const code = url.searchParams.get("code");
   const stateToken = url.searchParams.get("state");
   const error = url.searchParams.get("error") || url.searchParams.get("error_description");
+  const db = postgres.isPostgresEnabled()
+    ? { connectorState: readConnectorStateSync() }
+    : await readDb({ skipInventory: false });
+  db.connectorState = mergedConnectorState(db);
 
-  if (error) {
-    return sendHtml(res, 400, `
-      <!doctype html>
-      <title>eBay Authorization Failed</title>
-      <body style="font-family:system-ui;padding:32px">
-        <h1>eBay authorization failed</h1>
-        <p>${escapeHtml(error)}</p>
-        <p><a href="/">Return to DataPlus</a></p>
-      </body>
-    `);
+  let returnTo = "/channels";
+  try {
+    returnTo = validateEbayOAuthState(db.connectorState, stateToken);
+  } catch (stateError) {
+    return sendHtml(res, 400, ebayAuthorizationResultHtml({ message: stateError.message, returnTo }));
   }
 
-  if (db.connectorState?.ebayOauthState && stateToken !== db.connectorState.ebayOauthState) {
-    return sendHtml(res, 400, `
-      <!doctype html>
-      <title>eBay Authorization Failed</title>
-      <body style="font-family:system-ui;padding:32px">
-        <h1>eBay authorization failed</h1>
-        <p>The eBay callback state did not match. Start the connection again from DataPlus.</p>
-        <p><a href="/">Return to DataPlus</a></p>
-      </body>
-    `);
+  clearEbayOAuthState(db.connectorState);
+  const clearedConnectorState = { ...readConnectorStateSync(), ...db.connectorState };
+  clearEbayOAuthState(clearedConnectorState);
+  db.connectorState = clearedConnectorState;
+  writeConnectorStateSync(clearedConnectorState);
+  if (!postgres.isPostgresEnabled()) await writeDb(db);
+
+  if (error) {
+    return sendHtml(res, 400, ebayAuthorizationResultHtml({ message: error, returnTo }));
   }
 
   try {
-    const result = await exchangeEbayCode(db, code);
-    return sendHtml(res, 200, `
-      <!doctype html>
-      <title>eBay Connected</title>
-      <body style="font-family:system-ui;padding:32px">
-        <h1>eBay connected</h1>
-        <p>Access token saved for ${escapeHtml(result.environment)}.</p>
-        <p><a href="/">Return to DataPlus</a></p>
-      </body>
-    `);
+    const result = await exchangeEbayCode(db, code, { connectorOnly: postgres.isPostgresEnabled() });
+    return sendHtml(res, 200, ebayAuthorizationResultHtml({ success: true, environment: result.environment, returnTo }));
   } catch (exchangeError) {
-    return sendHtml(res, 500, `
-      <!doctype html>
-      <title>eBay Token Exchange Failed</title>
-      <body style="font-family:system-ui;padding:32px">
-        <h1>eBay token exchange failed</h1>
-        <p>${escapeHtml(exchangeError.message)}</p>
-        <p><a href="/">Return to DataPlus</a></p>
-      </body>
-    `);
+    return sendHtml(res, 500, ebayAuthorizationResultHtml({ message: exchangeError.message, returnTo }));
   }
 }
 
