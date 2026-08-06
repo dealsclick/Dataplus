@@ -267,6 +267,15 @@ type ChannelSettings = {
   ebayOrderImportScheduleTimes?: string
   ebayOrderImportScheduleEveryHours?: number
   ebayListingLaunchLimit?: number
+  ebayPricingMode?: string
+  ebayPriceMarkupPercent?: number
+  ebayMinMarginPercent?: number
+  ebayMinimumPrice?: number
+  ebayRoundingRule?: string
+  ebayWebhookEnabled?: boolean
+  ebayWebhookOrderSyncEnabled?: boolean
+  ebayWebhookEndpoint?: string
+  ebayWebhookVerificationToken?: string
   roundingRule?: string
   [key: string]: unknown
 }
@@ -2366,11 +2375,12 @@ function ChannelDetail({
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [credentials, setCredentials] = useState<{ shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; clientIdPreview?: string; clientSecretPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean } | null>(null)
-  const [ebayCredentials, setEbayCredentials] = useState<{ environment?: string; ruName?: string; scope?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; hasSellerAuthorization?: boolean; sellerAuthorizedAt?: string; accessTokenExpiresAt?: string; connectionVerifiedAt?: string; connectionVerificationMessage?: string; clientIdPreview?: string; clientSecretPreview?: string; refreshTokenPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean; configured?: boolean } | null>(null)
+  const [ebayCredentials, setEbayCredentials] = useState<{ environment?: string; ruName?: string; scope?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; hasSellerAuthorization?: boolean; sellerAuthorizedAt?: string; accessTokenExpiresAt?: string; connectionVerifiedAt?: string; connectionVerificationMessage?: string; webhookEnabled?: boolean; webhookEndpoint?: string; webhookVerificationTokenConfigured?: boolean; webhookLastReceivedAt?: string; webhookLastTopic?: string; webhookLastSignatureVerifiedAt?: string; webhookVerificationAt?: string; webhookVerificationMessage?: string; clientIdPreview?: string; clientSecretPreview?: string; refreshTokenPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean; configured?: boolean } | null>(null)
   const [credentialsOpen, setCredentialsOpen] = useState(false)
   const [ebayCredentialsOpen, setEbayCredentialsOpen] = useState(false)
   const [credentialSaving, setCredentialSaving] = useState(false)
   const [ebayVerifying, setEbayVerifying] = useState(false)
+  const [ebayWebhookVerifying, setEbayWebhookVerifying] = useState(false)
   const [credentialDraft, setCredentialDraft] = useState({ storeDomain: "", apiVersion: "", clientId: "", clientSecret: "", accessToken: "" })
   const [ebayCredentialDraft, setEbayCredentialDraft] = useState({ environment: "production", ruName: "", scope: "", clientId: "", clientSecret: "", refreshToken: "", accessToken: "" })
   const [ebayOrderImportOpen, setEbayOrderImportOpen] = useState(false)
@@ -2389,6 +2399,9 @@ function ChannelDetail({
   const ebayOrderImportScheduleTimes = String(settings.ebayOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
   const selectedWarehouseId = String(settings.shopifyInventoryWarehouseId || "")
   const ebayOAuthCallbackUrl = `${window.location.origin}/auth/ebay/callback`
+  const defaultEbayWebhookEndpoint = `${window.location.origin}/api/webhooks/ebay`
+  const ebayWebhookEndpoint = String(settings.ebayWebhookEndpoint || ebayCredentials?.webhookEndpoint || defaultEbayWebhookEndpoint)
+  const hasUnsavedChannelChanges = Object.keys(draft).length > 0
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const [activeTab, setActiveTab] = useState(requestedTab === "setup" || requestedTab === "actions" ? requestedTab : "overview")
 
@@ -2502,6 +2515,32 @@ function ChannelDetail({
       toast.error(error instanceof Error ? error.message : "Unable to verify the eBay seller connection.")
     } finally {
       setEbayVerifying(false)
+    }
+  }
+
+  function generateEbayWebhookToken() {
+    const bytes = new Uint8Array(32)
+    window.crypto.getRandomValues(bytes)
+    const token = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")
+    update("ebayWebhookVerificationToken", token)
+    toast.success("A new eBay webhook verification token is ready. Save the channel settings before using it in eBay.")
+  }
+
+  async function verifyEbayWebhookSetup() {
+    if (hasUnsavedChannelChanges) {
+      toast.error("Save the eBay channel changes before verifying webhook setup.")
+      return
+    }
+    setEbayWebhookVerifying(true)
+    try {
+      const result = await api<{ credentials?: typeof ebayCredentials; message?: string }>("/api/ebay/webhooks/verify", { method: "POST", body: JSON.stringify({}) })
+      setEbayCredentials(result.credentials || null)
+      toast.success(result.message || "eBay webhook setup verified.")
+      onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to verify eBay webhook setup.")
+    } finally {
+      setEbayWebhookVerifying(false)
     }
   }
 
@@ -2751,6 +2790,9 @@ function ChannelDetail({
                 <Detail label="Seller authorization" value={ebayCredentials?.hasSellerAuthorization ? "Connected" : "Required"} />
                 <Detail label="Connected" value={ebayCredentials?.sellerAuthorizedAt ? new Date(ebayCredentials.sellerAuthorizedAt).toLocaleString() : "Not yet"} />
                 <Detail label="Last verified" value={ebayCredentials?.connectionVerifiedAt ? new Date(ebayCredentials.connectionVerifiedAt).toLocaleString() : "Not yet"} />
+                <Detail label="Webhooks" value={ebayCredentials?.webhookEnabled ? "Enabled" : "Off"} />
+                <Detail label="Webhook API" value={ebayCredentials?.webhookVerificationAt ? "Verified" : "Not verified"} />
+                <Detail label="Last eBay event" value={ebayCredentials?.webhookLastReceivedAt ? new Date(ebayCredentials.webhookLastReceivedAt).toLocaleString() : "None"} />
                 {!ebayCredentials?.hasSellerAuthorization && <div className="col-span-full"><Alert>
                   <AlertCircle className="size-4" />
                   <AlertTitle>Finish the eBay RuName setup</AlertTitle>
@@ -2840,6 +2882,21 @@ function ChannelDetail({
                 <Field label="Active-listing sync limit"><Input disabled={!editing} min="1" max="100000" type="number" value={String(settings.ebayCatalogSyncLimit ?? 50000)} onChange={(event) => update("ebayCatalogSyncLimit", Number(event.target.value || 50000))} /><p className="mt-1 text-xs text-muted-foreground">Maximum active offers read from eBay per listing sync.</p></Field>
                 <ToggleField label="Enable eBay catalog sync" checked={settings.ebayCatalogSyncEnabled !== false} disabled={!editing} onCheckedChange={(value) => update("ebayCatalogSyncEnabled", value)} />
                 <ToggleField label="Enable eBay order imports" checked={Boolean(settings.ebayOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayOrderImportEnabled", value)} />
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay webhooks</p><p className="pt-1 text-xs text-muted-foreground">Use signed eBay notifications for fast order reconciliation. DataPlus validates the public endpoint and records every accepted delivery in Channel logs.</p></div>
+                <div className="col-span-full grid gap-4 rounded-md border bg-muted/20 p-4 lg:grid-cols-[minmax(0,1fr)_auto]">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="md:col-span-2"><Field label="Public HTTPS endpoint"><Input disabled={!editing} value={ebayWebhookEndpoint} placeholder={defaultEbayWebhookEndpoint} onChange={(event) => update("ebayWebhookEndpoint", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Register this exact URL as the eBay Notification API destination.</p></Field></div>
+                    <div className="md:col-span-2"><Field label="Webhook verification token"><div className="flex gap-2"><Input disabled={!editing} type={editing ? "text" : "password"} value={editing ? String(settings.ebayWebhookVerificationToken || "") : settings.ebayWebhookVerificationToken ? "Configured" : ""} placeholder="Generate a 32-80 character token" onChange={(event) => update("ebayWebhookVerificationToken", event.target.value)} /><Button type="button" variant="outline" disabled={!editing} onClick={generateEbayWebhookToken}>Generate</Button></div><p className="mt-1 text-xs text-muted-foreground">Save after generating. Then paste the token into the eBay destination configuration.</p></Field></div>
+                    <ToggleField label="Enable signed eBay webhook processing" checked={Boolean(settings.ebayWebhookEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayWebhookEnabled", value)} />
+                    <ToggleField label="Reconcile orders from Order Confirmation" checked={settings.ebayWebhookOrderSyncEnabled !== false} disabled={!editing || !Boolean(settings.ebayWebhookEnabled) || !Boolean(settings.ebayOrderImportEnabled)} onCheckedChange={(value) => update("ebayWebhookOrderSyncEnabled", value)} />
+                  </div>
+                  <div className="flex min-w-56 flex-col justify-between gap-3 rounded-md border bg-background p-3 text-sm">
+                    <div><p className="font-medium">Webhook readiness</p><p className="mt-1 text-xs text-muted-foreground">{ebayCredentials?.webhookVerificationMessage || "Save a valid endpoint and token, then verify Notification API access."}</p></div>
+                    <div className="space-y-1 text-xs text-muted-foreground"><p>{ebayCredentials?.webhookLastReceivedAt ? `Last event: ${new Date(ebayCredentials.webhookLastReceivedAt).toLocaleString()}` : "No event received yet."}</p>{ebayCredentials?.webhookLastTopic ? <p className="truncate">Topic: {ebayCredentials.webhookLastTopic}</p> : null}</div>
+                    <Button type="button" variant="outline" size="sm" disabled={!ebayCredentials?.hasClientCredentials || ebayWebhookVerifying || hasUnsavedChannelChanges} onClick={() => void verifyEbayWebhookSetup()}>{ebayWebhookVerifying ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}Verify webhook setup</Button>
+                    <a className="inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-4 hover:underline" href="https://developer.ebay.com/develop/api/sell/notification_api" target="_blank" rel="noreferrer">Open eBay Notification API <ExternalLink className="size-3" /></a>
+                  </div>
+                </div>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay order import</p><p className="pt-1 text-xs text-muted-foreground">Import a selected history window on demand, then keep recent eBay orders synchronized on a schedule.</p></div>
                 <Field label="Manual import lookback days"><Select disabled={!editing} value={String(settings.ebayOrderImportLookbackDays ?? 30)} onValueChange={(value) => update("ebayOrderImportLookbackDays", Number(value))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="1">Last 24 hours</SelectItem><SelectItem value="7">Last 7 days</SelectItem><SelectItem value="30">Last 30 days</SelectItem><SelectItem value="90">Last 90 days</SelectItem><SelectItem value="180">Last 180 days</SelectItem><SelectItem value="365">Last 365 days</SelectItem></SelectContent></Select></Field>
                 <Field label="Orders per import"><Input disabled={!editing} type="number" min="1" max="5000" value={String(settings.ebayOrderImportLimit ?? 250)} onChange={(event) => update("ebayOrderImportLimit", Number(event.target.value || 250))} /></Field>
@@ -3130,13 +3187,19 @@ function ChannelDetail({
               </>}
               {isEbay && <>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay listing defaults</p><p className="pt-1 text-xs text-muted-foreground">Policies are imported from the eBay seller account. These defaults are prefilled for every eBay listing review and can be changed for a specific bulk launch.</p></div>
+                <div className="col-span-full rounded-md border border-blue-200 bg-blue-50/60 p-3 dark:border-blue-900 dark:bg-blue-950/30"><p className="text-sm font-medium">eBay price formula</p><p className="mt-1 text-xs text-muted-foreground">This calculation is used only for eBay listing reviews and launches. It does not change your Shopify or catalog price.</p></div>
+                <Field label="Formula"><Select disabled={!editing} value={String(settings.ebayPricingMode || "cost-plus")} onValueChange={(value) => update("ebayPricingMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cost-plus">Cost plus markup</SelectItem><SelectItem value="higher-of-product-or-cost">Higher of catalog price or cost formula</SelectItem><SelectItem value="product-price">Use catalog price</SelectItem></SelectContent></Select></Field>
+                <Field label="Cost markup percent"><Input disabled={!editing} min="0" max="1000" type="number" value={String(settings.ebayPriceMarkupPercent ?? 60)} onChange={(event) => update("ebayPriceMarkupPercent", Number(event.target.value || 0))} /><p className="mt-1 text-xs text-muted-foreground">Applied to the eBay sell-unit cost.</p></Field>
+                <Field label="Minimum margin percent"><Input disabled={!editing} min="0" max="99" type="number" value={String(settings.ebayMinMarginPercent ?? 0)} onChange={(event) => update("ebayMinMarginPercent", Number(event.target.value || 0))} /></Field>
+                <Field label="Minimum eBay price"><Input disabled={!editing} min="0" step="0.01" type="number" value={String(settings.ebayMinimumPrice ?? 0)} onChange={(event) => update("ebayMinimumPrice", Number(event.target.value || 0))} /></Field>
+                <Field label="eBay rounding rule"><Select disabled={!editing} value={String(settings.ebayRoundingRule || "none")} onValueChange={(value) => update("ebayRoundingRule", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">No rounding</SelectItem><SelectItem value="nearest .99">Nearest .99</SelectItem><SelectItem value="nearest .95">Nearest .95</SelectItem><SelectItem value="round up">Round up</SelectItem></SelectContent></Select></Field>
                 <Field label="Marketplace"><Select disabled={!editing} value={String(settings.ebayMarketplaceId || "EBAY_US")} onValueChange={(value) => update("ebayMarketplaceId", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EBAY_US">United States</SelectItem><SelectItem value="EBAY_CA">Canada</SelectItem><SelectItem value="EBAY_GB">United Kingdom</SelectItem><SelectItem value="EBAY_AU">Australia</SelectItem></SelectContent></Select></Field>
                 <Field label="Merchant location">
                   {ebayMerchantLocations.length ? <Select disabled={!editing} value={String(settings.ebayMerchantLocationKey || "none")} onValueChange={(value) => update("ebayMerchantLocationKey", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Select imported location" /></SelectTrigger><SelectContent><SelectItem value="none">No merchant location selected</SelectItem>{ebayMerchantLocations.map((location: any) => <SelectItem key={`rule-${String(location.merchantLocationKey || location.key || location.name)}`} value={String(location.merchantLocationKey || location.key || location.name)}>{String(location.name || location.merchantLocationKey || location.key)}{location.status ? ` / ${String(location.status)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input disabled={!editing} value={String(settings.ebayMerchantLocationKey || "")} placeholder="Sync policies and locations first" onChange={(event) => update("ebayMerchantLocationKey", event.target.value)} />}
                 </Field>
-                <Field label="Payment policy"><Select disabled={!editing || !ebayPaymentPolicies.length} value={String(settings.ebayPaymentPolicyId || "none")} onValueChange={(value) => update("ebayPaymentPolicyId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Sync eBay policies first" /></SelectTrigger><SelectContent><SelectItem value="none">No payment policy selected</SelectItem>{ebayPaymentPolicies.map((policy: any) => <SelectItem key={String(policy.paymentPolicyId || policy.id)} value={String(policy.paymentPolicyId || policy.id)}>{String(policy.name || policy.paymentPolicyId || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
-                <Field label="Return policy"><Select disabled={!editing || !ebayReturnPolicies.length} value={String(settings.ebayReturnPolicyId || "none")} onValueChange={(value) => update("ebayReturnPolicyId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Sync eBay policies first" /></SelectTrigger><SelectContent><SelectItem value="none">No return policy selected</SelectItem>{ebayReturnPolicies.map((policy: any) => <SelectItem key={String(policy.returnPolicyId || policy.id)} value={String(policy.returnPolicyId || policy.id)}>{String(policy.name || policy.returnPolicyId || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
-                <Field label="Shipping / fulfillment policy"><Select disabled={!editing || !ebayFulfillmentPolicies.length} value={String(settings.ebayFulfillmentPolicyId || "none")} onValueChange={(value) => update("ebayFulfillmentPolicyId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Sync eBay policies first" /></SelectTrigger><SelectContent><SelectItem value="none">No fulfillment policy selected</SelectItem>{ebayFulfillmentPolicies.map((policy: any) => <SelectItem key={String(policy.fulfillmentPolicyId || policy.id)} value={String(policy.fulfillmentPolicyId || policy.id)}>{String(policy.name || policy.fulfillmentPolicyId || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+                <Field label="Default eBay payment policy"><Select disabled={!editing || !ebayPaymentPolicies.length} value={String(settings.ebayPaymentPolicyId || "none")} onValueChange={(value) => update("ebayPaymentPolicyId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Sync eBay policies first" /></SelectTrigger><SelectContent><SelectItem value="none">No payment policy selected</SelectItem>{ebayPaymentPolicies.map((policy: any) => <SelectItem key={String(policy.paymentPolicyId || policy.id)} value={String(policy.paymentPolicyId || policy.id)}>{String(policy.name || policy.paymentPolicyId || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+                <Field label="Default eBay returns policy"><Select disabled={!editing || !ebayReturnPolicies.length} value={String(settings.ebayReturnPolicyId || "none")} onValueChange={(value) => update("ebayReturnPolicyId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Sync eBay policies first" /></SelectTrigger><SelectContent><SelectItem value="none">No return policy selected</SelectItem>{ebayReturnPolicies.map((policy: any) => <SelectItem key={String(policy.returnPolicyId || policy.id)} value={String(policy.returnPolicyId || policy.id)}>{String(policy.name || policy.returnPolicyId || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+                <Field label="Default eBay shipping policy"><Select disabled={!editing || !ebayFulfillmentPolicies.length} value={String(settings.ebayFulfillmentPolicyId || "none")} onValueChange={(value) => update("ebayFulfillmentPolicyId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Sync eBay policies first" /></SelectTrigger><SelectContent><SelectItem value="none">No fulfillment policy selected</SelectItem>{ebayFulfillmentPolicies.map((policy: any) => <SelectItem key={String(policy.fulfillmentPolicyId || policy.id)} value={String(policy.fulfillmentPolicyId || policy.id)}>{String(policy.name || policy.fulfillmentPolicyId || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
                 <Field label="Default eBay category ID"><Input disabled={!editing} value={String(settings.ebayDefaultCategoryId || "")} placeholder="Set a mapped eBay category ID" onChange={(event) => update("ebayDefaultCategoryId", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">A SKU-level eBay category mapping takes precedence over this fallback.</p></Field>
                 <Field label="Condition"><Select disabled={!editing} value={String(settings.ebayDefaultCondition || "NEW")} onValueChange={(value) => update("ebayDefaultCondition", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="NEW">New</SelectItem><SelectItem value="USED_EXCELLENT">Used - Excellent</SelectItem><SelectItem value="USED_VERY_GOOD">Used - Very good</SelectItem><SelectItem value="USED_GOOD">Used - Good</SelectItem><SelectItem value="USED_ACCEPTABLE">Used - Acceptable</SelectItem></SelectContent></Select></Field>
                 <Field label="Listing type"><Select disabled={!editing} value={String(settings.ebayListingFormat || "FIXED_PRICE")} onValueChange={(value) => update("ebayListingFormat", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="FIXED_PRICE">Fixed price</SelectItem></SelectContent></Select></Field>
@@ -3148,19 +3211,21 @@ function ChannelDetail({
                 <ToggleField label="Enable Best Offer by default" checked={Boolean(settings.ebayBestOfferEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayBestOfferEnabled", value)} />
                 <div className="col-span-full flex flex-wrap items-center gap-2 rounded-md border p-3"><Button type="button" size="sm" variant="outline" onClick={() => void runEbayAction("account")}><RefreshCw className="size-4" />Sync eBay policies and locations</Button><span className="text-xs text-muted-foreground">{settings.ebayAccountSettingsSyncedAt ? `Last synced ${new Date(String(settings.ebayAccountSettingsSyncedAt)).toLocaleString()}` : "No eBay policies or locations imported yet."}</span></div>
               </>}
-              <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Pricing rules</p></div>
-              <Field label="Price markup percent">
-                <Input disabled={!editing} type="number" value={String(settings.priceMarkupPercent ?? 0)} onChange={(event) => update("priceMarkupPercent", Number(event.target.value || 0))} />
-              </Field>
-              <Field label="Minimum margin percent">
-                <Input disabled={!editing} type="number" value={String(settings.minMarginPercent ?? 0)} onChange={(event) => update("minMarginPercent", Number(event.target.value || 0))} />
-              </Field>
-              <Field label="Rounding rule">
-                <Select disabled={!editing} value={String(settings.roundingRule || "none")} onValueChange={(value) => update("roundingRule", value)}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent><SelectItem value="none">No rounding</SelectItem><SelectItem value="nearest .99">Nearest .99</SelectItem><SelectItem value="nearest .95">Nearest .95</SelectItem><SelectItem value="round up">Round up</SelectItem></SelectContent>
-                </Select>
-              </Field>
+              {!isEbay && <>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Pricing rules</p></div>
+                <Field label="Price markup percent">
+                  <Input disabled={!editing} type="number" value={String(settings.priceMarkupPercent ?? 0)} onChange={(event) => update("priceMarkupPercent", Number(event.target.value || 0))} />
+                </Field>
+                <Field label="Minimum margin percent">
+                  <Input disabled={!editing} type="number" value={String(settings.minMarginPercent ?? 0)} onChange={(event) => update("minMarginPercent", Number(event.target.value || 0))} />
+                </Field>
+                <Field label="Rounding rule">
+                  <Select disabled={!editing} value={String(settings.roundingRule || "none")} onValueChange={(value) => update("roundingRule", value)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="none">No rounding</SelectItem><SelectItem value="nearest .99">Nearest .99</SelectItem><SelectItem value="nearest .95">Nearest .95</SelectItem><SelectItem value="round up">Round up</SelectItem></SelectContent>
+                  </Select>
+                </Field>
+              </>}
               {isShopify && <>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify inventory push</p></div>
                 <Field label="DataPlus warehouse">

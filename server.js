@@ -744,6 +744,13 @@ const DEFAULT_CHANNEL_SETTINGS = {
   pricingRuleVersion: 1,
   minMarginPercent: 0,
   roundingRule: "none",
+  // eBay has its own economics. These values are applied only when an eBay
+  // listing is prepared or launched, never to Shopify or another channel.
+  ebayPricingMode: "cost-plus",
+  ebayPriceMarkupPercent: 60,
+  ebayMinMarginPercent: 0,
+  ebayMinimumPrice: 0,
+  ebayRoundingRule: "none",
   ebayMarketplaceId: "EBAY_US",
   ebayCurrency: "USD",
   ebayMerchantLocationKey: "",
@@ -770,6 +777,10 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayOrderImportScheduleTimes: "05:00,17:00",
   ebayOrderImportScheduleEveryHours: 12,
   ebayListingLaunchLimit: 500,
+  ebayWebhookEnabled: false,
+  ebayWebhookOrderSyncEnabled: true,
+  ebayWebhookEndpoint: "",
+  ebayWebhookVerificationToken: "",
   shopifyStoreDomain: "",
   shopifyAdminApiVersion: "2026-04",
   shopifyDefaultStatus: "draft",
@@ -3845,10 +3856,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayMaxImages", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayListingLaunchLimit", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayListingLaunchLimit", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "ebayCatalogSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "ebayCatalogSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -3868,6 +3879,17 @@ function normalizeChannel(channel = {}) {
   settings.ebayOrderImportScheduleType = String(settings.ebayOrderImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.ebayOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.ebayOrderImportScheduleEveryHours || 12) || 12));
   settings.ebayOrderImportScheduleTimes = normalizeChannelScheduleTimes(settings.ebayOrderImportScheduleTimes || DEFAULT_CHANNEL_SETTINGS.ebayOrderImportScheduleTimes);
+  settings.ebayPricingMode = ["cost-plus", "product-price", "higher-of-product-or-cost"].includes(String(settings.ebayPricingMode || "").trim())
+    ? String(settings.ebayPricingMode).trim()
+    : DEFAULT_CHANNEL_SETTINGS.ebayPricingMode;
+  settings.ebayPriceMarkupPercent = Math.max(0, Math.min(1000, Number(settings.ebayPriceMarkupPercent || 0) || 0));
+  settings.ebayMinMarginPercent = Math.max(0, Math.min(99, Number(settings.ebayMinMarginPercent || 0) || 0));
+  settings.ebayMinimumPrice = Math.max(0, Number(settings.ebayMinimumPrice || 0) || 0);
+  settings.ebayRoundingRule = ["none", "nearest .99", "nearest .95", "round up"].includes(String(settings.ebayRoundingRule || ""))
+    ? String(settings.ebayRoundingRule)
+    : DEFAULT_CHANNEL_SETTINGS.ebayRoundingRule;
+  settings.ebayWebhookEndpoint = String(settings.ebayWebhookEndpoint || "").trim().replace(/\/+$/, "");
+  settings.ebayWebhookVerificationToken = String(settings.ebayWebhookVerificationToken || "").trim();
   if (isShopify && ["online store, shop", "all shopify sources"].includes(String(settings.shopifyOrderImportSources || "").trim().toLowerCase())) {
     settings.shopifyOrderImportSources = "Native Shopify sources";
   }
@@ -16567,7 +16589,7 @@ function getEbayConfig(db = {}) {
     clientId: runtime.clientId || process.env.EBAY_CLIENT_ID || "",
     clientSecret: runtime.clientSecret || process.env.EBAY_CLIENT_SECRET || "",
     ruName: runtime.ruName || process.env.EBAY_RUNAME || "",
-    scope: runtime.scope || process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly",
+    scope: runtime.scope || process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly",
     appScope: runtime.appScope || process.env.EBAY_APP_SCOPE || "https://api.ebay.com/oauth/api_scope",
     appAccessToken: connectorState.ebayAppAccessToken || runtime.appAccessToken || process.env.EBAY_APP_ACCESS_TOKEN || "",
     appAccessTokenExpiresAt: connectorState.ebayAppAccessTokenExpiresAt || "",
@@ -17175,12 +17197,19 @@ function roundMarketplacePrice(value, rule = "none") {
 function marketplaceSuggestedPrice(item = {}, settings = {}) {
   const cost = marketplaceItemCost(item);
   const basePrice = marketplaceBaseSellPrice(item);
-  const markupPercent = Number(settings.priceMarkupPercent || 0);
-  const marginPercent = Number(settings.minMarginPercent || 0);
+  const pricingMode = String(settings.ebayPricingMode || "cost-plus");
+  const markupPercent = Number(settings.ebayPriceMarkupPercent ?? settings.priceMarkupPercent ?? 0);
+  const marginPercent = Number(settings.ebayMinMarginPercent ?? settings.minMarginPercent ?? 0);
+  const minimumPrice = Math.max(0, Number(settings.ebayMinimumPrice || 0));
   const markupPrice = cost > 0 && markupPercent > 0 ? cost * (1 + markupPercent / 100) : 0;
   const marginPrice = cost > 0 && marginPercent > 0 && marginPercent < 100 ? cost / (1 - marginPercent / 100) : 0;
-  const candidate = Math.max(markupPrice, marginPrice, basePrice, cost);
-  return roundMarketplacePrice(candidate, settings.roundingRule || "none");
+  const costFormulaPrice = Math.max(markupPrice, marginPrice, cost);
+  const candidate = pricingMode === "product-price"
+    ? Math.max(basePrice, cost, minimumPrice)
+    : pricingMode === "higher-of-product-or-cost"
+      ? Math.max(basePrice, costFormulaPrice, minimumPrice)
+      : Math.max(costFormulaPrice, minimumPrice);
+  return roundMarketplacePrice(candidate, settings.ebayRoundingRule || settings.roundingRule || "none");
 }
 
 function marketplaceListingQuantity(item = {}, settings = {}) {
@@ -20616,6 +20645,7 @@ function publicEbayConfigStatus(db = {}) {
   const config = getEbayConfig(db);
   const runtime = readEbayRuntimeCredentials();
   const connectorState = mergedConnectorState(db);
+  const channelSettings = ebayChannelSettings(Object.keys(db || {}).length ? db : (dbCache.data || {}));
   return {
     environment: config.environment,
     ruName: config.ruName,
@@ -20627,6 +20657,14 @@ function publicEbayConfigStatus(db = {}) {
     accessTokenExpiresAt: config.accessTokenExpiresAt || "",
     connectionVerifiedAt: connectorState.ebayConnectionVerifiedAt || "",
     connectionVerificationMessage: connectorState.ebayConnectionVerificationMessage || "",
+    webhookEnabled: Boolean(channelSettings.ebayWebhookEnabled),
+    webhookEndpoint: ebayWebhookEndpoint(channelSettings),
+    webhookVerificationTokenConfigured: Boolean(channelSettings.ebayWebhookVerificationToken),
+    webhookLastReceivedAt: connectorState.ebayWebhookLastReceivedAt || "",
+    webhookLastTopic: connectorState.ebayWebhookLastTopic || "",
+    webhookLastSignatureVerifiedAt: connectorState.ebayWebhookLastSignatureVerifiedAt || "",
+    webhookVerificationAt: connectorState.ebayWebhookVerificationAt || "",
+    webhookVerificationMessage: connectorState.ebayWebhookVerificationMessage || "",
     clientIdPreview: credentialPreview(config.clientId),
     clientSecretPreview: credentialPreview(config.clientSecret),
     refreshTokenPreview: credentialPreview(config.refreshToken),
@@ -20664,6 +20702,114 @@ function publicShopifyConfigStatus() {
 
 function configuredShopifyAppUrl() {
   return String(process.env.SHOPIFY_APP_URL || process.env.APPLICATION_URL || "").trim();
+}
+
+function configuredPublicAppUrl(req = null) {
+  const configured = String(process.env.APPLICATION_URL || process.env.SHOPIFY_APP_URL || "").trim().replace(/\/+$/, "");
+  if (/^https:\/\//i.test(configured)) return configured;
+  const host = String(req?.headers?.host || "").trim();
+  if (!host) return "";
+  const forwardedProto = String(req?.headers?.["x-forwarded-proto"] || "").split(",")[0].trim();
+  const protocol = forwardedProto || (req?.socket?.encrypted ? "https" : "http");
+  return `${protocol}://${host}`;
+}
+
+function ebayWebhookEndpoint(settings = {}, req = null) {
+  const configured = String(settings?.ebayWebhookEndpoint || "").trim().replace(/\/+$/, "");
+  if (configured) return configured;
+  const publicUrl = configuredPublicAppUrl(req);
+  return publicUrl ? `${publicUrl}/api/webhooks/ebay` : "";
+}
+
+function ebayWebhookTokenIsValid(value = "") {
+  return /^[A-Za-z0-9_-]{32,80}$/.test(String(value || "").trim());
+}
+
+function ebayWebhookState(db = {}, patch = {}) {
+  const next = {
+    ...readConnectorStateSync(),
+    ...(db.connectorState || {}),
+    ...patch
+  };
+  db.connectorState = next;
+  writeConnectorStateSync(next);
+  return next;
+}
+
+function ebayWebhookPublicKey(value = "") {
+  const key = String(value || "").trim().replace(/\\n/g, "\n");
+  if (!key) return "";
+  if (/-----BEGIN PUBLIC KEY-----/.test(key)) return key;
+  return `-----BEGIN PUBLIC KEY-----\n${key.replace(/\s+/g, "")}\n-----END PUBLIC KEY-----`;
+}
+
+const EBAY_WEBHOOK_PUBLIC_KEY_CACHE_TTL_MS = 60 * 60 * 1000;
+const ebayWebhookPublicKeyCache = new Map();
+
+async function getEbayWebhookPublicKey(db, keyId) {
+  const cacheKey = String(keyId || "").trim();
+  const cached = ebayWebhookPublicKeyCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.publicKey;
+  const keyPayload = await ebayRequest(db, `/commerce/notification/v1/public_key/${encodeURIComponent(cacheKey)}`, {
+    tokenType: "app",
+    operation: "Verify eBay webhook signature",
+    timeoutMs: 15000
+  });
+  const publicKey = ebayWebhookPublicKey(keyPayload?.key || keyPayload?.publicKey || keyPayload?.public_key || "");
+  if (!publicKey) throw new Error("eBay returned no usable public key for this webhook signature.");
+  ebayWebhookPublicKeyCache.set(cacheKey, { publicKey, expiresAt: Date.now() + EBAY_WEBHOOK_PUBLIC_KEY_CACHE_TTL_MS });
+  return publicKey;
+}
+
+async function verifyEbayWebhookSignature(db, payload, signatureHeader = "") {
+  const header = String(signatureHeader || "").trim();
+  if (!header) return { valid: false, reason: "Missing X-EBAY-SIGNATURE header." };
+  let signatureEnvelope;
+  try {
+    signatureEnvelope = JSON.parse(Buffer.from(header, "base64").toString("utf8"));
+  } catch {
+    return { valid: false, reason: "The X-EBAY-SIGNATURE header is not a valid eBay signature envelope." };
+  }
+  const keyId = String(signatureEnvelope.kid || signatureEnvelope.keyId || "").trim();
+  const signature = String(signatureEnvelope.signature || "").trim();
+  if (!keyId || !signature) return { valid: false, reason: "The eBay signature envelope is missing its key ID or signature." };
+  try {
+    const publicKey = await getEbayWebhookPublicKey(db, keyId);
+    const verifier = crypto.createVerify("SHA256");
+    // eBay's official Node SDK verifies the canonical JSON payload, not the
+    // original transport bytes (which may contain harmless whitespace).
+    verifier.update(JSON.stringify(payload));
+    verifier.end();
+    const valid = verifier.verify(publicKey, Buffer.from(signature, "base64"));
+    return valid ? { valid: true, keyId } : { valid: false, reason: "eBay webhook signature verification failed." };
+  } catch (error) {
+    return { valid: false, reason: `eBay webhook signature verification could not run: ${error.message}` };
+  }
+}
+
+async function verifyEbayWebhookSetup(db, req = null) {
+  const settings = ebayChannelSettings(db);
+  const endpoint = ebayWebhookEndpoint(settings, req);
+  const verificationToken = String(settings.ebayWebhookVerificationToken || "").trim();
+  if (!/^https:\/\//i.test(endpoint)) throw new Error("Set a public HTTPS eBay webhook endpoint before verifying notification setup.");
+  if (!ebayWebhookTokenIsValid(verificationToken)) throw new Error("Set a webhook verification token with 32-80 letters, numbers, underscores, or hyphens before verifying notification setup.");
+  const topics = await ebayRequest(db, "/commerce/notification/v1/topic", {
+    tokenType: "app",
+    operation: "Verify eBay Notification API",
+    timeoutMs: 15000
+  });
+  const verifiedAt = new Date().toISOString();
+  ebayWebhookState(db, {
+    ebayWebhookVerificationAt: verifiedAt,
+    ebayWebhookVerificationMessage: "eBay Notification API credentials verified. Configure a destination and topic subscriptions in eBay using this endpoint."
+  });
+  return {
+    verified: true,
+    verifiedAt,
+    endpoint,
+    topicCount: Array.isArray(topics?.topics) ? topics.topics.length : 0,
+    message: "eBay Notification API credentials verified. The endpoint is ready for eBay's challenge request and signed event deliveries."
+  };
 }
 
 function sanitizeApiLogMessage(value = "") {
@@ -22300,6 +22446,58 @@ async function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split("/").filter(Boolean);
 
+  if (req.method === "GET" && url.pathname === "/api/webhooks/ebay") {
+    const challengeCode = String(url.searchParams.get("challenge_code") || "").trim();
+    const db = await readDbFast({ skipInventory: true });
+    const settings = ebayChannelSettings(db);
+    const endpoint = ebayWebhookEndpoint(settings, req);
+    const verificationToken = String(settings.ebayWebhookVerificationToken || "").trim();
+    if (!challengeCode || !ebayWebhookTokenIsValid(verificationToken) || !/^https:\/\//i.test(endpoint)) {
+      return sendJson(res, 400, { error: "eBay webhook verification is not configured with a public HTTPS endpoint and valid verification token." });
+    }
+    const challengeResponse = crypto.createHash("sha256").update(`${challengeCode}${verificationToken}${endpoint}`).digest("hex");
+    appendChannelApiLog({ channel: "eBay", transport: "webhook", method: "GET", path: url.pathname, operation: "eBay webhook endpoint challenge", statusCode: 200, ok: true, message: "eBay webhook endpoint challenge completed." });
+    return sendJson(res, 200, { challengeResponse });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/webhooks/ebay") {
+    const startedAt = Date.now();
+    const rawBody = await readRawBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    let payload;
+    try {
+      payload = rawBody.length ? JSON.parse(rawBody.toString("utf8")) : {};
+    } catch {
+      appendChannelApiLog({ channel: "eBay", transport: "webhook", method: "POST", path: url.pathname, operation: "eBay webhook delivery", statusCode: 400, ok: false, durationMs: Date.now() - startedAt, message: "eBay sent invalid JSON." });
+      return sendJson(res, 400, { error: "Invalid eBay webhook payload." });
+    }
+    const settings = ebayChannelSettings(db);
+    const verification = await verifyEbayWebhookSignature(db, payload, req.headers["x-ebay-signature"]);
+    if (!verification.valid) {
+      appendChannelApiLog({ channel: "eBay", transport: "webhook", method: "POST", path: url.pathname, operation: "eBay webhook delivery", statusCode: 412, ok: false, durationMs: Date.now() - startedAt, message: verification.reason || "Invalid eBay webhook signature." });
+      return sendJson(res, 412, { error: "Invalid eBay webhook signature." });
+    }
+    const metadata = payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : {};
+    const topic = String(metadata.topic || payload.topic || req.headers["x-ebay-topic"] || "eBay notification").trim();
+    const eventId = String(payload?.notification?.notificationId || metadata.notificationId || metadata.notification_id || req.headers["x-ebay-notification-id"] || crypto.createHash("sha256").update(rawBody).digest("hex")).trim();
+    const duplicateKey = `dataplus:ebay:webhook:${eventId}`;
+    if (eventId && await redisCache.getJson(duplicateKey)) return sendJson(res, 200, { accepted: true, duplicate: true, message: "eBay webhook was already processed." });
+    if (eventId) await redisCache.setJson(duplicateKey, { receivedAt: new Date().toISOString(), topic }, 60 * 60 * 24 * 7);
+    const receivedAt = new Date().toISOString();
+    ebayWebhookState(db, {
+      ebayWebhookLastReceivedAt: receivedAt,
+      ebayWebhookLastTopic: topic,
+      ebayWebhookLastSignatureVerifiedAt: receivedAt
+    });
+    const shouldRefreshOrders = Boolean(settings.ebayWebhookEnabled && settings.ebayWebhookOrderSyncEnabled && settings.ebayOrderImportEnabled && topic.toUpperCase() === "ORDER_CONFIRMATION");
+    if (shouldRefreshOrders) {
+      void queueEbayOrderImportJob(db, { lookbackDays: 1, limit: Math.min(250, Number(settings.ebayOrderImportLimit || 250)), includeCanceled: true }, { operation: "eBay webhook order reconciliation" })
+        .catch((error) => appendChannelApiLog({ channel: "eBay", transport: "webhook", method: "POST", path: url.pathname, operation: topic, statusCode: 500, ok: false, message: `Unable to queue eBay order reconciliation: ${error.message}` }));
+    }
+    appendChannelApiLog({ channel: "eBay", transport: "webhook", method: "POST", path: url.pathname, operation: topic, statusCode: 202, ok: true, durationMs: Date.now() - startedAt, message: shouldRefreshOrders ? "Signed eBay event received; eBay order reconciliation queued." : "Signed eBay event received and recorded." });
+    return sendJson(res, 202, { accepted: true, topic, receivedAt, queuedOrderReconciliation: shouldRefreshOrders });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/webhooks/shopify/orders") {
     const rawBody = await readRawBody(req);
     const signature = String(req.headers["x-shopify-hmac-sha256"] || "");
@@ -22402,6 +22600,18 @@ async function handleApi(req, res) {
       ? await readDbFast({ skipInventory: true })
       : await readDb({ skipInventory: false });
     const result = await verifyEbaySellerConnection(db);
+    if (!postgres.isPostgresEnabled()) await writeDb(db);
+    return sendJson(res, 200, {
+      ...result,
+      credentials: publicEbayConfigStatus(db)
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/webhooks/verify") {
+    const db = postgres.isPostgresEnabled()
+      ? await readDbFast({ skipInventory: true })
+      : await readDb({ skipInventory: false });
+    const result = await verifyEbayWebhookSetup(db, req);
     if (!postgres.isPostgresEnabled()) await writeDb(db);
     return sendJson(res, 200, {
       ...result,
