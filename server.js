@@ -24122,7 +24122,7 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/inventory/facets") {
     if (postgres.isPostgresEnabled()) {
-      const cacheKey = "dataplus:products:facets:v1";
+      const cacheKey = "dataplus:products:facets:v2";
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const facets = await postgres.productFacets();
@@ -24579,7 +24579,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/inventory") {
     if (postgres.isPostgresEnabled()) {
       const cacheQuery = url.searchParams.toString();
-      const cacheKey = `dataplus:products:v6:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const cacheKey = `dataplus:products:v7:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
       const fastPage = ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase());
@@ -24602,8 +24602,11 @@ async function handleApi(req, res) {
         filters
       });
       if (result) {
-        const shopifyStatusMap = readShopifyStatusMapSync();
-        const sourceEnrichmentMap = readProductSourceEnrichmentSync();
+        // The compact grid is backed by indexed Shopify status rows in Postgres.
+        // Avoid parsing the large legacy status-map file on a request path that can
+        // run every time a user opens or filters the catalog.
+        const shopifyStatusMap = fastPage ? {} : readShopifyStatusMapSync();
+        const sourceEnrichmentMap = fastPage ? {} : readProductSourceEnrichmentSync();
         // The compact Products grid uses catalog fields already stored on the product row.
         // Source fallback enrichment remains available in the SKU detail and export workflows.
         const sourceFallbackMap = fastPage ? new Map() : await sourceCatalogExportFallbackMap(result.inventory || []);

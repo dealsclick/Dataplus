@@ -5915,39 +5915,14 @@ async function productFacets() {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
-  const [suppliers, brands, manufacturers, categories, shopifyStatuses, ebayStatuses, shopifyLiveCounts] = await Promise.all([
+  // The catalog filter dialog only needs human-selectable product dimensions.
+  // Channel status choices are a fixed product contract in the UI, so avoid
+  // scanning every Shopify/eBay status row just to rebuild a dropdown.
+  const [suppliers, brands, manufacturers, categories] = await Promise.all([
     client.query("select distinct supplier as value from products where coalesce(supplier, '') <> '' order by supplier limit 500"),
     client.query("select distinct brand as value from products where coalesce(brand, '') <> '' order by brand limit 1000"),
     client.query("select distinct coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName') as value from products where coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName', '') <> '' order by 1 limit 1000"),
-    client.query("select distinct category as value from products where coalesce(category, '') <> '' order by category limit 2000"),
-    client.query(`
-      select value
-      from (
-        select shopify_status as value from shopify_product_statuses where coalesce(shopify_status, '') <> ''
-        union
-        select raw ->> 'shopifyStatus' as value from products where coalesce(raw ->> 'shopifyStatus', '') <> ''
-      ) statuses
-      where coalesce(value, '') <> ''
-      order by value
-      limit 100
-    `),
-    client.query(`
-      select distinct coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '') as value
-      from products
-      where coalesce(raw #>> '{ebayListing,ebayStatus}', raw #>> '{ebayListing,status}', '') <> ''
-      order by value
-      limit 100
-    `),
-    client.query(`
-      select
-        count(distinct nullif(shopify_id, ''))::int as live_products,
-        count(*) filter (where coalesce(shopify_variant_id, '') <> '')::int as live_variants
-      from shopify_product_statuses
-      where coalesce(shopify_id, '') <> ''
-        and lower(coalesce(shopify_status, '')) = 'active'
-        and coalesce(shopify_published, false) = true
-        and lower(coalesce(sync_source, '')) in ('shopify-api-sku-map', 'graphql')
-    `)
+    client.query("select distinct category as value from products where coalesce(category, '') <> '' order by category limit 2000")
   ]);
   return {
     suppliers: suppliers.rows.map((row) => row.value),
@@ -5955,26 +5930,69 @@ async function productFacets() {
     manufacturers: manufacturers.rows.map((row) => row.value),
     categories: categories.rows.map((row) => row.value),
     stockStatuses: [],
-    shopifyStatuses: shopifyStatuses.rows.map((row) => row.value),
-    ebayStatuses: ebayStatuses.rows.map((row) => row.value),
-    shopifyLiveProducts: Number(shopifyLiveCounts.rows[0]?.live_products || 0),
-    shopifyLiveVariants: Number(shopifyLiveCounts.rows[0]?.live_variants || 0)
+    shopifyStatuses: [],
+    ebayStatuses: [],
+    shopifyLiveProducts: 0,
+    shopifyLiveVariants: 0
   };
 }
 
 async function hydrateProductsWithShopifyStatuses(items = []) {
   const client = getPool();
+  const productIds = [...new Set((Array.isArray(items) ? items : []).map((item) => nullableString(item.id)).filter(Boolean))];
   const skus = [...new Set((Array.isArray(items) ? items : []).map((item) => nullableString(item.sku)?.toLowerCase()).filter(Boolean))];
-  if (!client || !skus.length) return items;
+  if (!client || (!productIds.length && !skus.length)) return items;
   const result = await client.query(`
-    select sku, status_payload
+    select product_id, sku, shopify_id, shopify_variant_id, shopify_status,
+      shopify_published, shopify_synced_at, sync_source, status_payload
     from shopify_product_statuses
-    where lower(sku) = any($1)
-  `, [skus]);
-  const bySku = new Map(result.rows.map((row) => [String(row.sku || "").toLowerCase(), row.status_payload || {}]));
+    where product_id = any($1::text[])
+       or lower(sku) = any($2::text[])
+    order by updated_at desc
+  `, [productIds, skus]);
+  const statusFromRow = (row = {}) => {
+    const payload = row.status_payload && typeof row.status_payload === "object" ? row.status_payload : {};
+    return {
+      ...payload,
+      shopifyId: payload.shopifyId || row.shopify_id || "",
+      shopifyVariantId: payload.shopifyVariantId || row.shopify_variant_id || "",
+      shopifyVariantSku: payload.shopifyVariantSku || row.sku || "",
+      shopifyStatus: payload.shopifyStatus || row.shopify_status || "",
+      shopifyPublished: Object.prototype.hasOwnProperty.call(payload, "shopifyPublished") ? payload.shopifyPublished : Boolean(row.shopify_published),
+      shopifySyncedAt: payload.shopifySyncedAt || row.shopify_synced_at?.toISOString?.() || "",
+      shopifySyncSource: payload.shopifySyncSource || row.sync_source || ""
+    };
+  };
+  const bySku = new Map();
+  const byProductId = new Map();
+  for (const row of result.rows) {
+    const status = statusFromRow(row);
+    const skuKey = String(row.sku || status.shopifyVariantSku || "").toLowerCase();
+    const productKey = String(row.product_id || "");
+    if (skuKey && !bySku.has(skuKey)) bySku.set(skuKey, status);
+    if (productKey) {
+      const rows = byProductId.get(productKey) || [];
+      rows.push(status);
+      byProductId.set(productKey, rows);
+    }
+  }
   return items.map((item) => {
-    const status = bySku.get(String(item.sku || "").toLowerCase());
-    return status ? { ...item, ...status } : item;
+    const directStatus = bySku.get(String(item.sku || "").toLowerCase());
+    const productStatuses = byProductId.get(String(item.id || "")) || [];
+    const statuses = productStatuses.length ? productStatuses : (directStatus ? [directStatus] : []);
+    const primaryStatus = directStatus || statuses[0];
+    if (!primaryStatus) return item;
+    const existingMatches = item.shopifyVariantMatches && typeof item.shopifyVariantMatches === "object" ? item.shopifyVariantMatches : {};
+    const statusMatches = Object.fromEntries(statuses
+      .map((status) => [String(status.shopifyVariantSku || "").toLowerCase(), status])
+      .filter(([sku]) => sku));
+    return {
+      ...item,
+      ...primaryStatus,
+      shopifyVariantMatches: { ...existingMatches, ...statusMatches },
+      shopifyVariantSkus: [...new Set(statuses.map((status) => String(status.shopifyVariantSku || "").trim()).filter(Boolean))],
+      shopifyVariantIds: [...new Set(statuses.map((status) => String(status.shopifyVariantId || "").trim()).filter(Boolean))]
+    };
   });
 }
 
