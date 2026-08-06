@@ -6062,15 +6062,13 @@ async function listBrandCatalogSummary() {
   const result = await client.query(`
     with source_catalog as (
       select
-        lower(trim(brand)) as brand_key,
-        min(trim(brand)) as brand_name,
-        count(distinct coalesce(nullif(internal_sku, ''), nullif(source_sku, '')))::int as source_product_count,
-        count(distinct coalesce(nullif(internal_sku, ''), nullif(source_sku, ''))) filter (where coalesce(qty, 0) > 0)::int as source_in_stock_count,
-        coalesce(sum(greatest(coalesce(qty, 0), 0)), 0)::bigint as source_stock_qty,
-        array_remove(array_agg(distinct nullif(trim(coalesce(raw ->> 'supplier', raw ->> 'vendor', vendor_id)), '')), null) as suppliers
-      from vendor_catalog_items
-      where nullif(trim(coalesce(brand, '')), '') is not null
-      group by lower(trim(brand))
+        lower(facet_value) as brand_key,
+        min(display_value) as brand_name,
+        max(row_count)::int as source_product_count,
+        '{}'::text[] as suppliers
+      from vendor_catalog_facets
+      where facet_type = 'brand' and coalesce(facet_value, '') <> ''
+      group by lower(facet_value)
     ),
     shopify_by_sku as (
       select lower(sku) as sku_key,
@@ -6115,8 +6113,8 @@ async function listBrandCatalogSummary() {
       coalesce(source_catalog.brand_key, managed_products.brand_key) as "brandKey",
       coalesce(source_catalog.brand_name, initcap(coalesce(source_catalog.brand_key, managed_products.brand_key))) as "brandName",
       coalesce(source_catalog.source_product_count, 0)::int as "sourceProductCount",
-      coalesce(source_catalog.source_in_stock_count, 0)::int as "sourceInStockCount",
-      coalesce(source_catalog.source_stock_qty, 0)::bigint as "sourceStockQty",
+      coalesce(managed_products.managed_in_stock_count, 0)::int as "sourceInStockCount",
+      coalesce(managed_products.managed_stock_qty, 0)::bigint as "sourceStockQty",
       coalesce(managed_products.product_count, 0)::int as "productCount",
       coalesce(managed_products.active_product_count, 0)::int as "activeProductCount",
       coalesce(managed_products.managed_in_stock_count, 0)::int as "managedInStockCount",
