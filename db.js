@@ -151,7 +151,9 @@ async function initRelationalSchema() {
     create index if not exists products_raw_upc_code_idx on products ((raw ->> 'upcCode'));
     create index if not exists products_mfr_part_number_idx on products (lower(mfr_part_number));
     create index if not exists products_supplier_idx on products (lower(supplier));
+    create index if not exists products_brand_idx on products (brand);
     create index if not exists products_category_idx on products (category);
+    create index if not exists products_manufacturer_facet_idx on products ((coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName')));
     create index if not exists products_discontinued_idx on products (to_be_discontinued);
     create index if not exists products_temu_direct_presence_idx on products (product_id)
       where raw ?| array['temuId', 'temuProductId', 'temuListingId', 'temuOfferId', 'temuSku'];
@@ -5914,10 +5916,10 @@ async function productFacets() {
   if (!client) return null;
   await initRelationalSchema();
   const [suppliers, brands, manufacturers, categories, shopifyStatuses, ebayStatuses, shopifyLiveCounts] = await Promise.all([
-    client.query("select supplier as value, count(*)::int as count from products where coalesce(supplier, '') <> '' group by supplier order by supplier limit 500"),
-    client.query("select brand as value, count(*)::int as count from products where coalesce(brand, '') <> '' group by brand order by brand limit 1000"),
-    client.query("select coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName') as value, count(*)::int as count from products where coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName', '') <> '' group by 1 order by 1 limit 1000"),
-    client.query("select category as value, count(*)::int as count from products where coalesce(category, '') <> '' group by category order by category limit 2000"),
+    client.query("select distinct supplier as value from products where coalesce(supplier, '') <> '' order by supplier limit 500"),
+    client.query("select distinct brand as value from products where coalesce(brand, '') <> '' order by brand limit 1000"),
+    client.query("select distinct coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName') as value from products where coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName', '') <> '' order by 1 limit 1000"),
+    client.query("select distinct category as value from products where coalesce(category, '') <> '' order by category limit 2000"),
     client.query(`
       select value
       from (

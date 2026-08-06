@@ -62,7 +62,7 @@ const BACKGROUND_EXPORT_PAGE_SIZE = 100;
 const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(60, Number(process.env.IMPORT_JOB_FILE_RETENTION_DAYS || 60) || 60);
 const IMPORT_JOB_HISTORY_LIMIT = Math.max(1000, Math.min(5000, Number(process.env.IMPORT_JOB_HISTORY_LIMIT || 1000) || 1000));
 const REDIS_CATALOG_CACHE_TTL_SECONDS = Math.max(15, Math.min(600, Number(process.env.REDIS_CATALOG_CACHE_TTL_SECONDS || 90) || 90));
-const REDIS_PRODUCTS_CACHE_TTL_SECONDS = Math.max(15, Math.min(300, Number(process.env.REDIS_PRODUCTS_CACHE_TTL_SECONDS || 45) || 45));
+const REDIS_PRODUCTS_CACHE_TTL_SECONDS = Math.max(30, Math.min(900, Number(process.env.REDIS_PRODUCTS_CACHE_TTL_SECONDS || 120) || 120));
 const REDIS_UNIVERSAL_SEARCH_CACHE_TTL_SECONDS = Math.max(5, Math.min(120, Number(process.env.REDIS_UNIVERSAL_SEARCH_CACHE_TTL_SECONDS || 30) || 30));
 const REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS = Math.max(60, Math.min(3600, Number(process.env.REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS || 900) || 900));
 const REDIS_CATEGORY_REQUIREMENTS_CACHE_TTL_SECONDS = Math.max(300, Math.min(86400, Number(process.env.REDIS_CATEGORY_REQUIREMENTS_CACHE_TTL_SECONDS || 43200) || 43200));
@@ -24579,7 +24579,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/inventory") {
     if (postgres.isPostgresEnabled()) {
       const cacheQuery = url.searchParams.toString();
-      const cacheKey = `dataplus:products:v5:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const cacheKey = `dataplus:products:v6:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
       const fastPage = ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase());

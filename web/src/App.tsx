@@ -9858,6 +9858,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   const [ebayLaunchAllFiltered, setEbayLaunchAllFiltered] = useState(false)
   const [ebayLaunchDraft, setEbayLaunchDraft] = useState({ lifecycleAction: "launch", marketplaceId: "EBAY_US", merchantLocationKey: "", paymentPolicyId: "", returnPolicyId: "", fulfillmentPolicyId: "", categoryId: "", storeCategoryId: "", storeCategoryName: "", listingTemplateId: "", itemSpecificTemplateId: "", dispatchTimeDays: "2", condition: "NEW", bestOfferEnabled: false, limit: "500" })
   const [filterOpen, setFilterOpen] = useState(false)
+  const [facetsLoading, setFacetsLoading] = useState(false)
   const [filterField, setFilterField] = useState("supplier")
   const [channelFilterScope, setChannelFilterScope] = useState("shopify")
   const [filterSearch, setFilterSearch] = useState("")
@@ -9932,22 +9933,33 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   }
 
   useEffect(() => {
-    const sourceOnly = filters.catalogStatus === "source-only"
-    const endpoint = sourceOnly ? "/api/catalog/facets" : "/api/inventory/facets"
-    api<{ facets?: { suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] }; suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] }>(endpoint)
-      .then((result) => {
-        const facets = result.facets || result
-        setFacets({
-          suppliers: facets.suppliers || [],
-          brands: facets.brands || [],
-          manufacturers: facets.manufacturers || [],
-          categories: facets.categories || [],
-        })
-      })
-      .catch(() => {})
     load(1, filters)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters.catalogStatus])
+
+  useEffect(() => {
+    if (!filterOpen) return
+    let active = true
+    const sourceOnly = filters.catalogStatus === "source-only"
+    const endpoint = sourceOnly ? "/api/catalog/facets" : "/api/inventory/facets"
+    setFacetsLoading(true)
+    api<{ facets?: { suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] }; suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] }>(endpoint)
+      .then((result) => {
+        if (!active) return
+        const loadedFacets = result.facets || result
+        setFacets({
+          suppliers: loadedFacets.suppliers || [],
+          brands: loadedFacets.brands || [],
+          manufacturers: loadedFacets.manufacturers || [],
+          categories: loadedFacets.categories || [],
+        })
+      })
+      .catch(() => {
+        if (active) toast.error("Unable to load catalog filter values.")
+      })
+      .finally(() => { if (active) setFacetsLoading(false) })
+    return () => { active = false }
+  }, [filterOpen, filters.catalogStatus])
 
   const activeDefinition = filterDefinitions[filterField]
   const filterValues = filterField === "channelStatus"
@@ -10412,6 +10424,12 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                       onChange={(event) => setFilterSearch(event.target.value)}
                     />
                   </div>
+                  {facetsLoading ? (
+                    <div className="flex items-center gap-2 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                      <Loader2 className="size-3 animate-spin" />
+                      Loading filter values...
+                    </div>
+                  ) : null}
                   <div className="max-h-52 overflow-y-auto rounded-md border">
                     <div className="flex items-center justify-between gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
                       <span>{matchingValues.length} shown</span>
