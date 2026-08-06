@@ -759,13 +759,38 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayFulfillmentPolicyId: "",
   ebayDefaultCondition: "NEW",
   ebayDefaultCategoryId: "",
+  ebayDefaultStoreCategoryId: "",
+  ebayDefaultStoreCategoryName: "",
+  ebayListingTemplateId: "",
+  ebayItemSpecificTemplateId: "",
   ebayListingFormat: "FIXED_PRICE",
   ebayQuantityMode: "available",
+  ebayDefaultSafetyQty: 0,
+  ebayDefaultMaxSellableQty: 0,
+  ebayMinInventoryForAutoListing: 1,
+  ebayDefaultDispatchTimeDays: 2,
   ebayDescriptionSource: "longDescription",
   ebayMaxImages: 12,
   ebayAutoPublish: false,
+  ebayAutoRelistEnabled: false,
   ebayRequireImage: true,
+  ebayRequireProductIdentifier: false,
   ebayBestOfferEnabled: false,
+  ebayInventoryUpdateEnabled: true,
+  ebayPriceUpdateEnabled: true,
+  ebayTrackingUploadEnabled: true,
+  ebaySettlementImportEnabled: false,
+  ebayPaidOrdersOnly: true,
+  ebayPreventDuplicateParentListings: true,
+  ebayDivideInventoryPerListing: false,
+  ebayOutOfStockControlEnabled: true,
+  ebayStoreCategories: [],
+  ebayListingTemplates: [],
+  ebayItemSpecificTemplates: [],
+  ebayBuyerRequirements: {},
+  ebayShippingMethodMappings: [],
+  ebayCustomPolicies: [],
+  ebayAccountHealth: {},
   ebayCatalogSyncEnabled: true,
   ebayCatalogSyncLimit: 50000,
   ebayOrderImportEnabled: false,
@@ -3856,10 +3881,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayListingLaunchLimit", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayListingLaunchLimit", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayRequireImage", "ebayBestOfferEnabled", "ebayCatalogSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -3885,11 +3910,21 @@ function normalizeChannel(channel = {}) {
   settings.ebayPriceMarkupPercent = Math.max(0, Math.min(1000, Number(settings.ebayPriceMarkupPercent || 0) || 0));
   settings.ebayMinMarginPercent = Math.max(0, Math.min(99, Number(settings.ebayMinMarginPercent || 0) || 0));
   settings.ebayMinimumPrice = Math.max(0, Number(settings.ebayMinimumPrice || 0) || 0);
+  settings.ebayDefaultSafetyQty = Math.max(0, Math.floor(Number(settings.ebayDefaultSafetyQty || settings.defaultSafetyQty || 0) || 0));
+  settings.ebayDefaultMaxSellableQty = Math.max(0, Math.floor(Number(settings.ebayDefaultMaxSellableQty || settings.defaultMaxSellableQty || 0) || 0));
+  settings.ebayMinInventoryForAutoListing = Math.max(0, Math.floor(Number(settings.ebayMinInventoryForAutoListing || 0) || 0));
+  settings.ebayDefaultDispatchTimeDays = Math.max(0, Math.min(30, Math.floor(Number(settings.ebayDefaultDispatchTimeDays || settings.defaultHandlingTimeDays || 0) || 0)));
   settings.ebayRoundingRule = ["none", "nearest .99", "nearest .95", "round up"].includes(String(settings.ebayRoundingRule || ""))
     ? String(settings.ebayRoundingRule)
     : DEFAULT_CHANNEL_SETTINGS.ebayRoundingRule;
   settings.ebayWebhookEndpoint = String(settings.ebayWebhookEndpoint || "").trim().replace(/\/+$/, "");
   settings.ebayWebhookVerificationToken = String(settings.ebayWebhookVerificationToken || "").trim();
+  for (const field of ["ebayStoreCategories", "ebayListingTemplates", "ebayItemSpecificTemplates", "ebayShippingMethodMappings", "ebayCustomPolicies"]) {
+    settings[field] = Array.isArray(settings[field]) ? settings[field] : [];
+  }
+  settings.ebayBuyerRequirements = settings.ebayBuyerRequirements && typeof settings.ebayBuyerRequirements === "object" && !Array.isArray(settings.ebayBuyerRequirements)
+    ? settings.ebayBuyerRequirements
+    : {};
   if (isShopify && ["online store, shop", "all shopify sources"].includes(String(settings.shopifyOrderImportSources || "").trim().toLowerCase())) {
     settings.shopifyOrderImportSources = "Native Shopify sources";
   }
@@ -12639,6 +12674,23 @@ async function queueEbayOrderImportJob(db, body = {}, options = {}) {
   return { duplicate: false, job, workerPayload };
 }
 
+function normalizeEbayListingLifecycleAction(value = "launch") {
+  const action = String(value || "launch").trim().toLowerCase();
+  if (["launch", "review", "compliance", "revise", "relist", "end"].includes(action)) return action;
+  return "launch";
+}
+
+function ebayListingLifecycleLabel(action = "launch") {
+  return {
+    launch: "eBay listing launch",
+    review: "eBay listing review",
+    compliance: "eBay listing compliance audit",
+    revise: "eBay listing revision",
+    relist: "eBay listing relist",
+    end: "eBay listing end"
+  }[normalizeEbayListingLifecycleAction(action)] || "eBay listing launch";
+}
+
 async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
   const channel = findChannelByName(db, "eBay");
   const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
@@ -12657,7 +12709,10 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     throw error;
   }
   const limit = Math.max(1, Math.min(5000, Number(body.limit || settings.ebayListingLaunchLimit || 500) || 500));
-  const dryRun = body.dryRun === true || body.apply === false;
+  const lifecycleAction = normalizeEbayListingLifecycleAction(body.lifecycleAction || body.action || options.lifecycleAction || "launch");
+  const dryRun = lifecycleAction === "review" || lifecycleAction === "compliance" || body.dryRun === true || body.apply === false;
+  const label = ebayListingLifecycleLabel(lifecycleAction);
+  const artifactStem = lifecycleAction === "launch" ? "ebay-listing-launch" : `ebay-listing-${lifecycleAction}`;
   const workerPayload = {
     skus: selectedKeys,
     allFiltered,
@@ -12665,26 +12720,32 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     filters: body.filters && typeof body.filters === "object" ? body.filters : {},
     limit,
     dryRun,
-    publish: body.publish !== false && !dryRun,
+    lifecycleAction,
+    publish: lifecycleAction === "relist" ? true : body.publish !== false && !dryRun && lifecycleAction === "launch",
     marketplaceId: String(body.marketplaceId || settings.ebayMarketplaceId || "EBAY_US"),
     merchantLocationKey: String(body.merchantLocationKey || settings.ebayMerchantLocationKey || ""),
     paymentPolicyId: String(body.paymentPolicyId || settings.ebayPaymentPolicyId || ""),
     returnPolicyId: String(body.returnPolicyId || settings.ebayReturnPolicyId || ""),
     fulfillmentPolicyId: String(body.fulfillmentPolicyId || settings.ebayFulfillmentPolicyId || ""),
     categoryId: String(body.categoryId || settings.ebayDefaultCategoryId || ""),
+    storeCategoryId: String(body.storeCategoryId || settings.ebayDefaultStoreCategoryId || ""),
+    storeCategoryName: String(body.storeCategoryName || settings.ebayDefaultStoreCategoryName || ""),
+    listingTemplateId: String(body.listingTemplateId || settings.ebayListingTemplateId || ""),
+    itemSpecificTemplateId: String(body.itemSpecificTemplateId || settings.ebayItemSpecificTemplateId || ""),
+    dispatchTimeDays: Math.max(0, Math.min(30, Math.floor(Number(body.dispatchTimeDays ?? settings.ebayDefaultDispatchTimeDays ?? 0) || 0))),
     condition: String(body.condition || settings.ebayDefaultCondition || "NEW"),
     bestOfferEnabled: body.bestOfferEnabled === undefined || body.bestOfferEnabled === null || body.bestOfferEnabled === ""
       ? settings.ebayBestOfferEnabled === true
       : body.bestOfferEnabled === true || String(body.bestOfferEnabled).toLowerCase() === "true"
   };
-  const operation = options.operation || (dryRun ? "eBay listing launch review" : "eBay listing launch");
+  const operation = options.operation || label;
   const activeLaunch = await findActiveImportJobByWorkerTask(db, "ebay-listing-launch");
   if (activeLaunch) return { duplicate: true, job: activeLaunch, workerPayload };
   const duplicate = await findActiveDuplicateImportJob(db, {
     section: "Products",
     operation,
     direction: "sync",
-    fileName: dryRun ? "ebay-listing-launch-review.csv" : "ebay-listing-launch-results.csv",
+    fileName: dryRun ? `${artifactStem}-review.csv` : `${artifactStem}-results.csv`,
     workerTask: "ebay-listing-launch",
     workerPayload
   });
@@ -12696,14 +12757,14 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     operation,
     direction: "sync",
     status: "queued",
-    fileName: dryRun ? "ebay-listing-launch-review.csv" : "ebay-listing-launch-results.csv",
+    fileName: dryRun ? `${artifactStem}-review.csv` : `${artifactStem}-results.csv`,
     totalRows: allFiltered ? limit : selectedKeys.length,
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : "ebay-listing-launch",
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
-    message: `${dryRun ? "eBay listing review" : "eBay listing launch"} queued for ${selectedLabel}.`
+    message: `${dryRun ? label : label} queued for ${selectedLabel}.`
   });
   upsertImportJobStore(job);
   if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
@@ -12712,7 +12773,7 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     transport: "Job",
     method: "QUEUE",
     path: "ebay-listings",
-    operation: `${dryRun ? "eBay listing review" : "eBay listing launch"} queued`,
+    operation: `${label} queued`,
     statusCode: 202,
     ok: true,
     jobId: job.id,
@@ -14602,16 +14663,38 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
 
 async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
-  const dryRun = payload.dryRun === true || payload.publish === false;
+  const lifecycleAction = normalizeEbayListingLifecycleAction(payload.lifecycleAction || "launch");
+  // A revision updates an existing offer without publishing a new listing, so
+  // `publish: false` must not accidentally turn that lifecycle action into a dry run.
+  const dryRun = lifecycleAction === "review" || lifecycleAction === "compliance" || payload.dryRun === true || payload.apply === false;
+  const label = ebayListingLifecycleLabel(lifecycleAction);
+  const artifactStem = lifecycleAction === "launch" ? "ebay-listing-launch" : `ebay-listing-${lifecycleAction}`;
+  const runningPhase = lifecycleAction === "end"
+    ? "ending_ebay_listings"
+    : lifecycleAction === "relist"
+      ? "relisting_ebay_listings"
+      : lifecycleAction === "revise"
+        ? "revising_ebay_listings"
+        : dryRun
+          ? "reviewing_ebay_listings"
+          : "launching_ebay_listings";
   const startedAt = job.startedAt || new Date().toISOString();
   job = await persistWorkerImportJob(job, {
     status: "running",
-    phase: dryRun ? "reviewing_ebay_listings" : "launching_ebay_listings",
+    phase: runningPhase,
     startedAt,
     processedRows: 0,
-    message: dryRun ? "Reviewing eBay listing readiness..." : "Creating and publishing eBay listings..."
+    message: lifecycleAction === "end"
+      ? "Ending eBay listings..."
+      : lifecycleAction === "relist"
+        ? "Revising and relisting eBay offers..."
+        : lifecycleAction === "revise"
+          ? "Revising eBay offer drafts..."
+          : dryRun
+            ? "Reviewing eBay listing readiness..."
+            : "Creating and publishing eBay listings..."
   });
-  appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: dryRun ? "eBay listing review started" : "eBay listing launch started", statusCode: 102, ok: true, jobId: job.id, message: job.message });
+  appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: `${label} started`, statusCode: 102, ok: true, jobId: job.id, message: job.message });
   try {
     const [workDb, candidates] = await Promise.all([
       readDbFast({ skipInventory: true }).then(normalizeDb),
@@ -14630,24 +14713,52 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
       const item = candidates[index];
       const sku = String(item.sku || item.id || "");
       try {
-        if (item.active === false || /discontinued/i.test(String(item.status || ""))) {
+        if (lifecycleAction !== "end" && (item.active === false || /discontinued/i.test(String(item.status || "")))) {
           skipped += 1;
           results.push({ sku, status: "skipped", reason: "Inactive or discontinued" });
         } else {
           const readiness = await ebayListingReadiness(workDb, item, payload);
-          if (!readiness.ready) {
+          const config = readiness.config || {};
+          const resultBase = {
+            sku,
+            listing_status: readiness.status,
+            offer_id: item.ebayListing?.offerId || "",
+            listing_id: item.ebayListing?.listingId || "",
+            enabled: config.enabled !== false,
+            restricted: config.restricted === true,
+            inventory_source: config.inventorySource || "",
+            price: readiness.price,
+            quantity: readiness.quantity,
+            category_id: config.categoryId || "",
+            store_category: config.storeCategoryName || config.storeCategoryId || "",
+            listing_template: config.listingTemplateId || "",
+            item_specific_template: config.itemSpecificTemplateId || "",
+            dispatch_time_days: config.dispatchTimeDays ?? "",
+            compliance_policies: Array.isArray(config.productCompliancePolicyIds) ? config.productCompliancePolicyIds.join(";") : "",
+            identifier: config.identifierValue || config.ePid || config.mpn || "",
+            merchant_location: config.merchantLocationKey || "",
+            payment_policy: config.paymentPolicyId || "",
+            return_policy: config.returnPolicyId || "",
+            fulfillment_policy: config.fulfillmentPolicyId || ""
+          };
+          if (lifecycleAction === "end") {
+            const listing = await withdrawEbayListing(workDb, item, payload);
+            touched.push(item);
+            launched += 1;
+            results.push({ ...resultBase, status: "ended", offer_id: listing.offerId || "", listing_id: listing.listingId || "" });
+          } else if (!readiness.ready || (lifecycleAction === "relist" && readiness.status === "disabled")) {
             skipped += 1;
-            results.push({ sku, status: "not_ready", missing: readiness.missing.join("; "), price: readiness.price, quantity: readiness.quantity });
+            results.push({ ...resultBase, status: "not_ready", missing: readiness.missing.join("; ") });
           } else if (dryRun) {
             ready += 1;
-            results.push({ sku, status: readiness.live ? "already_live" : "ready", offer_id: item.ebayListing?.offerId || "", listing_id: item.ebayListing?.listingId || "", price: readiness.price, quantity: readiness.quantity, merchant_location: readiness.config.merchantLocationKey, payment_policy: readiness.config.paymentPolicyId, return_policy: readiness.config.returnPolicyId, fulfillment_policy: readiness.config.fulfillmentPolicyId });
+            results.push({ ...resultBase, status: readiness.live ? "already_live" : "ready", missing: readiness.missing.join("; ") });
           } else {
             // Let the SKU resolve its own eBay inheritance/override profile. Bulk-level
             // payload fields still win when the operator explicitly supplied them.
-            const result = await createOrUpdateEbayListing(workDb, item, payload, { publish: payload.publish !== false });
+            const result = await createOrUpdateEbayListing(workDb, item, payload, { publish: lifecycleAction === "relist" || (lifecycleAction === "launch" && payload.publish !== false) });
             touched.push(item);
             launched += 1;
-            results.push({ sku, status: result.config?.listingId ? "live" : "offer", offer_id: result.config?.offerId || "", listing_id: result.config?.listingId || "", listing_url: result.config?.listingUrl || "", price: result.config?.price || readiness.price, quantity: result.config?.quantity || readiness.quantity, merchant_location: result.config?.merchantLocationKey || "", payment_policy: result.config?.paymentPolicyId || "", return_policy: result.config?.returnPolicyId || "", fulfillment_policy: result.config?.fulfillmentPolicyId || "" });
+            results.push({ ...resultBase, status: result.config?.listingId ? "live" : "offer", offer_id: result.config?.offerId || "", listing_id: result.config?.listingId || "", listing_url: result.config?.listingUrl || "", price: result.config?.price || readiness.price, quantity: result.config?.quantity || readiness.quantity });
           }
         }
       } catch (error) {
@@ -14657,7 +14768,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
       const processedRows = index + 1;
       await persistWorkerImportJob(job, {
         status: "running",
-        phase: dryRun ? "reviewing_ebay_listings" : "launching_ebay_listings",
+        phase: runningPhase,
         totalRows: total,
         processedRows,
         progressPercent: progressPercent(processedRows, total),
@@ -14666,13 +14777,13 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
       });
     }
     if (touched.length && postgres.isPostgresEnabled()) await postgres.upsertProductsFromState(touched);
-    attachImportJobOriginalFile(job, rowsToCsv(results), dryRun ? "ebay-listing-launch-review.csv" : "ebay-listing-launch-results.csv");
+    attachImportJobOriginalFile(job, rowsToCsv(results), dryRun ? `${artifactStem}-review.csv` : `${artifactStem}-results.csv`);
     attachImportJobErrorsFile(job, errors);
     const status = errors.length ? (launched || ready ? "done_with_warnings" : "failed") : "success";
     const changed = dryRun ? ready : launched;
     const message = dryRun
-      ? `eBay listing review complete: ${ready.toLocaleString()} ready, ${skipped.toLocaleString()} need data, ${errors.length.toLocaleString()} failed.`
-      : `eBay listing launch complete: ${launched.toLocaleString()} published or updated, ${skipped.toLocaleString()} need data, ${errors.length.toLocaleString()} failed.`;
+      ? `${label} complete: ${ready.toLocaleString()} ready, ${skipped.toLocaleString()} need data, ${errors.length.toLocaleString()} failed.`
+      : `${label} complete: ${launched.toLocaleString()} processed, ${skipped.toLocaleString()} need data, ${errors.length.toLocaleString()} failed.`;
     finishImportJob(job, {
       status,
       phase: status === "failed" ? "failed" : "complete",
@@ -14691,13 +14802,13 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     if (errors.length) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
-    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: dryRun ? "eBay listing review completed" : "eBay listing launch completed", statusCode: errors.length ? 207 : 200, ok: !errors.length, jobId: job.id, message });
+    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: `${label} completed`, statusCode: errors.length ? 207 : 200, ok: !errors.length, jobId: job.id, message });
     publicStateJsonCache = null;
     return job;
   } catch (error) {
-    const message = error.message || "eBay listing launch failed.";
+    const message = error.message || `${label} failed.`;
     await persistWorkerImportJob(job, { status: "failed", phase: "failed", missingCount: 1, errors: [message], estimatedSecondsRemaining: 0, message, finishedAt: new Date().toISOString() });
-    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: dryRun ? "eBay listing review failed" : "eBay listing launch failed", statusCode: 502, ok: false, jobId: job.id, message });
+    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: `${label} failed`, statusCode: 502, ok: false, jobId: job.id, message });
     throw error;
   }
 }
@@ -17184,6 +17295,7 @@ function ebayChannelSettings(db = {}) {
 
 const EBAY_PRODUCT_SETTING_STRING_FIELDS = [
   "ebayMarketplaceId",
+  "ebayMerchantSku",
   "ebayMerchantLocationKey",
   "ebayPaymentPolicyId",
   "ebayReturnPolicyId",
@@ -17198,7 +17310,19 @@ const EBAY_PRODUCT_SETTING_STRING_FIELDS = [
   "ebayCategoryId",
   "ebayCategoryPath",
   "ebayTaxonomyVersion",
-  "ebayItemSpecifics"
+  "ebayItemSpecifics",
+  "ebayStoreCategoryId",
+  "ebayStoreCategoryName",
+  "ebayListingTemplateId",
+  "ebayItemSpecificTemplateId",
+  "ebayIdentifierType",
+  "ebayIdentifierValue",
+  "ebayIdentifierUnavailableText",
+  "ebayEPid",
+  "ebayMpn",
+  "ebaySubtitle",
+  "ebayRestrictionReason",
+  "ebayProductCompliancePolicyIds"
 ];
 
 const EBAY_PRODUCT_SETTING_NUMBER_FIELDS = [
@@ -17208,7 +17332,13 @@ const EBAY_PRODUCT_SETTING_NUMBER_FIELDS = [
   "ebayMinimumPrice",
   "ebayPrice",
   "ebayManualPrice",
-  "ebayQuantityOverride"
+  "ebayQuantityOverride",
+  "ebaySafetyQty",
+  "ebayMaxSellableQty",
+  "ebayMinInventoryForAutoListing",
+  "ebayBestOfferAutoAcceptPrice",
+  "ebayBestOfferAutoDeclinePrice",
+  "ebayDispatchTimeDays"
 ];
 
 const EBAY_PRODUCT_SETTING_BOOLEAN_FIELDS = [
@@ -17216,7 +17346,13 @@ const EBAY_PRODUCT_SETTING_BOOLEAN_FIELDS = [
   "ebayUseDefaultPricingFormula",
   "ebayAutoPublish",
   "ebayRequireImage",
-  "ebayBestOfferEnabled"
+  "ebayBestOfferEnabled",
+  "ebayEnabled",
+  "ebayRestricted",
+  "ebayInventoryConnected",
+  "ebayUseChannelDefaultSafetyQty",
+  "ebayUseChannelDefaultMaxSellableQty",
+  "ebayIdentifierUnavailable"
 ];
 
 function ebayBoolean(value, fallback = false) {
@@ -17249,7 +17385,7 @@ function normalizeEbayProductSettings(listing = {}, incoming = {}) {
   for (const field of EBAY_PRODUCT_SETTING_BOOLEAN_FIELDS) {
     if (source[field] !== undefined) {
       settings[field] = ebayBoolean(source[field]);
-    } else if (field === "ebayUseChannelDefaultQuantity" || field === "ebayUseDefaultPricingFormula") {
+    } else if (["ebayUseChannelDefaultQuantity", "ebayUseDefaultPricingFormula", "ebayEnabled", "ebayInventoryConnected", "ebayUseChannelDefaultSafetyQty", "ebayUseChannelDefaultMaxSellableQty"].includes(field)) {
       settings[field] = true;
     }
   }
@@ -17265,6 +17401,12 @@ function ebayEffectiveSettings(db = {}, item = {}, body = {}) {
   const skuRuntimeSettings = {
     ebayUseChannelDefaultQuantity: productSettings.ebayUseChannelDefaultQuantity !== false,
     ebayUseDefaultPricingFormula: productSettings.ebayUseDefaultPricingFormula !== false,
+    ebayUseChannelDefaultSafetyQty: productSettings.ebayUseChannelDefaultSafetyQty !== false,
+    ebayUseChannelDefaultMaxSellableQty: productSettings.ebayUseChannelDefaultMaxSellableQty !== false,
+    ebayEnabled: productSettings.ebayEnabled !== false,
+    ebayRestricted: productSettings.ebayRestricted === true,
+    ebayRestrictionReason: productSettings.ebayRestrictionReason || "",
+    ebayInventoryConnected: productSettings.ebayInventoryConnected !== false,
     ebayPrice: productSettings.ebayPrice ?? productSettings.ebayManualPrice ?? ""
   };
   return {
@@ -17317,8 +17459,14 @@ function marketplaceListingQuantity(item = {}, settings = {}) {
   const reserved = Math.max(0, Math.floor(Number(item.reserved || 0)));
   const available = Math.max(0, onHand - reserved);
   const sourceQty = settings.ebayQuantityMode === "stockQty" ? sourceStock : settings.ebayQuantityMode === "qty" ? onHand : available;
-  const safetyQty = Math.max(0, Math.floor(Number(settings.defaultSafetyQty || 0)));
-  const maxSellableQty = Math.max(0, Math.floor(Number(settings.defaultMaxSellableQty || 0)));
+  const configuredSafetyQty = settings.ebaySafetyQty !== undefined && settings.ebaySafetyQty !== null && settings.ebaySafetyQty !== ""
+    ? settings.ebaySafetyQty
+    : settings.ebayDefaultSafetyQty ?? settings.defaultSafetyQty;
+  const configuredMaxSellableQty = settings.ebayMaxSellableQty !== undefined && settings.ebayMaxSellableQty !== null && settings.ebayMaxSellableQty !== ""
+    ? settings.ebayMaxSellableQty
+    : settings.ebayDefaultMaxSellableQty ?? settings.defaultMaxSellableQty;
+  const safetyQty = Math.max(0, Math.floor(Number(configuredSafetyQty || 0)));
+  const maxSellableQty = Math.max(0, Math.floor(Number(configuredMaxSellableQty || 0)));
   const afterSafety = Math.max(0, sourceQty - safetyQty);
   return maxSellableQty > 0 ? Math.min(afterSafety, maxSellableQty) : afterSafety;
 }
@@ -17496,18 +17644,30 @@ function missingRequiredEbayAspects(config = {}) {
 function ebayListingConfig(db, item, body = {}) {
   const saved = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
   const { productSettings, effectiveSettings } = ebayEffectiveSettings(db, item, body);
+  const listingTemplates = Array.isArray(effectiveSettings.ebayListingTemplates) ? effectiveSettings.ebayListingTemplates : [];
+  const selectedListingTemplateId = String(body.listingTemplateId ?? productSettings.ebayListingTemplateId ?? effectiveSettings.ebayListingTemplateId ?? "").trim();
+  const selectedListingTemplate = listingTemplates.find((template) => String(template?.id || "") === selectedListingTemplateId) || null;
+  const listingTemplateSettings = selectedListingTemplate?.settings && typeof selectedListingTemplate.settings === "object"
+    ? selectedListingTemplate.settings
+    : selectedListingTemplate?.defaults && typeof selectedListingTemplate.defaults === "object"
+      ? selectedListingTemplate.defaults
+      : {};
+  const templateSetting = (settingField) => listingTemplateSettings[settingField];
   const explicit = (field, settingField, fallback = "") => {
     if (body[field] !== undefined && body[field] !== null && String(body[field]).trim() !== "") return body[field];
+    if (templateSetting(settingField) !== undefined && templateSetting(settingField) !== null && String(templateSetting(settingField)).trim() !== "") return templateSetting(settingField);
     if (effectiveSettings[settingField] !== undefined && effectiveSettings[settingField] !== null && String(effectiveSettings[settingField]).trim() !== "") return effectiveSettings[settingField];
     return fallback;
   };
   const explicitBoolean = (field, settingField, fallback = false) => {
     if (body[field] !== undefined) return ebayBoolean(body[field], fallback);
+    if (templateSetting(settingField) !== undefined) return ebayBoolean(templateSetting(settingField), fallback);
     if (effectiveSettings[settingField] !== undefined) return ebayBoolean(effectiveSettings[settingField], fallback);
     return fallback;
   };
   const explicitNumber = (field, settingField, fallback = 0) => {
     if (body[field] !== undefined && body[field] !== null && String(body[field]) !== "") return Number(body[field]);
+    if (templateSetting(settingField) !== undefined && templateSetting(settingField) !== null && String(templateSetting(settingField)) !== "") return Number(templateSetting(settingField));
     if (effectiveSettings[settingField] !== undefined && effectiveSettings[settingField] !== null && String(effectiveSettings[settingField]) !== "") return Number(effectiveSettings[settingField]);
     return fallback;
   };
@@ -17518,16 +17678,43 @@ function ebayListingConfig(db, item, body = {}) {
     : !useDefaultPricingFormula && manualPrice > 0
       ? manualPrice
       : Number(marketplaceSuggestedPrice(item, effectiveSettings));
-  const channelDefaultQuantity = marketplaceListingQuantity(item, effectiveSettings);
   const actualAvailableQuantity = Math.max(0, Math.floor(Number(item.qty ?? item.stockQty ?? 0)) - Math.max(0, Math.floor(Number(item.reserved || 0))));
   const useChannelDefaultQuantity = productSettings.ebayUseChannelDefaultQuantity !== false;
+  const useChannelDefaultSafetyQty = productSettings.ebayUseChannelDefaultSafetyQty !== false;
+  const useChannelDefaultMaxSellableQty = productSettings.ebayUseChannelDefaultMaxSellableQty !== false;
+  const safetyQty = useChannelDefaultSafetyQty
+    ? Math.max(0, Math.floor(Number(effectiveSettings.ebayDefaultSafetyQty ?? effectiveSettings.defaultSafetyQty ?? 0) || 0))
+    : Math.max(0, Math.floor(Number(productSettings.ebaySafetyQty || 0) || 0));
+  const maxSellableQty = useChannelDefaultMaxSellableQty
+    ? Math.max(0, Math.floor(Number(effectiveSettings.ebayDefaultMaxSellableQty ?? effectiveSettings.defaultMaxSellableQty ?? 0) || 0))
+    : Math.max(0, Math.floor(Number(productSettings.ebayMaxSellableQty || 0) || 0));
+  const channelDefaultQuantity = marketplaceListingQuantity(item, {
+    ...effectiveSettings,
+    ebaySafetyQty: safetyQty,
+    ebayMaxSellableQty: maxSellableQty
+  });
+  const inventoryConnected = productSettings.ebayInventoryConnected !== false;
+  const quantityOverride = productSettings.ebayQuantityOverride !== undefined && productSettings.ebayQuantityOverride !== null && productSettings.ebayQuantityOverride !== ""
+    ? Math.max(0, Math.floor(Number(productSettings.ebayQuantityOverride || 0)))
+    : null;
   const requestedQuantity = body.quantity !== undefined && body.quantity !== null && String(body.quantity) !== ""
     ? Math.max(0, Math.floor(Number(body.quantity || 0)))
     : null;
-  const defaultQuantity = useChannelDefaultQuantity ? channelDefaultQuantity : actualAvailableQuantity;
-  const quantity = requestedQuantity !== null && (requestedQuantity > 0 || defaultQuantity <= 0)
-    ? requestedQuantity
-    : Math.max(0, Math.floor(Number(defaultQuantity || 0)));
+  const disconnectedQuantity = quantityOverride !== null
+    ? quantityOverride
+    : Math.max(0, Math.floor(Number(saved.quantity || 0) || 0));
+  const defaultQuantity = !inventoryConnected
+    ? disconnectedQuantity
+    : quantityOverride !== null
+      ? quantityOverride
+      : useChannelDefaultQuantity
+        ? channelDefaultQuantity
+        : actualAvailableQuantity;
+  const quantity = requestedQuantity !== null ? requestedQuantity : Math.max(0, Math.floor(Number(defaultQuantity || 0)));
+  const minInventoryForAutoListing = Math.max(0, Math.floor(Number(productSettings.ebayMinInventoryForAutoListing ?? effectiveSettings.ebayMinInventoryForAutoListing ?? 0) || 0));
+  const listingEnabled = productSettings.ebayEnabled !== false;
+  const listingRestricted = productSettings.ebayRestricted === true;
+  const restrictionReason = String(productSettings.ebayRestrictionReason || body.restrictionReason || "").trim();
   const categorySetting = categorySettingForProduct(db, item);
   const masterEbayMapping = categorySetting?.mappings?.ebay || {};
   const categoryAttributes = Array.isArray(body.categoryAttributes) && body.categoryAttributes.length
@@ -17536,16 +17723,46 @@ function ebayListingConfig(db, item, body = {}) {
       ? saved.categoryAttributes
       : Array.isArray(masterEbayMapping.attributes) ? masterEbayMapping.attributes : [];
   const aspectMappings = Array.isArray(masterEbayMapping.attributeMappings) ? masterEbayMapping.attributeMappings : [];
+  const itemSpecificTemplates = Array.isArray(effectiveSettings.ebayItemSpecificTemplates) ? effectiveSettings.ebayItemSpecificTemplates : [];
+  const itemSpecificTemplateId = String(body.itemSpecificTemplateId ?? productSettings.ebayItemSpecificTemplateId ?? effectiveSettings.ebayItemSpecificTemplateId ?? "").trim();
+  const itemSpecificTemplate = itemSpecificTemplates.find((template) => String(template?.id || "") === itemSpecificTemplateId) || null;
   // Category and item specifics are inherently SKU-level, even when the SKU
   // inherits commercial and fulfillment defaults from the eBay channel.
+  const templateAspects = parseEbayAspects(itemSpecificTemplate?.aspects ?? itemSpecificTemplate?.itemSpecifics, item);
   const aspectInput = body.aspects ?? body.itemSpecifics ?? productSettings.ebayItemSpecifics ?? saved.aspects;
-  const aspects = enrichEbayAspectsFromSource(item, parseEbayAspects(aspectInput, item), categoryAttributes, aspectMappings);
+  const aspects = enrichEbayAspectsFromSource(item, {
+    ...templateAspects,
+    ...parseEbayAspects(aspectInput, item)
+  }, categoryAttributes, aspectMappings);
   const categoryId = ebayListingCategoryId(db, item, {
     ...body,
     categoryId: body.categoryId !== undefined
       ? body.categoryId
       : productSettings.ebayCategoryId || saved.categoryId || ""
   });
+  const identifierType = String(body.identifierType ?? productSettings.ebayIdentifierType ?? saved.identifierType ?? "").trim().toUpperCase();
+  const identifierValue = String(body.identifierValue ?? productSettings.ebayIdentifierValue ?? saved.identifierValue ?? "").trim()
+    || sourceDataValue(item, identifierType === "EAN" ? ["ean"] : identifierType === "ISBN" ? ["isbn"] : identifierType === "MPN" ? ["mfrPartNumber", "mpn", "vendorSku"] : ["upc", "upcCode", "gtin"]);
+  const identifierUnavailable = explicitBoolean("identifierUnavailable", "ebayIdentifierUnavailable", false);
+  const identifierUnavailableText = String(body.identifierUnavailableText ?? productSettings.ebayIdentifierUnavailableText ?? saved.identifierUnavailableText ?? "Does not apply").trim();
+  const ePid = String(body.ePid ?? productSettings.ebayEPid ?? saved.ePid ?? "").trim();
+  const mpn = String((body.mpn ?? productSettings.ebayMpn ?? saved.mpn ?? item.mfrPartNumber ?? item.vendorSku ?? "")).trim();
+  const storeCategories = Array.isArray(effectiveSettings.ebayStoreCategories) ? effectiveSettings.ebayStoreCategories : [];
+  const storeCategoryId = String(body.storeCategoryId ?? productSettings.ebayStoreCategoryId ?? effectiveSettings.ebayDefaultStoreCategoryId ?? saved.storeCategoryId ?? "").trim();
+  const selectedStoreCategory = storeCategories.find((category) => String(category?.id || category?.categoryId || "") === storeCategoryId) || null;
+  const storeCategoryName = String(
+    body.storeCategoryName
+    ?? productSettings.ebayStoreCategoryName
+    ?? selectedStoreCategory?.name
+    ?? selectedStoreCategory?.categoryName
+    ?? effectiveSettings.ebayDefaultStoreCategoryName
+    ?? saved.storeCategoryName
+    ?? ""
+  ).trim();
+  const productCompliancePolicyIds = parseList(body.productCompliancePolicyIds ?? productSettings.ebayProductCompliancePolicyIds ?? saved.productCompliancePolicyIds)
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .slice(0, 6);
   return {
     marketplaceId: String(explicit("marketplaceId", "ebayMarketplaceId", process.env.EBAY_MARKETPLACE_ID || "EBAY_US")).trim(),
     merchantLocationKey: String(explicit("merchantLocationKey", "ebayMerchantLocationKey", process.env.EBAY_MERCHANT_LOCATION_KEY || "")).trim(),
@@ -17558,11 +17775,37 @@ function ebayListingConfig(db, item, body = {}) {
     fulfillmentPolicyId: String(explicit("fulfillmentPolicyId", "ebayFulfillmentPolicyId", process.env.EBAY_FULFILLMENT_POLICY_ID || "")).trim(),
     currency: String(explicit("currency", "ebayCurrency", process.env.EBAY_CURRENCY || "USD")).trim(),
     format: String(explicit("format", "ebayListingFormat", "FIXED_PRICE")).trim(),
+    enabled: listingEnabled,
+    restricted: listingRestricted,
+    restrictionReason,
+    inventoryConnected,
+    inventorySource: !inventoryConnected ? "manual" : useChannelDefaultQuantity ? "channel default" : "actual inventory",
+    safetyQty,
+    maxSellableQty,
+    minInventoryForAutoListing,
+    requireProductIdentifier: explicitBoolean("requireProductIdentifier", "ebayRequireProductIdentifier", false),
     bestOfferEnabled: explicitBoolean("bestOfferEnabled", "ebayBestOfferEnabled", false),
+    bestOfferAutoAcceptPrice: Math.max(0, Number(body.bestOfferAutoAcceptPrice ?? productSettings.ebayBestOfferAutoAcceptPrice ?? saved.bestOfferAutoAcceptPrice ?? 0) || 0),
+    bestOfferAutoDeclinePrice: Math.max(0, Number(body.bestOfferAutoDeclinePrice ?? productSettings.ebayBestOfferAutoDeclinePrice ?? saved.bestOfferAutoDeclinePrice ?? 0) || 0),
     requireImage: explicitBoolean("requireImage", "ebayRequireImage", true),
     maxImages: Math.max(1, Math.min(24, explicitNumber("maxImages", "ebayMaxImages", 12))),
     price,
     quantity,
+    quantityOverride,
+    merchantSku: String((body.merchantSku ?? productSettings.ebayMerchantSku ?? saved.merchantSku ?? item.sku ?? "")).trim(),
+    identifierType,
+    identifierValue,
+    identifierUnavailable,
+    identifierUnavailableText,
+    ePid,
+    mpn,
+    subtitle: String(body.subtitle ?? productSettings.ebaySubtitle ?? saved.subtitle ?? "").trim(),
+    storeCategoryId,
+    storeCategoryName,
+    listingTemplateId: selectedListingTemplateId,
+    itemSpecificTemplateId,
+    dispatchTimeDays: Math.max(0, Math.min(30, Math.floor(Number(body.dispatchTimeDays ?? productSettings.ebayDispatchTimeDays ?? effectiveSettings.ebayDefaultDispatchTimeDays ?? 0) || 0))),
+    productCompliancePolicyIds,
     listingDescription: ebayListingDescription(item, { ...body, db, ebayDescriptionSource: explicit("ebayDescriptionSource", "ebayDescriptionSource", "longDescription") }),
     aspects,
     categoryAttributes,
@@ -17580,16 +17823,40 @@ async function ebayListingReadiness(db, item = {}, overrides = {}) {
   const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
   const listingId = String(listing.listingId || item.ebayId || "").trim();
   const offerId = String(listing.offerId || "").trim();
-  const status = listingId ? "live" : missing.length ? "not-ready" : offerId ? "offer" : "ready";
+  const status = config.enabled === false
+    ? "disabled"
+    : config.restricted
+      ? "restricted"
+      : listingId
+        ? "live"
+        : missing.length
+          ? "not-ready"
+          : offerId
+            ? "offer"
+            : "ready";
   return {
     status,
-    ready: status === "ready" || status === "offer",
+    ready: status === "ready" || status === "offer" || status === "live",
     live: Boolean(listingId),
     missing,
     price: config.price,
     quantity: config.quantity,
     config
   };
+}
+
+function appendEbayListingHistory(listing = {}, entry = {}) {
+  const previous = Array.isArray(listing.history) ? listing.history : [];
+  const now = entry.at || new Date().toISOString();
+  return [{
+    id: crypto.randomUUID(),
+    at: now,
+    action: entry.action || "updated",
+    message: entry.message || "eBay listing settings updated.",
+    actor: entry.actor || "system",
+    offerId: entry.offerId || listing.offerId || "",
+    listingId: entry.listingId || listing.listingId || ""
+  }, ...previous].slice(0, 100);
 }
 
 async function saveEbayListingDraft(db, item, body = {}) {
@@ -17615,7 +17882,12 @@ async function saveEbayListingDraft(db, item, body = {}) {
     listingUrl: existing.listingUrl || ebayListingUrl(existing.listingId || config.listingId || "", config.marketplaceId),
     status: existing.listingId ? "published" : existing.offerId ? "offer" : "draft",
     draftSavedAt: now,
-    updatedAt: now
+    updatedAt: now,
+    history: appendEbayListingHistory(existing, {
+      action: "draft_saved",
+      message: "eBay listing draft saved.",
+      at: now
+    })
   };
   item.sources = { ...(item.sources || {}), eBay: item.ebayListing.listingId || item.ebayListing.offerId || item.sku };
   item.updatedAt = now;
@@ -17858,8 +18130,16 @@ function ebayCatalogRowFromOffer(offer = {}, inventoryItem = {}) {
     description: String(product.description || offer.listingDescription || "").trim(),
     brand: product.brand || "",
     mpn: product.mpn || "",
+    ePid: product.epid || product.ePid || "",
+    identifiers: {
+      upc: Array.isArray(product.upc) ? product.upc : product.upc ? [product.upc] : [],
+      ean: Array.isArray(product.ean) ? product.ean : product.ean ? [product.ean] : [],
+      isbn: Array.isArray(product.isbn) ? product.isbn : product.isbn ? [product.isbn] : []
+    },
     aspects: product.aspects || {},
     imageUrls: Array.isArray(product.imageUrls) ? product.imageUrls : [],
+    listingPolicies: offer.listingPolicies && typeof offer.listingPolicies === "object" ? offer.listingPolicies : {},
+    listingDuration: String(offer.listingDuration || "").trim(),
     rawOffer: offer,
     rawInventoryItem: inventoryItem
   };
@@ -17969,6 +18249,15 @@ async function syncEbayAccountSettings(db, options = {}) {
   channel.settings.ebayPaymentPolicies = result.paymentPolicies;
   channel.settings.ebayReturnPolicies = result.returnPolicies;
   channel.settings.ebayFulfillmentPolicies = result.fulfillmentPolicies;
+  channel.settings.ebayAccountHealth = {
+    status: failures.length ? (fetchedCount ? "warning" : "needs_attention") : "ready",
+    updatedAt: channel.settings.ebayAccountSettingsSyncedAt,
+    merchantLocations: result.merchantLocations.length,
+    paymentPolicies: result.paymentPolicies.length,
+    returnPolicies: result.returnPolicies.length,
+    fulfillmentPolicies: result.fulfillmentPolicies.length,
+    failures: failures.slice(0, 10)
+  };
   if (!channel.settings.ebayMerchantLocationKey && result.merchantLocations.length) channel.settings.ebayMerchantLocationKey = result.merchantLocations[0].merchantLocationKey;
   if (!channel.settings.ebayPaymentPolicyId && result.paymentPolicies.length) channel.settings.ebayPaymentPolicyId = result.paymentPolicies[0].id;
   if (!channel.settings.ebayReturnPolicyId && result.returnPolicies.length) channel.settings.ebayReturnPolicyId = result.returnPolicies[0].id;
@@ -18103,6 +18392,7 @@ function applyEbayCatalogRowToProduct(db, item, row, matchBy = "sku") {
     marketplaceId: row.marketplaceId,
     merchantLocationKey: row.merchantLocationKey || item.ebayListing?.merchantLocationKey || "",
     categoryId: row.categoryId || item.ebayListing?.categoryId || "",
+    merchantSku: row.sku || item.ebayListing?.merchantSku || item.sku || "",
     price: row.price || item.ebayListing?.price || 0,
     quantity: row.quantity,
     currency: row.currency || item.ebayListing?.currency || "USD",
@@ -18111,6 +18401,17 @@ function applyEbayCatalogRowToProduct(db, item, row, matchBy = "sku") {
     listingUrl: row.listingUrl || item.ebayListing?.listingUrl || "",
     status: row.live ? "published" : "offer",
     ebayStatus: row.status,
+    condition: row.rawInventoryItem?.condition || item.ebayListing?.condition || "",
+    currency: row.currency || item.ebayListing?.currency || "USD",
+    aspects: row.aspects || item.ebayListing?.aspects || {},
+    ePid: row.ePid || item.ebayListing?.ePid || "",
+    mpn: row.mpn || item.ebayListing?.mpn || "",
+    identifiers: row.identifiers || item.ebayListing?.identifiers || {},
+    paymentPolicyId: row.listingPolicies?.paymentPolicyId || item.ebayListing?.paymentPolicyId || "",
+    returnPolicyId: row.listingPolicies?.returnPolicyId || item.ebayListing?.returnPolicyId || "",
+    fulfillmentPolicyId: row.listingPolicies?.fulfillmentPolicyId || item.ebayListing?.fulfillmentPolicyId || "",
+    listingDuration: row.listingDuration || item.ebayListing?.listingDuration || "",
+    sourceOfTruth: "ebay_catalog_sync",
     importedFromEbayAt: now,
     matchBy
   };
@@ -18226,6 +18527,8 @@ async function importEbayCatalog(db, options = {}) {
 
 function validateEbayListingConfig(config, publish = false, item = {}) {
   const missing = [];
+  if (config.enabled === false) missing.push("listing enabled");
+  if (config.restricted === true) missing.push(config.restrictionReason ? `restricted: ${config.restrictionReason}` : "listing restriction");
   for (const [key, value] of [
     ["merchantLocationKey", config.merchantLocationKey],
     ["categoryId", config.categoryId],
@@ -18237,6 +18540,12 @@ function validateEbayListingConfig(config, publish = false, item = {}) {
   }
   if (!(config.price > 0)) missing.push("price");
   if (publish && !(config.quantity > 0)) missing.push("quantity");
+  if (publish && config.minInventoryForAutoListing > 0 && Number(config.quantity || 0) < Number(config.minInventoryForAutoListing || 0)) {
+    missing.push(`minimum inventory ${config.minInventoryForAutoListing}`);
+  }
+  if (publish && config.requireProductIdentifier && !config.identifierUnavailable && !config.identifierValue && !config.ePid && !config.mpn) {
+    missing.push("product identifier");
+  }
   if (publish) {
     for (const name of missingRequiredEbayAspects(config)) {
       missing.push(`item specific ${name}`);
@@ -18262,6 +18571,23 @@ async function assertEbayInventoryPermission(db) {
 
 function ebayInventoryItemPayload(item, config) {
   const images = ebayProductImageUrls(item).slice(0, config.maxImages || 12);
+  const identifierType = String(config.identifierType || "").toLowerCase();
+  const identifierValue = String(config.identifierValue || "").trim();
+  const product = {
+    title: String(item.marketplaceTitle || item.title || item.sku).slice(0, 80),
+    description: config.listingDescription || item.shortDescription || item.title || item.sku,
+    aspects: config.aspects,
+    brand: item.brand || undefined,
+    mpn: config.mpn || item.mfrPartNumber || item.vendorSku || undefined,
+    epid: config.ePid || undefined,
+    imageUrls: images.length ? images : undefined
+  };
+  if (identifierValue && !config.identifierUnavailable) {
+    if (identifierType === "ean") product.ean = [identifierValue];
+    else if (identifierType === "isbn") product.isbn = [identifierValue];
+    else if (identifierType === "mpn") product.mpn = identifierValue;
+    else product.upc = [identifierValue];
+  }
   return {
     availability: {
       shipToLocationAvailability: {
@@ -18269,14 +18595,7 @@ function ebayInventoryItemPayload(item, config) {
       }
     },
     condition: config.condition,
-    product: {
-      title: String(item.marketplaceTitle || item.title || item.sku).slice(0, 80),
-      description: config.listingDescription || item.shortDescription || item.title || item.sku,
-      aspects: config.aspects,
-      brand: item.brand || undefined,
-      mpn: item.mfrPartNumber || item.vendorSku || undefined,
-      imageUrls: images.length ? images : undefined
-    }
+    product
   };
 }
 
@@ -18305,7 +18624,7 @@ function ebayProductImageUrls(item = {}) {
 
 function ebayOfferPayload(item, config) {
   const payload = {
-    sku: item.sku,
+    sku: config.merchantSku || item.sku,
     marketplaceId: config.marketplaceId,
     format: config.format || "FIXED_PRICE",
     availableQuantity: config.quantity,
@@ -18315,7 +18634,27 @@ function ebayOfferPayload(item, config) {
     listingPolicies: {
       paymentPolicyId: config.paymentPolicyId,
       returnPolicyId: config.returnPolicyId,
-      fulfillmentPolicyId: config.fulfillmentPolicyId
+      fulfillmentPolicyId: config.fulfillmentPolicyId,
+      ...(config.bestOfferEnabled ? {
+        bestOfferTerms: {
+          bestOfferEnabled: true,
+          ...(config.bestOfferAutoAcceptPrice > 0 ? {
+            autoAcceptPrice: {
+              currency: config.currency,
+              value: String(Number(config.bestOfferAutoAcceptPrice).toFixed(2))
+            }
+          } : {}),
+          ...(config.bestOfferAutoDeclinePrice > 0 ? {
+            autoDeclinePrice: {
+              currency: config.currency,
+              value: String(Number(config.bestOfferAutoDeclinePrice).toFixed(2))
+            }
+          } : {})
+        }
+      } : {}),
+      ...(Array.isArray(config.productCompliancePolicyIds) && config.productCompliancePolicyIds.length ? {
+        productCompliancePolicyIds: config.productCompliancePolicyIds
+      } : {})
     },
     pricingSummary: {
       price: {
@@ -18325,7 +18664,6 @@ function ebayOfferPayload(item, config) {
     },
     listingDuration: "GTC"
   };
-  if (config.bestOfferEnabled) payload.bestOfferTerms = { bestOfferEnabled: true };
   return payload;
 }
 
@@ -18345,10 +18683,11 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
   const publish = Boolean(options.publish);
   await enrichItemWithCatalogSource(db, item);
   const config = ebayListingConfig(db, item, body);
+  const inventorySku = config.merchantSku || item.sku;
   const missing = validateEbayListingConfig(config, publish, item);
   if (missing.length) throw new Error(`eBay listing is missing: ${missing.join(", ")}.`);
   try {
-    await ebayRequest(db, `/sell/inventory/v1/inventory_item/${encodeURIComponent(item.sku)}`, {
+    await ebayRequest(db, `/sell/inventory/v1/inventory_item/${encodeURIComponent(inventorySku)}`, {
       method: "PUT",
       body: ebayInventoryItemPayload(item, config)
     });
@@ -18357,7 +18696,7 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
     if (publish) {
       throw new Error(`eBay inventory item update failed before publish. Save the offer first, review required item specifics, then publish. Original eBay error: ${error.message}`);
     }
-    await ebayRequest(db, `/sell/inventory/v1/inventory_item/${encodeURIComponent(item.sku)}`, {
+    await ebayRequest(db, `/sell/inventory/v1/inventory_item/${encodeURIComponent(inventorySku)}`, {
       method: "PUT",
       body: ebayMinimalInventoryItemPayload(item, config)
     });
@@ -18396,19 +18735,56 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
   }
 
   const now = new Date().toISOString();
+  const previous = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const listingId = published?.listingId || config.listingId || previous.listingId || "";
   item.ebayListing = {
+    ...previous,
     ...config,
     offerId,
-    listingId: published?.listingId || config.listingId || "",
-    listingUrl: ebayListingUrl(published?.listingId || config.listingId || "", config.marketplaceId),
-    status: published?.listingId ? "published" : "offer",
+    listingId,
+    listingUrl: ebayListingUrl(listingId, config.marketplaceId),
+    status: listingId ? "published" : "offer",
     updatedAt: now,
-    publishedAt: published?.listingId ? now : config.publishedAt || ""
+    publishedAt: published?.listingId ? now : config.publishedAt || previous.publishedAt || "",
+    lastLifecycleAction: published?.listingId ? "published" : previous.offerId ? "revised" : "offer_created",
+    history: appendEbayListingHistory(previous, {
+      action: published?.listingId ? "published" : previous.offerId ? "revised" : "offer_created",
+      message: published?.listingId ? "eBay listing published." : previous.offerId ? "eBay offer revised." : "eBay offer created.",
+      at: now,
+      offerId,
+      listingId
+    })
   };
   item.ebayId = item.ebayListing.listingId || item.ebayId || "";
   item.sources = { ...(item.sources || {}), eBay: item.ebayListing.listingId || item.ebayListing.offerId || item.sku };
   item.updatedAt = now;
   return { config: item.ebayListing, offer, published };
+}
+
+async function withdrawEbayListing(db, item, body = {}) {
+  await enrichItemWithCatalogSource(db, item);
+  const existing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const offerId = String(body.offerId || existing.offerId || "").trim();
+  if (!offerId) throw new Error("This SKU does not have an eBay offer ID yet. Reconcile the eBay catalog link before ending the listing.");
+  await ebayRequest(db, `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/withdraw`, { method: "POST" });
+  const now = new Date().toISOString();
+  item.ebayListing = {
+    ...existing,
+    offerId,
+    status: "ended",
+    endedAt: now,
+    updatedAt: now,
+    lastLifecycleAction: "ended",
+    history: appendEbayListingHistory(existing, {
+      action: "ended",
+      message: "eBay offer withdrawn and listing ended.",
+      at: now,
+      offerId,
+      listingId: existing.listingId || ""
+    })
+  };
+  item.updatedAt = now;
+  return item.ebayListing;
 }
 
 function mapEbayOrder(order, db = {}, fulfillments = []) {
@@ -20802,6 +21178,42 @@ function publicEbayConfigStatus(db = {}) {
     accessTokenPreview: credentialPreview(config.accessToken),
     runtimeManaged: Boolean(Object.keys(runtime).length),
     configured: Boolean(config.clientId && config.clientSecret && config.ruName),
+  };
+}
+
+function publicEbayHealthStatus(db = {}) {
+  const channel = findChannelByName(db, "eBay");
+  const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+  const accountHealth = settings.ebayAccountHealth && typeof settings.ebayAccountHealth === "object" ? settings.ebayAccountHealth : {};
+  const credentials = publicEbayConfigStatus(db);
+  const hasDefaults = Boolean(settings.ebayMerchantLocationKey && settings.ebayPaymentPolicyId && settings.ebayReturnPolicyId && settings.ebayFulfillmentPolicyId);
+  return {
+    channel: {
+      id: channel?.id || "",
+      connected: Boolean(channel?.connected),
+      enabled: channel?.enabled !== false,
+      lastSync: channel?.lastSync || ""
+    },
+    credentials,
+    account: {
+      status: accountHealth.status || (hasDefaults ? "ready" : "needs_attention"),
+      lastSyncedAt: settings.ebayAccountSettingsSyncedAt || accountHealth.updatedAt || "",
+      merchantLocations: Array.isArray(settings.ebayMerchantLocations) ? settings.ebayMerchantLocations.length : 0,
+      paymentPolicies: Array.isArray(settings.ebayPaymentPolicies) ? settings.ebayPaymentPolicies.length : 0,
+      returnPolicies: Array.isArray(settings.ebayReturnPolicies) ? settings.ebayReturnPolicies.length : 0,
+      fulfillmentPolicies: Array.isArray(settings.ebayFulfillmentPolicies) ? settings.ebayFulfillmentPolicies.length : 0,
+      failures: Array.isArray(accountHealth.failures) ? accountHealth.failures : []
+    },
+    workflows: {
+      inventoryUpdateEnabled: settings.ebayInventoryUpdateEnabled !== false,
+      priceUpdateEnabled: settings.ebayPriceUpdateEnabled !== false,
+      trackingUploadEnabled: settings.ebayTrackingUploadEnabled !== false,
+      settlementImportEnabled: settings.ebaySettlementImportEnabled === true,
+      autoRelistEnabled: settings.ebayAutoRelistEnabled === true,
+      webhookEnabled: settings.ebayWebhookEnabled === true,
+      webhookEndpoint: ebayWebhookEndpoint(settings)
+    },
+    defaultsReady: hasDefaults
   };
 }
 
@@ -26128,7 +26540,11 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     db.inventory = [item];
     const action = String(body.action || "offer").toLowerCase();
-    if (!["draft", "offer", "publish"].includes(action)) return sendJson(res, 400, { error: "Unsupported eBay listing action." });
+    if (!["draft", "offer", "publish", "readiness", "compliance", "revise", "relist", "end", "withdraw"].includes(action)) return sendJson(res, 400, { error: "Unsupported eBay listing action." });
+    if (action === "readiness" || action === "compliance") {
+      const readiness = await ebayListingReadiness(db, item, body);
+      return sendJson(res, 200, { item: publicProductItem(item), readiness, ebayListing: item.ebayListing || {} });
+    }
     if (action === "draft") {
       const config = await saveEbayListingDraft(db, item, body);
       await postgres.upsertProductsFromState([item]);
@@ -26142,7 +26558,13 @@ async function handleApi(req, res) {
         state: publicState(stateDb, { lite: true })
       });
     }
-    const result = await createOrUpdateEbayListing(db, item, body, { publish: action === "publish" });
+    if (action === "end" || action === "withdraw") {
+      const ebayListing = await withdrawEbayListing(db, item, body);
+      await postgres.upsertProductsFromState([item]);
+      const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
+      return sendJson(res, 200, { item: publicProductItem(updated || item), ebayListing, ended: true });
+    }
+    const result = await createOrUpdateEbayListing(db, item, body, { publish: action === "publish" || action === "relist" });
     await postgres.upsertProductsFromState([item]);
     await postgres.upsertInventoryLevelsFromProducts([item]);
     const updated = await postgres.readProductByKey(item.id || item.sku || parts[2]);
@@ -30632,6 +31054,11 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { authUrl });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/ebay/health" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    return sendJson(res, 200, publicEbayHealthStatus(db));
+  }
+
   if (req.method === "POST" && url.pathname === "/api/ebay/account-settings/sync" && postgres.isPostgresEnabled()) {
     const db = await readDbFast({ skipInventory: true });
     const job = queueEbayAccountSettingsSyncJob(db);
@@ -30659,6 +31086,23 @@ async function handleApi(req, res) {
       });
     } catch (error) {
       return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay order import." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/fulfillment/reconcile" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const result = await queueEbayOrderImportJob(db, { ...body, forceLookback: true, scheduled: false }, { operation: "eBay fulfillment reconciliation" });
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
+        message: result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay fulfillment reconciliation." });
     }
   }
 
@@ -30691,6 +31135,29 @@ async function handleApi(req, res) {
       });
     } catch (error) {
       return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay listing launch." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/compliance/audit" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const result = await queueEbayListingLaunchJob(db, { ...body, lifecycleAction: "compliance", dryRun: true, apply: false }, { operation: "eBay listing compliance audit" });
+      return sendJson(res, result.duplicate ? 200 : 202, { queued: true, duplicate: result.duplicate, job: normalizeImportJob(result.job), message: result.job.message });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay listing compliance audit." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/listings/lifecycle" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const action = normalizeEbayListingLifecycleAction(body.action || body.lifecycleAction || "revise");
+      const result = await queueEbayListingLaunchJob(db, { ...body, lifecycleAction: action, apply: action === "review" || action === "compliance" ? false : body.apply }, { operation: ebayListingLifecycleLabel(action) });
+      return sendJson(res, result.duplicate ? 200 : 202, { queued: true, duplicate: result.duplicate, job: normalizeImportJob(result.job), message: result.job.message });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay listing lifecycle action." });
     }
   }
 
@@ -31815,6 +32282,20 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "GET" && url.pathname === "/api/ebay/health") {
+    return sendJson(res, 200, publicEbayHealthStatus(db));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/fulfillment/reconcile") {
+    const body = await parseBody(req);
+    try {
+      const result = await queueEbayOrderImportJob(db, { ...body, forceLookback: true });
+      return sendJson(res, result.duplicate ? 200 : 202, { queued: true, duplicate: result.duplicate, job: normalizeImportJob(result.job), message: result.job.message });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay fulfillment reconciliation." });
+    }
+  }
+
   if (req.method === "POST" && ["/api/inventory/ebay/bulk-launch", "/api/ebay/listings/launch"].includes(url.pathname)) {
     const body = await parseBody(req);
     try {
@@ -31828,6 +32309,27 @@ async function handleApi(req, res) {
       });
     } catch (error) {
       return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay listing launch." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/compliance/audit") {
+    const body = await parseBody(req);
+    try {
+      const result = await queueEbayListingLaunchJob(db, { ...body, lifecycleAction: "compliance", dryRun: true, apply: false }, { operation: "eBay listing compliance audit" });
+      return sendJson(res, result.duplicate ? 200 : 202, { queued: true, duplicate: result.duplicate, job: normalizeImportJob(result.job), message: result.job.message });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay listing compliance audit." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/listings/lifecycle") {
+    const body = await parseBody(req);
+    try {
+      const action = normalizeEbayListingLifecycleAction(body.action || body.lifecycleAction || "revise");
+      const result = await queueEbayListingLaunchJob(db, { ...body, lifecycleAction: action, apply: action === "review" || action === "compliance" ? false : body.apply }, { operation: ebayListingLifecycleLabel(action) });
+      return sendJson(res, result.duplicate ? 200 : 202, { queued: true, duplicate: result.duplicate, job: normalizeImportJob(result.job), message: result.job.message });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay listing lifecycle action." });
     }
   }
 
@@ -32518,7 +33020,11 @@ async function handleApi(req, res) {
     const item = db.inventory.find((row) => row.id === parts[2]);
     if (!item) return notFound(res);
     const action = String(body.action || "offer").toLowerCase();
-    if (!["draft", "offer", "publish"].includes(action)) return sendJson(res, 400, { error: "Unsupported eBay listing action." });
+    if (!["draft", "offer", "publish", "readiness", "compliance", "revise", "relist", "end", "withdraw"].includes(action)) return sendJson(res, 400, { error: "Unsupported eBay listing action." });
+    if (action === "readiness" || action === "compliance") {
+      const readiness = await ebayListingReadiness(db, item, body);
+      return sendJson(res, 200, { item, readiness, ebayListing: item.ebayListing || {} });
+    }
     if (action === "draft") {
       const config = await saveEbayListingDraft(db, item, body);
       const normalized = normalizeDb(db);
@@ -32530,7 +33036,13 @@ async function handleApi(req, res) {
         state: publicState(normalized)
       });
     }
-    const result = await createOrUpdateEbayListing(db, item, body, { publish: action === "publish" });
+    if (action === "end" || action === "withdraw") {
+      const ebayListing = await withdrawEbayListing(db, item, body);
+      const normalized = normalizeDb(db);
+      await writeDb(normalized);
+      return sendJson(res, 200, { item: normalized.inventory.find((row) => row.id === item.id) || item, ebayListing, ended: true, state: publicState(normalized) });
+    }
+    const result = await createOrUpdateEbayListing(db, item, body, { publish: action === "publish" || action === "relist" });
     const normalized = normalizeDb(db);
     await writeDb(normalized);
     return sendJson(res, 200, {
