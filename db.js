@@ -1990,21 +1990,39 @@ function vendorCatalogWhere(options = {}) {
     params.push(suppliers);
     where.push(`lower(coalesce(vendor_id, '')) = any($${params.length})`);
   }
+  const sourceLookupKeys = `array[
+    lower(coalesce(vendor_catalog_items.source_sku, '')),
+    lower(coalesce(vendor_catalog_items.internal_sku, '')),
+    lower(coalesce(vendor_catalog_items.vendor_sku, '')),
+    lower(coalesce(vendor_catalog_items.mfr_part_number, ''))
+  ]`;
+  const productMembershipMatch = `exists (
+    select 1
+    from products p
+    where lower(p.sku) = any(${sourceLookupKeys})
+      or exists (
+        select 1
+        from product_aliases pa
+        where pa.product_id = p.product_id
+          and pa.active = true
+          and lower(pa.alias_sku) = any(${sourceLookupKeys})
+      )
+  )`;
   const productMembership = nullableString(filters.productMembership);
   if (productMembership === "in-products") {
-    where.push(`exists (select 1 from products p where lower(p.sku) = lower(vendor_catalog_items.source_sku))`);
+    where.push(productMembershipMatch);
   } else if (productMembership === "not-in-products") {
-    where.push(`not exists (select 1 from products p where lower(p.sku) = lower(vendor_catalog_items.source_sku))`);
+    where.push(`not ${productMembershipMatch}`);
   }
-  const stockStatus = nullableString(filters.stockStatus);
-  if (stockStatus) {
-    params.push(stockStatus.toLowerCase());
-    where.push(`lower(coalesce(stock_status, '')) = $${params.length}`);
+  const stockStatuses = splitFilterValues(filters.stockStatus)
+    .map((value) => value.toLowerCase());
+  if (stockStatuses.length) {
+    params.push(stockStatuses);
+    where.push(`lower(coalesce(stock_status, '')) = any($${params.length})`);
   }
-  const hasStock = nullableString(filters.hasStock);
-  if (hasStock) {
-    if (["true", "1", "yes", "in-stock"].includes(hasStock.toLowerCase())) where.push(`coalesce(qty, 0) > 0`);
-    if (["false", "0", "no", "out-of-stock"].includes(hasStock.toLowerCase())) where.push(`coalesce(qty, 0) <= 0`);
+  const hasStockValues = [...new Set(splitFilterValues(filters.hasStock).map(parseFilterBoolean))];
+  if (hasStockValues.length === 1) {
+    where.push(hasStockValues[0] ? `coalesce(qty, 0) > 0` : `coalesce(qty, 0) <= 0`);
   }
   const stockQtyOperator = nullableString(filters.stockQtyOperator);
   const stockQtyValues = String(filters.stockQty || "")
@@ -2029,34 +2047,43 @@ function vendorCatalogWhere(options = {}) {
       where.push(`qty = $${firstParam}`);
     }
   }
-  const discontinued = nullableString(filters.toBeDiscontinued || filters.discontinued);
-  if (discontinued) {
-    params.push(["true", "1", "yes", "y"].includes(discontinued.toLowerCase()));
+  const discontinuedValues = [...new Set(splitFilterValues(filters.toBeDiscontinued || filters.discontinued).map(parseFilterBoolean))];
+  if (discontinuedValues.length === 1) {
+    params.push(discontinuedValues[0]);
     where.push(`coalesce(to_be_discontinued, false) = $${params.length}`);
   }
-  const brand = nullableString(filters.brand);
-  if (brand) {
-    params.push(brand.toLowerCase());
-    where.push(`lower(coalesce(brand, '')) = $${params.length}`);
+  const brands = splitFilterValues(filters.brand).map((value) => value.toLowerCase());
+  if (brands.length) {
+    params.push(brands);
+    where.push(`lower(coalesce(brand, '')) = any($${params.length})`);
   }
-  const manufacturer = nullableString(filters.manufacturer);
-  if (manufacturer) {
-    params.push(manufacturer.toLowerCase());
-    where.push(`lower(coalesce(manufacturer, '')) = $${params.length}`);
+  const manufacturers = splitFilterValues(filters.manufacturer).map((value) => value.toLowerCase());
+  if (manufacturers.length) {
+    params.push(manufacturers);
+    where.push(`lower(coalesce(manufacturer, '')) = any($${params.length})`);
   }
-  const category = nullableString(filters.category);
-  if (category) {
-    params.push(category.toLowerCase());
-    where.push(`lower(coalesce(source_category, category, '')) = $${params.length}`);
+  const categories = splitFilterValues(filters.category).map((value) => value.toLowerCase());
+  if (categories.length) {
+    params.push(categories);
+    where.push(`lower(coalesce(source_category, category, '')) = any($${params.length})`);
   }
-  const hazardous = nullableString(filters.hazardous);
-  if (hazardous) {
-    params.push(["true", "1", "yes", "y"].includes(hazardous.toLowerCase()));
+  const hasImageValues = [...new Set(splitFilterValues(filters.hasImage).map(parseFilterBoolean))];
+  if (hasImageValues.length === 1) {
+    const hasImageExpression = `(
+      coalesce(default_image, raw ->> 'image', raw ->> 'imageUrl', raw ->> 'defaultImage', raw ->> 'primaryImage', raw ->> 'thumbnailUrl', '') <> ''
+      or jsonb_array_length(case when jsonb_typeof(raw -> 'images') = 'array' then raw -> 'images' else '[]'::jsonb end) > 0
+      or jsonb_array_length(case when jsonb_typeof(raw -> 'productImages') = 'array' then raw -> 'productImages' else '[]'::jsonb end) > 0
+    )`;
+    where.push(hasImageValues[0] ? hasImageExpression : `not ${hasImageExpression}`);
+  }
+  const hazardousValues = [...new Set(splitFilterValues(filters.hazardous).map(parseFilterBoolean))];
+  if (hazardousValues.length === 1) {
+    params.push(hazardousValues[0]);
     where.push(`case when lower(coalesce(raw ->> 'hazardous', 'false')) in ('true','1','yes','y') then true else false end = $${params.length}`);
   }
-  const active = nullableString(filters.active);
-  if (active) {
-    params.push(["true", "1", "yes", "active"].includes(active.toLowerCase()));
+  const activeValues = [...new Set(splitFilterValues(filters.active).map(parseFilterBoolean))];
+  if (activeValues.length === 1) {
+    params.push(activeValues[0]);
     where.push(`case when lower(coalesce(raw ->> 'active', 'true')) in ('true','1','yes','active') then true else false end = $${params.length}`);
   }
   return {

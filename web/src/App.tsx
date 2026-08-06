@@ -463,6 +463,11 @@ type CatalogItem = {
   active?: boolean
   status?: string
   inProducts?: boolean
+  productCatalogId?: string
+  productCatalogSku?: string
+  productCatalogStatus?: string
+  productCatalogActive?: boolean
+  productCatalogDiffs?: string[]
   toBeDiscontinued?: boolean
   hazardous?: boolean
   alternateVendorCount?: number
@@ -625,6 +630,35 @@ type ProductItem = CatalogItem & {
   recentChanges?: Array<{ field?: string; previousValue?: string; nextValue?: string; updatedAt?: string; createdAt?: string }>
 }
 
+type CatalogStatusFilter = "" | "source-only" | "managed"
+
+function normalizeUnifiedCatalogFilters(input: Record<string, string> = {}) {
+  const next = { ...input }
+  const catalogStatuses = String(next.catalogStatus || "").split("|").filter(Boolean) as CatalogStatusFilter[]
+  if (catalogStatuses.length !== 1) delete next.catalogStatus
+  const needsManagedRecords = ["channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo"].some((key) => Boolean(next[key]))
+  if (needsManagedRecords) next.catalogStatus = "managed"
+  if (next.catalogStatus === "source-only") {
+    ;["channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo"].forEach((key) => delete next[key])
+  }
+  return next
+}
+
+function unifiedCatalogUsesManagedRecords(filters: Record<string, string> = {}) {
+  return filters.catalogStatus === "managed"
+    || ["channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo"].some((key) => Boolean(filters[key]))
+}
+
+function unifiedCatalogSourceFilters(filters: Record<string, string> = {}) {
+  const next = { ...filters }
+  const sourceOnly = next.catalogStatus === "source-only"
+  delete next.catalogStatus
+  ;["channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo"].forEach((key) => delete next[key])
+  if (sourceOnly) next.productMembership = "not-in-products"
+  else delete next.productMembership
+  return next
+}
+
 type CatalogResponse = {
   items?: CatalogItem[]
   page?: number
@@ -716,8 +750,7 @@ const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
 ]
 
 const catalogSidebarItems: Array<{ label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { label: "Products", path: "/products", icon: Boxes },
-  { label: "Source Catalog", path: "/source-catalog", icon: Database },
+  { label: "Catalog", path: "/products", icon: Boxes },
   { label: "Import Review", path: "/import-review", icon: FileWarning },
   { label: "SKU Changes", path: "/sku-changes", icon: Activity },
   { label: "Categories", path: "/categories", icon: PackageSearch },
@@ -5760,7 +5793,7 @@ function ToggleRow({ label, description, checked, disabled, onCheckedChange }: {
   return <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-medium">{label}</p><p className="text-xs text-muted-foreground">{description}</p></div><Switch aria-label={label} checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} /></div>
 }
 
-type CatalogWorkspaceTab = "products" | "source" | "review" | "changes" | "categories" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "readiness"
+type CatalogWorkspaceTab = "products" | "review" | "changes" | "categories" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "readiness"
 
 type CategoryAttribute = {
   id?: string
@@ -5866,8 +5899,7 @@ type CategoryProfile = {
 }
 
 const catalogWorkspaceTabs: Array<{ id: CatalogWorkspaceTab; label: string }> = [
-  { id: "products", label: "Products" },
-  { id: "source", label: "Source Catalog" },
+  { id: "products", label: "Catalog" },
   { id: "review", label: "Import Review" },
   { id: "changes", label: "SKU Changes" },
   { id: "categories", label: "Categories" },
@@ -5881,7 +5913,7 @@ const catalogWorkspaceTabs: Array<{ id: CatalogWorkspaceTab; label: string }> = 
 
 function catalogWorkspaceTabFromPath() {
   const path = window.location.pathname.toLowerCase()
-  if (path.startsWith("/source-catalog") || path === "/source") return "source"
+  if (path.startsWith("/source-catalog") || path === "/source") return "products"
   if (path.startsWith("/import-review")) return "review"
   if (path.startsWith("/sku-changes")) return "changes"
   if (path.startsWith("/categories")) return "categories"
@@ -9726,8 +9758,17 @@ function InventoryWorkspace() {
 }
 
 function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSettings = {} }: { totalSkuCount?: number; channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
-  const [query, setQuery] = useState("")
-  const [filters, setFilters] = useState<Record<string, string>>({})
+  const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("q") || "")
+  const [filters, setFilters] = useState<Record<string, string>>(() => {
+    const params = new URLSearchParams(window.location.search)
+    const initial = Object.fromEntries(
+      ["catalogStatus", "supplier", "suppliers", "active", "stockStatus", "hasStock", "hasImage", "stockQty", "stockQtyOperator", "hazardous", "toBeDiscontinued", "brand", "manufacturer", "category", "channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo"]
+        .map((key) => [key, params.get(key) || ""])
+        .filter(([, value]) => Boolean(value)),
+    ) as Record<string, string>
+    if (window.location.pathname.toLowerCase().startsWith("/source-catalog") || window.location.pathname.toLowerCase() === "/source") initial.catalogStatus = "source-only"
+    return normalizeUnifiedCatalogFilters(initial)
+  })
   const [savedViews, setSavedViews] = useState<Array<{ name: string; query: string; filters: Record<string, string>; sort: { key: string; direction: "asc" | "desc" } }>>(() => {
     try { return JSON.parse(window.localStorage.getItem("dataplus-products-saved-views") || "[]") } catch { return [] }
   })
@@ -9759,7 +9800,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   const [autoAlternates, setAutoAlternates] = useState(() => window.localStorage.getItem("dataplus-products-auto-alternates") === "true")
   const [compact, setCompact] = useState(() => window.localStorage.getItem("dataplus-products-density") === "compact")
   const [visible, setVisible] = useState<Record<string, boolean>>(() => {
-    const defaults = { readiness: true, stock: true, price: true, brand: true, category: true, channels: true, images: true, updated: true, created: false, verified: false, hazardous: false, shopifySynced: false, alternates: false, manufacturer: false, vendorSku: false, status: false, shadows: false, uom: false, shipping: true }
+    const defaults = { readiness: true, catalogStatus: true, stock: true, price: true, brand: true, category: true, channels: true, images: true, updated: true, created: false, verified: false, hazardous: false, shopifySynced: false, alternates: false, manufacturer: false, vendorSku: false, status: false, shadows: false, uom: false, shipping: true }
     try { return { ...defaults, ...JSON.parse(window.localStorage.getItem("dataplus-products-columns") || "{}") } } catch { return defaults }
   })
   const ebayChannel = channels.find((channel) => String(channel.name || "").toLowerCase() === "ebay")
@@ -9773,9 +9814,10 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   const ebayItemSpecificTemplates = Array.isArray(ebaySettings.ebayItemSpecificTemplates) ? ebaySettings.ebayItemSpecificTemplates : []
   const ebayLifecycleLabel: Record<string, string> = { launch: "Publish eligible listings", review: "Review listing readiness", compliance: "Run compliance audit", revise: "Queue listing revisions", relist: "Relist eligible listings", end: "End active listings" }
   const columns = [
-    ["readiness", "Readiness"], ["stock", "Stock"], ["price", "Price"], ["brand", "Brand"], ["category", "Category"], ["channels", "Channels"], ["images", "Images"], ["updated", "Updated"], ["created", "Created"], ["verified", "Category verified"], ["hazardous", "Hazardous"], ["shopifySynced", "Shopify synced"], ["alternates", "Alternates"], ["manufacturer", "Manufacturer"], ["vendorSku", "Vendor SKU"], ["status", "Status"], ["shadows", "Shadows"], ["uom", "UOM"], ["shipping", "Shipping"],
+    ["readiness", "Readiness"], ["catalogStatus", "Catalog status"], ["stock", "Stock"], ["price", "Price"], ["brand", "Brand"], ["category", "Category"], ["channels", "Channels"], ["images", "Images"], ["updated", "Updated"], ["created", "Created"], ["verified", "Category verified"], ["hazardous", "Hazardous"], ["shopifySynced", "Shopify synced"], ["alternates", "Alternates"], ["manufacturer", "Manufacturer"], ["vendorSku", "Vendor SKU"], ["status", "Status"], ["shadows", "Shadows"], ["uom", "UOM"], ["shipping", "Shipping"],
   ] as const
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
+    catalogStatus: { label: "Catalog status", values: ["source-only", "managed"], display: (value) => value === "source-only" ? "Needs review" : "Managed catalog" },
     channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
@@ -9791,22 +9833,42 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   }
 
   async function load(nextPage = page, nextFilters = filters, nextSort = sort, nextPageSize = pageSize) {
+    const normalizedFilters = normalizeUnifiedCatalogFilters(nextFilters)
+    const useManagedRecords = unifiedCatalogUsesManagedRecords(normalizedFilters)
     setLoading(true)
     try {
       const params = new URLSearchParams({ q: query, page: String(nextPage), limit: String(nextPageSize), fastPage: "true", includeTotal: "true", sort: nextSort.key, sortDirection: nextSort.direction })
-      Object.entries(nextFilters).forEach(([key, value]) => { if (value) params.set(key, value) })
-      const result = await api<{ inventory?: ProductItem[]; total?: number; totalQty?: number; page?: number; hasMore?: boolean }>(`/api/inventory?${params}`)
-      setRows(result.inventory || [])
-      setTotal(Number(result.total || 0))
-      setTotalQty(Number(result.totalQty || 0))
-      setHasMore(Boolean(result.hasMore))
-      setPage(Number(result.page || nextPage))
+      const requestFilters = useManagedRecords ? { ...normalizedFilters } : unifiedCatalogSourceFilters(normalizedFilters)
+      delete requestFilters.catalogStatus
+      Object.entries(requestFilters).forEach(([key, value]) => { if (value) params.set(key, value) })
+      if (useManagedRecords) {
+        const result = await api<{ inventory?: ProductItem[]; total?: number; totalQty?: number; page?: number; hasMore?: boolean }>(`/api/inventory?${params}`)
+        setRows(result.inventory || [])
+        setTotal(Number(result.total || 0))
+        setTotalQty(Number(result.totalQty || 0))
+        setHasMore(Boolean(result.hasMore))
+        setPage(Number(result.page || nextPage))
+      } else {
+        const result = await api<CatalogResponse>(`/api/catalog/products?${params}`)
+        const sourceRows = (result.items || []) as ProductItem[]
+        setRows(sourceRows)
+        setTotal(Number(result.totalMatches || 0))
+        setTotalQty(sourceRows.reduce((sum, row) => sum + Number(row.qty ?? row.stockQty ?? 0), 0))
+        setHasMore(Boolean(result.hasMore))
+        setPage(Number(result.page || nextPage))
+      }
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load products.") } finally { setLoading(false) }
   }
 
   useEffect(() => {
-    api<{ facets?: { suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] } }>("/api/inventory/facets").then((result) => setFacets(result.facets || {})).catch(() => {})
-    load(1, {})
+    Promise.all([
+      api<{ facets?: { suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] } }>("/api/inventory/facets"),
+      api<{ suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] }>("/api/catalog/facets"),
+    ]).then(([managed, source]) => {
+      const merged = (key: "suppliers" | "brands" | "manufacturers" | "categories") => Array.from(new Set([...(managed.facets?.[key] || []), ...(source[key] || [])])).sort()
+      setFacets({ suppliers: merged("suppliers"), brands: merged("brands"), manufacturers: merged("manufacturers"), categories: merged("categories") })
+    }).catch(() => {})
+    load(1, filters)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -9827,7 +9889,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   const setDensity = (next: boolean) => { setCompact(next); window.localStorage.setItem("dataplus-products-density", next ? "compact" : "regular") }
   const toggleColumn = (key: string) => setVisible((current) => { const next = { ...current, [key]: !current[key] }; window.localStorage.setItem("dataplus-products-columns", JSON.stringify(next)); return next })
   const resetColumns = () => {
-    const defaults = { readiness: true, stock: true, price: true, brand: true, category: true, channels: true, images: true, updated: true, created: false, verified: false, hazardous: false, shopifySynced: false, alternates: false, manufacturer: false, vendorSku: false, status: false, shadows: false, uom: false, shipping: true }
+    const defaults = { readiness: true, catalogStatus: true, stock: true, price: true, brand: true, category: true, channels: true, images: true, updated: true, created: false, verified: false, hazardous: false, shopifySynced: false, alternates: false, manufacturer: false, vendorSku: false, status: false, shadows: false, uom: false, shipping: true }
     setVisible(defaults)
     window.localStorage.setItem("dataplus-products-columns", JSON.stringify(defaults))
   }
@@ -9868,14 +9930,15 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
       if (values.length) next[key] = values.join("|")
       else delete next[key]
     })
-    setFilters(next); setFilterOpen(false); setFilterSelection([]); setPendingFilters({}); setFilterSearch(""); setAllFiltered(false); setSelectedIds(new Set()); load(1, next)
+    const normalized = normalizeUnifiedCatalogFilters(next)
+    setFilters(normalized); setFilterOpen(false); setFilterSelection([]); setPendingFilters({}); setFilterSearch(""); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized)
   }
-  const removeFilter = (key: string) => { const next = { ...filters }; delete next[key]; setFilters(next); setAllFiltered(false); setSelectedIds(new Set()); load(1, next) }
+  const removeFilter = (key: string) => { const next = { ...filters }; delete next[key]; const normalized = normalizeUnifiedCatalogFilters(next); setFilters(normalized); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized) }
   const resetFilters = () => { setFilters({}); setQuery(""); setAllFiltered(false); setSelectedIds(new Set()); load(1, {}) }
   const toggleRow = (id: string, checked: boolean) => { setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next }) }
   const togglePage = (checked: boolean) => { setAllFiltered(false); setSelectedIds((current) => { const next = new Set(current); pageIds.forEach((id) => checked ? next.add(id) : next.delete(id)); return next }) }
-  const applySavedFilter = (next: Record<string, string>) => { setFilters(next); setAllFiltered(false); setSelectedIds(new Set()); load(1, next) }
-  const applySavedView = (view: { name: string; query: string; filters: Record<string, string>; sort: { key: string; direction: "asc" | "desc" } }) => { setQuery(view.query || ""); setFilters(view.filters || {}); setSort(view.sort || { key: "", direction: "asc" }); setAllFiltered(false); setSelectedIds(new Set()); load(1, view.filters || {}, view.sort || { key: "", direction: "asc" }) }
+  const applySavedFilter = (next: Record<string, string>) => { const normalized = normalizeUnifiedCatalogFilters(next); setFilters(normalized); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized) }
+  const applySavedView = (view: { name: string; query: string; filters: Record<string, string>; sort: { key: string; direction: "asc" | "desc" } }) => { const normalized = normalizeUnifiedCatalogFilters(view.filters || {}); setQuery(view.query || ""); setFilters(normalized); setSort(view.sort || { key: "", direction: "asc" }); setAllFiltered(false); setSelectedIds(new Set()); load(1, normalized, view.sort || { key: "", direction: "asc" }) }
   const saveCurrentView = () => {
     const name = window.prompt("Name this product view")?.trim()
     if (!name) return
@@ -9902,6 +9965,26 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
       toast.success(`${numberLabel(result.changed || 0)} product${result.changed === 1 ? "" : "s"} updated.${result.limited ? " Limited to the first 25,000 filtered rows." : ""}`)
       setSelectedIds(new Set()); setAllFiltered(false); load(1)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update selected products.") }
+  }
+  async function addSourceRowsToManaged(requestedSkus?: string[]) {
+    const skus = requestedSkus || rows.filter((item) => selectedIds.has(String(item.id || item.sku || ""))).map((item) => String(item.sku || "")).filter(Boolean)
+    const isFilteredBatch = allFiltered && !requestedSkus
+    if (!isFilteredBatch && !skus.length) return
+    const count = isFilteredBatch ? total : skus.length
+    const actionLabel = needsReviewView ? "add to the managed catalog" : "add or refresh in the managed catalog"
+    if (!window.confirm(`${actionLabel.charAt(0).toUpperCase()}${actionLabel.slice(1)} for ${numberLabel(count)} source record${count === 1 ? "" : "s"}? This keeps DataWarehouse as the source of truth and creates managed records only for the selected SKUs.`)) return
+    try {
+      const result = await api<{ job?: ImportJob; message?: string; impact?: { limited?: boolean } }>("/api/catalog/bulk", {
+        method: "POST",
+        body: JSON.stringify(isFilteredBatch
+          ? { action: "add-active", allFiltered: true, query, filters: unifiedCatalogSourceFilters(filters), importMode: "new-and-update" }
+          : { action: "add-active", skus, importMode: "new-and-update" }),
+      })
+      toast.success(result.message || `${numberLabel(count)} source record${count === 1 ? "" : "s"} queued for managed catalog import.${result.impact?.limited ? " The configured batch limit applies." : ""}`)
+      setSelectedIds(new Set())
+      setAllFiltered(false)
+      if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 450)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to queue the managed catalog import.") }
   }
   function openEbayLaunch(ids?: string[]) {
     const selected = ids || [...selectedIds]
@@ -10063,7 +10146,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
     return { score, missing: [!checks[0] && "title", !checks[1] && "category", !checks[2] && "price", !checks[3] && "image", !checks[4] && "stock"].filter(Boolean).join(", ") }
   }
   const applyChannelFilter = (channelStatus: string) => {
-    const next = { ...filters, channelStatus }
+    const next = normalizeUnifiedCatalogFilters({ ...filters, channelStatus })
     setFilters(next)
     setAllFiltered(false)
     setSelectedIds(new Set())
@@ -10079,6 +10162,9 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
       return { channel, counts }
     })
     .filter((entry): entry is { channel: ChannelConnection; counts: { live: number; attention: number; disabled: number } } => Boolean(entry))
+  const managedCatalogView = unifiedCatalogUsesManagedRecords(filters)
+  const sourceCatalogView = !managedCatalogView
+  const needsReviewView = filters.catalogStatus === "source-only"
   const cellCount = 4 + columns.filter(([key]) => visible[key]).length
 
   useEffect(() => { if (autoAlternates && rows.length) loadAlternates() }, [autoAlternates, rows])
@@ -10086,8 +10172,12 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
     <div className="grid gap-5">
       <PageHeader
         eyebrow="Catalog"
-        title="Products"
-        description="Approved SKUs for Shopify and connected channels. Fast paged results with legacy table controls restored."
+        title="Catalog"
+        description={needsReviewView
+          ? "Source records that still need a managed catalog record before marketplace work can begin."
+          : managedCatalogView
+            ? "Managed catalog SKUs with marketplace settings, status controls, and connected-channel actions."
+            : "All supplier source records in one workspace. Managed catalog and channel state appear when a source SKU is linked."}
       />
       <Card>
         <CardHeader className="grid gap-3 border-b">
@@ -10348,7 +10438,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                 type="date"
                 value={filters.createdFrom || ""}
                 onChange={(event) => {
-                  const next = { ...filters, createdFrom: event.target.value };
+                  const next = normalizeUnifiedCatalogFilters({ ...filters, createdFrom: event.target.value });
                   setFilters(next);
                   setAllFiltered(false);
                   setSelectedIds(new Set());
@@ -10362,7 +10452,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                 type="date"
                 value={filters.createdTo || ""}
                 onChange={(event) => {
-                  const next = { ...filters, createdTo: event.target.value };
+                  const next = normalizeUnifiedCatalogFilters({ ...filters, createdTo: event.target.value });
                   setFilters(next);
                   setAllFiltered(false);
                   setSelectedIds(new Set());
@@ -10378,28 +10468,30 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
             >
               Clear
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void exportProducts()}
-            >
-              <FileDown className="size-4" /> Export
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={loadAlternates}
-              disabled={loadingAlternates || !rows.length}
-            >
-              {loadingAlternates ? "Loading alternates" : "Load alternates"}
-            </Button>
-            <label className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Switch
-                checked={autoAlternates}
-                onCheckedChange={toggleAutoAlternates}
-              />{" "}
-              Auto alternates
-            </label>
+              {managedCatalogView ? <>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void exportProducts()}
+                >
+                  <FileDown className="size-4" /> Export
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={loadAlternates}
+                  disabled={loadingAlternates || !rows.length}
+                >
+                  {loadingAlternates ? "Loading alternates" : "Load alternates"}
+                </Button>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Switch
+                    checked={autoAlternates}
+                    onCheckedChange={toggleAutoAlternates}
+                  />{" "}
+                  Auto alternates
+                </label>
+              </> : <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300">Source records</Badge>}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button size="sm" variant="outline">
@@ -10493,7 +10585,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
             <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 p-2">
               <p className="text-sm font-medium">
                 {allFiltered
-                  ? `${numberLabel(selectionCount)} filtered products selected`
+                  ? `${numberLabel(selectionCount)} filtered ${sourceCatalogView ? "records" : "products"} selected`
                   : `${numberLabel(selectionCount)} selected`}
               </p>
               {!allFiltered && total > selectedIds.size ? (
@@ -10510,7 +10602,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                 </Button>
               ) : null}
               <span className="mr-auto text-sm text-muted-foreground">
-                Total qty: <span className="font-medium text-foreground">{numberLabel(selectedQty)}</span>
+                Total qty: <span className="font-medium text-foreground">{allFiltered && sourceCatalogView ? "Calculated in import" : numberLabel(selectedQty)}</span>
               </span>
               <Button className="w-full sm:w-auto"
                 size="sm"
@@ -10522,72 +10614,76 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
               >
                 Clear
               </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void exportProducts()}
-              >
-                <FileDown className="size-4" /> Export selection
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void runShopifyLaunch(false)}
-              >
-                <ShoppingBag className="size-4" /> Review Shopify
-              </Button>
-              <Button size="sm" onClick={() => void runShopifyLaunch(true)}>
-                <ShoppingBag className="size-4" /> Launch Shopify
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void runShopifyLink(false)}
-              >
-                Review Shopify links
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void runShopifyLink(true)}
-              >
-                Link existing Shopify
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => runBulk("set-active")}
-              >
-                Set active
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => runBulk("set-inactive")}
-              >
-                Set inactive
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => runBulk("set-discontinued")}
-              >
-                Discontinue
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => openEbayLaunch()}
-              >
-                Launch eBay
-              </Button>
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={() => runBulk("delete")}
-              >
-                Delete
-              </Button>
+              {sourceCatalogView ? <Button size="sm" onClick={() => void addSourceRowsToManaged()}>
+                <Boxes className="size-4" /> {needsReviewView ? "Add to managed catalog" : "Add / refresh managed catalog"}
+              </Button> : <>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void exportProducts()}
+                >
+                  <FileDown className="size-4" /> Export selection
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void runShopifyLaunch(false)}
+                >
+                  <ShoppingBag className="size-4" /> Review Shopify
+                </Button>
+                <Button size="sm" onClick={() => void runShopifyLaunch(true)}>
+                  <ShoppingBag className="size-4" /> Launch Shopify
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void runShopifyLink(false)}
+                >
+                  Review Shopify links
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void runShopifyLink(true)}
+                >
+                  Link existing Shopify
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => runBulk("set-active")}
+                >
+                  Set active
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => runBulk("set-inactive")}
+                >
+                  Set inactive
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => runBulk("set-discontinued")}
+                >
+                  Discontinue
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => openEbayLaunch()}
+                >
+                  Launch eBay
+                </Button>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={() => runBulk("delete")}
+                >
+                  Delete
+                </Button>
+              </>}
             </div>
           )}
         </CardHeader>
@@ -10623,6 +10719,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                     </TableHead>
                     <TableHead>Title</TableHead>
                     {visible.readiness && <TableHead>Readiness</TableHead>}
+                    {visible.catalogStatus && <TableHead>Catalog status</TableHead>}
                     {visible.stock && (
                       <TableHead>
                         <Button
@@ -10739,6 +10836,8 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                 <TableBody>
                   {rows.map((item) => {
                     const id = String(item.id || item.sku || "");
+                    const isManagedItem = managedCatalogView || Boolean(item.inProducts || item.productCatalogId)
+                    const managedSku = String(item.productCatalogSku || item.sku || "")
                     const ready = readiness(item);
                     const imageCount = Number(
                       item.imageCount || (item.defaultImage ? 1 : 0),
@@ -10768,7 +10867,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                         </TableCell>
                         <TableCell className="min-w-36">
                           <div className="group flex items-center gap-1">
-                            <a className="font-mono text-xs font-semibold hover:text-primary hover:underline" href={`/products/${encodeURIComponent(item.sku || "")}`}>{item.sku}</a>
+                            {isManagedItem ? <a className="font-mono text-xs font-semibold hover:text-primary hover:underline" href={`/products/${encodeURIComponent(managedSku)}`}>{item.sku}</a> : <Button variant="link" size="sm" className="h-auto p-0 font-mono text-xs font-semibold" onClick={() => setSelected(item)}>{item.sku}</Button>}
                             <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" className="size-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100" onClick={() => setSelected(item)} aria-label={`Quick view ${item.sku}`}><Eye className="size-3.5" /></Button></TooltipTrigger><TooltipContent>Quick view</TooltipContent></Tooltip>
                           </div>
                         </TableCell>
@@ -10788,6 +10887,11 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                                 {ready.missing}
                               </p>
                             )}
+                          </TableCell>
+                        )}
+                        {visible.catalogStatus && (
+                          <TableCell>
+                            {isManagedItem ? <div className="grid gap-1"><Badge variant="outline" className="w-fit border-emerald-500/35 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300">Managed</Badge>{!compact && item.productCatalogDiffs?.length ? <p className="max-w-36 truncate text-xs text-amber-700 dark:text-amber-300" title={item.productCatalogDiffs.join(", ")}>Source changes: {item.productCatalogDiffs.join(", ")}</p> : null}</div> : <Badge variant="outline" className="border-amber-500/35 bg-amber-500/10 text-amber-800 dark:text-amber-300">Needs review</Badge>}
                           </TableCell>
                         )}
                         {visible.stock && (
@@ -10940,73 +11044,77 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                               >
                                 Quick view
                               </DropdownMenuItem>
-                              <DropdownMenuItem asChild>
-                                <a
-                                  href={`/products/${encodeURIComponent(item.sku || "")}`}
+                              {sourceCatalogView ? <>
+                                {isManagedItem ? <DropdownMenuItem asChild><a href={`/products/${encodeURIComponent(managedSku)}`}>Open managed product</a></DropdownMenuItem> : <DropdownMenuItem onClick={() => void addSourceRowsToManaged([String(item.sku || "")])}>Add to managed catalog</DropdownMenuItem>}
+                              </> : <>
+                                <DropdownMenuItem asChild>
+                                  <a
+                                    href={`/products/${encodeURIComponent(item.sku || "")}`}
+                                  >
+                                    Open product page
+                                  </a>
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={() => void syncShopifyStatus(item)}
                                 >
-                                  Open product page
-                                </a>
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onClick={() => void syncShopifyStatus(item)}
-                              >
-                                Refresh Shopify status
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onClick={() =>
-                                  void runShopifyLaunch(false, [
-                                    String(item.sku || ""),
-                                  ])
-                                }
-                              >
-                                Review Shopify launch
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                disabled={Boolean(
-                                  item.toBeDiscontinued || item.shopifyId,
-                                )}
-                                onClick={() =>
-                                  void runShopifyLaunch(true, [
-                                    String(item.sku || ""),
-                                  ])
-                                }
-                              >
-                                Launch Shopify
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onClick={() => openEbayLaunch([String(item.sku || id)])}
-                              >
-                                Launch eBay
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                onClick={() => runBulkRow(id, "set-active")}
-                              >
-                                Set active
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onClick={() => runBulkRow(id, "set-inactive")}
-                              >
-                                Set inactive
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onClick={() =>
-                                  runBulkRow(id, "set-discontinued")
-                                }
-                              >
-                                Discontinue
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                onClick={() =>
-                                  window.open(
-                                    `/legacy/products?sku=${encodeURIComponent(item.sku || "")}`,
-                                    "_blank",
-                                  )
-                                }
-                              >
-                                Open legacy product
-                              </DropdownMenuItem>
+                                  Refresh Shopify status
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={() =>
+                                    void runShopifyLaunch(false, [
+                                      String(item.sku || ""),
+                                    ])
+                                  }
+                                >
+                                  Review Shopify launch
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  disabled={Boolean(
+                                    item.toBeDiscontinued || item.shopifyId,
+                                  )}
+                                  onClick={() =>
+                                    void runShopifyLaunch(true, [
+                                      String(item.sku || ""),
+                                    ])
+                                  }
+                                >
+                                  Launch Shopify
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={() => openEbayLaunch([String(item.sku || id)])}
+                                >
+                                  Launch eBay
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  onClick={() => runBulkRow(id, "set-active")}
+                                >
+                                  Set active
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={() => runBulkRow(id, "set-inactive")}
+                                >
+                                  Set inactive
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={() =>
+                                    runBulkRow(id, "set-discontinued")
+                                  }
+                                >
+                                  Discontinue
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  onClick={() =>
+                                    window.open(
+                                      `/legacy/products?sku=${encodeURIComponent(item.sku || "")}`,
+                                      "_blank",
+                                    )
+                                  }
+                                >
+                                  Open legacy product
+                                </DropdownMenuItem>
+                              </>}
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </TableCell>
@@ -11186,6 +11294,14 @@ function CatalogPage({ channels = [], systemSettings = {} }: { channels?: Channe
   const [tab, setTab] = useState<CatalogWorkspaceTab>(catalogWorkspaceTabFromPath)
   const [workspaceCounts, setWorkspaceCounts] = useState<Record<string, number>>({})
   useEffect(() => {
+    const path = window.location.pathname.toLowerCase()
+    if (!path.startsWith("/source-catalog") && path !== "/source") return
+    const params = new URLSearchParams(window.location.search)
+    params.set("catalogStatus", "source-only")
+    window.history.replaceState({}, "", `/products?${params.toString()}`)
+    setTab("products")
+  }, [])
+  useEffect(() => {
     api<{ counts?: Record<string, number> }>("/api/catalog/workspace-summary")
       .then((result) => setWorkspaceCounts(result.counts || {}))
       .catch(() => {})
@@ -11193,13 +11309,13 @@ function CatalogPage({ channels = [], systemSettings = {} }: { channels?: Channe
   const selectTab = (next: string) => {
     const selected = next as CatalogWorkspaceTab
     setTab(selected)
-    const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", source: "/source-catalog", review: "/import-review", changes: "/sku-changes", categories: "/categories", mappings: "/vendor-category-mappings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
+    const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", review: "/import-review", changes: "/sku-changes", categories: "/categories", mappings: "/vendor-category-mappings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
     window.history.replaceState({}, "", paths[selected])
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "source" && <SourceCatalogPage />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
+  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="text-xs">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
 }
 
-function SourceCatalogPage() {
+export function SourceCatalogPage() {
   const paramsAtLoad = new URLSearchParams(window.location.search)
   const defaultFilters: SourceCatalogFilters = {
     suppliers: paramsAtLoad.get("suppliers")?.split("|").filter(Boolean) || [], productMembership: paramsAtLoad.get("productMembership") || "", stockStatus: paramsAtLoad.get("stockStatus") || "", hasStock: paramsAtLoad.get("hasStock") || "", stockQtyOperator: paramsAtLoad.get("stockQtyOperator") || "", stockQty: paramsAtLoad.get("stockQty") || "", hazardous: paramsAtLoad.get("hazardous") || "", toBeDiscontinued: paramsAtLoad.get("toBeDiscontinued") || "", active: paramsAtLoad.get("active") || "", brand: paramsAtLoad.get("brand") || "", category: paramsAtLoad.get("category") || "", manufacturer: paramsAtLoad.get("manufacturer") || "",

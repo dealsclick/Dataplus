@@ -19989,6 +19989,7 @@ function catalogFilterParams(searchParams) {
     stockStatus: searchParams.get("stockStatus") || "",
     channelStatus: searchParams.get("channelStatus") || searchParams.get("shopifyStatus") || "",
     hasStock: searchParams.get("hasStock") || "",
+    hasImage: searchParams.get("hasImage") || "",
     stockQty: searchParams.get("stockQty") || "",
     stockQtyOperator: searchParams.get("stockQtyOperator") || "",
     hazardous: searchParams.get("hazardous") || "",
@@ -20131,6 +20132,7 @@ function productMatchesCatalogFilters(product = {}, filters = {}) {
   if (!catalogFilterMatches(filters.stockStatus, product.stockStatus)) return false;
   if (filters.channelStatus && !catalogFilterValues(filters.channelStatus).some((value) => productMatchesCatalogChannelStatus(product, value))) return false;
   if (!catalogFilterMatches(filters.hasStock, String(Number(product.stockQty ?? product.qty ?? 0) > 0))) return false;
+  if (!catalogFilterMatches(filters.hasImage, String(catalogProductHasImage(product)))) return false;
   if (!catalogNumberFilterMatches(filters.stockQtyOperator, filters.stockQty, product.stockQty ?? product.qty)) return false;
   if (!catalogFilterMatches(filters.hazardous, String(Boolean(product.hazardous)))) return false;
   if (!catalogFilterMatches(filters.toBeDiscontinued, String(Boolean(product.toBeDiscontinued || product.closeoutEligible)))) return false;
@@ -20338,13 +20340,71 @@ function sourceProductDiffs(source = {}, product = {}) {
     .map(([field]) => field);
 }
 
+function sourceCatalogLookupKeys(product = {}) {
+  return [...new Set([
+    product.id,
+    product.sku,
+    product.internalSku,
+    product.vendorSku,
+    product.mfrPartNumber,
+    product.externalId,
+    product.shopifyVariantSku,
+    product.barcode
+  ]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean))];
+}
+
+function managedProductLookup(products = []) {
+  const lookup = new Map();
+  for (const product of Array.isArray(products) ? products : []) {
+    for (const key of sourceCatalogLookupKeys(product)) {
+      if (!lookup.has(key)) lookup.set(key, product);
+    }
+    for (const alias of Array.isArray(product.aliases) ? product.aliases : []) {
+      const key = String(alias?.aliasSku || alias?.sku || alias?.value || "").trim().toLowerCase();
+      if (key && !lookup.has(key)) lookup.set(key, product);
+    }
+  }
+  return lookup;
+}
+
+function managedProductForSource(row = {}, productsBySku = new Map()) {
+  for (const key of sourceCatalogLookupKeys(row)) {
+    const product = productsBySku.get(key);
+    if (product) return product;
+  }
+  return null;
+}
+
+function catalogManagedFields(product = {}) {
+  if (!product) return {};
+  const fields = [
+    "shopifyId", "shopifyProductId", "shopifyVariantId", "shopifyVariantSku", "shopifyHandle",
+    "shopifyStatus", "shopifyPublished", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt",
+    "shopifyLivePrice", "shopifyLiveInventoryQuantity", "shopifyOnlineStoreUrl", "shopifySyncSource",
+    "shopifyVariantCount", "ebayId", "ebayListing", "channelStatuses", "sources",
+    "shippingClass", "shippingMethod", "shippingClassReason", "createdAt", "createdBy",
+    "createdMethod", "createdSource", "createdSourceDetail", "updatedAt", "imageCount"
+  ];
+  return Object.fromEntries(fields
+    .filter((field) => product[field] !== undefined)
+    .map((field) => [field, product[field]]));
+}
+
 function decorateSourceCatalogProduct(product = {}, overrides = {}, productsBySku = new Map(), vendorMappings = {}) {
   const row = applySourceCatalogOverride(product, overrides, vendorMappings);
-  const activeProduct = productsBySku.get(String(row.sku || "").toLowerCase());
+  const activeProduct = managedProductForSource(row, productsBySku);
+  const sourceImages = Array.isArray(row.images) ? row.images.filter(Boolean) : [];
+  const managedImages = Array.isArray(activeProduct?.images) ? activeProduct.images.filter(Boolean) : [];
   return {
     ...row,
+    ...catalogManagedFields(activeProduct),
+    defaultImage: row.defaultImage || activeProduct?.defaultImage || "",
+    images: sourceImages.length ? sourceImages : managedImages,
     inProducts: Boolean(activeProduct),
     productCatalogId: activeProduct?.id || "",
+    productCatalogSku: activeProduct?.sku || "",
     productCatalogStatus: activeProduct?.status || "",
     productCatalogActive: activeProduct ? activeProduct.active !== false : false,
     productCatalogDiffs: activeProduct ? sourceProductDiffs(row, activeProduct) : []
@@ -20400,9 +20460,37 @@ function catalogSummary(product = {}) {
     status: product.status || "Draft",
     inProducts: Boolean(product.inProducts),
     productCatalogId: product.productCatalogId || "",
+    productCatalogSku: product.productCatalogSku || "",
     productCatalogStatus: product.productCatalogStatus || "",
     productCatalogActive: Boolean(product.productCatalogActive),
     productCatalogDiffs: Array.isArray(product.productCatalogDiffs) ? product.productCatalogDiffs : [],
+    shopifyId: product.shopifyId || "",
+    shopifyProductId: product.shopifyProductId || "",
+    shopifyVariantId: product.shopifyVariantId || "",
+    shopifyVariantSku: product.shopifyVariantSku || "",
+    shopifyHandle: product.shopifyHandle || "",
+    shopifyStatus: product.shopifyStatus || "",
+    shopifyPublished: Boolean(product.shopifyPublished),
+    shopifyPublishedAt: product.shopifyPublishedAt || "",
+    shopifyUpdatedAt: product.shopifyUpdatedAt || "",
+    shopifySyncedAt: product.shopifySyncedAt || "",
+    shopifyLivePrice: product.shopifyLivePrice ?? null,
+    shopifyLiveInventoryQuantity: product.shopifyLiveInventoryQuantity ?? null,
+    shopifyOnlineStoreUrl: product.shopifyOnlineStoreUrl || "",
+    shopifySyncSource: product.shopifySyncSource || "",
+    shopifyVariantCount: Number(product.shopifyVariantCount || 0),
+    ebayId: product.ebayId || "",
+    ebayListing: product.ebayListing || {},
+    channelStatuses: product.channelStatuses || {},
+    createdAt: product.createdAt || product.lastSeenAt || "",
+    createdBy: product.createdBy || "",
+    createdMethod: product.createdMethod || "",
+    createdSource: product.createdSource || "source catalog / data dump",
+    createdSourceDetail: product.createdSourceDetail || "",
+    updatedAt: product.updatedAt || "",
+    shippingClass: product.shippingClass || "",
+    shippingMethod: product.shippingMethod || "",
+    shippingClassReason: product.shippingClassReason || "",
     alternateVendorCount: Number(product.alternateVendorCount || 0),
     defaultImage: product.defaultImage || "",
     images: Array.isArray(product.images) ? product.images.slice(0, 4) : [],
@@ -21056,7 +21144,7 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sor
   const filtered = hasCatalogFilters(filters);
   const selectedSuppliers = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim()).filter(Boolean);
   const supplierIndexedFilter = selectedSuppliers.length >= 1 && !q;
-  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.manufacturer, filters.category].every((value) => !value);
+  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hasImage, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.manufacturer, filters.category].every((value) => !value);
   const vendorIndex = supplierIndexedFilter ? readCatalogVendorIndex() : null;
   const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
   const supplierTotal = supplierOnlyFilter
@@ -21076,7 +21164,7 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sor
   };
   const cacheLatestPage = sort === "latest" && !q && !filtered && pageNumber <= 200;
   const cacheCursor = cursor ? crypto.createHash("sha1").update(String(cursor)).digest("hex").slice(0, 16) : "first";
-  const cacheKey = cacheLatestPage ? `dataplus:catalog:latest:v2:${cacheCursor}:${pageSize}` : "";
+  const cacheKey = cacheLatestPage ? `dataplus:catalog:latest:v3:${cacheCursor}:${pageSize}` : "";
   if (cacheKey) {
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return { ...cached, cached: true };
@@ -21087,10 +21175,12 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sor
       if (pgResult) {
         const overrides = sourceCatalogOverrideMap(db);
         const vendorMappings = vendorCategoryMappingMap(db);
-        const productsBySku = inventoryBySkuMap(db);
-        result.items = pgResult.items
+        const normalizedItems = pgResult.items
           .map((item) => normalizeCatalogProductForInventory(item))
-          .filter(Boolean)
+          .filter(Boolean);
+        const managedProducts = await postgres.readProductsByKeys(normalizedItems.flatMap((item) => sourceCatalogLookupKeys(item)));
+        const productsBySku = managedProductLookup(managedProducts);
+        result.items = normalizedItems
           .map((item) => decorateSourceCatalogProduct(item, overrides, productsBySku, vendorMappings))
           .filter((item) => !item.sourceCatalogDeleted)
           .map(catalogSummary);
@@ -21125,7 +21215,7 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sor
   }
   const overrides = sourceCatalogOverrideMap(db);
   const vendorMappings = vendorCategoryMappingMap(db);
-  const productsBySku = inventoryBySkuMap(db);
+  const productsBySku = managedProductLookup(Array.isArray(db.inventory) ? db.inventory : []);
   const sourceIndex = supplierIndexedFilter ? readSourceCatalogIndexManifest() : null;
   if (sourceIndex) {
     const supplierRows = (sourceIndex.suppliers || []).filter((row) => supplierNames.has(String(row.name || "").toLowerCase()));
@@ -21224,16 +21314,19 @@ async function collectCatalogProductsForExport({ query = "", filters = {}, limit
   const q = String(query || "").trim().toLowerCase();
   const overrides = sourceCatalogOverrideMap(db);
   const vendorMappings = vendorCategoryMappingMap(db);
-  const productsBySku = inventoryBySkuMap(db);
+  const productsBySku = managedProductLookup(Array.isArray(db.inventory) ? db.inventory : []);
   if (postgres.isPostgresEnabled()) {
     try {
       const pgResult = await postgres.collectVendorCatalogItems({ query, filters: catalogFiltersWithIndexedSupplierKeys(filters), limit: maxItems });
       if (pgResult) {
+        const normalizedItems = pgResult.items
+          .map((item) => normalizeCatalogProductForInventory(item))
+          .filter(Boolean);
+        const managedProducts = await postgres.readProductsByKeys(normalizedItems.flatMap((item) => sourceCatalogLookupKeys(item)));
+        const managedBySku = managedProductLookup(managedProducts);
         return {
-          items: pgResult.items
-            .map((item) => normalizeCatalogProductForInventory(item))
-            .filter(Boolean)
-            .map((item) => decorateSourceCatalogProduct(item, overrides, productsBySku, vendorMappings))
+          items: normalizedItems
+            .map((item) => decorateSourceCatalogProduct(item, overrides, managedBySku, vendorMappings))
             .filter((item) => !item.sourceCatalogDeleted)
             .map(catalogSummary),
           matched: Number(pgResult.matched || 0),
@@ -21247,7 +21340,7 @@ async function collectCatalogProductsForExport({ query = "", filters = {}, limit
   }
   const selectedSuppliers = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim()).filter(Boolean);
   const supplierIndexedFilter = selectedSuppliers.length >= 1 && !q;
-  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.category].every((value) => !value);
+  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hasImage, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.manufacturer, filters.category].every((value) => !value);
   const sourceIndex = supplierIndexedFilter ? readSourceCatalogIndexManifest() : null;
   const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
   const items = [];
@@ -21338,12 +21431,17 @@ async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query
   const overrides = sourceCatalogOverrideMap(runtimeDb);
   sourceRows = sourceRows.filter((row) => !overrides[String(row.sku || "").toLowerCase()]?.deleted);
   const importSkus = [...new Set(sourceRows.map((row) => row.sku).filter(Boolean))];
-  const existingProducts = importSkus.length ? await postgres.readProductsByKeys(importSkus) : [];
-  const existingKeys = new Set((existingProducts || []).map((item) => String(item.sku || "").toLowerCase()));
+  const importKeys = [...new Set(sourceRows.flatMap((row) => sourceCatalogLookupKeys(row)))];
+  const existingProducts = importKeys.length ? await postgres.readProductsByKeys(importKeys) : [];
+  const existingByKey = managedProductLookup(existingProducts);
+  const sourceRowIsManaged = (row) => Boolean(managedProductForSource(row, existingByKey));
+  const candidateSourceRows = sourceRows;
+  const existingCount = candidateSourceRows.filter(sourceRowIsManaged).length;
+  const newCount = candidateSourceRows.length - existingCount;
   if (mode === "new-only") {
-    sourceRows = sourceRows.filter((row) => !existingKeys.has(String(row.sku || "").toLowerCase()));
+    sourceRows = sourceRows.filter((row) => !sourceRowIsManaged(row));
   } else if (mode === "update-existing") {
-    sourceRows = sourceRows.filter((row) => existingKeys.has(String(row.sku || "").toLowerCase()));
+    sourceRows = sourceRows.filter((row) => sourceRowIsManaged(row));
   }
   const filteredImportSkus = [...new Set(sourceRows.map((row) => row.sku).filter(Boolean))];
   const closeouts = sourceRows.filter((row) => row.toBeDiscontinued || row.closeoutEligible).length;
@@ -21351,10 +21449,10 @@ async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query
     matched,
     requested: allFiltered ? matched : skus.length,
     importable: filteredImportSkus.length,
-    existing: filteredImportSkus.filter((sku) => existingKeys.has(String(sku || "").toLowerCase())).length,
-    newProducts: filteredImportSkus.filter((sku) => !existingKeys.has(String(sku || "").toLowerCase())).length,
-    skippedExisting: mode === "new-only" ? importSkus.filter((sku) => existingKeys.has(String(sku || "").toLowerCase())).length : 0,
-    skippedNew: mode === "update-existing" ? importSkus.filter((sku) => !existingKeys.has(String(sku || "").toLowerCase())).length : 0,
+    existing: existingCount,
+    newProducts: newCount,
+    skippedExisting: mode === "new-only" ? existingCount : 0,
+    skippedNew: mode === "update-existing" ? newCount : 0,
     closeouts,
     limited,
     batchLimit,
@@ -21369,17 +21467,18 @@ async function promoteSourceCatalogRows({ sourceRows = [], skus = [], progress, 
   let rows = sourceRows;
   if (!rows.length && skus.length) rows = await postgres.readVendorCatalogItemsBySkus(skus);
   const importSkus = [...new Set(rows.map((row) => row.sku).filter(Boolean))];
-  const existingProducts = importSkus.length ? await postgres.readProductsByKeys(importSkus) : [];
+  const importKeys = [...new Set(rows.flatMap((row) => sourceCatalogLookupKeys(row)))];
+  const existingProducts = importKeys.length ? await postgres.readProductsByKeys(importKeys) : [];
   db.inventory = existingProducts || [];
   const products = rows.map(normalizeCatalogProductForInventory).filter(Boolean);
   const changedItems = [];
   let created = 0;
   let updated = 0;
-  const existingKeys = new Set((existingProducts || []).map((item) => String(item.sku || "").toLowerCase()));
+  const existingByKey = managedProductLookup(existingProducts);
   for (let index = 0; index < products.length; index += 1) {
     if (isCanceled?.()) throw new Error("Source catalog import canceled.");
     const product = products[index];
-    const existed = existingKeys.has(String(product.sku || "").toLowerCase());
+    const existed = Boolean(managedProductForSource(product, existingByKey));
     const upserted = upsertInventoryProductFromCatalog(db, product, {
       createdBy: "DataPlus",
       createdMethod: "Product import",
