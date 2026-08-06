@@ -526,7 +526,29 @@ type ProductItem = CatalogItem & {
   updatedAt?: string
   shadowSkuCount?: number
   shopifyVariantCount?: number
-  ebayListing?: { status?: string; offerId?: string; listingId?: string; listingUrl?: string; marketplaceId?: string; merchantLocationKey?: string; categoryId?: string; categoryPath?: string; taxonomyVersion?: string; condition?: string; quantity?: number; price?: number; currency?: string; paymentPolicyId?: string; returnPolicyId?: string; fulfillmentPolicyId?: string; bestOfferEnabled?: boolean; updatedAt?: string; attributesSyncedAt?: string }
+  ebayListing?: {
+    status?: string
+    offerId?: string
+    listingId?: string
+    listingUrl?: string
+    marketplaceId?: string
+    merchantLocationKey?: string
+    categoryId?: string
+    categoryPath?: string
+    taxonomyVersion?: string
+    condition?: string
+    quantity?: number
+    price?: number
+    currency?: string
+    paymentPolicyId?: string
+    returnPolicyId?: string
+    fulfillmentPolicyId?: string
+    bestOfferEnabled?: boolean
+    settings?: Record<string, string | number | boolean>
+    itemSpecifics?: Record<string, string | string[]>
+    updatedAt?: string
+    attributesSyncedAt?: string
+  }
   shortDescription?: string
   longDescription?: string
   condition?: string
@@ -3980,6 +4002,7 @@ function StandaloneProductWorkspace({ product, sku, onBack }: { product: Product
 function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }: { product: ProductItem; sku: string; channels: ChannelConnection[]; onBack: () => void; onUpdated: (product: ProductItem) => void }) {
   if (false) return <StandaloneProductWorkspace product={product} sku={sku} onBack={onBack} />
   const [editorOpen, setEditorOpen] = useState(false)
+  const [ebayEditorOpen, setEbayEditorOpen] = useState(false)
   const [productTab, setProductTab] = useState("overview")
   const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState<Record<string, string | boolean>>({})
@@ -4018,7 +4041,14 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   }).slice(0, 80)
   const enabledChannels = channels.filter((channel) => channel.connected && String(channel.status || "active").toLowerCase() !== "inactive")
   const ebayEnabled = enabledChannels.some((channel) => String(channel.name || "").toLowerCase() === "ebay")
+  const ebayChannel = enabledChannels.find((channel) => String(channel.name || "").toLowerCase() === "ebay")
   const channelTabId = (channel: ChannelConnection) => `channel-${String(channel.id || channel.name).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+  const eBayTabActive = Boolean(ebayChannel && productTab === channelTabId(ebayChannel))
+  useEffect(() => {
+    if (!editorOpen || !eBayTabActive) return
+    setEditorOpen(false)
+    setEbayEditorOpen(true)
+  }, [editorOpen, eBayTabActive])
   const readinessChecks = [
     ["Category", Boolean(product.categoryVerified)],
     ["Content", Boolean(product.shortDescription && product.longDescription)],
@@ -4039,16 +4069,17 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
       <TabsContent value="pricing" className="mt-4 grid gap-4">{section("Pricing calculation", "The actual rule sequence used to calculate the primary Shopify sell-unit price.", <><div className="mb-4 rounded-md border bg-muted/30 p-3 text-sm"><span className="font-medium">{pricingSourceLabel}:</span>{" "}{pricing.priceSource === "vendor-website-price" ? "a valid supplier website price overrides the calculated markup price." : pricing.priceSource === "minimum-allowed-price" ? "the configured minimum allowed price is higher than the calculated markup price." : `sell-unit cost x (1 + ${Number(pricing.markupPercent ?? 35).toFixed(0)}% markup).`}</div>{values([["Rule cost basis", pricing.costBasis === "sell-unit" ? "Sell unit" : "Each unit"], ["Primary sell unit", pricing.sellUnit || product.uomDisplay || "Each"], ["Source cost", moneyLabel(pricing.sourceCost ?? product.sourceCost ?? product.cost)], ["Sell-unit cost", moneyLabel(pricing.sellUnitCost ?? product.sellUnitCost)], ["Price basis", moneyLabel(pricing.primarySellUnitCost ?? product.sellUnitCost)], ["Markup", `${Number(pricing.markupPercent ?? 35).toFixed(0)}%`], ["Calculated markup price", moneyLabel(pricing.markedUpPrice)], ["Supplier website price", moneyLabel(pricing.vendorWebsitePrice)], ["Minimum allowed price", pricing.minimumAllowedPriceEnforced ? moneyLabel(pricing.minimumAllowedPrice) : "Not enforced"], ["Final DataPlus price", moneyLabel(pricing.finalPrice ?? price)], ["Last price update", product.lastPricesUpdateAt ? dateLabel(product.lastPricesUpdateAt) : "Not recorded"], ["Updated by", product.lastPricesUpdateBy || "Not recorded"]])}</>)}{section("Price status & channel comparison", "Current product price compared with the connected Shopify variant.", values([["FOB", moneyLabel(product.fobPrice)], ["List / MSRP", moneyLabel(product.listPrice || product.msrp)], ["Shopify system price", moneyLabel(product.shopifySystemPrice)], ["Shopify live price", moneyLabel(product.shopifyLivePrice)], ["Live price difference", moneyLabel(product.shopifyPriceDelta ?? undefined)], ["Price sync", product.shopifyPriceMismatch ? "Needs review" : product.shopifyId ? "Matched" : "Not linked"], ["Product record updated", product.updatedAt ? dateLabel(product.updatedAt) : "Not recorded"], ["Stock updated", product.stockUpdatedAt ? dateLabel(product.stockUpdatedAt) : "Not recorded"]]))}{section("Shopify purchase variants", "Actual UOM-based sell units; Essendant stays UOM-only.", <ProductVariantsTable rows={product.shopifyPurchaseVariants || []} />)}</TabsContent>
       <TabsContent value="inventory" className="mt-4 grid gap-4">{section("Inventory operations", "Open orders, reservations, movement, velocity, and fulfillment history for this SKU.", <Button asChild size="sm"><a href={`/inventory/${encodeURIComponent(product.sku || sku)}`}>View full inventory details</a></Button>)}{section("Warehouse stock", "Warehouse-level quantities and reorder thresholds.", <ProductWarehouseTable rows={product.warehouseStock || []} />)}{section("Stock ledger", "SKU-specific inventory movement and adjustment history.", <ProductInventoryLedger sku={product.sku || sku} />)}{section("Recent product changes", "Latest recorded import and operational changes.", <ProductChangesTable rows={product.recentChanges || []} />)}</TabsContent>
       <TabsContent value="shipping" className="mt-4 grid gap-4"><Alert><Truck className="size-4" /><AlertTitle>{product.shippingMethod || product.shippingClass || "Needs measurements"}</AlertTitle><AlertDescription>{product.shippingClassReason || "Enter package measurements to classify shipping."}</AlertDescription></Alert><div className="grid gap-4 xl:grid-cols-2">{section("Item dimensions", "Physical product measurements.", values([["Length", product.itemLength ? `${product.itemLength} in` : ""], ["Width", product.itemWidth ? `${product.itemWidth} in` : ""], ["Height", product.itemHeight ? `${product.itemHeight} in` : ""], ["Weight", product.itemWeight ? `${product.itemWeight} lb` : ""]]))}{section("Package information", "Measurements used to classify and rate shipments.", values([["Package Length", product.packageLength ? `${product.packageLength} in` : ""], ["Package Width", product.packageWidth ? `${product.packageWidth} in` : ""], ["Package Height", product.packageHeight ? `${product.packageHeight} in` : ""], ["Package Weight", product.packageWeight ? `${product.packageWeight} lb` : ""]]))}</div>{section("Compliance", "Regulatory and shipping documentation.", values([["Dimensional weight", product.dimensionalWeight ? `${product.dimensionalWeight} lb` : ""], ["Hazardous", product.hazardous ? "Yes" : "No"], ["SDS", product.sdsUrl ? "Available" : "Missing"], ["Country of origin", product.countryOfOrigin || ""]]))}</TabsContent>
-      {enabledChannels.map((channel) => <TabsContent key={channel.id || channel.name} value={channelTabId(channel)} className="mt-4 grid gap-4"><ProductChannelPanel channel={channel} product={product} section={section} values={values} /></TabsContent>)}
+      {enabledChannels.map((channel) => <TabsContent key={channel.id || channel.name} value={channelTabId(channel)} className="mt-4 grid gap-4"><ProductChannelPanel channel={channel} product={product} section={section} values={values} onEditEbay={String(channel.name || "").toLowerCase() === "ebay" ? () => setEbayEditorOpen(true) : undefined} /></TabsContent>)}
       <TabsContent value="offers" className="mt-4 grid gap-4">{section("System variants", "Product UOM and purchasable variants generated by vendor rules.", <ProductVariantsTable rows={product.systemVariants || []} />)}{section("Aliases & marketplace shadows", "Related SKUs and channel-specific shadow records.", <div className="grid gap-4 lg:grid-cols-2"><ProductAliases rows={product.aliases || []} /><ProductShadows rows={product.shadowSkus || []} /></div>)}{section("Alternate supplier offers", "Existing alternate supplier records for this item.", <ProductOffers rows={product.vendorOffers || []} />)}</TabsContent>
       <TabsContent value="source" className="mt-4 grid gap-4">{section("Source catalog & audit", "Raw supplier fields and import history remain available for review.", <><ProductChangesTable rows={product.recentChanges || []} /><div className="mt-4 overflow-hidden rounded-md border"><Table><TableHeader><TableRow><TableHead>Source field</TableHead><TableHead>Value</TableHead></TableRow></TableHeader><TableBody>{sourceRows.map(([key, value]) => <TableRow key={key}><TableCell className="w-64 font-medium">{key}</TableCell><TableCell className="max-w-xl whitespace-pre-wrap break-words">{typeof value === "object" ? JSON.stringify(value) : String(value ?? "-")}</TableCell></TableRow>)}{!sourceRows.length && <TableRow><TableCell colSpan={2} className="py-8 text-center text-muted-foreground">No raw source fields are stored for this product.</TableCell></TableRow>}</TableBody></Table></div></>)}</TabsContent>
     </Tabs><ProductEditorDialog open={editorOpen} onOpenChange={setEditorOpen} initialTab={productTab === "content" ? "content" : productTab === "pricing" || productTab === "inventory" ? "pricing" : productTab === "shipping" ? "shipping" : productTab === "source" ? "audit" : "basics"} draft={draft} setDraft={setDraft} saving={saving} onSave={save} />
+    {ebayChannel ? <ProductEbaySettingsDialog open={ebayEditorOpen} onOpenChange={setEbayEditorOpen} product={product} channel={ebayChannel} onUpdated={onUpdated} /> : null}
   </div>
 }
 
 function ProductReadinessPanel({ score, checks, discontinued }: { score: number; checks: ReadonlyArray<readonly [string, boolean]>; discontinued: boolean }) { const missing = checks.filter(([, ready]) => !ready).map(([label]) => label); const label = discontinued ? "Blocked" : score === 100 ? "Ready" : `${missing.length} item${missing.length === 1 ? "" : "s"} need attention`; return <Card className="order-first lg:absolute lg:right-5 lg:top-[72px] lg:z-10 lg:w-[44%]"><CardContent className="grid gap-3 p-4"><div className="flex items-center justify-between gap-3"><div><p className="text-sm font-semibold">Product readiness</p><p className="text-xs text-muted-foreground">{discontinued ? "Discontinued products cannot be published." : label}</p></div><Badge variant={discontinued ? "destructive" : score === 100 ? "success" : "warning"}>{discontinued ? "Blocked" : `${score}%`}</Badge></div><Progress value={score} className="h-2" /><div className="grid grid-cols-3 gap-x-3 gap-y-2 text-xs">{checks.map(([label, ready]) => <div key={label} className={ready ? "text-foreground" : "text-muted-foreground"}><span className={ready ? "mr-1 text-emerald-600" : "mr-1 text-amber-600"}>{ready ? "Ready" : "Needs"}</span>{label}</div>)}</div></CardContent></Card> }
 
-function ProductChannelPanel({ channel, product, section, values }: { channel: ChannelConnection; product: ProductItem; section: (title: string, description: string, children: React.ReactNode) => React.ReactNode; values: (rows: Array<[string, string]>) => React.ReactNode }) {
+function ProductChannelPanel({ channel, product, section, values, onEditEbay }: { channel: ChannelConnection; product: ProductItem; section: (title: string, description: string, children: React.ReactNode) => React.ReactNode; values: (rows: Array<[string, string]>) => React.ReactNode; onEditEbay?: () => void }) {
   const name = String(channel.name || "Channel")
   const kind = name.toLowerCase()
   if (kind === "shopify") {
@@ -4065,21 +4096,25 @@ function ProductChannelPanel({ channel, product, section, values }: { channel: C
   if (kind === "ebay") {
     const ebay = product.ebayListing || {}
     const settings = channel.settings || {}
+    const overrides = ebay.settings || {}
+    const usesChannelDefaults = overrides.useChannelDefaults !== false
+    const effectiveSettings: Record<string, unknown> = usesChannelDefaults ? { ...settings } : { ...settings, ...overrides }
+    const configuredValue = (listingKey: keyof NonNullable<ProductItem["ebayListing"]>, settingKey: string, fallback = "") => usesChannelDefaults ? effectiveSettings[settingKey] ?? fallback : ebay[listingKey] ?? effectiveSettings[settingKey] ?? fallback
     const policyLabel = (entries: Array<{ id?: string; name?: string; description?: string }> | undefined, id: unknown, fallback: string) => {
       const value = String(id || "").trim()
       if (!value) return fallback
       const match = (entries || []).find((entry) => String(entry.id || "") === value)
       return match ? `${match.name || value}${match.description ? ` - ${match.description}` : ""}` : value
     }
-    const locationKey = String(ebay.merchantLocationKey || settings.ebayMerchantLocationKey || "").trim()
+    const locationKey = String(configuredValue("merchantLocationKey", "ebayMerchantLocationKey") || "").trim()
     const location = (settings.ebayMerchantLocations || []).find((entry) => String(entry.merchantLocationKey || "") === locationKey)
-    const paymentPolicyId = ebay.paymentPolicyId || settings.ebayPaymentPolicyId
-    const returnPolicyId = ebay.returnPolicyId || settings.ebayReturnPolicyId
-    const fulfillmentPolicyId = ebay.fulfillmentPolicyId || settings.ebayFulfillmentPolicyId
-    const listingRows: Array<[string, string]> = [["Status", ebay.status || "Not listed"], ["Listing ID", ebay.listingId || "Not linked"], ["Offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", ebay.marketplaceId || "EBAY_US"], ["Merchant location", ebay.merchantLocationKey || ""], ["Category ID", ebay.categoryId || ""], ["Category path", ebay.categoryPath || ""], ["Taxonomy version", ebay.taxonomyVersion || ""], ["Condition", ebay.condition || product.condition || "New"], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
-    const commerceRows: Array<[string, string]> = [["Listing price", ebay.price === undefined ? "" : `${ebay.currency || "USD"} ${moneyLabel(ebay.price)}`], ["Listing quantity", numberLabel(ebay.quantity)], ["Best offer", ebay.bestOfferEnabled ? "Enabled" : "Off"], ["DataPlus price", moneyLabel(product.websitePrice ?? product.price)], ["Available quantity", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]
-    const policyRows: Array<[string, string]> = [["Merchant location", location ? `${location.name || locationKey}${location.status ? ` / ${location.status}` : ""}` : locationKey || "Not selected"], ["Payment policy", policyLabel(settings.ebayPaymentPolicies, paymentPolicyId, "Not selected")], ["Return policy", policyLabel(settings.ebayReturnPolicies, returnPolicyId, "Not selected")], ["Shipping / fulfillment policy", policyLabel(settings.ebayFulfillmentPolicies, fulfillmentPolicyId, "Not selected")], ["Default condition", String(ebay.condition || settings.ebayDefaultCondition || "NEW")], ["Description source", String(settings.ebayDescriptionSource || "longDescription")], ["Maximum images", numberLabel(settings.ebayMaxImages ?? 12)]]
-    return <>{section("eBay listing connection", "Offer, listing, and category values associated with this SKU.", values(listingRows))}{section("eBay commercial settings", "Product-level listing quantity and price values.", values(commerceRows))}{section("eBay policy bundle", "Imported seller-account policies that will be used when this SKU is created or updated on eBay.", values(policyRows))}</>
+    const paymentPolicyId = configuredValue("paymentPolicyId", "ebayPaymentPolicyId")
+    const returnPolicyId = configuredValue("returnPolicyId", "ebayReturnPolicyId")
+    const fulfillmentPolicyId = configuredValue("fulfillmentPolicyId", "ebayFulfillmentPolicyId")
+    const listingRows: Array<[string, string]> = [["Settings source", usesChannelDefaults ? "Channel defaults" : "SKU override"], ["Status", ebay.status || "Not listed"], ["Listing ID", ebay.listingId || "Not linked"], ["Offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", String(configuredValue("marketplaceId", "ebayMarketplaceId", "EBAY_US"))], ["Merchant location", locationKey], ["Category ID", ebay.categoryId || String(overrides.ebayCategoryId || "")], ["Category path", ebay.categoryPath || String(overrides.ebayCategoryPath || "")], ["Taxonomy version", ebay.taxonomyVersion || String(overrides.ebayTaxonomyVersion || "")], ["Condition", String(configuredValue("condition", "ebayDefaultCondition", product.condition || "New"))], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
+    const commerceRows: Array<[string, string]> = [["Listing price", ebay.price === undefined ? "Not listed" : `${ebay.currency || configuredValue("currency", "ebayCurrency", "USD")} ${moneyLabel(ebay.price)}`], ["Listing quantity", ebay.quantity === undefined ? "Not listed" : numberLabel(ebay.quantity)], ["Price rule", String(effectiveSettings.ebayPricingMode || "cost-plus")], ["Markup", `${numberLabel(Number(effectiveSettings.ebayPriceMarkupPercent || 0))}%`], ["Minimum margin", `${numberLabel(Number(effectiveSettings.ebayMinMarginPercent || 0))}%`], ["Minimum price", moneyLabel(Number(effectiveSettings.ebayMinimumPrice || 0))], ["Rounding", String(effectiveSettings.ebayRoundingRule || "none")], ["Quantity rule", String(effectiveSettings.ebayQuantityMode || "available")], ["Best offer", configuredValue("bestOfferEnabled", "ebayBestOfferEnabled") ? "Enabled" : "Off"], ["Auto publish", effectiveSettings.ebayAutoPublish ? "Enabled" : "Off"], ["Require image", effectiveSettings.ebayRequireImage === false ? "Off" : "Enabled"], ["DataPlus price", moneyLabel(product.websitePrice ?? product.price)], ["Available quantity", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]
+    const policyRows: Array<[string, string]> = [["Merchant location", location ? `${location.name || locationKey}${location.status ? ` / ${location.status}` : ""}` : locationKey || "Not selected"], ["Payment policy", policyLabel(settings.ebayPaymentPolicies, paymentPolicyId, "Not selected")], ["Return policy", policyLabel(settings.ebayReturnPolicies, returnPolicyId, "Not selected")], ["Shipping / fulfillment policy", policyLabel(settings.ebayFulfillmentPolicies, fulfillmentPolicyId, "Not selected")], ["Description source", String(effectiveSettings.ebayDescriptionSource || "longDescription")], ["Maximum images", numberLabel(Number(effectiveSettings.ebayMaxImages ?? 12))]]
+    return <><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 px-4 py-3"><div className="flex flex-wrap items-center gap-2"><Badge variant={usesChannelDefaults ? "outline" : "default"}>{usesChannelDefaults ? "Using eBay defaults" : "SKU override"}</Badge><p className="text-sm text-muted-foreground">Defaults are managed in the eBay channel. This SKU can override them when needed.</p></div>{onEditEbay ? <Button type="button" size="sm" variant="outline" onClick={onEditEbay}><Pencil className="size-4" /> Edit eBay settings</Button> : null}</div>{section("eBay listing connection", "Offer, listing, and category values associated with this SKU.", values(listingRows))}{section("eBay commercial settings", "Product-level pricing, quantity, and publishing behavior used for this listing.", values(commerceRows))}{section("eBay policy bundle", "Imported seller-account policies that will be used when this SKU is created or updated on eBay.", values(policyRows))}</>
   }
   const shadowRows = (product.shadowSkus || []).filter((shadow) => String(shadow.marketplace || shadow.company || "").toLowerCase() === kind)
   const channelRows: Array<[string, string]> = [["Connection", channel.connected ? "Enabled" : "Disabled"], ["Channel status", channel.status || "Active"], ["Default status", String(channel.settings?.defaultShadowStatus || "Draft")], ["Default handling days", String(channel.settings?.defaultHandlingTimeDays ?? "")], ["Default safety quantity", String(channel.settings?.defaultSafetyQty ?? "")], ["Default max sellable qty", String(channel.settings?.defaultMaxSellableQty ?? "")], ["Default shipping profile", String(channel.settings?.defaultShippingProfile || "")], ["Default shipping service", String(channel.settings?.defaultShippingService || "")]]
@@ -4131,6 +4166,120 @@ function ProductEditorDialog({ open, onOpenChange, initialTab, draft, setDraft, 
   const set = (key: string, value: string | boolean) => setDraft((current) => ({ ...current, [key]: value }))
   const input = (label: string, key: string, type = "text") => <div className="grid gap-1.5"><Label>{label}</Label><Input type={type} value={String(draft[key] ?? "")} onChange={(event) => set(key, event.target.value)} /></div>
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="flex max-h-[92vh] min-h-[620px] flex-col overflow-hidden sm:max-w-5xl"><DialogHeader><DialogTitle>Edit product</DialogTitle><DialogDescription>Update the catalog record in focused sections. Channel-specific values remain in their channel tabs.</DialogDescription></DialogHeader><Tabs value={editorTab} onValueChange={(value) => setEditorTab(value as typeof editorTab)} className="flex min-h-0 flex-1 flex-col"><div className="overflow-x-auto border-y bg-muted/20 px-1"><TabsList className="h-auto min-w-max bg-transparent p-1"><TabsTrigger value="basics">Basics</TabsTrigger><TabsTrigger value="content">Content</TabsTrigger><TabsTrigger value="pricing">Pricing & inventory</TabsTrigger><TabsTrigger value="shipping">Shipping</TabsTrigger><TabsTrigger value="media">Media</TabsTrigger><TabsTrigger value="audit">Audit fields</TabsTrigger></TabsList></div><div className="min-h-0 flex-1 overflow-y-auto py-5 pr-2"><TabsContent value="basics" className="m-0 grid gap-5"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{input("Product title", "marketplaceTitle")}{input("Brand", "brand")}{input("Manufacturer", "manufacturer")}{input("Manufacturer part number", "mfrPartNumber")}{input("Supplier", "supplier")}{input("Supplier code", "supplierCode")}{input("Vendor SKU", "vendorSku")}<MainCategoryPicker value={String(draft.mainCategory ?? "")} onValueChange={(value) => set("mainCategory", value)} />{input("Source category", "sourceCategory")}{input("Vendor category", "vendorCategory")}{input("Condition", "condition")}{input("Status", "status")}</div><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{input("UPC / barcode", "barcode")}{input("External ID", "externalId")}{input("UNSPSC", "unspsc")}{input("UOM", "uom")}{input("UOM quantity", "uomQty", "number")}{input("Tags (comma separated)", "tags")}</div><div className="grid gap-4 rounded-md border p-4 sm:grid-cols-2"><ToggleRow label="Product active" description="Controls whether the catalog record is active." checked={Boolean(draft.active)} disabled={false} onCheckedChange={(checked) => set("active", checked)} /><ToggleRow label="Category verified" description="Set automatically when an approved main category is saved." checked={Boolean(draft.categoryVerified)} disabled={true} onCheckedChange={() => undefined} /></div></TabsContent><TabsContent value="content" className="m-0 grid gap-5"><div className="grid gap-1.5"><Label>Short description</Label><Textarea rows={4} value={String(draft.shortDescription ?? "")} onChange={(event) => set("shortDescription", event.target.value)} /></div><div className="grid gap-1.5"><Label>Long description</Label><Textarea rows={10} value={String(draft.longDescription ?? "")} onChange={(event) => set("longDescription", event.target.value)} /></div><div className="grid gap-1.5"><Label>Bullet points (one per line)</Label><Textarea rows={6} value={String(draft.bulletPoints ?? "")} onChange={(event) => set("bulletPoints", event.target.value)} /></div><div className="grid gap-3 sm:grid-cols-2">{input("SEO keywords", "seoKeywords")}{input("Wildcard search", "wildcardSearch")}</div></TabsContent><TabsContent value="pricing" className="m-0 grid gap-5"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{input("Website price", "websitePrice", "number")}{input("Source cost", "cost", "number")}{input("FOB price", "fobPrice", "number")}{input("List / MSRP", "listPrice", "number")}</div><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{input("On-hand quantity", "qty", "number")}{input("Reserved quantity", "reserved", "number")}{input("Reorder point", "reorderPoint", "number")}{input("Minimum quantity", "minQuantity", "number")}{input("Quantity increments", "quantityIncrements", "number")}{input("Lead time", "leadTime", "number")}</div><p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Vendor and channel pricing rules still determine calculated channel prices. Manual values here update the catalog inputs used by those rules.</p></TabsContent><TabsContent value="shipping" className="m-0 grid gap-5"><div className="grid gap-3"><p className="text-sm font-medium">Item dimensions</p><div className="grid gap-3 sm:grid-cols-4">{input("Length (in)", "itemLength", "number")}{input("Width (in)", "itemWidth", "number")}{input("Height (in)", "itemHeight", "number")}{input("Weight (lb)", "itemWeight", "number")}</div></div><div className="grid gap-3"><p className="text-sm font-medium">Package information</p><div className="grid gap-3 sm:grid-cols-4">{input("Package Length (in)", "packageLength", "number")}{input("Package Width (in)", "packageWidth", "number")}{input("Package Height (in)", "packageHeight", "number")}{input("Package Weight (lb)", "packageWeight", "number")}</div></div><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{input("Dimensional weight (lb)", "dimensionalWeight", "number")}{input("Country of origin", "countryOfOrigin")}{input("SDS URL", "sdsUrl")}</div><ToggleRow label="Hazardous product" description="Marks this record for shipping and compliance review." checked={Boolean(draft.hazardous)} disabled={false} onCheckedChange={(checked) => set("hazardous", checked)} /></TabsContent><TabsContent value="media" className="m-0 grid gap-5"><div className="grid gap-1.5">{input("Default image URL", "defaultImage")}<Label>Image URLs (one per line)</Label><Textarea rows={10} value={String(draft.images ?? "")} onChange={(event) => set("images", event.target.value)} placeholder="https://..." /></div></TabsContent><TabsContent value="audit" className="m-0 grid gap-5"><p className="text-sm text-muted-foreground">These fields preserve the latest supplier feed and price audit details when they need correction.</p><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{input("Stock status", "stockStatus")}{input("Stock updated at", "stockUpdatedAt")}{input("Last price update at", "lastPricesUpdateAt")}{input("Last price updated by", "lastPricesUpdateBy")}</div></TabsContent></div></Tabs><DialogFooter className="border-t pt-4"><Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button onClick={onSave} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save product</Button></DialogFooter></DialogContent></Dialog>
+}
+
+type EbayProductSettingsDraft = Record<string, string | boolean>
+
+function ProductEbaySettingsDialog({ open, onOpenChange, product, channel, onUpdated }: { open: boolean; onOpenChange: (open: boolean) => void; product: ProductItem; channel: ChannelConnection; onUpdated: (product: ProductItem) => void }) {
+  const [draft, setDraft] = useState<EbayProductSettingsDraft>({ useChannelDefaults: true })
+  const [saving, setSaving] = useState(false)
+  const ebay = product.ebayListing || {}
+  const channelSettings = channel.settings || {}
+  const overrides = ebay.settings || {}
+  const locations = Array.isArray(channelSettings.ebayMerchantLocations) ? channelSettings.ebayMerchantLocations : []
+  const paymentPolicies = Array.isArray(channelSettings.ebayPaymentPolicies) ? channelSettings.ebayPaymentPolicies : []
+  const returnPolicies = Array.isArray(channelSettings.ebayReturnPolicies) ? channelSettings.ebayReturnPolicies : []
+  const fulfillmentPolicies = Array.isArray(channelSettings.ebayFulfillmentPolicies) ? channelSettings.ebayFulfillmentPolicies : []
+
+  useEffect(() => {
+    if (!open) return
+    const useChannelDefaults = overrides.useChannelDefaults !== false
+    const value = (key: string, fallback: unknown = "") => useChannelDefaults ? channelSettings[key] ?? fallback : overrides[key] ?? channelSettings[key] ?? fallback
+    const storedSpecifics = overrides.ebayItemSpecifics ?? (Object.keys(ebay.itemSpecifics || {}).length ? JSON.stringify(ebay.itemSpecifics, null, 2) : "")
+    setDraft({
+      useChannelDefaults,
+      ebayMarketplaceId: String(value("ebayMarketplaceId", "EBAY_US")),
+      ebayMerchantLocationKey: String(value("ebayMerchantLocationKey", "")),
+      ebayPaymentPolicyId: String(value("ebayPaymentPolicyId", "")),
+      ebayReturnPolicyId: String(value("ebayReturnPolicyId", "")),
+      ebayFulfillmentPolicyId: String(value("ebayFulfillmentPolicyId", "")),
+      ebayDefaultCondition: String(value("ebayDefaultCondition", ebay.condition || "NEW")),
+      ebayCurrency: String(value("ebayCurrency", ebay.currency || "USD")),
+      ebayListingFormat: String(value("ebayListingFormat", "FIXED_PRICE")),
+      ebayQuantityMode: String(value("ebayQuantityMode", "available")),
+      ebayDescriptionSource: String(value("ebayDescriptionSource", "longDescription")),
+      ebayPricingMode: String(value("ebayPricingMode", "cost-plus")),
+      ebayRoundingRule: String(value("ebayRoundingRule", "none")),
+      ebayMaxImages: String(value("ebayMaxImages", 12)),
+      ebayPriceMarkupPercent: String(value("ebayPriceMarkupPercent", 0)),
+      ebayMinMarginPercent: String(value("ebayMinMarginPercent", 0)),
+      ebayMinimumPrice: String(value("ebayMinimumPrice", 0)),
+      ebayManualPrice: String(overrides.ebayManualPrice ?? ""),
+      ebayQuantityOverride: String(overrides.ebayQuantityOverride ?? ""),
+      ebayAutoPublish: value("ebayAutoPublish", false) === true || String(value("ebayAutoPublish", false)).toLowerCase() === "true",
+      ebayRequireImage: value("ebayRequireImage", true) !== false && String(value("ebayRequireImage", true)).toLowerCase() !== "false",
+      ebayBestOfferEnabled: value("ebayBestOfferEnabled", false) === true || String(value("ebayBestOfferEnabled", false)).toLowerCase() === "true",
+      ebayCategoryId: String(overrides.ebayCategoryId ?? ebay.categoryId ?? ""),
+      ebayCategoryPath: String(overrides.ebayCategoryPath ?? ebay.categoryPath ?? ""),
+      ebayTaxonomyVersion: String(overrides.ebayTaxonomyVersion ?? ebay.taxonomyVersion ?? ""),
+      ebayItemSpecifics: String(storedSpecifics || ""),
+    })
+  }, [open, product, channel, ebay, overrides, channelSettings])
+
+  const useChannelDefaults = draft.useChannelDefaults !== false
+  const set = (key: string, value: string | boolean) => setDraft((current) => ({ ...current, [key]: value }))
+  const text = (key: string) => String(draft[key] ?? "")
+  const input = (label: string, key: string, type = "text", disabled = useChannelDefaults, description = "") => <div className="grid gap-1.5"><Label htmlFor={`ebay-${key}`}>{label}</Label><Input id={`ebay-${key}`} type={type} min={type === "number" ? 0 : undefined} step={type === "number" ? "0.01" : undefined} disabled={disabled} value={text(key)} onChange={(event) => set(key, event.target.value)} />{description ? <p className="text-xs text-muted-foreground">{description}</p> : null}</div>
+  const select = (label: string, key: string, options: Array<{ value: string; label: string }>, disabled = useChannelDefaults, description = "") => {
+    const selected = text(key)
+    const hasSelected = options.some((option) => option.value === selected)
+    const available = selected && !hasSelected ? [{ value: selected, label: selected }, ...options] : options
+    return <div className="grid gap-1.5"><Label>{label}</Label><Select disabled={disabled} value={selected || "__not_set"} onValueChange={(value) => set(key, value === "__not_set" ? "" : value)}><SelectTrigger><SelectValue placeholder="Not selected" /></SelectTrigger><SelectContent><SelectItem value="__not_set">Not selected</SelectItem>{available.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>{description ? <p className="text-xs text-muted-foreground">{description}</p> : null}</div>
+  }
+  const toggle = (label: string, description: string, key: string, disabled = useChannelDefaults) => <div className="rounded-md border p-3"><ToggleRow label={label} description={description} checked={draft[key] === true} disabled={disabled} onCheckedChange={(checked) => set(key, checked)} /></div>
+  const save = async () => {
+    setSaving(true)
+    try {
+      const ebaySettings = {
+        useChannelDefaults,
+        ebayMarketplaceId: text("ebayMarketplaceId"),
+        ebayMerchantLocationKey: text("ebayMerchantLocationKey"),
+        ebayPaymentPolicyId: text("ebayPaymentPolicyId"),
+        ebayReturnPolicyId: text("ebayReturnPolicyId"),
+        ebayFulfillmentPolicyId: text("ebayFulfillmentPolicyId"),
+        ebayDefaultCondition: text("ebayDefaultCondition"),
+        ebayCurrency: text("ebayCurrency"),
+        ebayListingFormat: text("ebayListingFormat"),
+        ebayQuantityMode: text("ebayQuantityMode"),
+        ebayDescriptionSource: text("ebayDescriptionSource"),
+        ebayPricingMode: text("ebayPricingMode"),
+        ebayRoundingRule: text("ebayRoundingRule"),
+        ebayMaxImages: text("ebayMaxImages"),
+        ebayPriceMarkupPercent: text("ebayPriceMarkupPercent"),
+        ebayMinMarginPercent: text("ebayMinMarginPercent"),
+        ebayMinimumPrice: text("ebayMinimumPrice"),
+        ebayManualPrice: text("ebayManualPrice"),
+        ebayQuantityOverride: text("ebayQuantityOverride"),
+        ebayAutoPublish: draft.ebayAutoPublish === true,
+        ebayRequireImage: draft.ebayRequireImage === true,
+        ebayBestOfferEnabled: draft.ebayBestOfferEnabled === true,
+        ebayCategoryId: text("ebayCategoryId"),
+        ebayCategoryPath: text("ebayCategoryPath"),
+        ebayTaxonomyVersion: text("ebayTaxonomyVersion"),
+        ebayItemSpecifics: text("ebayItemSpecifics"),
+      }
+      const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.id || product.sku || "")}/ebay/listing`, {
+        method: "POST",
+        body: JSON.stringify({
+          action: "draft",
+          ebaySettings,
+          categoryId: ebaySettings.ebayCategoryId,
+          categoryPath: ebaySettings.ebayCategoryPath,
+          taxonomyVersion: ebaySettings.ebayTaxonomyVersion,
+          itemSpecifics: ebaySettings.ebayItemSpecifics,
+        }),
+      })
+      onUpdated(result.item)
+      onOpenChange(false)
+      toast.success(useChannelDefaults ? "eBay channel defaults are now linked to this SKU." : "eBay SKU override saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save eBay SKU settings.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="flex h-[min(92vh,940px)] max-w-[calc(100vw-1rem)] flex-col overflow-hidden p-0 sm:max-w-6xl"><DialogHeader className="border-b px-6 py-5"><div className="flex flex-wrap items-center justify-between gap-3 pr-8"><div><DialogTitle>eBay listing settings</DialogTitle><DialogDescription className="mt-1">Configure eBay behavior for <span className="font-mono">{product.sku}</span>. Saving this stores configuration only; it does not create or publish an eBay listing.</DialogDescription></div><Badge variant={useChannelDefaults ? "outline" : "default"}>{useChannelDefaults ? "Using channel defaults" : "SKU override"}</Badge></div></DialogHeader><Tabs defaultValue="inheritance" className="flex min-h-0 flex-1 flex-col"><div className="overflow-x-auto border-b bg-muted/20 px-4"><TabsList className="h-auto min-w-max bg-transparent p-1"><TabsTrigger value="inheritance">Inheritance</TabsTrigger><TabsTrigger value="commercial">Commercial</TabsTrigger><TabsTrigger value="policies">Policies & fulfillment</TabsTrigger><TabsTrigger value="category">Category & specifics</TabsTrigger></TabsList></div><div className="min-h-0 flex-1 overflow-y-auto px-6 py-5"><TabsContent value="inheritance" className="m-0 grid gap-5"><Alert><Settings className="size-4" /><AlertTitle>{useChannelDefaults ? "This SKU follows the eBay channel defaults" : "This SKU has its own eBay override"}</AlertTitle><AlertDescription>Channel defaults stay centralized in Channels &gt; eBay &gt; Rules. Turn off inheritance only when this SKU needs different policies, fulfillment, price logic, or publishing behavior. Category and item specifics remain SKU-specific either way.</AlertDescription></Alert><div className="rounded-lg border bg-muted/20 p-4"><ToggleRow label="Use eBay channel defaults" description="When enabled, future changes to eBay channel rules automatically apply to this SKU." checked={useChannelDefaults} disabled={false} onCheckedChange={(checked) => set("useChannelDefaults", checked)} /></div><div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">{input("Marketplace", "ebayMarketplaceId")}{select("Condition", "ebayDefaultCondition", [{ value: "NEW", label: "New" }, { value: "LIKE_NEW", label: "Like new" }, { value: "NEW_WITH_DEFECTS", label: "New with defects" }, { value: "USED_EXCELLENT", label: "Used - excellent" }, { value: "USED_VERY_GOOD", label: "Used - very good" }, { value: "USED_GOOD", label: "Used - good" }, { value: "USED_ACCEPTABLE", label: "Used - acceptable" }, { value: "FOR_PARTS_OR_NOT_WORKING", label: "For parts or not working" }])}{input("Currency", "ebayCurrency")}</div></TabsContent><TabsContent value="commercial" className="m-0 grid gap-5"><div className={useChannelDefaults ? "grid gap-5 opacity-75" : "grid gap-5"}><div><h3 className="text-sm font-semibold">Pricing</h3><p className="mt-1 text-sm text-muted-foreground">These controls calculate the offer price from the SKU's sell-unit cost and product price.</p></div><div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">{select("Price rule", "ebayPricingMode", [{ value: "cost-plus", label: "Cost plus markup" }, { value: "product-price", label: "Use product price" }, { value: "higher-of-product-or-cost", label: "Higher of product or cost" }])}{input("Markup percent", "ebayPriceMarkupPercent", "number")}{input("Minimum margin percent", "ebayMinMarginPercent", "number")}{input("Minimum price", "ebayMinimumPrice", "number")}{input("Manual price override", "ebayManualPrice", "number", useChannelDefaults, "Optional. When set, this SKU uses this price instead of the formula.")}{select("Rounding", "ebayRoundingRule", [{ value: "none", label: "Nearest cent" }, { value: "nearest .99", label: "Nearest .99" }, { value: "nearest .95", label: "Nearest .95" }, { value: "round up", label: "Round up" }])}</div><Separator /><div><h3 className="text-sm font-semibold">Listing inventory and content</h3><p className="mt-1 text-sm text-muted-foreground">Choose the inventory source and the description DataPlus sends to eBay.</p></div><div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">{select("Quantity source", "ebayQuantityMode", [{ value: "available", label: "Available inventory" }, { value: "qty", label: "On-hand quantity" }, { value: "stockQty", label: "Supplier stock quantity" }])}{input("Quantity override", "ebayQuantityOverride", "number", useChannelDefaults, "Optional fixed eBay quantity for this SKU.")}{select("Description source", "ebayDescriptionSource", [{ value: "longDescription", label: "Long description" }, { value: "shortDescription", label: "Short description" }, { value: "title", label: "Product title" }])}{input("Maximum images", "ebayMaxImages", "number")}</div><div className="grid gap-3 md:grid-cols-3">{toggle("Auto publish", "Allows scheduled eBay workflows to publish eligible offers.", "ebayAutoPublish")}{toggle("Require an image", "Block listing readiness when the SKU has no product image.", "ebayRequireImage")}{toggle("Best offer", "Enable eBay best-offer terms for this SKU.", "ebayBestOfferEnabled")}</div></div></TabsContent><TabsContent value="policies" className="m-0 grid gap-5"><div className={useChannelDefaults ? "grid gap-5 opacity-75" : "grid gap-5"}><Alert><Truck className="size-4" /><AlertTitle>Seller policy bundle</AlertTitle><AlertDescription>These seller-account policies are imported from eBay in the channel settings. The selected set is sent with each offer.</AlertDescription></Alert><div className="grid gap-4 md:grid-cols-2">{select("Merchant location", "ebayMerchantLocationKey", locations.map((location) => ({ value: String(location.merchantLocationKey || ""), label: `${location.name || location.merchantLocationKey || "Location"}${location.status ? ` - ${location.status}` : ""}` })).filter((option) => option.value))}{select("Payment policy", "ebayPaymentPolicyId", paymentPolicies.map((policy) => ({ value: String(policy.id || ""), label: `${policy.name || policy.id || "Policy"}${policy.description ? ` - ${policy.description}` : ""}` })).filter((option) => option.value))}{select("Return policy", "ebayReturnPolicyId", returnPolicies.map((policy) => ({ value: String(policy.id || ""), label: `${policy.name || policy.id || "Policy"}${policy.description ? ` - ${policy.description}` : ""}` })).filter((option) => option.value))}{select("Fulfillment policy", "ebayFulfillmentPolicyId", fulfillmentPolicies.map((policy) => ({ value: String(policy.id || ""), label: `${policy.name || policy.id || "Policy"}${policy.description ? ` - ${policy.description}` : ""}` })).filter((option) => option.value))}{select("Listing format", "ebayListingFormat", [{ value: "FIXED_PRICE", label: "Fixed price" }])}</div></div></TabsContent><TabsContent value="category" className="m-0 grid gap-5"><Alert><Database className="size-4" /><AlertTitle>SKU-specific eBay category</AlertTitle><AlertDescription>These mapping values remain specific to this SKU. They are used in addition to the master category mapping and can be changed whenever eBay's taxonomy needs a correction.</AlertDescription></Alert><div className="grid gap-4 md:grid-cols-2"><div className="md:col-span-2">{input("eBay category ID", "ebayCategoryId", "text", false, "Use the eBay category ID selected for this individual SKU.")}</div>{input("eBay category path", "ebayCategoryPath", "text", false)}{input("Taxonomy version / tree ID", "ebayTaxonomyVersion", "text", false)}</div><div className="grid gap-1.5"><Label htmlFor="ebay-item-specifics">Item specifics (JSON)</Label><Textarea id="ebay-item-specifics" rows={12} value={text("ebayItemSpecifics")} onChange={(event) => set("ebayItemSpecifics", event.target.value)} placeholder={'{\n  "Brand": ["Example"],\n  "MPN": ["12345"]\n}'} /><p className="text-xs text-muted-foreground">DataPlus retains category-required specifics and enriches missing values from catalog data when possible.</p></div></TabsContent></div></Tabs><DialogFooter className="border-t px-6 py-4"><Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button><Button onClick={() => void save()} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save eBay settings</Button></DialogFooter></DialogContent></Dialog>
 }
 
 function MeasurementInputs({ prefix, draft, disabled, onChange }: { prefix: "item" | "package"; draft: Record<string, string | number | boolean>; disabled: boolean; onChange: (key: string, value: string) => void }) {

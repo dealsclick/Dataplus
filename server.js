@@ -14642,7 +14642,9 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
             ready += 1;
             results.push({ sku, status: readiness.live ? "already_live" : "ready", offer_id: item.ebayListing?.offerId || "", listing_id: item.ebayListing?.listingId || "", price: readiness.price, quantity: readiness.quantity, merchant_location: readiness.config.merchantLocationKey, payment_policy: readiness.config.paymentPolicyId, return_policy: readiness.config.returnPolicyId, fulfillment_policy: readiness.config.fulfillmentPolicyId });
           } else {
-            const result = await createOrUpdateEbayListing(workDb, item, { ...payload, useChannelPricing: true }, { publish: payload.publish !== false });
+            // Let the SKU resolve its own eBay inheritance/override profile. Bulk-level
+            // payload fields still win when the operator explicitly supplied them.
+            const result = await createOrUpdateEbayListing(workDb, item, payload, { publish: payload.publish !== false });
             touched.push(item);
             launched += 1;
             results.push({ sku, status: result.config?.listingId ? "live" : "offer", offer_id: result.config?.offerId || "", listing_id: result.config?.listingId || "", listing_url: result.config?.listingUrl || "", price: result.config?.price || readiness.price, quantity: result.config?.quantity || readiness.quantity, merchant_location: result.config?.merchantLocationKey || "", payment_policy: result.config?.paymentPolicyId || "", return_policy: result.config?.returnPolicyId || "", fulfillment_policy: result.config?.fulfillmentPolicyId || "" });
@@ -15153,6 +15155,7 @@ function publicConnection(connection = {}) {
 
 function publicEbayListing(listing = null) {
   if (!listing || typeof listing !== "object") return null;
+  const settings = normalizeEbayProductSettings(listing);
   return {
     status: listing.status || "",
     offerId: listing.offerId || "",
@@ -15171,6 +15174,8 @@ function publicEbayListing(listing = null) {
     returnPolicyId: listing.returnPolicyId || "",
     fulfillmentPolicyId: listing.fulfillmentPolicyId || "",
     bestOfferEnabled: Boolean(listing.bestOfferEnabled),
+    settings,
+    itemSpecifics: listing.aspects && typeof listing.aspects === "object" ? listing.aspects : {},
     updatedAt: listing.updatedAt || "",
     attributesSyncedAt: listing.attributesSyncedAt || ""
   };
@@ -17177,6 +17182,86 @@ function ebayChannelSettings(db = {}) {
   return { ...DEFAULT_CHANNEL_SETTINGS, ...(channel?.settings || {}) };
 }
 
+const EBAY_PRODUCT_SETTING_STRING_FIELDS = [
+  "ebayMarketplaceId",
+  "ebayMerchantLocationKey",
+  "ebayPaymentPolicyId",
+  "ebayReturnPolicyId",
+  "ebayFulfillmentPolicyId",
+  "ebayDefaultCondition",
+  "ebayCurrency",
+  "ebayListingFormat",
+  "ebayQuantityMode",
+  "ebayDescriptionSource",
+  "ebayPricingMode",
+  "ebayRoundingRule",
+  "ebayCategoryId",
+  "ebayCategoryPath",
+  "ebayTaxonomyVersion",
+  "ebayItemSpecifics"
+];
+
+const EBAY_PRODUCT_SETTING_NUMBER_FIELDS = [
+  "ebayMaxImages",
+  "ebayPriceMarkupPercent",
+  "ebayMinMarginPercent",
+  "ebayMinimumPrice",
+  "ebayManualPrice",
+  "ebayQuantityOverride"
+];
+
+const EBAY_PRODUCT_SETTING_BOOLEAN_FIELDS = [
+  "ebayAutoPublish",
+  "ebayRequireImage",
+  "ebayBestOfferEnabled"
+];
+
+function ebayBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return value === true || String(value).trim().toLowerCase() === "true";
+}
+
+function normalizeEbayProductSettings(listing = {}, incoming = {}) {
+  const stored = listing?.settings && typeof listing.settings === "object" && !Array.isArray(listing.settings)
+    ? listing.settings
+    : {};
+  const requested = incoming && typeof incoming === "object" && !Array.isArray(incoming) ? incoming : {};
+  const source = { ...stored, ...requested };
+  const settings = {
+    useChannelDefaults: ebayBoolean(source.useChannelDefaults, true)
+  };
+
+  for (const field of EBAY_PRODUCT_SETTING_STRING_FIELDS) {
+    if (source[field] !== undefined) settings[field] = String(source[field] ?? "").trim();
+  }
+  for (const field of EBAY_PRODUCT_SETTING_NUMBER_FIELDS) {
+    if (source[field] === undefined) continue;
+    if (source[field] === "" || source[field] === null) {
+      settings[field] = "";
+      continue;
+    }
+    const value = Number(source[field]);
+    settings[field] = Number.isFinite(value) ? value : "";
+  }
+  for (const field of EBAY_PRODUCT_SETTING_BOOLEAN_FIELDS) {
+    if (source[field] !== undefined) settings[field] = ebayBoolean(source[field]);
+  }
+  return settings;
+}
+
+function ebayEffectiveSettings(db = {}, item = {}, body = {}) {
+  const listing = item?.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const productSettings = normalizeEbayProductSettings(listing, body.ebaySettings);
+  const channelSettings = ebayChannelSettings(db);
+  return {
+    channelSettings,
+    productSettings,
+    effectiveSettings: productSettings.useChannelDefaults
+      ? channelSettings
+      : { ...channelSettings, ...productSettings }
+  };
+}
+
 function marketplaceItemCost(item = {}) {
   return productSellUnitCost(item);
 }
@@ -17396,55 +17481,88 @@ function missingRequiredEbayAspects(config = {}) {
 
 function ebayListingConfig(db, item, body = {}) {
   const saved = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
-  const channelSettings = ebayChannelSettings(db);
-  const merged = { ...saved, ...body };
+  const { productSettings, effectiveSettings } = ebayEffectiveSettings(db, item, body);
+  const explicit = (field, settingField, fallback = "") => {
+    if (body[field] !== undefined && body[field] !== null && String(body[field]).trim() !== "") return body[field];
+    if (effectiveSettings[settingField] !== undefined && effectiveSettings[settingField] !== null && String(effectiveSettings[settingField]).trim() !== "") return effectiveSettings[settingField];
+    return fallback;
+  };
+  const explicitBoolean = (field, settingField, fallback = false) => {
+    if (body[field] !== undefined) return ebayBoolean(body[field], fallback);
+    if (effectiveSettings[settingField] !== undefined) return ebayBoolean(effectiveSettings[settingField], fallback);
+    return fallback;
+  };
+  const explicitNumber = (field, settingField, fallback = 0) => {
+    if (body[field] !== undefined && body[field] !== null && String(body[field]) !== "") return Number(body[field]);
+    if (effectiveSettings[settingField] !== undefined && effectiveSettings[settingField] !== null && String(effectiveSettings[settingField]) !== "") return Number(effectiveSettings[settingField]);
+    return fallback;
+  };
+  const manualPrice = productSettings.useChannelDefaults ? 0 : Number(productSettings.ebayManualPrice || 0);
   const price = body.useChannelPricing === true
-    ? Number(marketplaceSuggestedPrice(item, channelSettings))
-    : Number(merged.price ?? marketplaceSuggestedPrice(item, channelSettings));
-  const defaultQuantity = marketplaceListingQuantity(item, channelSettings);
-  const requestedQuantity = merged.quantity !== undefined && merged.quantity !== null && String(merged.quantity) !== ""
-    ? Math.max(0, Math.floor(Number(merged.quantity || 0)))
-    : null;
+    ? Number(marketplaceSuggestedPrice(item, effectiveSettings))
+    : body.price !== undefined && body.price !== null && String(body.price) !== ""
+      ? Number(body.price)
+      : manualPrice > 0
+        ? manualPrice
+        : Number(marketplaceSuggestedPrice(item, effectiveSettings));
+  const defaultQuantity = marketplaceListingQuantity(item, effectiveSettings);
+  const quantityOverride = productSettings.useChannelDefaults ? "" : productSettings.ebayQuantityOverride;
+  const requestedQuantity = body.quantity !== undefined && body.quantity !== null && String(body.quantity) !== ""
+    ? Math.max(0, Math.floor(Number(body.quantity || 0)))
+    : quantityOverride !== undefined && quantityOverride !== null && String(quantityOverride) !== ""
+      ? Math.max(0, Math.floor(Number(quantityOverride || 0)))
+      : null;
   const quantity = requestedQuantity !== null && (requestedQuantity > 0 || defaultQuantity <= 0)
     ? requestedQuantity
     : Math.max(0, Math.floor(Number(defaultQuantity || 0)));
   const categorySetting = categorySettingForProduct(db, item);
   const masterEbayMapping = categorySetting?.mappings?.ebay || {};
-  const categoryAttributes = Array.isArray(merged.categoryAttributes) && merged.categoryAttributes.length
-    ? merged.categoryAttributes
+  const categoryAttributes = Array.isArray(body.categoryAttributes) && body.categoryAttributes.length
+    ? body.categoryAttributes
     : Array.isArray(saved.categoryAttributes) && saved.categoryAttributes.length
       ? saved.categoryAttributes
       : Array.isArray(masterEbayMapping.attributes) ? masterEbayMapping.attributes : [];
   const aspectMappings = Array.isArray(masterEbayMapping.attributeMappings) ? masterEbayMapping.attributeMappings : [];
-  const aspects = enrichEbayAspectsFromSource(item, parseEbayAspects(merged.aspects || merged.itemSpecifics, item), categoryAttributes, aspectMappings);
+  // Category and item specifics are inherently SKU-level, even when the SKU
+  // inherits commercial and fulfillment defaults from the eBay channel.
+  const aspectInput = body.aspects ?? body.itemSpecifics ?? productSettings.ebayItemSpecifics ?? saved.aspects;
+  const aspects = enrichEbayAspectsFromSource(item, parseEbayAspects(aspectInput, item), categoryAttributes, aspectMappings);
+  const categoryId = ebayListingCategoryId(db, item, {
+    ...body,
+    categoryId: body.categoryId !== undefined
+      ? body.categoryId
+      : productSettings.ebayCategoryId || saved.categoryId || ""
+  });
   return {
-    marketplaceId: String(merged.marketplaceId || channelSettings.ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US").trim(),
-    merchantLocationKey: String(merged.merchantLocationKey || channelSettings.ebayMerchantLocationKey || process.env.EBAY_MERCHANT_LOCATION_KEY || "").trim(),
-    categoryId: ebayListingCategoryId(db, item, merged),
-    categoryPath: String(merged.categoryPath || "").trim(),
-    taxonomyVersion: String(merged.taxonomyVersion || "").trim(),
-    condition: String(merged.condition || channelSettings.ebayDefaultCondition || "NEW").trim(),
-    paymentPolicyId: String(merged.paymentPolicyId || channelSettings.ebayPaymentPolicyId || process.env.EBAY_PAYMENT_POLICY_ID || "").trim(),
-    returnPolicyId: String(merged.returnPolicyId || channelSettings.ebayReturnPolicyId || process.env.EBAY_RETURN_POLICY_ID || "").trim(),
-    fulfillmentPolicyId: String(merged.fulfillmentPolicyId || channelSettings.ebayFulfillmentPolicyId || process.env.EBAY_FULFILLMENT_POLICY_ID || "").trim(),
-    currency: String(merged.currency || channelSettings.ebayCurrency || process.env.EBAY_CURRENCY || "USD").trim(),
-    format: String(merged.format || channelSettings.ebayListingFormat || "FIXED_PRICE").trim(),
-    bestOfferEnabled: merged.bestOfferEnabled !== undefined ? Boolean(merged.bestOfferEnabled) : Boolean(channelSettings.ebayBestOfferEnabled),
-    requireImage: merged.requireImage !== undefined ? Boolean(merged.requireImage) : channelSettings.ebayRequireImage !== false,
-    maxImages: Math.max(1, Math.min(24, Number(merged.maxImages || channelSettings.ebayMaxImages || 12))),
+    marketplaceId: String(explicit("marketplaceId", "ebayMarketplaceId", process.env.EBAY_MARKETPLACE_ID || "EBAY_US")).trim(),
+    merchantLocationKey: String(explicit("merchantLocationKey", "ebayMerchantLocationKey", process.env.EBAY_MERCHANT_LOCATION_KEY || "")).trim(),
+    categoryId,
+    categoryPath: String(body.categoryPath !== undefined ? body.categoryPath : productSettings.ebayCategoryPath || saved.categoryPath || "").trim(),
+    taxonomyVersion: String(body.taxonomyVersion !== undefined ? body.taxonomyVersion : productSettings.ebayTaxonomyVersion || saved.taxonomyVersion || "").trim(),
+    condition: String(explicit("condition", "ebayDefaultCondition", "NEW")).trim(),
+    paymentPolicyId: String(explicit("paymentPolicyId", "ebayPaymentPolicyId", process.env.EBAY_PAYMENT_POLICY_ID || "")).trim(),
+    returnPolicyId: String(explicit("returnPolicyId", "ebayReturnPolicyId", process.env.EBAY_RETURN_POLICY_ID || "")).trim(),
+    fulfillmentPolicyId: String(explicit("fulfillmentPolicyId", "ebayFulfillmentPolicyId", process.env.EBAY_FULFILLMENT_POLICY_ID || "")).trim(),
+    currency: String(explicit("currency", "ebayCurrency", process.env.EBAY_CURRENCY || "USD")).trim(),
+    format: String(explicit("format", "ebayListingFormat", "FIXED_PRICE")).trim(),
+    bestOfferEnabled: explicitBoolean("bestOfferEnabled", "ebayBestOfferEnabled", false),
+    requireImage: explicitBoolean("requireImage", "ebayRequireImage", true),
+    maxImages: Math.max(1, Math.min(24, explicitNumber("maxImages", "ebayMaxImages", 12))),
     price,
     quantity,
-    listingDescription: ebayListingDescription(item, { ...merged, db, ebayDescriptionSource: channelSettings.ebayDescriptionSource }),
+    listingDescription: ebayListingDescription(item, { ...body, db, ebayDescriptionSource: explicit("ebayDescriptionSource", "ebayDescriptionSource", "longDescription") }),
     aspects,
     categoryAttributes,
-    offerId: String(merged.offerId || saved.offerId || "").trim(),
-    listingId: String(merged.listingId || saved.listingId || "").trim()
+    offerId: String(body.offerId || saved.offerId || "").trim(),
+    listingId: String(body.listingId || saved.listingId || "").trim(),
+    settings: productSettings,
+    useChannelDefaults: productSettings.useChannelDefaults
   };
 }
 
 async function ebayListingReadiness(db, item = {}, overrides = {}) {
   await enrichItemWithCatalogSource(db, item);
-  const config = ebayListingConfig(db, item, { useChannelPricing: true, ...overrides });
+  const config = ebayListingConfig(db, item, overrides);
   const missing = validateEbayListingConfig(config, true, item);
   const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
   const listingId = String(listing.listingId || item.ebayId || "").trim();
