@@ -28014,7 +28014,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "vendors" && parts[2] === "marketplace-summary" && parts.length === 3 && postgres.isPostgresEnabled()) {
-    const cacheKey = "dataplus:vendor-marketplace-summary:v1";
+    const cacheKey = "dataplus:vendor-marketplace-summary:v2";
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
     const rows = await postgres.listVendorMarketplaceSummary();
