@@ -6230,7 +6230,9 @@ async function listBrandCatalogItems({ brand = "", query = "", page = 1, limit =
   const pageNumber = Math.max(1, Number(page || 1));
   const pageSize = Math.min(100, Math.max(1, Number(limit || 25)));
   const params = [brandName.toLowerCase()];
-  const where = ["lower(coalesce(brand, '')) = $1"];
+  // Keep this expression aligned with vendor_catalog_items_brand_source_idx.
+  // `lower(coalesce(brand, ''))` forces a full catalog scan on large brands.
+  const where = ["lower(brand) = $1"];
   const search = nullableString(query);
   if (search) {
     params.push(`%${search.toLowerCase()}%`);
