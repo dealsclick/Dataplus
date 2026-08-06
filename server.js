@@ -16960,7 +16960,7 @@ async function ebayRequest(db, resourcePath, options = {}) {
     const permissionHint = response.status === 403 && /insufficient permissions|access denied/i.test(detail)
       ? (options.tokenType === "app"
         ? " Confirm the application has the general eBay OAuth scope enabled: https://api.ebay.com/oauth/api_scope."
-        : " Reconnect eBay from Channels so the seller token is reissued with https://api.ebay.com/oauth/api_scope/sell.inventory.")
+        : " Reconnect eBay from Channels so the seller token is reissued with the required eBay Sell API permissions.")
       : "";
     const error = new Error(`eBay API error (${response.status}) on ${method} ${resourcePath}: ${detail}${permissionHint}`);
     error.status = response.status;
@@ -16970,6 +16970,38 @@ async function ebayRequest(db, resourcePath, options = {}) {
     throw error;
   }
   return data;
+}
+
+async function verifyEbaySellerConnection(db) {
+  const config = getEbayConfig(db);
+  const missing = missingEbayConfig(config, { requireToken: true });
+  if (missing.length) {
+    throw new Error(`eBay connection cannot be verified because ${missing.join(", ")} is missing. Add the credentials and connect the seller account first.`);
+  }
+
+  // eBay's Account API exposes seller privileges, so this proves the saved OAuth
+  // authorization can make a seller-scoped request without changing account data.
+  const privileges = await ebayRequest(db, "/sell/account/v1/privilege", {
+    operation: "Verify eBay seller connection",
+    timeoutMs: 15000
+  });
+  const verifiedAt = new Date().toISOString();
+  const connectorState = {
+    ...readConnectorStateSync(),
+    ...(db.connectorState || {}),
+    ebayConnectionVerifiedAt: verifiedAt,
+    ebayConnectionVerificationMessage: "Seller OAuth authorization verified with eBay Account API."
+  };
+  db.connectorState = connectorState;
+  writeConnectorStateSync(connectorState);
+
+  return {
+    verified: true,
+    verifiedAt,
+    environment: config.environment,
+    privileges: Array.isArray(privileges?.privileges) ? privileges.privileges.length : 0,
+    message: "eBay seller connection verified."
+  };
 }
 
 async function ebayShippingFulfillments(db, orderId) {
@@ -20593,6 +20625,8 @@ function publicEbayConfigStatus(db = {}) {
     hasAccessToken: Boolean(config.accessToken),
     sellerAuthorizedAt: connectorState.ebayAuthorizedAt || connectorState.ebayTokenCreatedAt || "",
     accessTokenExpiresAt: config.accessTokenExpiresAt || "",
+    connectionVerifiedAt: connectorState.ebayConnectionVerifiedAt || "",
+    connectionVerificationMessage: connectorState.ebayConnectionVerificationMessage || "",
     clientIdPreview: credentialPreview(config.clientId),
     clientSecretPreview: credentialPreview(config.clientSecret),
     refreshTokenPreview: credentialPreview(config.refreshToken),
@@ -22361,6 +22395,18 @@ async function handleApi(req, res) {
       appendChannelApiLog({ channel: "eBay", transport: "configuration", method: "PUT", path: url.pathname, operation: "Update eBay credentials", statusCode: 200, ok: true, message: `Updated ${Object.keys(patch).filter((key) => !["clientSecret", "refreshToken", "accessToken"].includes(key)).join(", ") || "secret credentials"}.` });
       return sendJson(res, 200, { credentials: publicEbayConfigStatus(), message: "eBay credentials updated. Existing secrets remain masked." });
     }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/connection/verify") {
+    const db = postgres.isPostgresEnabled()
+      ? await readDbFast({ skipInventory: true })
+      : await readDb({ skipInventory: false });
+    const result = await verifyEbaySellerConnection(db);
+    if (!postgres.isPostgresEnabled()) await writeDb(db);
+    return sendJson(res, 200, {
+      ...result,
+      credentials: publicEbayConfigStatus(db)
+    });
   }
 
   if (parts[0] === "api" && parts[1] === "export-mappings" && !parts[3]) {
@@ -34203,7 +34249,7 @@ function ebayAuthorizationResultHtml(options = {}) {
   const title = success ? "eBay Connected" : "eBay Authorization Failed";
   const heading = success ? "eBay connected" : "eBay authorization failed";
   const message = success
-    ? `Seller authorization saved for ${String(options.environment || "eBay")}. You can close this window or return to DataPlus.`
+    ? `Seller authorization saved for ${String(options.environment || "eBay")}. This window will close automatically.`
     : String(options.message || "DataPlus could not connect the eBay seller account.");
   const eventPayload = JSON.stringify({
     type: success ? "dataplus:ebay-authorized" : "dataplus:ebay-authorization-error",
@@ -34222,6 +34268,16 @@ function ebayAuthorizationResultHtml(options = {}) {
         (() => {
           const payload = ${eventPayload};
           if (window.opener && !window.opener.closed) window.opener.postMessage(payload, window.location.origin);
+          const openedByDataPlus = Boolean(window.opener && !window.opener.closed);
+          if (payload.type === "dataplus:ebay-authorized" && openedByDataPlus) {
+            window.setTimeout(() => {
+              window.close();
+              window.setTimeout(() => {
+                if (!window.closed) window.location.replace(payload.returnTo);
+              }, 250);
+            }, 650);
+            return;
+          }
           window.setTimeout(() => window.location.replace(payload.returnTo), 1500);
         })();
       </script>

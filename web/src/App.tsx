@@ -2366,10 +2366,11 @@ function ChannelDetail({
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [credentials, setCredentials] = useState<{ shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; clientIdPreview?: string; clientSecretPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean } | null>(null)
-  const [ebayCredentials, setEbayCredentials] = useState<{ environment?: string; ruName?: string; scope?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; hasSellerAuthorization?: boolean; sellerAuthorizedAt?: string; accessTokenExpiresAt?: string; clientIdPreview?: string; clientSecretPreview?: string; refreshTokenPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean; configured?: boolean } | null>(null)
+  const [ebayCredentials, setEbayCredentials] = useState<{ environment?: string; ruName?: string; scope?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; hasSellerAuthorization?: boolean; sellerAuthorizedAt?: string; accessTokenExpiresAt?: string; connectionVerifiedAt?: string; connectionVerificationMessage?: string; clientIdPreview?: string; clientSecretPreview?: string; refreshTokenPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean; configured?: boolean } | null>(null)
   const [credentialsOpen, setCredentialsOpen] = useState(false)
   const [ebayCredentialsOpen, setEbayCredentialsOpen] = useState(false)
   const [credentialSaving, setCredentialSaving] = useState(false)
+  const [ebayVerifying, setEbayVerifying] = useState(false)
   const [credentialDraft, setCredentialDraft] = useState({ storeDomain: "", apiVersion: "", clientId: "", clientSecret: "", accessToken: "" })
   const [ebayCredentialDraft, setEbayCredentialDraft] = useState({ environment: "production", ruName: "", scope: "", clientId: "", clientSecret: "", refreshToken: "", accessToken: "" })
   const [ebayOrderImportOpen, setEbayOrderImportOpen] = useState(false)
@@ -2488,6 +2489,20 @@ function ChannelDetail({
       toast.success(result.message || "eBay credentials updated.")
       onRefreshData()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update eBay credentials.") } finally { setCredentialSaving(false) }
+  }
+
+  async function verifyEbayConnection() {
+    setEbayVerifying(true)
+    try {
+      const result = await api<{ credentials?: typeof ebayCredentials; message?: string }>("/api/ebay/connection/verify", { method: "POST", body: JSON.stringify({}) })
+      setEbayCredentials(result.credentials || null)
+      toast.success(result.message || "eBay seller connection verified.")
+      onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to verify the eBay seller connection.")
+    } finally {
+      setEbayVerifying(false)
+    }
   }
 
   async function runEbayAction(kind: "authorize" | "account" | "catalog") {
@@ -2722,15 +2737,20 @@ function ChannelDetail({
                 </div>
                 <div className="flex flex-wrap justify-end gap-2">
                   <Button onClick={() => void runEbayAction("authorize")} disabled={!ebayCredentials?.configured}>{ebayCredentials?.hasSellerAuthorization ? "Reconnect eBay account" : "Sign in with eBay"}</Button>
+                  <Button variant="outline" onClick={() => void verifyEbayConnection()} disabled={!ebayCredentials?.hasSellerAuthorization || ebayVerifying}>
+                    {ebayVerifying ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                    Verify connection
+                  </Button>
                   <Button variant="outline" onClick={openEbayCredentials}>Update API credentials</Button>
                 </div>
               </CardHeader>
-              <CardContent className="grid gap-3 md:grid-cols-4">
+              <CardContent className="grid gap-3 md:grid-cols-5">
                 <Detail label="Environment" value={ebayCredentials?.environment || "Production"} />
                 <Detail label="Client credentials" value={ebayCredentials?.hasClientCredentials ? "Configured" : "Missing"} />
                 <Detail label="Redirect URI name" value={ebayCredentials?.ruName || "Missing"} />
                 <Detail label="Seller authorization" value={ebayCredentials?.hasSellerAuthorization ? "Connected" : "Required"} />
                 <Detail label="Connected" value={ebayCredentials?.sellerAuthorizedAt ? new Date(ebayCredentials.sellerAuthorizedAt).toLocaleString() : "Not yet"} />
+                <Detail label="Last verified" value={ebayCredentials?.connectionVerifiedAt ? new Date(ebayCredentials.connectionVerifiedAt).toLocaleString() : "Not yet"} />
                 {!ebayCredentials?.hasSellerAuthorization && <div className="col-span-full"><Alert>
                   <AlertCircle className="size-4" />
                   <AlertTitle>Finish the eBay RuName setup</AlertTitle>
