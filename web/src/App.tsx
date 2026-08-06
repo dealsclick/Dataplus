@@ -341,7 +341,7 @@ type Vendor = {
   sourcePriority?: Record<string, unknown>
   catalogSettings?: {
     enabled?: boolean
-    supplierAliases?: string[]
+    sourceCodes?: string[]
     note?: string
   }
   channelRules?: Record<string, unknown>
@@ -350,6 +350,7 @@ type Vendor = {
 type VendorMarketplaceSummary = {
   supplierKey: string
   supplier: string
+  sourceCodes?: string[]
   productCount: number
   activeProductCount: number
   shopifyLive: number
@@ -11687,14 +11688,14 @@ const emptyVendorMarketplaceCoverage: VendorMarketplaceCoverage = {
 }
 
 function vendorMarketplaceCoverage(vendor: Vendor, rowsBySupplier: Map<string, VendorMarketplaceSummary>): VendorMarketplaceCoverage {
-  const configuredAliases = Array.isArray(vendor.catalogSettings?.supplierAliases) ? vendor.catalogSettings.supplierAliases : []
-  const aliases = [...new Set([vendor.name, vendor.code, ...configuredAliases]
+  const sourceCodes = new Set((Array.isArray(vendor.catalogSettings?.sourceCodes) ? vendor.catalogSettings.sourceCodes : [])
     .map((value) => String(value || "").trim().toLowerCase())
-    .filter(Boolean))]
+    .filter(Boolean))
   const seen = new Set<string>()
   const coverage = { ...emptyVendorMarketplaceCoverage, matchedSuppliers: [] as string[] }
-  for (const alias of aliases) {
-    const row = rowsBySupplier.get(alias)
+  for (const row of rowsBySupplier.values()) {
+    const rowCodes = (row.sourceCodes || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+    if (!rowCodes.some((code) => sourceCodes.has(code))) continue
     if (!row || seen.has(row.supplierKey)) continue
     seen.add(row.supplierKey)
     coverage.productCount += Number(row.productCount || 0)
@@ -11868,8 +11869,8 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const purchaseOrderRules = (vendor as Vendor & { purchaseOrderRules?: Record<string, unknown> }).purchaseOrderRules || {}
   const sourcePriority = vendor.sourcePriority || {}
   const catalogSettings = vendor.catalogSettings || {}
-  const catalogAliasesValue = draft["catalogSettings.supplierAliases"] ?? catalogSettings.supplierAliases ?? [vendor.name, vendor.code].filter(Boolean)
-  const catalogAliases = Array.isArray(catalogAliasesValue) ? catalogAliasesValue.join(" | ") : String(catalogAliasesValue || "")
+  const catalogSourceCodesValue = draft["catalogSettings.sourceCodes"] ?? catalogSettings.sourceCodes ?? []
+  const catalogSourceCodes = Array.isArray(catalogSourceCodesValue) ? catalogSourceCodesValue.join(" | ") : String(catalogSourceCodesValue || "")
 
   return (
     <div className="grid gap-4">
@@ -12013,9 +12014,9 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
                   <Detail label="eBay live" value={marketplaceLoading ? "Checking" : numberLabel(marketplaceCoverage.ebayLive)} />
                 </div>
                 <ToggleField label="Include supplier in catalog" checked={Boolean(draft["catalogSettings.enabled"] ?? (catalogSettings.enabled !== false))} disabled={!editing} onCheckedChange={(next) => update("catalogSettings.enabled", next)} />
-                <Field label="Supplier aliases">
-                  <Input disabled={!editing} value={catalogAliases} onChange={(event) => update("catalogSettings.supplierAliases", event.target.value.split(/[|,\n]/).map((entry) => entry.trim()).filter(Boolean))} placeholder="True Value | TRV" />
-                  <p className="text-xs text-muted-foreground">Use the names found in incoming feeds. They ensure this setting matches supplier records reliably.</p>
+                <Field label="Source / feed codes">
+                  <Input disabled={!editing} value={catalogSourceCodes} onChange={(event) => update("catalogSettings.sourceCodes", event.target.value.split(/[|,\n]/).map((entry) => entry.trim()).filter(Boolean))} placeholder="TRV | USS" />
+                  <p className="text-xs text-muted-foreground">Use the stable supplier code from the incoming feed, never the product brand. A brand can be carried by more than one supplier.</p>
                 </Field>
                 <div className="md:col-span-2">
                   <Field label="Catalog note">

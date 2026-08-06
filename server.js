@@ -9822,16 +9822,12 @@ function normalizeVendor(db, vendor) {
       note: vendor.sourcePriority?.note || ""
     },
     catalogSettings: {
-      // Keep existing suppliers visible until an operator explicitly opts them out.
-      // Aliases make this setting resilient to supplier labels such as TRUE VALUE / TRV.
+      // Participation is keyed to the upstream feed code, never a brand or display name.
       enabled: vendor.catalogSettings?.enabled !== false,
-      supplierAliases: [...new Set([
-        vendorName,
-        vendorCode,
-        ...(Array.isArray(vendor.catalogSettings?.supplierAliases)
-          ? vendor.catalogSettings.supplierAliases
-          : String(vendor.catalogSettings?.supplierAliases || "").split(/[|,\n]/))
-      ].map((value) => String(value || "").trim()).filter(Boolean))],
+      sourceCodes: [...new Set((Array.isArray(vendor.catalogSettings?.sourceCodes)
+        ? vendor.catalogSettings.sourceCodes
+        : String(vendor.catalogSettings?.sourceCodes || "").split(/[|,\n]/))
+        .map((value) => String(value || "").trim()).filter(Boolean))],
       note: vendor.catalogSettings?.note || ""
     },
     openPOs: Number(vendor.openPOs || 0),
@@ -20032,33 +20028,32 @@ function catalogFilterParams(searchParams) {
     warehouse: searchParams.get("warehouse") || "",
     vendorScope: searchParams.get("vendorScope") || "",
     includedSuppliers: searchParams.get("includedSuppliers") || "",
+    includedSupplierCodes: searchParams.get("includedSupplierCodes") || "",
     excludedSuppliers: searchParams.get("excludedSuppliers") || ""
   };
 }
 
-function vendorCatalogAliases(vendor = {}) {
-  const configuredAliases = Array.isArray(vendor.catalogSettings?.supplierAliases)
-    ? vendor.catalogSettings.supplierAliases
-    : String(vendor.catalogSettings?.supplierAliases || "").split(/[|,\n]/);
-  return [...new Set([
-    vendor.name,
-    vendor.code,
-    ...configuredAliases
-  ].map((value) => sourceTextValue(value).toLowerCase()).filter(Boolean))];
+function vendorCatalogSourceCodes(vendor = {}) {
+  const configuredCodes = Array.isArray(vendor.catalogSettings?.sourceCodes)
+    ? vendor.catalogSettings.sourceCodes
+    : String(vendor.catalogSettings?.sourceCodes || "").split(/[|,\n]/);
+  return [...new Set(configuredCodes
+    .map((value) => sourceTextValue(value).toLowerCase())
+    .filter(Boolean))];
 }
 
 function applyVendorCatalogScope(filters = {}, vendors = []) {
   const scope = String(filters.vendorScope || "enabled").trim().toLowerCase();
   if (scope === "all") return { ...filters };
-  const enabledSupplierAliases = [...new Set((vendors || [])
+  const enabledSourceCodes = [...new Set((vendors || [])
     .filter((vendor) => vendor?.catalogSettings?.enabled !== false)
-    .flatMap(vendorCatalogAliases))];
-  if (!enabledSupplierAliases.length) return { ...filters, includedSuppliers: "__no_enabled_supplier__" };
+    .flatMap(vendorCatalogSourceCodes))];
+  if (!enabledSourceCodes.length) return { ...filters, includedSupplierCodes: "__no_enabled_source__" };
   return {
     ...filters,
-    includedSuppliers: [...new Set([
-      ...catalogFilterValues(filters.includedSuppliers),
-      ...enabledSupplierAliases
+    includedSupplierCodes: [...new Set([
+      ...catalogFilterValues(filters.includedSupplierCodes),
+      ...enabledSourceCodes
     ])].join("|")
   };
 }
@@ -24128,12 +24123,12 @@ async function handleApi(req, res) {
         { vendorScope: url.searchParams.get("vendorScope") || "enabled" },
         Array.isArray(catalogVendors) ? catalogVendors : []
       );
-      const includedSuppliers = catalogFilterValues(scopedFilters.includedSuppliers);
-      const scopeHash = crypto.createHash("sha1").update(includedSuppliers.sort().join("|")).digest("hex").slice(0, 12);
-      const cacheKey = `dataplus:products:facets:v3:${scopeHash}`;
+      const includedSupplierCodes = catalogFilterValues(scopedFilters.includedSupplierCodes);
+      const scopeHash = crypto.createHash("sha1").update(includedSupplierCodes.sort().join("|")).digest("hex").slice(0, 12);
+      const cacheKey = `dataplus:products:facets:v4:${scopeHash}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
-      const facets = await postgres.productFacets({ includedSuppliers });
+      const facets = await postgres.productFacets({ includedSupplierCodes });
       if (facets) {
         const payload = { facets };
         await redisCache.setJson(cacheKey, payload, REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS);
@@ -24586,10 +24581,6 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/inventory") {
     if (postgres.isPostgresEnabled()) {
-      const cacheQuery = url.searchParams.toString();
-      const cacheKey = `dataplus:products:v7:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
-      const cached = await redisCache.getJson(cacheKey);
-      if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
       const fastPage = ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase());
       // Do not hydrate the complete legacy state here. The catalog is a hot path and
       // its only state dependency is the small vendor participation document.
@@ -24598,6 +24589,10 @@ async function handleApi(req, res) {
         catalogFilterParams(url.searchParams),
         Array.isArray(catalogVendors) ? catalogVendors : []
       );
+      const cacheQuery = `${url.searchParams.toString()}|feedCodes:${String(filters.includedSupplierCodes || "")}`;
+      const cacheKey = `dataplus:products:v8:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const cached = await redisCache.getJson(cacheKey);
+      if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
       const result = await postgres.listProducts({
         q: url.searchParams.get("q") || "",
         page: url.searchParams.get("page") || 1,
@@ -28076,7 +28071,7 @@ async function handleApi(req, res) {
     const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
     const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "overdueReminderEnabled"]);
     const numericPurchaseOrderRuleFields = new Set(["approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
-    const catalogSettingsFields = new Set(["enabled", "supplierAliases", "note"]);
+    const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
@@ -28165,7 +28160,7 @@ async function handleApi(req, res) {
         vendor.catalogSettings = vendor.catalogSettings || {};
         const value = booleanCatalogSettingsFields.has(key)
           ? Boolean(rawValue)
-          : key === "supplierAliases"
+          : key === "sourceCodes"
             ? [...new Set((Array.isArray(rawValue) ? rawValue : String(rawValue ?? "").split(/[|,\n]/)).map((entry) => String(entry || "").trim()).filter(Boolean))]
             : String(rawValue ?? "");
         if (JSON.stringify(vendor.catalogSettings[key]) !== JSON.stringify(value)) {
@@ -35050,7 +35045,7 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const catalogSettingsFields = new Set(["enabled", "supplierAliases", "note"]);
+    const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
@@ -35128,7 +35123,7 @@ async function handleApi(req, res) {
         vendor.catalogSettings = vendor.catalogSettings || {};
         const value = booleanCatalogSettingsFields.has(key)
           ? Boolean(rawValue)
-          : key === "supplierAliases"
+          : key === "sourceCodes"
             ? [...new Set((Array.isArray(rawValue) ? rawValue : String(rawValue ?? "").split(/[|,\n]/)).map((entry) => String(entry || "").trim()).filter(Boolean))]
             : String(rawValue ?? "");
         if (JSON.stringify(vendor.catalogSettings[key]) !== JSON.stringify(value)) {

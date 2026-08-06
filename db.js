@@ -151,6 +151,7 @@ async function initRelationalSchema() {
     create index if not exists products_raw_upc_code_idx on products ((raw ->> 'upcCode'));
     create index if not exists products_mfr_part_number_idx on products (lower(mfr_part_number));
     create index if not exists products_supplier_idx on products (lower(supplier));
+    create index if not exists products_supplier_code_idx on products (lower(supplier_code));
     create index if not exists products_brand_idx on products (brand);
     create index if not exists products_category_idx on products (category);
     create index if not exists products_manufacturer_facet_idx on products ((coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName')));
@@ -5401,6 +5402,20 @@ async function listProducts(options = {}) {
       or coalesce(trim(supplier), '') = ''
     )`);
   }
+  const includedSupplierCodeValues = splitFilterValues(filters.includedSupplierCodes).map((value) => value.toLowerCase());
+  if (includedSupplierCodeValues.length) {
+    params.push(includedSupplierCodeValues);
+    // Source codes identify the incoming supplier feed. They are intentionally
+    // separate from brand and supplier display names, which are not unique.
+    // Keep only truly unassigned manual SKUs alongside enabled feed records.
+    where.push(`(
+      lower(coalesce(supplier_code, '')) = any($${params.length})
+      or (
+        coalesce(trim(supplier_code), '') = ''
+        and coalesce(trim(supplier), '') = ''
+      )
+    )`);
+  }
   const activeValues = [...new Set(splitFilterValues(filters.active).map(parseFilterBoolean))];
   if (activeValues.length === 1) {
     params.push(activeValues[0]);
@@ -5925,12 +5940,12 @@ async function productFacets(filters = {}) {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
-  const includedSuppliers = Array.isArray(filters.includedSuppliers)
-    ? filters.includedSuppliers.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+  const includedSupplierCodes = Array.isArray(filters.includedSupplierCodes)
+    ? filters.includedSupplierCodes.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
     : [];
-  const params = includedSuppliers.length ? [includedSuppliers] : [];
-  const scopeWhere = includedSuppliers.length
-    ? "where (lower(coalesce(supplier, '')) = any($1::text[]) or coalesce(trim(supplier), '') = '')"
+  const params = includedSupplierCodes.length ? [includedSupplierCodes] : [];
+  const scopeWhere = includedSupplierCodes.length
+    ? "where (lower(coalesce(supplier_code, '')) = any($1::text[]) or (coalesce(trim(supplier_code), '') = '' and coalesce(trim(supplier), '') = ''))"
     : "";
   // The catalog filter dialog only needs human-selectable product dimensions.
   // Channel status choices are a fixed product contract in the UI, so avoid
@@ -5991,6 +6006,7 @@ async function listVendorMarketplaceSummary() {
       select
         p.product_id,
         p.supplier,
+        p.supplier_code,
         p.active,
         (
           (
@@ -6013,6 +6029,7 @@ async function listVendorMarketplaceSummary() {
     select
       lower(supplier) as "supplierKey",
       min(supplier) as supplier,
+      array_remove(array_agg(distinct nullif(trim(supplier_code), '')), null) as "sourceCodes",
       count(*)::int as "productCount",
       count(*) filter (where coalesce(active, true))::int as "activeProductCount",
       count(*) filter (where shopify_live)::int as "shopifyLive",
@@ -6025,6 +6042,7 @@ async function listVendorMarketplaceSummary() {
   return result.rows.map((row) => ({
     supplierKey: String(row.supplierKey || "").toLowerCase(),
     supplier: String(row.supplier || ""),
+    sourceCodes: Array.isArray(row.sourceCodes) ? row.sourceCodes.map((value) => String(value || "").trim()).filter(Boolean) : [],
     productCount: Number(row.productCount || 0),
     activeProductCount: Number(row.activeProductCount || 0),
     shopifyLive: Number(row.shopifyLive || 0),
