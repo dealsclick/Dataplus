@@ -9821,6 +9821,19 @@ function normalizeVendor(db, vendor) {
       directFeedPriority: vendor.sourcePriority?.directFeedPriority || "direct-over-datawarehouse",
       note: vendor.sourcePriority?.note || ""
     },
+    catalogSettings: {
+      // Keep existing suppliers visible until an operator explicitly opts them out.
+      // Aliases make this setting resilient to supplier labels such as TRUE VALUE / TRV.
+      enabled: vendor.catalogSettings?.enabled !== false,
+      supplierAliases: [...new Set([
+        vendorName,
+        vendorCode,
+        ...(Array.isArray(vendor.catalogSettings?.supplierAliases)
+          ? vendor.catalogSettings.supplierAliases
+          : String(vendor.catalogSettings?.supplierAliases || "").split(/[|,\n]/))
+      ].map((value) => String(value || "").trim()).filter(Boolean))],
+      note: vendor.catalogSettings?.note || ""
+    },
     openPOs: Number(vendor.openPOs || 0),
     totalPOs: Number(vendor.totalPOs || 0),
     totalSpend: Number(vendor.totalSpend || 0),
@@ -10368,8 +10381,8 @@ function updateCustomerProfile(customer, body) {
   return changes;
 }
 
-function sendJson(res, status, data) {
-  sendJsonText(res, status, JSON.stringify(data));
+function sendJson(res, status, data, req = null) {
+  sendJsonText(res, status, JSON.stringify(data), req);
 }
 
 function sendJsonText(res, status, text, req = null) {
@@ -15485,6 +15498,19 @@ function publicProductItem(item = {}) {
   return publicInventoryItem(item, publicInventoryContext());
 }
 
+function compactCatalogImageUrl(item = {}) {
+  const image = String(item.defaultImage || item.originalImage || "").trim();
+  if (!image) return "";
+  const key = String(item.id || item.sku || "").trim();
+  if (!key) return "";
+  const version = String(item.updatedAt || item.productDumpUpdatedAt || "").trim();
+  if (image === "__dataplus_catalog_image__") {
+    return `/api/inventory/${encodeURIComponent(key)}/image${version ? `?v=${encodeURIComponent(version)}` : ""}`;
+  }
+  if (!/^data:image\//i.test(image)) return image;
+  return `/api/inventory/${encodeURIComponent(key)}/image${version ? `?v=${encodeURIComponent(version)}` : ""}`;
+}
+
 function publicInventoryListItem(item = {}, context = {}) {
   const rulesDb = context.db || dbCache.data || null;
   item = sourceEnrichedItem(item, context.sourceEnrichmentMap || {});
@@ -15595,8 +15621,10 @@ function publicInventoryListItem(item = {}, context = {}) {
     shippingMethod: shippingClassification.shippingMethod,
     shippingClassReason: shippingClassification.shippingClassReason,
     dimensionalWeight: shippingClassification.dimensionalWeight,
-    defaultImage: item.defaultImage || "",
-    originalImage: item.originalImage || "",
+    // Product lists should never transport inline base64 images with every row.
+    // The dedicated endpoint keeps thumbnails browser-cacheable and the grid light.
+    defaultImage: compactCatalogImageUrl(item),
+    originalImage: "",
     imageCount: images.length || (item.defaultImage ? 1 : 0),
     alternateVendorCount: Number(item.alternateVendorCount || 0),
     updatedAt: item.updatedAt || item.productDumpUpdatedAt || "",
@@ -20001,7 +20029,36 @@ function catalogFilterParams(searchParams) {
     inventoryAvailability: searchParams.get("inventoryAvailability") || "",
     lowStock: searchParams.get("lowStock") || "",
     replenishable: searchParams.get("replenishable") || "",
-    warehouse: searchParams.get("warehouse") || ""
+    warehouse: searchParams.get("warehouse") || "",
+    vendorScope: searchParams.get("vendorScope") || "",
+    excludedSuppliers: searchParams.get("excludedSuppliers") || ""
+  };
+}
+
+function vendorCatalogAliases(vendor = {}) {
+  const configuredAliases = Array.isArray(vendor.catalogSettings?.supplierAliases)
+    ? vendor.catalogSettings.supplierAliases
+    : String(vendor.catalogSettings?.supplierAliases || "").split(/[|,\n]/);
+  return [...new Set([
+    vendor.name,
+    vendor.code,
+    ...configuredAliases
+  ].map((value) => sourceTextValue(value).toLowerCase()).filter(Boolean))];
+}
+
+function applyVendorCatalogScope(filters = {}, vendors = []) {
+  const scope = String(filters.vendorScope || "enabled").trim().toLowerCase();
+  if (scope === "all") return { ...filters };
+  const disabledSupplierAliases = [...new Set((vendors || [])
+    .filter((vendor) => vendor?.catalogSettings?.enabled === false)
+    .flatMap(vendorCatalogAliases))];
+  if (!disabledSupplierAliases.length) return { ...filters };
+  return {
+    ...filters,
+    excludedSuppliers: [...new Set([
+      ...catalogFilterValues(filters.excludedSuppliers),
+      ...disabledSupplierAliases
+    ])].join("|")
   };
 }
 
@@ -24104,6 +24161,27 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "image" && parts.length === 4 && postgres.isPostgresEnabled()) {
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const enriched = sourceEnrichedItem(item, readProductSourceEnrichmentSync());
+    const image = String(enriched.defaultImage || enriched.originalImage || "").trim();
+    if (/^https?:\/\//i.test(image)) {
+      res.writeHead(302, { Location: image, "Cache-Control": "public, max-age=3600" });
+      return res.end();
+    }
+    const match = /^data:(image\/(?:png|jpe?g|webp));base64,([A-Za-z0-9+/=\s]+)$/i.exec(image);
+    if (!match) return notFound(res);
+    const body = Buffer.from(match[2], "base64");
+    if (!body.length || body.length > 10 * 1024 * 1024) return sendJson(res, 413, { error: "Catalog image is unavailable." }, req);
+    res.writeHead(200, {
+      "Content-Type": match[1].toLowerCase().replace("jpg", "jpeg"),
+      "Content-Length": body.length,
+      "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800"
+    });
+    return res.end(body);
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "operations" && postgres.isPostgresEnabled()) {
     const item = await postgres.readProductByKey(parts[2]);
     if (!item) return notFound(res);
@@ -24501,10 +24579,12 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/inventory") {
     if (postgres.isPostgresEnabled()) {
       const cacheQuery = url.searchParams.toString();
-      const cacheKey = `dataplus:products:v4:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const cacheKey = `dataplus:products:v5:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
-      if (cached) return sendJson(res, 200, { ...cached, cached: true });
+      if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
       const fastPage = ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase());
+      const catalogState = await readDbFast({ skipInventory: true });
+      const filters = applyVendorCatalogScope(catalogFilterParams(url.searchParams), catalogState.vendors || []);
       const result = await postgres.listProducts({
         q: url.searchParams.get("q") || "",
         page: url.searchParams.get("page") || 1,
@@ -24514,7 +24594,7 @@ async function handleApi(req, res) {
         sort: url.searchParams.get("sort") || "",
         sortDirection: url.searchParams.get("sortDirection") || "asc",
         includeInventoryLevels: ["1", "true", "yes"].includes(String(url.searchParams.get("inventoryWorkspace") || "").toLowerCase()),
-        filters: catalogFilterParams(url.searchParams)
+        filters
       });
       if (result) {
         const shopifyStatusMap = readShopifyStatusMapSync();
@@ -24534,9 +24614,9 @@ async function handleApi(req, res) {
           storage: "postgres"
         };
         await redisCache.setJson(cacheKey, payload, REDIS_PRODUCTS_CACHE_TTL_SECONDS);
-        return sendJson(res, 200, payload);
+        return sendJson(res, 200, payload, req);
       }
-      return sendJson(res, 500, { error: "Postgres catalog query did not return a result." });
+      return sendJson(res, 500, { error: "Postgres catalog query did not return a result." }, req);
     }
     const db = await readDbFast();
     const shopifyStatusMap = readShopifyStatusMapSync();
@@ -27970,6 +28050,8 @@ async function handleApi(req, res) {
     const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
     const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "overdueReminderEnabled"]);
     const numericPurchaseOrderRuleFields = new Set(["approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
+    const catalogSettingsFields = new Set(["enabled", "supplierAliases", "note"]);
+    const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
@@ -28051,6 +28133,21 @@ async function handleApi(req, res) {
         }
         continue;
       }
+      if (field.startsWith("catalogSettings.")) {
+        const key = field.split(".")[1];
+        if (!catalogSettingsFields.has(key)) continue;
+        vendor.catalogSettings = vendor.catalogSettings || {};
+        const value = booleanCatalogSettingsFields.has(key)
+          ? Boolean(rawValue)
+          : key === "supplierAliases"
+            ? [...new Set((Array.isArray(rawValue) ? rawValue : String(rawValue ?? "").split(/[|,\n]/)).map((entry) => String(entry || "").trim()).filter(Boolean))]
+            : String(rawValue ?? "");
+        if (JSON.stringify(vendor.catalogSettings[key]) !== JSON.stringify(value)) {
+          changes.push(`${field} changed`);
+          vendor.catalogSettings[key] = value;
+        }
+        continue;
+      }
       if (!allowedFields.has(field)) continue;
       const value = numericFields.has(field) ? Number(rawValue || 0) : String(rawValue ?? "");
       if (vendor[field] !== value) {
@@ -28066,9 +28163,13 @@ async function handleApi(req, res) {
         user: body.user || "Luis"
       });
     }
+    const normalizedVendor = normalizeVendor(db, vendor);
+    const vendorIndex = (db.vendors || []).findIndex((entry) => entry.id === vendor.id);
+    if (vendorIndex >= 0) db.vendors[vendorIndex] = normalizedVendor;
     await postgres.writeStateDocuments({ vendors: db.vendors || [] });
+    if (changes.some((change) => change.startsWith("catalogSettings."))) await redisCache.deleteByPrefix("dataplus:products:");
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { vendor, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { vendor: normalizedVendor, state: publicState(stateDb, { lite: true }) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "files" && postgres.isPostgresEnabled()) {
@@ -34918,6 +35019,8 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
+    const catalogSettingsFields = new Set(["enabled", "supplierAliases", "note"]);
+    const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
@@ -34988,6 +35091,21 @@ async function handleApi(req, res) {
         }
         continue;
       }
+      if (field.startsWith("catalogSettings.")) {
+        const key = field.split(".")[1];
+        if (!catalogSettingsFields.has(key)) continue;
+        vendor.catalogSettings = vendor.catalogSettings || {};
+        const value = booleanCatalogSettingsFields.has(key)
+          ? Boolean(rawValue)
+          : key === "supplierAliases"
+            ? [...new Set((Array.isArray(rawValue) ? rawValue : String(rawValue ?? "").split(/[|,\n]/)).map((entry) => String(entry || "").trim()).filter(Boolean))]
+            : String(rawValue ?? "");
+        if (JSON.stringify(vendor.catalogSettings[key]) !== JSON.stringify(value)) {
+          changes.push(`${field} changed`);
+          vendor.catalogSettings[key] = value;
+        }
+        continue;
+      }
       if (!allowedFields.has(field)) continue;
       const value = numericFields.has(field) ? Number(rawValue || 0) : String(rawValue ?? "");
       if (vendor[field] !== value) {
@@ -35004,8 +35122,11 @@ async function handleApi(req, res) {
       });
     }
 
+    const normalizedVendor = normalizeVendor(db, vendor);
+    const vendorIndex = (db.vendors || []).findIndex((entry) => entry.id === vendor.id);
+    if (vendorIndex >= 0) db.vendors[vendorIndex] = normalizedVendor;
     await writeDb(db);
-    return sendJson(res, 200, { vendor, state: publicState(db) });
+    return sendJson(res, 200, { vendor: normalizedVendor, state: publicState(db) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts.length === 2) {

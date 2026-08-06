@@ -5384,6 +5384,11 @@ async function listProducts(options = {}) {
     params.push(supplierValues);
     where.push(`lower(coalesce(supplier, '')) = any($${params.length})`);
   }
+  const excludedSupplierValues = splitFilterValues(filters.excludedSuppliers).map((value) => value.toLowerCase());
+  if (excludedSupplierValues.length) {
+    params.push(excludedSupplierValues);
+    where.push(`not (lower(coalesce(supplier, '')) = any($${params.length}))`);
+  }
   const activeValues = [...new Set(splitFilterValues(filters.active).map(parseFilterBoolean))];
   if (activeValues.length === 1) {
     params.push(activeValues[0]);
@@ -5393,15 +5398,16 @@ async function listProducts(options = {}) {
   if (hasStockValues.length === 1) {
     where.push(hasStockValues[0] ? `coalesce(qty, 0) > 0` : `coalesce(qty, 0) <= 0`);
   }
+  const catalogImagePresenceExpression = `(
+    coalesce(default_image, '') <> ''
+    or coalesce(raw ->> 'image', raw ->> 'imageUrl', raw ->> 'defaultImage', raw ->> 'primaryImage', raw ->> 'thumbnailUrl', '') <> ''
+    or jsonb_array_length(case when jsonb_typeof(raw -> 'images') = 'array' then raw -> 'images' else '[]'::jsonb end) > 0
+    or jsonb_array_length(case when jsonb_typeof(raw -> 'productImages') = 'array' then raw -> 'productImages' else '[]'::jsonb end) > 0
+    or jsonb_array_length(case when jsonb_typeof(raw -> 'shopifyImages') = 'array' then raw -> 'shopifyImages' else '[]'::jsonb end) > 0
+  )`;
   const hasImageValues = [...new Set(splitFilterValues(filters.hasImage).map(parseFilterBoolean))];
   if (hasImageValues.length === 1) {
-    const hasImageExpression = `(
-      coalesce(raw ->> 'image', raw ->> 'imageUrl', raw ->> 'defaultImage', raw ->> 'primaryImage', raw ->> 'thumbnailUrl', '') <> ''
-      or jsonb_array_length(case when jsonb_typeof(raw -> 'images') = 'array' then raw -> 'images' else '[]'::jsonb end) > 0
-      or jsonb_array_length(case when jsonb_typeof(raw -> 'productImages') = 'array' then raw -> 'productImages' else '[]'::jsonb end) > 0
-      or jsonb_array_length(case when jsonb_typeof(raw -> 'shopifyImages') = 'array' then raw -> 'shopifyImages' else '[]'::jsonb end) > 0
-    )`;
-    where.push(hasImageValues[0] ? hasImageExpression : `not ${hasImageExpression}`);
+    where.push(hasImageValues[0] ? catalogImagePresenceExpression : `not ${catalogImagePresenceExpression}`);
   }
   const discontinuedValues = [...new Set(splitFilterValues(filters.toBeDiscontinued).map(parseFilterBoolean))];
   if (discontinuedValues.length === 1) {
@@ -5785,8 +5791,40 @@ async function listProducts(options = {}) {
     ${whereSql}
   `, params);
   params.push(fastPage ? limit + 1 : limit, offset);
+  // The list screen needs product metadata, not megabytes of image payloads. Keep image
+  // presence as a marker; the API resolves the small browser-cacheable image endpoint
+  // only when a row is actually visible.
+  const listRawProjection = `coalesce(raw, '{}'::jsonb) - array[
+    'image', 'imageUrl', 'defaultImage', 'originalImage', 'primaryImage',
+    'thumbnailUrl', 'images', 'productImages', 'shopifyImages'
+  ]::text[]`;
   const result = await client.query(`
-    select *
+    select
+      product_id,
+      sku,
+      title,
+      marketplace_title,
+      brand,
+      manufacturer,
+      mfr_part_number,
+      vendor_sku,
+      barcode,
+      category,
+      main_category,
+      source_category,
+      supplier,
+      supplier_code,
+      active,
+      to_be_discontinued,
+      uom,
+      uom_qty,
+      cost,
+      price,
+      qty,
+      case when ${catalogImagePresenceExpression} then '__dataplus_catalog_image__' else '' end as default_image,
+      ${listRawProjection} as raw,
+      created_at,
+      updated_at
     from products
     ${whereSql}
     order by ${orderBy} ${sortDirection}, sku asc

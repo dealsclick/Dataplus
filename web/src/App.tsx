@@ -339,6 +339,11 @@ type Vendor = {
   variationRules?: Record<string, unknown>
   inventoryRules?: Record<string, unknown>
   sourcePriority?: Record<string, unknown>
+  catalogSettings?: {
+    enabled?: boolean
+    supplierAliases?: string[]
+    note?: string
+  }
   channelRules?: Record<string, unknown>
 }
 
@@ -654,15 +659,14 @@ function normalizeUnifiedCatalogFilters(input: Record<string, string> = {}) {
 }
 
 function unifiedCatalogUsesManagedRecords(filters: Record<string, string> = {}) {
-  return filters.catalogStatus === "managed"
-    || ["channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo"].some((key) => Boolean(filters[key]))
+  return filters.catalogStatus !== "source-only"
 }
 
 function unifiedCatalogSourceFilters(filters: Record<string, string> = {}) {
   const next = { ...filters }
   const sourceOnly = next.catalogStatus === "source-only"
   delete next.catalogStatus
-  ;["channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo"].forEach((key) => delete next[key])
+  ;["channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo", "vendorScope"].forEach((key) => delete next[key])
   if (sourceOnly) next.productMembership = "not-in-products"
   else delete next.productMembership
   return next
@@ -9828,7 +9832,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   const [filters, setFilters] = useState<Record<string, string>>(() => {
     const params = new URLSearchParams(window.location.search)
     const initial = Object.fromEntries(
-      ["catalogStatus", "supplier", "suppliers", "active", "stockStatus", "hasStock", "hasImage", "stockQty", "stockQtyOperator", "hazardous", "toBeDiscontinued", "brand", "manufacturer", "category", "channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo"]
+      ["catalogStatus", "vendorScope", "supplier", "suppliers", "active", "stockStatus", "hasStock", "hasImage", "stockQty", "stockQtyOperator", "hazardous", "toBeDiscontinued", "brand", "manufacturer", "category", "channelStatus", "creationSource", "verifiedBrand", "createdFrom", "createdTo"]
         .map((key) => [key, params.get(key) || ""])
         .filter(([, value]) => Boolean(value)),
     ) as Record<string, string>
@@ -9884,6 +9888,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   ] as const
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
     catalogStatus: { label: "Catalog status", values: ["source-only", "managed"], display: (value) => value === "source-only" ? "Needs review" : "Managed catalog" },
+    vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
     channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
@@ -9927,16 +9932,22 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   }
 
   useEffect(() => {
-    Promise.all([
-      api<{ facets?: { suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] } }>("/api/inventory/facets"),
-      api<{ suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] }>("/api/catalog/facets"),
-    ]).then(([managed, source]) => {
-      const merged = (key: "suppliers" | "brands" | "manufacturers" | "categories") => Array.from(new Set([...(managed.facets?.[key] || []), ...(source[key] || [])])).sort()
-      setFacets({ suppliers: merged("suppliers"), brands: merged("brands"), manufacturers: merged("manufacturers"), categories: merged("categories") })
-    }).catch(() => {})
+    const sourceOnly = filters.catalogStatus === "source-only"
+    const endpoint = sourceOnly ? "/api/catalog/facets" : "/api/inventory/facets"
+    api<{ facets?: { suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] }; suppliers?: string[]; brands?: string[]; manufacturers?: string[]; categories?: string[] }>(endpoint)
+      .then((result) => {
+        const facets = result.facets || result
+        setFacets({
+          suppliers: facets.suppliers || [],
+          brands: facets.brands || [],
+          manufacturers: facets.manufacturers || [],
+          categories: facets.categories || [],
+        })
+      })
+      .catch(() => {})
     load(1, filters)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [filters.catalogStatus])
 
   const activeDefinition = filterDefinitions[filterField]
   const filterValues = filterField === "channelStatus"
@@ -11717,6 +11728,9 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
   const variationRules = vendor.variationRules || {}
   const purchaseOrderRules = (vendor as Vendor & { purchaseOrderRules?: Record<string, unknown> }).purchaseOrderRules || {}
   const sourcePriority = vendor.sourcePriority || {}
+  const catalogSettings = vendor.catalogSettings || {}
+  const catalogAliasesValue = draft["catalogSettings.supplierAliases"] ?? catalogSettings.supplierAliases ?? [vendor.name, vendor.code].filter(Boolean)
+  const catalogAliases = Array.isArray(catalogAliasesValue) ? catalogAliasesValue.join(" | ") : String(catalogAliasesValue || "")
 
   return (
     <div className="grid gap-4">
@@ -11839,6 +11853,24 @@ function VendorDetail({ vendor, onSave }: { vendor: Vendor; onSave: (id: string,
         </TabsContent>
         <TabsContent value="data-feed">
           <div className="grid gap-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Catalog participation</CardTitle>
+                <CardDescription>Controls whether this supplier appears in the fast managed catalog. Disabled supplier records stay available in the source archive and can be included temporarily with the catalog filter.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2">
+                <ToggleField label="Include supplier in catalog" checked={Boolean(draft["catalogSettings.enabled"] ?? (catalogSettings.enabled ?? true))} disabled={!editing} onCheckedChange={(next) => update("catalogSettings.enabled", next)} />
+                <Field label="Supplier aliases">
+                  <Input disabled={!editing} value={catalogAliases} onChange={(event) => update("catalogSettings.supplierAliases", event.target.value.split(/[|,\n]/).map((entry) => entry.trim()).filter(Boolean))} placeholder="True Value | TRV" />
+                  <p className="text-xs text-muted-foreground">Use the names found in incoming feeds. They ensure this setting matches supplier records reliably.</p>
+                </Field>
+                <div className="md:col-span-2">
+                  <Field label="Catalog note">
+                    <Textarea disabled={!editing} value={String(draft["catalogSettings.note"] ?? catalogSettings.note ?? "")} onChange={(event) => update("catalogSettings.note", event.target.value)} placeholder="Why this supplier is included or excluded from the normal catalog" />
+                  </Field>
+                </div>
+              </CardContent>
+            </Card>
             <Card>
               <CardHeader><CardTitle className="text-base">Source precedence</CardTitle><CardDescription>When this supplier has a direct feed, decide whether it overrides the universal DataWarehouse import for this supplier's records.</CardDescription></CardHeader>
               <CardContent className="grid gap-4 md:grid-cols-2">
