@@ -14537,9 +14537,22 @@ async function runEbayCatalogImportWorkerJob(job = {}) {
     processedRows: 0,
     message: "Fetching live eBay catalog..."
   });
-  const workDb = normalizeDb(await readDbFast({ skipInventory: false }));
+  // A catalog sync only needs local products referenced by the eBay offers.
+  // Loading the complete catalog here can exhaust the long-lived worker heap.
+  const workDb = normalizeDb(await readDbFast({
+    skipInventory: postgres.isPostgresEnabled(),
+    orderLimit: 1,
+    purchaseOrderLimit: 1
+  }));
+  let catalogMatches = null;
   const result = await importEbayCatalog(workDb, {
     job,
+    hydrateProducts: async (rows = []) => {
+      if (!postgres.isPostgresEnabled()) return;
+      catalogMatches = await loadEbayCatalogProductMatches(rows);
+      workDb.inventory = catalogMatches.inventory;
+    },
+    resolveProduct: (row) => catalogMatches?.resolve(row) || null,
     progress: (patch = {}) => {
       persistWorkerImportJob(job, {
         ...patch,
@@ -18102,6 +18115,44 @@ function ebayOfferCurrency(offer = {}) {
   return String(offer.pricingSummary?.price?.currency || offer.price?.currency || process.env.EBAY_CURRENCY || "USD").trim();
 }
 
+function ebayCatalogOfferSnapshot(offer = {}) {
+  const price = offer.pricingSummary?.price || offer.price || {};
+  return {
+    sku: String(offer.sku || "").trim(),
+    offerId: String(offer.offerId || "").trim(),
+    listingId: ebayOfferListingId(offer),
+    status: ebayOfferStatus(offer),
+    marketplaceId: String(offer.marketplaceId || "").trim(),
+    categoryId: String(offer.categoryId || "").trim(),
+    merchantLocationKey: String(offer.merchantLocationKey || "").trim(),
+    availableQuantity: Number(offer.availableQuantity ?? offer.quantity ?? offer.inventory?.availableQuantity ?? 0) || 0,
+    pricingSummary: { price: { value: price?.value ?? price ?? 0, currency: price?.currency || "" } },
+    listingPolicies: offer.listingPolicies && typeof offer.listingPolicies === "object" ? offer.listingPolicies : {},
+    listingDuration: String(offer.listingDuration || "").trim(),
+    title: String(offer.title || "").trim()
+  };
+}
+
+function ebayCatalogInventorySnapshot(item = {}) {
+  const product = item.product || {};
+  const quantity = Number(item.availability?.shipToLocationAvailability?.quantity ?? item.availableQuantity ?? item.quantity ?? 0) || 0;
+  return {
+    sku: String(item.sku || "").trim(),
+    condition: String(item.condition || "").trim(),
+    availability: { shipToLocationAvailability: { quantity } },
+    product: {
+      title: String(product.title || "").trim(),
+      brand: String(product.brand || "").trim(),
+      mpn: String(product.mpn || "").trim(),
+      epid: String(product.epid || product.ePid || "").trim(),
+      upc: Array.isArray(product.upc) ? product.upc : product.upc ? [product.upc] : [],
+      ean: Array.isArray(product.ean) ? product.ean : product.ean ? [product.ean] : [],
+      isbn: Array.isArray(product.isbn) ? product.isbn : product.isbn ? [product.isbn] : [],
+      aspects: product.aspects && typeof product.aspects === "object" ? product.aspects : {}
+    }
+  };
+}
+
 function ebayCatalogRowFromOffer(offer = {}, inventoryItem = {}) {
   const sku = String(offer.sku || inventoryItem.sku || "").trim();
   const product = inventoryItem.product || {};
@@ -18127,21 +18178,18 @@ function ebayCatalogRowFromOffer(offer = {}, inventoryItem = {}) {
     price: ebayOfferPrice(offer),
     currency: ebayOfferCurrency(offer),
     title: String(product.title || offer.title || sku).trim(),
-    description: String(product.description || offer.listingDescription || "").trim(),
     brand: product.brand || "",
     mpn: product.mpn || "",
     ePid: product.epid || product.ePid || "",
+    condition: String(inventoryItem.condition || "").trim(),
     identifiers: {
       upc: Array.isArray(product.upc) ? product.upc : product.upc ? [product.upc] : [],
       ean: Array.isArray(product.ean) ? product.ean : product.ean ? [product.ean] : [],
       isbn: Array.isArray(product.isbn) ? product.isbn : product.isbn ? [product.isbn] : []
     },
     aspects: product.aspects || {},
-    imageUrls: Array.isArray(product.imageUrls) ? product.imageUrls : [],
     listingPolicies: offer.listingPolicies && typeof offer.listingPolicies === "object" ? offer.listingPolicies : {},
-    listingDuration: String(offer.listingDuration || "").trim(),
-    rawOffer: offer,
-    rawInventoryItem: inventoryItem
+    listingDuration: String(offer.listingDuration || "").trim()
   };
 }
 
@@ -18152,7 +18200,13 @@ async function fetchEbayOffers(db, options = {}) {
   for (let offset = 0; offset < maxRows; offset += limit) {
     const data = await ebayRequest(db, `/sell/inventory/v1/offer?limit=${limit}&offset=${offset}`, { jobId: options.jobId, operation: "Fetch eBay offers" });
     const page = Array.isArray(data.offers) ? data.offers : Array.isArray(data.offerSummaries) ? data.offerSummaries : [];
-    offers.push(...page);
+    offers.push(...page.map(ebayCatalogOfferSnapshot));
+    options.progress?.({
+      phase: "fetching_ebay_offers",
+      processedRows: offers.length,
+      totalRows: Math.min(maxRows, Math.max(offers.length, Number(data.total || 0) || offers.length)),
+      message: `Fetched ${offers.length.toLocaleString()} eBay offer${offers.length === 1 ? "" : "s"}...`
+    });
     if (!page.length || page.length < limit || offers.length >= Number(data.total || Infinity) || offers.length >= maxRows) break;
   }
   return offers.slice(0, maxRows);
@@ -18165,7 +18219,13 @@ async function fetchEbayInventoryItems(db, options = {}) {
   for (let offset = 0; offset < maxRows; offset += limit) {
     const data = await ebayRequest(db, `/sell/inventory/v1/inventory_item?limit=${limit}&offset=${offset}`, { jobId: options.jobId, operation: "Fetch eBay inventory items" });
     const page = Array.isArray(data.inventoryItems) ? data.inventoryItems : [];
-    items.push(...page);
+    items.push(...page.map(ebayCatalogInventorySnapshot));
+    options.progress?.({
+      phase: "fetching_ebay_inventory",
+      processedRows: items.length,
+      totalRows: Math.min(maxRows, Math.max(items.length, Number(data.total || 0) || items.length)),
+      message: `Fetched ${items.length.toLocaleString()} eBay inventory record${items.length === 1 ? "" : "s"}...`
+    });
     if (!page.length || page.length < limit || items.length >= Number(data.total || Infinity) || items.length >= maxRows) break;
   }
   return items.slice(0, maxRows);
@@ -18401,7 +18461,7 @@ function applyEbayCatalogRowToProduct(db, item, row, matchBy = "sku") {
     listingUrl: row.listingUrl || item.ebayListing?.listingUrl || "",
     status: row.live ? "published" : "offer",
     ebayStatus: row.status,
-    condition: row.rawInventoryItem?.condition || item.ebayListing?.condition || "",
+    condition: row.condition || item.ebayListing?.condition || "",
     currency: row.currency || item.ebayListing?.currency || "USD",
     aspects: row.aspects || item.ebayListing?.aspects || {},
     ePid: row.ePid || item.ebayListing?.ePid || "",
@@ -18440,11 +18500,11 @@ async function importEbayCatalog(db, options = {}) {
   const jobId = options.job?.id || options.jobId || "";
   const channelSettings = ebayChannelSettings(db);
   const maxRows = Math.max(1, Math.min(100000, Number(options.maxRows || channelSettings.ebayCatalogSyncLimit || 50000) || 50000));
-  const offers = await fetchEbayOffers(db, { jobId, maxRows });
+  const offers = await fetchEbayOffers(db, { jobId, maxRows, progress });
   if (isCanceled()) throw new Error("eBay catalog sync canceled.");
   let inventoryItems = [];
   try {
-    inventoryItems = await fetchEbayInventoryItems(db, { jobId, maxRows });
+    inventoryItems = await fetchEbayInventoryItems(db, { jobId, maxRows, progress });
   } catch {
     inventoryItems = [];
   }
@@ -18452,6 +18512,9 @@ async function importEbayCatalog(db, options = {}) {
   const rows = offers
     .map((offer) => ebayCatalogRowFromOffer(offer, inventoryBySku.get(String(offer.sku || "").toLowerCase()) || {}))
     .filter((row) => row.sku);
+  if (typeof options.hydrateProducts === "function") {
+    await options.hydrateProducts(rows);
+  }
   const job = options.job || createImportJob(db, {
     section: "Products",
     operation: "eBay catalog sync",
@@ -18465,12 +18528,18 @@ async function importEbayCatalog(db, options = {}) {
   let live = 0;
   const errorRows = [];
   let processed = 0;
-  progress({ phase: "mapping_catalog", processedRows: 0, totalRows: rows.length });
+  progress({
+    phase: "mapping_catalog",
+    processedRows: 0,
+    totalRows: rows.length,
+    message: `Matching ${rows.length.toLocaleString()} eBay offer${rows.length === 1 ? "" : "s"} to DataPlus SKUs...`
+  });
   for (const row of rows) {
     if (isCanceled()) throw new Error("eBay catalog sync canceled.");
     processed += 1;
     if (row.live) live += 1;
-    const { item, matchBy } = findInventoryByEbayCatalogRow(db, row);
+    const resolved = typeof options.resolveProduct === "function" ? options.resolveProduct(row) : null;
+    const { item, matchBy } = resolved?.item ? resolved : findInventoryByEbayCatalogRow(db, row);
     if (!item) {
       queueUnmappedEbayCatalogReview(db, row);
       errorRows.push(standardImportError({
@@ -18482,7 +18551,12 @@ async function importEbayCatalog(db, options = {}) {
         details: row.listingUrl || ""
       }));
       if (processed % 25 === 0 || processed === rows.length) {
-        progress({ phase: "mapping_catalog", processedRows: processed, totalRows: rows.length });
+        progress({
+          phase: "mapping_catalog",
+          processedRows: processed,
+          totalRows: rows.length,
+          message: `Matched ${processed.toLocaleString()} of ${rows.length.toLocaleString()} eBay offers...`
+        });
         await new Promise((resolve) => setImmediate(resolve));
       }
       continue;
@@ -18490,7 +18564,12 @@ async function importEbayCatalog(db, options = {}) {
     matched += 1;
     if (applyEbayCatalogRowToProduct(db, item, row, matchBy)) updated += 1;
     if (processed % 25 === 0 || processed === rows.length) {
-      progress({ phase: "mapping_catalog", processedRows: processed, totalRows: rows.length });
+      progress({
+        phase: "mapping_catalog",
+        processedRows: processed,
+        totalRows: rows.length,
+        message: `Matched ${processed.toLocaleString()} of ${rows.length.toLocaleString()} eBay offers...`
+      });
       await new Promise((resolve) => setImmediate(resolve));
     }
   }
@@ -18523,6 +18602,51 @@ async function importEbayCatalog(db, options = {}) {
     connection.lastCatalogSync = connection.lastSync;
   }
   return { fetched: rows.length, live, matched, updated, unmapped: errorRows.length, job };
+}
+
+async function loadEbayCatalogProductMatches(rows = []) {
+  const skuKeys = [...new Set(rows.map((row) => String(row.sku || "").trim()).filter(Boolean))];
+  const externalKeys = [...new Set(rows.flatMap((row) => [row.listingId, row.offerId]).map((value) => String(value || "").trim()).filter(Boolean))];
+  const productsById = new Map();
+  const pageSize = 2000;
+
+  for (let offset = 0; offset < skuKeys.length; offset += pageSize) {
+    const products = await postgres.readProductsByKeys(skuKeys.slice(offset, offset + pageSize));
+    for (const product of products) productsById.set(String(product.id || product.sku || ""), product);
+  }
+  for (let offset = 0; offset < externalKeys.length; offset += pageSize) {
+    const products = await postgres.readProductsByEbayListingKeys(externalKeys.slice(offset, offset + pageSize));
+    for (const product of products) productsById.set(String(product.id || product.sku || ""), product);
+  }
+
+  const inventory = [...productsById.values()];
+  const bySku = new Map();
+  const byListingId = new Map();
+  const byOfferId = new Map();
+  const add = (map, key, item, matchBy) => {
+    const normalized = String(key || "").trim().toLowerCase();
+    if (normalized && !map.has(normalized)) map.set(normalized, { item, matchBy });
+  };
+  for (const item of inventory) {
+    add(bySku, item.sku, item, "sku");
+    for (const alias of item.aliases || []) add(bySku, alias.aliasSku, item, "sku");
+    for (const shadow of item.shadowSkus || []) add(bySku, shadow.shadowSku, item, "sku");
+    const saved = item.ebayListing || {};
+    add(byListingId, saved.listingId, item, "listingId");
+    add(byListingId, item.ebayId, item, "listingId");
+    add(byListingId, item.sources?.eBay, item, "listingId");
+    add(byOfferId, saved.offerId, item, "offerId");
+  }
+
+  return {
+    inventory,
+    resolve(row = {}) {
+      const sku = String(row.sku || "").trim().toLowerCase();
+      const listingId = String(row.listingId || "").trim().toLowerCase();
+      const offerId = String(row.offerId || "").trim().toLowerCase();
+      return bySku.get(sku) || byListingId.get(listingId) || byOfferId.get(offerId) || null;
+    }
+  };
 }
 
 function validateEbayListingConfig(config, publish = false, item = {}) {

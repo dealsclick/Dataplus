@@ -93,6 +93,9 @@ services:
     environment:
       DATAPLUS_DOCKER: "1"
       DATAPLUS_BACKGROUND_JOBS_MODE: "worker"
+      # The worker needs headroom for large marketplace syncs. Keep it below
+      # the Droplet's RAM so Postgres and the web process remain healthy.
+      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WORKER_MAX_OLD_SPACE_MB:-3072}
       TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
       REDIS_URL: redis://redis:6379/0

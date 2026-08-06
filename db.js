@@ -5193,7 +5193,56 @@ async function readProductsByKeys(keys = []) {
           and active = true
       )
   `, [lowerKeys, lowerLegacyKeys]);
-  return result.rows.map(productRowToState);
+  const products = result.rows.map(productRowToState);
+  const productIds = products.map((product) => product.id).filter(Boolean);
+  if (!productIds.length) return products;
+  const aliases = await client.query(`
+    select *
+    from product_aliases
+    where product_id = any($1::text[])
+      and active = true
+  `, [productIds]);
+  const aliasesByProduct = new Map();
+  for (const alias of aliases.rows) {
+    if (!aliasesByProduct.has(alias.product_id)) aliasesByProduct.set(alias.product_id, []);
+    aliasesByProduct.get(alias.product_id).push(aliasRowToState(alias));
+  }
+  for (const product of products) product.aliases = aliasesByProduct.get(product.id) || [];
+  return products;
+}
+
+async function readProductsByEbayListingKeys(keys = []) {
+  const client = getPool();
+  if (!client) return [];
+  const normalized = [...new Set((Array.isArray(keys) ? keys : [])
+    .map((key) => nullableString(key)?.toLowerCase())
+    .filter(Boolean))];
+  if (!normalized.length) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    select *
+    from products
+    where lower(coalesce(raw -> 'ebayListing' ->> 'listingId', '')) = any($1)
+      or lower(coalesce(raw -> 'ebayListing' ->> 'offerId', '')) = any($1)
+      or lower(coalesce(raw ->> 'ebayId', '')) = any($1)
+      or lower(coalesce(raw -> 'sources' ->> 'eBay', '')) = any($1)
+  `, [normalized]);
+  const products = result.rows.map(productRowToState);
+  const productIds = products.map((product) => product.id).filter(Boolean);
+  if (!productIds.length) return products;
+  const aliases = await client.query(`
+    select *
+    from product_aliases
+    where product_id = any($1::text[])
+      and active = true
+  `, [productIds]);
+  const aliasesByProduct = new Map();
+  for (const alias of aliases.rows) {
+    if (!aliasesByProduct.has(alias.product_id)) aliasesByProduct.set(alias.product_id, []);
+    aliasesByProduct.get(alias.product_id).push(aliasRowToState(alias));
+  }
+  for (const product of products) product.aliases = aliasesByProduct.get(product.id) || [];
+  return products;
 }
 
 async function readProductsForOrderSkus(keys = []) {
@@ -6578,6 +6627,7 @@ module.exports = {
   readProductQualityRows,
   readProductSourceEnrichmentMap,
   readProductsByKeys,
+  readProductsByEbayListingKeys,
   readProductsForOrderSkus,
   readPurchaseOrderByKey,
   readShopifyStatusMap,
