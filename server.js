@@ -18193,23 +18193,49 @@ function ebayCatalogRowFromOffer(offer = {}, inventoryItem = {}) {
   };
 }
 
-async function fetchEbayOffers(db, options = {}) {
+async function fetchEbayOffers(db, skus = [], options = {}) {
+  const uniqueSkus = [...new Set((Array.isArray(skus) ? skus : [])
+    .map((sku) => String(sku || "").trim())
+    .filter(Boolean))];
   const offers = [];
-  const limit = 200;
-  const maxRows = Math.max(1, Math.min(100000, Number(options.maxRows || 50000) || 50000));
-  for (let offset = 0; offset < maxRows; offset += limit) {
-    const data = await ebayRequest(db, `/sell/inventory/v1/offer?limit=${limit}&offset=${offset}`, { jobId: options.jobId, operation: "Fetch eBay offers" });
-    const page = Array.isArray(data.offers) ? data.offers : Array.isArray(data.offerSummaries) ? data.offerSummaries : [];
-    offers.push(...page.map(ebayCatalogOfferSnapshot));
-    options.progress?.({
-      phase: "fetching_ebay_offers",
-      processedRows: offers.length,
-      totalRows: Math.min(maxRows, Math.max(offers.length, Number(data.total || 0) || offers.length)),
-      message: `Fetched ${offers.length.toLocaleString()} eBay offer${offers.length === 1 ? "" : "s"}...`
-    });
-    if (!page.length || page.length < limit || offers.length >= Number(data.total || Infinity) || offers.length >= maxRows) break;
-  }
-  return offers.slice(0, maxRows);
+  const errors = [];
+  const requested = uniqueSkus.length;
+  const concurrency = Math.max(1, Math.min(8, Number(options.concurrency || 4) || 4));
+  let cursor = 0;
+  let completed = 0;
+
+  const reportProgress = () => options.progress?.({
+    phase: "fetching_ebay_offers",
+    processedRows: completed,
+    totalRows: requested,
+    message: `Fetched offers for ${completed.toLocaleString()} of ${requested.toLocaleString()} matched eBay SKU${requested === 1 ? "" : "s"}...`
+  });
+  const nextSku = () => {
+    if (cursor >= uniqueSkus.length) return "";
+    const sku = uniqueSkus[cursor];
+    cursor += 1;
+    return sku;
+  };
+  const worker = async () => {
+    for (let sku = nextSku(); sku; sku = nextSku()) {
+      try {
+        // getOffers is scoped to one SKU. Calling it without `sku` makes
+        // eBay validate an empty SKU and fail the entire catalog sync.
+        const data = await ebayRequest(db, `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&limit=25&offset=0`, {
+          jobId: options.jobId,
+          operation: `Fetch eBay offers for ${sku}`
+        });
+        const page = Array.isArray(data.offers) ? data.offers : Array.isArray(data.offerSummaries) ? data.offerSummaries : [];
+        offers.push(...page.map(ebayCatalogOfferSnapshot));
+      } catch (error) {
+        errors.push({ sku, message: error?.message || String(error || "eBay offer lookup failed") });
+      }
+      completed += 1;
+      if (completed % 10 === 0 || completed === requested) reportProgress();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, requested) }, worker));
+  return { offers, errors };
 }
 
 async function fetchEbayInventoryItems(db, options = {}) {
@@ -18500,20 +18526,45 @@ async function importEbayCatalog(db, options = {}) {
   const jobId = options.job?.id || options.jobId || "";
   const channelSettings = ebayChannelSettings(db);
   const maxRows = Math.max(1, Math.min(100000, Number(options.maxRows || channelSettings.ebayCatalogSyncLimit || 50000) || 50000));
-  const offers = await fetchEbayOffers(db, { jobId, maxRows, progress });
-  if (isCanceled()) throw new Error("eBay catalog sync canceled.");
   let inventoryItems = [];
   try {
     inventoryItems = await fetchEbayInventoryItems(db, { jobId, maxRows, progress });
-  } catch {
-    inventoryItems = [];
+  } catch (error) {
+    throw new Error(`Could not retrieve eBay inventory items: ${error?.message || String(error || "unknown error")}`);
   }
-  const inventoryBySku = new Map(inventoryItems.map((item) => [String(item.sku || "").toLowerCase(), item]));
-  const rows = offers
-    .map((offer) => ebayCatalogRowFromOffer(offer, inventoryBySku.get(String(offer.sku || "").toLowerCase()) || {}))
+  if (isCanceled()) throw new Error("eBay catalog sync canceled.");
+  const inventoryRows = inventoryItems
+    .map((item) => ebayCatalogRowFromOffer({}, item))
     .filter((row) => row.sku);
   if (typeof options.hydrateProducts === "function") {
-    await options.hydrateProducts(rows);
+    await options.hydrateProducts(inventoryRows);
+  }
+  const matchedInventoryItems = inventoryItems.filter((item) => {
+    const row = ebayCatalogRowFromOffer({}, item);
+    const resolved = typeof options.resolveProduct === "function" ? options.resolveProduct(row) : null;
+    return Boolean(resolved?.item || findInventoryByEbayCatalogRow(db, row).item);
+  });
+  progress({
+    phase: "fetching_ebay_offers",
+    processedRows: 0,
+    totalRows: matchedInventoryItems.length,
+    message: `Loading offers for ${matchedInventoryItems.length.toLocaleString()} eBay SKU${matchedInventoryItems.length === 1 ? "" : "s"} matched to DataPlus...`
+  });
+  const offerResult = await fetchEbayOffers(db, matchedInventoryItems.map((item) => item.sku), { jobId, progress });
+  if (isCanceled()) throw new Error("eBay catalog sync canceled.");
+  const offersBySku = new Map();
+  for (const offer of offerResult.offers) {
+    const sku = String(offer.sku || "").trim().toLowerCase();
+    if (!sku) continue;
+    if (!offersBySku.has(sku)) offersBySku.set(sku, []);
+    offersBySku.get(sku).push(offer);
+  }
+  const rows = [];
+  for (const inventoryItem of inventoryItems) {
+    const sku = String(inventoryItem.sku || "").trim().toLowerCase();
+    const offers = offersBySku.get(sku) || [];
+    if (offers.length) rows.push(...offers.map((offer) => ebayCatalogRowFromOffer(offer, inventoryItem)));
+    else rows.push(ebayCatalogRowFromOffer({}, inventoryItem));
   }
   const job = options.job || createImportJob(db, {
     section: "Products",
@@ -18526,7 +18577,14 @@ async function importEbayCatalog(db, options = {}) {
   let matched = 0;
   let updated = 0;
   let live = 0;
-  const errorRows = [];
+  const errorRows = offerResult.errors.map((error) => standardImportError({
+    sku: error.sku,
+    recordKey: error.sku,
+    field: "sku",
+    issue: "Could not load eBay offer details",
+    rawValue: error.sku,
+    details: error.message
+  }));
   let processed = 0;
   progress({
     phase: "mapping_catalog",
