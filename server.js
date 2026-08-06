@@ -27391,6 +27391,9 @@ async function handleApi(req, res) {
     const job = normalizeImportJob({
       ...previous,
       id: crypto.randomUUID(),
+      // A retry is a distinct operation. Leave its display number empty so
+      // PostgreSQL allocates the next value from operations_job_number_seq.
+      jobNumber: undefined,
       status: "queued",
       phase: "queued",
       message: `Retry queued for ${previous.operation || "job"}.`,
@@ -27461,6 +27464,9 @@ async function handleApi(req, res) {
     const job = normalizeImportJob({
       ...previous,
       id: crypto.randomUUID(),
+      // A retry is a distinct operation. Leave its display number empty so
+      // PostgreSQL allocates the next value from operations_job_number_seq.
+      jobNumber: undefined,
       status: "queued",
       phase: "queued",
       message: `Retry queued for ${previous.operation || "job"}.`,
