@@ -4589,24 +4589,62 @@ function ProductEbaySettingsDialog({ open, onOpenChange, product, channel, onUpd
 // drafts. New product pages use the listing workspace below.
 void ProductEbaySettingsDialog
 
-function EbayListingWorkspace({ open, onOpenChange, product, channel, onUpdated }: { open: boolean; onOpenChange: (open: boolean) => void; product: ProductItem; channel: ChannelConnection; onUpdated: (product: ProductItem) => void }) {
-  const [draft, setDraft] = useState<Record<string, string | boolean>>({})
-  const [readiness, setReadiness] = useState<{ status?: string; ready?: boolean; live?: boolean; missing?: string[]; price?: number; quantity?: number } | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [ending, setEnding] = useState(false)
-  const listing = product.ebayListing || {}
-  const settings = channel.settings || {}
-  const overrides = listing.settings || {}
-  const locations = Array.isArray(settings.ebayMerchantLocations) ? settings.ebayMerchantLocations : []
-  const paymentPolicies = Array.isArray(settings.ebayPaymentPolicies) ? settings.ebayPaymentPolicies : []
-  const returnPolicies = Array.isArray(settings.ebayReturnPolicies) ? settings.ebayReturnPolicies : []
-  const fulfillmentPolicies = Array.isArray(settings.ebayFulfillmentPolicies) ? settings.ebayFulfillmentPolicies : []
-  const storeCategories = Array.isArray(settings.ebayStoreCategories) ? settings.ebayStoreCategories : []
-  const listingTemplates = Array.isArray(settings.ebayListingTemplates) ? settings.ebayListingTemplates : []
-  const itemSpecificTemplates = Array.isArray(settings.ebayItemSpecificTemplates) ? settings.ebayItemSpecificTemplates : []
+function EbayListingWorkspace({
+  open,
+  onOpenChange,
+  product,
+  channel,
+  onUpdated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  product: ProductItem;
+  channel: ChannelConnection;
+  onUpdated: (product: ProductItem) => void;
+}) {
+  const [draft, setDraft] = useState<Record<string, string | boolean>>({});
+  const [readiness, setReadiness] = useState<{
+    status?: string;
+    ready?: boolean;
+    live?: boolean;
+    missing?: string[];
+    price?: number;
+    quantity?: number;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [ending, setEnding] = useState(false);
+  const [activeTab, setActiveTab] = useState("commerce");
+  const listing = product.ebayListing || {};
+  const settings = channel.settings || {};
+  const overrides = listing.settings || {};
+  const locations = Array.isArray(settings.ebayMerchantLocations)
+    ? settings.ebayMerchantLocations
+    : [];
+  const paymentPolicies = Array.isArray(settings.ebayPaymentPolicies)
+    ? settings.ebayPaymentPolicies
+    : [];
+  const returnPolicies = Array.isArray(settings.ebayReturnPolicies)
+    ? settings.ebayReturnPolicies
+    : [];
+  const fulfillmentPolicies = Array.isArray(settings.ebayFulfillmentPolicies)
+    ? settings.ebayFulfillmentPolicies
+    : [];
+  const storeCategories = Array.isArray(settings.ebayStoreCategories)
+    ? settings.ebayStoreCategories
+    : [];
+  const listingTemplates = Array.isArray(settings.ebayListingTemplates)
+    ? settings.ebayListingTemplates
+    : [];
+  const itemSpecificTemplates = Array.isArray(
+    settings.ebayItemSpecificTemplates,
+  )
+    ? settings.ebayItemSpecificTemplates
+    : [];
 
-  const text = (key: string) => String(draft[key] ?? "")
-  const checked = (key: string, fallback = false) => draft[key] === undefined ? fallback : draft[key] === true
+  const text = (key: string) => String(draft[key] ?? "");
+  const checked = (key: string, fallback = false) =>
+    draft[key] === undefined ? fallback : draft[key] === true;
+  const usesChannelDefaults = checked("useChannelDefaults", true);
   const channelPolicyOverrideKeys = new Set([
     "ebayMarketplaceId",
     "ebayDefaultCondition",
@@ -4619,79 +4657,232 @@ function EbayListingWorkspace({ open, onOpenChange, product, channel, onUpdated 
     "ebayListingTemplateId",
     "ebayItemSpecificTemplateId",
     "ebayDispatchTimeDays",
-  ])
-  const change = (key: string, value: string | boolean) => setDraft((current) => ({
-    ...current,
-    [key]: value,
-    ...(channelPolicyOverrideKeys.has(key) ? { useChannelDefaults: false } : {}),
-  }))
-  const field = (label: string, key: string, type = "text", description = "") => (
+  ]);
+  const change = (key: string, value: string | boolean) =>
+    setDraft((current) => ({
+      ...current,
+      [key]: value,
+      ...(channelPolicyOverrideKeys.has(key)
+        ? { useChannelDefaults: false }
+        : {}),
+    }));
+  const field = (
+    label: string,
+    key: string,
+    type = "text",
+    description = "",
+  ) => (
     <FormField className="gap-1.5">
       <FieldLabel htmlFor={`ebay-workspace-${key}`}>{label}</FieldLabel>
-      <Input id={`ebay-workspace-${key}`} type={type} min={type === "number" ? 0 : undefined} step={type === "number" ? "0.01" : undefined} value={text(key)} onChange={(event) => change(key, event.target.value)} />
+      <Input
+        id={`ebay-workspace-${key}`}
+        type={type}
+        min={type === "number" ? 0 : undefined}
+        step={type === "number" ? "0.01" : undefined}
+        value={text(key)}
+        onChange={(event) => change(key, event.target.value)}
+      />
       {description ? <FieldDescription>{description}</FieldDescription> : null}
     </FormField>
-  )
-  const select = (label: string, key: string, options: Array<{ value: string; label: string }>, description = "") => {
-    const value = text(key)
-    const normalized = value && !options.some((option) => option.value === value) ? [{ value, label: value }, ...options] : options
-    return <FormField className="gap-1.5"><FieldLabel>{label}</FieldLabel><Select value={value || "__none"} onValueChange={(next) => change(key, next === "__none" ? "" : next)}><SelectTrigger><SelectValue placeholder="Not selected" /></SelectTrigger><SelectContent><SelectItem value="__none">Not selected</SelectItem>{normalized.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>{description ? <FieldDescription>{description}</FieldDescription> : null}</FormField>
-  }
-  const toggle = (label: string, description: string, key: string, fallback = false) => <div className="rounded-md border bg-card p-3"><ToggleRow label={label} description={description} checked={checked(key, fallback)} disabled={false} onCheckedChange={(value) => change(key, value)} /></div>
+  );
+  const select = (
+    label: string,
+    key: string,
+    options: Array<{ value: string; label: string }>,
+    description = "",
+  ) => {
+    const value = text(key);
+    const normalized =
+      value && !options.some((option) => option.value === value)
+        ? [{ value, label: value }, ...options]
+        : options;
+    return (
+      <FormField className="gap-1.5">
+        <FieldLabel>{label}</FieldLabel>
+        <Select
+          value={value || "__none"}
+          onValueChange={(next) => change(key, next === "__none" ? "" : next)}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="Not selected" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__none">Not selected</SelectItem>
+            {normalized.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {description ? (
+          <FieldDescription>{description}</FieldDescription>
+        ) : null}
+      </FormField>
+    );
+  };
+  const toggle = (
+    label: string,
+    description: string,
+    key: string,
+    fallback = false,
+  ) => (
+    <div className="rounded-md border bg-card p-3">
+      <ToggleRow
+        label={label}
+        description={description}
+        checked={checked(key, fallback)}
+        disabled={false}
+        onCheckedChange={(value) => change(key, value)}
+      />
+    </div>
+  );
 
   const initialize = () => {
-    const inherited = (key: string, fallback: unknown = "") => overrides.useChannelDefaults !== false ? settings[key] ?? fallback : overrides[key] ?? settings[key] ?? fallback
-    const specifics = overrides.ebayItemSpecifics ?? (listing.itemSpecifics ? JSON.stringify(listing.itemSpecifics, null, 2) : "")
+    const inherited = (key: string, fallback: unknown = "") =>
+      overrides.useChannelDefaults !== false
+        ? (settings[key] ?? fallback)
+        : (overrides[key] ?? settings[key] ?? fallback);
+    const specifics =
+      overrides.ebayItemSpecifics ??
+      (listing.itemSpecifics
+        ? JSON.stringify(listing.itemSpecifics, null, 2)
+        : "");
     setDraft({
       useChannelDefaults: overrides.useChannelDefaults !== false,
       ebayEnabled: listing.enabled !== false && overrides.ebayEnabled !== false,
-      ebayRestricted: listing.restricted === true || overrides.ebayRestricted === true,
-      ebayRestrictionReason: String(listing.restrictionReason ?? overrides.ebayRestrictionReason ?? ""),
-      ebayInventoryConnected: listing.inventoryConnected !== false && overrides.ebayInventoryConnected !== false,
-      ebayUseChannelDefaultQuantity: overrides.ebayUseChannelDefaultQuantity !== false,
-      ebayUseChannelDefaultSafetyQty: overrides.ebayUseChannelDefaultSafetyQty !== false,
-      ebayUseChannelDefaultMaxSellableQty: overrides.ebayUseChannelDefaultMaxSellableQty !== false,
-      ebayUseDefaultPricingFormula: overrides.ebayUseDefaultPricingFormula !== false,
-      ebayMarketplaceId: String(inherited("ebayMarketplaceId", listing.marketplaceId || "EBAY_US")),
-      ebayDefaultCondition: String(inherited("ebayDefaultCondition", listing.condition || "NEW")),
-      ebayCurrency: String(inherited("ebayCurrency", listing.currency || "USD")),
-      ebayMerchantLocationKey: String(inherited("ebayMerchantLocationKey", listing.merchantLocationKey || "")),
-      ebayPaymentPolicyId: String(inherited("ebayPaymentPolicyId", listing.paymentPolicyId || "")),
-      ebayReturnPolicyId: String(inherited("ebayReturnPolicyId", listing.returnPolicyId || "")),
-      ebayFulfillmentPolicyId: String(inherited("ebayFulfillmentPolicyId", listing.fulfillmentPolicyId || "")),
+      ebayRestricted:
+        listing.restricted === true || overrides.ebayRestricted === true,
+      ebayRestrictionReason: String(
+        listing.restrictionReason ?? overrides.ebayRestrictionReason ?? "",
+      ),
+      ebayInventoryConnected:
+        listing.inventoryConnected !== false &&
+        overrides.ebayInventoryConnected !== false,
+      ebayUseChannelDefaultQuantity:
+        overrides.ebayUseChannelDefaultQuantity !== false,
+      ebayUseChannelDefaultSafetyQty:
+        overrides.ebayUseChannelDefaultSafetyQty !== false,
+      ebayUseChannelDefaultMaxSellableQty:
+        overrides.ebayUseChannelDefaultMaxSellableQty !== false,
+      ebayUseDefaultPricingFormula:
+        overrides.ebayUseDefaultPricingFormula !== false,
+      ebayMarketplaceId: String(
+        inherited("ebayMarketplaceId", listing.marketplaceId || "EBAY_US"),
+      ),
+      ebayDefaultCondition: String(
+        inherited("ebayDefaultCondition", listing.condition || "NEW"),
+      ),
+      ebayCurrency: String(
+        inherited("ebayCurrency", listing.currency || "USD"),
+      ),
+      ebayMerchantLocationKey: String(
+        inherited("ebayMerchantLocationKey", listing.merchantLocationKey || ""),
+      ),
+      ebayPaymentPolicyId: String(
+        inherited("ebayPaymentPolicyId", listing.paymentPolicyId || ""),
+      ),
+      ebayReturnPolicyId: String(
+        inherited("ebayReturnPolicyId", listing.returnPolicyId || ""),
+      ),
+      ebayFulfillmentPolicyId: String(
+        inherited("ebayFulfillmentPolicyId", listing.fulfillmentPolicyId || ""),
+      ),
       ebayPrice: String(overrides.ebayPrice ?? listing.price ?? ""),
       ebayQuantityOverride: String(overrides.ebayQuantityOverride ?? ""),
       ebaySafetyQty: String(overrides.ebaySafetyQty ?? listing.safetyQty ?? ""),
-      ebayMaxSellableQty: String(overrides.ebayMaxSellableQty ?? listing.maxSellableQty ?? ""),
-      ebayMinInventoryForAutoListing: String(overrides.ebayMinInventoryForAutoListing ?? listing.minInventoryForAutoListing ?? settings.ebayMinInventoryForAutoListing ?? 0),
-      ebayMerchantSku: String(overrides.ebayMerchantSku ?? listing.merchantSku ?? product.sku ?? ""),
+      ebayMaxSellableQty: String(
+        overrides.ebayMaxSellableQty ?? listing.maxSellableQty ?? "",
+      ),
+      ebayMinInventoryForAutoListing: String(
+        overrides.ebayMinInventoryForAutoListing ??
+          listing.minInventoryForAutoListing ??
+          settings.ebayMinInventoryForAutoListing ??
+          0,
+      ),
+      ebayMerchantSku: String(
+        overrides.ebayMerchantSku ?? listing.merchantSku ?? product.sku ?? "",
+      ),
       ebaySubtitle: String(overrides.ebaySubtitle ?? listing.subtitle ?? ""),
-      ebayDispatchTimeDays: String(overrides.ebayDispatchTimeDays ?? listing.dispatchTimeDays ?? settings.ebayDefaultDispatchTimeDays ?? 2),
-      ebayBestOfferEnabled: overrides.ebayBestOfferEnabled === true || listing.bestOfferEnabled === true,
-      ebayBestOfferAutoAcceptPrice: String(overrides.ebayBestOfferAutoAcceptPrice ?? listing.bestOfferAutoAcceptPrice ?? ""),
-      ebayBestOfferAutoDeclinePrice: String(overrides.ebayBestOfferAutoDeclinePrice ?? listing.bestOfferAutoDeclinePrice ?? ""),
-      ebayStoreCategoryId: String(overrides.ebayStoreCategoryId ?? listing.storeCategoryId ?? ""),
-      ebayListingTemplateId: String(overrides.ebayListingTemplateId ?? listing.listingTemplateId ?? ""),
-      ebayItemSpecificTemplateId: String(overrides.ebayItemSpecificTemplateId ?? listing.itemSpecificTemplateId ?? ""),
-      ebayCategoryId: String(overrides.ebayCategoryId ?? listing.categoryId ?? ""),
-      ebayCategoryPath: String(overrides.ebayCategoryPath ?? listing.categoryPath ?? ""),
-      ebayTaxonomyVersion: String(overrides.ebayTaxonomyVersion ?? listing.taxonomyVersion ?? ""),
+      ebayDispatchTimeDays: String(
+        overrides.ebayDispatchTimeDays ??
+          listing.dispatchTimeDays ??
+          settings.ebayDefaultDispatchTimeDays ??
+          2,
+      ),
+      ebayBestOfferEnabled:
+        overrides.ebayBestOfferEnabled === true ||
+        listing.bestOfferEnabled === true,
+      ebayBestOfferAutoAcceptPrice: String(
+        overrides.ebayBestOfferAutoAcceptPrice ??
+          listing.bestOfferAutoAcceptPrice ??
+          "",
+      ),
+      ebayBestOfferAutoDeclinePrice: String(
+        overrides.ebayBestOfferAutoDeclinePrice ??
+          listing.bestOfferAutoDeclinePrice ??
+          "",
+      ),
+      ebayStoreCategoryId: String(
+        overrides.ebayStoreCategoryId ?? listing.storeCategoryId ?? "",
+      ),
+      ebayListingTemplateId: String(
+        overrides.ebayListingTemplateId ?? listing.listingTemplateId ?? "",
+      ),
+      ebayItemSpecificTemplateId: String(
+        overrides.ebayItemSpecificTemplateId ??
+          listing.itemSpecificTemplateId ??
+          "",
+      ),
+      ebayCategoryId: String(
+        overrides.ebayCategoryId ?? listing.categoryId ?? "",
+      ),
+      ebayCategoryPath: String(
+        overrides.ebayCategoryPath ?? listing.categoryPath ?? "",
+      ),
+      ebayTaxonomyVersion: String(
+        overrides.ebayTaxonomyVersion ?? listing.taxonomyVersion ?? "",
+      ),
       ebayItemSpecifics: String(specifics || ""),
-      ebayIdentifierType: String(overrides.ebayIdentifierType ?? listing.identifierType ?? "UPC"),
-      ebayIdentifierValue: String(overrides.ebayIdentifierValue ?? listing.identifierValue ?? product.barcode ?? ""),
-      ebayIdentifierUnavailable: overrides.ebayIdentifierUnavailable === true || listing.identifierUnavailable === true,
-      ebayIdentifierUnavailableText: String(overrides.ebayIdentifierUnavailableText ?? listing.identifierUnavailableText ?? "Does not apply"),
+      ebayIdentifierType: String(
+        overrides.ebayIdentifierType ?? listing.identifierType ?? "UPC",
+      ),
+      ebayIdentifierValue: String(
+        overrides.ebayIdentifierValue ??
+          listing.identifierValue ??
+          product.barcode ??
+          "",
+      ),
+      ebayIdentifierUnavailable:
+        overrides.ebayIdentifierUnavailable === true ||
+        listing.identifierUnavailable === true,
+      ebayIdentifierUnavailableText: String(
+        overrides.ebayIdentifierUnavailableText ??
+          listing.identifierUnavailableText ??
+          "Does not apply",
+      ),
       ebayEPid: String(overrides.ebayEPid ?? listing.ePid ?? ""),
-      ebayMpn: String(overrides.ebayMpn ?? listing.mpn ?? product.mfrPartNumber ?? ""),
-      ebayProductCompliancePolicyIds: Array.isArray(overrides.ebayProductCompliancePolicyIds) ? overrides.ebayProductCompliancePolicyIds.join(", ") : Array.isArray(listing.productCompliancePolicyIds) ? listing.productCompliancePolicyIds.join(", ") : "",
-    })
-  }
+      ebayMpn: String(
+        overrides.ebayMpn ?? listing.mpn ?? product.mfrPartNumber ?? "",
+      ),
+      ebayProductCompliancePolicyIds: Array.isArray(
+        overrides.ebayProductCompliancePolicyIds,
+      )
+        ? overrides.ebayProductCompliancePolicyIds.join(", ")
+        : Array.isArray(listing.productCompliancePolicyIds)
+          ? listing.productCompliancePolicyIds.join(", ")
+          : "",
+    });
+  };
 
   const payload = () => {
     const ebaySettings = {
       ...draft,
-      ebayProductCompliancePolicyIds: text("ebayProductCompliancePolicyIds").split(/[,\n]+/).map((value) => value.trim()).filter(Boolean),
-    }
+      ebayProductCompliancePolicyIds: text("ebayProductCompliancePolicyIds")
+        .split(/[,\n]+/)
+        .map((value) => value.trim())
+        .filter(Boolean),
+    };
     return {
       ebaySettings,
       enabled: checked("ebayEnabled", true),
@@ -4719,84 +4910,854 @@ function EbayListingWorkspace({ open, onOpenChange, product, channel, onUpdated 
       itemSpecificTemplateId: text("ebayItemSpecificTemplateId"),
       productCompliancePolicyIds: ebaySettings.ebayProductCompliancePolicyIds,
       ...(text("ebayPrice") ? { price: text("ebayPrice") } : {}),
-      ...(text("ebayQuantityOverride") ? { quantity: text("ebayQuantityOverride") } : {}),
-    }
-  }
+      ...(text("ebayQuantityOverride")
+        ? { quantity: text("ebayQuantityOverride") }
+        : {}),
+    };
+  };
   const loadReadiness = async () => {
     try {
-      const result = await api<{ readiness?: typeof readiness; item?: ProductItem }>(`/api/inventory/${encodeURIComponent(product.id || product.sku || "")}/ebay/listing`, { method: "POST", body: JSON.stringify({ action: "readiness", ...payload() }) })
-      setReadiness(result.readiness || null)
-      if (result.item) onUpdated(result.item)
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to check eBay listing readiness.") }
-  }
+      const result = await api<{
+        readiness?: typeof readiness;
+        item?: ProductItem;
+      }>(
+        `/api/inventory/${encodeURIComponent(product.id || product.sku || "")}/ebay/listing`,
+        {
+          method: "POST",
+          body: JSON.stringify({ action: "readiness", ...payload() }),
+        },
+      );
+      setReadiness(result.readiness || null);
+      if (result.item) onUpdated(result.item);
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to check eBay listing readiness.",
+      );
+    }
+  };
   useEffect(() => {
-    if (!open) return
-    initialize()
-    void loadReadiness()
+    if (!open) return;
+    initialize();
+    setActiveTab("commerce");
+    void loadReadiness();
     // The editor deliberately resets from the latest persisted SKU each time it opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, product.id, product.updatedAt])
-
-  useEffect(() => {
-    if (!open) return
-    // The readiness view remains available, but opening on an editable tab makes
-    // per-SKU pricing and inventory overrides discoverable immediately.
-    const frame = window.requestAnimationFrame(() => {
-      const priceInventoryTab = Array.from(document.querySelectorAll<HTMLElement>('[role="tab"]'))
-        .find((element) => element.textContent?.trim() === "Price & inventory")
-      if (priceInventoryTab?.getAttribute("data-state") !== "active") priceInventoryTab?.click()
-    })
-    return () => window.cancelAnimationFrame(frame)
-  }, [open])
+  }, [open, product.id, product.updatedAt]);
 
   const saveDraft = async (quiet = false) => {
-    setBusy(true)
+    setBusy(true);
     try {
-      const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.id || product.sku || "")}/ebay/listing`, { method: "POST", body: JSON.stringify({ action: "draft", ...payload() }) })
-      onUpdated(result.item)
-      if (!quiet) toast.success("eBay listing draft saved.")
-      return result.item
+      const result = await api<{ item: ProductItem }>(
+        `/api/inventory/${encodeURIComponent(product.id || product.sku || "")}/ebay/listing`,
+        {
+          method: "POST",
+          body: JSON.stringify({ action: "draft", ...payload() }),
+        },
+      );
+      onUpdated(result.item);
+      if (!quiet) toast.success("eBay listing draft saved.");
+      return result.item;
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to save eBay listing settings.")
-      return null
-    } finally { setBusy(false) }
-  }
-  const runLifecycle = async (action: "offer" | "publish" | "revise" | "relist" | "end") => {
-    setBusy(true)
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to save eBay listing settings.",
+      );
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const runLifecycle = async (
+    action: "offer" | "publish" | "revise" | "relist" | "end",
+  ) => {
+    setBusy(true);
     try {
-      const result = await api<{ item: ProductItem; readiness?: typeof readiness; published?: boolean }>(`/api/inventory/${encodeURIComponent(product.id || product.sku || "")}/ebay/listing`, { method: "POST", body: JSON.stringify({ action, ...payload() }) })
-      onUpdated(result.item)
-      if (result.readiness) setReadiness(result.readiness)
-      toast.success(action === "end" ? "eBay listing ended." : action === "relist" ? "eBay listing relisted." : action === "publish" ? "eBay listing published." : action === "revise" ? "eBay listing revised." : "eBay offer created or updated.")
-      void loadReadiness()
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the eBay listing.") } finally { setBusy(false); setEnding(false) }
-  }
+      const result = await api<{
+        item: ProductItem;
+        readiness?: typeof readiness;
+        published?: boolean;
+      }>(
+        `/api/inventory/${encodeURIComponent(product.id || product.sku || "")}/ebay/listing`,
+        { method: "POST", body: JSON.stringify({ action, ...payload() }) },
+      );
+      onUpdated(result.item);
+      if (result.readiness) setReadiness(result.readiness);
+      toast.success(
+        action === "end"
+          ? "eBay listing ended."
+          : action === "relist"
+            ? "eBay listing relisted."
+            : action === "publish"
+              ? "eBay listing published."
+              : action === "revise"
+                ? "eBay listing revised."
+                : "eBay offer created or updated.",
+      );
+      void loadReadiness();
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to update the eBay listing.",
+      );
+    } finally {
+      setBusy(false);
+      setEnding(false);
+    }
+  };
   const syncAttributes = async () => {
-    setBusy(true)
+    setBusy(true);
     try {
-      const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.id || product.sku || "")}/ebay/attributes/sync`, { method: "POST", body: JSON.stringify({}) })
-      onUpdated(result.item)
-      toast.success("eBay category attributes refreshed.")
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load eBay category attributes.") } finally { setBusy(false) }
-  }
+      const result = await api<{ item: ProductItem }>(
+        `/api/inventory/${encodeURIComponent(product.id || product.sku || "")}/ebay/attributes/sync`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+      onUpdated(result.item);
+      toast.success("eBay category attributes refreshed.");
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to load eBay category attributes.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
 
-  const listingStatus = String(readiness?.status || listing.status || "draft").replace(/[-_]/g, " ")
-  const cost = Number(product.sellUnitCost ?? product.cost ?? 0)
-  const configuredPrice = Number(text("ebayPrice") || readiness?.price || listing.price || 0)
-  const margin = configuredPrice > 0 ? ((configuredPrice - cost) / configuredPrice) * 100 : 0
-  const attributes = Array.isArray(product.ebayListing?.categoryAttributes) ? product.ebayListing?.categoryAttributes : Array.isArray(listing.categoryAttributes) ? listing.categoryAttributes : []
-  const history = Array.isArray(product.ebayListing?.history) ? product.ebayListing?.history : []
+  const listingStatus = String(
+    readiness?.status || listing.status || "draft",
+  ).replace(/[-_]/g, " ");
+  const cost = Number(product.sellUnitCost ?? product.cost ?? 0);
+  const configuredPrice = Number(
+    text("ebayPrice") || readiness?.price || listing.price || 0,
+  );
+  const margin =
+    configuredPrice > 0
+      ? ((configuredPrice - cost) / configuredPrice) * 100
+      : 0;
+  const attributes = Array.isArray(product.ebayListing?.categoryAttributes)
+    ? product.ebayListing?.categoryAttributes
+    : Array.isArray(listing.categoryAttributes)
+      ? listing.categoryAttributes
+      : [];
+  const history = Array.isArray(product.ebayListing?.history)
+    ? product.ebayListing?.history
+    : [];
 
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="flex h-[min(94vh,960px)] max-w-[calc(100vw-0.75rem)] flex-col overflow-hidden p-0 sm:max-w-7xl"><DialogHeader className="border-b bg-muted/25 px-6 py-5"><div className="flex flex-wrap items-start justify-between gap-3 pr-8"><div><DialogTitle className="flex items-center gap-2">eBay listing workspace <Badge variant={readiness?.live ? "default" : "secondary"} className="capitalize">{listingStatus}</Badge></DialogTitle><DialogDescription className="mt-1">SKU <span className="font-mono font-medium">{product.sku}</span> · configure, validate, publish, and maintain one eBay listing from the same place.</DialogDescription></div><div className="flex flex-wrap gap-2">{listing.listingUrl ? <Button asChild size="sm" variant="outline"><a href={listing.listingUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" />View on eBay</a></Button> : null}<Button size="sm" variant="outline" onClick={() => void loadReadiness()} disabled={busy}><RefreshCw className={busy ? "size-4 animate-spin" : "size-4"} />Refresh readiness</Button></div></div></DialogHeader><Tabs defaultValue="readiness" className="flex min-h-0 flex-1 flex-col"><div className="overflow-x-auto border-b bg-background px-4"><TabsList className="h-auto min-w-max bg-transparent p-1"><TabsTrigger value="readiness">Readiness</TabsTrigger><TabsTrigger value="commerce">Price & inventory</TabsTrigger><TabsTrigger value="listing">Listing</TabsTrigger><TabsTrigger value="policies">Policies</TabsTrigger><TabsTrigger value="details">Identifiers & specifics</TabsTrigger><TabsTrigger value="history">History ({history.length})</TabsTrigger></TabsList></div><ScrollArea className="min-h-0 flex-1"><div className="px-6 py-5"><TabsContent value="readiness" className="m-0 grid gap-5"><div className="grid gap-3 sm:grid-cols-3"><Card><CardHeader className="p-4"><CardDescription>Listing state</CardDescription><CardTitle className="mt-1 capitalize">{listingStatus}</CardTitle></CardHeader></Card><Card><CardHeader className="p-4"><CardDescription>eBay price</CardDescription><CardTitle className="mt-1">{moneyLabel(readiness?.price ?? configuredPrice)}</CardTitle></CardHeader></Card><Card><CardHeader className="p-4"><CardDescription>Sendable quantity</CardDescription><CardTitle className="mt-1">{numberLabel(readiness?.quantity ?? listing.quantity ?? 0)}</CardTitle></CardHeader></Card></div>{readiness?.missing?.length ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Listing is not ready</AlertTitle><AlertDescription>{readiness.missing.join(" · ")}</AlertDescription></Alert> : <Alert><CheckCircle2 className="size-4" /><AlertTitle>{readiness?.live ? "Listing is live" : "Ready for the next listing action"}</AlertTitle><AlertDescription>{readiness?.live ? "Use Revise to send listing changes, or End listing to remove it from eBay." : "Save the draft, create the offer, then publish when this SKU is ready."}</AlertDescription></Alert>}<div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => void saveDraft()} disabled={busy}><Save className="size-4" />Save draft</Button>{listing.offerId || listing.listingId ? <Button variant="outline" onClick={() => void runLifecycle("revise")} disabled={busy || !readiness?.ready}><RefreshCw className="size-4" />Revise listing</Button> : <Button variant="outline" onClick={() => void runLifecycle("offer")} disabled={busy || !readiness?.ready}><PackageSearch className="size-4" />Create offer</Button>}{listing.listingId ? <Button variant="outline" onClick={() => void runLifecycle("relist")} disabled={busy || !readiness?.ready}><RotateCcw className="size-4" />Relist</Button> : <Button onClick={() => void runLifecycle("publish")} disabled={busy || !readiness?.ready}><Store className="size-4" />Publish listing</Button>}{listing.listingId ? <Button variant="destructive" onClick={() => setEnding(true)} disabled={busy}><Archive className="size-4" />End listing</Button> : null}</div></TabsContent><TabsContent value="commerce" className="m-0 grid gap-5"><Alert><Settings className="size-4" /><AlertTitle>Commercial controls</AlertTitle><AlertDescription>Override a channel setting only when this SKU needs its own pricing or inventory behavior.</AlertDescription></Alert><div className="grid gap-3 md:grid-cols-2">{toggle("Enable this SKU on eBay", "Disabled SKUs stay out of listing jobs without losing their eBay draft.", "ebayEnabled", true)}{toggle("Restrict this listing", "Use a reason to keep a policy, safety, or compliance hold visible.", "ebayRestricted")}{toggle("Use channel default price formula", "Turn off to specify this SKU's eBay selling price.", "ebayUseDefaultPricingFormula", true)}{toggle("Inventory is connected", "When off, eBay uses the manual quantity override rather than your live inventory.", "ebayInventoryConnected", true)}{toggle("Use channel default quantity", "When off, eBay sends the actual available inventory.", "ebayUseChannelDefaultQuantity", true)}{toggle("Use channel default safety quantity", "When off, define the safety stock for this SKU.", "ebayUseChannelDefaultSafetyQty", true)}{toggle("Use channel default max sellable quantity", "When off, cap this SKU's eBay quantity independently.", "ebayUseChannelDefaultMaxSellableQty", true)}</div>{checked("ebayRestricted") ? <div className="max-w-xl">{field("Restriction reason", "ebayRestrictionReason", "text", "This reason appears in listing readiness and review exports.")}</div> : null}<div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">{!checked("ebayUseDefaultPricingFormula", true) ? field("Fixed eBay price", "ebayPrice", "number", "Cost is " + moneyLabel(cost) + `; projected margin ${margin.toFixed(1)}%.`) : <Card className="border-dashed"><CardHeader className="p-4"><CardDescription>Channel formula</CardDescription><CardTitle className="mt-1 text-base">{String(settings.ebayPricingMode || "cost-plus")}</CardTitle><CardDescription className="mt-1">Target {moneyLabel(readiness?.price ?? listing.price ?? 0)}</CardDescription></CardHeader></Card>}{!checked("ebayInventoryConnected", true) ? field("Manual eBay quantity", "ebayQuantityOverride", "number", "This value remains stable until you change it.") : null}{!checked("ebayUseChannelDefaultSafetyQty", true) ? field("SKU safety quantity", "ebaySafetyQty", "number") : null}{!checked("ebayUseChannelDefaultMaxSellableQty", true) ? field("SKU max sellable quantity", "ebayMaxSellableQty", "number") : null}{field("Minimum inventory for auto-listing", "ebayMinInventoryForAutoListing", "number", "Listing jobs hold the SKU below this amount.")}</div></TabsContent><TabsContent value="listing" className="m-0 grid gap-5"><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{field("eBay merchant SKU", "ebayMerchantSku", "text", "Defaults to your DataPlus SKU.")}{field("Subtitle", "ebaySubtitle", "text")}{select("Condition", "ebayDefaultCondition", [{ value: "NEW", label: "New" }, { value: "NEW_WITH_DEFECTS", label: "New with defects" }, { value: "USED_EXCELLENT", label: "Used - Excellent" }, { value: "USED_VERY_GOOD", label: "Used - Very good" }, { value: "USED_GOOD", label: "Used - Good" }, { value: "USED_ACCEPTABLE", label: "Used - Acceptable" }])}{field("Dispatch time (days)", "ebayDispatchTimeDays", "number")}{select("Marketplace", "ebayMarketplaceId", [{ value: "EBAY_US", label: "United States" }, { value: "EBAY_CA", label: "Canada" }, { value: "EBAY_GB", label: "United Kingdom" }, { value: "EBAY_AU", label: "Australia" }])}{field("Currency", "ebayCurrency")}</div><div className="grid gap-3 md:grid-cols-3">{toggle("Enable Best Offer", "Offer terms are sent when the listing is created or revised.", "ebayBestOfferEnabled")}{checked("ebayBestOfferEnabled") ? field("Auto accept at or above", "ebayBestOfferAutoAcceptPrice", "number") : null}{checked("ebayBestOfferEnabled") ? field("Auto decline below", "ebayBestOfferAutoDeclinePrice", "number") : null}</div></TabsContent><TabsContent value="policies" className="m-0 grid gap-5"><Alert><ShieldCheck className="size-4" /><AlertTitle>Seller policies and templates</AlertTitle><AlertDescription>Policy choices are imported from the eBay seller account. They can stay at the channel default or be made SKU-specific here.</AlertDescription></Alert><div className="grid gap-4 md:grid-cols-2">{select("Merchant location", "ebayMerchantLocationKey", locations.map((location: any) => ({ value: String(location.merchantLocationKey || location.key || ""), label: String(location.name || location.merchantLocationKey || location.key || "Location") })).filter((option) => option.value))}{select("Payment policy", "ebayPaymentPolicyId", paymentPolicies.map((policy: any) => ({ value: String(policy.id || ""), label: String(policy.name || policy.id || "Policy") })).filter((option) => option.value))}{select("Return policy", "ebayReturnPolicyId", returnPolicies.map((policy: any) => ({ value: String(policy.id || ""), label: String(policy.name || policy.id || "Policy") })).filter((option) => option.value))}{select("Fulfillment policy", "ebayFulfillmentPolicyId", fulfillmentPolicies.map((policy: any) => ({ value: String(policy.id || ""), label: String(policy.name || policy.id || "Policy") })).filter((option) => option.value))}{select("Store category", "ebayStoreCategoryId", storeCategories.map((category: any) => ({ value: String(category.id || category.categoryId || ""), label: String(category.name || category.categoryName || category.id || "Store category") })).filter((option) => option.value))}{select("Listing template", "ebayListingTemplateId", listingTemplates.map((template: any) => ({ value: String(template.id || ""), label: String(template.name || template.id || "Template") })).filter((option) => option.value))}{select("Item specifics template", "ebayItemSpecificTemplateId", itemSpecificTemplates.map((template: any) => ({ value: String(template.id || ""), label: String(template.name || template.id || "Template") })).filter((option) => option.value))}</div></TabsContent><TabsContent value="details" className="m-0 grid gap-5"><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{select("Product identifier type", "ebayIdentifierType", [{ value: "UPC", label: "UPC" }, { value: "EAN", label: "EAN" }, { value: "ISBN", label: "ISBN" }, { value: "MPN", label: "MPN" }])}{field("Identifier value", "ebayIdentifierValue")}{field("ePID", "ebayEPid")}{field("MPN", "ebayMpn")}{field("eBay category ID", "ebayCategoryId")}{field("Category path", "ebayCategoryPath")}{field("Category tree / taxonomy", "ebayTaxonomyVersion")}</div>{toggle("Identifier does not apply", "Use only when eBay allows the product identifier exemption for this listing.", "ebayIdentifierUnavailable")}{checked("ebayIdentifierUnavailable") ? <div className="max-w-md">{field("Identifier exemption note", "ebayIdentifierUnavailableText")}</div> : null}<FormField className="gap-1.5"><FieldLabel htmlFor="ebay-workspace-specifics">Item specifics</FieldLabel><Textarea id="ebay-workspace-specifics" rows={10} value={text("ebayItemSpecifics")} onChange={(event) => change("ebayItemSpecifics", event.target.value)} placeholder={'{\n  "Brand": ["Example"],\n  "MPN": ["12345"]\n}'} /><FieldDescription>Use JSON or one <span className="font-mono">Name: Value</span> per line. Required aspects are shown below.</FieldDescription></FormField><Card><CardHeader className="flex flex-row items-start justify-between gap-4"><div><CardTitle className="text-base">Category-required item specifics</CardTitle><CardDescription>{attributes.length ? `${attributes.length} attributes cached for this eBay category.` : "No attributes loaded for this category yet."}</CardDescription></div><Button size="sm" variant="outline" onClick={() => void syncAttributes()} disabled={busy || !text("ebayCategoryId")}><RefreshCw className="size-4" />Load attributes</Button></CardHeader><CardContent>{attributes.length ? <div className="flex flex-wrap gap-2">{attributes.map((attribute, index) => <Badge key={`${attribute.id || attribute.name || "attribute"}-${index}`} variant={attribute.required ? "destructive" : "secondary"}>{String(attribute.name || attribute.id || "Attribute")}{attribute.required ? " required" : " optional"}</Badge>)}</div> : <p className="text-sm text-muted-foreground">Save a category ID, then load the eBay category attributes.</p>}</CardContent></Card><FormField className="gap-1.5"><FieldLabel htmlFor="ebay-workspace-compliance">Product compliance policy IDs</FieldLabel><Input id="ebay-workspace-compliance" value={text("ebayProductCompliancePolicyIds")} onChange={(event) => change("ebayProductCompliancePolicyIds", event.target.value)} placeholder="Comma-separated eBay policy IDs" /><FieldDescription>Attach any category or regulatory compliance policies required by eBay.</FieldDescription></FormField></TabsContent><TabsContent value="history" className="m-0"><Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>When</TableHead><TableHead>Action</TableHead><TableHead>Message</TableHead><TableHead>Offer / listing</TableHead></TableRow></TableHeader><TableBody>{history.length ? history.map((entry, index) => <TableRow key={entry.id || `${entry.at}-${index}`}><TableCell className="whitespace-nowrap text-xs">{entry.at ? new Date(entry.at).toLocaleString() : "-"}</TableCell><TableCell className="capitalize">{String(entry.action || "updated").replace(/[_-]/g, " ")}</TableCell><TableCell>{entry.message || "-"}</TableCell><TableCell className="font-mono text-xs">{entry.listingId || entry.offerId || "-"}</TableCell></TableRow>) : <TableRow><TableCell colSpan={4} className="py-10 text-center text-muted-foreground">No eBay listing events are recorded for this SKU yet.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent></div></ScrollArea></Tabs><DialogFooter className="border-t px-6 py-4"><Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>Close</Button><Button onClick={() => void saveDraft()} disabled={busy}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}Save eBay draft</Button></DialogFooter><AlertDialog open={ending} onOpenChange={setEnding}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>End this eBay listing?</AlertDialogTitle><AlertDialogDescription>The offer will be withdrawn from eBay. The DataPlus listing history will retain the action and you can later create a new offer or relist it.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep listing</AlertDialogCancel><AlertDialogAction onClick={() => void runLifecycle("end")}>End listing</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></DialogContent></Dialog>
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex h-[min(94vh,960px)] max-w-[calc(100vw-0.75rem)] flex-col overflow-hidden p-0 sm:max-w-7xl">
+        <DialogHeader className="border-b bg-muted/25 px-6 py-5">
+          <div className="flex flex-wrap items-start justify-between gap-3 pr-8">
+            <div>
+              <DialogTitle className="flex items-center gap-2">
+                eBay listing workspace{" "}
+                <Badge
+                  variant={readiness?.live ? "default" : "secondary"}
+                  className="capitalize"
+                >
+                  {listingStatus}
+                </Badge>
+              </DialogTitle>
+              <DialogDescription className="mt-1">
+                SKU <span className="font-mono font-medium">{product.sku}</span>{" "}
+                · configure, validate, publish, and maintain one eBay listing
+                from the same place.
+              </DialogDescription>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {listing.listingUrl ? (
+                <Button asChild size="sm" variant="outline">
+                  <a href={listing.listingUrl} target="_blank" rel="noreferrer">
+                    <ExternalLink className="size-4" />
+                    View on eBay
+                  </a>
+                </Button>
+              ) : null}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void loadReadiness()}
+                disabled={busy}
+              >
+                <RefreshCw
+                  className={busy ? "size-4 animate-spin" : "size-4"}
+                />
+                Refresh readiness
+              </Button>
+            </div>
+          </div>
+        </DialogHeader>
+        <Tabs
+          value={activeTab}
+          onValueChange={setActiveTab}
+          className="flex min-h-0 flex-1 flex-col"
+        >
+          <div className="overflow-x-auto border-b bg-background px-4">
+            <TabsList className="h-auto min-w-max bg-transparent p-1">
+              <TabsTrigger value="readiness">Readiness</TabsTrigger>
+              <TabsTrigger value="commerce">Price & inventory</TabsTrigger>
+              <TabsTrigger value="listing">Listing</TabsTrigger>
+              <TabsTrigger value="policies">Policies</TabsTrigger>
+              <TabsTrigger value="details">Identifiers & specifics</TabsTrigger>
+              <TabsTrigger value="history">
+                History ({history.length})
+              </TabsTrigger>
+            </TabsList>
+          </div>
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="px-6 py-5">
+              <TabsContent value="readiness" className="m-0 grid gap-5">
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <Card>
+                    <CardHeader className="p-4">
+                      <CardDescription>Listing state</CardDescription>
+                      <CardTitle className="mt-1 capitalize">
+                        {listingStatus}
+                      </CardTitle>
+                    </CardHeader>
+                  </Card>
+                  <Card>
+                    <CardHeader className="p-4">
+                      <CardDescription>eBay price</CardDescription>
+                      <CardTitle className="mt-1">
+                        {moneyLabel(readiness?.price ?? configuredPrice)}
+                      </CardTitle>
+                    </CardHeader>
+                  </Card>
+                  <Card>
+                    <CardHeader className="p-4">
+                      <CardDescription>Sendable quantity</CardDescription>
+                      <CardTitle className="mt-1">
+                        {numberLabel(
+                          readiness?.quantity ?? listing.quantity ?? 0,
+                        )}
+                      </CardTitle>
+                    </CardHeader>
+                  </Card>
+                </div>
+                {readiness?.missing?.length ? (
+                  <Alert variant="destructive">
+                    <AlertCircle className="size-4" />
+                    <AlertTitle>Listing is not ready</AlertTitle>
+                    <AlertDescription>
+                      {readiness.missing.join(" · ")}
+                    </AlertDescription>
+                  </Alert>
+                ) : (
+                  <Alert>
+                    <CheckCircle2 className="size-4" />
+                    <AlertTitle>
+                      {readiness?.live
+                        ? "Listing is live"
+                        : "Ready for the next listing action"}
+                    </AlertTitle>
+                    <AlertDescription>
+                      {readiness?.live
+                        ? "Use Revise to send listing changes, or End listing to remove it from eBay."
+                        : "Save the draft, create the offer, then publish when this SKU is ready."}
+                    </AlertDescription>
+                  </Alert>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => void saveDraft()}
+                    disabled={busy}
+                  >
+                    <Save className="size-4" />
+                    Save draft
+                  </Button>
+                  {listing.offerId || listing.listingId ? (
+                    <Button
+                      variant="outline"
+                      onClick={() => void runLifecycle("revise")}
+                      disabled={busy || !readiness?.ready}
+                    >
+                      <RefreshCw className="size-4" />
+                      Revise listing
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      onClick={() => void runLifecycle("offer")}
+                      disabled={busy || !readiness?.ready}
+                    >
+                      <PackageSearch className="size-4" />
+                      Create offer
+                    </Button>
+                  )}
+                  {listing.listingId ? (
+                    <Button
+                      variant="outline"
+                      onClick={() => void runLifecycle("relist")}
+                      disabled={busy || !readiness?.ready}
+                    >
+                      <RotateCcw className="size-4" />
+                      Relist
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={() => void runLifecycle("publish")}
+                      disabled={busy || !readiness?.ready}
+                    >
+                      <Store className="size-4" />
+                      Publish listing
+                    </Button>
+                  )}
+                  {listing.listingId ? (
+                    <Button
+                      variant="destructive"
+                      onClick={() => setEnding(true)}
+                      disabled={busy}
+                    >
+                      <Archive className="size-4" />
+                      End listing
+                    </Button>
+                  ) : null}
+                </div>
+              </TabsContent>
+              <TabsContent value="commerce" className="m-0 grid gap-5">
+                <Alert>
+                  <Settings className="size-4" />
+                  <AlertTitle>Commercial controls</AlertTitle>
+                  <AlertDescription>
+                    Override a channel setting only when this SKU needs its own
+                    pricing or inventory behavior.
+                  </AlertDescription>
+                </Alert>
+                <div className="grid gap-3 md:grid-cols-2">
+                  {toggle(
+                    "Enable this SKU on eBay",
+                    "Disabled SKUs stay out of listing jobs without losing their eBay draft.",
+                    "ebayEnabled",
+                    true,
+                  )}
+                  {toggle(
+                    "Restrict this listing",
+                    "Use a reason to keep a policy, safety, or compliance hold visible.",
+                    "ebayRestricted",
+                  )}
+                  {toggle(
+                    "Use channel default price formula",
+                    "Turn off to specify this SKU's eBay selling price.",
+                    "ebayUseDefaultPricingFormula",
+                    true,
+                  )}
+                  {toggle(
+                    "Inventory is connected",
+                    "When off, eBay uses the manual quantity override rather than your live inventory.",
+                    "ebayInventoryConnected",
+                    true,
+                  )}
+                  {toggle(
+                    "Use channel default quantity",
+                    "When off, eBay sends the actual available inventory.",
+                    "ebayUseChannelDefaultQuantity",
+                    true,
+                  )}
+                  {toggle(
+                    "Use channel default safety quantity",
+                    "When off, define the safety stock for this SKU.",
+                    "ebayUseChannelDefaultSafetyQty",
+                    true,
+                  )}
+                  {toggle(
+                    "Use channel default max sellable quantity",
+                    "When off, cap this SKU's eBay quantity independently.",
+                    "ebayUseChannelDefaultMaxSellableQty",
+                    true,
+                  )}
+                </div>
+                {checked("ebayRestricted") ? (
+                  <div className="max-w-xl">
+                    {field(
+                      "Restriction reason",
+                      "ebayRestrictionReason",
+                      "text",
+                      "This reason appears in listing readiness and review exports.",
+                    )}
+                  </div>
+                ) : null}
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  {!checked("ebayUseDefaultPricingFormula", true) ? (
+                    field(
+                      "Fixed eBay price",
+                      "ebayPrice",
+                      "number",
+                      "Cost is " +
+                        moneyLabel(cost) +
+                        `; projected margin ${margin.toFixed(1)}%.`,
+                    )
+                  ) : (
+                    <Card className="border-dashed">
+                      <CardHeader className="p-4">
+                        <CardDescription>Channel formula</CardDescription>
+                        <CardTitle className="mt-1 text-base">
+                          {String(settings.ebayPricingMode || "cost-plus")}
+                        </CardTitle>
+                        <CardDescription className="mt-1">
+                          Target{" "}
+                          {moneyLabel(readiness?.price ?? listing.price ?? 0)}
+                        </CardDescription>
+                      </CardHeader>
+                    </Card>
+                  )}
+                  {!checked("ebayInventoryConnected", true)
+                    ? field(
+                        "Manual eBay quantity",
+                        "ebayQuantityOverride",
+                        "number",
+                        "This value remains stable until you change it.",
+                      )
+                    : null}
+                  {!checked("ebayUseChannelDefaultSafetyQty", true)
+                    ? field("SKU safety quantity", "ebaySafetyQty", "number")
+                    : null}
+                  {!checked("ebayUseChannelDefaultMaxSellableQty", true)
+                    ? field(
+                        "SKU max sellable quantity",
+                        "ebayMaxSellableQty",
+                        "number",
+                      )
+                    : null}
+                  {field(
+                    "Minimum inventory for auto-listing",
+                    "ebayMinInventoryForAutoListing",
+                    "number",
+                    "Listing jobs hold the SKU below this amount.",
+                  )}
+                </div>
+              </TabsContent>
+              <TabsContent value="listing" className="m-0 grid gap-5">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  {field(
+                    "eBay merchant SKU",
+                    "ebayMerchantSku",
+                    "text",
+                    "Defaults to your DataPlus SKU.",
+                  )}
+                  {field("Subtitle", "ebaySubtitle", "text")}
+                  {select("Condition", "ebayDefaultCondition", [
+                    { value: "NEW", label: "New" },
+                    { value: "NEW_WITH_DEFECTS", label: "New with defects" },
+                    { value: "USED_EXCELLENT", label: "Used - Excellent" },
+                    { value: "USED_VERY_GOOD", label: "Used - Very good" },
+                    { value: "USED_GOOD", label: "Used - Good" },
+                    { value: "USED_ACCEPTABLE", label: "Used - Acceptable" },
+                  ])}
+                  {field(
+                    "Dispatch time (days)",
+                    "ebayDispatchTimeDays",
+                    "number",
+                  )}
+                  {select("Marketplace", "ebayMarketplaceId", [
+                    { value: "EBAY_US", label: "United States" },
+                    { value: "EBAY_CA", label: "Canada" },
+                    { value: "EBAY_GB", label: "United Kingdom" },
+                    { value: "EBAY_AU", label: "Australia" },
+                  ])}
+                  {field("Currency", "ebayCurrency")}
+                </div>
+                <div className="grid gap-3 md:grid-cols-3">
+                  {toggle(
+                    "Enable Best Offer",
+                    "Offer terms are sent when the listing is created or revised.",
+                    "ebayBestOfferEnabled",
+                  )}
+                  {checked("ebayBestOfferEnabled")
+                    ? field(
+                        "Auto accept at or above",
+                        "ebayBestOfferAutoAcceptPrice",
+                        "number",
+                      )
+                    : null}
+                  {checked("ebayBestOfferEnabled")
+                    ? field(
+                        "Auto decline below",
+                        "ebayBestOfferAutoDeclinePrice",
+                        "number",
+                      )
+                    : null}
+                </div>
+              </TabsContent>
+              <TabsContent value="policies" className="m-0 grid gap-5">
+                <Alert>
+                  <ShieldCheck className="size-4" />
+                  <AlertTitle>Seller policies and templates</AlertTitle>
+                  <AlertDescription>
+                    Policy choices are imported from the eBay seller account.
+                    They can stay at the channel default or be made SKU-specific
+                    here.
+                  </AlertDescription>
+                </Alert>
+                <div className="rounded-md border border-primary/25 bg-primary/5 p-4">
+                  <ToggleRow
+                    label="Use eBay channel policy defaults"
+                    description="When enabled, this SKU inherits marketplace, condition, merchant location, and seller policies from Channels > eBay. Pricing and inventory keep their own SKU-level controls."
+                    checked={usesChannelDefaults}
+                    disabled={false}
+                    onCheckedChange={(value) =>
+                      change("useChannelDefaults", value)
+                    }
+                  />
+                </div>
+                <Alert>
+                  <Settings className="size-4" />
+                  <AlertTitle>
+                    {usesChannelDefaults
+                      ? "Using eBay channel policy defaults"
+                      : "Using SKU-specific eBay policies"}
+                  </AlertTitle>
+                  <AlertDescription>
+                    {usesChannelDefaults
+                      ? "Select a policy below or turn this switch off to make this SKU independent from the channel defaults."
+                      : "Changes below apply only to this SKU and do not change the eBay channel defaults."}
+                  </AlertDescription>
+                </Alert>
+                <div className="grid gap-4 md:grid-cols-2">
+                  {select(
+                    "Merchant location",
+                    "ebayMerchantLocationKey",
+                    locations
+                      .map((location: any) => ({
+                        value: String(
+                          location.merchantLocationKey || location.key || "",
+                        ),
+                        label: String(
+                          location.name ||
+                            location.merchantLocationKey ||
+                            location.key ||
+                            "Location",
+                        ),
+                      }))
+                      .filter((option) => option.value),
+                  )}
+                  {select(
+                    "Payment policy",
+                    "ebayPaymentPolicyId",
+                    paymentPolicies
+                      .map((policy: any) => ({
+                        value: String(policy.id || ""),
+                        label: String(policy.name || policy.id || "Policy"),
+                      }))
+                      .filter((option) => option.value),
+                  )}
+                  {select(
+                    "Return policy",
+                    "ebayReturnPolicyId",
+                    returnPolicies
+                      .map((policy: any) => ({
+                        value: String(policy.id || ""),
+                        label: String(policy.name || policy.id || "Policy"),
+                      }))
+                      .filter((option) => option.value),
+                  )}
+                  {select(
+                    "Fulfillment policy",
+                    "ebayFulfillmentPolicyId",
+                    fulfillmentPolicies
+                      .map((policy: any) => ({
+                        value: String(policy.id || ""),
+                        label: String(policy.name || policy.id || "Policy"),
+                      }))
+                      .filter((option) => option.value),
+                  )}
+                  {select(
+                    "Store category",
+                    "ebayStoreCategoryId",
+                    storeCategories
+                      .map((category: any) => ({
+                        value: String(category.id || category.categoryId || ""),
+                        label: String(
+                          category.name ||
+                            category.categoryName ||
+                            category.id ||
+                            "Store category",
+                        ),
+                      }))
+                      .filter((option) => option.value),
+                  )}
+                  {select(
+                    "Listing template",
+                    "ebayListingTemplateId",
+                    listingTemplates
+                      .map((template: any) => ({
+                        value: String(template.id || ""),
+                        label: String(
+                          template.name || template.id || "Template",
+                        ),
+                      }))
+                      .filter((option) => option.value),
+                  )}
+                  {select(
+                    "Item specifics template",
+                    "ebayItemSpecificTemplateId",
+                    itemSpecificTemplates
+                      .map((template: any) => ({
+                        value: String(template.id || ""),
+                        label: String(
+                          template.name || template.id || "Template",
+                        ),
+                      }))
+                      .filter((option) => option.value),
+                  )}
+                </div>
+              </TabsContent>
+              <TabsContent value="details" className="m-0 grid gap-5">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  {select("Product identifier type", "ebayIdentifierType", [
+                    { value: "UPC", label: "UPC" },
+                    { value: "EAN", label: "EAN" },
+                    { value: "ISBN", label: "ISBN" },
+                    { value: "MPN", label: "MPN" },
+                  ])}
+                  {field("Identifier value", "ebayIdentifierValue")}
+                  {field("ePID", "ebayEPid")}
+                  {field("MPN", "ebayMpn")}
+                  {field("eBay category ID", "ebayCategoryId")}
+                  {field("Category path", "ebayCategoryPath")}
+                  {field("Category tree / taxonomy", "ebayTaxonomyVersion")}
+                </div>
+                {toggle(
+                  "Identifier does not apply",
+                  "Use only when eBay allows the product identifier exemption for this listing.",
+                  "ebayIdentifierUnavailable",
+                )}
+                {checked("ebayIdentifierUnavailable") ? (
+                  <div className="max-w-md">
+                    {field(
+                      "Identifier exemption note",
+                      "ebayIdentifierUnavailableText",
+                    )}
+                  </div>
+                ) : null}
+                <FormField className="gap-1.5">
+                  <FieldLabel htmlFor="ebay-workspace-specifics">
+                    Item specifics
+                  </FieldLabel>
+                  <Textarea
+                    id="ebay-workspace-specifics"
+                    rows={10}
+                    value={text("ebayItemSpecifics")}
+                    onChange={(event) =>
+                      change("ebayItemSpecifics", event.target.value)
+                    }
+                    placeholder={
+                      '{\n  "Brand": ["Example"],\n  "MPN": ["12345"]\n}'
+                    }
+                  />
+                  <FieldDescription>
+                    Use JSON or one{" "}
+                    <span className="font-mono">Name: Value</span> per line.
+                    Required aspects are shown below.
+                  </FieldDescription>
+                </FormField>
+                <Card>
+                  <CardHeader className="flex flex-row items-start justify-between gap-4">
+                    <div>
+                      <CardTitle className="text-base">
+                        Category-required item specifics
+                      </CardTitle>
+                      <CardDescription>
+                        {attributes.length
+                          ? `${attributes.length} attributes cached for this eBay category.`
+                          : "No attributes loaded for this category yet."}
+                      </CardDescription>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void syncAttributes()}
+                      disabled={busy || !text("ebayCategoryId")}
+                    >
+                      <RefreshCw className="size-4" />
+                      Load attributes
+                    </Button>
+                  </CardHeader>
+                  <CardContent>
+                    {attributes.length ? (
+                      <div className="flex flex-wrap gap-2">
+                        {attributes.map((attribute, index) => (
+                          <Badge
+                            key={`${attribute.id || attribute.name || "attribute"}-${index}`}
+                            variant={
+                              attribute.required ? "destructive" : "secondary"
+                            }
+                          >
+                            {String(
+                              attribute.name || attribute.id || "Attribute",
+                            )}
+                            {attribute.required ? " required" : " optional"}
+                          </Badge>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Save a category ID, then load the eBay category
+                        attributes.
+                      </p>
+                    )}
+                  </CardContent>
+                </Card>
+                <FormField className="gap-1.5">
+                  <FieldLabel htmlFor="ebay-workspace-compliance">
+                    Product compliance policy IDs
+                  </FieldLabel>
+                  <Input
+                    id="ebay-workspace-compliance"
+                    value={text("ebayProductCompliancePolicyIds")}
+                    onChange={(event) =>
+                      change(
+                        "ebayProductCompliancePolicyIds",
+                        event.target.value,
+                      )
+                    }
+                    placeholder="Comma-separated eBay policy IDs"
+                  />
+                  <FieldDescription>
+                    Attach any category or regulatory compliance policies
+                    required by eBay.
+                  </FieldDescription>
+                </FormField>
+              </TabsContent>
+              <TabsContent value="history" className="m-0">
+                <Card>
+                  <CardContent className="p-0">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>When</TableHead>
+                          <TableHead>Action</TableHead>
+                          <TableHead>Message</TableHead>
+                          <TableHead>Offer / listing</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {history.length ? (
+                          history.map((entry, index) => (
+                            <TableRow key={entry.id || `${entry.at}-${index}`}>
+                              <TableCell className="whitespace-nowrap text-xs">
+                                {entry.at
+                                  ? new Date(entry.at).toLocaleString()
+                                  : "-"}
+                              </TableCell>
+                              <TableCell className="capitalize">
+                                {String(entry.action || "updated").replace(
+                                  /[_-]/g,
+                                  " ",
+                                )}
+                              </TableCell>
+                              <TableCell>{entry.message || "-"}</TableCell>
+                              <TableCell className="font-mono text-xs">
+                                {entry.listingId || entry.offerId || "-"}
+                              </TableCell>
+                            </TableRow>
+                          ))
+                        ) : (
+                          <TableRow>
+                            <TableCell
+                              colSpan={4}
+                              className="py-10 text-center text-muted-foreground"
+                            >
+                              No eBay listing events are recorded for this SKU
+                              yet.
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </CardContent>
+                </Card>
+              </TabsContent>
+            </div>
+          </ScrollArea>
+        </Tabs>
+        <DialogFooter className="border-t px-6 py-4">
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            disabled={busy}
+          >
+            Close
+          </Button>
+          <Button onClick={() => void saveDraft()} disabled={busy}>
+            {busy ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Save className="size-4" />
+            )}
+            Save eBay draft
+          </Button>
+        </DialogFooter>
+        <AlertDialog open={ending} onOpenChange={setEnding}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>End this eBay listing?</AlertDialogTitle>
+              <AlertDialogDescription>
+                The offer will be withdrawn from eBay. The DataPlus listing
+                history will retain the action and you can later create a new
+                offer or relist it.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Keep listing</AlertDialogCancel>
+              <AlertDialogAction onClick={() => void runLifecycle("end")}>
+                End listing
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
-function MeasurementInputs({ prefix, draft, disabled, onChange }: { prefix: "item" | "package"; draft: Record<string, string | number | boolean>; disabled: boolean; onChange: (key: string, value: string) => void }) {
-  const fields = [["Length", `${prefix}Length`], ["Width", `${prefix}Width`], ["Height", `${prefix}Height`], ["Weight", `${prefix}Weight`]]
-  return <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{fields.map(([label, key]) => <div key={key} className="grid gap-1.5"><Label>{label}{label === "Weight" ? " (lb)" : " (in)"}</Label><Input disabled={disabled} type="number" min="0" step="0.001" value={String(draft[key] ?? 0)} onChange={(event) => onChange(key, event.target.value)} /></div>)}</div>
+function MeasurementInputs({
+  prefix,
+  draft,
+  disabled,
+  onChange,
+}: {
+  prefix: "item" | "package";
+  draft: Record<string, string | number | boolean>;
+  disabled: boolean;
+  onChange: (key: string, value: string) => void;
+}) {
+  const fields = [
+    ["Length", `${prefix}Length`],
+    ["Width", `${prefix}Width`],
+    ["Height", `${prefix}Height`],
+    ["Weight", `${prefix}Weight`],
+  ];
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {fields.map(([label, key]) => (
+        <div key={key} className="grid gap-1.5">
+          <Label>
+            {label}
+            {label === "Weight" ? " (lb)" : " (in)"}
+          </Label>
+          <Input
+            disabled={disabled}
+            type="number"
+            min="0"
+            step="0.001"
+            value={String(draft[key] ?? 0)}
+            onChange={(event) => onChange(key, event.target.value)}
+          />
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function ToggleRow({ label, description, checked, disabled, onCheckedChange }: { label: string; description: string; checked: boolean; disabled: boolean; onCheckedChange: (checked: boolean) => void }) {
-  return <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-medium">{label}</p><p className="text-xs text-muted-foreground">{description}</p></div><Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} /></div>
+  return <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-medium">{label}</p><p className="text-xs text-muted-foreground">{description}</p></div><Switch aria-label={label} checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} /></div>
 }
 
 type CatalogWorkspaceTab = "products" | "source" | "review" | "changes" | "categories" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "readiness"
