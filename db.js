@@ -279,6 +279,7 @@ async function initRelationalSchema() {
     create index if not exists vendor_catalog_items_raw_gtin_idx on vendor_catalog_items ((raw ->> 'gtin'));
     create index if not exists vendor_catalog_items_raw_upc_code_idx on vendor_catalog_items ((raw ->> 'upcCode'));
     create index if not exists vendor_catalog_items_brand_idx on vendor_catalog_items (lower(brand));
+    create index if not exists vendor_catalog_items_brand_source_idx on vendor_catalog_items (lower(brand), source_sku);
     create index if not exists vendor_catalog_items_category_idx on vendor_catalog_items (category);
     create index if not exists vendor_catalog_items_discontinued_idx on vendor_catalog_items (to_be_discontinued);
     create index if not exists vendor_catalog_items_qty_idx on vendor_catalog_items (qty);
