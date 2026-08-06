@@ -16667,6 +16667,18 @@ function normalizeEbayOAuthReturnTo(value) {
   return path;
 }
 
+function isEbayOAuthCallbackRequest(req) {
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  if (url.pathname === "/auth/ebay/callback") return true;
+
+  // Some existing eBay RuNames are configured to return to the DataPlus home page.
+  // Accept that legacy callback only when it contains our signed OAuth state, then
+  // validate it in handleEbayCallback before exchanging anything with eBay.
+  return url.pathname === "/"
+    && url.searchParams.has("state")
+    && (url.searchParams.has("code") || url.searchParams.has("error") || url.searchParams.has("error_description"));
+}
+
 function clearEbayOAuthState(connectorState = {}) {
   delete connectorState.ebayOauthState;
   delete connectorState.ebayOauthStateExpiresAt;
@@ -34274,7 +34286,7 @@ function startServer() {
       handleEbayStart(req, res).catch((error) => {
         sendHtml(res, 500, `<h1>eBay auth start error</h1><p>${escapeHtml(error.message)}</p>`);
       });
-    } else if (req.url.startsWith("/auth/ebay/callback")) {
+    } else if (isEbayOAuthCallbackRequest(req)) {
       handleEbayCallback(req, res).catch((error) => {
         sendHtml(res, 500, `<h1>eBay callback error</h1><p>${escapeHtml(error.message)}</p>`);
       });

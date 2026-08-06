@@ -2387,6 +2387,7 @@ function ChannelDetail({
   const orderImportScheduleTimes = String(settings.shopifyOrderImportScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
   const ebayOrderImportScheduleTimes = String(settings.ebayOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
   const selectedWarehouseId = String(settings.shopifyInventoryWarehouseId || "")
+  const ebayOAuthCallbackUrl = `${window.location.origin}/auth/ebay/callback`
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const [activeTab, setActiveTab] = useState(requestedTab === "setup" || requestedTab === "actions" ? requestedTab : "overview")
 
@@ -2730,6 +2731,17 @@ function ChannelDetail({
                 <Detail label="Redirect URI name" value={ebayCredentials?.ruName || "Missing"} />
                 <Detail label="Seller authorization" value={ebayCredentials?.hasSellerAuthorization ? "Connected" : "Required"} />
                 <Detail label="Connected" value={ebayCredentials?.sellerAuthorizedAt ? new Date(ebayCredentials.sellerAuthorizedAt).toLocaleString() : "Not yet"} />
+                {!ebayCredentials?.hasSellerAuthorization && <div className="col-span-full"><Alert>
+                  <AlertCircle className="size-4" />
+                  <AlertTitle>Finish the eBay RuName setup</AlertTitle>
+                  <AlertDescription className="space-y-2">
+                    <p>In eBay Developer Portal → User Tokens → your Production RuName, turn on <strong>OAuth Enabled</strong>. Set both <strong>Auth accepted URL</strong> and <strong>Auth declined URL</strong> to this DataPlus callback.</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="max-w-full break-all rounded bg-muted px-2 py-1 text-xs">{ebayOAuthCallbackUrl}</code>
+                      <Button size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(ebayOAuthCallbackUrl).then(() => toast.success("eBay callback URL copied."), () => toast.error("Unable to copy the callback URL."))}><Copy className="size-3.5" />Copy URL</Button>
+                    </div>
+                  </AlertDescription>
+                </Alert></div>}
               </CardContent>
             </Card>
           )}
