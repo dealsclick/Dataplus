@@ -236,6 +236,37 @@ type ChannelSettings = {
   shopifyPaidShippingProfileId?: string
   shopifyFreightShippingProfileId?: string
   shopifyFreightShippingRate?: number
+  ebayMarketplaceId?: string
+  ebayMerchantLocationKey?: string
+  ebayPaymentPolicyId?: string
+  ebayReturnPolicyId?: string
+  ebayFulfillmentPolicyId?: string
+  ebayDefaultCategoryId?: string
+  ebayDefaultCondition?: string
+  ebayCurrency?: string
+  ebayListingFormat?: string
+  ebayQuantityMode?: string
+  ebayDescriptionSource?: string
+  ebayMaxImages?: number
+  ebayAutoPublish?: boolean
+  ebayRequireImage?: boolean
+  ebayBestOfferEnabled?: boolean
+  ebayCatalogSyncEnabled?: boolean
+  ebayCatalogSyncLimit?: number
+  ebayAccountSettingsSyncedAt?: string
+  ebayMerchantLocations?: Array<{ merchantLocationKey?: string; name?: string; status?: string; type?: string; address?: Record<string, unknown> }>
+  ebayPaymentPolicies?: Array<{ id?: string; name?: string; description?: string; immediatePay?: boolean; paymentInstructions?: string }>
+  ebayReturnPolicies?: Array<{ id?: string; name?: string; description?: string; returnsAccepted?: boolean; returnPeriod?: Record<string, unknown>; refundMethod?: string; returnShippingCostPayer?: string; restockingFeePercentage?: number | null }>
+  ebayFulfillmentPolicies?: Array<{ id?: string; name?: string; description?: string; handlingTime?: Record<string, unknown>; shippingOptions?: Array<Record<string, unknown>>; globalShipping?: boolean }>
+  ebayOrderImportEnabled?: boolean
+  ebayOrderImportLookbackDays?: number
+  ebayOrderImportLimit?: number
+  ebayOrderImportIncludeCanceled?: boolean
+  ebayOrderImportScheduleEnabled?: boolean
+  ebayOrderImportScheduleType?: string
+  ebayOrderImportScheduleTimes?: string
+  ebayOrderImportScheduleEveryHours?: number
+  ebayListingLaunchLimit?: number
   roundingRule?: string
   [key: string]: unknown
 }
@@ -2341,12 +2372,20 @@ function ChannelDetail({
   const [credentialSaving, setCredentialSaving] = useState(false)
   const [credentialDraft, setCredentialDraft] = useState({ storeDomain: "", apiVersion: "", clientId: "", clientSecret: "", accessToken: "" })
   const [ebayCredentialDraft, setEbayCredentialDraft] = useState({ environment: "production", ruName: "", scope: "", clientId: "", clientSecret: "", refreshToken: "", accessToken: "" })
+  const [ebayOrderImportOpen, setEbayOrderImportOpen] = useState(false)
+  const [ebayOrderImportSaving, setEbayOrderImportSaving] = useState(false)
+  const [ebayOrderImportDraft, setEbayOrderImportDraft] = useState({ lookbackDays: "30", limit: "250", includeCanceled: false })
   const isShopify = channel.name?.toLowerCase() === "shopify"
   const isEbay = channel.name?.toLowerCase() === "ebay"
   const settings = { ...(channel.settings || {}), ...draft }
   const shippingProfiles = Array.isArray(channel.settings?.shopifyShippingProfiles) ? channel.settings.shopifyShippingProfiles : []
+  const ebayMerchantLocations = Array.isArray(settings.ebayMerchantLocations) ? settings.ebayMerchantLocations : []
+  const ebayPaymentPolicies = Array.isArray(settings.ebayPaymentPolicies) ? settings.ebayPaymentPolicies : []
+  const ebayReturnPolicies = Array.isArray(settings.ebayReturnPolicies) ? settings.ebayReturnPolicies : []
+  const ebayFulfillmentPolicies = Array.isArray(settings.ebayFulfillmentPolicies) ? settings.ebayFulfillmentPolicies : []
   const scheduleTimes = String(settings.inventoryScheduleTimes || "03:00,13:00").split(/[,;\s]+/).filter(Boolean)
   const orderImportScheduleTimes = String(settings.shopifyOrderImportScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
+  const ebayOrderImportScheduleTimes = String(settings.ebayOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
   const selectedWarehouseId = String(settings.shopifyInventoryWarehouseId || "")
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const [activeTab, setActiveTab] = useState(requestedTab === "setup" || requestedTab === "actions" ? requestedTab : "overview")
@@ -2443,6 +2482,36 @@ function ChannelDetail({
       toast.success(result.message || (kind === "account" ? "eBay account sync queued." : "eBay catalog sync queued."))
       onRefreshData()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to run eBay action.") }
+  }
+
+  function openEbayOrderImport() {
+    setEbayOrderImportDraft({
+      lookbackDays: String(settings.ebayOrderImportLookbackDays || 30),
+      limit: String(settings.ebayOrderImportLimit || 250),
+      includeCanceled: settings.ebayOrderImportIncludeCanceled === true,
+    })
+    setEbayOrderImportOpen(true)
+  }
+
+  async function queueEbayOrderImport() {
+    setEbayOrderImportSaving(true)
+    try {
+      const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>("/api/ebay/orders/import", {
+        method: "POST",
+        body: JSON.stringify({
+          lookbackDays: Math.max(1, Math.min(365, Number(ebayOrderImportDraft.lookbackDays || 30) || 30)),
+          limit: Math.max(1, Math.min(5000, Number(ebayOrderImportDraft.limit || 250) || 250)),
+          includeCanceled: ebayOrderImportDraft.includeCanceled,
+        }),
+      })
+      setEbayOrderImportOpen(false)
+      toast.success(result.message || (result.duplicate ? "An equivalent eBay order import is already running." : "eBay order import queued."))
+      onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue eBay order import.")
+    } finally {
+      setEbayOrderImportSaving(false)
+    }
   }
 
   function queueShopifyAction(kind: string, apply = false) {
@@ -2707,10 +2776,21 @@ function ChannelDetail({
                   <Button size="sm" variant="outline" onClick={openEbayCredentials}>Update API credentials</Button>
                 </div>
                 <Field label="Marketplace"><Select disabled={!editing} value={String(settings.ebayMarketplaceId || "EBAY_US")} onValueChange={(value) => update("ebayMarketplaceId", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EBAY_US">United States</SelectItem><SelectItem value="EBAY_CA">Canada</SelectItem><SelectItem value="EBAY_GB">United Kingdom</SelectItem><SelectItem value="EBAY_AU">Australia</SelectItem></SelectContent></Select></Field>
-                <Field label="Merchant location key"><Input disabled={!editing} value={String(settings.ebayMerchantLocationKey || "")} placeholder="eBay merchant location key" onChange={(event) => update("ebayMerchantLocationKey", event.target.value)} /></Field>
+                <Field label="Merchant location">
+                  {ebayMerchantLocations.length ? <Select disabled={!editing} value={String(settings.ebayMerchantLocationKey || "none")} onValueChange={(value) => update("ebayMerchantLocationKey", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Select an imported eBay location" /></SelectTrigger><SelectContent><SelectItem value="none">No merchant location selected</SelectItem>{ebayMerchantLocations.map((location: any) => <SelectItem key={String(location.merchantLocationKey || location.key || location.name)} value={String(location.merchantLocationKey || location.key || location.name)}>{String(location.name || location.merchantLocationKey || location.key)}{location.status ? ` / ${String(location.status)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input disabled={!editing} value={String(settings.ebayMerchantLocationKey || "")} placeholder="Sync policies and locations first" onChange={(event) => update("ebayMerchantLocationKey", event.target.value)} />}
+                </Field>
+                <Field label="Active-listing sync limit"><Input disabled={!editing} min="1" max="100000" type="number" value={String(settings.ebayCatalogSyncLimit ?? 50000)} onChange={(event) => update("ebayCatalogSyncLimit", Number(event.target.value || 50000))} /><p className="mt-1 text-xs text-muted-foreground">Maximum active offers read from eBay per listing sync.</p></Field>
                 <ToggleField label="Enable eBay catalog sync" checked={settings.ebayCatalogSyncEnabled !== false} disabled={!editing} onCheckedChange={(value) => update("ebayCatalogSyncEnabled", value)} />
-                <ToggleField label="Auto-publish to eBay" checked={Boolean(settings.ebayAutoPublish)} disabled={!editing} onCheckedChange={(value) => update("ebayAutoPublish", value)} />
-                <ToggleField label="Require image before listing" checked={Boolean(settings.ebayRequireImage)} disabled={!editing} onCheckedChange={(value) => update("ebayRequireImage", value)} />
+                <ToggleField label="Enable eBay order imports" checked={Boolean(settings.ebayOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayOrderImportEnabled", value)} />
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay order import</p><p className="pt-1 text-xs text-muted-foreground">Import a selected history window on demand, then keep recent eBay orders synchronized on a schedule.</p></div>
+                <Field label="Manual import lookback days"><Select disabled={!editing} value={String(settings.ebayOrderImportLookbackDays ?? 30)} onValueChange={(value) => update("ebayOrderImportLookbackDays", Number(value))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="1">Last 24 hours</SelectItem><SelectItem value="7">Last 7 days</SelectItem><SelectItem value="30">Last 30 days</SelectItem><SelectItem value="90">Last 90 days</SelectItem><SelectItem value="180">Last 180 days</SelectItem><SelectItem value="365">Last 365 days</SelectItem></SelectContent></Select></Field>
+                <Field label="Orders per import"><Input disabled={!editing} type="number" min="1" max="5000" value={String(settings.ebayOrderImportLimit ?? 250)} onChange={(event) => update("ebayOrderImportLimit", Number(event.target.value || 250))} /></Field>
+                <ToggleField label="Include canceled eBay orders" checked={Boolean(settings.ebayOrderImportIncludeCanceled)} disabled={!editing} onCheckedChange={(value) => update("ebayOrderImportIncludeCanceled", value)} />
+                <Field label="Order import schedule"><Select disabled={!editing} value={String(settings.ebayOrderImportScheduleType || "times")} onValueChange={(value) => update("ebayOrderImportScheduleType", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="times">Specific times</SelectItem><SelectItem value="interval">Every X hours</SelectItem></SelectContent></Select></Field>
+                <Field label="First scheduled import"><Input disabled={!editing} type="time" value={ebayOrderImportScheduleTimes[0] || "05:00"} onChange={(event) => update("ebayOrderImportScheduleTimes", [event.target.value, ebayOrderImportScheduleTimes[1] || "17:00"].join(","))} /></Field>
+                <Field label="Second scheduled import"><Input disabled={!editing} type="time" value={ebayOrderImportScheduleTimes[1] || "17:00"} onChange={(event) => update("ebayOrderImportScheduleTimes", [ebayOrderImportScheduleTimes[0] || "05:00", event.target.value].join(","))} /></Field>
+                <Field label="Import every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings.ebayOrderImportScheduleEveryHours ?? 12)} onChange={(event) => update("ebayOrderImportScheduleEveryHours", Number(event.target.value || 12))} /></Field>
+                <ToggleField label="Schedule eBay order imports" checked={Boolean(settings.ebayOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.ebayOrderImportEnabled)} onCheckedChange={(value) => update("ebayOrderImportScheduleEnabled", value)} />
               </>}
             </CardContent>
           </Card>
@@ -2850,26 +2930,86 @@ function ChannelDetail({
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">eBay connection and sync</CardTitle>
-                  <CardDescription>Authorize the seller account, then pull eBay policies, locations, offers, and inventory into DataPlus.</CardDescription>
+                  <CardDescription>Authorize the seller account, then sync business policies, merchant locations, active listings, and orders into DataPlus.</CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-wrap gap-2">
                   <Button onClick={() => void runEbayAction("authorize")} disabled={!ebayCredentials?.configured}>Authorize eBay seller</Button>
                   <Button variant="outline" onClick={openEbayCredentials}>Update API credentials</Button>
                   <Button variant="outline" onClick={() => void runEbayAction("account")} disabled={!ebayCredentials?.hasSellerAuthorization}>Sync policies and locations</Button>
-                  <Button variant="outline" onClick={() => void runEbayAction("catalog")} disabled={!ebayCredentials?.hasSellerAuthorization}>Sync eBay catalog</Button>
+                  <Button variant="outline" onClick={() => void runEbayAction("catalog")} disabled={!ebayCredentials?.hasSellerAuthorization || settings.ebayCatalogSyncEnabled === false}>Sync eBay offers & listing status</Button>
+                  <Button variant="outline" onClick={() => {
+                    if (!settings.ebayOrderImportEnabled) {
+                      toast.error("Enable eBay order imports in Setup before starting an import.")
+                      return
+                    }
+                    openEbayOrderImport()
+                  }} disabled={!ebayCredentials?.hasSellerAuthorization}>Import eBay orders</Button>
                 </CardContent>
               </Card>
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">What eBay sync imports</CardTitle>
-                  <CardDescription>Account sync refreshes marketplace policies and merchant locations. Catalog sync imports listing offers and inventory so DataPlus can identify existing eBay SKUs before you create new listings.</CardDescription>
+                  <CardTitle className="text-base">eBay configuration at a glance</CardTitle>
+                  <CardDescription>Account sync imports payment, return, and fulfillment policies. Active-listing sync pulls offers and inventory so DataPlus can identify live eBay SKUs before creating anything new.</CardDescription>
                 </CardHeader>
-                <CardContent className="grid gap-3 md:grid-cols-3">
+                <CardContent className="grid gap-3 md:grid-cols-4">
                   <Detail label="Seller authorization" value={ebayCredentials?.hasSellerAuthorization ? "Connected" : "Authorize first"} />
                   <Detail label="Marketplace" value={String(settings.ebayMarketplaceId || "EBAY_US")} />
                   <Detail label="Catalog sync" value={settings.ebayCatalogSyncEnabled === false ? "Disabled in Setup" : "Enabled"} />
+                  <Detail label="Order import" value={settings.ebayOrderImportEnabled ? "Enabled" : "Disabled in Setup"} />
+                  <Detail label="Merchant locations" value={numberLabel(ebayMerchantLocations.length)} />
+                  <Detail label="Payment policies" value={numberLabel(ebayPaymentPolicies.length)} />
+                  <Detail label="Return policies" value={numberLabel(ebayReturnPolicies.length)} />
+                  <Detail label="Shipping policies" value={numberLabel(ebayFulfillmentPolicies.length)} />
                 </CardContent>
               </Card>
+              <Dialog open={ebayOrderImportOpen} onOpenChange={setEbayOrderImportOpen}>
+                <DialogContent className="sm:max-w-xl">
+                  <DialogHeader>
+                    <DialogTitle>Import eBay orders</DialogTitle>
+                    <DialogDescription>Choose the order history window for this run. The import is queued as a job and creates a downloadable result file.</DialogDescription>
+                  </DialogHeader>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field label="Look back">
+                      <Select value={ebayOrderImportDraft.lookbackDays} onValueChange={(value) => setEbayOrderImportDraft((current) => ({ ...current, lookbackDays: value }))}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="1">Last 24 hours</SelectItem>
+                          <SelectItem value="7">Last 7 days</SelectItem>
+                          <SelectItem value="30">Last 30 days</SelectItem>
+                          <SelectItem value="90">Last 90 days</SelectItem>
+                          <SelectItem value="180">Last 180 days</SelectItem>
+                          <SelectItem value="365">Last 365 days</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    <Field label="Maximum orders">
+                      <Select value={ebayOrderImportDraft.limit} onValueChange={(value) => setEbayOrderImportDraft((current) => ({ ...current, limit: value }))}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="250">250 orders</SelectItem>
+                          <SelectItem value="500">500 orders</SelectItem>
+                          <SelectItem value="1000">1,000 orders</SelectItem>
+                          <SelectItem value="2500">2,500 orders</SelectItem>
+                          <SelectItem value="5000">5,000 orders</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    <div className="col-span-full flex items-center justify-between gap-4 rounded-md border bg-muted/35 p-3">
+                      <div>
+                        <p className="text-sm font-medium">Include canceled orders</p>
+                        <p className="text-xs text-muted-foreground">Leave this off for the working order queue. Imported cancellations can still be reviewed when needed.</p>
+                      </div>
+                      <Switch checked={ebayOrderImportDraft.includeCanceled} onCheckedChange={(checked) => setEbayOrderImportDraft((current) => ({ ...current, includeCanceled: checked }))} />
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setEbayOrderImportOpen(false)} disabled={ebayOrderImportSaving}>Cancel</Button>
+                    <Button onClick={() => void queueEbayOrderImport()} disabled={ebayOrderImportSaving}>
+                      {ebayOrderImportSaving && <Loader2 className="size-4 animate-spin" />} Import orders
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
             </div>
           ) : (
             <Card>
@@ -2929,6 +3069,26 @@ function ChannelDetail({
                 <Field label="Paid shipping tag"><Input disabled={!editing} value={String(settings.shopifyPaidShippingTag || "shipping-paid")} onChange={(event) => update("shopifyPaidShippingTag", event.target.value)} /></Field>
                 <Field label="Freight shipping tag"><Input disabled={!editing} value={String(settings.shopifyFreightShippingTag || "shipping-freight")} onChange={(event) => update("shopifyFreightShippingTag", event.target.value)} /></Field>
                 <div className="col-span-full flex flex-wrap items-center gap-2 rounded-md border p-3"><Button type="button" size="sm" variant="outline" onClick={syncShippingProfiles}><RefreshCw className="size-4" />Import Shopify delivery profiles</Button><span className="text-xs text-muted-foreground">{settings.shopifyShippingProfilesSyncedAt ? `Imported ${new Date(String(settings.shopifyShippingProfilesSyncedAt)).toLocaleString()}` : "No profiles imported yet."}</span></div>
+              </>}
+              {isEbay && <>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">eBay listing defaults</p><p className="pt-1 text-xs text-muted-foreground">Policies are imported from the eBay seller account. These defaults are prefilled for every eBay listing review and can be changed for a specific bulk launch.</p></div>
+                <Field label="Marketplace"><Select disabled={!editing} value={String(settings.ebayMarketplaceId || "EBAY_US")} onValueChange={(value) => update("ebayMarketplaceId", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EBAY_US">United States</SelectItem><SelectItem value="EBAY_CA">Canada</SelectItem><SelectItem value="EBAY_GB">United Kingdom</SelectItem><SelectItem value="EBAY_AU">Australia</SelectItem></SelectContent></Select></Field>
+                <Field label="Merchant location">
+                  {ebayMerchantLocations.length ? <Select disabled={!editing} value={String(settings.ebayMerchantLocationKey || "none")} onValueChange={(value) => update("ebayMerchantLocationKey", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Select imported location" /></SelectTrigger><SelectContent><SelectItem value="none">No merchant location selected</SelectItem>{ebayMerchantLocations.map((location: any) => <SelectItem key={`rule-${String(location.merchantLocationKey || location.key || location.name)}`} value={String(location.merchantLocationKey || location.key || location.name)}>{String(location.name || location.merchantLocationKey || location.key)}{location.status ? ` / ${String(location.status)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input disabled={!editing} value={String(settings.ebayMerchantLocationKey || "")} placeholder="Sync policies and locations first" onChange={(event) => update("ebayMerchantLocationKey", event.target.value)} />}
+                </Field>
+                <Field label="Payment policy"><Select disabled={!editing || !ebayPaymentPolicies.length} value={String(settings.ebayPaymentPolicyId || "none")} onValueChange={(value) => update("ebayPaymentPolicyId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Sync eBay policies first" /></SelectTrigger><SelectContent><SelectItem value="none">No payment policy selected</SelectItem>{ebayPaymentPolicies.map((policy: any) => <SelectItem key={String(policy.paymentPolicyId || policy.id)} value={String(policy.paymentPolicyId || policy.id)}>{String(policy.name || policy.paymentPolicyId || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+                <Field label="Return policy"><Select disabled={!editing || !ebayReturnPolicies.length} value={String(settings.ebayReturnPolicyId || "none")} onValueChange={(value) => update("ebayReturnPolicyId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Sync eBay policies first" /></SelectTrigger><SelectContent><SelectItem value="none">No return policy selected</SelectItem>{ebayReturnPolicies.map((policy: any) => <SelectItem key={String(policy.returnPolicyId || policy.id)} value={String(policy.returnPolicyId || policy.id)}>{String(policy.name || policy.returnPolicyId || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+                <Field label="Shipping / fulfillment policy"><Select disabled={!editing || !ebayFulfillmentPolicies.length} value={String(settings.ebayFulfillmentPolicyId || "none")} onValueChange={(value) => update("ebayFulfillmentPolicyId", value === "none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Sync eBay policies first" /></SelectTrigger><SelectContent><SelectItem value="none">No fulfillment policy selected</SelectItem>{ebayFulfillmentPolicies.map((policy: any) => <SelectItem key={String(policy.fulfillmentPolicyId || policy.id)} value={String(policy.fulfillmentPolicyId || policy.id)}>{String(policy.name || policy.fulfillmentPolicyId || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+                <Field label="Default eBay category ID"><Input disabled={!editing} value={String(settings.ebayDefaultCategoryId || "")} placeholder="Set a mapped eBay category ID" onChange={(event) => update("ebayDefaultCategoryId", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">A SKU-level eBay category mapping takes precedence over this fallback.</p></Field>
+                <Field label="Condition"><Select disabled={!editing} value={String(settings.ebayDefaultCondition || "NEW")} onValueChange={(value) => update("ebayDefaultCondition", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="NEW">New</SelectItem><SelectItem value="USED_EXCELLENT">Used - Excellent</SelectItem><SelectItem value="USED_VERY_GOOD">Used - Very good</SelectItem><SelectItem value="USED_GOOD">Used - Good</SelectItem><SelectItem value="USED_ACCEPTABLE">Used - Acceptable</SelectItem></SelectContent></Select></Field>
+                <Field label="Listing type"><Select disabled={!editing} value={String(settings.ebayListingFormat || "FIXED_PRICE")} onValueChange={(value) => update("ebayListingFormat", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="FIXED_PRICE">Fixed price</SelectItem></SelectContent></Select></Field>
+                <Field label="Description source"><Select disabled={!editing} value={String(settings.ebayDescriptionSource || "longDescription")} onValueChange={(value) => update("ebayDescriptionSource", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="longDescription">Long description</SelectItem><SelectItem value="shortDescription">Short description</SelectItem><SelectItem value="title">Product title</SelectItem></SelectContent></Select></Field>
+                <Field label="Maximum listing images"><Input disabled={!editing} type="number" min="1" max="12" value={String(settings.ebayMaxImages ?? 12)} onChange={(event) => update("ebayMaxImages", Number(event.target.value || 12))} /></Field>
+                <Field label="Listing launch cap"><Input disabled={!editing} type="number" min="1" max="5000" value={String(settings.ebayListingLaunchLimit ?? 500)} onChange={(event) => update("ebayListingLaunchLimit", Number(event.target.value || 500))} /><p className="mt-1 text-xs text-muted-foreground">A single eBay launch job is capped for predictable review and retries.</p></Field>
+                <ToggleField label="Default to publishing after review" checked={Boolean(settings.ebayAutoPublish)} disabled={!editing} onCheckedChange={(value) => update("ebayAutoPublish", value)} />
+                <ToggleField label="Require product image" checked={Boolean(settings.ebayRequireImage)} disabled={!editing} onCheckedChange={(value) => update("ebayRequireImage", value)} />
+                <ToggleField label="Enable Best Offer by default" checked={Boolean(settings.ebayBestOfferEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayBestOfferEnabled", value)} />
+                <div className="col-span-full flex flex-wrap items-center gap-2 rounded-md border p-3"><Button type="button" size="sm" variant="outline" onClick={() => void runEbayAction("account")}><RefreshCw className="size-4" />Sync eBay policies and locations</Button><span className="text-xs text-muted-foreground">{settings.ebayAccountSettingsSyncedAt ? `Last synced ${new Date(String(settings.ebayAccountSettingsSyncedAt)).toLocaleString()}` : "No eBay policies or locations imported yet."}</span></div>
               </>}
               <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Pricing rules</p></div>
               <Field label="Price markup percent">
@@ -3710,6 +3870,19 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const openEditor = () => { setDraft({ marketplaceTitle: product.marketplaceTitle || product.title || "", brand: product.brand || "", manufacturer: product.manufacturer || "", mfrPartNumber: product.mfrPartNumber || "", supplier: product.supplier || product.vendor || "", supplierCode: product.supplierCode || "", vendorSku: product.vendorSku || "", mainCategory: product.mainCategory || product.category || "", sourceCategory: product.sourceCategory || "", vendorCategory: product.vendorCategory || "", condition: product.condition || "New", status: product.status || "Active", barcode: product.barcode || "", externalId: product.externalId || "", unspsc: product.unspsc || "", uom: product.uom || "", uomQty: String(product.uomQty || 1), tags: (product.tags || []).join(", "), shortDescription: product.shortDescription || "", longDescription: product.longDescription || "", bulletPoints: (product.bulletPoints || []).join("\n"), seoKeywords: product.seoKeywords || "", wildcardSearch: product.wildcardSearch || "", defaultImage: product.defaultImage || imageUrls[0] || "", images: imageUrls.join("\n"), websitePrice: String(price), cost: String(product.cost ?? 0), fobPrice: String(product.fobPrice ?? 0), listPrice: String(product.listPrice ?? product.msrp ?? 0), qty: String(product.qty ?? product.stockQty ?? 0), reserved: String(product.reserved ?? 0), reorderPoint: String(product.reorderPoint || 0), minQuantity: String(product.minQuantity || ""), quantityIncrements: String(product.quantityIncrements || ""), leadTime: String(product.leadTime || product.leadtime || ""), itemLength: String(product.itemLength || 0), itemWidth: String(product.itemWidth || 0), itemHeight: String(product.itemHeight || 0), itemWeight: String(product.itemWeight || 0), packageLength: String(product.packageLength || 0), packageWidth: String(product.packageWidth || 0), packageHeight: String(product.packageHeight || 0), packageWeight: String(product.packageWeight || 0), dimensionalWeight: String(product.dimensionalWeight || 0), countryOfOrigin: product.countryOfOrigin || "", sdsUrl: product.sdsUrl || "", stockStatus: product.stockStatus || "", stockUpdatedAt: product.stockUpdatedAt || "", lastPricesUpdateAt: product.lastPricesUpdateAt || "", lastPricesUpdateBy: product.lastPricesUpdateBy || "", hazardous: Boolean(product.hazardous), active: product.active !== false, categoryVerified: Boolean(product.categoryVerified) }); setEditorOpen(true) }
   const save = async () => { setSaving(true); try { const numeric = new Set(["websitePrice", "cost", "fobPrice", "listPrice", "qty", "reserved", "reorderPoint", "minQuantity", "quantityIncrements", "itemLength", "itemWidth", "itemHeight", "itemWeight", "packageLength", "packageWidth", "packageHeight", "packageWeight", "dimensionalWeight"]); const payload = Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, key === "images" ? String(value || "").split(/\r?\n/).map((url) => url.trim()).filter(Boolean) : key === "bulletPoints" ? String(value || "").split(/\r?\n/).map((point) => point.trim()).filter(Boolean) : numeric.has(key) ? Number(value || 0) : value])); const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.id || product.sku || sku)}`, { method: "PATCH", body: JSON.stringify(payload) }); onUpdated(result.item); setEditorOpen(false); toast.success("Product details saved.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save product details.") } finally { setSaving(false) } }
   const pushShopify = async (path: string, apply: boolean, label: string) => { if (apply && product.toBeDiscontinued) return toast.error("Discontinued SKUs cannot be sent to Shopify."); try { const result = await api<{ job?: ImportJob; message?: string }>(path, { method: "POST", body: JSON.stringify({ skus: [product.sku], dryRun: !apply, apply }) }); toast.success(result.message || `${label} queued.`); if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 500) } catch (error) { toast.error(error instanceof Error ? error.message : `Unable to queue ${label.toLowerCase()}.`) } }
+  const pushEbay = async (dryRun: boolean) => {
+    if (product.toBeDiscontinued) return toast.error("Discontinued SKUs cannot be sent to eBay.")
+    try {
+      const result = await api<{ job?: ImportJob; message?: string }>("/api/ebay/listings/launch", {
+        method: "POST",
+        body: JSON.stringify({ skus: [product.sku], dryRun, apply: !dryRun, publish: !dryRun }),
+      })
+      toast.success(result.message || `eBay listing ${dryRun ? "review" : "launch"} queued.`)
+      if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 500)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue the eBay listing job.")
+    }
+  }
   useEffect(() => { const handleAction = (event: Event) => { const action = (event as CustomEvent<{ action?: string }>).detail?.action; if (action === "edit") openEditor(); if (action === "review-product") void pushShopify("/api/shopify/product-create", false, "Product review"); if (action === "review-price") void pushShopify("/api/shopify/variant-price-push", false, "Price review"); if (action === "create-product") void pushShopify("/api/shopify/product-create", true, "Product create"); if (action === "push-price") void pushShopify("/api/shopify/variant-price-push", true, "Price push") }; window.addEventListener("dataplus:product-action", handleAction); return () => window.removeEventListener("dataplus:product-action", handleAction) }, [product.sku, product.toBeDiscontinued])
   const sourceRows = Object.entries({
     "Created at": product.createdAt || "",
@@ -3721,6 +3894,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
     ...(product.original || {})
   }).slice(0, 80)
   const enabledChannels = channels.filter((channel) => channel.connected && String(channel.status || "active").toLowerCase() !== "inactive")
+  const ebayEnabled = enabledChannels.some((channel) => String(channel.name || "").toLowerCase() === "ebay")
   const channelTabId = (channel: ChannelConnection) => `channel-${String(channel.id || channel.name).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
   const readinessChecks = [
     ["Category", Boolean(product.categoryVerified)],
@@ -3733,7 +3907,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const readinessScore = Math.round((readinessChecks.filter(([, ready]) => ready).length / readinessChecks.length) * 100)
   return <div className="relative grid gap-5">
     <ProductReadinessPanel score={readinessScore} checks={readinessChecks} discontinued={Boolean(product.toBeDiscontinued)} />
-    <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" onClick={onBack}>Back to Products</Button><div className="flex flex-wrap gap-2"><Badge variant={product.active === false ? "outline" : "default"}>{product.active === false ? "Inactive" : "Active"}</Badge>{product.categoryVerified ? <Badge variant="outline">Category verified</Badge> : <Badge variant="outline">Category needs review</Badge>}{product.toBeDiscontinued ? <Badge variant="destructive">Discontinued</Badge> : null}<Button size="sm" onClick={openEditor}><Pencil className="size-4" /> Edit product</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Shopify</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/product-create", false, "Shopify launch review")}><ShoppingBag className="size-4" /> Review Shopify launch</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || Boolean(product.shopifyId)} onClick={() => void pushShopify("/api/shopify/product-create", true, "Shopify product launch")}><ShoppingBag className="size-4" /> {product.shopifyId ? "Already in Shopify" : "Launch on Shopify"}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/variant-price-push", false, "Shopify price review")}><ShoppingBag className="size-4" /> Review Shopify price</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || !product.shopifyId} onClick={() => void pushShopify("/api/shopify/variant-price-push", true, "Shopify price push")}><ShoppingBag className="size-4" /> Push Shopify price</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }}><History className="size-4" /> View channel jobs</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
+    <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" onClick={onBack}>Back to Products</Button><div className="flex flex-wrap gap-2"><Badge variant={product.active === false ? "outline" : "default"}>{product.active === false ? "Inactive" : "Active"}</Badge>{product.categoryVerified ? <Badge variant="outline">Category verified</Badge> : <Badge variant="outline">Category needs review</Badge>}{product.toBeDiscontinued ? <Badge variant="destructive">Discontinued</Badge> : null}<Button size="sm" onClick={openEditor}><Pencil className="size-4" /> Edit product</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Shopify</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/product-create", false, "Shopify launch review")}><ShoppingBag className="size-4" /> Review Shopify launch</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || Boolean(product.shopifyId)} onClick={() => void pushShopify("/api/shopify/product-create", true, "Shopify product launch")}><ShoppingBag className="size-4" /> {product.shopifyId ? "Already in Shopify" : "Launch on Shopify"}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/variant-price-push", false, "Shopify price review")}><ShoppingBag className="size-4" /> Review Shopify price</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || !product.shopifyId} onClick={() => void pushShopify("/api/shopify/variant-price-push", true, "Shopify price push")}><ShoppingBag className="size-4" /> Push Shopify price</DropdownMenuItem>{ebayEnabled && <><DropdownMenuSeparator /><DropdownMenuLabel>eBay</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushEbay(true)}><ShoppingBag className="size-4" /> Review eBay launch</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued} onClick={() => void pushEbay(false)}><ShoppingBag className="size-4" /> Launch on eBay</DropdownMenuItem></>}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }}><History className="size-4" /> View channel jobs</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
     <Card><CardContent className="grid gap-5 p-5 lg:grid-cols-[180px_minmax(0,1fr)]"><div className="grid aspect-square place-items-center overflow-hidden rounded-md border bg-muted/40">{product.defaultImage || imageUrls[0] ? <img src={product.defaultImage || imageUrls[0]} alt={product.title || sku} className="size-full object-contain p-3" /> : <Boxes className="size-10 text-muted-foreground" />}</div><div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Approved catalog product</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">{product.marketplaceTitle || product.title || "Untitled product"}</h1><div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground"><strong className="font-mono text-foreground">{product.sku || sku}</strong><span>{product.brand || "No brand"}</span><span>{product.supplier || product.vendor || "No supplier"}</span><span>{product.uomDisplay || "Each"}</span></div><p className="mt-4 text-sm text-muted-foreground">{product.mainCategory || product.category || "Uncategorized"}</p>{product.tags?.length ? <div className="mt-3 flex flex-wrap gap-1">{product.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div> : null}</div></CardContent></Card>
     <Tabs value={productTab} onValueChange={setProductTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="content">Content</TabsTrigger><TabsTrigger value="identifiers">Identifiers</TabsTrigger><TabsTrigger value="pricing">Pricing</TabsTrigger><TabsTrigger value="inventory">Inventory</TabsTrigger><TabsTrigger value="shipping">Shipping & compliance</TabsTrigger>{enabledChannels.map((channel) => <TabsTrigger key={channel.id || channel.name} value={channelTabId(channel)}>{channel.name}</TabsTrigger>)}<TabsTrigger value="offers">Variants & offers</TabsTrigger><TabsTrigger value="source">Source & history</TabsTrigger></TabsList></div>
       <TabsContent value="overview" className="mt-4 grid gap-4"><div className="grid gap-4 xl:grid-cols-2">{section("Identity & category", "Core catalog, supplier, and classification fields.", values([["SKU", product.sku || sku], ["Vendor SKU", product.vendorSku || ""], ["Brand", product.brand || ""], ["Manufacturer", product.manufacturer || ""], ["Mfr part number", product.mfrPartNumber || ""], ["Supplier", product.supplier || product.vendor || ""], ["Main category", product.mainCategory || product.category || ""], ["UPC / barcode", product.barcode || ""], ["UNSPSC", String(product.unspsc || "")], ["Selling UOM", product.uomDisplay || product.uom || "Each"]]))}{section("Pricing", "The current primary sell-unit price and its source.", values([["Sell-unit cost", moneyLabel(pricing.primarySellUnitCost ?? product.sellUnitCost)], ["Website price", moneyLabel(price)], ["Gross profit", moneyLabel(price - cost)], ["Margin", `${margin.toFixed(1)}%`], ["Pricing source", pricingSourceLabel], ["Last price update", product.lastPricesUpdateAt ? dateLabel(product.lastPricesUpdateAt) : "Not recorded"], ["Updated by", product.lastPricesUpdateBy || "Not recorded"], ["List / MSRP", moneyLabel(product.listPrice || product.msrp)]]))}</div>{section("Product content", "Customer-facing merchandising summary.", <div className="grid gap-4"><div><p className="mb-1 text-xs font-bold uppercase tracking-wide text-muted-foreground">Short description</p><p className="whitespace-pre-wrap text-sm leading-6">{product.shortDescription || "No short description has been prepared."}</p></div><Separator /><div><p className="mb-1 text-xs font-bold uppercase tracking-wide text-muted-foreground">Long description</p><p className="line-clamp-4 whitespace-pre-wrap text-sm leading-6">{product.longDescription || "No long description has been prepared."}</p></div></div>)}<div className="grid gap-4 xl:grid-cols-2">{section("Inventory & status", "Sellable stock, replenishment, and product state.", values([["On hand", numberLabel(product.qty ?? product.stockQty)], ["Reserved", numberLabel(product.reserved)], ["Available", numberLabel(available)], ["Reorder point", numberLabel(product.reorderPoint)], ["Replenishable", product.replenishable ? "Enabled" : "Off"], ["Replenishable qty", numberLabel(product.effectiveReplenishableQty)], ["Product status", product.toBeDiscontinued ? "Discontinued" : product.status || (product.active === false ? "Inactive" : "Active")], ["Stock updated", product.stockUpdatedAt ? dateLabel(product.stockUpdatedAt) : "Not recorded"]]))}{section("Dimensions & shipping", "Physical product and shipment measurements.", values([["Item dimensions", product.itemLength && product.itemWidth && product.itemHeight ? `${product.itemLength} x ${product.itemWidth} x ${product.itemHeight} in` : "Not recorded"], ["Item weight", product.itemWeight ? `${product.itemWeight} lb` : "Not recorded"], ["Package dimensions", product.packageLength && product.packageWidth && product.packageHeight ? `${product.packageLength} x ${product.packageWidth} x ${product.packageHeight} in` : "Not recorded"], ["Package weight", product.packageWeight ? `${product.packageWeight} lb` : "Not recorded"], ["Shipping class", product.shippingClass || "Not classified"], ["Shipping method", product.shippingMethod || "Not classified"], ["Dimensional weight", product.dimensionalWeight ? `${product.dimensionalWeight} lb` : "Not calculated"], ["Last record update", product.updatedAt ? dateLabel(product.updatedAt) : "Not recorded"]]))}</div></TabsContent>
@@ -3767,9 +3941,22 @@ function ProductChannelPanel({ channel, product, section, values }: { channel: C
 
   if (kind === "ebay") {
     const ebay = product.ebayListing || {}
+    const settings = channel.settings || {}
+    const policyLabel = (entries: Array<{ id?: string; name?: string; description?: string }> | undefined, id: unknown, fallback: string) => {
+      const value = String(id || "").trim()
+      if (!value) return fallback
+      const match = (entries || []).find((entry) => String(entry.id || "") === value)
+      return match ? `${match.name || value}${match.description ? ` - ${match.description}` : ""}` : value
+    }
+    const locationKey = String(ebay.merchantLocationKey || settings.ebayMerchantLocationKey || "").trim()
+    const location = (settings.ebayMerchantLocations || []).find((entry) => String(entry.merchantLocationKey || "") === locationKey)
+    const paymentPolicyId = ebay.paymentPolicyId || settings.ebayPaymentPolicyId
+    const returnPolicyId = ebay.returnPolicyId || settings.ebayReturnPolicyId
+    const fulfillmentPolicyId = ebay.fulfillmentPolicyId || settings.ebayFulfillmentPolicyId
     const listingRows: Array<[string, string]> = [["Status", ebay.status || "Not listed"], ["Listing ID", ebay.listingId || "Not linked"], ["Offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", ebay.marketplaceId || "EBAY_US"], ["Merchant location", ebay.merchantLocationKey || ""], ["Category ID", ebay.categoryId || ""], ["Category path", ebay.categoryPath || ""], ["Taxonomy version", ebay.taxonomyVersion || ""], ["Condition", ebay.condition || product.condition || "New"], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
-    const commerceRows: Array<[string, string]> = [["Listing price", ebay.price === undefined ? "" : `${ebay.currency || "USD"} ${moneyLabel(ebay.price)}`], ["Listing quantity", numberLabel(ebay.quantity)], ["Best offer", ebay.bestOfferEnabled ? "Enabled" : "Off"], ["Payment policy", ebay.paymentPolicyId || ""], ["Return policy", ebay.returnPolicyId || ""], ["Fulfillment policy", ebay.fulfillmentPolicyId || ""], ["DataPlus price", moneyLabel(product.websitePrice ?? product.price)], ["Available quantity", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]
-    return <>{section("eBay listing connection", "Offer, listing, and category values associated with this SKU.", values(listingRows))}{section("eBay commercial settings", "Product-level listing quantity, price, and policy assignments.", values(commerceRows))}</>
+    const commerceRows: Array<[string, string]> = [["Listing price", ebay.price === undefined ? "" : `${ebay.currency || "USD"} ${moneyLabel(ebay.price)}`], ["Listing quantity", numberLabel(ebay.quantity)], ["Best offer", ebay.bestOfferEnabled ? "Enabled" : "Off"], ["DataPlus price", moneyLabel(product.websitePrice ?? product.price)], ["Available quantity", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]
+    const policyRows: Array<[string, string]> = [["Merchant location", location ? `${location.name || locationKey}${location.status ? ` / ${location.status}` : ""}` : locationKey || "Not selected"], ["Payment policy", policyLabel(settings.ebayPaymentPolicies, paymentPolicyId, "Not selected")], ["Return policy", policyLabel(settings.ebayReturnPolicies, returnPolicyId, "Not selected")], ["Shipping / fulfillment policy", policyLabel(settings.ebayFulfillmentPolicies, fulfillmentPolicyId, "Not selected")], ["Default condition", String(ebay.condition || settings.ebayDefaultCondition || "NEW")], ["Description source", String(settings.ebayDescriptionSource || "longDescription")], ["Maximum images", numberLabel(settings.ebayMaxImages ?? 12)]]
+    return <>{section("eBay listing connection", "Offer, listing, and category values associated with this SKU.", values(listingRows))}{section("eBay commercial settings", "Product-level listing quantity and price values.", values(commerceRows))}{section("eBay policy bundle", "Imported seller-account policies that will be used when this SKU is created or updated on eBay.", values(policyRows))}</>
   }
   const shadowRows = (product.shadowSkus || []).filter((shadow) => String(shadow.marketplace || shadow.company || "").toLowerCase() === kind)
   const channelRows: Array<[string, string]> = [["Connection", channel.connected ? "Enabled" : "Disabled"], ["Channel status", channel.status || "Active"], ["Default status", String(channel.settings?.defaultShadowStatus || "Draft")], ["Default handling days", String(channel.settings?.defaultHandlingTimeDays ?? "")], ["Default safety quantity", String(channel.settings?.defaultSafetyQty ?? "")], ["Default max sellable qty", String(channel.settings?.defaultMaxSellableQty ?? "")], ["Default shipping profile", String(channel.settings?.defaultShippingProfile || "")], ["Default shipping service", String(channel.settings?.defaultShippingService || "")]]
@@ -7813,6 +8000,11 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   const [selected, setSelected] = useState<CatalogItem | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [allFiltered, setAllFiltered] = useState(false)
+  const [ebayLaunchOpen, setEbayLaunchOpen] = useState(false)
+  const [ebayLaunchSaving, setEbayLaunchSaving] = useState(false)
+  const [ebayLaunchSkus, setEbayLaunchSkus] = useState<string[]>([])
+  const [ebayLaunchAllFiltered, setEbayLaunchAllFiltered] = useState(false)
+  const [ebayLaunchDraft, setEbayLaunchDraft] = useState({ marketplaceId: "EBAY_US", merchantLocationKey: "", paymentPolicyId: "", returnPolicyId: "", fulfillmentPolicyId: "", categoryId: "", condition: "NEW", bestOfferEnabled: false, limit: "500" })
   const [filterOpen, setFilterOpen] = useState(false)
   const [filterField, setFilterField] = useState("supplier")
   const [channelFilterScope, setChannelFilterScope] = useState("shopify")
@@ -7829,6 +8021,12 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
     const defaults = { readiness: true, stock: true, price: true, brand: true, category: true, channels: true, images: true, updated: true, created: false, verified: false, hazardous: false, shopifySynced: false, alternates: false, manufacturer: false, vendorSku: false, status: false, shadows: false, uom: false, shipping: true }
     try { return { ...defaults, ...JSON.parse(window.localStorage.getItem("dataplus-products-columns") || "{}") } } catch { return defaults }
   })
+  const ebayChannel = channels.find((channel) => String(channel.name || "").toLowerCase() === "ebay")
+  const ebaySettings = ebayChannel?.settings || {}
+  const ebayMerchantLocations = Array.isArray(ebaySettings.ebayMerchantLocations) ? ebaySettings.ebayMerchantLocations : []
+  const ebayPaymentPolicies = Array.isArray(ebaySettings.ebayPaymentPolicies) ? ebaySettings.ebayPaymentPolicies : []
+  const ebayReturnPolicies = Array.isArray(ebaySettings.ebayReturnPolicies) ? ebaySettings.ebayReturnPolicies : []
+  const ebayFulfillmentPolicies = Array.isArray(ebaySettings.ebayFulfillmentPolicies) ? ebaySettings.ebayFulfillmentPolicies : []
   const columns = [
     ["readiness", "Readiness"], ["stock", "Stock"], ["price", "Price"], ["brand", "Brand"], ["category", "Category"], ["channels", "Channels"], ["images", "Images"], ["updated", "Updated"], ["created", "Created"], ["verified", "Category verified"], ["hazardous", "Hazardous"], ["shopifySynced", "Shopify synced"], ["alternates", "Alternates"], ["manufacturer", "Manufacturer"], ["vendorSku", "Vendor SKU"], ["status", "Status"], ["shadows", "Shadows"], ["uom", "UOM"], ["shipping", "Shipping"],
   ] as const
@@ -7960,24 +8158,62 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
       setSelectedIds(new Set()); setAllFiltered(false); load(1)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update selected products.") }
   }
-  async function runEbayLaunch(ids = [...selectedIds]) {
-    let launchIds = ids
-    if (allFiltered) {
-      try {
-        const params = new URLSearchParams({ q: query, page: "1", limit: "200", fastPage: "true", includeTotal: "true", sort: sort.key, sortDirection: sort.direction })
-        Object.entries(filters).forEach(([key, value]) => { if (value) params.set(key, value) })
-        const result = await api<{ inventory?: ProductItem[] }>(`/api/inventory?${params}`)
-        launchIds = (result.inventory || []).map((item) => String(item.id || item.sku || "")).filter(Boolean)
-      } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to prepare the eBay batch."); return }
+  function openEbayLaunch(ids?: string[]) {
+    const selected = ids || [...selectedIds]
+    const useAllFiltered = !ids && allFiltered
+    if (!useAllFiltered && !selected.length) {
+      toast.error("Select catalog products or choose all filtered results before preparing an eBay launch.")
+      return
     }
-    if (!launchIds.length) return
-    const label = allFiltered ? `the first ${numberLabel(launchIds.length)} matching products` : `${numberLabel(launchIds.length)} selected products`
-    if (!window.confirm(`Launch ${label} to eBay using channel pricing? Products that are not eBay-ready will be skipped.`)) return
+    setEbayLaunchSkus(selected)
+    setEbayLaunchAllFiltered(useAllFiltered)
+    setEbayLaunchDraft({
+      marketplaceId: String(ebaySettings.ebayMarketplaceId || "EBAY_US"),
+      merchantLocationKey: String(ebaySettings.ebayMerchantLocationKey || ""),
+      paymentPolicyId: String(ebaySettings.ebayPaymentPolicyId || ""),
+      returnPolicyId: String(ebaySettings.ebayReturnPolicyId || ""),
+      fulfillmentPolicyId: String(ebaySettings.ebayFulfillmentPolicyId || ""),
+      categoryId: String(ebaySettings.ebayDefaultCategoryId || ""),
+      condition: String(ebaySettings.ebayDefaultCondition || "NEW"),
+      bestOfferEnabled: ebaySettings.ebayBestOfferEnabled === true,
+      limit: String(ebaySettings.ebayListingLaunchLimit || 500),
+    })
+    setEbayLaunchOpen(true)
+  }
+
+  async function queueEbayLaunch(dryRun: boolean) {
+    setEbayLaunchSaving(true)
     try {
-      const result = await api<{ launched?: number; skipped?: number; failed?: number }>("/api/inventory/ebay/bulk-launch", { method: "POST", body: JSON.stringify({ ids: launchIds.slice(0, 200), useChannelPricing: true }) })
-      toast.success(`eBay: ${numberLabel(result.launched || 0)} launched, ${numberLabel(result.skipped || 0)} skipped, ${numberLabel(result.failed || 0)} failed.`)
-      setSelectedIds(new Set()); setAllFiltered(false); load(1)
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to launch eBay listings.") }
+      const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>("/api/ebay/listings/launch", {
+        method: "POST",
+        body: JSON.stringify({
+          skus: ebayLaunchAllFiltered ? [] : ebayLaunchSkus,
+          allFiltered: ebayLaunchAllFiltered,
+          query: ebayLaunchAllFiltered ? query : "",
+          filters: ebayLaunchAllFiltered ? filters : {},
+          limit: Math.max(1, Math.min(5000, Number(ebayLaunchDraft.limit || 500) || 500)),
+          dryRun,
+          apply: !dryRun,
+          publish: !dryRun,
+          marketplaceId: ebayLaunchDraft.marketplaceId,
+          merchantLocationKey: ebayLaunchDraft.merchantLocationKey,
+          paymentPolicyId: ebayLaunchDraft.paymentPolicyId,
+          returnPolicyId: ebayLaunchDraft.returnPolicyId,
+          fulfillmentPolicyId: ebayLaunchDraft.fulfillmentPolicyId,
+          categoryId: ebayLaunchDraft.categoryId,
+          condition: ebayLaunchDraft.condition,
+          bestOfferEnabled: ebayLaunchDraft.bestOfferEnabled,
+        }),
+      })
+      setEbayLaunchOpen(false)
+      toast.success(result.message || (result.duplicate ? "An equivalent eBay listing job is already running." : `eBay listing ${dryRun ? "review" : "launch"} queued.`))
+      if (!dryRun) { setSelectedIds(new Set()); setAllFiltered(false) }
+      void load(1)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue eBay listing work.")
+    } finally {
+      setEbayLaunchSaving(false)
+    }
   }
   async function runShopifyLaunch(apply: boolean, requestedSkus?: string[]) {
     const skus = requestedSkus || rows.filter((item) => selectedIds.has(String(item.id || item.sku || ""))).map((item) => String(item.sku || "")).filter(Boolean)
@@ -8581,7 +8817,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => runEbayLaunch()}
+                onClick={() => openEbayLaunch()}
               >
                 Launch eBay
               </Button>
@@ -8978,7 +9214,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                                 Launch Shopify
                               </DropdownMenuItem>
                               <DropdownMenuItem
-                                onClick={() => runEbayLaunch([id])}
+                                onClick={() => openEbayLaunch([String(item.sku || id)])}
                               >
                                 Launch eBay
                               </DropdownMenuItem>
@@ -9114,6 +9350,40 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
           </div>
         </div>
       </Card>
+      <Dialog open={ebayLaunchOpen} onOpenChange={setEbayLaunchOpen}>
+        <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Launch listings on eBay</DialogTitle>
+            <DialogDescription>Choose the seller policies for this marketplace-specific listing batch. Review checks readiness without writing to eBay; publish creates or updates offers and publishes eligible listings.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_250px]">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Marketplace"><Select value={ebayLaunchDraft.marketplaceId} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, marketplaceId: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EBAY_US">United States</SelectItem><SelectItem value="EBAY_CA">Canada</SelectItem><SelectItem value="EBAY_GB">United Kingdom</SelectItem><SelectItem value="EBAY_AU">Australia</SelectItem></SelectContent></Select></Field>
+              <Field label="Merchant location">
+                {ebayMerchantLocations.length ? <Select value={ebayLaunchDraft.merchantLocationKey || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Select location" /></SelectTrigger><SelectContent><SelectItem value="none">No merchant location selected</SelectItem>{ebayMerchantLocations.map((location: any) => <SelectItem key={`launch-location-${String(location.merchantLocationKey || location.key || location.name)}`} value={String(location.merchantLocationKey || location.key || location.name)}>{String(location.name || location.merchantLocationKey || location.key)}{location.status ? ` / ${String(location.status)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input value={ebayLaunchDraft.merchantLocationKey} placeholder="Sync locations in eBay channel settings" onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, merchantLocationKey: event.target.value }))} />}
+              </Field>
+              <Field label="Payment policy"><Select value={ebayLaunchDraft.paymentPolicyId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, paymentPolicyId: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Select imported policy" /></SelectTrigger><SelectContent><SelectItem value="none">No payment policy selected</SelectItem>{ebayPaymentPolicies.map((policy: any) => <SelectItem key={`launch-payment-${String(policy.id)}`} value={String(policy.id)}>{String(policy.name || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+              <Field label="Return policy"><Select value={ebayLaunchDraft.returnPolicyId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, returnPolicyId: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Select imported policy" /></SelectTrigger><SelectContent><SelectItem value="none">No return policy selected</SelectItem>{ebayReturnPolicies.map((policy: any) => <SelectItem key={`launch-return-${String(policy.id)}`} value={String(policy.id)}>{String(policy.name || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+              <Field label="Shipping / fulfillment policy"><Select value={ebayLaunchDraft.fulfillmentPolicyId || "none"} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, fulfillmentPolicyId: value === "none" ? "" : value }))}><SelectTrigger><SelectValue placeholder="Select imported policy" /></SelectTrigger><SelectContent><SelectItem value="none">No fulfillment policy selected</SelectItem>{ebayFulfillmentPolicies.map((policy: any) => <SelectItem key={`launch-fulfillment-${String(policy.id)}`} value={String(policy.id)}>{String(policy.name || policy.id)}</SelectItem>)}</SelectContent></Select></Field>
+              <Field label="Fallback eBay category ID"><Input value={ebayLaunchDraft.categoryId} placeholder="SKU mapping takes precedence" onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, categoryId: event.target.value }))} /></Field>
+              <Field label="Condition"><Select value={ebayLaunchDraft.condition} onValueChange={(value) => setEbayLaunchDraft((current) => ({ ...current, condition: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="NEW">New</SelectItem><SelectItem value="USED_EXCELLENT">Used - Excellent</SelectItem><SelectItem value="USED_VERY_GOOD">Used - Very good</SelectItem><SelectItem value="USED_GOOD">Used - Good</SelectItem><SelectItem value="USED_ACCEPTABLE">Used - Acceptable</SelectItem></SelectContent></Select></Field>
+              <Field label="Batch limit"><Input type="number" min="1" max="5000" value={ebayLaunchDraft.limit} onChange={(event) => setEbayLaunchDraft((current) => ({ ...current, limit: event.target.value }))} /></Field>
+              <div className="sm:col-span-2"><ToggleField label="Enable Best Offer for this batch" checked={ebayLaunchDraft.bestOfferEnabled} onCheckedChange={(value) => setEbayLaunchDraft((current) => ({ ...current, bestOfferEnabled: value }))} /></div>
+            </div>
+            <div className="grid content-start gap-3 rounded-md border bg-muted/30 p-4 text-sm">
+              <div><p className="font-medium">Batch scope</p><p className="mt-1 text-muted-foreground">{ebayLaunchAllFiltered ? `Up to ${numberLabel(Math.max(1, Math.min(5000, Number(ebayLaunchDraft.limit || 500) || 500)))} of ${numberLabel(total)} filtered products` : `${numberLabel(ebayLaunchSkus.length)} selected product${ebayLaunchSkus.length === 1 ? "" : "s"}`}</p></div>
+              <Separator />
+              <div><p className="font-medium">Review first</p><p className="mt-1 text-xs text-muted-foreground">The review Job exports every SKU as ready, already live, not ready, or failed, along with the applied policy IDs.</p></div>
+              <div><p className="font-medium">Publish behavior</p><p className="mt-1 text-xs text-muted-foreground">Publishing uses DataPlus pricing, available quantity, per-SKU category mappings when present, and this policy bundle as the fallback.</p></div>
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button variant="outline" onClick={() => setEbayLaunchOpen(false)} disabled={ebayLaunchSaving}>Cancel</Button>
+            <Button variant="secondary" disabled={ebayLaunchSaving} onClick={() => void queueEbayLaunch(true)}>{ebayLaunchSaving && <Loader2 className="size-4 animate-spin" />} Review readiness</Button>
+            <Button disabled={ebayLaunchSaving} onClick={() => void queueEbayLaunch(false)}>{ebayLaunchSaving && <Loader2 className="size-4 animate-spin" />} Publish eligible listings</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <ProductDetailSheet
         sourceItem={selected}
         open={Boolean(selected)}

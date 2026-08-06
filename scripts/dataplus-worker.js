@@ -55,6 +55,8 @@ const SUPPORTED_TASKS = [
   "ebay-catalog-sync",
   "ebay-account-settings-sync",
   "ebay-location-sync",
+  "ebay-order-import",
+  "ebay-listing-launch",
   "product-dump-import",
   "vendor-feed-import"
 ];
@@ -62,6 +64,7 @@ let lastHeartbeatAt = 0;
 let lastScheduleCheckAt = 0;
 let lastSkuMapScheduleCheckAt = 0;
 let lastOrderImportScheduleCheckAt = 0;
+let lastEbayOrderImportScheduleCheckAt = 0;
 let lastSupplierReminderScheduleCheckAt = 0;
 let lastVendorFeedScheduleCheckAt = 0;
 
@@ -688,6 +691,42 @@ async function checkScheduledShopifyOrderImport(force = false) {
   }
 }
 
+async function checkScheduledEbayOrderImport(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastEbayOrderImportScheduleCheckAt < 60000) return false;
+  lastEbayOrderImportScheduleCheckAt = nowMs;
+  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "ebay");
+  const settings = channel?.settings || {};
+  if (!channel || !settings.ebayOrderImportEnabled || !settings.ebayOrderImportScheduleEnabled) return false;
+  const now = new Date(nowMs);
+  const dueSlot = dueScheduleSlot(settings, "ebayOrderImportSchedule", now);
+  if (!dueSlot) return false;
+  const today = localDateKey(now);
+  const scheduleId = `${channel.id || "ebay"}:${today}:${dueSlot}`;
+  const scheduleState = docs.channelEbayOrderImportSchedules && typeof docs.channelEbayOrderImportSchedules === "object" ? docs.channelEbayOrderImportSchedules : {};
+  const previous = scheduleState[scheduleId] || {};
+  if (previous.lastRunDate === today || previous.lastAttemptedDate === today) return false;
+  try {
+    const result = await dataplus.queueEbayOrderImportJob(stateDb, {
+      lookbackDays: settings.ebayOrderImportLookbackDays,
+      limit: settings.ebayOrderImportLimit,
+      includeCanceled: Boolean(settings.ebayOrderImportIncludeCanceled)
+    }, { scheduled: true, scheduleKey: scheduleId, operation: "Scheduled eBay order import" });
+    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "eBay", time: dueSlot, lastRunDate: today, lastAttemptedDate: today, lastRunAt: new Date(nowMs).toISOString(), lastJobId: result.job?.id || "", lastError: result.duplicate ? "An eBay order import is already active." : "" };
+    console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled eBay order import for ${dueSlot} (${result.job?.id || "duplicate"})`);
+    await postgres.writeStateDocuments({ channelEbayOrderImportSchedules: scheduleState });
+    return true;
+  } catch (error) {
+    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "eBay", time: dueSlot, lastAttemptedDate: today, lastAttemptedAt: new Date(nowMs).toISOString(), lastError: error.message || "Unable to import eBay orders." };
+    dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "IMPORT", path: "ebay-orders", operation: "Scheduled eBay order import", statusCode: 502, ok: false, message: error.message || "Unable to import eBay orders." });
+    await postgres.writeStateDocuments({ channelEbayOrderImportSchedules: scheduleState });
+    console.error(`[${WORKER_ID}] scheduled eBay order import failed:`, error.message || error);
+    return false;
+  }
+}
+
 async function checkScheduledSupplierReminders(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastSupplierReminderScheduleCheckAt < 60000) return false;
@@ -1230,6 +1269,14 @@ async function runEbayLocationSyncJob(job) {
   return dataplus.runEbayLocationWorkerJob(job, job.workerPayload || {});
 }
 
+async function runEbayOrderImportJob(job) {
+  return dataplus.runEbayOrderImportWorkerJob(job, job.workerPayload || {});
+}
+
+async function runEbayListingLaunchJob(job) {
+  return dataplus.runEbayListingLaunchWorkerJob(job, job.workerPayload || {});
+}
+
 async function downloadVendorFeedFile(payload = {}) {
   const destination = String(payload.path || "").trim();
   if (!destination) throw new Error("Vendor feed download path is missing.");
@@ -1472,6 +1519,8 @@ async function runJob(job) {
   if (task === "ebay-catalog-sync") return runEbayCatalogSyncJob(job);
   if (task === "ebay-account-settings-sync") return runEbayAccountSettingsSyncJob(job);
   if (task === "ebay-location-sync") return runEbayLocationSyncJob(job);
+  if (task === "ebay-order-import") return runEbayOrderImportJob(job);
+  if (task === "ebay-listing-launch") return runEbayListingLaunchJob(job);
   if (task === "vendor-feed-import") return runVendorFeedImportJob(job);
   if (task === "product-dump-import") return runProductDumpImportJob(job);
   await persistJob(job, {
@@ -1491,6 +1540,7 @@ async function tick() {
   await checkScheduledShopifyInventoryUpdate();
   await checkScheduledShopifySkuPairAudit();
   await checkScheduledShopifyOrderImport();
+  await checkScheduledEbayOrderImport();
   await checkScheduledSupplierReminders();
   const job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS });
   if (!job) return false;
