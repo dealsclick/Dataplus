@@ -20088,10 +20088,49 @@ function catalogProductEbayReadinessStatus(product = {}) {
   return hasRequiredFields ? "ready" : "not-ready";
 }
 
+function catalogMarketplaceRecordValue(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) && value !== 0;
+  if (typeof value === "string") {
+    return !["", "false", "0", "none", "missing", "not found", "not enabled", "disabled", "inactive", "unknown"].includes(value.trim().toLowerCase());
+  }
+  if (Array.isArray(value)) return value.length > 0;
+  if (!value || typeof value !== "object") return false;
+  const record = value;
+  const identifiers = ["id", "productId", "listingId", "offerId", "variantId", "sku", "merchantSku", "externalId"];
+  if (identifiers.some((key) => catalogMarketplaceRecordValue(record[key]))) return true;
+  if (record.enabled === true || record.published === true || record.active === true) return true;
+  return catalogMarketplaceRecordValue(record.status ?? record.state ?? record.lifecycle);
+}
+
+function catalogProductMarketplaceDetected(product = {}, marketplace = "") {
+  const channel = String(marketplace || "").trim().toLowerCase();
+  const channelStatuses = product.channelStatuses && typeof product.channelStatuses === "object" ? product.channelStatuses : {};
+  const sources = product.sources && typeof product.sources === "object" ? product.sources : {};
+  const matchesChannelStatus = Object.entries(channelStatuses)
+    .filter(([key]) => String(key).toLowerCase().includes(channel))
+    .some(([, value]) => catalogMarketplaceRecordValue(value));
+  const matchesSource = Object.entries(sources)
+    .filter(([key]) => String(key).toLowerCase().includes(channel))
+    .some(([, value]) => catalogMarketplaceRecordValue(value));
+
+  if (channel === "shopify") {
+    return Boolean(product.shopifyId || product.shopifyProductId || product.shopifyVariantId || product.shopifyVariantSku || product.shopifyHandle || matchesChannelStatus);
+  }
+  if (channel === "ebay") {
+    const listing = product.ebayListing && typeof product.ebayListing === "object" ? product.ebayListing : {};
+    return Boolean(product.ebayId || listing.listingId || listing.offerId || matchesChannelStatus || matchesSource);
+  }
+  if (channel === "temu") {
+    return Boolean(product.temuId || product.temuProductId || product.temuListingId || product.temuOfferId || product.temuSku || product.temuListing || matchesChannelStatus || matchesSource);
+  }
+  return false;
+}
+
 function productMatchesCatalogChannelStatus(product = {}, status = "") {
   const value = String(status || "").trim().toLowerCase();
   if (!value) return true;
-  const shopifyLinked = Boolean(String(product.shopifyId || product.shopifyProductId || "").trim());
+  const shopifyLinked = catalogProductMarketplaceDetected(product, "shopify");
   const shopifyStatus = String(product.shopifyStatus || "").trim().toLowerCase();
   const shopifySyncSource = String(product.shopifySyncSource || product.syncSource || "").trim().toLowerCase();
   const ebayListing = product.ebayListing || {};
@@ -20105,7 +20144,7 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
     return readiness === "ready" || readiness === "live";
   }
   if (value === "shopify-not-ready") return catalogProductShopifyReadinessStatus(product) === "not-ready";
-  if (value === "shopify-linked") return shopifyLinked;
+  if (value === "shopify-linked" || value === "shopify-detected") return shopifyLinked;
   if (value === "shopify-published") return shopifyLinked && product.shopifyPublished === true;
   if (value === "shopify-unpublished") return shopifyLinked && product.shopifyPublished === false;
   if (value === "shopify-missing" || value === "missing") return !shopifyLinked;
@@ -20114,12 +20153,15 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
   if (value === "shopify-sync-failed") return shopifySyncSource === "failed";
   if (value.startsWith("shopify:")) return shopifyStatus === value.slice("shopify:".length);
   if (value.startsWith("shopify-")) return shopifyStatus === value.slice("shopify-".length);
+  if (value === "ebay-detected") return catalogProductMarketplaceDetected(product, "ebay");
   if (value === "ebay-live") return ebayStatus === "live";
   if (value === "ebay-offer") return ebayStatus === "offer";
   if (value === "ebay-missing") return ebayStatus === "missing";
   if (value === "ebay-ready") return catalogProductEbayReadinessStatus(product) === "ready";
   if (value === "ebay-not-ready") return catalogProductEbayReadinessStatus(product) === "not-ready";
   if (value.startsWith("ebay:")) return String(ebayListing.ebayStatus || ebayListing.status || ebayStatus).toLowerCase() === value.slice("ebay:".length);
+  if (value === "temu-detected") return catalogProductMarketplaceDetected(product, "temu");
+  if (value === "temu-missing") return !catalogProductMarketplaceDetected(product, "temu");
   return shopifyStatus === value;
 }
 

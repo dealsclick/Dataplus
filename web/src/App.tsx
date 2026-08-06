@@ -514,6 +514,7 @@ type ProductItem = CatalogItem & {
   lastPricesUpdateAt?: string
   lastPricesUpdateBy?: string
   shopifyId?: string
+  shopifyProductId?: string
   shopifyVariantId?: string
   shopifyHandle?: string
   shopifyStatus?: string
@@ -540,6 +541,14 @@ type ProductItem = CatalogItem & {
   updatedAt?: string
   shadowSkuCount?: number
   shopifyVariantCount?: number
+  ebayId?: string
+  temuId?: string
+  temuProductId?: string
+  temuListingId?: string
+  temuOfferId?: string
+  temuSku?: string
+  channelStatuses?: Record<string, unknown>
+  sources?: Record<string, unknown>
   ebayListing?: {
     status?: string
     offerId?: string
@@ -3616,6 +3625,7 @@ function channelFilterLabel(value: string) {
   const labels: Record<string, string> = {
     "shopify-live": "Shopify storefront live",
     "shopify-linked": "In Shopify catalog",
+    "shopify-detected": "Detected in Shopify catalog",
     "shopify-missing": "Not in Shopify catalog",
     "shopify-unpublished": "In Shopify catalog - not storefront live",
     "shopify-ready": "Ready to send to Shopify",
@@ -3623,11 +3633,67 @@ function channelFilterLabel(value: string) {
     "shopify-price-mismatch": "Shopify price needs review",
     "ebay-live": "eBay live",
     "ebay-offer": "eBay offer needs publishing",
+    "ebay-detected": "Detected in eBay catalog",
     "ebay-ready": "Ready to send to eBay",
     "ebay-not-ready": "eBay setup incomplete",
-    "ebay-missing": "Not in eBay catalog"
+    "ebay-missing": "Not in eBay catalog",
+    "temu-detected": "Detected in Temu catalog",
+    "temu-missing": "Not in Temu catalog"
   }
-  return labels[value] || value.replace(/^(shopify|ebay)-/, "$1 ").replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+  return labels[value] || value.replace(/^(shopify|ebay|temu)-/, "$1 ").replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+type MarketplaceChannelKey = "shopify" | "ebay" | "temu"
+
+function marketplaceChannelKey(channel: ChannelConnection): MarketplaceChannelKey | "" {
+  const key = `${channel.id} ${channel.name}`.toLowerCase()
+  if (key.includes("shopify")) return "shopify"
+  if (key.includes("ebay")) return "ebay"
+  if (key.includes("temu")) return "temu"
+  return ""
+}
+
+function isMarketplaceRecordValue(value: unknown): boolean {
+  if (typeof value === "boolean") return value
+  if (typeof value === "number") return Number.isFinite(value) && value !== 0
+  if (typeof value === "string") {
+    return !["", "false", "0", "none", "missing", "not found", "not enabled", "disabled", "inactive", "unknown"].includes(value.trim().toLowerCase())
+  }
+  if (Array.isArray(value)) return value.length > 0
+  if (!value || typeof value !== "object") return false
+
+  const record = value as Record<string, unknown>
+  const identifiers = ["id", "productId", "listingId", "offerId", "variantId", "sku", "merchantSku", "externalId"]
+  if (identifiers.some((key) => isMarketplaceRecordValue(record[key]))) return true
+  if (record.enabled === true || record.published === true || record.active === true) return true
+  return isMarketplaceRecordValue(record.status ?? record.state ?? record.lifecycle)
+}
+
+function catalogMarketplaceDetected(item: ProductItem, marketplace: MarketplaceChannelKey) {
+  const record = item as ProductItem & Record<string, unknown>
+  const matchingChannelStatus = Object.entries(item.channelStatuses || {})
+    .filter(([key]) => key.toLowerCase().includes(marketplace))
+    .some(([, value]) => isMarketplaceRecordValue(value))
+  const matchingSource = Object.entries(item.sources || {})
+    .filter(([key]) => key.toLowerCase().includes(marketplace))
+    .some(([, value]) => isMarketplaceRecordValue(value))
+
+  if (marketplace === "shopify") {
+    return Boolean(item.shopifyId || item.shopifyProductId || item.shopifyVariantId || item.shopifyVariantSku || item.shopifyHandle || matchingChannelStatus)
+  }
+  if (marketplace === "ebay") {
+    return Boolean(item.ebayId || item.ebayListing?.listingId || item.ebayListing?.offerId || matchingChannelStatus || matchingSource)
+  }
+  return Boolean(
+    item.temuId
+      || item.temuProductId
+      || item.temuListingId
+      || item.temuOfferId
+      || item.temuSku
+      || isMarketplaceRecordValue(record.temuListing)
+      || matchingChannelStatus
+      || matchingSource,
+  )
 }
 
 function catalogChannelState(item: ProductItem, channel: ChannelConnection) {
@@ -9818,7 +9884,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   ] as const
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
     catalogStatus: { label: "Catalog status", values: ["source-only", "managed"], display: (value) => value === "source-only" ? "Needs review" : "Managed catalog" },
-    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
@@ -10152,16 +10218,15 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
     setSelectedIds(new Set())
     load(1, next)
   }
-  const channelHealth = channels
+  const marketplacePresence = channels
     .filter((channel) => channel.connected && String(channel.status || "active").toLowerCase() !== "inactive")
     .map((channel) => {
-      const key = `${channel.id} ${channel.name}`.toLowerCase()
-      if (!key.includes("shopify") && !key.includes("ebay")) return null
-      const counts = { live: 0, attention: 0, disabled: 0 }
-      rows.forEach((item) => { counts[catalogChannelState(item, channel).state] += 1 })
-      return { channel, counts }
+      const marketplace = marketplaceChannelKey(channel)
+      if (!marketplace) return null
+      const detected = rows.filter((item) => catalogMarketplaceDetected(item, marketplace)).length
+      return { channel, marketplace, detected }
     })
-    .filter((entry): entry is { channel: ChannelConnection; counts: { live: number; attention: number; disabled: number } } => Boolean(entry))
+    .filter((entry): entry is { channel: ChannelConnection; marketplace: MarketplaceChannelKey; detected: number } => Boolean(entry))
   const managedCatalogView = unifiedCatalogUsesManagedRecords(filters)
   const sourceCatalogView = !managedCatalogView
   const needsReviewView = filters.catalogStatus === "source-only"
@@ -10318,10 +10383,11 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                         <SelectContent>
                           <SelectItem value="shopify">Shopify</SelectItem>
                           <SelectItem value="ebay">eBay</SelectItem>
+                          <SelectItem value="temu">Temu</SelectItem>
                         </SelectContent>
                       </Select>
                       <p className="text-xs text-muted-foreground">
-                        Choose a channel, then select the catalog, storefront, readiness, or price state to filter.
+                        Choose a channel, then select marketplace presence, storefront, readiness, or price state to filter.
                       </p>
                     </div>
                   ) : null}
@@ -10533,17 +10599,14 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
               </Button>
             </div>
           </div>
-          {channelHealth.length > 0 && (
+          {marketplacePresence.length > 0 && (
             <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/35 px-3 py-2">
-              <span className="text-xs font-semibold text-foreground">Channels on this page</span>
-              {channelHealth.map(({ channel, counts }) => {
-                const key = `${channel.id} ${channel.name}`.toLowerCase()
-                const prefix = key.includes("shopify") ? "shopify" : "ebay"
+              <span className="text-xs font-semibold text-foreground">Marketplace presence on this page</span>
+              <span className="text-xs text-muted-foreground">Detected counts include active, draft, unpublished, and issue states.</span>
+              {marketplacePresence.map(({ channel, marketplace, detected }) => {
                 return <div key={channel.id || channel.name} className="flex items-center gap-1 border-l pl-2 first:border-l-0 first:pl-0">
                   <span className="text-xs font-medium text-muted-foreground">{channel.name}</span>
-                  <Button size="sm" variant="ghost" className="h-6 px-1.5 text-xs text-emerald-700 hover:bg-emerald-500/15 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200" onClick={() => applyChannelFilter(`${prefix}-live`)}>{counts.live} live</Button>
-                  <Button size="sm" variant="ghost" className="h-6 px-1.5 text-xs text-rose-700 hover:bg-rose-500/15 hover:text-rose-800 dark:text-rose-300 dark:hover:text-rose-200" onClick={() => applyChannelFilter(prefix === "shopify" ? "shopify-unpublished" : "ebay-offer")}>{counts.attention} attention</Button>
-                  <Button size="sm" variant="ghost" className="h-6 px-1.5 text-xs text-muted-foreground hover:bg-muted" onClick={() => applyChannelFilter(`${prefix}-missing`)}>{counts.disabled} not enabled</Button>
+                  <Button size="sm" variant="ghost" className="h-6 px-1.5 text-xs text-sky-700 hover:bg-sky-500/15 hover:text-sky-800 dark:text-sky-300 dark:hover:text-sky-200" onClick={() => applyChannelFilter(`${marketplace}-detected`)}>{numberLabel(detected)} detected</Button>
                 </div>
               })}
             </div>

@@ -5568,6 +5568,16 @@ async function listProducts(options = {}) {
     coalesce(raw #>> '{ebayListing,listingId}', raw ->> 'ebayId', '') <> ''
     or ${ebayListingStatusExpression} = 'Live'
   )`;
+  const hasEbayDetected = `(
+    coalesce(raw ->> 'ebayId', raw #>> '{ebayListing,listingId}', raw #>> '{ebayListing,offerId}', '') <> ''
+    or lower(${ebayListingStatusExpression}) in ('live', 'active', 'offer', 'draft', 'unpublished', 'published')
+  )`;
+  const hasTemuDetected = `(
+    coalesce(raw ->> 'temuId', raw ->> 'temuProductId', raw ->> 'temuListingId', raw ->> 'temuOfferId', raw ->> 'temuSku', '') <> ''
+    or coalesce(raw #>> '{sources,Temu}', raw #>> '{sources,temu}', '') <> ''
+    or coalesce(raw #>> '{channelStatuses,Temu,id}', raw #>> '{channelStatuses,temu,id}', raw #>> '{channelStatuses,Temu,productId}', raw #>> '{channelStatuses,temu,productId}', raw #>> '{channelStatuses,Temu,listingId}', raw #>> '{channelStatuses,temu,listingId}', raw #>> '{channelStatuses,Temu,offerId}', raw #>> '{channelStatuses,temu,offerId}', '') <> ''
+    or lower(coalesce(raw #>> '{channelStatuses,Temu,status}', raw #>> '{channelStatuses,temu,status}', raw #>> '{channelStatuses,Temu,state}', raw #>> '{channelStatuses,temu,state}', '')) in ('live', 'active', 'offer', 'draft', 'unpublished', 'published')
+  )`;
   const numericEbayPriceExpression = `coalesce(
     case when coalesce(raw #>> '{ebayListing,price}', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw #>> '{ebayListing,price}')::numeric end,
     price,
@@ -5635,7 +5645,7 @@ async function listProducts(options = {}) {
           ) >= 0.01
       )`;
     }
-    if (channelStatus === "shopify-linked") {
+    if (channelStatus === "shopify-linked" || channelStatus === "shopify-detected") {
       return `(
         coalesce(raw ->> 'shopifyId', '') <> ''
         or exists (
@@ -5715,6 +5725,7 @@ async function listProducts(options = {}) {
         )
       )`;
     }
+    if (channelStatus === "ebay-detected") return hasEbayDetected;
     if (channelStatus === "ebay-ready") return `(not (${hasEbayLive}) and not (${hasEbayOffer}) and ${hasEbayRequiredFields})`;
     if (channelStatus === "ebay-not-ready") return `(not (${hasEbayLive}) and not (${hasEbayRequiredFields}))`;
     if (channelStatus === "ebay-live") return hasEbayLive;
@@ -5724,6 +5735,8 @@ async function listProducts(options = {}) {
       params.push(channelStatus.slice("ebay:".length));
       return `${ebayListingStatusExpression} = $${params.length}`;
     }
+    if (channelStatus === "temu-detected") return hasTemuDetected;
+    if (channelStatus === "temu-missing") return `(not (${hasTemuDetected}))`;
     return "";
   };
   if (channelStatusValues.length) {
