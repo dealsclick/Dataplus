@@ -17206,11 +17206,14 @@ const EBAY_PRODUCT_SETTING_NUMBER_FIELDS = [
   "ebayPriceMarkupPercent",
   "ebayMinMarginPercent",
   "ebayMinimumPrice",
+  "ebayPrice",
   "ebayManualPrice",
   "ebayQuantityOverride"
 ];
 
 const EBAY_PRODUCT_SETTING_BOOLEAN_FIELDS = [
+  "ebayUseChannelDefaultQuantity",
+  "ebayUseDefaultPricingFormula",
   "ebayAutoPublish",
   "ebayRequireImage",
   "ebayBestOfferEnabled"
@@ -17244,7 +17247,11 @@ function normalizeEbayProductSettings(listing = {}, incoming = {}) {
     settings[field] = Number.isFinite(value) ? value : "";
   }
   for (const field of EBAY_PRODUCT_SETTING_BOOLEAN_FIELDS) {
-    if (source[field] !== undefined) settings[field] = ebayBoolean(source[field]);
+    if (source[field] !== undefined) {
+      settings[field] = ebayBoolean(source[field]);
+    } else if (field === "ebayUseChannelDefaultQuantity" || field === "ebayUseDefaultPricingFormula") {
+      settings[field] = true;
+    }
   }
   return settings;
 }
@@ -17253,12 +17260,19 @@ function ebayEffectiveSettings(db = {}, item = {}, body = {}) {
   const listing = item?.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
   const productSettings = normalizeEbayProductSettings(listing, body.ebaySettings);
   const channelSettings = ebayChannelSettings(db);
+  // These two switches are SKU-level by design: a SKU can follow eBay's
+  // channel rules for policies while using a direct price or actual stock.
+  const skuRuntimeSettings = {
+    ebayUseChannelDefaultQuantity: productSettings.ebayUseChannelDefaultQuantity !== false,
+    ebayUseDefaultPricingFormula: productSettings.ebayUseDefaultPricingFormula !== false,
+    ebayPrice: productSettings.ebayPrice ?? productSettings.ebayManualPrice ?? ""
+  };
   return {
     channelSettings,
     productSettings,
     effectiveSettings: productSettings.useChannelDefaults
-      ? channelSettings
-      : { ...channelSettings, ...productSettings }
+      ? { ...channelSettings, ...skuRuntimeSettings }
+      : { ...channelSettings, ...productSettings, ...skuRuntimeSettings }
   };
 }
 
@@ -17497,21 +17511,20 @@ function ebayListingConfig(db, item, body = {}) {
     if (effectiveSettings[settingField] !== undefined && effectiveSettings[settingField] !== null && String(effectiveSettings[settingField]) !== "") return Number(effectiveSettings[settingField]);
     return fallback;
   };
-  const manualPrice = productSettings.useChannelDefaults ? 0 : Number(productSettings.ebayManualPrice || 0);
-  const price = body.useChannelPricing === true
-    ? Number(marketplaceSuggestedPrice(item, effectiveSettings))
-    : body.price !== undefined && body.price !== null && String(body.price) !== ""
-      ? Number(body.price)
-      : manualPrice > 0
-        ? manualPrice
-        : Number(marketplaceSuggestedPrice(item, effectiveSettings));
-  const defaultQuantity = marketplaceListingQuantity(item, effectiveSettings);
-  const quantityOverride = productSettings.useChannelDefaults ? "" : productSettings.ebayQuantityOverride;
+  const useDefaultPricingFormula = productSettings.ebayUseDefaultPricingFormula !== false;
+  const manualPrice = Number(productSettings.ebayPrice ?? productSettings.ebayManualPrice ?? 0);
+  const price = body.price !== undefined && body.price !== null && String(body.price) !== ""
+    ? Number(body.price)
+    : !useDefaultPricingFormula && manualPrice > 0
+      ? manualPrice
+      : Number(marketplaceSuggestedPrice(item, effectiveSettings));
+  const channelDefaultQuantity = marketplaceListingQuantity(item, effectiveSettings);
+  const actualAvailableQuantity = Math.max(0, Math.floor(Number(item.qty ?? item.stockQty ?? 0)) - Math.max(0, Math.floor(Number(item.reserved || 0))));
+  const useChannelDefaultQuantity = productSettings.ebayUseChannelDefaultQuantity !== false;
   const requestedQuantity = body.quantity !== undefined && body.quantity !== null && String(body.quantity) !== ""
     ? Math.max(0, Math.floor(Number(body.quantity || 0)))
-    : quantityOverride !== undefined && quantityOverride !== null && String(quantityOverride) !== ""
-      ? Math.max(0, Math.floor(Number(quantityOverride || 0)))
-      : null;
+    : null;
+  const defaultQuantity = useChannelDefaultQuantity ? channelDefaultQuantity : actualAvailableQuantity;
   const quantity = requestedQuantity !== null && (requestedQuantity > 0 || defaultQuantity <= 0)
     ? requestedQuantity
     : Math.max(0, Math.floor(Number(defaultQuantity || 0)));
