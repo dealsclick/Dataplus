@@ -4737,6 +4737,18 @@ function EbayListingWorkspace({ open, onOpenChange, product, channel, onUpdated 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, product.id, product.updatedAt])
 
+  useEffect(() => {
+    if (!open) return
+    // The readiness view remains available, but opening on an editable tab makes
+    // per-SKU pricing and inventory overrides discoverable immediately.
+    const frame = window.requestAnimationFrame(() => {
+      const priceInventoryTab = Array.from(document.querySelectorAll<HTMLElement>('[role="tab"]'))
+        .find((element) => element.textContent?.trim() === "Price & inventory")
+      if (priceInventoryTab?.getAttribute("data-state") !== "active") priceInventoryTab?.click()
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [open])
+
   const saveDraft = async (quiet = false) => {
     setBusy(true)
     try {
