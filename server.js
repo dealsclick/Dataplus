@@ -24583,8 +24583,13 @@ async function handleApi(req, res) {
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
       const fastPage = ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase());
-      const catalogState = await readDbFast({ skipInventory: true });
-      const filters = applyVendorCatalogScope(catalogFilterParams(url.searchParams), catalogState.vendors || []);
+      // Do not hydrate the complete legacy state here. The catalog is a hot path and
+      // its only state dependency is the small vendor participation document.
+      const catalogVendors = await postgres.readStateField("vendors").catch(() => []);
+      const filters = applyVendorCatalogScope(
+        catalogFilterParams(url.searchParams),
+        Array.isArray(catalogVendors) ? catalogVendors : []
+      );
       const result = await postgres.listProducts({
         q: url.searchParams.get("q") || "",
         page: url.searchParams.get("page") || 1,
