@@ -27968,8 +27968,47 @@ async function handleApi(req, res) {
     };
     db.brands.unshift(brand);
     await postgres.writeStateDocuments({ brands: db.brands || [] });
+    await redisCache.deleteByPrefix("dataplus:brand-catalog-summary:");
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "brands" && parts[2] === "summary" && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const cacheKey = "dataplus:brand-catalog-summary:v1";
+    const cached = await redisCache.getJson(cacheKey);
+    if (cached) return sendJson(res, 200, { ...cached, cached: true });
+    const db = await readDbFast({ skipInventory: true });
+    const savedByName = new Map((db.brands || []).map((brand) => [String(brand.name || "").trim().toLowerCase(), brand]));
+    const summaryRows = await postgres.listBrandCatalogSummary();
+    const rows = summaryRows.map((summary) => ({
+      ...(savedByName.get(summary.brandKey) || { id: "", name: summary.brandName, status: "active", vendorIds: [], preferredVendorId: "", virtual: true }),
+      ...summary,
+      name: (savedByName.get(summary.brandKey)?.name || summary.brandName)
+    }));
+    for (const brand of db.brands || []) {
+      const exists = rows.some((row) => String(row.brandKey || "").toLowerCase() === String(brand.name || "").trim().toLowerCase());
+      if (!exists) rows.push({ ...brand, brandKey: String(brand.name || "").trim().toLowerCase(), brandName: brand.name, sourceProductCount: 0, sourceInStockCount: 0, sourceStockQty: 0, productCount: 0, activeProductCount: 0, managedInStockCount: 0, managedStockQty: 0, shopifyLive: 0, ebayListed: 0, orderCount: 0, lastOrderAt: "", orderValue: 0, suppliers: [] });
+    }
+    const payload = { rows, generatedAt: new Date().toISOString() };
+    await redisCache.setJson(cacheKey, payload, 300);
+    return sendJson(res, 200, payload);
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "brands" && parts[2] === "profile" && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const brandId = String(url.searchParams.get("id") || "").trim();
+    const brandName = String(url.searchParams.get("name") || "").trim();
+    const page = Math.max(1, Number(url.searchParams.get("page") || 1));
+    const limit = Math.min(100, Math.max(10, Number(url.searchParams.get("limit") || 25)));
+    const query = String(url.searchParams.get("q") || "").trim();
+    const db = await readDbFast({ skipInventory: true });
+    const summaries = await postgres.listBrandCatalogSummary();
+    let brand = (db.brands || []).find((row) => row.id === brandId) || (db.brands || []).find((row) => String(row.name || "").toLowerCase() === brandName.toLowerCase());
+    const summary = summaries.find((row) => row.brandKey === String(brand?.name || brandName || "").trim().toLowerCase());
+    if (!brand && !summary) return notFound(res);
+    brand = brand || { id: "", name: summary.brandName, status: "active", vendorIds: [], preferredVendorId: "", virtual: true };
+    const catalogDb = await readSourceCatalogRuntimeDb();
+    const catalog = await scanCatalog({ query, page, limit, filters: { brand: brand.name }, db: catalogDb });
+    return sendJson(res, 200, { brand, summary: summary || {}, products: catalog.items || [], page: catalog.page, limit: catalog.limit, total: catalog.totalMatches || 0 });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "brands" && parts[2] && postgres.isPostgresEnabled()) {
@@ -27994,6 +28033,7 @@ async function handleApi(req, res) {
     }
     brand.updatedAt = new Date().toISOString();
     await postgres.writeStateDocuments({ brands: db.brands || [] });
+    await redisCache.deleteByPrefix("dataplus:brand-catalog-summary:");
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
   }
@@ -28009,6 +28049,7 @@ async function handleApi(req, res) {
     brand.status = nextStatus;
     brand.updatedAt = new Date().toISOString();
     await postgres.writeStateDocuments({ brands: db.brands || [] });
+    await redisCache.deleteByPrefix("dataplus:brand-catalog-summary:");
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
   }

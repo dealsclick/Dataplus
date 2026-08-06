@@ -6051,6 +6051,106 @@ async function listVendorMarketplaceSummary() {
   }));
 }
 
+async function listBrandCatalogSummary() {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+
+  // This deliberately summarizes the two catalog tables in SQL. Loading all
+  // source records into the browser made the legacy Brands page unusable at
+  // DataPlus catalog scale.
+  const result = await client.query(`
+    with source_catalog as (
+      select
+        lower(trim(brand)) as brand_key,
+        min(trim(brand)) as brand_name,
+        count(distinct coalesce(nullif(internal_sku, ''), nullif(source_sku, '')))::int as source_product_count,
+        count(distinct coalesce(nullif(internal_sku, ''), nullif(source_sku, ''))) filter (where coalesce(qty, 0) > 0)::int as source_in_stock_count,
+        coalesce(sum(greatest(coalesce(qty, 0), 0)), 0)::bigint as source_stock_qty,
+        array_remove(array_agg(distinct nullif(trim(coalesce(raw ->> 'supplier', raw ->> 'vendor', vendor_id)), '')), null) as suppliers
+      from vendor_catalog_items
+      where nullif(trim(coalesce(brand, '')), '') is not null
+      group by lower(trim(brand))
+    ),
+    shopify_by_sku as (
+      select lower(sku) as sku_key,
+        bool_or(coalesce(shopify_id, '') <> '' and lower(coalesce(shopify_status, '')) = 'active' and coalesce(shopify_published, false)) as shopify_live
+      from shopify_product_statuses
+      where coalesce(sku, '') <> ''
+      group by lower(sku)
+    ),
+    managed_products as (
+      select
+        lower(trim(p.brand)) as brand_key,
+        count(*)::int as product_count,
+        count(*) filter (where coalesce(p.active, true))::int as active_product_count,
+        count(*) filter (where coalesce(p.qty, 0) > 0)::int as managed_in_stock_count,
+        coalesce(sum(greatest(coalesce(p.qty, 0), 0)), 0)::bigint as managed_stock_qty,
+        count(*) filter (where coalesce(s.shopify_live, false))::int as shopify_live,
+        count(*) filter (where coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> '')::int as ebay_listed
+      from products p
+      left join shopify_by_sku s on s.sku_key = lower(p.sku)
+      where nullif(trim(coalesce(p.brand, '')), '') is not null
+      group by lower(trim(p.brand))
+    ),
+    order_brand_rows as (
+      select distinct
+        o.entity_id,
+        lower(trim(p.brand)) as brand_key,
+        o.updated_at,
+        case when coalesce(o.data ->> 'total', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (o.data ->> 'total')::numeric else 0 end as order_total
+      from entity_documents o
+      cross join lateral jsonb_array_elements(case when jsonb_typeof(o.data -> 'items') = 'array' then o.data -> 'items' else '[]'::jsonb end) item
+      join products p on lower(p.sku) = lower(coalesce(item ->> 'sku', ''))
+      where o.collection = 'orders'
+        and lower(coalesce(o.data ->> 'status', '')) not in ('void', 'canceled', 'cancelled', 'deleted')
+        and nullif(trim(coalesce(p.brand, '')), '') is not null
+    ),
+    order_stats as (
+      select brand_key, count(*)::int as order_count, max(updated_at) as last_order_at, coalesce(sum(order_total), 0)::numeric as order_value
+      from order_brand_rows
+      group by brand_key
+    )
+    select
+      coalesce(source_catalog.brand_key, managed_products.brand_key) as "brandKey",
+      coalesce(source_catalog.brand_name, initcap(coalesce(source_catalog.brand_key, managed_products.brand_key))) as "brandName",
+      coalesce(source_catalog.source_product_count, 0)::int as "sourceProductCount",
+      coalesce(source_catalog.source_in_stock_count, 0)::int as "sourceInStockCount",
+      coalesce(source_catalog.source_stock_qty, 0)::bigint as "sourceStockQty",
+      coalesce(managed_products.product_count, 0)::int as "productCount",
+      coalesce(managed_products.active_product_count, 0)::int as "activeProductCount",
+      coalesce(managed_products.managed_in_stock_count, 0)::int as "managedInStockCount",
+      coalesce(managed_products.managed_stock_qty, 0)::bigint as "managedStockQty",
+      coalesce(managed_products.shopify_live, 0)::int as "shopifyLive",
+      coalesce(managed_products.ebay_listed, 0)::int as "ebayListed",
+      coalesce(order_stats.order_count, 0)::int as "orderCount",
+      order_stats.last_order_at as "lastOrderAt",
+      coalesce(order_stats.order_value, 0)::numeric as "orderValue",
+      coalesce(source_catalog.suppliers, '{}'::text[]) as suppliers
+    from source_catalog
+    full outer join managed_products on managed_products.brand_key = source_catalog.brand_key
+    left join order_stats on order_stats.brand_key = coalesce(source_catalog.brand_key, managed_products.brand_key)
+    order by "sourceProductCount" desc, "productCount" desc, "brandName"
+  `);
+  return result.rows.map((row) => ({
+    brandKey: String(row.brandKey || "").toLowerCase(),
+    brandName: String(row.brandName || ""),
+    sourceProductCount: Number(row.sourceProductCount || 0),
+    sourceInStockCount: Number(row.sourceInStockCount || 0),
+    sourceStockQty: Number(row.sourceStockQty || 0),
+    productCount: Number(row.productCount || 0),
+    activeProductCount: Number(row.activeProductCount || 0),
+    managedInStockCount: Number(row.managedInStockCount || 0),
+    managedStockQty: Number(row.managedStockQty || 0),
+    shopifyLive: Number(row.shopifyLive || 0),
+    ebayListed: Number(row.ebayListed || 0),
+    orderCount: Number(row.orderCount || 0),
+    lastOrderAt: row.lastOrderAt?.toISOString?.() || row.lastOrderAt || "",
+    orderValue: Number(row.orderValue || 0),
+    suppliers: Array.isArray(row.suppliers) ? row.suppliers.map((value) => String(value || "").trim()).filter(Boolean) : []
+  }));
+}
+
 async function hydrateProductsWithShopifyStatuses(items = []) {
   const client = getPool();
   const productIds = [...new Set((Array.isArray(items) ? items : []).map((item) => nullableString(item.id)).filter(Boolean))];
@@ -6872,6 +6972,7 @@ module.exports = {
   findBarcodeMatches,
   productFacets,
   listVendorMarketplaceSummary,
+  listBrandCatalogSummary,
   listVendorCatalogItems,
   listVendorCategoryMappingSources,
   applyVendorCategoryMainMapping,

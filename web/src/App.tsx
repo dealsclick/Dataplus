@@ -122,7 +122,7 @@ import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbP
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { cn } from "@/lib/utils"
 
-type AppView = "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "ai-chat" | "settings"
+type AppView = "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
 
 type ImportJob = {
   id: string
@@ -347,6 +347,43 @@ type Vendor = {
   channelRules?: Record<string, unknown>
 }
 
+type Brand = {
+  id: string
+  name: string
+  status?: string
+  vendorIds?: string[]
+  preferredVendorId?: string
+  logoUrl?: string
+  logoDataUrl?: string
+  category?: string
+  website?: string
+  mapPolicy?: string
+  warranty?: string
+  leadTimeNotes?: string
+  notes?: string
+  virtual?: boolean
+  createdAt?: string
+  updatedAt?: string
+}
+
+type BrandSummary = Brand & {
+  brandKey: string
+  brandName: string
+  sourceProductCount: number
+  sourceInStockCount: number
+  sourceStockQty: number
+  productCount: number
+  activeProductCount: number
+  managedInStockCount: number
+  managedStockQty: number
+  shopifyLive: number
+  ebayListed: number
+  orderCount: number
+  lastOrderAt?: string
+  orderValue: number
+  suppliers?: string[]
+}
+
 type VendorMarketplaceSummary = {
   supplierKey: string
   supplier: string
@@ -418,6 +455,7 @@ type VendorFeedSchedule = {
 type LiteState = {
   connections?: ChannelConnection[]
   vendors?: Vendor[]
+  brands?: Brand[]
   warehouses?: Array<Record<string, unknown>>
   systemSettings?: SystemSettings
   catalogImportReviews?: CatalogImportReview[]
@@ -758,6 +796,7 @@ const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
     label: "Catalog",
     items: [
       { id: "catalog", label: "Catalog", icon: PackageSearch },
+      { id: "brands", label: "Brands", icon: Store },
       { id: "vendors", label: "Vendors", icon: Warehouse },
     ],
   },
@@ -782,6 +821,7 @@ const catalogSidebarItems: Array<{ label: string; path: string; icon: React.Comp
   { label: "Import Review", path: "/import-review", icon: FileWarning },
   { label: "SKU Changes", path: "/sku-changes", icon: Activity },
   { label: "Categories", path: "/categories", icon: PackageSearch },
+  { label: "Brands", path: "/brands", icon: Store },
   { label: "Vendor Mappings", path: "/vendor-category-mappings", icon: Warehouse },
   { label: "Attributes", path: "/attributes", icon: CheckCircle2 },
   { label: "Attribute Groups", path: "/groups", icon: Boxes },
@@ -820,6 +860,8 @@ const viewPaths: Record<AppView, string> = {
   "inventory-detail": "/inventory",
   "category-detail": "/categories",
   vendors: "/vendors",
+  brands: "/brands",
+  "brand-detail": "/brands",
   "ai-chat": "/ai",
   settings: "/settings",
 }
@@ -839,6 +881,8 @@ function viewFromPath(pathname = "/"): AppView {
   if (path.startsWith("/inventory/")) return "inventory-detail"
   if (path.startsWith("/products/")) return "product-detail"
   if (path.startsWith("/categories/")) return "category-detail"
+  if (/^\/brands\/[^/]+$/.test(path)) return "brand-detail"
+  if (path.startsWith("/brands")) return "brands"
   if (path.startsWith("/products") || path.startsWith("/catalog")) return "catalog"
   if (["/categories", "/source-catalog", "/import-review", "/sku-changes", "/vendor-category-mappings", "/attributes", "/groups", "/inventory", "/templates", "/readiness"].some((prefix) => path.startsWith(prefix))) return "catalog"
   if (path.startsWith("/vendors")) return "vendors"
@@ -1304,6 +1348,54 @@ function App() {
     }
   }
 
+  async function createBrand(patch: Record<string, unknown>) {
+    try {
+      const result = await api<{ brand: Brand; state?: LiteState }>("/api/brands", {
+        method: "POST",
+        body: JSON.stringify(patch),
+      })
+      setState((current) => ({ ...current, ...(result.state || {}), brands: result.state?.brands || [result.brand, ...(current.brands || [])] }))
+      toast.success("Brand created.")
+      return result.brand
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to create brand.")
+      throw error
+    }
+  }
+
+  async function saveBrand(brandId: string, patch: Record<string, unknown>) {
+    try {
+      const result = await api<{ brand: Brand; state?: LiteState }>(`/api/brands/${encodeURIComponent(brandId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      })
+      setState((current) => ({
+        ...current,
+        ...(result.state || {}),
+        brands: (result.state?.brands || current.brands || []).map((brand) => brand.id === brandId ? result.brand : brand),
+      }))
+      toast.success("Brand profile saved.")
+      return result.brand
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save brand.")
+      throw error
+    }
+  }
+
+  async function runBrandAction(brandId: string, action: "enable" | "disable" | "void") {
+    try {
+      const result = await api<{ brand: Brand; state?: LiteState }>(`/api/brands/${encodeURIComponent(brandId)}/action`, {
+        method: "POST",
+        body: JSON.stringify({ action }),
+      })
+      setState((current) => ({ ...current, ...(result.state || {}), brands: (result.state?.brands || current.brands || []).map((brand) => brand.id === brandId ? result.brand : brand) }))
+      toast.success(`Brand ${action === "void" ? "voided" : action === "enable" ? "enabled" : "disabled"}.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to update brand status.")
+      throw error
+    }
+  }
+
   async function saveSystemSettings(patch: Record<string, unknown>) {
     try {
       const result = await api<{ state?: LiteState; systemSettings?: SystemSettings }>("/api/system-settings", {
@@ -1553,6 +1645,8 @@ function App() {
                     onSaveVendor={saveVendor}
                   />
                 )}
+                {view === "brands" && <BrandsPage vendors={state.vendors || []} onCreateBrand={createBrand} />}
+                {view === "brand-detail" && <BrandDetailPage vendors={state.vendors || []} onCreateBrand={createBrand} onSaveBrand={saveBrand} onBrandAction={runBrandAction} />}
                 {view === "settings" && (
                   <SettingsPage
                     settings={state.systemSettings || {}}
@@ -11706,6 +11800,147 @@ function vendorMarketplaceCoverage(vendor: Vendor, rowsBySupplier: Map<string, V
     coverage.matchedSuppliers.push(row.supplier)
   }
   return coverage
+}
+
+function brandLogo(brand: Brand) {
+  return brand.logoDataUrl || brand.logoUrl || ""
+}
+
+function openBrand(brand: BrandSummary | Brand) {
+  const identifier = brand.id || encodeURIComponent(brand.name)
+  const query = brand.id ? "" : `?name=${encodeURIComponent(brand.name)}`
+  window.history.pushState({}, "", `/brands/${identifier}${query}`)
+  window.dispatchEvent(new PopStateEvent("popstate"))
+}
+
+function BrandLogo({ brand, size = "size-10" }: { brand: Brand; size?: string }) {
+  const src = brandLogo(brand)
+  if (src) return <CatalogImage src={src} alt={`${brand.name} logo`} className={`${size} shrink-0`} imageClassName="p-1" />
+  return <div className={`grid shrink-0 place-items-center rounded-md border bg-muted text-xs font-bold text-muted-foreground ${size}`}>{brand.name.slice(0, 2).toUpperCase()}</div>
+}
+
+function BrandEditorDialog({
+  open,
+  onOpenChange,
+  brand,
+  vendors,
+  onSave,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  brand?: Brand
+  vendors: Vendor[]
+  onSave: (patch: Record<string, unknown>) => Promise<void>
+}) {
+  const [draft, setDraft] = useState<Record<string, unknown>>({})
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    setDraft({
+      name: brand?.name || "",
+      status: brand?.status || "active",
+      category: brand?.category || "",
+      website: brand?.website || "",
+      logoUrl: brand?.logoUrl || "",
+      logoDataUrl: brand?.logoDataUrl || "",
+      mapPolicy: brand?.mapPolicy || "",
+      warranty: brand?.warranty || "",
+      leadTimeNotes: brand?.leadTimeNotes || "",
+      notes: brand?.notes || "",
+      preferredVendorId: brand?.preferredVendorId || "none",
+      vendorIds: brand?.vendorIds || [],
+    })
+  }, [brand, open])
+  const value = (field: string) => String(draft[field] || "")
+  const vendorIds = Array.isArray(draft.vendorIds) ? draft.vendorIds.map(String) : []
+  function update(field: string, next: unknown) { setDraft((current) => ({ ...current, [field]: next })) }
+  function toggleVendor(vendorId: string, checked: boolean) {
+    update("vendorIds", checked ? [...new Set([...vendorIds, vendorId])] : vendorIds.filter((id) => id !== vendorId))
+  }
+  async function useLogo(file?: File) {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => update("logoDataUrl", String(reader.result || ""))
+    reader.readAsDataURL(file)
+  }
+  async function save() {
+    if (!value("name").trim()) { toast.error("Brand name is required."); return }
+    setSaving(true)
+    try {
+      await onSave({ ...draft, preferredVendorId: value("preferredVendorId") === "none" ? "" : value("preferredVendorId") })
+      onOpenChange(false)
+    } finally { setSaving(false) }
+  }
+  return <Dialog open={open} onOpenChange={onOpenChange}>
+    <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
+      <DialogHeader><DialogTitle>{brand ? `Edit ${brand.name}` : "Create brand"}</DialogTitle><DialogDescription>Centralize commercial policy and the suppliers that carry this brand.</DialogDescription></DialogHeader>
+      <Tabs defaultValue="profile">
+        <TabsList className="w-full justify-start overflow-x-auto"><TabsTrigger value="profile">Profile</TabsTrigger><TabsTrigger value="commercial">Commercial</TabsTrigger><TabsTrigger value="vendors">Vendors</TabsTrigger><TabsTrigger value="notes">Notes</TabsTrigger></TabsList>
+        <TabsContent value="profile" className="grid gap-4 pt-3">
+          <div className="flex flex-wrap items-center gap-3"><BrandLogo brand={{ ...(brand || { id: "" }), name: value("name") || "BR", logoUrl: value("logoUrl"), logoDataUrl: value("logoDataUrl") }} size="size-16" /><div className="grid gap-1"><Label htmlFor="brand-logo">Brand logo</Label><Input id="brand-logo" type="file" accept="image/*" onChange={(event) => void useLogo(event.target.files?.[0])} /></div></div>
+          <div className="grid gap-4 sm:grid-cols-2"><Field label="Brand name"><Input value={value("name")} onChange={(event) => update("name", event.target.value)} /></Field><Field label="Status"><Select value={value("status") || "active"} onValueChange={(next) => update("status", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem><SelectItem value="void">Void</SelectItem></SelectContent></Select></Field><Field label="Category"><Input value={value("category")} onChange={(event) => update("category", event.target.value)} placeholder="Optional brand category" /></Field><Field label="Website"><Input value={value("website")} onChange={(event) => update("website", event.target.value)} placeholder="https://" /></Field><Field label="Logo URL"><Input value={value("logoUrl")} onChange={(event) => update("logoUrl", event.target.value)} placeholder="Optional hosted logo URL" /></Field></div>
+        </TabsContent>
+        <TabsContent value="commercial" className="grid gap-4 pt-3 sm:grid-cols-2"><Field label="MAP policy"><Input value={value("mapPolicy")} onChange={(event) => update("mapPolicy", event.target.value)} placeholder="e.g. Enforce MAP" /></Field><Field label="Warranty"><Input value={value("warranty")} onChange={(event) => update("warranty", event.target.value)} placeholder="e.g. 1 year manufacturer warranty" /></Field><div className="sm:col-span-2"><Field label="Lead time notes"><Textarea value={value("leadTimeNotes")} onChange={(event) => update("leadTimeNotes", event.target.value)} placeholder="Supplier lead times, ordering notes, or exceptions" /></Field></div></TabsContent>
+        <TabsContent value="vendors" className="grid gap-4 pt-3"><Field label="Preferred vendor"><Select value={value("preferredVendorId") || "none"} onValueChange={(next) => update("preferredVendorId", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">No preferred vendor</SelectItem>{vendors.map((vendor) => <SelectItem key={vendor.id} value={vendor.id}>{vendor.name}</SelectItem>)}</SelectContent></Select></Field><div className="grid gap-2 rounded-md border p-3 sm:grid-cols-2">{vendors.map((vendor) => <label key={vendor.id} className="flex cursor-pointer items-center gap-2 rounded-md border bg-background p-2 text-sm"><Checkbox checked={vendorIds.includes(vendor.id)} onCheckedChange={(checked) => toggleVendor(vendor.id, checked === true)} />{vendor.name}</label>)}</div></TabsContent>
+        <TabsContent value="notes" className="pt-3"><Field label="Internal notes"><Textarea className="min-h-40" value={value("notes")} onChange={(event) => update("notes", event.target.value)} placeholder="Brand notes visible to the catalog and purchasing teams." /></Field></TabsContent>
+      </Tabs>
+      <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button onClick={() => void save()} disabled={saving}>{saving && <Loader2 className="size-4 animate-spin" />}{brand ? "Save brand" : "Create brand"}</Button></DialogFooter>
+    </DialogContent>
+  </Dialog>
+}
+
+function BrandsPage({ vendors, onCreateBrand }: { vendors: Vendor[]; onCreateBrand: (patch: Record<string, unknown>) => Promise<Brand> }) {
+  const [rows, setRows] = useState<BrandSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [query, setQuery] = useState("")
+  const [status, setStatus] = useState("all")
+  const [vendor, setVendor] = useState("all")
+  const [open, setOpen] = useState(false)
+  const load = async () => {
+    setLoading(true)
+    try { const result = await api<{ rows?: BrandSummary[] }>("/api/brands/summary"); setRows(result.rows || []) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load brands.") } finally { setLoading(false) }
+  }
+  useEffect(() => { void load() }, [])
+  const vendorNames = useMemo(() => new Map(vendors.map((item) => [item.id, item.name])), [vendors])
+  const filtered = rows.filter((brand) => {
+    const preferred = vendorNames.get(brand.preferredVendorId || "") || ""
+    const mapped = (brand.vendorIds || []).map((id) => vendorNames.get(id) || "").join(" ")
+    const text = `${brand.name} ${brand.category || ""} ${preferred} ${mapped} ${(brand.suppliers || []).join(" ")} ${brand.notes || ""}`.toLowerCase()
+    return text.includes(query.toLowerCase()) && (status === "all" || String(brand.status || "active").toLowerCase() === status) && (vendor === "all" || brand.preferredVendorId === vendor || (brand.vendorIds || []).includes(vendor))
+  })
+  const catalogSkus = rows.reduce((sum, row) => sum + Number(row.sourceProductCount || 0), 0)
+  return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title="Brands" description="Manage brand policy, supplier relationships, catalog coverage, and marketplace performance in one place." action={<Button onClick={() => setOpen(true)}>Create brand</Button>} />
+    <div className="grid gap-3 md:grid-cols-4"><MetricCard label="Brands" value={rows.length} icon={Store} /><MetricCard label="Catalog SKUs" value={catalogSkus} icon={Boxes} /><MetricCard label="Shopify live" value={rows.reduce((sum, row) => sum + row.shopifyLive, 0)} icon={ShoppingBag} /><MetricCard label="eBay listed" value={rows.reduce((sum, row) => sum + row.ebayListed, 0)} icon={ExternalLink} /></div>
+    <Card><CardHeader className="gap-3 border-b"><div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div><CardTitle className="text-base">Brand register</CardTitle><CardDescription>SKU and marketplace counts are calculated from the catalog database.</CardDescription></div><Button variant="outline" size="sm" onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button></div><div className="grid gap-2 sm:grid-cols-3"><div className="relative"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="pl-8" placeholder="Search brand, supplier, notes" value={query} onChange={(event) => setQuery(event.target.value)} /></div><Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue placeholder="Status" /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem><SelectItem value="void">Void</SelectItem></SelectContent></Select><Select value={vendor} onValueChange={setVendor}><SelectTrigger><SelectValue placeholder="Vendor" /></SelectTrigger><SelectContent><SelectItem value="all">All vendors</SelectItem>{vendors.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div></CardHeader>
+      <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Brand</TableHead><TableHead>Status</TableHead><TableHead>Preferred vendor</TableHead><TableHead className="text-right">Catalog SKUs</TableHead><TableHead className="text-right">In stock</TableHead><TableHead className="text-right">Shopify</TableHead><TableHead className="text-right">eBay</TableHead><TableHead>Last order</TableHead><TableHead className="text-right">Order value</TableHead></TableRow></TableHeader><TableBody>{loading ? <TableRow><TableCell colSpan={9} className="h-32 text-center text-muted-foreground"><Loader2 className="mx-auto size-5 animate-spin" />Loading brands</TableCell></TableRow> : filtered.map((brand) => <TableRow key={`${brand.id || "source"}-${brand.brandKey}`} className="cursor-pointer" onClick={() => openBrand(brand)}><TableCell><div className="flex items-center gap-3"><BrandLogo brand={brand} /><div className="min-w-0"><button className="block max-w-56 truncate text-left font-medium text-primary hover:underline">{brand.name}</button><p className="max-w-56 truncate text-xs text-muted-foreground">{brand.category || (brand.suppliers || []).slice(0, 2).join(", ") || "No category"}</p></div></div></TableCell><TableCell><Badge variant={String(brand.status || "active").toLowerCase() === "active" ? "success" : "outline"}>{brand.status || "active"}</Badge></TableCell><TableCell>{vendorNames.get(brand.preferredVendorId || "") || "-"}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(brand.sourceProductCount)}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(brand.sourceInStockCount)}</TableCell><TableCell className="text-right"><Badge variant={brand.shopifyLive ? "success" : "outline"}>{numberLabel(brand.shopifyLive)}</Badge></TableCell><TableCell className="text-right"><Badge variant={brand.ebayListed ? "info" : "outline"}>{numberLabel(brand.ebayListed)}</Badge></TableCell><TableCell>{dateLabel(brand.lastOrderAt)}</TableCell><TableCell className="text-right font-medium tabular-nums">{moneyLabel(brand.orderValue)}</TableCell></TableRow>)}{!loading && !filtered.length && <TableRow><TableCell colSpan={9} className="h-32 text-center text-muted-foreground">No brands match these filters.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
+    <BrandEditorDialog open={open} onOpenChange={setOpen} vendors={vendors} onSave={async (patch) => { const brand = await onCreateBrand(patch); openBrand(brand) }} />
+  </div>
+}
+
+function BrandDetailPage({ vendors, onCreateBrand, onSaveBrand, onBrandAction }: { vendors: Vendor[]; onCreateBrand: (patch: Record<string, unknown>) => Promise<Brand>; onSaveBrand: (id: string, patch: Record<string, unknown>) => Promise<Brand>; onBrandAction: (id: string, action: "enable" | "disable" | "void") => Promise<void> }) {
+  const pathPart = decodeURIComponent(window.location.pathname.replace(/\/+$/, "").split("/").pop() || "")
+  const suppliedName = new URLSearchParams(window.location.search).get("name") || ""
+  const [profile, setProfile] = useState<{ brand: Brand; summary: BrandSummary; products: ProductItem[]; page: number; limit: number; total: number } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [editing, setEditing] = useState(false)
+  const [q, setQ] = useState("")
+  const [page, setPage] = useState(1)
+  const load = async () => { setLoading(true); try { const params = new URLSearchParams({ page: String(page), limit: "25", q }); if (suppliedName) params.set("name", suppliedName); else params.set("id", pathPart); setProfile(await api(`/api/brands/profile?${params}`)) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load brand profile.") } finally { setLoading(false) } }
+  useEffect(() => { void load() }, [page, q, pathPart, suppliedName])
+  if (loading && !profile) return <LoadingState />
+  if (!profile) return <Empty><EmptyHeader><EmptyTitle>Brand not found</EmptyTitle><EmptyDescription>This profile is unavailable.</EmptyDescription></EmptyHeader></Empty>
+  const { brand, summary } = profile
+  const preferredVendor = vendors.find((vendor) => vendor.id === brand.preferredVendorId)
+  const mappedVendors = vendors.filter((vendor) => (brand.vendorIds || []).includes(vendor.id))
+  async function save(patch: Record<string, unknown>) {
+    if (!brand.id) { const created = await onCreateBrand({ name: brand.name }); const updated = await onSaveBrand(created.id, patch); setProfile((current) => current ? { ...current, brand: updated } : current); window.history.replaceState({}, "", `/brands/${created.id}`); return }
+    const updated = await onSaveBrand(brand.id, patch); setProfile((current) => current ? { ...current, brand: updated } : current)
+    void load()
+  }
+  return <div className="grid gap-5"><PageHeader eyebrow="Catalog / Brands" title={brand.name} description={`${brand.category || "Uncategorized"} / ${summary.sourceProductCount || 0} catalog SKUs`} action={<div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => window.history.back()}>Back to brands</Button><Button onClick={() => setEditing(true)}><Pencil className="size-4" /> Edit brand</Button><DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline" size="icon"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => brand.id && void onBrandAction(brand.id, "enable")}>Set active</DropdownMenuItem><DropdownMenuItem onClick={() => brand.id && void onBrandAction(brand.id, "disable")}>Set inactive</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onClick={() => brand.id && void onBrandAction(brand.id, "void")}>Void brand</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>} />
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><MetricCard label="Catalog SKUs" value={summary.sourceProductCount || 0} icon={Boxes} /><MetricCard label="In stock" value={summary.sourceInStockCount || 0} icon={CheckCircle2} /><MetricCard label="Shopify live" value={summary.shopifyLive || 0} icon={ShoppingBag} /><MetricCard label="eBay listed" value={summary.ebayListed || 0} icon={ExternalLink} /><MetricCard label="Order value" value={moneyLabel(summary.orderValue || 0)} icon={Database} /></div>
+    <Tabs defaultValue="overview"><TabsList className="w-full justify-start overflow-x-auto"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="products">Products ({numberLabel(profile.total)})</TabsTrigger><TabsTrigger value="vendors">Vendors ({mappedVendors.length})</TabsTrigger><TabsTrigger value="performance">Performance</TabsTrigger></TabsList><TabsContent value="overview" className="grid gap-4 pt-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(300px,.65fr)]"><Card><CardHeader><div className="flex items-center gap-3"><BrandLogo brand={brand} size="size-16" /><div><CardTitle>{brand.name}</CardTitle><CardDescription>{brand.website || "No brand website"}</CardDescription></div></div></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2"><Detail label="Status" value={brand.status || "active"} /><Detail label="Category" value={brand.category || "Uncategorized"} /><Detail label="MAP policy" value={brand.mapPolicy || "Not set"} /><Detail label="Warranty" value={brand.warranty || "Not set"} /><Detail label="Lead-time notes" value={brand.leadTimeNotes || "No notes"} /><Detail label="Last brand order" value={dateLabel(summary.lastOrderAt)} /></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Commercial owner</CardTitle></CardHeader><CardContent className="grid gap-3"><Detail label="Preferred vendor" value={preferredVendor?.name || "Not assigned"} /><Detail label="Mapped suppliers" value={mappedVendors.map((vendor) => vendor.name).join(", ") || "Not assigned"} /><p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">{brand.notes || "No internal brand notes."}</p></CardContent></Card></TabsContent><TabsContent value="products" className="pt-4"><Card><CardHeader className="gap-3 border-b sm:flex-row sm:items-center sm:justify-between"><div><CardTitle className="text-base">Catalog products</CardTitle><CardDescription>Every source-catalog record associated with this brand.</CardDescription></div><div className="relative w-full sm:w-72"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="pl-8" value={q} onChange={(event) => { setQ(event.target.value); setPage(1) }} placeholder="Search SKU or title" /></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Product</TableHead><TableHead>SKU</TableHead><TableHead>Supplier</TableHead><TableHead>Category</TableHead><TableHead className="text-right">Stock</TableHead><TableHead className="text-right">Price</TableHead></TableRow></TableHeader><TableBody>{profile.products.map((product) => <TableRow key={`${product.sku}-${product.supplier}`}><TableCell><div className="flex items-center gap-2"><CatalogImage src={product.defaultImage} alt={product.title || product.sku || "Product"} className="size-9 shrink-0" imageClassName="p-0.5" /><a href={`/products/${encodeURIComponent(product.productCatalogSku || product.sku || "")}`} className="max-w-64 truncate font-medium text-primary hover:underline">{product.title || "Untitled product"}</a></div></TableCell><TableCell className="font-mono text-xs">{product.sku || "-"}</TableCell><TableCell>{product.supplier || "-"}</TableCell><TableCell className="max-w-64 truncate">{product.mainCategory || product.sourceCategory || "Uncategorized"}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(product.stockQty ?? product.qty ?? 0)}</TableCell><TableCell className="text-right tabular-nums">{moneyLabel(product.websitePrice ?? product.price ?? 0)}</TableCell></TableRow>)}{!profile.products.length && <TableRow><TableCell colSpan={6} className="h-28 text-center text-muted-foreground">No catalog products match this search.</TableCell></TableRow>}</TableBody></Table></div>{profile.total > profile.limit && <div className="flex items-center justify-between border-t p-3 text-sm"><span>Page {profile.page} of {Math.max(1, Math.ceil(profile.total / profile.limit))}</span><div className="flex gap-2"><Button variant="outline" size="sm" disabled={profile.page <= 1} onClick={() => setPage((current) => current - 1)}>Previous</Button><Button variant="outline" size="sm" disabled={profile.page * profile.limit >= profile.total} onClick={() => setPage((current) => current + 1)}>Next</Button></div></div>}</CardContent></Card></TabsContent><TabsContent value="vendors" className="pt-4"><Card><CardHeader><CardTitle className="text-base">Suppliers carrying this brand</CardTitle><CardDescription>Use a preferred vendor for purchasing while preserving every approved supplier relationship.</CardDescription></CardHeader><CardContent className="grid gap-2 sm:grid-cols-2">{mappedVendors.map((vendor) => <div key={vendor.id} className="flex items-center justify-between rounded-md border bg-background p-3"><div><p className="font-medium">{vendor.name}</p><p className="text-xs text-muted-foreground">{vendor.code || vendor.type || "Supplier"}</p></div>{vendor.id === brand.preferredVendorId && <Badge variant="success">Preferred</Badge>}</div>)}{!mappedVendors.length && <p className="text-sm text-muted-foreground">No supplier relationship has been assigned.</p>}</CardContent></Card></TabsContent><TabsContent value="performance" className="grid gap-4 pt-4 md:grid-cols-3"><MetricCard label="Orders" value={summary.orderCount || 0} icon={ShoppingBag} /><MetricCard label="Order value" value={moneyLabel(summary.orderValue || 0)} icon={Database} /><MetricCard label="Last order" value={dateLabel(summary.lastOrderAt)} icon={History} /></TabsContent></Tabs>
+    <BrandEditorDialog open={editing} onOpenChange={setEditing} brand={brand} vendors={vendors} onSave={save} />
+  </div>
 }
 
 function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendor: (id: string, patch: Record<string, unknown>) => Promise<void> }) {
