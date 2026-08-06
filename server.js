@@ -28001,9 +28001,9 @@ async function handleApi(req, res) {
     const limit = Math.min(100, Math.max(10, Number(url.searchParams.get("limit") || 25)));
     const query = String(url.searchParams.get("q") || "").trim();
     const db = await readDbFast({ skipInventory: true });
-    const summaries = await postgres.listBrandCatalogSummary();
     let brand = (db.brands || []).find((row) => row.id === brandId) || (db.brands || []).find((row) => String(row.name || "").toLowerCase() === brandName.toLowerCase());
-    const summary = summaries.find((row) => row.brandKey === String(brand?.name || brandName || "").trim().toLowerCase());
+    const resolvedName = String(brand?.name || brandName || "").trim();
+    const summary = await postgres.getBrandCatalogSummary(resolvedName);
     if (!brand && !summary) return notFound(res);
     brand = brand || { id: "", name: summary.brandName, status: "active", vendorIds: [], preferredVendorId: "", virtual: true };
     const catalog = await postgres.listBrandCatalogItems({ brand: brand.name, query, page, limit });

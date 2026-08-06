@@ -6149,6 +6149,78 @@ async function listBrandCatalogSummary() {
   }));
 }
 
+async function getBrandCatalogSummary(brand = "") {
+  const client = getPool();
+  const brandName = nullableString(brand);
+  if (!client || !brandName) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    with source_catalog as (
+      select
+        min(display_value) as brand_name,
+        max(row_count)::int as source_product_count
+      from vendor_catalog_facets
+      where facet_type = 'brand'
+        and lower(facet_value) = $1
+    ),
+    managed_products as (
+      select
+        count(*)::int as product_count,
+        count(*) filter (where coalesce(p.active, true))::int as active_product_count,
+        count(*) filter (where coalesce(p.qty, 0) > 0)::int as managed_in_stock_count,
+        coalesce(sum(greatest(coalesce(p.qty, 0), 0)), 0)::bigint as managed_stock_qty,
+        count(*) filter (where exists (
+          select 1
+          from shopify_product_statuses s
+          where lower(s.sku) = lower(p.sku)
+            and coalesce(s.shopify_id, '') <> ''
+            and lower(coalesce(s.shopify_status, '')) = 'active'
+            and coalesce(s.shopify_published, false)
+        ))::int as shopify_live,
+        count(*) filter (where coalesce(p.raw #>> '{ebayListing,listingId}', p.raw ->> 'ebayId', '') <> '')::int as ebay_listed
+      from products p
+      where lower(trim(coalesce(p.brand, ''))) = $1
+    )
+    select
+      $1 as "brandKey",
+      coalesce(source_catalog.brand_name, initcap($1)) as "brandName",
+      coalesce(source_catalog.source_product_count, 0)::int as "sourceProductCount",
+      coalesce(managed_products.managed_in_stock_count, 0)::int as "sourceInStockCount",
+      coalesce(managed_products.managed_stock_qty, 0)::bigint as "sourceStockQty",
+      coalesce(managed_products.product_count, 0)::int as "productCount",
+      coalesce(managed_products.active_product_count, 0)::int as "activeProductCount",
+      coalesce(managed_products.managed_in_stock_count, 0)::int as "managedInStockCount",
+      coalesce(managed_products.managed_stock_qty, 0)::bigint as "managedStockQty",
+      coalesce(managed_products.shopify_live, 0)::int as "shopifyLive",
+      coalesce(managed_products.ebay_listed, 0)::int as "ebayListed",
+      0::int as "orderCount",
+      null::timestamptz as "lastOrderAt",
+      0::numeric as "orderValue",
+      '{}'::text[] as suppliers
+    from source_catalog
+    full outer join managed_products on true
+  `, [brandName.toLowerCase()]);
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    brandKey: String(row.brandKey || "").toLowerCase(),
+    brandName: String(row.brandName || ""),
+    sourceProductCount: Number(row.sourceProductCount || 0),
+    sourceInStockCount: Number(row.sourceInStockCount || 0),
+    sourceStockQty: Number(row.sourceStockQty || 0),
+    productCount: Number(row.productCount || 0),
+    activeProductCount: Number(row.activeProductCount || 0),
+    managedInStockCount: Number(row.managedInStockCount || 0),
+    managedStockQty: Number(row.managedStockQty || 0),
+    shopifyLive: Number(row.shopifyLive || 0),
+    ebayListed: Number(row.ebayListed || 0),
+    orderCount: Number(row.orderCount || 0),
+    lastOrderAt: "",
+    orderValue: Number(row.orderValue || 0),
+    suppliers: []
+  };
+}
+
 async function listBrandCatalogItems({ brand = "", query = "", page = 1, limit = 25 } = {}) {
   const client = getPool();
   const brandName = nullableString(brand);
@@ -6996,6 +7068,7 @@ module.exports = {
   productFacets,
   listVendorMarketplaceSummary,
   listBrandCatalogSummary,
+  getBrandCatalogSummary,
   listBrandCatalogItems,
   listVendorCatalogItems,
   listVendorCategoryMappingSources,
