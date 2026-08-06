@@ -28006,9 +28006,9 @@ async function handleApi(req, res) {
     const summary = summaries.find((row) => row.brandKey === String(brand?.name || brandName || "").trim().toLowerCase());
     if (!brand && !summary) return notFound(res);
     brand = brand || { id: "", name: summary.brandName, status: "active", vendorIds: [], preferredVendorId: "", virtual: true };
-    const catalogDb = await readSourceCatalogRuntimeDb();
-    const catalog = await scanCatalog({ query, page, limit, filters: { brand: brand.name }, db: catalogDb });
-    return sendJson(res, 200, { brand, summary: summary || {}, products: catalog.items || [], page: catalog.page, limit: catalog.limit, total: catalog.totalMatches || 0 });
+    const catalog = await postgres.listBrandCatalogItems({ brand: brand.name, query, page, limit });
+    const total = Number(summary?.sourceProductCount || summary?.productCount || 0);
+    return sendJson(res, 200, { brand, summary: summary || {}, products: catalog.items || [], page: catalog.page, limit: catalog.limit, total });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "brands" && parts[2] && postgres.isPostgresEnabled()) {

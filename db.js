@@ -6149,6 +6149,31 @@ async function listBrandCatalogSummary() {
   }));
 }
 
+async function listBrandCatalogItems({ brand = "", query = "", page = 1, limit = 25 } = {}) {
+  const client = getPool();
+  const brandName = nullableString(brand);
+  if (!client || !brandName) return { items: [], page: 1, limit: 25 };
+  await initRelationalSchema();
+  const pageNumber = Math.max(1, Number(page || 1));
+  const pageSize = Math.min(100, Math.max(1, Number(limit || 25)));
+  const params = [brandName.toLowerCase()];
+  const where = ["lower(coalesce(brand, '')) = $1"];
+  const search = nullableString(query);
+  if (search) {
+    params.push(`%${search.toLowerCase()}%`);
+    where.push(`(lower(coalesce(source_sku, '')) like $${params.length} or lower(coalesce(internal_sku, '')) like $${params.length} or lower(coalesce(title, '')) like $${params.length})`);
+  }
+  params.push(pageSize, (pageNumber - 1) * pageSize);
+  const result = await client.query(`
+    select *
+    from vendor_catalog_items
+    where ${where.join(" and ")}
+    order by source_sku
+    limit $${params.length - 1} offset $${params.length}
+  `, params);
+  return { items: result.rows.map(vendorCatalogRowToState), page: pageNumber, limit: pageSize };
+}
+
 async function hydrateProductsWithShopifyStatuses(items = []) {
   const client = getPool();
   const productIds = [...new Set((Array.isArray(items) ? items : []).map((item) => nullableString(item.id)).filter(Boolean))];
@@ -6971,6 +6996,7 @@ module.exports = {
   productFacets,
   listVendorMarketplaceSummary,
   listBrandCatalogSummary,
+  listBrandCatalogItems,
   listVendorCatalogItems,
   listVendorCategoryMappingSources,
   applyVendorCategoryMainMapping,
