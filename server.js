@@ -9,6 +9,7 @@ const readline = require("readline");
 const zlib = require("zlib");
 const nodemailer = require("nodemailer");
 const ftp = require("basic-ftp");
+const { XMLParser } = require("fast-xml-parser");
 const postgres = require("./db");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
@@ -792,6 +793,9 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayCustomPolicies: [],
   ebayAccountHealth: {},
   ebayCatalogSyncEnabled: true,
+  // Inventory API only includes listings created through that API. Keep the
+  // Trading API fallback on so Seller Hub / legacy listings are paired too.
+  ebayLegacyListingSyncEnabled: true,
   ebayCatalogSyncLimit: 50000,
   ebayOrderImportEnabled: false,
   ebayOrderImportLookbackDays: 30,
@@ -3884,7 +3888,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayListingLaunchLimit", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
+  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -16810,6 +16814,156 @@ function ebayRawRequest(urlString, options = {}) {
   });
 }
 
+const ebayTradingXmlParser = new XMLParser({
+  ignoreAttributes: false,
+  parseTagValue: false,
+  trimValues: true,
+  removeNSPrefix: true
+});
+
+function ebayTradingArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value === undefined || value === null || value === "") return [];
+  return [value];
+}
+
+function ebayTradingText(value) {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "object") return String(value).trim();
+  return String(value["#text"] ?? value.text ?? value.value ?? value._ ?? "").trim();
+}
+
+function ebayTradingNumber(value, fallback = 0) {
+  const parsed = Number(ebayTradingText(value));
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function ebayTradingMoney(value, fallbackCurrency = "USD") {
+  return {
+    value: ebayTradingNumber(value, 0),
+    currency: String(value?.["@_currencyID"] || value?.currencyID || fallbackCurrency || "USD").trim()
+  };
+}
+
+function ebayRawXmlRequest(urlString, options = {}) {
+  const url = new URL(urlString);
+  const bodyText = String(options.bodyText || "");
+  const headers = { ...(options.headers || {}) };
+  if (bodyText) headers["Content-Length"] = Buffer.byteLength(bodyText);
+  return new Promise((resolve, reject) => {
+    const request = https.request({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || undefined,
+      path: `${url.pathname}${url.search}`,
+      method: options.method || "POST",
+      headers,
+      timeout: Number(options.timeoutMs || 25000)
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({
+        response: {
+          ok: response.statusCode >= 200 && response.statusCode < 300,
+          status: response.statusCode,
+          headers: response.headers
+        },
+        text: Buffer.concat(chunks).toString("utf8")
+      }));
+    });
+    request.on("timeout", () => {
+      request.destroy(new Error(`eBay Trading API error (504): request timed out for ${url.pathname}${url.search}`));
+    });
+    request.on("error", reject);
+    if (bodyText) request.write(bodyText);
+    request.end();
+  });
+}
+
+function ebayTradingErrorMessage(payload = {}) {
+  return ebayTradingArray(payload.Errors?.Error)
+    .map((error) => ebayTradingText(error.LongMessage || error.ShortMessage || error.ErrorCode))
+    .filter(Boolean)
+    .join("; ");
+}
+
+async function ebayTradingRequest(db, callName, requestXml, options = {}) {
+  const config = getEbayConfig(db);
+  const resourcePath = "/ws/api.dll";
+  const execute = async (token) => {
+    const startedAt = Date.now();
+    try {
+      const result = await ebayRawXmlRequest(`${config.apiBase}${resourcePath}`, {
+        timeoutMs: options.timeoutMs || 30000,
+        headers: {
+          Accept: "text/xml",
+          "Content-Type": "text/xml",
+          "X-EBAY-API-CALL-NAME": callName,
+          "X-EBAY-API-COMPATIBILITY-LEVEL": String(options.compatibilityLevel || "1231"),
+          "X-EBAY-API-SITEID": String(options.siteId ?? 0),
+          "X-EBAY-API-IAF-TOKEN": token
+        },
+        bodyText: requestXml
+      });
+      let payload = {};
+      try {
+        const parsed = ebayTradingXmlParser.parse(result.text || "");
+        payload = parsed?.[`${callName}Response`] || parsed || {};
+      } catch (error) {
+        throw new Error(`eBay Trading API returned unreadable XML (${result.response.status}): ${(result.text || "").slice(0, 180)}`);
+      }
+      const apiMessage = ebayTradingErrorMessage(payload);
+      appendChannelApiLog({
+        channel: "eBay",
+        transport: "OAuth Seller / Trading",
+        method: "POST",
+        path: resourcePath,
+        operation: options.operation || callName,
+        statusCode: result.response.status || 0,
+        ok: Boolean(result.response.ok),
+        durationMs: Date.now() - startedAt,
+        message: result.response.ok ? (ebayTradingText(payload.Ack) || "OK") : (apiMessage || (result.text || "").slice(0, 1200)),
+        requestId: String(result.response.headers?.["x-ebay-c-request-id"] || result.response.headers?.rlogid || ""),
+        jobId: options.jobId || ""
+      });
+      return { ...result, payload };
+    } catch (error) {
+      appendChannelApiLog({
+        channel: "eBay",
+        transport: "OAuth Seller / Trading",
+        method: "POST",
+        path: resourcePath,
+        operation: options.operation || callName,
+        statusCode: error.status || (/request timed out/i.test(String(error.message || "")) ? 504 : 0),
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        message: error.message || String(error),
+        jobId: options.jobId || ""
+      });
+      throw error;
+    }
+  };
+
+  let token = await ebayAccessToken(db);
+  let result = await execute(token);
+  if (result.response.status === 401 && getEbayConfig(db).refreshToken) {
+    token = await refreshEbayAccessToken(db);
+    result = await execute(token);
+  }
+  if (!result.response.ok) {
+    const detail = ebayTradingErrorMessage(result.payload) || (result.text || "").slice(0, 300);
+    const error = new Error(`eBay Trading API error (${result.response.status}) on ${callName}: ${detail}`);
+    error.status = result.response.status;
+    error.ebayData = result.payload;
+    throw error;
+  }
+  const ack = ebayTradingText(result.payload.Ack);
+  if (ack && !/^(success|warning)$/i.test(ack)) {
+    throw new Error(`eBay Trading API ${callName} failed: ${ebayTradingErrorMessage(result.payload) || ack}`);
+  }
+  return result.payload;
+}
+
 const EBAY_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
 function normalizeEbayOAuthReturnTo(value) {
@@ -18153,6 +18307,256 @@ function ebayCatalogInventorySnapshot(item = {}) {
   };
 }
 
+function ebayTradingItemSpecifics(item = {}) {
+  const aspects = {};
+  for (const entry of ebayTradingArray(item.ItemSpecifics?.NameValueList)) {
+    const name = ebayTradingText(entry?.Name);
+    const values = ebayTradingArray(entry?.Value).map(ebayTradingText).filter(Boolean);
+    if (name && values.length) aspects[name] = values;
+  }
+  return aspects;
+}
+
+function ebayTradingAspectValues(aspects = {}, names = []) {
+  const keys = new Set((Array.isArray(names) ? names : [names]).map((name) => String(name || "").trim().toLowerCase()));
+  const values = [];
+  for (const [name, value] of Object.entries(aspects || {})) {
+    if (!keys.has(String(name || "").trim().toLowerCase())) continue;
+    values.push(...ebayTradingArray(value).map(ebayTradingText).filter(Boolean));
+  }
+  return [...new Set(values)];
+}
+
+function ebayTradingIdentifiers(item = {}, aspects = {}) {
+  const productDetails = item.ProductListingDetails || {};
+  const withDetail = (detailKey, aspectNames) => [...new Set([
+    ...ebayTradingAspectValues(aspects, aspectNames),
+    ...ebayTradingArray(productDetails?.[detailKey]).map(ebayTradingText).filter(Boolean)
+  ])];
+  return {
+    upc: withDetail("UPC", ["UPC", "GTIN"]),
+    ean: withDetail("EAN", ["EAN"]),
+    isbn: withDetail("ISBN", ["ISBN"])
+  };
+}
+
+function ebayTradingAvailableQuantity(item = {}, fallback = 0) {
+  const direct = [
+    item.QuantityAvailable,
+    item.SellingStatus?.QuantityAvailable,
+    item.availableQuantity
+  ].map((value) => ebayTradingNumber(value, NaN)).find(Number.isFinite);
+  if (Number.isFinite(direct)) return Math.max(0, direct);
+  const total = ebayTradingNumber(item.Quantity, NaN);
+  const sold = ebayTradingNumber(item.SellingStatus?.QuantitySold, 0);
+  if (Number.isFinite(total)) return Math.max(0, total - sold);
+  return Math.max(0, Number(fallback) || 0);
+}
+
+function ebayTradingPrice(item = {}, fallback = {}) {
+  for (const value of [
+    item.SellingStatus?.CurrentPrice,
+    item.StartPrice,
+    item.BuyItNowPrice,
+    fallback.SellingStatus?.CurrentPrice,
+    fallback.StartPrice,
+    fallback.BuyItNowPrice
+  ]) {
+    const money = ebayTradingMoney(value, ebayTradingText(fallback?.Currency) || "USD");
+    if (money.value > 0) return money;
+  }
+  return { value: 0, currency: ebayTradingText(fallback?.Currency) || "USD" };
+}
+
+function ebayTradingListingRows(listing = {}, options = {}) {
+  const marketplaceId = String(options.marketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US").trim();
+  const listingAspects = ebayTradingItemSpecifics(listing);
+  const listingId = ebayTradingText(listing.ItemID);
+  const baseSku = ebayTradingText(listing.SKU);
+  const baseTitle = ebayTradingText(listing.Title) || baseSku || listingId || "Untitled eBay listing";
+  const basePrice = ebayTradingPrice(listing);
+  const baseQuantity = ebayTradingAvailableQuantity(listing);
+  const base = {
+    sku: baseSku,
+    offerId: "",
+    listingId,
+    listingUrl: ebayListingUrl(listingId, marketplaceId),
+    status: ebayTradingText(listing.SellingStatus?.ListingStatus) || "ACTIVE",
+    live: true,
+    marketplaceId,
+    categoryId: ebayTradingText(listing.PrimaryCategory?.CategoryID),
+    merchantLocationKey: "",
+    quantity: baseQuantity,
+    price: basePrice.value,
+    currency: basePrice.currency,
+    title: baseTitle,
+    brand: ebayTradingAspectValues(listingAspects, ["Brand"])[0] || "",
+    mpn: ebayTradingAspectValues(listingAspects, ["MPN", "Manufacturer Part Number"])[0] || "",
+    ePid: ebayTradingText(listing.ProductListingDetails?.ProductReferenceID),
+    condition: ebayTradingText(listing.ConditionID || listing.ConditionDisplayName),
+    identifiers: ebayTradingIdentifiers(listing, listingAspects),
+    aspects: listingAspects,
+    listingPolicies: {},
+    listingDuration: ebayTradingText(listing.ListingDuration),
+    listingSource: "eBay Trading API"
+  };
+  const variations = ebayTradingArray(listing.Variations?.Variation);
+  if (!variations.length) return [base];
+  return variations.map((variation) => {
+    const variationAspects = ebayTradingItemSpecifics({ ItemSpecifics: variation.VariationSpecifics || variation.ItemSpecifics || {} });
+    const combinedAspects = { ...listingAspects, ...variationAspects };
+    const variationLabels = Object.entries(variationAspects)
+      .map(([name, values]) => `${name}: ${ebayTradingArray(values).map(ebayTradingText).filter(Boolean).join(" / ")}`)
+      .filter(Boolean);
+    const price = ebayTradingPrice(variation, listing);
+    return {
+      ...base,
+      sku: ebayTradingText(variation.SKU) || baseSku,
+      quantity: ebayTradingAvailableQuantity(variation, baseQuantity),
+      price: price.value || base.price,
+      currency: price.currency || base.currency,
+      title: variationLabels.length ? `${baseTitle} - ${variationLabels.join(", ")}` : baseTitle,
+      brand: ebayTradingAspectValues(combinedAspects, ["Brand"])[0] || base.brand,
+      mpn: ebayTradingAspectValues(combinedAspects, ["MPN", "Manufacturer Part Number"])[0] || base.mpn,
+      identifiers: ebayTradingIdentifiers({ ...listing, ItemSpecifics: { NameValueList: [] } }, combinedAspects),
+      aspects: combinedAspects
+    };
+  });
+}
+
+async function fetchEbayTradingActiveListings(db, options = {}) {
+  const maxRows = Math.max(1, Math.min(100000, Number(options.maxRows || 50000) || 50000));
+  const pageSize = 200;
+  const marketplaceId = ebayChannelSettings(db).ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
+  const isCanceled = typeof options.isCanceled === "function" ? options.isCanceled : () => false;
+  const rows = [];
+  const errors = [];
+  let pageNumber = 1;
+  let totalListings = 0;
+  let totalPages = 1;
+  let fetchedListings = 0;
+  do {
+    if (isCanceled()) throw new Error("eBay catalog sync canceled.");
+    const payload = await ebayTradingRequest(db, "GetMyeBaySelling", `<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <DetailLevel>ReturnAll</DetailLevel>
+  <ActiveList>
+    <Include>true</Include>
+    <Pagination>
+      <EntriesPerPage>${pageSize}</EntriesPerPage>
+      <PageNumber>${pageNumber}</PageNumber>
+    </Pagination>
+  </ActiveList>
+</GetMyeBaySellingRequest>`, {
+      jobId: options.jobId,
+      operation: `Fetch eBay active listings page ${pageNumber}`,
+      timeoutMs: options.timeoutMs || 30000
+    });
+    const activeList = payload.ActiveList || {};
+    const listings = ebayTradingArray(activeList.ItemArray?.Item);
+    const pagination = activeList.PaginationResult || {};
+    totalListings = Math.max(totalListings, ebayTradingNumber(pagination.TotalNumberOfEntries, listings.length));
+    totalPages = Math.max(1, ebayTradingNumber(pagination.TotalNumberOfPages, 1));
+    fetchedListings += listings.length;
+    for (const listing of listings) {
+      for (const row of ebayTradingListingRows(listing, { marketplaceId })) {
+        if (rows.length >= maxRows) break;
+        rows.push(row);
+      }
+      if (rows.length >= maxRows) break;
+    }
+    options.progress?.({
+      phase: "fetching_ebay_active_listings",
+      processedRows: Math.min(rows.length, Math.max(fetchedListings, rows.length)),
+      totalRows: Math.min(maxRows, Math.max(totalListings, rows.length)),
+      message: `Fetched ${Math.min(fetchedListings, maxRows).toLocaleString()} of ${Math.min(totalListings || fetchedListings, maxRows).toLocaleString()} active eBay listing${totalListings === 1 ? "" : "s"}...`
+    });
+    pageNumber += 1;
+  } while (pageNumber <= totalPages && fetchedListings > 0 && rows.length < maxRows);
+
+  if (totalListings > maxRows) {
+    errors.push({
+      sku: "",
+      field: "catalogSyncLimit",
+      issue: "eBay active-listing sync limit reached",
+      details: `eBay reported ${totalListings.toLocaleString()} active listings, but this sync is limited to ${maxRows.toLocaleString()}.`
+    });
+  }
+  if (totalListings > 25000) {
+    errors.push({
+      sku: "",
+      field: "GetMyeBaySelling",
+      issue: "eBay Trading API active-listing limit reached",
+      details: "GetMyeBaySelling returns at most 25,000 active listings. Configure a GetSellerList backfill before relying on a larger seller catalog."
+    });
+  }
+  return { rows, errors, totalListings, fetchedListings };
+}
+
+function mergeEbayCatalogRows(tradingRows = [], inventoryRows = []) {
+  const rows = [];
+  const bySku = new Map();
+  const byListingId = new Map();
+  const normalizedSku = (row = {}) => String(row.sku || "").trim().toLowerCase();
+  const normalizedListingId = (row = {}) => String(row.listingId || "").trim().toLowerCase();
+  const merge = (existing = {}, incoming = {}) => ({
+    ...existing,
+    ...incoming,
+    sku: incoming.sku || existing.sku || "",
+    offerId: incoming.offerId || existing.offerId || "",
+    listingId: incoming.listingId || existing.listingId || "",
+    listingUrl: incoming.listingUrl || existing.listingUrl || "",
+    status: incoming.live ? (incoming.status || existing.status) : (existing.status || incoming.status),
+    live: Boolean(existing.live || incoming.live),
+    marketplaceId: incoming.marketplaceId || existing.marketplaceId || "",
+    categoryId: incoming.categoryId || existing.categoryId || "",
+    merchantLocationKey: incoming.merchantLocationKey || existing.merchantLocationKey || "",
+    quantity: Number.isFinite(Number(incoming.quantity)) ? Number(incoming.quantity) : Number(existing.quantity || 0),
+    price: Number(incoming.price || 0) > 0 ? Number(incoming.price) : Number(existing.price || 0),
+    currency: incoming.currency || existing.currency || "USD",
+    title: incoming.title || existing.title || "",
+    brand: incoming.brand || existing.brand || "",
+    mpn: incoming.mpn || existing.mpn || "",
+    ePid: incoming.ePid || existing.ePid || "",
+    condition: incoming.condition || existing.condition || "",
+    identifiers: {
+      upc: [...new Set([...(existing.identifiers?.upc || []), ...(incoming.identifiers?.upc || [])])],
+      ean: [...new Set([...(existing.identifiers?.ean || []), ...(incoming.identifiers?.ean || [])])],
+      isbn: [...new Set([...(existing.identifiers?.isbn || []), ...(incoming.identifiers?.isbn || [])])]
+    },
+    aspects: { ...(existing.aspects || {}), ...(incoming.aspects || {}) },
+    listingPolicies: { ...(existing.listingPolicies || {}), ...(incoming.listingPolicies || {}) },
+    listingDuration: incoming.listingDuration || existing.listingDuration || "",
+    listingSource: existing.listingSource && incoming.listingSource && existing.listingSource !== incoming.listingSource
+      ? `${existing.listingSource} + ${incoming.listingSource}`
+      : incoming.listingSource || existing.listingSource || ""
+  });
+  const insert = (incoming = {}) => {
+    const sku = normalizedSku(incoming);
+    const listingId = normalizedListingId(incoming);
+    let index = sku ? bySku.get(sku) : undefined;
+    if (index === undefined && listingId !== "") {
+      const candidate = byListingId.get(listingId);
+      const candidateSku = candidate === undefined ? "" : normalizedSku(rows[candidate]);
+      if (!sku || !candidateSku || candidateSku === sku) index = candidate;
+    }
+    if (index === undefined) {
+      rows.push({ ...incoming });
+      index = rows.length - 1;
+    } else {
+      rows[index] = merge(rows[index], incoming);
+    }
+    const row = rows[index];
+    const rowSku = normalizedSku(row);
+    const rowListingId = normalizedListingId(row);
+    if (rowSku) bySku.set(rowSku, index);
+    if (rowListingId) byListingId.set(rowListingId, index);
+  };
+  for (const row of tradingRows) insert(row);
+  for (const row of inventoryRows) insert(row);
+  return rows;
+}
+
 function ebayCatalogRowFromOffer(offer = {}, inventoryItem = {}) {
   const sku = String(offer.sku || inventoryItem.sku || "").trim();
   const product = inventoryItem.product || {};
@@ -18497,6 +18901,7 @@ function applyEbayCatalogRowToProduct(db, item, row, matchBy = "sku") {
     returnPolicyId: row.listingPolicies?.returnPolicyId || item.ebayListing?.returnPolicyId || "",
     fulfillmentPolicyId: row.listingPolicies?.fulfillmentPolicyId || item.ebayListing?.fulfillmentPolicyId || "",
     listingDuration: row.listingDuration || item.ebayListing?.listingDuration || "",
+    listingSource: row.listingSource || item.ebayListing?.listingSource || "",
     sourceOfTruth: "ebay_catalog_sync",
     importedFromEbayAt: now,
     matchBy
@@ -18527,17 +18932,37 @@ async function importEbayCatalog(db, options = {}) {
   const channelSettings = ebayChannelSettings(db);
   const maxRows = Math.max(1, Math.min(100000, Number(options.maxRows || channelSettings.ebayCatalogSyncLimit || 50000) || 50000));
   let inventoryItems = [];
+  let inventoryFetchError = "";
   try {
     inventoryItems = await fetchEbayInventoryItems(db, { jobId, maxRows, progress });
   } catch (error) {
-    throw new Error(`Could not retrieve eBay inventory items: ${error?.message || String(error || "unknown error")}`);
+    // Seller Hub and legacy listings are not returned by the Inventory API.
+    // Keep going when the Trading API can still give us the active catalog.
+    inventoryFetchError = error?.message || String(error || "unknown error");
+  }
+  let tradingResult = { rows: [], errors: [], totalListings: 0, fetchedListings: 0 };
+  let tradingFetchError = "";
+  if (channelSettings.ebayLegacyListingSyncEnabled !== false) {
+    try {
+      tradingResult = await fetchEbayTradingActiveListings(db, { jobId, maxRows, progress, isCanceled });
+    } catch (error) {
+      tradingFetchError = error?.message || String(error || "unknown error");
+    }
+  }
+  if (!inventoryItems.length && !tradingResult.rows.length) {
+    const details = [
+      inventoryFetchError && `Inventory API: ${inventoryFetchError}`,
+      tradingFetchError && `Trading API: ${tradingFetchError}`
+    ].filter(Boolean).join(" | ");
+    throw new Error(`Could not retrieve eBay catalog records${details ? `: ${details}` : "."}`);
   }
   if (isCanceled()) throw new Error("eBay catalog sync canceled.");
   const inventoryRows = inventoryItems
     .map((item) => ebayCatalogRowFromOffer({}, item))
     .filter((row) => row.sku);
+  const preOfferRows = mergeEbayCatalogRows(tradingResult.rows, inventoryRows);
   if (typeof options.hydrateProducts === "function") {
-    await options.hydrateProducts(inventoryRows);
+    await options.hydrateProducts(preOfferRows);
   }
   const matchedInventoryItems = inventoryItems.filter((item) => {
     const row = ebayCatalogRowFromOffer({}, item);
@@ -18559,46 +18984,96 @@ async function importEbayCatalog(db, options = {}) {
     if (!offersBySku.has(sku)) offersBySku.set(sku, []);
     offersBySku.get(sku).push(offer);
   }
-  const rows = [];
+  const inventoryOfferRows = [];
   for (const inventoryItem of inventoryItems) {
     const sku = String(inventoryItem.sku || "").trim().toLowerCase();
     const offers = offersBySku.get(sku) || [];
-    if (offers.length) rows.push(...offers.map((offer) => ebayCatalogRowFromOffer(offer, inventoryItem)));
-    else rows.push(ebayCatalogRowFromOffer({}, inventoryItem));
+    if (offers.length) inventoryOfferRows.push(...offers.map((offer) => ({
+      ...ebayCatalogRowFromOffer(offer, inventoryItem),
+      listingSource: "eBay Inventory API"
+    })));
+    else inventoryOfferRows.push({ ...ebayCatalogRowFromOffer({}, inventoryItem), listingSource: "eBay Inventory API" });
   }
+  const rows = mergeEbayCatalogRows(tradingResult.rows, inventoryOfferRows);
   const job = options.job || createImportJob(db, {
     section: "Products",
     operation: "eBay catalog sync",
     direction: "import",
-    fileName: "eBay Inventory API",
+    fileName: "eBay Inventory + Trading APIs",
     totalRows: rows.length,
-    message: `Importing ${rows.length} eBay offer${rows.length === 1 ? "" : "s"}.`
+    message: `Importing ${rows.length} eBay listing SKU record${rows.length === 1 ? "" : "s"}.`
   });
   let matched = 0;
   let updated = 0;
   let live = 0;
-  const errorRows = offerResult.errors.map((error) => standardImportError({
+  let unmapped = 0;
+  const errorRows = [
+    ...(inventoryFetchError ? [standardImportError({
+      recordKey: "Inventory API",
+      field: "source",
+      issue: "Could not load eBay Inventory API records",
+      rawValue: "eBay Inventory API",
+      details: inventoryFetchError
+    })] : []),
+    ...(tradingFetchError ? [standardImportError({
+      recordKey: "GetMyeBaySelling",
+      field: "source",
+      issue: "Could not load eBay Trading API active listings",
+      rawValue: "GetMyeBaySelling",
+      details: tradingFetchError
+    })] : []),
+    ...(tradingResult.errors || []).map((error) => standardImportError({
+      sku: error.sku,
+      recordKey: error.sku || error.field || "GetMyeBaySelling",
+      field: error.field || "source",
+      issue: error.issue || "eBay Trading API warning",
+      rawValue: error.sku || "GetMyeBaySelling",
+      details: error.details || error.message || ""
+    })),
+    ...offerResult.errors.map((error) => standardImportError({
     sku: error.sku,
     recordKey: error.sku,
     field: "sku",
     issue: "Could not load eBay offer details",
     rawValue: error.sku,
     details: error.message
-  }));
+    }))
+  ];
   let processed = 0;
   progress({
     phase: "mapping_catalog",
     processedRows: 0,
     totalRows: rows.length,
-    message: `Matching ${rows.length.toLocaleString()} eBay offer${rows.length === 1 ? "" : "s"} to DataPlus SKUs...`
+    message: `Matching ${rows.length.toLocaleString()} eBay listing SKU record${rows.length === 1 ? "" : "s"} to DataPlus SKUs...`
   });
   for (const row of rows) {
     if (isCanceled()) throw new Error("eBay catalog sync canceled.");
     processed += 1;
     if (row.live) live += 1;
+    if (!String(row.sku || "").trim()) {
+      unmapped += 1;
+      errorRows.push(standardImportError({
+        recordKey: row.listingId || row.offerId || "eBay listing",
+        field: "sku",
+        issue: "eBay listing does not include a seller SKU",
+        rawValue: JSON.stringify({ offerId: row.offerId, listingId: row.listingId, title: row.title }),
+        details: row.listingUrl || ""
+      }));
+      if (processed % 25 === 0 || processed === rows.length) {
+        progress({
+          phase: "mapping_catalog",
+          processedRows: processed,
+          totalRows: rows.length,
+          message: `Matched ${processed.toLocaleString()} of ${rows.length.toLocaleString()} eBay listing SKU records...`
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      continue;
+    }
     const resolved = typeof options.resolveProduct === "function" ? options.resolveProduct(row) : null;
     const { item, matchBy } = resolved?.item ? resolved : findInventoryByEbayCatalogRow(db, row);
     if (!item) {
+      unmapped += 1;
       queueUnmappedEbayCatalogReview(db, row);
       errorRows.push(standardImportError({
         sku: row.sku,
@@ -18613,7 +19088,7 @@ async function importEbayCatalog(db, options = {}) {
           phase: "mapping_catalog",
           processedRows: processed,
           totalRows: rows.length,
-          message: `Matched ${processed.toLocaleString()} of ${rows.length.toLocaleString()} eBay offers...`
+          message: `Matched ${processed.toLocaleString()} of ${rows.length.toLocaleString()} eBay listing SKU records...`
         });
         await new Promise((resolve) => setImmediate(resolve));
       }
@@ -18626,20 +19101,24 @@ async function importEbayCatalog(db, options = {}) {
         phase: "mapping_catalog",
         processedRows: processed,
         totalRows: rows.length,
-        message: `Matched ${processed.toLocaleString()} of ${rows.length.toLocaleString()} eBay offers...`
+        message: `Matched ${processed.toLocaleString()} of ${rows.length.toLocaleString()} eBay listing SKU records...`
       });
       await new Promise((resolve) => setImmediate(resolve));
     }
   }
   attachImportJobErrorsFile(job, errorRows);
   const status = errorRows.length ? "warning" : "success";
-  const message = `Mapped ${matched} of ${rows.length} eBay offer${rows.length === 1 ? "" : "s"} (${live} live)${errorRows.length ? `; ${errorRows.length} need review.` : "."}`;
+  const sourceSummary = [
+    tradingResult.fetchedListings ? `${tradingResult.fetchedListings.toLocaleString()} active listing${tradingResult.fetchedListings === 1 ? "" : "s"} from Trading` : "",
+    inventoryItems.length ? `${inventoryItems.length.toLocaleString()} Inventory API record${inventoryItems.length === 1 ? "" : "s"}` : ""
+  ].filter(Boolean).join(" + ");
+  const message = `Mapped ${matched} of ${rows.length} eBay listing SKU record${rows.length === 1 ? "" : "s"} (${live} live)${sourceSummary ? ` from ${sourceSummary}` : ""}${errorRows.length ? `; ${unmapped.toLocaleString()} need SKU/product review.` : "."}`;
   finishImportJob(job, {
     status,
     message,
     totalRows: rows.length,
     changed: updated,
-    missingCount: errorRows.length,
+    missingCount: unmapped,
     errors: importErrorMessages(errorRows)
   });
   db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
@@ -18659,11 +19138,29 @@ async function importEbayCatalog(db, options = {}) {
     connection.lastSync = new Date().toISOString();
     connection.lastCatalogSync = connection.lastSync;
   }
-  return { fetched: rows.length, live, matched, updated, unmapped: errorRows.length, job };
+  return {
+    fetched: rows.length,
+    live,
+    matched,
+    updated,
+    unmapped,
+    inventoryRecords: inventoryItems.length,
+    activeListings: tradingResult.totalListings || tradingResult.fetchedListings || 0,
+    job
+  };
+}
+
+function ebayCatalogSkuLookupKeys(value = "") {
+  const sku = String(value || "").trim();
+  if (!sku) return [];
+  // DataPlus commonly derives channel variants such as BUS123TRV-12PC from a
+  // parent catalog SKU. Query the exact eBay SKU first, then that known UOM base.
+  const uomBase = sku.replace(/[-_](?:\d+)(?:PC|PK|PACK|CT|EA|EACH|UNIT|UNITS|CASE)$/i, "").trim();
+  return [...new Set([sku, ...(uomBase && uomBase.toLowerCase() !== sku.toLowerCase() ? [uomBase] : [])])];
 }
 
 async function loadEbayCatalogProductMatches(rows = []) {
-  const skuKeys = [...new Set(rows.map((row) => String(row.sku || "").trim()).filter(Boolean))];
+  const skuKeys = [...new Set(rows.flatMap((row) => ebayCatalogSkuLookupKeys(row.sku)))];
   const externalKeys = [...new Set(rows.flatMap((row) => [row.listingId, row.offerId]).map((value) => String(value || "").trim()).filter(Boolean))];
   const productsById = new Map();
   const pageSize = 2000;
@@ -18702,7 +19199,13 @@ async function loadEbayCatalogProductMatches(rows = []) {
       const sku = String(row.sku || "").trim().toLowerCase();
       const listingId = String(row.listingId || "").trim().toLowerCase();
       const offerId = String(row.offerId || "").trim().toLowerCase();
-      return bySku.get(sku) || byListingId.get(listingId) || byOfferId.get(offerId) || null;
+      const direct = bySku.get(sku);
+      if (direct) return direct;
+      for (const candidate of ebayCatalogSkuLookupKeys(row.sku).slice(1)) {
+        const base = bySku.get(candidate.toLowerCase());
+        if (base) return { ...base, matchBy: "skuVariantBase" };
+      }
+      return byListingId.get(listingId) || byOfferId.get(offerId) || null;
     }
   };
 }
@@ -32542,7 +33045,7 @@ async function handleApi(req, res) {
       operation: "eBay catalog sync",
       direction: "import",
       status: "queued",
-      fileName: "eBay Inventory API",
+      fileName: "eBay Inventory + Trading APIs",
       totalRows: 0,
       processedRows: 0,
       progressPercent: 0,
