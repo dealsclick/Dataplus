@@ -3,7 +3,9 @@ set -euo pipefail
 
 APP_DIR="${DATAPLUS_APP_DIR:-/root/dataplus}"
 BACKUP_DIR="${DATAPLUS_BACKUP_DIR:-$APP_DIR/backups}"
-RETENTION_DAYS="${DATAPLUS_BACKUP_RETENTION_DAYS:-30}"
+# These custom dumps are large on the production catalog. Keep a small, complete
+# recovery set by default instead of retaining a month of daily copies on-disk.
+RETENTION_COUNT="${DATAPLUS_BACKUP_RETENTION_COUNT:-3}"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 CONTAINER="${DATAPLUS_POSTGRES_CONTAINER:-dataplus-postgres}"
 DATABASE="${DATAPLUS_POSTGRES_DATABASE:-dataplus}"
@@ -32,6 +34,14 @@ docker exec "$CONTAINER" rm -f "/tmp/dataplus-postgres-$STAMP.dump"
 
 sha256sum "$OUT" > "$OUT.sha256"
 
-find "$BACKUP_DIR" -type f \( -name 'dataplus-postgres-*.dump' -o -name 'dataplus-postgres-*.dump.sha256' \) -mtime +"$RETENTION_DAYS" -delete
+# Keep each dump and its checksum together. Sorting by modification time is
+# deliberate: a failed/corrupt dump never replaces a newer verified backup.
+find "$BACKUP_DIR" -maxdepth 1 -type f -name 'dataplus-postgres-*.dump' -printf '%T@ %f\n' \
+  | sort -nr \
+  | tail -n +"$((RETENTION_COUNT + 1))" \
+  | cut -d' ' -f2- \
+  | while IFS= read -r old_dump; do
+      rm -f -- "$BACKUP_DIR/$old_dump" "$BACKUP_DIR/$old_dump.sha256"
+    done
 
 ls -lh "$OUT"
