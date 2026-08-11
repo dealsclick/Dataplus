@@ -16814,7 +16814,7 @@ function publicState(db, options = {}) {
     connections: (db.connections || []).map(publicConnection),
     // The vendor directory needs the complete profile list even in lite state;
     // its search/filter UI cannot recover records that were truncated here.
-    vendors: db.vendors || [],
+    vendors: (db.vendors || []).map((vendor) => normalizeVendor(db, vendor)),
     brands: lite ? (db.brands || []).slice(0, 100) : (db.brands || []),
     inventory: lite ? [] : (db.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, systemSettings })),
     orders: lite ? (db.orders || []).slice(0, 25) : (db.orders || []),
