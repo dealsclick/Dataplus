@@ -54,6 +54,7 @@ const SUPPORTED_TASKS = [
   "shopify-taxonomy-push",
   "shopify-status-sync",
   "shopify-inventory-update",
+  "ebay-category-auto-map",
   "ebay-catalog-sync",
   "ebay-account-settings-sync",
   "ebay-location-sync",
@@ -1312,6 +1313,10 @@ async function runEbayCatalogSyncJob(job) {
   return dataplus.runEbayCatalogImportWorkerJob(job);
 }
 
+async function runEbayCategoryAutoMapJob(job) {
+  return dataplus.runEbayCategoryAutoMapWorkerJob(job, job.workerPayload || {});
+}
+
 async function runEbayAccountSettingsSyncJob(job) {
   return dataplus.runEbayAccountSettingsSyncWorkerJob(job);
 }
@@ -1622,6 +1627,7 @@ async function runJob(job) {
   if (task === "shopify-taxonomy-push") return runShopifyTaxonomyPushJob(job);
   if (task === "shopify-status-sync") return runShopifyStatusSyncJob(job);
   if (task === "shopify-inventory-update") return runShopifyInventoryUpdateJob(job);
+  if (task === "ebay-category-auto-map") return runEbayCategoryAutoMapJob(job);
   if (task === "ebay-catalog-sync") return runEbayCatalogSyncJob(job);
   if (task === "ebay-account-settings-sync") return runEbayAccountSettingsSyncJob(job);
   if (task === "ebay-location-sync") return runEbayLocationSyncJob(job);
