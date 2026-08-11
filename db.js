@@ -6,6 +6,7 @@ const zlib = require("zlib");
 
 let pool;
 let relationalSchemaReady = false;
+let relationalSchemaPromise = null;
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -65,14 +66,19 @@ async function initDatabase() {
 }
 
 async function initRelationalSchema() {
-  const client = getPool();
-  if (!client) return false;
+  const dbPool = getPool();
+  if (!dbPool) return false;
   if (relationalSchemaReady) return true;
-  // The web process and worker start together; serialize shared DDL to avoid startup deadlocks.
-  await client.query("select pg_advisory_lock($1)", [8249317]);
-  try {
-    if (relationalSchemaReady) return true;
-    await client.query(`
+  if (relationalSchemaPromise) return relationalSchemaPromise;
+  relationalSchemaPromise = (async () => {
+    const client = await dbPool.connect();
+    let lockAcquired = false;
+    try {
+      // Session advisory locks must be acquired and released on the same connection.
+      await client.query("select pg_advisory_lock($1)", [8249317]);
+      lockAcquired = true;
+      if (relationalSchemaReady) return true;
+      await client.query(`
     create table if not exists schema_migrations (
       name text primary key,
       applied_at timestamptz not null default now()
@@ -682,10 +688,21 @@ async function initRelationalSchema() {
       "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
       ["2026-05-26-core-catalog-ops"]
     );
-    relationalSchemaReady = true;
-    return true;
-  } finally {
-    await client.query("select pg_advisory_unlock($1)", [8249317]);
+      relationalSchemaReady = true;
+      return true;
+    } finally {
+      try {
+        if (lockAcquired) await client.query("select pg_advisory_unlock($1)", [8249317]);
+      } finally {
+        client.release();
+      }
+    }
+  })();
+  try {
+    return await relationalSchemaPromise;
+  } catch (error) {
+    relationalSchemaPromise = null;
+    throw error;
   }
 }
 
