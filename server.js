@@ -10036,6 +10036,19 @@ function normalizeVendor(db, vendor) {
   const createdAt = vendor.createdAt || new Date().toISOString();
   const vendorName = String(vendor.name || "").trim();
   const vendorCode = String(vendor.code || vendor.vendorCode || "").trim();
+  const catalogParticipationEnabled = vendor.catalogSettings?.enabled === true;
+  const catalogSourceCodes = [...new Set((Array.isArray(vendor.catalogSettings?.sourceCodes)
+    ? vendor.catalogSettings.sourceCodes
+    : String(vendor.catalogSettings?.sourceCodes || vendorCode || "").split(/[|,\n]/))
+    .map((value) => String(value || "").trim()).filter(Boolean))];
+  const importedParticipationNote = /DataWarehouse source supplier\.|Catalog participation remains disabled until reviewed\./i.test(String(vendor.notes || ""));
+  const normalizedVendorNotes = importedParticipationNote
+    ? `DataWarehouse source supplier${catalogSourceCodes.length ? ` (feed code ${catalogSourceCodes.join(", ")})` : ""}. Catalog participation is ${catalogParticipationEnabled ? "enabled" : "disabled until reviewed"}.`
+    : (vendor.notes || "");
+  const importedCatalogNote = /Excluded from broad catalog browsing unless explicitly enabled\./i.test(String(vendor.catalogSettings?.note || ""));
+  const normalizedCatalogNote = importedCatalogNote
+    ? `DataWarehouse source supplier. Catalog participation is ${catalogParticipationEnabled ? "enabled" : "disabled until reviewed"}.`
+    : (vendor.catalogSettings?.note || "");
   const isEssendant = vendorName.toLowerCase().includes("essendant") || vendorCode.toLowerCase() === "uss";
   const isTrueValue = vendorName.toLowerCase().includes("true value") || vendorCode.toLowerCase() === "trv";
   const existingChannelRules = vendor.channelRules && typeof vendor.channelRules === "object" ? vendor.channelRules : {};
@@ -10112,7 +10125,7 @@ function normalizeVendor(db, vendor) {
     moq: Number(vendor.moq || 0),
     address: vendor.address || { line1: "", line2: "", city: "", state: "", postalCode: "", country: "US" },
     categories: Array.isArray(vendor.categories) ? vendor.categories : [],
-    notes: vendor.notes || "",
+    notes: normalizedVendorNotes,
     rating: Number(vendor.rating || 0),
     fileFeeds: {
       priceUpdates: Array.isArray(vendor.fileFeeds?.priceUpdates) ? vendor.fileFeeds.priceUpdates : [],
@@ -10181,12 +10194,9 @@ function normalizeVendor(db, vendor) {
     catalogSettings: {
       // Participation is keyed to the upstream feed code, never a brand or display name.
       // Default the identity to the vendor code, but keep catalog participation opt-in.
-      enabled: vendor.catalogSettings?.enabled === true,
-      sourceCodes: [...new Set((Array.isArray(vendor.catalogSettings?.sourceCodes)
-        ? vendor.catalogSettings.sourceCodes
-        : String(vendor.catalogSettings?.sourceCodes || vendorCode || "").split(/[|,\n]/))
-        .map((value) => String(value || "").trim()).filter(Boolean))],
-      note: vendor.catalogSettings?.note || ""
+      enabled: catalogParticipationEnabled,
+      sourceCodes: catalogSourceCodes,
+      note: normalizedCatalogNote
     },
     openPOs: Number(vendor.openPOs || 0),
     totalPOs: Number(vendor.totalPOs || 0),
