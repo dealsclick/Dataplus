@@ -25620,12 +25620,22 @@ async function handleApi(req, res) {
       );
       const includedSupplierCodes = catalogFilterValues(scopedFilters.includedSupplierCodes);
       const scopeHash = crypto.createHash("sha1").update(includedSupplierCodes.sort().join("|")).digest("hex").slice(0, 12);
-      const cacheKey = `dataplus:products:facets:v4:${scopeHash}`;
+      const cacheKey = `dataplus:products:facets:v5:${scopeHash}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const facets = await postgres.productFacets({ includedSupplierCodes });
       if (facets) {
-        const payload = { facets: catalogSupplierFacetLabels(facets, Array.isArray(catalogVendors) ? catalogVendors : []) };
+        const knownSupplierNames = (Array.isArray(catalogVendors) ? catalogVendors : [])
+          .map((vendor) => typeof vendor === "string" ? vendor : vendor?.name)
+          .filter(Boolean);
+        const payload = {
+          facets: catalogSupplierFacetLabels({
+            ...facets,
+            // Keep newly created supplier profiles selectable even before their
+            // first product row is present in the managed catalog.
+            suppliers: [...(facets.suppliers || []), ...knownSupplierNames]
+          }, Array.isArray(catalogVendors) ? catalogVendors : [])
+        };
         await redisCache.setJson(cacheKey, payload, REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS);
         return sendJson(res, 200, payload);
       }
@@ -25636,6 +25646,9 @@ async function handleApi(req, res) {
     }
     const db = await readDbFast();
     const products = db.inventory || [];
+    const knownSupplierNames = (Array.isArray(db.vendors) ? db.vendors : [])
+      .map((vendor) => typeof vendor === "string" ? vendor : vendor?.name)
+      .filter(Boolean);
     const shopifyStatusMap = readShopifyStatusMapSync();
     const liveVariantRows = Object.values(shopifyStatusMap || {}).filter((payload) =>
       payload
@@ -25647,7 +25660,10 @@ async function handleApi(req, res) {
     );
     return sendJson(res, 202, {
       facets: {
-        suppliers: products.map((item) => item.supplier || item.vendor).filter(Boolean),
+        suppliers: [...new Set([
+          ...products.map((item) => item.supplier || item.vendor).filter(Boolean),
+          ...knownSupplierNames
+        ])],
         stockStatuses: products.map((item) => item.stockStatus).filter(Boolean),
         shopifyStatuses: products.map((item) => item.shopifyStatus).filter(Boolean),
         ebayStatuses: products.map((item) => item.ebayListing?.ebayStatus || item.ebayListing?.status).filter(Boolean),
@@ -29797,6 +29813,9 @@ async function handleApi(req, res) {
     });
     db.vendors.unshift(vendor);
     await postgres.writeStateDocuments({ vendors: db.vendors || [], sequence: db.sequence || {} });
+    // A new supplier must be visible immediately in catalog facet options;
+    // otherwise the cached dropdown can stay stale until its TTL expires.
+    await redisCache.deleteByPrefix("dataplus:products:");
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { vendor, state: publicState(stateDb, { lite: true }) });
   }

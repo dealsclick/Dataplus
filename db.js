@@ -6117,7 +6117,17 @@ async function listProducts(options = {}) {
   const supplierValues = splitFilterValues(filters.supplier).map((value) => value.toLowerCase());
   if (supplierValues.length) {
     params.push(supplierValues);
-    where.push(`lower(coalesce(supplier, '')) = any($${params.length})`);
+    where.push(`(
+      lower(coalesce(supplier, '')) = any($${params.length})
+      or lower(coalesce(supplier_code, '')) = any($${params.length})
+      or exists (
+        select 1
+        from vendors supplier_profile
+        where lower(coalesce(supplier_profile.name, '')) = any($${params.length})
+          and lower(coalesce(supplier_code, '')) = lower(coalesce(supplier_profile.code, ''))
+          and coalesce(supplier_code, '') <> ''
+      )
+    )`);
   }
   const excludedSupplierValues = splitFilterValues(filters.excludedSuppliers).map((value) => value.toLowerCase());
   if (excludedSupplierValues.length) {
