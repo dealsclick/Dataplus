@@ -21651,8 +21651,7 @@ async function readExactSourceCatalogMatches(value = "") {
   if (!normalizedItems.length) return [];
   const runtimeDb = await readSourceCatalogRuntimeDb();
   const managedProducts = await postgres.readProductsByKeys(
-    normalizedItems.flatMap((item) => sourceCatalogLookupKeys(item)),
-    { includeMarketplaceIds: false }
+    normalizedItems.flatMap((item) => sourceCatalogLookupKeys(item))
   );
   const productsBySku = managedProductLookup(managedProducts);
   const overrides = sourceCatalogOverrideMap(runtimeDb);
