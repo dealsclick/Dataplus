@@ -1853,7 +1853,10 @@ async function readDbFast(options = {}) {
   db.exportMappings = readExportMappingsStore(db.exportMappings);
   // Keep lightweight PostgreSQL reads fast, but still apply the small vendor
   // normalization needed by the supplier directory and catalog filters.
-  if (Array.isArray(db.vendors)) db.vendors = db.vendors.map((vendor) => normalizeVendor(db, vendor));
+  if (Array.isArray(db.vendors)) {
+    db.vendors = db.vendors.map((vendor) => normalizeVendor(db, vendor));
+    mergeCanonicalSupplierDirectory(db);
+  }
   if (!stored) dbCache = { mtimeMs: fs.statSync(DB_FILE).mtimeMs, data: db };
   return db;
 }
@@ -2736,7 +2739,10 @@ const KNOWN_SUPPLIER_NAMES_BY_KEY = Object.freeze({
   mar: "Marcone",
   marcone: "Marcone",
   mcn: "Marcone",
-  msc: "MSC"
+  msc: "MSC",
+  dib: "Do It Best",
+  "do it best": "Do It Best",
+  doitbest: "Do It Best"
 });
 
 function canonicalCatalogSupplierName(value = "", supplierCode = "") {
@@ -3732,6 +3738,8 @@ function normalizeDb(db) {
 
   if (db.vendors.some((vendor) => !Array.isArray(vendor.changeLog))) changed = true;
   db.vendors = db.vendors.map((vendor) => normalizeVendor(db, vendor));
+  const supplierDirectoryMerge = mergeCanonicalSupplierDirectory(db);
+  if (supplierDirectoryMerge.changed) changed = true;
 
   const brandResult = normalizeBrands(db);
   if (brandResult.changed) changed = true;
@@ -10037,8 +10045,8 @@ function normalizeWarehouse(warehouse) {
 
 function normalizeVendor(db, vendor) {
   const createdAt = vendor.createdAt || new Date().toISOString();
-  const vendorName = String(vendor.name || "").trim();
   const vendorCode = String(vendor.code || vendor.vendorCode || "").trim();
+  const vendorName = canonicalCatalogSupplierName(vendor.name || vendor.vendorName || vendorCode, vendorCode);
   const catalogParticipationEnabled = vendor.catalogSettings?.enabled === true;
   const catalogSourceCodes = [...new Set((Array.isArray(vendor.catalogSettings?.sourceCodes)
     ? vendor.catalogSettings.sourceCodes
@@ -10399,8 +10407,103 @@ function preferredVendorForOrders(db, orders) {
 }
 
 function findVendorByName(db, name) {
-  const target = String(name || "").toLowerCase();
-  return (db.vendors || []).find((vendor) => vendor.name.toLowerCase() === target);
+  const target = canonicalCatalogSupplierName(name).toLowerCase();
+  return (db.vendors || []).find((vendor) => canonicalCatalogSupplierName(vendor.name, vendor.code).toLowerCase() === target);
+}
+
+function mergeCanonicalSupplierDirectory(db) {
+  const vendors = Array.isArray(db.vendors) ? db.vendors : [];
+  const groups = new Map();
+  for (const vendor of vendors) {
+    const key = canonicalCatalogSupplierName(vendor.name || vendor.vendorName || vendor.code, vendor.code).toLowerCase();
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(vendor);
+  }
+
+  let changed = false;
+  const removedIds = new Set();
+  for (const [key, group] of groups) {
+    if (group.length < 2) {
+      if (group[0] && canonicalCatalogSupplierName(group[0].name, group[0].code).toLowerCase() === key) {
+        group[0].name = canonicalCatalogSupplierName(group[0].name, group[0].code);
+      }
+      continue;
+    }
+
+    const canonical = group.find((vendor) => String(vendor.code || "").trim().toUpperCase() === "DIB")
+      || group.find((vendor) => String(vendor.name || "").replace(/[^a-z0-9]/gi, "").toLowerCase() === "doitbest")
+      || group[0];
+    const duplicates = group.filter((vendor) => vendor !== canonical);
+    const duplicateIds = new Set(duplicates.map((vendor) => String(vendor.id || "")).filter(Boolean));
+
+    canonical.name = canonicalCatalogSupplierName(canonical.name || canonical.vendorName || canonical.code, canonical.code) || "Do It Best";
+    if (key === "do it best") canonical.name = "Do It Best";
+    if (canonical.name === "Do It Best") canonical.code = "DIB";
+
+    const allCatalogSettings = [canonical, ...duplicates].map((vendor) => vendor.catalogSettings || {});
+    const sourceCodes = [...new Set(allCatalogSettings
+      .flatMap((settings) => Array.isArray(settings.sourceCodes) ? settings.sourceCodes : [])
+      .concat(group.map((vendor) => vendor.code || ""))
+      .concat(canonical.name === "Do It Best" ? ["DIB"] : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean))];
+    canonical.catalogSettings = {
+      ...(duplicates.find((vendor) => vendor.catalogSettings)?.catalogSettings || {}),
+      ...(canonical.catalogSettings || {}),
+      enabled: allCatalogSettings.some((settings) => settings.enabled === true),
+      sourceCodes,
+      note: canonical.catalogSettings?.note || ""
+    };
+
+    for (const duplicate of duplicates) {
+      for (const field of ["email", "phone", "website", "contactName", "paymentTerms", "notes"]) {
+        if (!canonical[field] && duplicate[field]) canonical[field] = duplicate[field];
+      }
+      for (const field of ["address", "submissionSettings", "purchaseOrderRules", "channelRules", "pricingRules", "variationRules", "inventoryRules", "sourcePriority"]) {
+        if ((!canonical[field] || typeof canonical[field] !== "object" || !Object.keys(canonical[field]).length) && duplicate[field]) {
+          canonical[field] = duplicate[field];
+        }
+      }
+      canonical.changeLog = [...(Array.isArray(canonical.changeLog) ? canonical.changeLog : []), ...(Array.isArray(duplicate.changeLog) ? duplicate.changeLog : [])];
+    }
+
+    for (const purchaseOrder of db.purchaseOrders || []) {
+      if (duplicateIds.has(String(purchaseOrder.vendorId || "")) || canonicalCatalogSupplierName(purchaseOrder.supplier, purchaseOrder.supplierCode).toLowerCase() === key) {
+        purchaseOrder.vendorId = canonical.id;
+        purchaseOrder.supplier = canonical.name;
+      }
+    }
+    for (const brand of db.brands || []) {
+      if (duplicateIds.has(String(brand.preferredVendorId || ""))) brand.preferredVendorId = canonical.id;
+      if (Array.isArray(brand.vendorIds)) brand.vendorIds = [...new Set(brand.vendorIds.map((id) => duplicateIds.has(String(id)) ? canonical.id : id))];
+    }
+    for (const feed of db.vendorFeedSchedules || []) {
+      if (duplicateIds.has(String(feed.vendorId || "")) || canonicalCatalogSupplierName(feed.vendorName, feed.vendorCode).toLowerCase() === key) {
+        feed.vendorId = canonical.id;
+        feed.vendorName = canonical.name;
+        feed.vendorCode = canonical.code;
+      }
+    }
+    for (const item of db.inventory || []) {
+      const itemSupplier = item.supplier || item.vendor || item.defaultSupplier || "";
+      if (canonicalCatalogSupplierName(itemSupplier, item.supplierCode).toLowerCase() !== key) continue;
+      item.supplier = canonical.name;
+      if (item.vendor) item.vendor = canonical.name;
+      item.supplierCode = canonical.code || item.supplierCode || "";
+    }
+
+    for (const duplicate of duplicates) removedIds.add(String(duplicate.id || ""));
+    changed = true;
+  }
+
+  if (removedIds.size) {
+    db.vendors = vendors.filter((vendor) => !removedIds.has(String(vendor.id || "")));
+  }
+  if (changed) {
+    Object.defineProperty(db, "__supplierDirectoryChanged", { value: true, writable: true, configurable: true, enumerable: false });
+  }
+  return { changed, removedIds: [...removedIds] };
 }
 
 function customerKeyFrom(order) {
@@ -21466,10 +21569,10 @@ function normalizeVendorCategoryMappings(mappings = {}) {
     : Object.entries(mappings || {});
   const result = {};
   for (const [key, row] of entries) {
-    const supplier = sourceTextValue(row?.supplier);
+    const supplier = canonicalCatalogSupplierName(sourceTextValue(row?.supplier), sourceTextValue(row?.supplierCode));
     const vendorCategory = formatCategoryName(row?.vendorCategory || row?.sourceCategory || row?.category);
     const mainCategory = formatCategoryName(row?.mainCategory || row?.mappedCategory || row?.categoryOverride);
-    const normalizedKey = key && key.includes("::") ? key : vendorCategoryMappingKey(supplier, vendorCategory);
+    const normalizedKey = vendorCategoryMappingKey(supplier, vendorCategory);
     if (!normalizedKey || !supplier || !vendorCategory || !mainCategory) continue;
     result[normalizedKey] = {
       supplier,
@@ -38011,6 +38114,26 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
+async function reconcileSupplierDirectoryOnStartup() {
+  if (!postgres.isPostgresEnabled()) return;
+  try {
+    const stored = await postgres.readState({ skipInventory: true, orderLimit: 5000, purchaseOrderLimit: 5000 });
+    if (!stored) return;
+    const normalized = normalizeDb(stored);
+    if (!normalized.__supplierDirectoryChanged) return;
+    await postgres.writeStateDocuments({
+      vendors: normalized.vendors || [],
+      brands: normalized.brands || [],
+      purchaseOrders: normalized.purchaseOrders || [],
+      vendorFeedSchedules: normalized.vendorFeedSchedules || [],
+      vendorCategoryMappings: normalized.vendorCategoryMappings || {}
+    });
+    console.log("Supplier directory reconciled: duplicate aliases merged into canonical profiles.");
+  } catch (error) {
+    console.error(`Supplier directory reconciliation failed: ${error.message}`);
+  }
+}
+
 function startServer() {
   ensureDb();
   pruneChannelApiLogsSoon(true);
@@ -38043,6 +38166,7 @@ function startServer() {
   server.listen(PORT, () => {
     console.log(`DataPlus is running at http://localhost:${PORT}`);
   });
+  reconcileSupplierDirectoryOnStartup();
   return server;
 }
 

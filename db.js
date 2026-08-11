@@ -37,7 +37,10 @@ const KNOWN_SUPPLIER_NAMES_BY_KEY = Object.freeze({
   mar: "Marcone",
   marcone: "Marcone",
   mcn: "Marcone",
-  msc: "MSC"
+  msc: "MSC",
+  dib: "Do It Best",
+  "do it best": "Do It Best",
+  doitbest: "Do It Best"
 });
 
 function canonicalSupplierName(value = "", supplierCode = "") {
@@ -1423,7 +1426,7 @@ function productRecordFromState(item = {}) {
     category: nullableString(item.category),
     main_category: nullableString(item.mainCategory || item.category),
     source_category: nullableString(item.sourceCategory || item.vendorCategory),
-    supplier: nullableString(item.supplier || item.vendor),
+    supplier: nullableString(canonicalSupplierName(item.supplier || item.vendor, item.supplierCode)),
     supplier_code: nullableString(item.supplierCode),
     active: boolOrNull(item.active),
     to_be_discontinued: boolOrNull(item.toBeDiscontinued || item.discontinued || item.closeoutEligible),
@@ -1439,7 +1442,7 @@ function productRecordFromState(item = {}) {
 
 function vendorRecordFromState(item = {}) {
   const vendorId = vendorIdFor(item);
-  const name = nullableString(item.supplier || item.vendor || item.supplierCode);
+  const name = nullableString(canonicalSupplierName(item.supplier || item.vendor || item.supplierCode, item.supplierCode));
   if (!vendorId || !name) return null;
   return {
     vendor_id: vendorId,
