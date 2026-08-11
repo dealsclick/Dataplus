@@ -10478,7 +10478,10 @@ function mergeCanonicalSupplierDirectory(db) {
       if (duplicateIds.has(String(brand.preferredVendorId || ""))) brand.preferredVendorId = canonical.id;
       if (Array.isArray(brand.vendorIds)) brand.vendorIds = [...new Set(brand.vendorIds.map((id) => duplicateIds.has(String(id)) ? canonical.id : id))];
     }
-    for (const feed of db.vendorFeedSchedules || []) {
+    const feedSchedules = Array.isArray(db.vendorFeedSchedules)
+      ? db.vendorFeedSchedules
+      : Object.values(db.vendorFeedSchedules || {});
+    for (const feed of feedSchedules) {
       if (duplicateIds.has(String(feed.vendorId || "")) || canonicalCatalogSupplierName(feed.vendorName, feed.vendorCode).toLowerCase() === key) {
         feed.vendorId = canonical.id;
         feed.vendorName = canonical.name;
