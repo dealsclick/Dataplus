@@ -813,6 +813,46 @@ async function readStateField(field) {
   return result.rows[0]?.value;
 }
 
+async function readStateFields(fields = [], options = {}) {
+  const client = getPool();
+  if (!client) return {};
+  await initRelationalSchema();
+  const keys = [...new Set((Array.isArray(fields) ? fields : [])
+    .map((field) => String(field || "").trim())
+    .filter(Boolean))];
+  if (!keys.length) return {};
+
+  const [documents, entities] = await Promise.all([
+    client.query("select doc_key, data from state_documents where doc_key = any($1::text[])", [keys]),
+    client.query(`
+      select collection, data
+      from entity_documents
+      where collection = any($1::text[])
+      order by collection, position, entity_id
+    `, [keys])
+  ]);
+  const state = {};
+  for (const key of keys) {
+    if (ENTITY_DOCUMENT_COLLECTIONS.has(key)) state[key] = [];
+  }
+  for (const row of documents.rows) state[row.doc_key] = row.data;
+  for (const row of entities.rows) {
+    if (!Array.isArray(state[row.collection])) state[row.collection] = [];
+    state[row.collection].push(row.data);
+  }
+
+  const missing = keys.filter((key) => state[key] === undefined);
+  if (!missing.length || options.fallbackToLegacy === false || await stateDocumentCount()) return state;
+
+  await initDatabase();
+  const legacy = await client.query("select data from app_state where id = 1");
+  const legacyState = legacy.rows[0]?.data || {};
+  for (const key of missing) {
+    if (legacyState[key] !== undefined) state[key] = legacyState[key];
+  }
+  return state;
+}
+
 async function readCategoryState() {
   const client = getPool();
   if (!client) return null;
@@ -7462,6 +7502,7 @@ module.exports = {
   readState,
   readLiteState,
   readStateField,
+  readStateFields,
   readUserTablePreferences,
   upsertCategoryChannelMappingsFromState,
   upsertUserTablePreference,

@@ -21503,14 +21503,14 @@ function vendorCategoryMappingMap(db = {}) {
 
 async function readSourceCatalogRuntimeDb() {
   if (!postgres.isPostgresEnabled()) return readDbFast();
-  const [sourceCatalogOverrides, vendorCategoryMappings] = await Promise.all([
-    postgres.readStateField("sourceCatalogOverrides").catch(() => ({})),
-    postgres.readStateField("vendorCategoryMappings").catch(() => ({}))
-  ]);
+  const runtimeState = await postgres.readStateFields([
+    "sourceCatalogOverrides",
+    "vendorCategoryMappings"
+  ], { fallbackToLegacy: false }).catch(() => ({}));
   return {
     inventory: [],
-    sourceCatalogOverrides: sourceCatalogOverrides || {},
-    vendorCategoryMappings: vendorCategoryMappings || {}
+    sourceCatalogOverrides: runtimeState.sourceCatalogOverrides || {},
+    vendorCategoryMappings: runtimeState.vendorCategoryMappings || {}
   };
 }
 
