@@ -29,6 +29,24 @@ function isPostgresEnabled() {
   return Boolean(getDatabaseUrl());
 }
 
+const KNOWN_SUPPLIER_NAMES_BY_KEY = Object.freeze({
+  rz: "Zoro",
+  zoro: "Zoro",
+  mar: "Marcone",
+  marcone: "Marcone",
+  mcn: "Marcone",
+  msc: "MSC"
+});
+
+function canonicalSupplierName(value = "", supplierCode = "") {
+  const raw = value == null ? "" : String(value).trim();
+  const codeKey = supplierCode == null ? "" : String(supplierCode).trim().toLowerCase();
+  const rawKey = raw.toLowerCase();
+  return KNOWN_SUPPLIER_NAMES_BY_KEY[codeKey]
+    || KNOWN_SUPPLIER_NAMES_BY_KEY[rawKey]
+    || raw;
+}
+
 function getPool() {
   if (!isPostgresEnabled()) return null;
   if (!pool) {
@@ -2076,9 +2094,15 @@ function vendorCatalogRowToState(row = {}) {
     mainCategory: row.category ?? row.raw?.mainCategory,
     sourceCategory: row.source_category ?? row.raw?.sourceCategory,
     vendorCategory: row.source_category ?? row.raw?.vendorCategory,
-    supplier: row.raw?.supplier || row.raw?.vendor || row.vendor_id,
+    supplier: canonicalSupplierName(
+      row.raw?.supplier || row.raw?.vendor || row.vendor_id,
+      row.raw?.supplierCode || row.vendor_id
+    ),
     supplierCode: row.raw?.supplierCode || row.vendor_id,
-    vendor: row.raw?.vendor || row.raw?.supplier || row.vendor_id,
+    vendor: canonicalSupplierName(
+      row.raw?.vendor || row.raw?.supplier || row.vendor_id,
+      row.raw?.supplierCode || row.vendor_id
+    ),
     cost: row.cost ?? row.raw?.cost,
     sourceCost: row.cost ?? row.raw?.sourceCost ?? row.raw?.cost,
     price: row.price ?? row.raw?.price,
@@ -7777,6 +7801,7 @@ async function analyzeCatalogTables(options = {}) {
 
 module.exports = {
   closePool,
+  canonicalSupplierName,
   databaseHealth,
   getDatabaseUrl,
   initDatabase,

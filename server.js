@@ -2720,6 +2720,54 @@ function sourceTextValue(value) {
   return scalar == null ? "" : String(scalar).trim();
 }
 
+// Supplier feeds use short source codes, but operators need stable supplier names
+// in the catalog. Keep this small map explicit so display labels and filters agree.
+const KNOWN_SUPPLIER_NAMES_BY_KEY = Object.freeze({
+  rz: "Zoro",
+  zoro: "Zoro",
+  mar: "Marcone",
+  marcone: "Marcone",
+  mcn: "Marcone",
+  msc: "MSC"
+});
+
+function canonicalCatalogSupplierName(value = "", supplierCode = "") {
+  const raw = sourceTextValue(value);
+  const codeKey = sourceTextValue(supplierCode).toLowerCase();
+  const rawKey = raw.toLowerCase();
+  return KNOWN_SUPPLIER_NAMES_BY_KEY[codeKey]
+    || KNOWN_SUPPLIER_NAMES_BY_KEY[rawKey]
+    || raw;
+}
+
+function catalogSupplierAliasIndex(vendors = []) {
+  const nameByKey = new Map(Object.entries(KNOWN_SUPPLIER_NAMES_BY_KEY));
+  const codesByName = new Map();
+  const addCode = (name, code) => {
+    const displayName = canonicalCatalogSupplierName(name, code);
+    const normalizedCode = sourceTextValue(code).toLowerCase();
+    if (!displayName || !normalizedCode) return;
+    if (!codesByName.has(displayName)) codesByName.set(displayName, new Set());
+    codesByName.get(displayName).add(normalizedCode);
+    // Explicit aliases win over ambiguous vendor-index rows.
+    if (!Object.prototype.hasOwnProperty.call(KNOWN_SUPPLIER_NAMES_BY_KEY, normalizedCode)) {
+      nameByKey.set(normalizedCode, displayName);
+    }
+  };
+  for (const [key, name] of Object.entries(KNOWN_SUPPLIER_NAMES_BY_KEY)) {
+    nameByKey.set(key, name);
+    addCode(name, key);
+  }
+  for (const vendor of vendors || []) {
+    const name = typeof vendor === "string" ? vendor : vendor?.name || vendor?.vendorName;
+    const displayName = canonicalCatalogSupplierName(name, vendor?.supplierCode);
+    if (!displayName) continue;
+    nameByKey.set(sourceTextValue(name).toLowerCase(), displayName);
+    for (const code of vendorCatalogSourceCodes(vendor)) addCode(displayName, code);
+  }
+  return { nameByKey, codesByName };
+}
+
 function sourceNumberValue(value, fallback = 0) {
   const number = Number(sourceScalarValue(value));
   return Number.isFinite(number) ? number : fallback;
@@ -16633,6 +16681,7 @@ function publicInventoryListItem(item = {}, context = {}) {
   const warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
   const onHand = Number(item.qty || 0);
   const reserved = Number(item.reserved || 0);
+  const supplierName = canonicalCatalogSupplierName(item.supplier || item.vendor, item.supplierCode);
   return {
     id: item.id,
     sku: item.sku,
@@ -16652,8 +16701,8 @@ function publicInventoryListItem(item = {}, context = {}) {
     mainCategorySource: item.mainCategorySource || "",
     sourceCategory: item.sourceCategory,
     vendorCategory: item.vendorCategory || item.sourceCategory || "",
-    supplier: item.supplier,
-    vendor: item.vendor,
+    supplier: supplierName,
+    vendor: supplierName,
     hazardous: Boolean(item.hazardous),
     toBeDiscontinued: productIsCloseout(item),
     closeoutEligible: productIsCloseout(item),
@@ -21165,21 +21214,12 @@ function applyVendorCatalogScope(filters = {}, vendors = []) {
 }
 
 function catalogSupplierFacetLabels(facets = {}, vendors = []) {
-  const nameByCode = new Map();
-  for (const vendor of vendors || []) {
-    if (vendor?.catalogSettings?.enabled !== true) continue;
-    const name = sourceTextValue(vendor.name || vendor.vendorName || "");
-    if (!name) continue;
-    for (const code of vendorCatalogSourceCodes(vendor)) {
-      nameByCode.set(code.toLowerCase(), name);
-    }
-  }
-
+  const aliases = catalogSupplierAliasIndex(vendors);
   const canonical = new Map();
   for (const supplier of facets.suppliers || []) {
     const value = sourceTextValue(supplier);
     if (!value) continue;
-    const label = nameByCode.get(value.toLowerCase()) || value;
+    const label = aliases.nameByKey.get(value.toLowerCase()) || canonicalCatalogSupplierName(value);
     if (!canonical.has(label.toLowerCase())) canonical.set(label.toLowerCase(), label);
   }
   return {
@@ -21692,7 +21732,7 @@ function catalogSummary(product = {}) {
     manufacturer: product.manufacturer || "",
     mfrPartNumber: product.mfrPartNumber || "",
     vendorSku: product.vendorSku || "",
-    supplier: product.supplier || "",
+    supplier: canonicalCatalogSupplierName(product.supplier || product.vendor, product.supplierCode),
     supplierCode: product.supplierCode || "",
     stockStatus: product.stockStatus || "",
     hazardous: Boolean(product.hazardous),
@@ -21781,9 +21821,22 @@ function catalogFiltersWithIndexedSupplierKeys(filters = {}) {
   const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
   const keys = new Set(selectedSuppliers);
   const vendorIndex = readCatalogVendorIndex();
+  const aliases = catalogSupplierAliasIndex(vendorIndex?.vendors || vendorIndex?.suppliers || []);
+  for (const selectedSupplier of selectedSuppliers) {
+    const displayName = aliases.nameByKey.get(selectedSupplier.toLowerCase())
+      || canonicalCatalogSupplierName(selectedSupplier);
+    if (displayName) {
+      keys.add(displayName);
+      for (const code of aliases.codesByName.get(displayName) || []) {
+        keys.add(code);
+        keys.add(code.toLowerCase());
+        keys.add(code.toUpperCase());
+      }
+    }
+  }
   for (const row of vendorIndex?.vendors || vendorIndex?.suppliers || []) {
     const name = typeof row === "string" ? row : row?.name;
-    if (!name || !supplierNames.has(String(name).toLowerCase())) continue;
+    if (!name || !supplierNames.has(String(name).toLowerCase()) && !supplierNames.has(canonicalCatalogSupplierName(name).toLowerCase())) continue;
     keys.add(String(name));
     for (const code of row?.supplierCodes || row?.codes || []) {
       if (!code) continue;
@@ -21897,9 +21950,15 @@ function normalizeCatalogProductForInventory(record) {
     manufacturer: sourceTextValue(record.manufacturer),
     mfrPartNumber: sourceTextValue(record.mfrPartNumber || record.mfr_part_number),
     vendorSku: sourceTextValue(record.vendorSku || record.vendor_sku),
-    supplier: sourceTextValue(record.supplier),
+    supplier: canonicalCatalogSupplierName(
+      sourceTextValue(record.supplier || record.vendor),
+      sourceTextValue(record.supplierCode || record.supplier_code)
+    ),
     supplierCode: sourceTextValue(record.supplierCode || record.supplier_code),
-    vendor: sourceTextValue(record.vendor || record.supplier),
+    vendor: canonicalCatalogSupplierName(
+      sourceTextValue(record.vendor || record.supplier),
+      sourceTextValue(record.supplierCode || record.supplier_code)
+    ),
     unspsc: sourceTextValue(record.unspsc),
     uom: sourceTextValue(record.uom),
     uomQty: sourceTextValue(record.uomQty || record.uom_qty),
