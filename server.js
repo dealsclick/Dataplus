@@ -22394,7 +22394,10 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sor
         const normalizedItems = pgResult.items
           .map((item) => normalizeCatalogProductForInventory(item))
           .filter(Boolean);
-        const managedProducts = await postgres.readProductsByKeys(normalizedItems.flatMap((item) => sourceCatalogLookupKeys(item)));
+        const managedProducts = await postgres.readProductsByKeys(
+          normalizedItems.flatMap((item) => sourceCatalogLookupKeys(item)),
+          { includeMarketplaceIds: false }
+        );
         const productsBySku = managedProductLookup(managedProducts);
         result.items = normalizedItems
           .map((item) => decorateSourceCatalogProduct(item, overrides, productsBySku, vendorMappings))
@@ -22538,7 +22541,10 @@ async function collectCatalogProductsForExport({ query = "", filters = {}, limit
         const normalizedItems = pgResult.items
           .map((item) => normalizeCatalogProductForInventory(item))
           .filter(Boolean);
-        const managedProducts = await postgres.readProductsByKeys(normalizedItems.flatMap((item) => sourceCatalogLookupKeys(item)));
+        const managedProducts = await postgres.readProductsByKeys(
+          normalizedItems.flatMap((item) => sourceCatalogLookupKeys(item)),
+          { includeMarketplaceIds: false }
+        );
         const managedBySku = managedProductLookup(managedProducts);
         return {
           items: normalizedItems
