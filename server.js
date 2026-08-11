@@ -31215,11 +31215,11 @@ async function handleApi(req, res) {
     const job = createImportJob(db, {
       section: "Source Catalog",
       category: "Source Catalog",
-      operation: "Refresh source catalog facets",
+      operation: "Refresh source catalog facets & supplier coverage",
       direction: "maintenance",
       status: "queued",
       fileName: "vendor_catalog_facets",
-      totalRows: 4,
+      totalRows: 5,
       processedRows: 0,
       progressPercent: 0,
       phase: "queued",

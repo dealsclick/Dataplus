@@ -996,7 +996,7 @@ async function runSourceFacetsRefreshJob(job) {
     return persistJob(current, {
       status: "success",
       phase: "complete",
-      message: "Source catalog facets refreshed.",
+      message: "Source catalog facets and supplier coverage refreshed.",
       totalRows: result.totalRows || current.totalRows || 5,
       processedRows: result.processedRows || result.totalRows || current.totalRows || 5,
       changed: 1,
@@ -1553,26 +1553,6 @@ async function runProductDumpImportJob(job) {
       }
     } finally {
       clearInterval(postImportHeartbeatTimer);
-    }
-    current = await persistJob(current, {
-      status: "running",
-      phase: "rebuilding_supplier_coverage",
-      message: "Matching supplier coverage and storing indexed catalog statuses..."
-    });
-    try {
-      supplierCoverageResult = await postgres.refreshVendorSupplierCoverage({
-        onProgress: (patch = {}) => {
-          current = normalizeJobPatch(current, {
-            ...patch,
-            status: "running",
-            phase: "rebuilding_supplier_coverage",
-            message: patch.message || current.message
-          });
-          postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist supplier coverage progress:", error.message || error));
-        }
-      });
-    } catch (error) {
-      supplierCoverageError = error.message || "Supplier coverage status rebuild failed.";
     }
   }
   const followOn = [];
