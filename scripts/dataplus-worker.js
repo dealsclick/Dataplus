@@ -47,6 +47,8 @@ const SUPPORTED_TASKS = [
   "shopify-shipping-eligibility-sync",
   "shopify-variant-price-push",
   "shopify-product-create",
+  "shopify-product-publication-update",
+  "shopify-product-status-update",
   "shopify-existing-variant-link",
   "shopify-product-type-collections-sync",
   "shopify-taxonomy-push",
@@ -56,6 +58,7 @@ const SUPPORTED_TASKS = [
   "ebay-account-settings-sync",
   "ebay-location-sync",
   "ebay-order-import",
+  "ebay-price-inventory-sync",
   "ebay-listing-launch",
   "product-dump-import",
   "vendor-feed-import"
@@ -65,6 +68,7 @@ let lastScheduleCheckAt = 0;
 let lastSkuMapScheduleCheckAt = 0;
 let lastOrderImportScheduleCheckAt = 0;
 let lastEbayOrderImportScheduleCheckAt = 0;
+let lastEbayPriceInventoryScheduleCheckAt = 0;
 let lastSupplierReminderScheduleCheckAt = 0;
 let lastVendorFeedScheduleCheckAt = 0;
 
@@ -404,6 +408,7 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
   const channels = Array.isArray(stateDb.connections) ? stateDb.connections : [];
   const scheduledChannels = channels.filter((channel) => {
     const channelSettings = channel.settings || {};
+    if (channelSettings.channelEnabled === false) return false;
     if (channelSettings.inventoryScheduleEnabled === true || String(channelSettings.inventoryScheduleEnabled).toLowerCase() === "true") return true;
     return String(channel.name || "").toLowerCase() === "shopify" && settings.shopifyDailyInventoryUpdateEnabled;
   });
@@ -600,6 +605,7 @@ async function checkScheduledShopifySkuPairAudit(force = false) {
   const channels = Array.isArray(stateDb.connections) ? stateDb.connections : [];
   const scheduledChannels = channels.filter((channel) => (
     String(channel.name || "").toLowerCase() === "shopify"
+    && channel.settings?.channelEnabled !== false
     && (channel.settings?.shopifySkuMapScheduleEnabled === true || String(channel.settings?.shopifySkuMapScheduleEnabled).toLowerCase() === "true")
   ));
   if (!scheduledChannels.length) return false;
@@ -663,7 +669,7 @@ async function checkScheduledShopifyOrderImport(force = false) {
   const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
   const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "shopify");
   const settings = channel?.settings || {};
-  if (!channel || !settings.shopifyOrderImportEnabled || !settings.shopifyOrderImportScheduleEnabled) return false;
+  if (!channel || settings.channelEnabled === false || !settings.shopifyOrderImportEnabled || !settings.shopifyOrderImportScheduleEnabled) return false;
   const now = new Date(nowMs);
   const dueSlot = dueScheduleSlot(settings, "shopifyOrderImportSchedule", now);
   if (!dueSlot) return false;
@@ -699,7 +705,7 @@ async function checkScheduledEbayOrderImport(force = false) {
   const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
   const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "ebay");
   const settings = channel?.settings || {};
-  if (!channel || !settings.ebayOrderImportEnabled || !settings.ebayOrderImportScheduleEnabled) return false;
+  if (!channel || settings.channelEnabled === false || !settings.ebayOrderImportEnabled || !settings.ebayOrderImportScheduleEnabled) return false;
   const now = new Date(nowMs);
   const dueSlot = dueScheduleSlot(settings, "ebayOrderImportSchedule", now);
   if (!dueSlot) return false;
@@ -723,6 +729,43 @@ async function checkScheduledEbayOrderImport(force = false) {
     dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "IMPORT", path: "ebay-orders", operation: "Scheduled eBay order import", statusCode: 502, ok: false, message: error.message || "Unable to import eBay orders." });
     await postgres.writeStateDocuments({ channelEbayOrderImportSchedules: scheduleState });
     console.error(`[${WORKER_ID}] scheduled eBay order import failed:`, error.message || error);
+    return false;
+  }
+}
+
+async function checkScheduledEbayPriceInventorySync(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastEbayPriceInventoryScheduleCheckAt < 60000) return false;
+  lastEbayPriceInventoryScheduleCheckAt = nowMs;
+  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "ebay");
+  const settings = channel?.settings || {};
+  if (!channel || settings.channelEnabled === false || !settings.ebayPriceInventorySyncScheduleEnabled) return false;
+  if (settings.ebayInventoryUpdateEnabled === false && settings.ebayPriceUpdateEnabled === false) return false;
+  const now = new Date(nowMs);
+  const dueSlot = dueScheduleSlot(settings, "ebayPriceInventorySyncSchedule", now);
+  if (!dueSlot) return false;
+  const today = localDateKey(now);
+  const scheduleId = `${channel.id || "ebay"}:${today}:${dueSlot}`;
+  const scheduleState = docs.channelEbayPriceInventorySchedules && typeof docs.channelEbayPriceInventorySchedules === "object" ? docs.channelEbayPriceInventorySchedules : {};
+  const previous = scheduleState[scheduleId] || {};
+  if (previous.lastRunDate === today || previous.lastAttemptedDate === today) return false;
+  try {
+    const result = await dataplus.queueEbayPriceInventorySyncJob(stateDb, {
+      limit: settings.ebayPriceInventorySyncLimit,
+      updateInventory: settings.ebayInventoryUpdateEnabled !== false,
+      updatePrice: settings.ebayPriceUpdateEnabled !== false
+    }, { scheduled: true, scheduleKey: scheduleId, operation: "Scheduled eBay price and inventory sync" });
+    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "eBay", time: dueSlot, lastRunDate: today, lastAttemptedDate: today, lastRunAt: new Date(nowMs).toISOString(), lastJobId: result.job?.id || "", lastError: result.duplicate ? "An eBay price and inventory sync is already active." : "" };
+    console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled eBay price and inventory sync for ${dueSlot} (${result.job?.id || "duplicate"})`);
+    await postgres.writeStateDocuments({ channelEbayPriceInventorySchedules: scheduleState });
+    return true;
+  } catch (error) {
+    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "eBay", time: dueSlot, lastAttemptedDate: today, lastAttemptedAt: new Date(nowMs).toISOString(), lastError: error.message || "Unable to sync eBay price and inventory." };
+    dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "SYNC", path: "ebay-price-inventory", operation: "Scheduled eBay price and inventory sync", statusCode: 502, ok: false, message: error.message || "Unable to sync eBay price and inventory." });
+    await postgres.writeStateDocuments({ channelEbayPriceInventorySchedules: scheduleState });
+    console.error(`[${WORKER_ID}] scheduled eBay price and inventory sync failed:`, error.message || error);
     return false;
   }
 }
@@ -953,8 +996,8 @@ async function runSourceFacetsRefreshJob(job) {
       status: "success",
       phase: "complete",
       message: "Source catalog facets refreshed.",
-      totalRows: result.totalRows || current.totalRows || 4,
-      processedRows: result.processedRows || result.totalRows || current.totalRows || 4,
+      totalRows: result.totalRows || current.totalRows || 5,
+      processedRows: result.processedRows || result.totalRows || current.totalRows || 5,
       changed: 1,
       progressPercent: 100,
       estimatedSecondsRemaining: 0,
@@ -1104,6 +1147,14 @@ async function runShopifyVariantPricePushJob(job) {
 
 async function runShopifyProductCreateJob(job) {
   return dataplus.runShopifyProductCreateWorkerJob(job, job.workerPayload || {});
+}
+
+async function runShopifyProductStatusUpdateJob(job) {
+  return dataplus.runShopifyProductStatusUpdateWorkerJob(job, job.workerPayload || {});
+}
+
+async function runShopifyProductPublicationJob(job) {
+  return dataplus.runShopifyProductPublicationWorkerJob(job, job.workerPayload || {});
 }
 
 async function runShopifyExistingVariantLinkJob(job) {
@@ -1271,6 +1322,10 @@ async function runEbayLocationSyncJob(job) {
 
 async function runEbayOrderImportJob(job) {
   return dataplus.runEbayOrderImportWorkerJob(job, job.workerPayload || {});
+}
+
+async function runEbayPriceInventorySyncJob(job) {
+  return dataplus.runEbayPriceInventorySyncWorkerJob(job, job.workerPayload || {});
 }
 
 async function runEbayListingLaunchJob(job) {
@@ -1448,6 +1503,8 @@ async function runProductDumpImportJob(job) {
     });
   }
   let analyzeResult = { tables: [] };
+  let supplierCoverageResult = null;
+  let supplierCoverageError = "";
   if (payload.postgresOnly !== false && postgres.isPostgresEnabled()) {
     current = await persistJob(current, {
       status: "running",
@@ -1458,6 +1515,26 @@ async function runProductDumpImportJob(job) {
       analyzeResult = await postgres.analyzeCatalogTables({ vendorCatalog: true });
     } catch (error) {
       analyzeResult = { tables: [], error: error.message || "Planner statistics refresh failed." };
+    }
+    current = await persistJob(current, {
+      status: "running",
+      phase: "rebuilding_supplier_coverage",
+      message: "Matching supplier coverage and storing indexed catalog statuses..."
+    });
+    try {
+      supplierCoverageResult = await postgres.refreshVendorSupplierCoverage({
+        onProgress: (patch = {}) => {
+          current = normalizeJobPatch(current, {
+            ...patch,
+            status: "running",
+            phase: "rebuilding_supplier_coverage",
+            message: patch.message || current.message
+          });
+          postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist supplier coverage progress:", error.message || error));
+        }
+      });
+    } catch (error) {
+      supplierCoverageError = error.message || "Supplier coverage status rebuild failed.";
     }
   }
   const followOn = [];
@@ -1479,10 +1556,10 @@ async function runProductDumpImportJob(job) {
     }
   }
   return persistJob(current, {
-    status: "success",
-    phase: "complete",
-    message: "Product dump import finished.",
-    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", ...followOn].filter(Boolean).join(" "),
+    status: supplierCoverageError ? "warning" : "success",
+    phase: supplierCoverageError ? "completed_with_warning" : "complete",
+    message: supplierCoverageError ? "Product dump import finished, but supplier coverage needs review." : "Product dump import and supplier coverage rebuild finished.",
+    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", supplierCoverageResult ? `Stored supplier coverage for ${Number(supplierCoverageResult.productsUpdated || 0).toLocaleString()} approved products and ${Number(supplierCoverageResult.vendorItemsUpdated || 0).toLocaleString()} source records from ${Number(supplierCoverageResult.keys || 0).toLocaleString()} matched identities.` : "", supplierCoverageError ? `Supplier coverage rebuild failed: ${supplierCoverageError}` : "", ...followOn].filter(Boolean).join(" "),
     totalRows: finalProcessedRows || current.totalRows || 0,
     processedRows: finalProcessedRows || current.processedRows || 0,
     changed: finalChanged || current.changed || 0,
@@ -1495,6 +1572,20 @@ async function runProductDumpImportJob(job) {
 
 async function runJob(job) {
   const task = String(job.workerTask || "").trim();
+  const channelName = task.startsWith("shopify-") ? "Shopify" : task.startsWith("ebay-") ? "eBay" : "";
+  if (channelName) {
+    const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+    const channel = (stateDb.connections || []).find((entry) => String(entry?.name || "").trim().toLowerCase() === channelName.toLowerCase());
+    if (channel?.settings?.channelEnabled === false) {
+      return persistJob(job, {
+        status: "stopped",
+        phase: "stopped",
+        message: `${channelName} is disabled. The queued ${task} job was stopped before it ran.`,
+        details: "Re-enable the channel in Channel Settings before retrying this job.",
+        finishedAt: new Date().toISOString()
+      });
+    }
+  }
   if (task === "postgres-backup") return runBackupJob(job);
   if (task === "data-quality-scan") return runDataQualityScanJob(job);
   if (task === "source-search-index") return runSourceSearchIndexJob(job);
@@ -1511,6 +1602,8 @@ async function runJob(job) {
   if (task === "shopify-shipping-eligibility-sync") return runShopifyShippingEligibilitySyncJob(job);
   if (task === "shopify-variant-price-push") return runShopifyVariantPricePushJob(job);
   if (task === "shopify-product-create") return runShopifyProductCreateJob(job);
+  if (task === "shopify-product-publication-update") return runShopifyProductPublicationJob(job);
+  if (task === "shopify-product-status-update") return runShopifyProductStatusUpdateJob(job);
   if (task === "shopify-existing-variant-link") return runShopifyExistingVariantLinkJob(job);
   if (task === "shopify-product-type-collections-sync") return runShopifyProductTypeCollectionsSyncJob(job);
   if (task === "shopify-taxonomy-push") return runShopifyTaxonomyPushJob(job);
@@ -1520,6 +1613,7 @@ async function runJob(job) {
   if (task === "ebay-account-settings-sync") return runEbayAccountSettingsSyncJob(job);
   if (task === "ebay-location-sync") return runEbayLocationSyncJob(job);
   if (task === "ebay-order-import") return runEbayOrderImportJob(job);
+  if (task === "ebay-price-inventory-sync") return runEbayPriceInventorySyncJob(job);
   if (task === "ebay-listing-launch") return runEbayListingLaunchJob(job);
   if (task === "vendor-feed-import") return runVendorFeedImportJob(job);
   if (task === "product-dump-import") return runProductDumpImportJob(job);
@@ -1541,6 +1635,7 @@ async function tick() {
   await checkScheduledShopifySkuPairAudit();
   await checkScheduledShopifyOrderImport();
   await checkScheduledEbayOrderImport();
+  await checkScheduledEbayPriceInventorySync();
   await checkScheduledSupplierReminders();
   const job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS });
   if (!job) return false;

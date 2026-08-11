@@ -138,10 +138,18 @@ async function initRelationalSchema() {
       price numeric,
       qty numeric,
       default_image text,
+      supplier_count integer not null default 0,
+      has_multiple_suppliers boolean not null default false,
+      supplier_coverage_match_type text,
+      supplier_coverage_updated_at timestamptz,
       raw jsonb not null default '{}'::jsonb,
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     );
+    alter table products add column if not exists supplier_count integer not null default 0;
+    alter table products add column if not exists has_multiple_suppliers boolean not null default false;
+    alter table products add column if not exists supplier_coverage_match_type text;
+    alter table products add column if not exists supplier_coverage_updated_at timestamptz;
     create index if not exists products_sku_lower_idx on products (lower(sku));
     create index if not exists products_vendor_sku_idx on products (lower(vendor_sku));
     create index if not exists products_barcode_idx on products (barcode);
@@ -156,6 +164,7 @@ async function initRelationalSchema() {
     create index if not exists products_category_idx on products (category);
     create index if not exists products_manufacturer_facet_idx on products ((coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName')));
     create index if not exists products_discontinued_idx on products (to_be_discontinued);
+    create index if not exists products_multiple_suppliers_idx on products (has_multiple_suppliers, product_id);
     create index if not exists products_temu_direct_presence_idx on products (product_id)
       where raw ?| array['temuId', 'temuProductId', 'temuListingId', 'temuOfferId', 'temuSku'];
     create index if not exists products_temu_source_presence_idx on products (product_id)
@@ -263,6 +272,10 @@ async function initRelationalSchema() {
       uom text,
       uom_qty numeric,
       to_be_discontinued boolean not null default false,
+      supplier_count integer not null default 0,
+      has_multiple_suppliers boolean not null default false,
+      supplier_coverage_match_type text,
+      supplier_coverage_updated_at timestamptz,
       default_image text,
       raw jsonb not null default '{}'::jsonb,
       last_feed_run_id text,
@@ -271,6 +284,10 @@ async function initRelationalSchema() {
       updated_at timestamptz not null default now(),
       primary key (vendor_id, source_sku)
     );
+    alter table vendor_catalog_items add column if not exists supplier_count integer not null default 0;
+    alter table vendor_catalog_items add column if not exists has_multiple_suppliers boolean not null default false;
+    alter table vendor_catalog_items add column if not exists supplier_coverage_match_type text;
+    alter table vendor_catalog_items add column if not exists supplier_coverage_updated_at timestamptz;
     create index if not exists vendor_catalog_items_source_sku_idx on vendor_catalog_items (lower(source_sku));
     create index if not exists vendor_catalog_items_internal_sku_idx on vendor_catalog_items (lower(internal_sku));
     create index if not exists vendor_catalog_items_vendor_sku_idx on vendor_catalog_items (lower(vendor_sku));
@@ -283,6 +300,8 @@ async function initRelationalSchema() {
     create index if not exists vendor_catalog_items_category_idx on vendor_catalog_items (category);
     create index if not exists vendor_catalog_items_discontinued_idx on vendor_catalog_items (to_be_discontinued);
     create index if not exists vendor_catalog_items_qty_idx on vendor_catalog_items (qty);
+    create index if not exists vendor_catalog_items_multiple_suppliers_idx on vendor_catalog_items (has_multiple_suppliers, vendor_id, source_sku);
+    create index if not exists vendor_catalog_items_multiple_suppliers_latest_idx on vendor_catalog_items (created_at desc, vendor_id, source_sku) where has_multiple_suppliers = true;
     create index if not exists vendor_catalog_items_latest_idx on vendor_catalog_items (created_at desc, vendor_id, source_sku);
     create table if not exists product_dump_commercial_fields (
       vendor_id text not null,
@@ -370,6 +389,13 @@ async function initRelationalSchema() {
       primary key (facet_type, facet_value)
     );
     create index if not exists vendor_catalog_facets_type_count_idx on vendor_catalog_facets (facet_type, row_count desc, facet_value);
+
+    create table if not exists vendor_supplier_coverage (
+      match_key text primary key,
+      supplier_count integer not null,
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists vendor_supplier_coverage_count_idx on vendor_supplier_coverage (supplier_count, match_key);
 
     create table if not exists vendor_catalog_snapshots (
       feed_run_id text not null references vendor_feed_runs(feed_run_id) on delete cascade,
@@ -1929,6 +1955,10 @@ function vendorCatalogRowToState(row = {}) {
     uomQty: row.uom_qty ?? row.raw?.uomQty ?? row.raw?.uom_qty,
     toBeDiscontinued: row.to_be_discontinued ?? row.raw?.toBeDiscontinued,
     closeoutEligible: row.to_be_discontinued ?? row.raw?.closeoutEligible,
+    supplierCount: Number(row.supplier_count ?? row.raw?.supplierCount ?? 0),
+    hasMultipleSuppliers: Boolean(row.has_multiple_suppliers ?? row.raw?.hasMultipleSuppliers ?? false),
+    supplierCoverageMatchType: row.supplier_coverage_match_type ?? row.raw?.supplierCoverageMatchType ?? "",
+    supplierCoverageUpdatedAt: row.supplier_coverage_updated_at?.toISOString?.() || row.raw?.supplierCoverageUpdatedAt || "",
     defaultImage: row.default_image ?? row.raw?.defaultImage,
     ...commercial,
     lastSeenAt: row.last_seen_at?.toISOString?.() || row.raw?.lastSeenAt || "",
@@ -2034,6 +2064,11 @@ function vendorCatalogWhere(options = {}) {
   if (hasStockValues.length === 1) {
     where.push(hasStockValues[0] ? `coalesce(qty, 0) > 0` : `coalesce(qty, 0) <= 0`);
   }
+  const multipleSupplierValues = [...new Set(splitFilterValues(filters.multipleSuppliers).map(parseFilterBoolean))];
+  if (multipleSupplierValues.length === 1) {
+    params.push(multipleSupplierValues[0]);
+    where.push(`has_multiple_suppliers = $${params.length}`);
+  }
   const stockQtyOperator = nullableString(filters.stockQtyOperator);
   const stockQtyValues = String(filters.stockQty || "")
     .split("|")
@@ -2100,6 +2135,146 @@ function vendorCatalogWhere(options = {}) {
     params,
     whereSql: where.length ? `where ${where.join(" and ")}` : ""
   };
+}
+
+async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
+  const catalogPool = getPool();
+  if (!catalogPool) return { enabled: false, keys: 0 };
+  await initRelationalSchema();
+  const client = await catalogPool.connect();
+  if (typeof onProgress === "function") onProgress({
+    phase: "supplier_coverage",
+    message: "building supplier coverage",
+    processedRows: 4,
+    totalRows: 5
+  });
+  try {
+    if (typeof isCanceled === "function" && isCanceled()) throw new Error("Supplier coverage refresh canceled.");
+    await client.query("drop table if exists vendor_supplier_coverage_next");
+    await client.query(`
+      create temporary table vendor_supplier_coverage_next as
+      with coverage_candidates as materialized (
+        select
+          case
+            when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> ''
+              then 'barcode:' || lower(coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), '')))
+            when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> ''
+              then 'mfr:' || lower(trim(brand)) || '|' || lower(trim(mfr_part_number))
+            else 'sku:' || lower(trim(coalesce(nullif(internal_sku, ''), nullif(vendor_sku, ''), source_sku)))
+          end as match_key,
+          vendor_id
+        from vendor_catalog_items
+      )
+      select candidate.match_key, count(distinct candidate.vendor_id)::integer as supplier_count
+      from coverage_candidates candidate
+      where coalesce(candidate.match_key, '') <> ''
+      group by candidate.match_key
+    `);
+    if (typeof isCanceled === "function" && isCanceled()) throw new Error("Supplier coverage refresh canceled.");
+    await client.query("begin");
+    await client.query("truncate vendor_supplier_coverage");
+    const result = await client.query(`
+      insert into vendor_supplier_coverage (match_key, supplier_count, updated_at)
+      select match_key, supplier_count, now()
+      from vendor_supplier_coverage_next
+      returning match_key
+    `);
+    const productsResult = await client.query(`
+      with product_identities as materialized (
+        select
+          product_id,
+          case
+            when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> ''
+              then 'barcode:' || lower(coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), '')))
+            when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> ''
+              then 'mfr:' || lower(trim(brand)) || '|' || lower(trim(mfr_part_number))
+            else 'sku:' || lower(trim(sku))
+          end as match_key,
+          case
+            when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> '' then 'upc'
+            when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> '' then 'manufacturer-part-and-brand'
+            else 'exact-sku'
+          end as match_type
+        from products
+      ), product_coverage as materialized (
+        select
+          product_identity.product_id,
+          product_identity.match_type,
+          coalesce(coverage.supplier_count, 0)::integer as supplier_count
+        from product_identities product_identity
+        left join vendor_supplier_coverage coverage on coverage.match_key = product_identity.match_key
+      )
+      update products product
+      set
+        supplier_count = coverage.supplier_count,
+        has_multiple_suppliers = coverage.supplier_count >= 2,
+        supplier_coverage_match_type = coverage.match_type,
+        supplier_coverage_updated_at = now()
+      from product_coverage coverage
+      where product.product_id = coverage.product_id
+        and (
+          product.supplier_count is distinct from coverage.supplier_count
+          or product.has_multiple_suppliers is distinct from (coverage.supplier_count >= 2)
+          or product.supplier_coverage_match_type is distinct from coverage.match_type
+          or product.supplier_coverage_updated_at is null
+        )
+    `);
+    const vendorItemsResult = await client.query(`
+      with vendor_item_identities as materialized (
+        select
+          vendor_id,
+          source_sku,
+          case
+            when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> ''
+              then 'barcode:' || lower(coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), '')))
+            when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> ''
+              then 'mfr:' || lower(trim(brand)) || '|' || lower(trim(mfr_part_number))
+            else 'sku:' || lower(trim(coalesce(nullif(internal_sku, ''), nullif(vendor_sku, ''), source_sku)))
+          end as match_key,
+          case
+            when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> '' then 'upc'
+            when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> '' then 'manufacturer-part-and-brand'
+            else 'exact-sku'
+          end as match_type
+        from vendor_catalog_items
+      ), vendor_item_coverage as materialized (
+        select
+          vendor_item.vendor_id,
+          vendor_item.source_sku,
+          vendor_item.match_type,
+          coalesce(coverage.supplier_count, 1)::integer as supplier_count
+        from vendor_item_identities vendor_item
+        left join vendor_supplier_coverage coverage on coverage.match_key = vendor_item.match_key
+      )
+      update vendor_catalog_items item
+      set
+        supplier_count = coverage.supplier_count,
+        has_multiple_suppliers = coverage.supplier_count >= 2,
+        supplier_coverage_match_type = coverage.match_type,
+        supplier_coverage_updated_at = now()
+      from vendor_item_coverage coverage
+      where item.vendor_id = coverage.vendor_id
+        and item.source_sku = coverage.source_sku
+        and (
+          item.supplier_count is distinct from coverage.supplier_count
+          or item.has_multiple_suppliers is distinct from (coverage.supplier_count >= 2)
+          or item.supplier_coverage_match_type is distinct from coverage.match_type
+          or item.supplier_coverage_updated_at is null
+        )
+    `);
+    await client.query("commit");
+    return {
+      enabled: true,
+      keys: result.rowCount || 0,
+      productsUpdated: productsResult.rowCount || 0,
+      vendorItemsUpdated: vendorItemsResult.rowCount || 0
+    };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function vendorCatalogFiltersWithSupplierKeys(client, filters = {}) {
@@ -2393,6 +2568,98 @@ async function readVendorCatalogItemsBySkus(skus = []) {
   return result.rows.map(vendorCatalogRowToState);
 }
 
+function vendorCatalogSupplierMatchRow(row = {}, matchType = "") {
+  const item = vendorCatalogRowToState(row);
+  return {
+    supplier: row.supplier_name || row.vendor_name || item.supplier || item.vendor || row.vendor_id || "",
+    supplierCode: row.supplier_code || item.supplierCode || row.vendor_id || "",
+    sku: item.sku || row.source_sku || "",
+    vendorSku: item.vendorSku || row.vendor_sku || row.source_sku || "",
+    title: item.marketplaceTitle || item.title || "",
+    brand: item.brand || "",
+    manufacturer: item.manufacturer || "",
+    mfrPartNumber: item.mfrPartNumber || "",
+    barcode: item.barcode || "",
+    category: item.mainCategory || item.category || "",
+    sourceCategory: item.sourceCategory || "",
+    cost: item.cost,
+    price: item.websitePrice ?? item.price,
+    qty: item.qty ?? item.stockQty,
+    stockStatus: item.stockStatus || "",
+    uom: item.uom || "",
+    uomQty: item.uomQty,
+    discontinued: Boolean(item.toBeDiscontinued),
+    defaultImage: item.defaultImage || "",
+    lastSeenAt: item.lastSeenAt || "",
+    updatedAt: item.updatedAt || "",
+    matchType
+  };
+}
+
+async function findVendorCatalogSupplierMatches(identity = {}) {
+  const client = getPool();
+  if (!client) return { matchType: "none", matches: [] };
+  await initRelationalSchema();
+
+  const sku = nullableString(identity.sku || identity.internalSku || "");
+  const barcode = nullableString(identity.barcode || identity.upc || identity.gtin || "");
+  const mfrPartNumber = nullableString(identity.mfrPartNumber || identity.manufacturerPartNumber || "");
+  const brand = nullableString(identity.brand || "");
+  const baseSelect = `
+    select vci.*, v.name as supplier_name, v.code as supplier_code
+    from vendor_catalog_items vci
+    left join vendors v on v.vendor_id = vci.vendor_id
+  `;
+  const orderAndLimit = ` order by vci.updated_at desc nulls last, vci.last_seen_at desc nulls last limit 150`;
+  let rows = [];
+  let matchType = "none";
+
+  if (barcode) {
+    const barcodeQueries = [
+      `${baseSelect} where lower(vci.barcode) = lower($1) ${orderAndLimit}`,
+      `${baseSelect} where vci.raw ->> 'upc' = $1 ${orderAndLimit}`,
+      `${baseSelect} where vci.raw ->> 'gtin' = $1 ${orderAndLimit}`,
+      `${baseSelect} where vci.raw ->> 'upcCode' = $1 ${orderAndLimit}`
+    ];
+    for (const query of barcodeQueries) {
+      const result = await client.query(query, [barcode]);
+      if (result.rows.length) {
+        rows = result.rows;
+        break;
+      }
+    }
+    if (rows.length) matchType = "upc";
+  }
+
+  if (!rows.length && mfrPartNumber && brand) {
+    const result = await client.query(`${baseSelect}
+      where lower(vci.mfr_part_number) = lower($1)
+        and lower(vci.brand) = lower($2)
+      ${orderAndLimit}`, [mfrPartNumber, brand]);
+    rows = result.rows;
+    if (rows.length) matchType = "manufacturer-part-and-brand";
+  }
+
+  if (!rows.length && sku) {
+    const result = await client.query(`${baseSelect}
+      where lower(vci.source_sku) = lower($1)
+        or lower(vci.internal_sku) = lower($1)
+        or lower(vci.vendor_sku) = lower($1)
+      ${orderAndLimit}`, [sku]);
+    rows = result.rows;
+    if (rows.length) matchType = "exact-sku";
+  }
+
+  const seen = new Set();
+  const matches = rows.map((row) => vendorCatalogSupplierMatchRow(row, matchType)).filter((row) => {
+    const key = `${String(row.supplierCode || row.supplier || "").toLowerCase()}|${String(row.sku || row.vendorSku || "").toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return { matchType, matches };
+}
+
 async function vendorCatalogFacets() {
   const client = getPool();
   if (!client) return null;
@@ -2495,7 +2762,7 @@ async function refreshVendorCatalogFacets({ onProgress, isCanceled } = {}) {
   const startedAt = Date.now();
   const runStep = async (phase, sql) => {
     checkCanceled();
-    progress({ phase, message: phase.replace(/_/g, " "), processedRows: 0, totalRows: 4 });
+    progress({ phase, message: phase.replace(/_/g, " "), processedRows: 0, totalRows: 5 });
     await client.query(sql);
     checkCanceled();
   };
@@ -2552,9 +2819,10 @@ async function refreshVendorCatalogFacets({ onProgress, isCanceled } = {}) {
           row_count = excluded.row_count,
           updated_at = now()
   `);
-  progress({ phase: "complete", processedRows: 4, totalRows: 4, progressPercent: 100 });
+  const supplierCoverage = await refreshVendorSupplierCoverage({ onProgress: progress, isCanceled });
+  progress({ phase: "complete", processedRows: 5, totalRows: 5, progressPercent: 100 });
   const facets = await vendorCatalogFacets();
-  return { ...facets, durationMs: Date.now() - startedAt };
+  return { ...facets, supplierCoverage, durationMs: Date.now() - startedAt };
 }
 
 async function sourceCatalogSearchIndexStatus() {
@@ -3007,7 +3275,8 @@ async function buildSourceCatalogPerformanceIndexes({ isCanceled, onProgress } =
     ["vendor_catalog_items_vendor_stock_idx", "create index concurrently if not exists vendor_catalog_items_vendor_stock_idx on vendor_catalog_items (vendor_id, stock_status)"],
     ["vendor_catalog_items_vendor_discontinued_idx", "create index concurrently if not exists vendor_catalog_items_vendor_discontinued_idx on vendor_catalog_items (vendor_id, to_be_discontinued)"],
     ["vendor_catalog_items_vendor_qty_idx", "create index concurrently if not exists vendor_catalog_items_vendor_qty_idx on vendor_catalog_items (vendor_id, qty)"],
-    ["vendor_catalog_items_membership_idx", "create index concurrently if not exists vendor_catalog_items_membership_idx on vendor_catalog_items (lower(source_sku), vendor_id)"]
+    ["vendor_catalog_items_membership_idx", "create index concurrently if not exists vendor_catalog_items_membership_idx on vendor_catalog_items (lower(source_sku), vendor_id)"],
+    ["vendor_catalog_items_mfr_brand_idx", "create index concurrently if not exists vendor_catalog_items_mfr_brand_idx on vendor_catalog_items (lower(mfr_part_number), lower(brand))"]
   ];
   const completed = [];
   for (let index = 0; index < indexes.length; index += 1) {
@@ -4966,6 +5235,10 @@ function productRowToState(row = {}) {
     price: row.price ?? row.raw?.price,
     qty: row.qty ?? row.raw?.qty,
     defaultImage: row.default_image ?? row.raw?.defaultImage,
+    supplierCount: Number(row.supplier_count ?? row.raw?.supplierCount ?? 0),
+    hasMultipleSuppliers: Boolean(row.has_multiple_suppliers ?? row.raw?.hasMultipleSuppliers ?? false),
+    supplierCoverageMatchType: row.supplier_coverage_match_type ?? row.raw?.supplierCoverageMatchType ?? "",
+    supplierCoverageUpdatedAt: row.supplier_coverage_updated_at?.toISOString?.() || row.raw?.supplierCoverageUpdatedAt || "",
     createdAt: row.created_at?.toISOString?.() || row.raw?.createdAt || "",
     updatedAt: row.updated_at?.toISOString?.() || row.raw?.updatedAt || ""
   };
@@ -4996,6 +5269,7 @@ function offerRowToState(row = {}) {
     id: row.offer_id,
     productId: row.product_id || row.raw?.productId || "",
     vendorId: row.vendor_id || row.raw?.vendorId || "",
+    supplier: row.supplier_name || row.vendor_name || row.raw?.supplier || row.raw?.vendor || "",
     sourceKey: row.source_key || row.raw?.sourceKey || "",
     vendorSku: row.vendor_sku || row.raw?.vendorSku || "",
     cost: row.cost ?? row.raw?.cost,
@@ -5071,10 +5345,11 @@ async function readProductByKey(key) {
       order by identifier_type, identifier_value
     `, [productId]),
     client.query(`
-      select *
-      from vendor_offers
-      where product_id = $1
-      order by observed_at desc
+      select vo.*, v.name as supplier_name, v.code as supplier_code
+      from vendor_offers vo
+      left join vendors v on v.vendor_id = vo.vendor_id
+      where vo.product_id = $1
+      order by vo.observed_at desc
       limit 25
     `, [productId]),
     client.query(`
@@ -5416,6 +5691,11 @@ async function listProducts(options = {}) {
         and coalesce(trim(supplier), '') = ''
       )
     )`);
+  }
+  const multipleSupplierValues = [...new Set(splitFilterValues(filters.multipleSuppliers).map(parseFilterBoolean))];
+  if (multipleSupplierValues.length === 1) {
+    params.push(multipleSupplierValues[0]);
+    where.push(`products.has_multiple_suppliers = $${params.length}`);
   }
   const activeValues = [...new Set(splitFilterValues(filters.active).map(parseFilterBoolean))];
   if (activeValues.length === 1) {
@@ -5862,6 +6142,7 @@ async function listProducts(options = {}) {
   let inventory = result.rows.slice(0, limit).map(productRowToState);
   if (options.includeInventoryLevels) inventory = await hydrateProductsWithInventoryLevels(inventory);
   inventory = await hydrateProductsWithShopifyStatuses(inventory);
+  if (options.includeVendorOffers) inventory = await hydrateProductsWithVendorOffers(inventory);
   return {
     inventory,
     total: countResult?.rows[0]?.total || 0,
@@ -6306,6 +6587,31 @@ async function hydrateProductsWithShopifyStatuses(items = []) {
       shopifyVariantIds: [...new Set(statuses.map((status) => String(status.shopifyVariantId || "").trim()).filter(Boolean))]
     };
   });
+}
+
+async function hydrateProductsWithVendorOffers(items = []) {
+  const client = getPool();
+  const productIds = [...new Set((Array.isArray(items) ? items : [])
+    .map((item) => nullableString(item.id))
+    .filter(Boolean))];
+  if (!client || !productIds.length) return items;
+  const result = await client.query(`
+    select vo.*, v.name as supplier_name, v.code as supplier_code
+    from vendor_offers vo
+    left join vendors v on v.vendor_id = vo.vendor_id
+    where vo.product_id = any($1::text[])
+    order by vo.product_id, vo.observed_at desc
+  `, [productIds]);
+  const offersByProduct = new Map();
+  for (const row of result.rows) {
+    const offers = offersByProduct.get(row.product_id) || [];
+    offers.push(offerRowToState(row));
+    offersByProduct.set(row.product_id, offers);
+  }
+  return items.map((item) => ({
+    ...item,
+    vendorOffers: offersByProduct.get(String(item.id || "")) || []
+  }));
 }
 
 async function listCategoryProductStats() {
@@ -7029,6 +7335,7 @@ module.exports = {
   listProductChangeEvents,
   readCategoryState,
   readVendorCatalogItemsBySkus,
+  findVendorCatalogSupplierMatches,
   sourceCatalogSearchIndexStatus,
   readOperationJobs,
   readOperationJobsPage,
@@ -7078,6 +7385,7 @@ module.exports = {
   applyVendorCategoryMainMapping,
   vendorCatalogFacets,
   refreshVendorCatalogFacets,
+  refreshVendorSupplierCoverage,
   isPostgresEnabled,
   readState,
   readStateField,

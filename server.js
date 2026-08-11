@@ -729,6 +729,9 @@ const DEFAULT_EXPORT_MAPPINGS = [
 ];
 
 const DEFAULT_CHANNEL_SETTINGS = {
+  // Master circuit breaker for every channel workflow. Individual settings are
+  // preserved so turning the channel back on restores the configured behavior.
+  channelEnabled: true,
   defaultShadowStatus: "Draft",
   defaultHandlingTimeDays: 2,
   defaultSafetyQty: 0,
@@ -805,6 +808,11 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayOrderImportScheduleType: "times",
   ebayOrderImportScheduleTimes: "05:00,17:00",
   ebayOrderImportScheduleEveryHours: 12,
+  ebayPriceInventorySyncScheduleEnabled: false,
+  ebayPriceInventorySyncScheduleType: "times",
+  ebayPriceInventorySyncScheduleTimes: "04:00,16:00",
+  ebayPriceInventorySyncScheduleEveryHours: 12,
+  ebayPriceInventorySyncLimit: 1000,
   ebayListingLaunchLimit: 500,
   ebayWebhookEnabled: false,
   ebayWebhookOrderSyncEnabled: true,
@@ -985,6 +993,7 @@ function publicVendorFeedSchedule(feed = {}) {
 }
 
 async function queueShopifyVariantPricePushJob(db, body = {}, options = {}) {
+  requireEnabledChannel(db, "Shopify");
   const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))];
   const dryRun = body.apply === true ? false : body.dryRun !== false;
   const suppliedFilters = body.filters && typeof body.filters === "object" ? body.filters : {};
@@ -1008,6 +1017,7 @@ async function queueShopifyVariantPricePushJob(db, body = {}, options = {}) {
 }
 
 async function queueShopifyShippingEligibilitySyncJob(db, body = {}) {
+  requireEnabledChannel(db, "Shopify");
   const requestedSkus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))];
   const dryRun = body.apply === true ? false : body.dryRun !== false;
   const limit = Math.max(1, Math.min(25000, Number(body.limit || 1000) || 1000));
@@ -3885,10 +3895,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayListingLaunchLimit", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -3908,6 +3918,10 @@ function normalizeChannel(channel = {}) {
   settings.ebayOrderImportScheduleType = String(settings.ebayOrderImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.ebayOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.ebayOrderImportScheduleEveryHours || 12) || 12));
   settings.ebayOrderImportScheduleTimes = normalizeChannelScheduleTimes(settings.ebayOrderImportScheduleTimes || DEFAULT_CHANNEL_SETTINGS.ebayOrderImportScheduleTimes);
+  settings.ebayPriceInventorySyncLimit = Math.max(1, Math.min(25000, Number(settings.ebayPriceInventorySyncLimit || 1000) || 1000));
+  settings.ebayPriceInventorySyncScheduleType = String(settings.ebayPriceInventorySyncScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
+  settings.ebayPriceInventorySyncScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.ebayPriceInventorySyncScheduleEveryHours || 12) || 12));
+  settings.ebayPriceInventorySyncScheduleTimes = normalizeChannelScheduleTimes(settings.ebayPriceInventorySyncScheduleTimes || DEFAULT_CHANNEL_SETTINGS.ebayPriceInventorySyncScheduleTimes);
   settings.ebayPricingMode = ["cost-plus", "product-price", "higher-of-product-or-cost"].includes(String(settings.ebayPricingMode || "").trim())
     ? String(settings.ebayPricingMode).trim()
     : DEFAULT_CHANNEL_SETTINGS.ebayPricingMode;
@@ -3939,7 +3953,7 @@ function normalizeChannel(channel = {}) {
     id: channel.id || crypto.randomUUID(),
     name: channel.name || "Marketplace",
     connected: Boolean(channel.connected),
-    status: channel.status || (channel.connected ? "active" : "inactive"),
+    status: settings.channelEnabled === false ? "inactive" : (channel.status || (channel.connected ? "active" : "inactive")),
     lastSync: channel.lastSync || null,
     logoUrl: channel.logoUrl || "",
     logoDataUrl: channel.logoDataUrl || "",
@@ -3988,6 +4002,21 @@ function findChannelByName(db, name = "") {
   return (db.connections || []).find((channel) => String(channel.name || "").toLowerCase() === key);
 }
 
+function requireEnabledChannel(db, name = "") {
+  const channel = findChannelByName(db, name);
+  if (!channel) {
+    const error = new Error(`${name} channel was not found.`);
+    error.statusCode = 404;
+    throw error;
+  }
+  if (channel.settings?.channelEnabled === false) {
+    const error = new Error(`${name} is disabled. Enable the channel in Channel Settings before running this operation.`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return channel;
+}
+
 function resolveShopifyInventoryLocation(db, body = {}) {
   const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
   const warehouses = Array.isArray(db.warehouses) ? db.warehouses.map(normalizeWarehouse) : [];
@@ -4009,6 +4038,7 @@ function resolveShopifyInventoryLocation(db, body = {}) {
 }
 
 async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
+  requireEnabledChannel(db, "Shopify");
   const apply = body.apply !== false && body.dryRun !== true;
   const limit = Math.max(0, Number(body.limit || 0) || 0);
   const productBatchSize = Math.max(1, Math.min(50, Number(body.productBatchSize || 35) || 35));
@@ -4100,12 +4130,7 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
 async function queueShopifySkuMapSyncJob(db, body = {}, options = {}) {
   const limit = Math.max(0, Math.min(500000, Number(body.limit || 0) || 0));
   const pageSize = Math.max(1, Math.min(250, Number(body.pageSize || 250) || 250));
-  const channel = findChannelByName(db, "Shopify");
-  if (!channel) {
-    const error = new Error("Shopify channel was not found.");
-    error.statusCode = 404;
-    throw error;
-  }
+  const channel = requireEnabledChannel(db, "Shopify");
   const workerPayload = {
     limit,
     pageSize,
@@ -4169,13 +4194,8 @@ async function queueShopifySkuMapSyncJob(db, body = {}, options = {}) {
 }
 
 async function queueShopifyOrderImportJob(db, body = {}, options = {}) {
-  const channel = findChannelByName(db, "Shopify");
+  const channel = requireEnabledChannel(db, "Shopify");
   const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
-  if (!channel) {
-    const error = new Error("Shopify channel was not found.");
-    error.statusCode = 404;
-    throw error;
-  }
   if (!settings.shopifyOrderImportEnabled) {
     const error = new Error("Enable Shopify order imports in Channel Settings before importing orders.");
     error.statusCode = 400;
@@ -9744,7 +9764,9 @@ function normalizeVendor(db, vendor) {
     vendorNumber: vendor.vendorNumber || nextVendorNumber(db),
     name: vendorName || "Unnamed vendor",
     code: vendorCode,
-    status: vendor.status || "active",
+    // A supplier must be deliberately enabled for the managed catalog. Old
+    // vendor records did not carry this setting and otherwise looked active.
+    status: vendor.status || "inactive",
     type: vendor.type || "Supplier",
     contactName: vendor.contactName || "",
     email: vendor.email || "",
@@ -9823,10 +9845,11 @@ function normalizeVendor(db, vendor) {
     },
     catalogSettings: {
       // Participation is keyed to the upstream feed code, never a brand or display name.
-      enabled: vendor.catalogSettings?.enabled !== false,
+      // Default the identity to the vendor code, but keep catalog participation opt-in.
+      enabled: vendor.catalogSettings?.enabled === true,
       sourceCodes: [...new Set((Array.isArray(vendor.catalogSettings?.sourceCodes)
         ? vendor.catalogSettings.sourceCodes
-        : String(vendor.catalogSettings?.sourceCodes || "").split(/[|,\n]/))
+        : String(vendor.catalogSettings?.sourceCodes || vendorCode || "").split(/[|,\n]/))
         .map((value) => String(value || "").trim()).filter(Boolean))],
       note: vendor.catalogSettings?.note || ""
     },
@@ -12574,6 +12597,7 @@ function startEbayAccountSettingsSyncJob(jobId) {
 }
 
 function queueEbayAccountSettingsSyncJob(db) {
+  requireEnabledChannel(db, "eBay");
   const job = createImportJob(db, {
     section: "Channels",
     operation: "eBay account settings sync",
@@ -12594,7 +12618,7 @@ function queueEbayAccountSettingsSyncJob(db) {
     setActiveJobProgress(job.id, {
       status: "queued",
       phase: "queued",
-      totalRows: 4,
+      totalRows: 5,
       processedRows: 0,
       startedAt: job.startedAt || new Date().toISOString()
     });
@@ -12604,13 +12628,8 @@ function queueEbayAccountSettingsSyncJob(db) {
 }
 
 async function queueEbayOrderImportJob(db, body = {}, options = {}) {
-  const channel = findChannelByName(db, "eBay");
+  const channel = requireEnabledChannel(db, "eBay");
   const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
-  if (!channel) {
-    const error = new Error("eBay channel was not found.");
-    error.statusCode = 404;
-    throw error;
-  }
   if (!settings.ebayOrderImportEnabled) {
     const error = new Error("Enable eBay order imports in Channel Settings before importing orders.");
     error.statusCode = 400;
@@ -12687,6 +12706,82 @@ async function queueEbayOrderImportJob(db, body = {}, options = {}) {
   return { duplicate: false, job, workerPayload };
 }
 
+async function queueEbayPriceInventorySyncJob(db, body = {}, options = {}) {
+  const channel = requireEnabledChannel(db, "eBay");
+  const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+  if (settings.ebayInventoryUpdateEnabled === false && settings.ebayPriceUpdateEnabled === false) {
+    const error = new Error("Enable eBay inventory updates, price updates, or both before running a listing sync.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const limit = Math.max(1, Math.min(25000, Number(body.limit || settings.ebayPriceInventorySyncLimit || 1000) || 1000));
+  const workerPayload = {
+    limit,
+    updateInventory: body.updateInventory === undefined
+      ? settings.ebayInventoryUpdateEnabled !== false
+      : ebayBoolean(body.updateInventory),
+    updatePrice: body.updatePrice === undefined
+      ? settings.ebayPriceUpdateEnabled !== false
+      : ebayBoolean(body.updatePrice),
+    scheduled: options.scheduled === true,
+    scheduleKey: options.scheduleKey || ""
+  };
+  const activeSync = await findActiveImportJobByWorkerTask(db, "ebay-price-inventory-sync");
+  if (activeSync) return { duplicate: true, job: activeSync, workerPayload };
+  const duplicate = await findActiveDuplicateImportJob(db, {
+    section: "Products",
+    operation: options.operation || "eBay price and inventory sync",
+    direction: "sync",
+    fileName: "ebay-price-inventory-sync-results.csv",
+    workerTask: "ebay-price-inventory-sync",
+    workerPayload
+  });
+  if (duplicate) return { duplicate: true, job: duplicate, workerPayload };
+  const changes = [workerPayload.updatePrice ? "prices" : "", workerPayload.updateInventory ? "inventory" : ""].filter(Boolean).join(" and ");
+  const job = createImportJob(db, {
+    section: "Products",
+    category: "eBay",
+    operation: options.operation || "eBay price and inventory sync",
+    direction: "sync",
+    status: "queued",
+    fileName: "ebay-price-inventory-sync-results.csv",
+    totalRows: limit,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "ebay-price-inventory-sync",
+    workerPayload: shouldRunJobsInline() ? {} : workerPayload,
+    message: `${options.scheduled ? "Scheduled " : ""}eBay ${changes} sync queued for up to ${limit.toLocaleString()} existing eBay listings. New listings will not be created.`
+  });
+  upsertImportJobStore(job);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  appendChannelApiLog({
+    channel: "eBay",
+    transport: "Job",
+    method: "QUEUE",
+    path: "ebay-price-inventory",
+    operation: `${options.scheduled ? "Scheduled " : ""}eBay price and inventory sync queued`,
+    statusCode: 202,
+    ok: true,
+    jobId: job.id,
+    message: job.message
+  });
+  if (shouldRunJobsInline()) {
+    setTimeout(() => runEbayPriceInventorySyncWorkerJob(job, workerPayload).catch((error) => {
+      finishImportJob(job, {
+        status: "failed",
+        phase: "failed",
+        message: error.message || "eBay price and inventory sync failed.",
+        errors: [error.message || "eBay price and inventory sync failed."],
+        missingCount: 1,
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+    }), 25);
+  }
+  return { duplicate: false, job, workerPayload };
+}
+
 function normalizeEbayListingLifecycleAction(value = "launch") {
   const action = String(value || "launch").trim().toLowerCase();
   if (["launch", "review", "compliance", "revise", "relist", "end"].includes(action)) return action;
@@ -12705,13 +12800,8 @@ function ebayListingLifecycleLabel(action = "launch") {
 }
 
 async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
-  const channel = findChannelByName(db, "eBay");
+  const channel = requireEnabledChannel(db, "eBay");
   const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
-  if (!channel) {
-    const error = new Error("eBay channel was not found.");
-    error.statusCode = 404;
-    throw error;
-  }
   const selectedKeys = [...new Set((Array.isArray(body.skus) ? body.skus : Array.isArray(body.ids) ? body.ids : [])
     .map((value) => String(value || "").trim())
     .filter(Boolean))];
@@ -12892,6 +12982,7 @@ function startEbayLocationJob(jobId, body = {}) {
 }
 
 function queueEbayLocationJob(db, body = {}) {
+  requireEnabledChannel(db, "eBay");
   const merchantLocationKey = ebayMerchantLocationKeyFromBody(body);
   ebayLocationPayload(body);
   const job = createImportJob(db, {
@@ -13892,6 +13983,371 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
   return job;
 }
 
+function normalizeShopifyRequestedProductStatus(value = "") {
+  const status = String(value || "").trim().toUpperCase();
+  return ["ACTIVE", "DRAFT", "ARCHIVED"].includes(status) ? status : "ACTIVE";
+}
+
+async function shopifyProductStatusUpdateCandidateProducts(payload = {}) {
+  const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
+    .map((sku) => String(sku || "").trim())
+    .filter(Boolean))];
+  const limit = Math.max(1, Math.min(25000, Number(payload.limit || 100) || 100));
+  if (requestedSkus.length) return postgres.readProductsByKeys(requestedSkus.slice(0, limit));
+  const result = await postgres.listProducts({
+    q: payload.query || "",
+    filters: payload.filters || { channelStatus: "shopify-linked" },
+    page: 1,
+    limit
+  });
+  return result?.items || result?.inventory || [];
+}
+
+async function runShopifyProductStatusUpdateWorkerJob(job = {}, attrs = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const requestedStatus = normalizeShopifyRequestedProductStatus(payload.status);
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "preparing_shopify_status_update",
+    startedAt,
+    message: `Preparing Shopify ${requestedStatus.toLowerCase()} status update...`
+  });
+
+  const candidates = await shopifyProductStatusUpdateCandidateProducts(payload);
+  const prepared = [];
+  const skipped = [];
+  for (const item of candidates) {
+    const shopifyId = normalizeShopifyProductGid(item.shopifyId || item.shopifyProductId);
+    if (!shopifyId) {
+      skipped.push({ sku: item.sku || "", issue: "No Shopify product link" });
+      continue;
+    }
+    if (requestedStatus === "ACTIVE" && item.toBeDiscontinued === true) {
+      skipped.push({ sku: item.sku || "", shopify_product_id: shopifyId, issue: "Discontinued products are not activated" });
+      continue;
+    }
+    prepared.push({ item, shopifyId });
+  }
+
+  const report = {
+    requestedStatus,
+    productsLoaded: candidates.length,
+    productsPrepared: prepared.length,
+    productsUpdated: 0,
+    alreadyAtStatus: 0,
+    skipped,
+    userErrors: [],
+    updated: []
+  };
+  await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "updating_shopify_product_status",
+    totalRows: prepared.length,
+    processedRows: 0,
+    changed: 0,
+    missingCount: skipped.length,
+    progressPercent: 5,
+    message: `Updating ${prepared.length.toLocaleString()} Shopify product${prepared.length === 1 ? "" : "s"} to ${requestedStatus.toLowerCase()}...`
+  });
+
+  const mutation = `
+    mutation DataPlusProductStatusUpdate($product: ProductUpdateInput!) {
+      productUpdate(product: $product) {
+        product {
+          id
+          title
+          handle
+          status
+          publishedAt
+          updatedAt
+          onlineStoreUrl
+          variants(first: 100) { nodes { id sku inventoryQuantity } }
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+  const touched = [];
+  const statusPatch = {};
+  let processed = 0;
+  for (const { item, shopifyId } of prepared) {
+    try {
+      const data = await shopifyGraphqlRequestAuto(mutation, {
+        product: { id: shopifyId, status: requestedStatus }
+      }, { jobId: job.id, operation: `Set Shopify product ${requestedStatus.toLowerCase()}` });
+      const result = data?.productUpdate || {};
+      const userErrors = result.userErrors || [];
+      if (userErrors.length) {
+        report.userErrors.push({
+          sku: item.sku || "",
+          shopify_product_id: shopifyId,
+          message: userErrors.map((error) => `${Array.isArray(error.field) ? error.field.join(".") : error.field || "product"}: ${error.message}`).join("; ")
+        });
+      } else if (result.product) {
+        const before = normalizeShopifyStatus(item.shopifyStatus);
+        const synced = shopifyStatusPayloadFromProduct(result.product, item);
+        const fields = ["shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublished", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource", "shopifyOnlineStoreUrl", "shopifyVariantSku", "shopifyVariantCount"];
+        for (const field of fields) {
+          if (synced[field] !== undefined) item[field] = synced[field];
+        }
+        item.shopifySyncSource = "shopify-api-status-update";
+        item.updatedAt = new Date().toISOString();
+        touched.push(item);
+        if (item.sku) statusPatch[String(item.sku).toLowerCase()] = { ...synced, sku: item.sku, shopifySyncSource: item.shopifySyncSource };
+        if (before === normalizeShopifyStatus(synced.shopifyStatus)) report.alreadyAtStatus += 1;
+        else report.productsUpdated += 1;
+        report.updated.push({
+          sku: item.sku || "",
+          shopify_product_id: synced.shopifyId || shopifyId,
+          shopify_status: synced.shopifyStatus || "",
+          shopify_published: synced.shopifyPublished === true ? "true" : "false",
+          shopify_online_store_url: synced.shopifyOnlineStoreUrl || ""
+        });
+      }
+    } catch (error) {
+      report.userErrors.push({ sku: item.sku || "", shopify_product_id: shopifyId, message: error.message || String(error) });
+    }
+    processed += 1;
+    if (processed % 10 === 0 || processed === prepared.length) {
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "updating_shopify_product_status",
+        totalRows: prepared.length,
+        processedRows: processed,
+        changed: report.productsUpdated,
+        missingCount: skipped.length + report.userErrors.length,
+        progressPercent: 5 + Math.min(90, Math.round((processed / Math.max(1, prepared.length)) * 90)),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, prepared.length),
+        message: `Updated ${report.productsUpdated.toLocaleString()} of ${prepared.length.toLocaleString()} Shopify product${prepared.length === 1 ? "" : "s"} to ${requestedStatus.toLowerCase()}...`
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  if (touched.length) await postgres.upsertProductsFromState(touched);
+  if (Object.keys(statusPatch).length) mergeShopifyStatusMapSync(statusPatch);
+
+  const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "shopify-product-status-update"));
+  fs.mkdirSync(jobDir, { recursive: true });
+  const reportPath = path.join(jobDir, "shopify-product-status-update-report.json");
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  job.artifacts = Array.isArray(job.artifacts) ? job.artifacts : [];
+  const addArtifact = (kind, fileName, rows) => {
+    if (!rows.length) return;
+    const filePath = path.join(jobDir, fileName);
+    fs.writeFileSync(filePath, csvRecordsToText(rows));
+    job.artifacts.push({ kind, fileName, filePath, contentType: "text/csv; charset=utf-8", rowCount: rows.length, byteSize: fs.statSync(filePath).size });
+  };
+  addArtifact("shopify-status-updated-skus", "shopify-product-status-updated.csv", report.updated);
+  addArtifact("shopify-status-update-skipped", "shopify-product-status-skipped.csv", skipped);
+  addArtifact("shopify-status-update-errors", "shopify-product-status-errors.csv", report.userErrors);
+  job.originalFilePath = reportPath;
+  job.originalFileName = path.basename(reportPath);
+  job.fileName = path.basename(reportPath);
+  finishImportJob(job, {
+    status: report.userErrors.length || skipped.length ? "warning" : "success",
+    phase: "complete",
+    message: `Shopify ${requestedStatus.toLowerCase()} update finished: ${report.productsUpdated.toLocaleString()} changed; ${report.alreadyAtStatus.toLocaleString()} already ${requestedStatus.toLowerCase()}.`,
+    details: `${skipped.length.toLocaleString()} skipped; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
+    totalRows: prepared.length,
+    processedRows: prepared.length,
+    changed: report.productsUpdated,
+    missingCount: skipped.length + report.userErrors.length,
+    errors: [
+      ...skipped.slice(0, 25).map((row) => `${row.sku || "blank sku"}: ${row.issue}`),
+      ...report.userErrors.slice(0, 25).map((row) => `${row.sku || "Shopify"}: ${row.message}`)
+    ].slice(0, 50),
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job);
+  await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+  await Promise.all(job.artifacts.map((artifact) => postgres.upsertOperationArtifact(job, artifact.kind).catch(() => {})));
+  publicStateJsonCache = null;
+  return job;
+}
+
+async function runShopifyProductPublicationWorkerJob(job = {}, attrs = {}) {
+  const startedAt = job.startedAt || new Date().toISOString();
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const publicationId = String(payload.publicationId || "").trim();
+  const publicationName = String(payload.publicationName || "Online Store").trim() || "Online Store";
+  if (!/^gid:\/\/shopify\/Publication\/\d+$/i.test(publicationId)) {
+    throw new Error("Choose a valid Shopify publication before publishing products.");
+  }
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "preparing_shopify_publication",
+    startedAt,
+    message: `Preparing Shopify publication to ${publicationName}...`
+  });
+
+  const candidates = await shopifyProductStatusUpdateCandidateProducts(payload);
+  const prepared = [];
+  const skipped = [];
+  for (const item of candidates) {
+    const shopifyId = normalizeShopifyProductGid(item.shopifyId || item.shopifyProductId);
+    if (!shopifyId) {
+      skipped.push({ sku: item.sku || "", issue: "No Shopify product link" });
+      continue;
+    }
+    if (item.toBeDiscontinued === true) {
+      skipped.push({ sku: item.sku || "", shopify_product_id: shopifyId, issue: "Discontinued products are not published" });
+      continue;
+    }
+    prepared.push({ item, shopifyId });
+  }
+
+  const report = {
+    publicationId,
+    publicationName,
+    productsLoaded: candidates.length,
+    productsPrepared: prepared.length,
+    productsPublished: 0,
+    skipped,
+    userErrors: [],
+    updated: []
+  };
+  await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "publishing_to_shopify_channel",
+    totalRows: prepared.length,
+    processedRows: 0,
+    changed: 0,
+    missingCount: skipped.length,
+    progressPercent: 5,
+    message: `Publishing ${prepared.length.toLocaleString()} active Shopify product${prepared.length === 1 ? "" : "s"} to ${publicationName}...`
+  });
+
+  const touched = [];
+  const statusPatch = {};
+  const batchSize = 5;
+  let processed = 0;
+  for (let start = 0; start < prepared.length; start += batchSize) {
+    const batch = prepared.slice(start, start + batchSize);
+    const variableDefinitions = ["$input: [PublicationInput!]!", "$publicationId: ID!"];
+    const variables = {
+      input: [{ publicationId }],
+      publicationId
+    };
+    const selections = batch.map(({ shopifyId }, index) => {
+      variableDefinitions.push(`$id${index}: ID!`);
+      variables[`id${index}`] = shopifyId;
+      return `p${index}: publishablePublish(id: $id${index}, input: $input) { publishable { ... on Product { id publishedOnPublication(publicationId: $publicationId) } } userErrors { field message } }`;
+    });
+    try {
+      const mutation = `mutation DataPlusProductPublication(${variableDefinitions.join(", ")}) { ${selections.join(" ")} }`;
+      const data = await shopifyGraphqlRequestAuto(mutation, variables, {
+        jobId: job.id,
+        operation: `Publish Shopify products to ${publicationName}`
+      });
+      for (let index = 0; index < batch.length; index += 1) {
+        const { item, shopifyId } = batch[index];
+        const result = data?.[`p${index}`] || {};
+        const userErrors = result.userErrors || [];
+        const published = result.publishable?.publishedOnPublication === true;
+        if (userErrors.length || !published) {
+          report.userErrors.push({
+            sku: item.sku || "",
+            shopify_product_id: shopifyId,
+            message: userErrors.length
+              ? userErrors.map((error) => `${Array.isArray(error.field) ? error.field.join(".") : error.field || "publication"}: ${error.message}`).join("; ")
+              : `Shopify did not confirm publication to ${publicationName}.`
+          });
+          continue;
+        }
+        const publishedAt = new Date().toISOString();
+        item.shopifyPublished = true;
+        item.shopifyPublishedAt = item.shopifyPublishedAt || publishedAt;
+        item.shopifyOnlineStorePublished = publicationName.toLowerCase() === "online store" ? true : item.shopifyOnlineStorePublished;
+        item.shopifyOnlineStorePublishedAt = publicationName.toLowerCase() === "online store" ? publishedAt : item.shopifyOnlineStorePublishedAt;
+        item.shopifySyncSource = "shopify-api-publication-update";
+        item.updatedAt = publishedAt;
+        touched.push(item);
+        if (item.sku) {
+          statusPatch[String(item.sku).toLowerCase()] = {
+            sku: item.sku,
+            shopifyId,
+            shopifyStatus: item.shopifyStatus,
+            shopifyPublished: true,
+            shopifyPublishedAt: item.shopifyPublishedAt,
+            shopifyOnlineStorePublished: item.shopifyOnlineStorePublished === true,
+            shopifyOnlineStorePublishedAt: item.shopifyOnlineStorePublishedAt || "",
+            shopifySyncSource: item.shopifySyncSource
+          };
+        }
+        report.productsPublished += 1;
+        report.updated.push({
+          sku: item.sku || "",
+          shopify_product_id: shopifyId,
+          publication: publicationName,
+          published: "true"
+        });
+      }
+    } catch (error) {
+      for (const { item, shopifyId } of batch) {
+        report.userErrors.push({ sku: item.sku || "", shopify_product_id: shopifyId, message: error.message || String(error) });
+      }
+    }
+    processed += batch.length;
+    await persistWorkerImportJob(job, {
+      status: "running",
+      phase: "publishing_to_shopify_channel",
+      totalRows: prepared.length,
+      processedRows: processed,
+      changed: report.productsPublished,
+      missingCount: skipped.length + report.userErrors.length,
+      progressPercent: 5 + Math.min(90, Math.round((processed / Math.max(1, prepared.length)) * 90)),
+      estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, processed, prepared.length),
+      message: `Published ${report.productsPublished.toLocaleString()} of ${prepared.length.toLocaleString()} Shopify product${prepared.length === 1 ? "" : "s"} to ${publicationName}...`
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  if (touched.length) await postgres.upsertProductsFromState(touched);
+  if (Object.keys(statusPatch).length) mergeShopifyStatusMapSync(statusPatch);
+
+  const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "shopify-product-publication-update"));
+  fs.mkdirSync(jobDir, { recursive: true });
+  const reportPath = path.join(jobDir, "shopify-product-publication-update-report.json");
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  job.artifacts = Array.isArray(job.artifacts) ? job.artifacts : [];
+  const addArtifact = (kind, fileName, rows) => {
+    if (!rows.length) return;
+    const filePath = path.join(jobDir, fileName);
+    fs.writeFileSync(filePath, csvRecordsToText(rows));
+    job.artifacts.push({ kind, fileName, filePath, contentType: "text/csv; charset=utf-8", rowCount: rows.length, byteSize: fs.statSync(filePath).size });
+  };
+  addArtifact("shopify-publication-updated-skus", "shopify-product-publication-updated.csv", report.updated);
+  addArtifact("shopify-publication-update-skipped", "shopify-product-publication-skipped.csv", skipped);
+  addArtifact("shopify-publication-update-errors", "shopify-product-publication-errors.csv", report.userErrors);
+  job.originalFilePath = reportPath;
+  job.originalFileName = path.basename(reportPath);
+  job.fileName = path.basename(reportPath);
+  finishImportJob(job, {
+    status: report.userErrors.length || skipped.length ? "warning" : "success",
+    phase: "complete",
+    message: `Shopify publication to ${publicationName} finished: ${report.productsPublished.toLocaleString()} product${report.productsPublished === 1 ? "" : "s"} published.`,
+    details: `${skipped.length.toLocaleString()} skipped; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
+    totalRows: prepared.length,
+    processedRows: prepared.length,
+    changed: report.productsPublished,
+    missingCount: skipped.length + report.userErrors.length,
+    errors: [
+      ...skipped.slice(0, 25).map((row) => `${row.sku || "blank sku"}: ${row.issue}`),
+      ...report.userErrors.slice(0, 25).map((row) => `${row.sku || "Shopify"}: ${row.message}`)
+    ].slice(0, 50),
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job);
+  await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+  await Promise.all(job.artifacts.map((artifact) => postgres.upsertOperationArtifact(job, artifact.kind).catch(() => {})));
+  publicStateJsonCache = null;
+  return job;
+}
+
 async function runShopifyExistingVariantLinkWorkerJob(job = {}, attrs = {}) {
   const startedAt = job.startedAt || new Date().toISOString();
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
@@ -14835,6 +15291,165 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     const message = error.message || `${label} failed.`;
     await persistWorkerImportJob(job, { status: "failed", phase: "failed", missingCount: 1, errors: [message], estimatedSecondsRemaining: 0, message, finishedAt: new Date().toISOString() });
     appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: `${label} failed`, statusCode: 502, ok: false, jobId: job.id, message });
+    throw error;
+  }
+}
+
+async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const limit = Math.max(1, Math.min(25000, Number(payload.limit || job.totalRows || 1000) || 1000));
+  const updateInventory = payload.updateInventory !== false;
+  const updatePrice = payload.updatePrice !== false;
+  if (!updateInventory && !updatePrice) throw new Error("Choose eBay inventory updates, price updates, or both.");
+  const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "preparing_ebay_price_inventory_sync",
+    totalRows: limit,
+    processedRows: 0,
+    startedAt,
+    message: `Preparing eBay ${[updatePrice ? "prices" : "", updateInventory ? "inventory" : ""].filter(Boolean).join(" and ")} updates for existing listings...`
+  });
+  appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-price-inventory", operation: "eBay price and inventory sync started", statusCode: 102, ok: true, jobId: job.id, message: job.message });
+  try {
+    const [workDb, candidates] = await Promise.all([
+      readDbFast({ skipInventory: true }).then(normalizeDb),
+      ebayListingLaunchCandidates({ allFiltered: true, filters: { channelStatusAll: ["ebay-detected"] }, limit })
+    ]);
+    const linked = candidates.filter((item) => {
+      const listing = item?.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+      return Boolean(listing.offerId || listing.listingId);
+    });
+    const total = linked.length;
+    await persistWorkerImportJob(job, { totalRows: total, processedRows: 0, progressPercent: 0, estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, 0, total) });
+    if (!total) {
+      finishImportJob(job, {
+        status: "success",
+        phase: "complete",
+        totalRows: 0,
+        processedRows: 0,
+        changed: 0,
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0,
+        message: "No linked eBay offers were found. Run eBay offer and listing status sync first, or launch a listing before syncing it."
+      });
+      await postgres.upsertOperationJob(job);
+      appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-price-inventory", operation: "eBay price and inventory sync completed", statusCode: 200, ok: true, jobId: job.id, message: job.message });
+      return job;
+    }
+    const prepared = [];
+    const rows = [];
+    const errors = [];
+    const touched = [];
+    for (const item of linked) {
+      const sku = String(item.sku || item.id || "").trim();
+      try {
+        const config = ebayListingConfig(workDb, item, {});
+        const previous = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+        const inventorySku = String(config.merchantSku || sku).trim();
+        const request = { sku: inventorySku };
+        const previousPrice = Number(previous.price || 0);
+        const previousQuantity = Number(previous.quantity || 0);
+        const priceChanged = updatePrice && Math.abs(Number(config.price || 0) - previousPrice) >= 0.005;
+        const quantityChanged = updateInventory && Number(config.quantity || 0) !== previousQuantity;
+        if (priceChanged) request.price = { currency: config.currency || "USD", value: String(Number(config.price || 0).toFixed(2)) };
+        if (quantityChanged) request.shipToLocationAvailability = { quantity: Math.max(0, Math.floor(Number(config.quantity || 0))) };
+        if (!priceChanged && !quantityChanged) {
+          rows.push({ sku, status: "unchanged", previous_price: previousPrice || "", target_price: Number(config.price || 0), previous_quantity: Number.isFinite(previousQuantity) ? previousQuantity : "", target_quantity: Number(config.quantity || 0), offer_id: previous.offerId || "", listing_id: previous.listingId || "" });
+          continue;
+        }
+        prepared.push({ item, sku, config, previous, request, priceChanged, quantityChanged });
+      } catch (error) {
+        const message = error.message || "Could not prepare eBay price or inventory update.";
+        errors.push({ sku, issue: message });
+        rows.push({ sku, status: "failed", error: message });
+      }
+    }
+    let processed = rows.length;
+    const batches = [];
+    for (let index = 0; index < prepared.length; index += 25) batches.push(prepared.slice(index, index + 25));
+    for (const batch of batches) {
+      const response = await ebayRequest(workDb, "/sell/inventory/v1/bulk_update_price_quantity", {
+        method: "POST",
+        body: { requests: batch.map((entry) => entry.request) }
+      });
+      const responseRows = Array.isArray(response?.responses) ? response.responses : [];
+      for (let index = 0; index < batch.length; index += 1) {
+        const entry = batch[index];
+        const responseRow = responseRows[index] || {};
+        const responseErrors = Array.isArray(responseRow.errors) ? responseRow.errors : [];
+        const failed = Number(responseRow.statusCode || 200) >= 400 || responseErrors.length;
+        const issue = responseErrors.map((row) => row.longMessage || row.message || row.errorId).filter(Boolean).join("; ");
+        if (failed) {
+          const message = issue || `eBay rejected this ${Number(responseRow.statusCode || 0) || ""} update.`.trim();
+          errors.push({ sku: entry.sku, issue: message });
+          rows.push({ sku: entry.sku, status: "failed", error: message, previous_price: entry.previous.price || "", target_price: entry.config.price, previous_quantity: entry.previous.quantity ?? "", target_quantity: entry.config.quantity, offer_id: entry.previous.offerId || "", listing_id: entry.previous.listingId || "" });
+        } else {
+          const now = new Date().toISOString();
+          entry.item.ebayListing = {
+            ...entry.previous,
+            ...entry.config,
+            price: entry.config.price,
+            quantity: entry.config.quantity,
+            updatedAt: now,
+            lastPriceInventorySyncAt: now,
+            lastLifecycleAction: "price_inventory_sync",
+            history: appendEbayListingHistory(entry.previous, {
+              action: "price_inventory_sync",
+              message: `eBay ${[entry.priceChanged ? "price" : "", entry.quantityChanged ? "inventory" : ""].filter(Boolean).join(" and ")} updated.`,
+              at: now,
+              offerId: entry.previous.offerId || "",
+              listingId: entry.previous.listingId || ""
+            })
+          };
+          entry.item.updatedAt = now;
+          touched.push(entry.item);
+          rows.push({ sku: entry.sku, status: "updated", price_updated: entry.priceChanged, inventory_updated: entry.quantityChanged, previous_price: entry.previous.price || "", target_price: entry.config.price, previous_quantity: entry.previous.quantity ?? "", target_quantity: entry.config.quantity, offer_id: entry.previous.offerId || "", listing_id: entry.previous.listingId || "" });
+        }
+      }
+      processed += batch.length;
+      await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "syncing_ebay_price_inventory",
+        totalRows: total,
+        processedRows: Math.min(total, processed),
+        progressPercent: progressPercent(Math.min(total, processed), total),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, Math.min(total, processed), total),
+        lastProgressAt: new Date().toISOString()
+      });
+    }
+    if (touched.length && postgres.isPostgresEnabled()) await postgres.upsertProductsFromState(touched);
+    attachImportJobOriginalFile(job, rowsToCsv(rows), "ebay-price-inventory-sync-results.csv");
+    attachImportJobErrorsFile(job, errors);
+    const updated = rows.filter((row) => row.status === "updated").length;
+    const unchanged = rows.filter((row) => row.status === "unchanged").length;
+    const status = errors.length ? (updated || unchanged ? "done_with_warnings" : "failed") : "success";
+    const message = `eBay price and inventory sync complete: ${updated.toLocaleString()} updated, ${unchanged.toLocaleString()} already current, ${errors.length.toLocaleString()} failed.`;
+    finishImportJob(job, {
+      status,
+      phase: status === "failed" ? "failed" : "complete",
+      totalRows: total,
+      processedRows: total,
+      changed: updated,
+      missingCount: errors.length,
+      errors: errors.map((row) => `${row.sku || "eBay"}: ${row.issue}`).slice(0, 100),
+      progressPercent: 100,
+      estimatedSecondsRemaining: 0,
+      message,
+      finishedAt: new Date().toISOString()
+    });
+    await postgres.upsertOperationJob(job);
+    await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+    if (errors.length) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-price-inventory", operation: "eBay price and inventory sync completed", statusCode: errors.length ? 207 : 200, ok: !errors.length, jobId: job.id, message });
+    publicStateJsonCache = null;
+    return job;
+  } catch (error) {
+    const message = error.message || "eBay price and inventory sync failed.";
+    await persistWorkerImportJob(job, { status: "failed", phase: "failed", missingCount: 1, errors: [message], estimatedSecondsRemaining: 0, message, finishedAt: new Date().toISOString() });
+    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-price-inventory", operation: "eBay price and inventory sync failed", statusCode: 502, ok: false, jobId: job.id, message });
     throw error;
   }
 }
@@ -20014,6 +20629,7 @@ function catalogFilterParams(searchParams) {
     channelStatus: searchParams.get("channelStatus") || searchParams.get("shopifyStatus") || "",
     hasStock: searchParams.get("hasStock") || "",
     hasImage: searchParams.get("hasImage") || "",
+    multipleSuppliers: searchParams.get("multipleSuppliers") || "",
     stockQty: searchParams.get("stockQty") || "",
     stockQtyOperator: searchParams.get("stockQtyOperator") || "",
     hazardous: searchParams.get("hazardous") || "",
@@ -20046,7 +20662,7 @@ function applyVendorCatalogScope(filters = {}, vendors = []) {
   const scope = String(filters.vendorScope || "enabled").trim().toLowerCase();
   if (scope === "all") return { ...filters };
   const enabledSourceCodes = [...new Set((vendors || [])
-    .filter((vendor) => vendor?.catalogSettings?.enabled !== false)
+    .filter((vendor) => vendor?.catalogSettings?.enabled === true)
     .flatMap(vendorCatalogSourceCodes))];
   if (!enabledSourceCodes.length) return { ...filters, includedSupplierCodes: "__no_enabled_source__" };
   return {
@@ -20055,6 +20671,30 @@ function applyVendorCatalogScope(filters = {}, vendors = []) {
       ...catalogFilterValues(filters.includedSupplierCodes),
       ...enabledSourceCodes
     ])].join("|")
+  };
+}
+
+function catalogSupplierFacetLabels(facets = {}, vendors = []) {
+  const nameByCode = new Map();
+  for (const vendor of vendors || []) {
+    if (vendor?.catalogSettings?.enabled !== true) continue;
+    const name = sourceTextValue(vendor.name || vendor.vendorName || "");
+    if (!name) continue;
+    for (const code of vendorCatalogSourceCodes(vendor)) {
+      nameByCode.set(code.toLowerCase(), name);
+    }
+  }
+
+  const canonical = new Map();
+  for (const supplier of facets.suppliers || []) {
+    const value = sourceTextValue(supplier);
+    if (!value) continue;
+    const label = nameByCode.get(value.toLowerCase()) || value;
+    if (!canonical.has(label.toLowerCase())) canonical.set(label.toLowerCase(), label);
+  }
+  return {
+    ...facets,
+    suppliers: [...canonical.values()].sort((left, right) => left.localeCompare(right))
   };
 }
 
@@ -20228,6 +20868,7 @@ function productMatchesCatalogFilters(product = {}, filters = {}) {
   if (filters.channelStatus && !catalogFilterValues(filters.channelStatus).some((value) => productMatchesCatalogChannelStatus(product, value))) return false;
   if (!catalogFilterMatches(filters.hasStock, String(Number(product.stockQty ?? product.qty ?? 0) > 0))) return false;
   if (!catalogFilterMatches(filters.hasImage, String(catalogProductHasImage(product)))) return false;
+  if (!catalogFilterMatches(filters.multipleSuppliers, String(product.hasMultipleSuppliers === true))) return false;
   if (!catalogNumberFilterMatches(filters.stockQtyOperator, filters.stockQty, product.stockQty ?? product.qty)) return false;
   if (!catalogFilterMatches(filters.hazardous, String(Boolean(product.hazardous)))) return false;
   if (!catalogFilterMatches(filters.toBeDiscontinued, String(Boolean(product.toBeDiscontinued || product.closeoutEligible)))) return false;
@@ -21239,7 +21880,7 @@ async function scanCatalog({ query = "", page = 1, limit = 50, filters = {}, sor
   const filtered = hasCatalogFilters(filters);
   const selectedSuppliers = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim()).filter(Boolean);
   const supplierIndexedFilter = selectedSuppliers.length >= 1 && !q;
-  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hasImage, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.manufacturer, filters.category].every((value) => !value);
+  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hasImage, filters.multipleSuppliers, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.manufacturer, filters.category].every((value) => !value);
   const vendorIndex = supplierIndexedFilter ? readCatalogVendorIndex() : null;
   const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
   const supplierTotal = supplierOnlyFilter
@@ -21435,7 +22076,7 @@ async function collectCatalogProductsForExport({ query = "", filters = {}, limit
   }
   const selectedSuppliers = String(filters.suppliers || filters.supplier || "").split("|").map((value) => value.trim()).filter(Boolean);
   const supplierIndexedFilter = selectedSuppliers.length >= 1 && !q;
-  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hasImage, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.manufacturer, filters.category].every((value) => !value);
+  const supplierOnlyFilter = supplierIndexedFilter && [filters.active, filters.productMembership, filters.stockStatus, filters.hasStock, filters.hasImage, filters.multipleSuppliers, filters.stockQty, filters.stockQtyOperator, filters.hazardous, filters.toBeDiscontinued, filters.brand, filters.manufacturer, filters.category].every((value) => !value);
   const sourceIndex = supplierIndexedFilter ? readSourceCatalogIndexManifest() : null;
   const supplierNames = new Set(selectedSuppliers.map((supplier) => supplier.toLowerCase()));
   const items = [];
@@ -23680,6 +24321,7 @@ async function queueShopifyProductCreateJob(payload = {}) {
   const dryRun = payload.apply === true ? false : payload.dryRun !== false;
   const query = String(payload.query || "");
   const db = await readDbFast({ skipInventory: true });
+  requireEnabledChannel(db, "Shopify");
   const launchBatchLimit = shopifyProductLaunchBatchLimit(readSystemSettingsStore(db?.systemSettings || {}));
   const limit = Math.max(1, Math.min(launchBatchLimit, Number(payload.limit || launchBatchLimit) || launchBatchLimit));
   const limitedSkus = requestedSkus.slice(0, limit);
@@ -23737,6 +24379,132 @@ async function queueShopifyProductCreateJob(payload = {}) {
     await postgres.upsertOperationJob(normalizeImportJob(job));
   }
   return { job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }) };
+}
+
+async function queueShopifyProductStatusUpdateJob(payload = {}) {
+  const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
+    .map((sku) => String(sku || "").trim())
+    .filter(Boolean))];
+  const db = await readDbFast({ skipInventory: true });
+  requireEnabledChannel(db, "Shopify");
+  const limit = Math.max(1, Math.min(25000, Number(payload.limit || 100) || 100));
+  const limitedSkus = requestedSkus.slice(0, limit);
+  const status = normalizeShopifyRequestedProductStatus(payload.status);
+  const filters = payload.filters && Object.keys(payload.filters || {}).length
+    ? payload.filters
+    : { channelStatus: "shopify-linked" };
+  if (!limitedSkus.length && !Object.keys(filters).length && !String(payload.query || "").trim()) {
+    throw new Error("Choose Shopify-linked products to update.");
+  }
+  const job = createImportJob(db, {
+    section: "Products",
+    operation: `Set Shopify products ${status.toLowerCase()}`,
+    direction: "sync",
+    status: "queued",
+    fileName: "shopify-product-status-update-report.json",
+    totalRows: limitedSkus.length || limit,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "shopify-product-status-update",
+    workerPayload: shouldRunJobsInline() ? {} : {
+      skus: limitedSkus,
+      query: String(payload.query || ""),
+      filters,
+      limit,
+      status
+    },
+    message: `Shopify ${status.toLowerCase()} update queued for up to ${(limitedSkus.length || limit).toLocaleString()} product${(limitedSkus.length || limit) === 1 ? "" : "s"}.`
+  });
+  upsertImportJobStore(job);
+  if (shouldRunJobsInline()) {
+    setTimeout(() => runShopifyProductStatusUpdateWorkerJob(job, {
+      skus: limitedSkus,
+      query: String(payload.query || ""),
+      filters,
+      limit,
+      status
+    }).catch((error) => {
+      finishImportJob(job, {
+        status: "failed",
+        message: error.message || "Shopify product status update failed.",
+        errors: [error.message || "Shopify product status update failed."],
+        missingCount: 1,
+        phase: "failed",
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+    }), 250);
+  } else {
+    await postgres.upsertOperationJob(normalizeImportJob(job));
+  }
+  return { job: normalizeImportJob(job) };
+}
+
+async function queueShopifyProductPublicationJob(payload = {}) {
+  const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
+    .map((sku) => String(sku || "").trim())
+    .filter(Boolean))];
+  const publicationId = String(payload.publicationId || "").trim();
+  const publicationName = String(payload.publicationName || "Online Store").trim() || "Online Store";
+  if (!/^gid:\/\/shopify\/Publication\/\d+$/i.test(publicationId)) {
+    throw new Error("Choose a valid Shopify publication before publishing products.");
+  }
+  const db = await readDbFast({ skipInventory: true });
+  requireEnabledChannel(db, "Shopify");
+  const limit = Math.max(1, Math.min(25000, Number(payload.limit || 100) || 100));
+  const limitedSkus = requestedSkus.slice(0, limit);
+  const filters = payload.filters && Object.keys(payload.filters || {}).length
+    ? payload.filters
+    : { channelStatus: "shopify-linked" };
+  if (!limitedSkus.length && !Object.keys(filters).length && !String(payload.query || "").trim()) {
+    throw new Error("Choose Shopify-linked products to publish.");
+  }
+  const job = createImportJob(db, {
+    section: "Products",
+    operation: `Publish Shopify products to ${publicationName}`,
+    direction: "sync",
+    status: "queued",
+    fileName: "shopify-product-publication-update-report.json",
+    totalRows: limitedSkus.length || limit,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "shopify-product-publication-update",
+    workerPayload: shouldRunJobsInline() ? {} : {
+      skus: limitedSkus,
+      query: String(payload.query || ""),
+      filters,
+      limit,
+      publicationId,
+      publicationName
+    },
+    message: `Shopify publication to ${publicationName} queued for up to ${(limitedSkus.length || limit).toLocaleString()} product${(limitedSkus.length || limit) === 1 ? "" : "s"}.`
+  });
+  upsertImportJobStore(job);
+  if (shouldRunJobsInline()) {
+    setTimeout(() => runShopifyProductPublicationWorkerJob(job, {
+      skus: limitedSkus,
+      query: String(payload.query || ""),
+      filters,
+      limit,
+      publicationId,
+      publicationName
+    }).catch((error) => {
+      finishImportJob(job, {
+        status: "failed",
+        message: error.message || "Shopify product publication failed.",
+        errors: [error.message || "Shopify product publication failed."],
+        missingCount: 1,
+        phase: "failed",
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+    }), 250);
+  } else {
+    await postgres.upsertOperationJob(normalizeImportJob(job));
+  }
+  return { job: normalizeImportJob(job) };
 }
 
 async function davidShopifyLaunchPreflight(sku, settings) {
@@ -23872,6 +24640,7 @@ async function handleApi(req, res) {
     const challengeCode = String(url.searchParams.get("challenge_code") || "").trim();
     const db = await readDbFast({ skipInventory: true });
     const settings = ebayChannelSettings(db);
+    if (settings.channelEnabled === false) return sendJson(res, 400, { error: "eBay is disabled in Channel Settings." });
     const endpoint = ebayWebhookEndpoint(settings, req);
     const verificationToken = String(settings.ebayWebhookVerificationToken || "").trim();
     if (!challengeCode || !ebayWebhookTokenIsValid(verificationToken) || !/^https:\/\//i.test(endpoint)) {
@@ -23894,6 +24663,7 @@ async function handleApi(req, res) {
       return sendJson(res, 400, { error: "Invalid eBay webhook payload." });
     }
     const settings = ebayChannelSettings(db);
+    if (settings.channelEnabled === false) return sendJson(res, 202, { accepted: true, message: "eBay webhook received while the channel is disabled." });
     const verification = await verifyEbayWebhookSignature(db, payload, req.headers["x-ebay-signature"]);
     if (!verification.valid) {
       appendChannelApiLog({ channel: "eBay", transport: "webhook", method: "POST", path: url.pathname, operation: "eBay webhook delivery", statusCode: 412, ok: false, durationMs: Date.now() - startedAt, message: verification.reason || "Invalid eBay webhook signature." });
@@ -23931,7 +24701,7 @@ async function handleApi(req, res) {
     if (webhookId && await redisCache.getJson(`dataplus:shopify:webhook:${webhookId}`)) return sendJson(res, 200, { accepted: true, duplicate: true, message: "Shopify webhook was already processed." });
     const db = await readDbFast({ skipInventory: true });
     const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
-    if (!settings.shopifyOrderWebhookEnabled || !settings.shopifyOrderImportEnabled) return sendJson(res, 202, { accepted: true, message: "Shopify order webhook received while order webhooks are disabled." });
+    if (settings.channelEnabled === false || !settings.shopifyOrderWebhookEnabled || !settings.shopifyOrderImportEnabled) return sendJson(res, 202, { accepted: true, message: "Shopify order webhook received while Shopify or order webhooks are disabled." });
     const payload = rawBody.length ? JSON.parse(rawBody.toString("utf8")) : {};
     const numericId = String(payload.order_id || payload.id || "").trim();
     const orderId = String(payload.admin_graphql_api_id || (numericId ? `gid://shopify/Order/${numericId}` : "")).trim();
@@ -24130,7 +24900,7 @@ async function handleApi(req, res) {
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const facets = await postgres.productFacets({ includedSupplierCodes });
       if (facets) {
-        const payload = { facets };
+        const payload = { facets: catalogSupplierFacetLabels(facets, Array.isArray(catalogVendors) ? catalogVendors : []) };
         await redisCache.setJson(cacheKey, payload, REDIS_PRODUCT_FACETS_CACHE_TTL_SECONDS);
         return sendJson(res, 200, payload);
       }
@@ -24301,6 +25071,49 @@ async function handleApi(req, res) {
     if (!item) return notFound(res);
     const sourceFallbackMap = await sourceCatalogExportFallbackMap([item]);
     return sendJson(res, 200, { item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync(), sourceFallbackMap }) });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "suppliers" && parts.length === 4 && postgres.isPostgresEnabled()) {
+    const product = await postgres.readProductByKey(parts[2]);
+    if (!product) return notFound(res);
+    const cacheKey = `dataplus:supplier-coverage:v1:${crypto.createHash("sha1").update(`${String(product.sku || parts[2]).toLowerCase()}|${String(product.updatedAt || "")}`).digest("hex")}`;
+    const cached = await redisCache.getJson(cacheKey);
+    if (cached) return sendJson(res, 200, { ...cached, cached: true });
+    const coverage = await postgres.findVendorCatalogSupplierMatches({
+      sku: product.sku,
+      barcode: product.barcode,
+      mfrPartNumber: product.mfrPartNumber,
+      brand: product.brand
+    });
+    const primarySupplier = product.supplier || product.vendor || "";
+    const primarySku = product.vendorSku || product.sku || "";
+    const exists = (coverage.matches || []).some((row) => String(row.supplier || "").toLowerCase() === String(primarySupplier).toLowerCase() && String(row.vendorSku || row.sku || "").toLowerCase() === String(primarySku).toLowerCase());
+    const matches = exists ? coverage.matches : [{
+      supplier: primarySupplier,
+      supplierCode: product.supplierCode || "",
+      sku: product.sku || "",
+      vendorSku: primarySku,
+      title: product.marketplaceTitle || product.title || "",
+      brand: product.brand || "",
+      manufacturer: product.manufacturer || "",
+      mfrPartNumber: product.mfrPartNumber || "",
+      barcode: product.barcode || "",
+      category: product.mainCategory || product.category || "",
+      sourceCategory: product.sourceCategory || "",
+      cost: product.cost,
+      qty: product.qty ?? product.stockQty,
+      stockStatus: product.stockStatus || "",
+      uom: product.uom || "",
+      uomQty: product.uomQty,
+      discontinued: Boolean(product.toBeDiscontinued),
+      defaultImage: product.defaultImage || "",
+      updatedAt: product.updatedAt || "",
+      matchType: "primary"
+    }, ...(coverage.matches || [])];
+    const supplierCount = new Set(matches.map((row) => String(row.supplierCode || row.supplier || "").trim().toLowerCase()).filter(Boolean)).size;
+    const payload = { matchType: coverage.matchType, supplierCount, matches };
+    await redisCache.setJson(cacheKey, payload, 300);
+    return sendJson(res, 200, payload);
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "ledger" && postgres.isPostgresEnabled()) {
@@ -24585,16 +25398,23 @@ async function handleApi(req, res) {
       // Do not hydrate the complete legacy state here. The catalog is a hot path and
       // its only state dependency is the small vendor participation document.
       const catalogVendors = await postgres.readStateField("vendors").catch(() => []);
-      const filters = applyVendorCatalogScope(
-        catalogFilterParams(url.searchParams),
-        Array.isArray(catalogVendors) ? catalogVendors : []
-      );
+      const catalogQuery = String(url.searchParams.get("q") || "").trim();
+      const requestedFilters = catalogFilterParams(url.searchParams);
+      // A deliberate SKU/title/UPC search must always be able to find a record.
+      // Vendor participation keeps the default catalog fast, but it must never hide
+      // a product the operator explicitly asked to inspect.
+      const filters = catalogQuery
+        ? { ...requestedFilters, vendorScope: "all" }
+        : applyVendorCatalogScope(
+          requestedFilters,
+          Array.isArray(catalogVendors) ? catalogVendors : []
+        );
       const cacheQuery = `${url.searchParams.toString()}|feedCodes:${String(filters.includedSupplierCodes || "")}`;
       const cacheKey = `dataplus:products:v8:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
       const result = await postgres.listProducts({
-        q: url.searchParams.get("q") || "",
+        q: catalogQuery,
         page: url.searchParams.get("page") || 1,
         limit: url.searchParams.get("limit") || 100000,
         fastPage,
@@ -24602,6 +25422,7 @@ async function handleApi(req, res) {
         sort: url.searchParams.get("sort") || "",
         sortDirection: url.searchParams.get("sortDirection") || "asc",
         includeInventoryLevels: ["1", "true", "yes"].includes(String(url.searchParams.get("inventoryWorkspace") || "").toLowerCase()),
+        includeVendorOffers: true,
         filters
       });
       if (result) {
@@ -26218,7 +27039,7 @@ async function handleApi(req, res) {
       if (source !== "shopify") return sendJson(res, 400, { error: "Channel cancellation is available only for Shopify-imported orders." });
       const db = await readDbFast({ skipInventory: true });
       const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
-      if (!settings.shopifyCancellationNotificationEnabled) return sendJson(res, 400, { error: "Enable Shopify cancellation API in Channel Settings before sending a cancellation to Shopify." });
+      if (settings.channelEnabled === false || !settings.shopifyCancellationNotificationEnabled) return sendJson(res, 400, { error: "Enable Shopify and the cancellation API in Channel Settings before sending a cancellation to Shopify." });
       channelCancellation = await cancelShopifyOrder(order, body);
     }
     if (action === "delete") {
@@ -27218,7 +28039,7 @@ async function handleApi(req, res) {
     if (["sent", "synced"].includes(String(refund.channelSync?.status || "").toLowerCase())) return sendJson(res, 400, { error: "This refund was already sent to Shopify." });
     const db = await readDbFast({ skipInventory: true });
     const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
-    if (!settings.shopifyRefundSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify refund sync in Channel Settings before sending refunds." });
+    if (settings.channelEnabled === false || !settings.shopifyRefundSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify and refund sync in Channel Settings before sending refunds." });
     try {
       const shopifyRefund = await syncShopifyRefund(order, refund);
       refund.channelSync = { status: "sent", channel: "Shopify", refundId: shopifyRefund.id || "", updatedAt: new Date().toISOString(), message: "Refund sent to Shopify." };
@@ -27245,7 +28066,7 @@ async function handleApi(req, res) {
     if (String(order.source || "").trim().toLowerCase() !== "shopify") return sendJson(res, 400, { error: "Shopify sync is available only for Shopify-imported orders." });
     if (["sent", "synced"].includes(String(returnRecord.channelSync?.status || "").toLowerCase())) return sendJson(res, 400, { error: "This return was already sent to Shopify." });
     const settings = findChannelByName(state, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
-    if (!settings.shopifyReturnSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify return sync in Channel Settings before sending returns." });
+    if (settings.channelEnabled === false || !settings.shopifyReturnSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify and return sync in Channel Settings before sending returns." });
     try {
       const shopifyReturn = await syncShopifyReturn(order, returnRecord);
       returnRecord.channelSync = { status: "sent", channel: "Shopify", returnId: shopifyReturn.id || "", updatedAt: new Date().toISOString(), message: "Return sent to Shopify." };
@@ -27273,7 +28094,7 @@ async function handleApi(req, res) {
     if (!(Number(body.amount || 0) > 0) || Number(body.amount || 0) > Number(payment.amount || 0)) return sendJson(res, 400, { error: "Capture amount must be greater than zero and cannot exceed the selected authorization." });
     const db = await readDbFast({ skipInventory: true });
     const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
-    if (!settings.shopifyPaymentCaptureEnabled) return sendJson(res, 400, { error: "Enable Shopify payment capture in Channel Settings before capturing an authorization." });
+    if (settings.channelEnabled === false || !settings.shopifyPaymentCaptureEnabled) return sendJson(res, 400, { error: "Enable Shopify and payment capture in Channel Settings before capturing an authorization." });
     try {
       const transaction = await captureShopifyPayment(order, payment, Number(body.amount || 0));
       payment.manuallyCapturable = false;
@@ -27296,7 +28117,7 @@ async function handleApi(req, res) {
     if (String(order.source || "").trim().toLowerCase() !== "shopify") return sendJson(res, 400, { error: "Shopify address sync is available only for Shopify-imported orders." });
     const db = await readDbFast({ skipInventory: true });
     const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
-    if (!settings.shopifyOrderAddressSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify order address sync in Channel Settings before sending an address update." });
+    if (settings.channelEnabled === false || !settings.shopifyOrderAddressSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify and order address sync in Channel Settings before sending an address update." });
     try {
       const shopifyOrder = await syncShopifyOrderAddress(order);
       order.channelAddressSync = { status: "sent", channel: "Shopify", updatedAt: new Date().toISOString(), message: "Customer email and shipping address sent to Shopify.", orderId: shopifyOrder.id || "" };
@@ -28074,7 +28895,7 @@ async function handleApi(req, res) {
       id: crypto.randomUUID(),
       vendorNumber: nextVendorNumber(db),
       name,
-      status: "active",
+      status: "inactive",
       type: String(body.type || "Supplier"),
       contactName: String(body.contactName || ""),
       email: String(body.email || ""),
@@ -28775,7 +29596,7 @@ async function handleApi(req, res) {
     if (String(shipment.status || "").toLowerCase() !== "fulfilled") return sendJson(res, 400, { error: "Confirm this shipment as fulfilled before sending it to Shopify." });
     const db = await readDbFast({ skipInventory: true });
     const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
-    if (!settings.shopifyFulfillmentSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify fulfillment sync in Channel Settings before sending shipments." });
+    if (settings.channelEnabled === false || !settings.shopifyFulfillmentSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify and fulfillment sync in Channel Settings before sending shipments." });
     if (["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) return sendJson(res, 400, { error: "This shipment was already sent to Shopify." });
     try {
       const fulfillment = await syncShopifyShipment(order, shipment);
@@ -29676,7 +30497,7 @@ async function handleApi(req, res) {
       return sendJson(res, 202, { job: normalizeImportJob(job), message: job.message });
     }
     activeJobRecords.set(job.id, normalizeImportJob(job));
-    setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: 4, processedRows: 0, progressPercent: 0 });
+    setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: 5, processedRows: 0, progressPercent: 0 });
     setTimeout(async () => {
       const workJob = activeJobRecords.get(job.id) || job;
       try {
@@ -29701,7 +30522,7 @@ async function handleApi(req, res) {
             upsertImportJobStore(workJob);
           }
         });
-        finishImportJob(workJob, { status: "success", message: `Refreshed source catalog facets for ${Number(result.total || 0).toLocaleString()} source rows.`, totalRows: 4, processedRows: 4, changed: 4, progressPercent: 100, phase: "complete", estimatedSecondsRemaining: 0 });
+        finishImportJob(workJob, { status: "success", message: `Refreshed source catalog facets and stored supplier coverage for ${Number(result.total || 0).toLocaleString()} source rows.`, totalRows: 5, processedRows: 5, changed: 5, progressPercent: 100, phase: "complete", estimatedSecondsRemaining: 0 });
       } catch (error) {
         const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
         finishImportJob(workJob, { status: wasCanceled ? "stopped" : "failed", message: wasCanceled ? "Source catalog facet refresh was canceled." : error.message, errors: wasCanceled ? [] : [error.message], missingCount: wasCanceled ? 0 : 1, phase: wasCanceled ? "stopped" : "failed" });
@@ -31593,6 +32414,26 @@ async function handleApi(req, res) {
     return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/shopify/product-status-update" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    try {
+      const result = await queueShopifyProductStatusUpdateJob(body);
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(result.job), state: await postgresLiteState({ importJobs: [result.job] }), message: result.job.message });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message || "Unable to queue Shopify product status update." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shopify/product-publication-update" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    try {
+      const result = await queueShopifyProductPublicationJob(body);
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(result.job), state: await postgresLiteState({ importJobs: [result.job] }), message: result.job.message });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message || "Unable to queue Shopify publication update." });
+    }
+  }
+
   if (req.method === "POST" && url.pathname === "/api/shopify/sku-map-sync" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
@@ -32086,6 +32927,23 @@ async function handleApi(req, res) {
       });
     } catch (error) {
       return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay order import." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/price-inventory/sync" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const result = await queueEbayPriceInventorySyncJob(db, body);
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
+        message: result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay price and inventory sync." });
     }
   }
 
@@ -33279,6 +34137,22 @@ async function handleApi(req, res) {
       });
     } catch (error) {
       return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay order import." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/price-inventory/sync") {
+    const body = await parseBody(req);
+    try {
+      const result = await queueEbayPriceInventorySyncJob(db, body);
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        state: publicState(normalizeDb({ ...db, importJobs: [result.job, ...(db.importJobs || [])] })),
+        message: result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay price and inventory sync." });
     }
   }
 
@@ -35205,7 +36079,7 @@ async function handleApi(req, res) {
       id: crypto.randomUUID(),
       vendorNumber: nextVendorNumber(db),
       name,
-      status: "active",
+      status: "inactive",
       type: String(body.type || "Supplier"),
       contactName: String(body.contactName || ""),
       email: String(body.email || ""),
@@ -36264,6 +37138,7 @@ module.exports = {
   queueShopifyOrderImportJob,
   queueShopifySkuMapSyncJob,
   queueEbayOrderImportJob,
+  queueEbayPriceInventorySyncJob,
   queueEbayListingLaunchJob,
   readDbFast,
   readExportMappingsApiStore,
@@ -36273,12 +37148,15 @@ module.exports = {
   runEbayCatalogImportWorkerJob,
   runEbayLocationWorkerJob,
   runEbayOrderImportWorkerJob,
+  runEbayPriceInventorySyncWorkerJob,
   runEbayListingLaunchWorkerJob,
   runJobsRetentionCleanupWorkerJob,
   runMappedProductImportWorkerJob,
   runShopifyExistingVariantLinkWorkerJob,
   runShopifyOrderImportWorkerJob,
   runShopifyProductCreateWorkerJob,
+  runShopifyProductPublicationWorkerJob,
+  runShopifyProductStatusUpdateWorkerJob,
   runShopifyProductTypeCollectionSyncWorkerJob,
   runShopifyShippingEligibilitySyncWorkerJob,
   runShopifyTaxonomyPushWorkerJob,
