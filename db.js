@@ -4870,7 +4870,26 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [] } = {}) {
       from operations_jobs
       where lower(status) = 'queued'
         and coalesce(raw ->> 'workerTask', '') = any($1::text[])
-      order by created_at asc, updated_at asc
+      order by
+        case
+          when coalesce(raw ->> 'queuePriority', '') ~ '^-?[0-9]+$'
+            then (raw ->> 'queuePriority')::integer
+          when lower(coalesce(raw ->> 'scheduled', 'false')) <> 'true'
+            and lower(coalesce(raw -> 'workerPayload' ->> 'scheduled', 'false')) <> 'true'
+            and lower(coalesce(name, '')) not like 'scheduled %'
+            then 100
+          when coalesce(raw ->> 'workerTask', '') in ('product-dump-import', 'vendor-feed-import')
+            then 70
+          when coalesce(raw ->> 'workerTask', '') in ('shopify-order-import', 'ebay-order-import')
+            then 65
+          when coalesce(raw ->> 'workerTask', '') in ('shopify-inventory-update', 'shopify-sku-map-sync', 'shopify-variant-price-push', 'ebay-price-inventory-sync')
+            then 50
+          when coalesce(raw ->> 'workerTask', '') in ('source-facets-refresh', 'data-quality-scan', 'source-search-index', 'source-performance-indexes', 'jobs-retention-cleanup', 'postgres-backup')
+            then 20
+          else 40
+        end desc,
+        created_at asc,
+        updated_at asc
       for update skip locked
       limit 1
     )

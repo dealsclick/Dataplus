@@ -54,6 +54,7 @@ const SUPPORTED_TASKS = [
   "shopify-taxonomy-push",
   "shopify-status-sync",
   "shopify-inventory-update",
+  "ebay-category-auto-map",
   "ebay-catalog-sync",
   "ebay-account-settings-sync",
   "ebay-location-sync",
@@ -1280,7 +1281,7 @@ async function runShopifyInventoryUpdateJob(job) {
     message: apply
       ? `Shopify inventory update applied ${Number(report.variantsApplied || 0).toLocaleString()} variant${Number(report.variantsApplied || 0) === 1 ? "" : "s"}.`
       : `Shopify inventory dry run found ${Number(report.variantsChanged || 0).toLocaleString()} variant${Number(report.variantsChanged || 0) === 1 ? "" : "s"} to update.`,
-    details: `${Number(report.variantsPrepared || 0).toLocaleString()} matched variants checked at ${report.locationName || "Shopify location"}; ${Number(report.productsMissingVariants || 0).toLocaleString()} products are missing expected variant SKU matches.`,
+    details: `${Number(report.variantsPrepared || 0).toLocaleString()} matched variants checked at ${report.locationName || "Shopify location"}; ${Number(report.productsMissingVariants || 0).toLocaleString()} products are missing expected variant SKU matches. Shopify API recovery retried ${Number(report.shopifyRetryStats?.retries || 0).toLocaleString()} request${Number(report.shopifyRetryStats?.retries || 0) === 1 ? "" : "s"}, including ${Number(report.shopifyRetryStats?.throttles || 0).toLocaleString()} throttle response${Number(report.shopifyRetryStats?.throttles || 0) === 1 ? "" : "s"}, and waited ${Math.round(Number(report.shopifyRetryStats?.totalWaitMs || 0) / 1000).toLocaleString()} second${Math.round(Number(report.shopifyRetryStats?.totalWaitMs || 0) / 1000) === 1 ? "" : "s"}.`,
     totalRows: Number(report.productsLoaded || 0) || current.totalRows || 0,
     processedRows: Number(report.productsLoaded || 0) || current.processedRows || 0,
     changed: Number(report.variantsApplied || report.variantsChanged || 0) || 0,
@@ -1310,6 +1311,10 @@ async function runShopifyInventoryUpdateJob(job) {
 
 async function runEbayCatalogSyncJob(job) {
   return dataplus.runEbayCatalogImportWorkerJob(job);
+}
+
+async function runEbayCategoryAutoMapJob(job) {
+  return dataplus.runEbayCategoryAutoMapWorkerJob(job, job.workerPayload || {});
 }
 
 async function runEbayAccountSettingsSyncJob(job) {
@@ -1382,6 +1387,9 @@ async function runProductDumpImportJob(job) {
   // while allowing BSON normalization enough working memory for the full supplier dump.
   const dumpNodeHeapMB = Math.max(1024, Math.min(4096, Number(process.env.PRODUCT_DUMP_NODE_MAX_OLD_SPACE_MB || resourceProfile.heapMb || 3072) || 3072));
   const dumpBatchSize = Math.max(25, Math.min(250, Number(payload.batchSize || resourceProfile.batchSize || 100) || 100));
+  const syncMode = ["full", "split", "catalog", "reconciliation"].includes(String(payload.syncMode || "").toLowerCase())
+    ? String(payload.syncMode).toLowerCase()
+    : "split";
   const args = ["scripts/import-product-dump.js"];
   if (payload.path) args.push(String(payload.path));
   if (payload.downloadFtp === true) args.push("--ftp");
@@ -1389,7 +1397,7 @@ async function runProductDumpImportJob(job) {
   if (payload.postgresOnly !== false) args.push("--postgres-only");
   if (Number(payload.limit || 0) > 0) args.push("--limit", String(Number(payload.limit || 0)));
   args.push("--batch-size", String(dumpBatchSize));
-  args.push("--sync-mode", ["full", "split", "catalog", "reconciliation"].includes(String(payload.syncMode || "").toLowerCase()) ? String(payload.syncMode).toLowerCase() : "split");
+  args.push("--sync-mode", syncMode);
   let current = await persistJob(job, {
     status: "running",
     phase: "importing_product_dump",
@@ -1505,16 +1513,46 @@ async function runProductDumpImportJob(job) {
   let analyzeResult = { tables: [] };
   let supplierCoverageResult = null;
   let supplierCoverageError = "";
+  const shouldRefreshSupplierCoverage = payload.refreshSupplierCoverage === true || syncMode !== "reconciliation";
   if (payload.postgresOnly !== false && postgres.isPostgresEnabled()) {
-    current = await persistJob(current, {
-      status: "running",
-      phase: "refreshing_query_statistics",
-      message: "Refreshing PostgreSQL planner statistics for the source catalog..."
-    });
+    const postImportHeartbeatTimer = setInterval(() => {
+      writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh product dump post-import heartbeat:", error.message || error));
+    }, Math.max(1000, Math.min(HEARTBEAT_MS, 5000)));
     try {
-      analyzeResult = await postgres.analyzeCatalogTables({ vendorCatalog: true });
-    } catch (error) {
-      analyzeResult = { tables: [], error: error.message || "Planner statistics refresh failed." };
+      current = await persistJob(current, {
+        status: "running",
+        phase: "refreshing_query_statistics",
+        message: "Refreshing PostgreSQL planner statistics for the source catalog..."
+      });
+      try {
+        analyzeResult = await postgres.analyzeCatalogTables({ vendorCatalog: true });
+      } catch (error) {
+        analyzeResult = { tables: [], error: error.message || "Planner statistics refresh failed." };
+      }
+      if (shouldRefreshSupplierCoverage) {
+        current = await persistJob(current, {
+          status: "running",
+          phase: "rebuilding_supplier_coverage",
+          message: "Matching supplier coverage and storing indexed catalog statuses..."
+        });
+        try {
+          supplierCoverageResult = await postgres.refreshVendorSupplierCoverage({
+            onProgress: (patch = {}) => {
+              current = normalizeJobPatch(current, {
+                ...patch,
+                status: "running",
+                phase: "rebuilding_supplier_coverage",
+                message: patch.message || current.message
+              });
+              postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist supplier coverage progress:", error.message || error));
+            }
+          });
+        } catch (error) {
+          supplierCoverageError = error.message || "Supplier coverage status rebuild failed.";
+        }
+      }
+    } finally {
+      clearInterval(postImportHeartbeatTimer);
     }
     current = await persistJob(current, {
       status: "running",
@@ -1559,7 +1597,7 @@ async function runProductDumpImportJob(job) {
     status: supplierCoverageError ? "warning" : "success",
     phase: supplierCoverageError ? "completed_with_warning" : "complete",
     message: supplierCoverageError ? "Product dump import finished, but supplier coverage needs review." : "Product dump import and supplier coverage rebuild finished.",
-    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", supplierCoverageResult ? `Stored supplier coverage for ${Number(supplierCoverageResult.productsUpdated || 0).toLocaleString()} approved products and ${Number(supplierCoverageResult.vendorItemsUpdated || 0).toLocaleString()} source records from ${Number(supplierCoverageResult.keys || 0).toLocaleString()} matched identities.` : "", supplierCoverageError ? `Supplier coverage rebuild failed: ${supplierCoverageError}` : "", ...followOn].filter(Boolean).join(" "),
+    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", supplierCoverageResult ? `Stored supplier coverage for ${Number(supplierCoverageResult.productsUpdated || 0).toLocaleString()} approved products and ${Number(supplierCoverageResult.vendorItemsUpdated || 0).toLocaleString()} source records from ${Number(supplierCoverageResult.keys || 0).toLocaleString()} matched identities.` : "", !shouldRefreshSupplierCoverage ? "Supplier coverage was unchanged and skipped for this reconciliation-only refresh." : "", supplierCoverageError ? `Supplier coverage rebuild failed: ${supplierCoverageError}` : "", ...followOn].filter(Boolean).join(" "),
     totalRows: finalProcessedRows || current.totalRows || 0,
     processedRows: finalProcessedRows || current.processedRows || 0,
     changed: finalChanged || current.changed || 0,
@@ -1609,6 +1647,7 @@ async function runJob(job) {
   if (task === "shopify-taxonomy-push") return runShopifyTaxonomyPushJob(job);
   if (task === "shopify-status-sync") return runShopifyStatusSyncJob(job);
   if (task === "shopify-inventory-update") return runShopifyInventoryUpdateJob(job);
+  if (task === "ebay-category-auto-map") return runEbayCategoryAutoMapJob(job);
   if (task === "ebay-catalog-sync") return runEbayCatalogSyncJob(job);
   if (task === "ebay-account-settings-sync") return runEbayAccountSettingsSyncJob(job);
   if (task === "ebay-location-sync") return runEbayLocationSyncJob(job);

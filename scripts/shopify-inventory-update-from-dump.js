@@ -46,6 +46,46 @@ function textValue(value = "") {
   return String(value ?? "").trim();
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const graphqlRetryStats = {
+  requests: 0,
+  retries: 0,
+  throttles: 0,
+  transientErrors: 0,
+  totalWaitMs: 0
+};
+
+function retryAfterMs(value = "") {
+  const text = textValue(value);
+  if (!text) return 0;
+  const seconds = Number(text);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  const dateMs = new Date(text).getTime();
+  return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : 0;
+}
+
+function throttleWaitMs(data = {}, attempt = 1) {
+  const cost = data.extensions?.cost || {};
+  const requested = Math.max(1, numberValue(cost.requestedQueryCost, 1));
+  const available = Math.max(0, numberValue(cost.throttleStatus?.currentlyAvailable, 0));
+  const restoreRate = Math.max(1, numberValue(cost.throttleStatus?.restoreRate, 50));
+  const calculated = Math.ceil((Math.max(0, requested - available) / restoreRate) * 1000) + 250;
+  return Math.max(1000, calculated, Math.min(30000, 750 * (2 ** Math.max(0, attempt - 1))));
+}
+
+function isTransientGraphqlError(error = {}) {
+  const statusCode = Number(error.statusCode || 0);
+  const code = textValue(error.code).toUpperCase();
+  return error.shopifyThrottle === true
+    || statusCode === 429
+    || [500, 502, 503, 504].includes(statusCode)
+    || ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED"].includes(code)
+    || /socket hang up|network|timed?\s*out/i.test(textValue(error.message));
+}
+
 function normalizeGid(value = "", type = "") {
   const text = textValue(value);
   if (!text) return "";
@@ -160,10 +200,17 @@ function requestJson(options, payload = null) {
         try {
           data = text ? JSON.parse(text) : {};
         } catch {
-          return reject(new Error(`Non-JSON response (${res.statusCode}) from ${options.path}`));
+          const error = new Error(`Non-JSON response (${res.statusCode}) from ${options.path}`);
+          error.statusCode = Number(res.statusCode || 0);
+          error.retryAfterMs = retryAfterMs(res.headers?.["retry-after"]);
+          return reject(error);
         }
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          return reject(new Error(`HTTP ${res.statusCode} from ${options.path}: ${text.slice(0, 500)}`));
+          const error = new Error(`HTTP ${res.statusCode} from ${options.path}: ${text.slice(0, 500)}`);
+          error.statusCode = Number(res.statusCode || 0);
+          error.retryAfterMs = retryAfterMs(res.headers?.["retry-after"]);
+          error.responseData = data;
+          return reject(error);
         }
         resolve(data);
       });
@@ -241,16 +288,42 @@ async function shopifyToken() {
 async function graphql(query, variables = {}, token) {
   const shop = process.env.SHOPIFY_STORE_DOMAIN;
   const version = process.env.SHOPIFY_ADMIN_API_VERSION || "2026-04";
-  const data = await requestJson({
-    hostname: shop,
-    path: `/admin/api/${encodeURIComponent(version)}/graphql.json`,
-    method: "POST",
-    headers: { "X-Shopify-Access-Token": token }
-  }, { query, variables });
-  if (Array.isArray(data.errors) && data.errors.length) {
-    throw new Error(`Shopify GraphQL error: ${JSON.stringify(data.errors).slice(0, 1000)}`);
+  const maxAttempts = Math.max(1, Math.min(10, numberValue(process.env.SHOPIFY_GRAPHQL_MAX_ATTEMPTS, 6)));
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    graphqlRetryStats.requests += 1;
+    try {
+      const data = await requestJson({
+        hostname: shop,
+        path: `/admin/api/${encodeURIComponent(version)}/graphql.json`,
+        method: "POST",
+        headers: { "X-Shopify-Access-Token": token }
+      }, { query, variables });
+      if (Array.isArray(data.errors) && data.errors.length) {
+        const error = new Error(`Shopify GraphQL error: ${JSON.stringify(data.errors).slice(0, 1000)}`);
+        error.shopifyThrottle = data.errors.some((entry) => textValue(entry?.extensions?.code).toUpperCase() === "THROTTLED");
+        error.retryAfterMs = error.shopifyThrottle ? throttleWaitMs(data, attempt) : 0;
+        throw error;
+      }
+      return data.data || {};
+    } catch (error) {
+      lastError = error;
+      if (!isTransientGraphqlError(error) || attempt >= maxAttempts) throw error;
+      const throttled = error.shopifyThrottle === true || Number(error.statusCode || 0) === 429;
+      const baseWait = Math.max(
+        numberValue(error.retryAfterMs, 0),
+        Math.min(30000, 750 * (2 ** Math.max(0, attempt - 1)))
+      );
+      const waitMs = Math.min(30000, baseWait + Math.floor(Math.random() * 250));
+      graphqlRetryStats.retries += 1;
+      graphqlRetryStats.totalWaitMs += waitMs;
+      if (throttled) graphqlRetryStats.throttles += 1;
+      else graphqlRetryStats.transientErrors += 1;
+      process.stderr.write(`Shopify ${throttled ? "throttled" : "request failed"}; retry ${attempt}/${maxAttempts - 1} in ${waitMs}ms.\n`);
+      await sleep(waitMs);
+    }
   }
-  return data.data || {};
+  throw lastError || new Error("Shopify GraphQL request failed.");
 }
 
 async function fetchLocations(token) {
@@ -437,6 +510,7 @@ async function main() {
     variantsApplied: 0,
     productsMissingVariants: 0,
     skippedUntracked: 0,
+    shopifyRetryStats: graphqlRetryStats,
     errors: [],
     samples: []
   };
@@ -510,7 +584,14 @@ async function main() {
     const reference = `dataplus://shopify-inventory/${new Date().toISOString().slice(0, 10)}`;
     for (let index = 0; index < updates.length; index += batchSize) {
       const batch = updates.slice(index, index + batchSize);
-      const result = await setInventory(batch, locationId, token, reference);
+      let result;
+      try {
+        result = await setInventory(batch, locationId, token, reference);
+      } catch (error) {
+        report.errors.push({ batch: `${index + 1}-${index + batch.length}`, error: error.message });
+        process.stderr.write(`Inventory batch ${index + 1}-${index + batch.length} failed after retries.\n`);
+        continue;
+      }
       const userErrors = result.userErrors || [];
       if (userErrors.length) {
         report.errors.push(...userErrors.map((error) => ({ batch: `${index + 1}-${index + batch.length}`, error })));
