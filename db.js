@@ -760,12 +760,27 @@ async function readLiteState() {
     "supplierReminderSchedules",
     "workerHeartbeat"
   ];
-  const values = await Promise.all(fields.map((field) => readStateField(field)));
-  const state = Object.fromEntries(fields.map((field, index) => [field, values[index]]));
-  const [orders, importJobs] = await Promise.all([
+  const hasDocuments = await stateDocumentCount();
+  if (!hasDocuments) {
+    return readState({ skipInventory: true, orderLimit: 25, purchaseOrderLimit: 1 });
+  }
+  const [documents, entities, orders, importJobs] = await Promise.all([
+    client.query("select doc_key, data from state_documents where doc_key = any($1::text[])", [fields]),
+    client.query(`
+      select collection, data
+      from entity_documents
+      where collection = any($1::text[])
+      order by collection, position, entity_id
+    `, [fields]),
     listOrders({ limit: 25 }),
-    readOperationJobs(100)
+    readOperationJobs(25)
   ]);
+  const state = {};
+  for (const field of fields) {
+    if (ENTITY_DOCUMENT_COLLECTIONS.has(field)) state[field] = [];
+  }
+  for (const row of documents.rows) state[row.doc_key] = row.data;
+  for (const row of entities.rows) state[row.collection].push(row.data);
   return {
     ...state,
     inventory: [],

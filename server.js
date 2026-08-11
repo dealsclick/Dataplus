@@ -16735,6 +16735,8 @@ function publicState(db, options = {}) {
     systemSettings: publicSystemSettings(systemSettings),
     tablePreferences: normalizeUserTablePreferences(db.tablePreferences || {}),
     connections: (db.connections || []).map(publicConnection),
+    vendors: lite ? (db.vendors || []).slice(0, 100) : (db.vendors || []),
+    brands: lite ? (db.brands || []).slice(0, 100) : (db.brands || []),
     inventory: lite ? [] : (db.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, systemSettings })),
     orders: lite ? (db.orders || []).slice(0, 25) : (db.orders || []),
     importJobs: clientImportJobs(Array.isArray(db.importJobs) ? db.importJobs.slice(0, IMPORT_JOB_HISTORY_LIMIT) : []),
