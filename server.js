@@ -1851,6 +1851,9 @@ async function readDbFast(options = {}) {
   }
   const db = stored || JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
   db.exportMappings = readExportMappingsStore(db.exportMappings);
+  // Keep lightweight PostgreSQL reads fast, but still apply the small vendor
+  // normalization needed by the supplier directory and catalog filters.
+  if (Array.isArray(db.vendors)) db.vendors = db.vendors.map((vendor) => normalizeVendor(db, vendor));
   if (!stored) dbCache = { mtimeMs: fs.statSync(DB_FILE).mtimeMs, data: db };
   return db;
 }
