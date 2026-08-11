@@ -23902,6 +23902,18 @@ async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}, webho
   return { order: merged, created: !existing };
 }
 
+const SHOPIFY_WEBHOOK_MAX_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.DATAPLUS_SHOPIFY_WEBHOOK_CONCURRENCY || 3) || 3));
+let shopifyWebhookInFlight = 0;
+
+async function readChannelSettingsFast(channelName = "") {
+  if (postgres.isPostgresEnabled()) {
+    const connections = await postgres.readStateField("connections");
+    return findChannelByName({ connections: Array.isArray(connections) ? connections : [] }, channelName)?.settings || DEFAULT_CHANNEL_SETTINGS;
+  }
+  const db = await readDbFast({ skipInventory: true });
+  return findChannelByName(db, channelName)?.settings || DEFAULT_CHANNEL_SETTINGS;
+}
+
 async function registerShopifyOrderWebhooks() {
   const baseUrl = configuredShopifyAppUrl().replace(/\/+$/, "");
   if (!/^https:\/\//i.test(baseUrl)) throw new Error("Set SHOPIFY_APP_URL to the public HTTPS DataPlus URL before registering webhooks.");
@@ -25293,13 +25305,17 @@ async function handleApi(req, res) {
     if (!valid) return sendJson(res, 401, { error: "Invalid Shopify webhook signature." });
     const webhookId = String(req.headers["x-shopify-webhook-id"] || "").trim();
     if (webhookId && await redisCache.getJson(`dataplus:shopify:webhook:${webhookId}`)) return sendJson(res, 200, { accepted: true, duplicate: true, message: "Shopify webhook was already processed." });
-    const db = await readDbFast({ skipInventory: true });
-    const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    const settings = await readChannelSettingsFast("Shopify");
     if (settings.channelEnabled === false || !settings.shopifyOrderWebhookEnabled || !settings.shopifyOrderImportEnabled) return sendJson(res, 202, { accepted: true, message: "Shopify order webhook received while Shopify or order webhooks are disabled." });
+    if (shopifyWebhookInFlight >= SHOPIFY_WEBHOOK_MAX_CONCURRENCY) {
+      res.setHeader("Retry-After", "5");
+      return sendJson(res, 429, { accepted: false, retry: true, message: "Shopify webhook processing is busy; retry shortly." });
+    }
     const payload = rawBody.length ? JSON.parse(rawBody.toString("utf8")) : {};
     const numericId = String(payload.order_id || payload.id || "").trim();
     const orderId = String(payload.admin_graphql_api_id || (numericId ? `gid://shopify/Order/${numericId}` : "")).trim();
     const startedAt = Date.now();
+    shopifyWebhookInFlight += 1;
     try {
       const topic = String(req.headers["x-shopify-topic"] || "orders/update");
       const result = await refreshShopifyOrderFromWebhook(orderId, settings, { topic, webhookId });
@@ -25309,6 +25325,8 @@ async function handleApi(req, res) {
     } catch (error) {
       appendChannelApiLog({ channel: "Shopify", transport: "webhook", method: "POST", path: url.pathname, operation: String(req.headers["x-shopify-topic"] || "orders/update"), statusCode: 500, ok: false, durationMs: Date.now() - startedAt, message: error.message || "Shopify webhook processing failed." });
       return sendJson(res, 500, { error: "Shopify webhook processing failed." });
+    } finally {
+      shopifyWebhookInFlight = Math.max(0, shopifyWebhookInFlight - 1);
     }
   }
 
@@ -30326,8 +30344,8 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/state") {
     const lite = ["1", "true", "yes"].includes(String(url.searchParams.get("lite") || "").toLowerCase());
     const includeInventory = ["1", "true", "yes"].includes(String(url.searchParams.get("inventory") || "").toLowerCase());
-    const db = await withOperationalSummary(lite && !postgres.isPostgresEnabled()
-      ? readDbLiteFast()
+    const db = await withOperationalSummary(lite
+      ? (postgres.isPostgresEnabled() ? await postgres.readLiteState() : readDbLiteFast())
       : await readDbFast({ skipInventory: postgres.isPostgresEnabled() && !includeInventory }));
     db.tablePreferences = await readUserTablePreferencesStore(db.tablePreferences || {});
     if (postgres.isPostgresEnabled()) {

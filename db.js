@@ -737,6 +737,44 @@ async function readState(options = {}) {
   return result.rows[0]?.data || null;
 }
 
+async function readLiteState() {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const fields = [
+    "sequence",
+    "marketplaceTemplates",
+    "exportMappings",
+    "systemSettings",
+    "connections",
+    "connectorState",
+    "vendors",
+    "brands",
+    "warehouses",
+    "shopifySettings",
+    "ebaySettings",
+    "channelInventorySchedules",
+    "channelSkuMapSchedules",
+    "channelOrderImportSchedules",
+    "vendorFeedSchedules",
+    "supplierReminderSchedules",
+    "workerHeartbeat"
+  ];
+  const values = await Promise.all(fields.map((field) => readStateField(field)));
+  const state = Object.fromEntries(fields.map((field, index) => [field, values[index]]));
+  const [orders, importJobs] = await Promise.all([
+    listOrders({ limit: 25 }),
+    readOperationJobs(100)
+  ]);
+  return {
+    ...state,
+    inventory: [],
+    orders: orders || [],
+    purchaseOrders: [],
+    importJobs: importJobs || []
+  };
+}
+
 async function readStateField(field) {
   const client = getPool();
   if (!client) return undefined;
@@ -7407,6 +7445,7 @@ module.exports = {
   refreshVendorSupplierCoverage,
   isPostgresEnabled,
   readState,
+  readLiteState,
   readStateField,
   readUserTablePreferences,
   upsertCategoryChannelMappingsFromState,
