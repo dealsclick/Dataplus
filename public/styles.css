@@ -6924,7 +6924,33 @@ body.is-saved .global-save-status {
 }
 
 .compact-availability .catalog-table {
-  min-width: 520px;
+  min-width: 860px;
+}
+
+.compact-availability td strong,
+.compact-availability td small {
+  display: block;
+}
+
+.compact-availability td small {
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.inline-alert.warning {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--line));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warning) 10%, var(--panel-solid));
+  color: var(--text);
+}
+
+.supplier-match-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 170px;
 }
 
 .readiness-table {

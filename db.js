@@ -409,6 +409,27 @@ async function initRelationalSchema() {
     );
     create index if not exists vendor_supplier_coverage_count_idx on vendor_supplier_coverage (supplier_count, match_key);
 
+    create table if not exists supplier_match_reviews (
+      match_id text primary key,
+      product_id text not null,
+      product_sku text not null,
+      vendor_id text not null,
+      source_sku text not null,
+      match_type text not null,
+      match_value text,
+      status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+      confidence numeric,
+      details jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      last_seen_at timestamptz not null default now(),
+      reviewed_at timestamptz,
+      reviewed_by text,
+      unique (product_id, vendor_id, source_sku, match_type)
+    );
+    create index if not exists supplier_match_reviews_product_idx on supplier_match_reviews (product_id, status, updated_at desc);
+    create index if not exists supplier_match_reviews_status_idx on supplier_match_reviews (status, updated_at desc);
+    create index if not exists supplier_match_reviews_vendor_idx on supplier_match_reviews (vendor_id, source_sku);
     create table if not exists vendor_catalog_snapshots (
       feed_run_id text not null references vendor_feed_runs(feed_run_id) on delete cascade,
       vendor_id text not null,
@@ -2295,6 +2316,69 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
       from vendor_supplier_coverage_next
       returning match_key
     `);
+    const reviewCandidatesResult = await client.query(`
+      insert into supplier_match_reviews (
+        match_id,
+        product_id,
+        product_sku,
+        vendor_id,
+        source_sku,
+        match_type,
+        match_value,
+        status,
+        confidence,
+        details,
+        created_at,
+        updated_at,
+        last_seen_at
+      )
+      select
+        md5(product.product_id || '|' || item.vendor_id || '|' || item.source_sku || '|manufacturer-part-number'),
+        product.product_id,
+        product.sku,
+        item.vendor_id,
+        item.source_sku,
+        'manufacturer-part-number',
+        trim(product.mfr_part_number),
+        'pending',
+        0.82,
+        jsonb_build_object(
+          'productBrand', coalesce(product.brand, ''),
+          'supplierBrand', coalesce(item.brand, ''),
+          'productTitle', coalesce(product.title, product.marketplace_title, ''),
+          'supplierTitle', coalesce(item.title, '')
+        ),
+        now(),
+        now(),
+        now()
+      from products product
+      join vendor_catalog_items item
+        on lower(item.mfr_part_number) = lower(product.mfr_part_number)
+      where length(trim(coalesce(product.mfr_part_number, ''))) >= 5
+        and not (
+          coalesce(trim(product.brand), '') <> ''
+          and lower(trim(coalesce(item.brand, ''))) = lower(trim(product.brand))
+        )
+        and not (
+          coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), ''), '') <> ''
+          and lower(coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''), '')) =
+            lower(coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), ''), ''))
+        )
+        and lower(trim(product.sku)) not in (
+          lower(trim(item.source_sku)),
+          lower(trim(coalesce(item.internal_sku, ''))),
+          lower(trim(coalesce(item.vendor_sku, '')))
+        )
+      on conflict (product_id, vendor_id, source_sku, match_type) do update
+      set
+        product_sku = excluded.product_sku,
+        match_value = excluded.match_value,
+        confidence = excluded.confidence,
+        details = excluded.details,
+        updated_at = now(),
+        last_seen_at = now()
+      returning match_id
+    `);
     const productsResult = await client.query(`
       with product_identities as materialized (
         select
@@ -2312,13 +2396,23 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
             else 'exact-sku'
           end as match_type
         from products
+      ), approved_reviews as materialized (
+        select product_id, count(distinct vendor_id)::integer as approved_supplier_count
+        from supplier_match_reviews
+        where status = 'approved'
+        group by product_id
       ), product_coverage as materialized (
         select
           product_identity.product_id,
-          product_identity.match_type,
-          coalesce(coverage.supplier_count, 0)::integer as supplier_count
+          case
+            when coalesce(review.approved_supplier_count, 0) > 0
+              then product_identity.match_type || '+approved-mfr-part-number'
+            else product_identity.match_type
+          end as match_type,
+          (coalesce(coverage.supplier_count, 0) + coalesce(review.approved_supplier_count, 0))::integer as supplier_count
         from product_identities product_identity
         left join vendor_supplier_coverage coverage on coverage.match_key = product_identity.match_key
+        left join approved_reviews review on review.product_id = product_identity.product_id
       )
       update products product
       set
@@ -2382,6 +2476,7 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
     return {
       enabled: true,
       keys: result.rowCount || 0,
+      reviewCandidates: reviewCandidatesResult.rowCount || 0,
       productsUpdated: productsResult.rowCount || 0,
       vendorItemsUpdated: vendorItemsResult.rowCount || 0
     };
@@ -2684,9 +2779,11 @@ async function readVendorCatalogItemsBySkus(skus = []) {
   return result.rows.map(vendorCatalogRowToState);
 }
 
-function vendorCatalogSupplierMatchRow(row = {}, matchType = "") {
+function vendorCatalogSupplierMatchRow(row = {}, matchType = "", review = null) {
   const item = vendorCatalogRowToState(row);
   return {
+    vendorId: row.vendor_id || "",
+    sourceSku: row.source_sku || item.sku || "",
     supplier: row.supplier_name || row.vendor_name || item.supplier || item.vendor || row.vendor_id || "",
     supplierCode: row.supplier_code || item.supplierCode || row.vendor_id || "",
     sku: item.sku || row.source_sku || "",
@@ -2708,7 +2805,14 @@ function vendorCatalogSupplierMatchRow(row = {}, matchType = "") {
     defaultImage: item.defaultImage || "",
     lastSeenAt: item.lastSeenAt || "",
     updatedAt: item.updatedAt || "",
-    matchType
+    matchType,
+    matchValue: review?.match_value || "",
+    matchStatus: review?.status || "confirmed",
+    reviewId: review?.match_id || "",
+    confidence: review?.confidence == null ? null : Number(review.confidence),
+    requiresReview: Boolean(review && review.status === "pending"),
+    reviewedAt: review?.reviewed_at?.toISOString?.() || "",
+    reviewedBy: review?.reviewed_by || ""
   };
 }
 
@@ -2717,6 +2821,7 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
   if (!client) return { matchType: "none", matches: [] };
   await initRelationalSchema();
 
+  const productId = nullableString(identity.productId || identity.id || "");
   const sku = nullableString(identity.sku || identity.internalSku || "");
   const barcode = nullableString(identity.barcode || identity.upc || identity.gtin || "");
   const mfrPartNumber = nullableString(identity.mfrPartNumber || identity.manufacturerPartNumber || "");
@@ -2773,7 +2878,187 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
     seen.add(key);
     return true;
   });
-  return { matchType, matches };
+
+  let reviewMatches = [];
+  if (mfrPartNumber && (productId || sku)) {
+    const productResult = await client.query(`
+      select product_id, sku
+      from products
+      where ($1 <> '' and product_id = $1)
+        or ($2 <> '' and lower(sku) = lower($2))
+      order by case when product_id = $1 then 0 else 1 end
+      limit 1
+    `, [productId || "", sku || ""]);
+    const product = productResult.rows[0];
+    if (product) {
+      const candidateResult = await client.query(`${baseSelect}
+        where lower(vci.mfr_part_number) = lower($1)
+          and not (
+            $2 <> ''
+            and coalesce(trim(vci.brand), '') <> ''
+            and lower(trim(vci.brand)) = lower(trim($2))
+          )
+        ${orderAndLimit}`, [mfrPartNumber, brand || ""]);
+      const confirmedVendorIds = new Set(rows.map((row) => String(row.vendor_id || "").toLowerCase()).filter(Boolean));
+      const candidates = candidateResult.rows.filter((row) => !confirmedVendorIds.has(String(row.vendor_id || "").toLowerCase()));
+      if (candidates.length) {
+        const payload = candidates.map((row) => ({
+          matchId: crypto.createHash("md5").update(`${product.product_id}|${row.vendor_id}|${row.source_sku}|manufacturer-part-number`).digest("hex"),
+          vendorId: row.vendor_id,
+          sourceSku: row.source_sku,
+          productBrand: brand || "",
+          supplierBrand: row.brand || "",
+          productTitle: identity.title || "",
+          supplierTitle: row.title || ""
+        }));
+        await client.query(`
+          insert into supplier_match_reviews (
+            match_id, product_id, product_sku, vendor_id, source_sku, match_type,
+            match_value, status, confidence, details, created_at, updated_at, last_seen_at
+          )
+          select
+            candidate.match_id,
+            $1,
+            $2,
+            candidate.vendor_id,
+            candidate.source_sku,
+            'manufacturer-part-number',
+            $3,
+            'pending',
+            0.82,
+            jsonb_build_object(
+              'productBrand', candidate.product_brand,
+              'supplierBrand', candidate.supplier_brand,
+              'productTitle', candidate.product_title,
+              'supplierTitle', candidate.supplier_title
+            ),
+            now(), now(), now()
+          from jsonb_to_recordset($4::jsonb) as candidate(
+            match_id text,
+            vendor_id text,
+            source_sku text,
+            product_brand text,
+            supplier_brand text,
+            product_title text,
+            supplier_title text
+          )
+          on conflict (product_id, vendor_id, source_sku, match_type) do update
+          set
+            product_sku = excluded.product_sku,
+            match_value = excluded.match_value,
+            confidence = excluded.confidence,
+            details = excluded.details,
+            updated_at = now(),
+            last_seen_at = now()
+        `, [product.product_id, product.sku, mfrPartNumber, JSON.stringify(payload.map((row) => ({
+          match_id: row.matchId,
+          vendor_id: row.vendorId,
+          source_sku: row.sourceSku,
+          product_brand: row.productBrand,
+          supplier_brand: row.supplierBrand,
+          product_title: row.productTitle,
+          supplier_title: row.supplierTitle
+        })))]);
+        const reviewResult = await client.query(`
+          select review.*, item.*, vendor.name as supplier_name, vendor.code as supplier_code
+          from supplier_match_reviews review
+          join vendor_catalog_items item
+            on item.vendor_id = review.vendor_id and item.source_sku = review.source_sku
+          left join vendors vendor on vendor.vendor_id = item.vendor_id
+          where review.product_id = $1
+            and review.match_type = 'manufacturer-part-number'
+          order by
+            case review.status when 'pending' then 0 when 'approved' then 1 else 2 end,
+            item.updated_at desc nulls last
+          limit 150
+        `, [product.product_id]);
+        reviewMatches = reviewResult.rows.map((row) => vendorCatalogSupplierMatchRow(row, "manufacturer-part-number", row));
+      }
+    }
+  }
+
+  const combined = [...matches];
+  const combinedKeys = new Set(combined.map((row) => `${row.vendorId}|${row.sourceSku}`));
+  for (const row of reviewMatches) {
+    const key = `${row.vendorId}|${row.sourceSku}`;
+    if (!combinedKeys.has(key)) {
+      combined.push(row);
+      combinedKeys.add(key);
+    }
+  }
+  return {
+    matchType: matchType === "none" && reviewMatches.length ? "manufacturer-part-number" : matchType,
+    matches: combined,
+    pendingReviewCount: reviewMatches.filter((row) => row.matchStatus === "pending").length
+  };
+}
+
+async function reviewSupplierMatch({ matchId, productId, status, reviewedBy = "DataPlus user" } = {}) {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  if (!matchId || !["approved", "rejected", "pending"].includes(normalizedStatus)) {
+    throw new Error("A valid supplier match and review decision are required.");
+  }
+  const result = await client.query(`
+    update supplier_match_reviews
+    set
+      status = $2,
+      reviewed_at = case when $2 = 'pending' then null else now() end,
+      reviewed_by = case when $2 = 'pending' then null else $3 end,
+      updated_at = now()
+    where match_id = $1
+      and ($4 = '' or product_id = $4)
+    returning *
+  `, [matchId, normalizedStatus, reviewedBy, nullableString(productId) || ""]);
+  const review = result.rows[0];
+  if (!review) return null;
+  await client.query(`
+    with product_identity as (
+      select
+        product_id,
+        case
+          when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> ''
+            then 'barcode:' || lower(coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), '')))
+          when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> ''
+            then 'mfr:' || lower(trim(brand)) || '|' || lower(trim(mfr_part_number))
+          else 'sku:' || lower(trim(sku))
+        end as match_key,
+        case
+          when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> '' then 'upc'
+          when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> '' then 'manufacturer-part-and-brand'
+          else 'exact-sku'
+        end as match_type
+      from products
+      where product_id = $1
+    ), approved as (
+      select count(distinct vendor_id)::integer as supplier_count
+      from supplier_match_reviews
+      where product_id = $1 and status = 'approved'
+    )
+    update products product
+    set
+      supplier_count = coalesce(coverage.supplier_count, 0) + approved.supplier_count,
+      has_multiple_suppliers = (coalesce(coverage.supplier_count, 0) + approved.supplier_count) >= 2,
+      supplier_coverage_match_type = case
+        when approved.supplier_count > 0 then identity.match_type || '+approved-mfr-part-number'
+        else identity.match_type
+      end,
+      supplier_coverage_updated_at = now()
+    from product_identity identity
+    cross join approved
+    left join vendor_supplier_coverage coverage on coverage.match_key = identity.match_key
+    where product.product_id = identity.product_id
+  `, [review.product_id]);
+  return {
+    matchId: review.match_id,
+    productId: review.product_id,
+    productSku: review.product_sku,
+    status: review.status,
+    reviewedAt: review.reviewed_at?.toISOString?.() || "",
+    reviewedBy: review.reviewed_by || ""
+  };
 }
 
 async function vendorCatalogFacets() {
@@ -7481,6 +7766,7 @@ module.exports = {
   readCategoryState,
   readVendorCatalogItemsBySkus,
   findVendorCatalogSupplierMatches,
+  reviewSupplierMatch,
   sourceCatalogSearchIndexStatus,
   readOperationJobs,
   readOperationJobsPage,

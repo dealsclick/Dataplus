@@ -6385,12 +6385,47 @@ async function loadProductAlternates(sku) {
   if (!key || productAlternatesCache[key]) return;
   productAlternatesCache[key] = { loading: true, rows: [] };
   try {
-    const result = await api(`/api/catalog/alternates?sku=${encodeURIComponent(sku)}`);
-    productAlternatesCache[key] = { loading: false, rows: result.alternates?.[key] || [] };
+    const result = await api(`/api/inventory/${encodeURIComponent(sku)}/suppliers`);
+    productAlternatesCache[key] = {
+      loading: false,
+      rows: result.matches || [],
+      matchType: result.matchType || "none",
+      supplierCount: Number(result.supplierCount || 0),
+      pendingReviewCount: Number(result.pendingReviewCount || 0)
+    };
   } catch (error) {
     productAlternatesCache[key] = { loading: false, rows: [], error: error.message };
   }
   if ((state.inventory || []).find((item) => item.id === selectedProductId)?.sku === sku) renderProductContentPage();
+}
+
+function supplierMatchLabel(row = {}) {
+  const type = String(row.matchType || "").toLowerCase();
+  if (type === "upc") return "UPC exact";
+  if (type === "manufacturer-part-and-brand") return "MFR part + brand";
+  if (type === "manufacturer-part-number") return "Close match: MFR part number";
+  if (type === "exact-sku") return "Exact SKU";
+  if (type === "primary") return "Primary supplier";
+  return type ? type.replaceAll("-", " ") : "Supplier record";
+}
+
+function supplierMatchStatusMarkup(row = {}) {
+  const status = String(row.matchStatus || "confirmed").toLowerCase();
+  if (status === "pending") return `<span class="status hold" title="This close match does not count as a confirmed supplier until approved.">Needs review</span>`;
+  if (status === "approved") return `<span class="status ready">Approved</span>`;
+  if (status === "rejected") return `<span class="status canceled">Rejected</span>`;
+  return `<span class="status ready">Confirmed</span>`;
+}
+
+async function reviewProductSupplierMatch(sku, reviewId, status) {
+  await api(`/api/inventory/${encodeURIComponent(sku)}/supplier-matches/${encodeURIComponent(reviewId)}/review`, {
+    method: "POST",
+    body: JSON.stringify({ status }),
+    feedbackLabel: status === "approved" ? "Approving supplier match..." : "Updating supplier match..."
+  });
+  delete productAlternatesCache[String(sku || "").toLowerCase()];
+  await loadProductAlternates(sku);
+  toast(status === "approved" ? "Supplier match approved." : status === "rejected" ? "Supplier match rejected." : "Supplier match returned to review.");
 }
 
 async function loadProductTableAlternates(items = []) {
@@ -6478,17 +6513,32 @@ function renderProductAvailabilityPanel(item = {}) {
   const rows = cache.rows || [];
   return rows.length
     ? `
+      ${cache.pendingReviewCount ? `<div class="inline-alert warning"><strong>${Number(cache.pendingReviewCount)} close match${Number(cache.pendingReviewCount) === 1 ? "" : "es"} need review.</strong> MFR-only matches are not counted as confirmed suppliers until approved.</div>` : ""}
       <div class="catalog-table-wrap compact-availability">
         <table class="catalog-table">
-          <thead><tr><th>SKU</th><th>Vendor / Supplier</th><th>Brand</th><th>Cost</th><th>Qty</th></tr></thead>
+          <thead><tr><th>SKU</th><th>Vendor / Supplier</th><th>Match</th><th>Brand</th><th>Cost</th><th>Qty</th><th>Review</th></tr></thead>
           <tbody>
             ${rows.map((row) => `
               <tr>
                 <td>${html(row.sku)}</td>
                 <td>${html(row.supplier || row.vendor || "Unknown")}</td>
+                <td>
+                  <strong>${html(supplierMatchLabel(row))}</strong>
+                  ${row.matchValue ? `<small>${html(row.matchValue)}</small>` : ""}
+                  ${supplierMatchStatusMarkup(row)}
+                </td>
                 <td>${html(row.brand || "No brand")}</td>
                 <td>${money(row.cost || 0)}</td>
                 <td>${Number(row.stockQty ?? row.qty ?? 0)}</td>
+                <td>
+                  ${row.reviewId ? `
+                    <div class="table-row-actions supplier-match-review-actions">
+                      ${row.matchStatus !== "approved" ? `<button class="button compact-button primary" type="button" data-review-supplier-match="approved" data-review-id="${html(row.reviewId)}" data-review-sku="${html(item.sku || "")}">Approve</button>` : ""}
+                      ${row.matchStatus !== "rejected" ? `<button class="button compact-button secondary" type="button" data-review-supplier-match="rejected" data-review-id="${html(row.reviewId)}" data-review-sku="${html(item.sku || "")}">Reject</button>` : ""}
+                      ${row.matchStatus !== "pending" ? `<button class="button compact-button ghost" type="button" data-review-supplier-match="pending" data-review-id="${html(row.reviewId)}" data-review-sku="${html(item.sku || "")}">Review again</button>` : ""}
+                    </div>
+                  ` : `<span class="muted">Automatic</span>`}
+                </td>
               </tr>
             `).join("")}
           </tbody>
@@ -21421,6 +21471,7 @@ document.addEventListener("click", async (event) => {
   const catalogBulkActionButton = event.target.closest("[data-catalog-bulk-action]");
   const loadProductAlternatesPageButton = event.target.closest("[data-load-product-alternates-page]");
   const loadProductAlternatesButton = event.target.closest("[data-load-product-alternates]");
+  const reviewSupplierMatchButton = event.target.closest("[data-review-supplier-match]");
   const vendorButton = event.target.closest("[data-select-vendor]");
   const brandButton = event.target.closest("[data-select-brand]");
   const customerButton = event.target.closest("[data-select-customer]");
@@ -23291,6 +23342,14 @@ document.addEventListener("click", async (event) => {
       if (catalogTab === "products") renderProductsTable(filteredCatalogItems());
     }).catch((error) => toast(error.message));
     renderProductsTable(filteredCatalogItems());
+    return;
+  }
+  if (reviewSupplierMatchButton) {
+    reviewProductSupplierMatch(
+      reviewSupplierMatchButton.dataset.reviewSku,
+      reviewSupplierMatchButton.dataset.reviewId,
+      reviewSupplierMatchButton.dataset.reviewSupplierMatch
+    ).catch((error) => toast(error.message));
     return;
   }
   if (productRowActionButton) {

@@ -25700,14 +25700,21 @@ async function handleApi(req, res) {
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
     const coverage = await postgres.findVendorCatalogSupplierMatches({
+      productId: product.id,
       sku: product.sku,
+      title: product.marketplaceTitle || product.title,
       barcode: product.barcode,
       mfrPartNumber: product.mfrPartNumber,
       brand: product.brand
     });
     const primarySupplier = product.supplier || product.vendor || "";
     const primarySku = product.vendorSku || product.sku || "";
-    const exists = (coverage.matches || []).some((row) => String(row.supplier || "").toLowerCase() === String(primarySupplier).toLowerCase() && String(row.vendorSku || row.sku || "").toLowerCase() === String(primarySku).toLowerCase());
+    const exists = (coverage.matches || []).some((row) => {
+      const confirmed = ["confirmed", "approved", ""].includes(String(row.matchStatus || "").toLowerCase());
+      return confirmed
+        && String(row.supplier || "").toLowerCase() === String(primarySupplier).toLowerCase()
+        && String(row.vendorSku || row.sku || "").toLowerCase() === String(primarySku).toLowerCase();
+    });
     const matches = exists ? coverage.matches : [{
       supplier: primarySupplier,
       supplierCode: product.supplierCode || "",
@@ -25728,12 +25735,32 @@ async function handleApi(req, res) {
       discontinued: Boolean(product.toBeDiscontinued),
       defaultImage: product.defaultImage || "",
       updatedAt: product.updatedAt || "",
-      matchType: "primary"
+      matchType: "primary",
+      matchStatus: "confirmed",
+      requiresReview: false
     }, ...(coverage.matches || [])];
-    const supplierCount = new Set(matches.map((row) => String(row.supplierCode || row.supplier || "").trim().toLowerCase()).filter(Boolean)).size;
-    const payload = { matchType: coverage.matchType, supplierCount, matches };
+    const confirmedMatches = matches.filter((row) => ["confirmed", "approved", ""].includes(String(row.matchStatus || "").toLowerCase()));
+    const supplierCount = new Set(confirmedMatches.map((row) => String(row.supplierCode || row.supplier || "").trim().toLowerCase()).filter(Boolean)).size;
+    const payload = { matchType: coverage.matchType, supplierCount, pendingReviewCount: Number(coverage.pendingReviewCount || 0), matches };
     await redisCache.setJson(cacheKey, payload, 300);
     return sendJson(res, 200, payload);
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "supplier-matches" && parts[4] && parts[5] === "review" && postgres.isPostgresEnabled()) {
+    const product = await postgres.readProductByKey(parts[2]);
+    if (!product) return notFound(res);
+    const body = await parseBody(req);
+    const review = await postgres.reviewSupplierMatch({
+      matchId: parts[4],
+      productId: product.id,
+      status: body.status,
+      reviewedBy: body.reviewedBy || body.user || "DataPlus user"
+    });
+    if (!review || review.productId !== product.id) return notFound(res);
+    await redisCache.deleteByPrefix("dataplus:supplier-coverage:");
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    return sendJson(res, 200, { review });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "ledger" && postgres.isPostgresEnabled()) {
