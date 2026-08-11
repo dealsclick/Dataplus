@@ -1928,7 +1928,10 @@ function writeStateSummarySync(db = {}) {
       cancellations: [],
       customers: Array.isArray(db.customers) ? db.customers.slice(0, 25) : [],
       purchaseOrders: Array.isArray(db.purchaseOrders) ? db.purchaseOrders.slice(0, 25) : [],
-      vendors: Array.isArray(db.vendors) ? db.vendors.slice(0, 100) : [],
+      // Vendor profiles are the lookup source for the supplier page and its
+      // filters. Keep the lightweight state complete so profiles beyond the
+      // first page (for example True Value) are not silently hidden.
+      vendors: Array.isArray(db.vendors) ? db.vendors : [],
       brands: Array.isArray(db.brands) ? db.brands.slice(0, 100) : [],
       warehouses: Array.isArray(db.warehouses) ? db.warehouses : [],
       inventoryLedger: [],
@@ -2723,6 +2726,8 @@ function sourceTextValue(value) {
 // Supplier feeds use short source codes, but operators need stable supplier names
 // in the catalog. Keep this small map explicit so display labels and filters agree.
 const KNOWN_SUPPLIER_NAMES_BY_KEY = Object.freeze({
+  trv: "True Value",
+  "true value": "True Value",
   rz: "Zoro",
   zoro: "Zoro",
   mar: "Marcone",
@@ -16794,7 +16799,9 @@ function publicState(db, options = {}) {
     systemSettings: publicSystemSettings(systemSettings),
     tablePreferences: normalizeUserTablePreferences(db.tablePreferences || {}),
     connections: (db.connections || []).map(publicConnection),
-    vendors: lite ? (db.vendors || []).slice(0, 100) : (db.vendors || []),
+    // The vendor directory needs the complete profile list even in lite state;
+    // its search/filter UI cannot recover records that were truncated here.
+    vendors: db.vendors || [],
     brands: lite ? (db.brands || []).slice(0, 100) : (db.brands || []),
     inventory: lite ? [] : (db.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, systemSettings })),
     orders: lite ? (db.orders || []).slice(0, 25) : (db.orders || []),

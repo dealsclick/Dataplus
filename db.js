@@ -30,6 +30,8 @@ function isPostgresEnabled() {
 }
 
 const KNOWN_SUPPLIER_NAMES_BY_KEY = Object.freeze({
+  trv: "True Value",
+  "true value": "True Value",
   rz: "Zoro",
   zoro: "Zoro",
   mar: "Marcone",
