@@ -29694,7 +29694,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "vendors" && parts[2] === "marketplace-summary" && parts.length === 3 && postgres.isPostgresEnabled()) {
-    const cacheKey = "dataplus:vendor-marketplace-summary:v2";
+    const cacheKey = "dataplus:vendor-marketplace-summary:v3";
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
     const rows = await postgres.listVendorMarketplaceSummary();
@@ -29713,6 +29713,7 @@ async function handleApi(req, res) {
       id: crypto.randomUUID(),
       vendorNumber: nextVendorNumber(db),
       name,
+      code: String(body.code || "").trim(),
       status: "inactive",
       type: String(body.type || "Supplier"),
       contactName: String(body.contactName || ""),
@@ -29734,7 +29735,7 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     const vendor = findVendorById(db, parts[2]);
     if (!vendor) return notFound(res);
-    const allowedFields = new Set(["name", "status", "type", "contactName", "email", "phone", "website", "paymentTerms", "leadTimeDays", "moq", "notes", "rating"]);
+    const allowedFields = new Set(["name", "code", "status", "type", "contactName", "email", "phone", "website", "paymentTerms", "leadTimeDays", "moq", "notes", "rating"]);
     const numericFields = new Set(["leadTimeDays", "moq", "rating"]);
     const submissionFields = new Set(["preferredMethod", "apiEnabled", "apiBaseUrl", "apiAuthType", "apiKeyReference", "ftpEnabled", "ftpHost", "ftpPort", "ftpUsername", "ftpPath", "emailEnabled", "emailTo", "emailCc", "emailSubjectTemplate", "attachCsv", "attachPdf"]);
     const booleanSubmissionFields = new Set(["apiEnabled", "ftpEnabled", "emailEnabled", "attachCsv", "attachPdf"]);
@@ -29868,7 +29869,7 @@ async function handleApi(req, res) {
     const vendorIndex = (db.vendors || []).findIndex((entry) => entry.id === vendor.id);
     if (vendorIndex >= 0) db.vendors[vendorIndex] = normalizedVendor;
     await postgres.writeStateDocuments({ vendors: db.vendors || [] });
-    if (changes.some((change) => change.startsWith("catalogSettings."))) {
+    if (changes.some((change) => change.startsWith("catalogSettings.") || change.startsWith("code changed"))) {
       await Promise.all([
         redisCache.deleteByPrefix("dataplus:products:"),
         redisCache.deleteByPrefix("dataplus:vendor-marketplace-summary:")
@@ -36776,7 +36777,7 @@ async function handleApi(req, res) {
     const vendor = findVendorById(db, parts[2]);
     if (!vendor) return notFound(res);
 
-    const allowedFields = new Set(["name", "status", "type", "contactName", "email", "phone", "website", "paymentTerms", "leadTimeDays", "moq", "notes", "rating"]);
+    const allowedFields = new Set(["name", "code", "status", "type", "contactName", "email", "phone", "website", "paymentTerms", "leadTimeDays", "moq", "notes", "rating"]);
     const numericFields = new Set(["leadTimeDays", "moq", "rating"]);
     const submissionFields = new Set(["preferredMethod", "apiEnabled", "apiBaseUrl", "apiAuthType", "apiKeyReference", "ftpEnabled", "ftpHost", "ftpPort", "ftpUsername", "ftpPath", "emailEnabled", "emailTo", "emailCc", "emailSubjectTemplate", "attachCsv", "attachPdf"]);
     const booleanSubmissionFields = new Set(["apiEnabled", "ftpEnabled", "emailEnabled", "attachCsv", "attachPdf"]);
@@ -36909,6 +36910,7 @@ async function handleApi(req, res) {
       id: crypto.randomUUID(),
       vendorNumber: nextVendorNumber(db),
       name,
+      code: String(body.code || "").trim(),
       status: "inactive",
       type: String(body.type || "Supplier"),
       contactName: String(body.contactName || ""),

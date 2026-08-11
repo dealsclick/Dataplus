@@ -6751,7 +6751,7 @@ async function listVendorMarketplaceSummary() {
     group by lower(supplier)
     order by "marketplaceLive" desc, "productCount" desc, supplier
   `);
-  return result.rows.map((row) => ({
+  const rows = result.rows.map((row) => ({
     supplierKey: String(row.supplierKey || "").toLowerCase(),
     supplier: String(row.supplier || ""),
     sourceCodes: Array.isArray(row.sourceCodes) ? row.sourceCodes.map((value) => String(value || "").trim()).filter(Boolean) : [],
@@ -6761,6 +6761,34 @@ async function listVendorMarketplaceSummary() {
     ebayLive: Number(row.ebayLive || 0),
     marketplaceLive: Number(row.marketplaceLive || 0)
   }));
+  const sourceResult = await client.query(`
+    select facet_value, display_value, row_count
+    from vendor_catalog_facets
+    where facet_type = 'supplier'
+      and coalesce(facet_value, '') <> ''
+    order by row_count desc, display_value
+  `);
+  for (const sourceRow of sourceResult.rows) {
+    const sourceCode = String(sourceRow.facet_value || "").trim();
+    const sourceKey = sourceCode.toLowerCase();
+    if (!sourceKey) continue;
+    const existing = rows.find((row) => row.sourceCodes.some((code) => code.toLowerCase() === sourceKey));
+    if (existing) {
+      existing.productCount = Math.max(existing.productCount, Number(sourceRow.row_count || 0));
+      continue;
+    }
+    rows.push({
+      supplierKey: sourceKey,
+      supplier: String(sourceRow.display_value || sourceCode).trim() || sourceCode,
+      sourceCodes: [sourceCode],
+      productCount: Number(sourceRow.row_count || 0),
+      activeProductCount: 0,
+      shopifyLive: 0,
+      ebayLive: 0,
+      marketplaceLive: 0
+    });
+  }
+  return rows.sort((left, right) => right.marketplaceLive - left.marketplaceLive || right.productCount - left.productCount || left.supplier.localeCompare(right.supplier));
 }
 
 async function listBrandCatalogSummary() {
