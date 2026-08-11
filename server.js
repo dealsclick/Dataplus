@@ -16571,7 +16571,12 @@ function publicInventoryItem(item = {}, context = {}) {
     vendorOffers: Array.isArray(item.vendorOffers) ? item.vendorOffers : [],
     warehouseStock: Array.isArray(item.warehouseStock) ? item.warehouseStock : [],
     recentChanges: Array.isArray(item.recentChanges) ? item.recentChanges : [],
-    sourceCatalogMatches: Array.isArray(item.sourceCatalogMatches) ? item.sourceCatalogMatches : []
+    sourceCatalogMatches: Array.isArray(item.sourceCatalogMatches) ? item.sourceCatalogMatches : [],
+    inProducts: item.inProducts === undefined ? true : Boolean(item.inProducts),
+    sourceOnly: Boolean(item.sourceOnly || item.inProducts === false),
+    productCatalogId: item.productCatalogId || "",
+    productCatalogSku: item.productCatalogSku || "",
+    productCatalogStatus: item.productCatalogStatus || ""
   };
 }
 
@@ -16719,7 +16724,12 @@ function publicInventoryListItem(item = {}, context = {}) {
     updatedAt: item.updatedAt || item.productDumpUpdatedAt || "",
     ebayListing: publicEbayListing(item.ebayListing),
     aliasCount: Array.isArray(item.aliases) ? item.aliases.filter((alias) => alias.active !== false).length : 0,
-    shadowSkuCount: Array.isArray(item.shadowSkus) ? item.shadowSkus.length : 0
+    shadowSkuCount: Array.isArray(item.shadowSkus) ? item.shadowSkus.length : 0,
+    inProducts: item.inProducts === undefined ? true : Boolean(item.inProducts),
+    sourceOnly: Boolean(item.sourceOnly || item.inProducts === false),
+    productCatalogId: item.productCatalogId || "",
+    productCatalogSku: item.productCatalogSku || "",
+    productCatalogStatus: item.productCatalogStatus || ""
   };
 }
 
@@ -21627,6 +21637,31 @@ function decorateSourceCatalogProduct(product = {}, overrides = {}, productsBySk
   };
 }
 
+function isExactCatalogIdentifier(value = "") {
+  return /^[a-z0-9_-]{5,}$/i.test(String(value || "").trim());
+}
+
+async function readExactSourceCatalogMatches(value = "") {
+  const identifier = String(value || "").trim();
+  if (!postgres.isPostgresEnabled() || !isExactCatalogIdentifier(identifier)) return [];
+  const rows = await postgres.readVendorCatalogItemsBySkus([identifier]);
+  const normalizedItems = (rows || [])
+    .map((item) => normalizeCatalogProductForInventory(item))
+    .filter(Boolean);
+  if (!normalizedItems.length) return [];
+  const runtimeDb = await readSourceCatalogRuntimeDb();
+  const managedProducts = await postgres.readProductsByKeys(
+    normalizedItems.flatMap((item) => sourceCatalogLookupKeys(item)),
+    { includeMarketplaceIds: false }
+  );
+  const productsBySku = managedProductLookup(managedProducts);
+  const overrides = sourceCatalogOverrideMap(runtimeDb);
+  const vendorMappings = vendorCategoryMappingMap(runtimeDb);
+  return normalizedItems
+    .map((item) => decorateSourceCatalogProduct(item, overrides, productsBySku, vendorMappings))
+    .filter((item) => !item.sourceCatalogDeleted);
+}
+
 function sourceCatalogCost(product = {}) {
   const sourceCost = Number(sourceNumberValue(product.sourceCost));
   if (sourceCost > 0) return sourceCost;
@@ -25675,12 +25710,26 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[2] !== "export.csv" && parts.length === 3) {
     if (postgres.isPostgresEnabled()) {
-      const cacheKey = `dataplus:product-detail:v1:${crypto.createHash("sha1").update(String(parts[2]).toLowerCase()).digest("hex")}`;
+      const cacheKey = `dataplus:product-detail:v2:${crypto.createHash("sha1").update(String(parts[2]).toLowerCase()).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const pgItem = await postgres.readProductByKey(parts[2]);
       if (pgItem) {
         const payload = { item: publicInventoryItem(pgItem, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) };
+        await redisCache.setJson(cacheKey, payload, 120);
+        return sendJson(res, 200, payload);
+      }
+      const sourceMatches = await readExactSourceCatalogMatches(parts[2]);
+      const sourceItem = sourceMatches.find((item) => sourceCatalogLookupKeys(item).includes(String(parts[2] || "").trim().toLowerCase())) || sourceMatches[0];
+      if (sourceItem) {
+        const sourceOnlyItem = {
+          ...sourceItem,
+          inProducts: false,
+          sourceOnly: true,
+          createdMethod: sourceItem.createdMethod || "DataWarehouse import",
+          createdSource: sourceItem.createdSource || "source catalog / data dump"
+        };
+        const payload = { item: publicInventoryItem(sourceOnlyItem, { shopifyStatusMap: {}, sourceEnrichmentMap: {}, systemSettings: readSystemSettingsStore(dbCache.data?.systemSettings || {}) }) };
         await redisCache.setJson(cacheKey, payload, 120);
         return sendJson(res, 200, payload);
       }
@@ -26057,7 +26106,7 @@ async function handleApi(req, res) {
           Array.isArray(catalogVendors) ? catalogVendors : []
         );
       const cacheQuery = `${url.searchParams.toString()}|feedCodes:${String(filters.includedSupplierCodes || "")}`;
-      const cacheKey = `dataplus:products:v8:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
+      const cacheKey = `dataplus:products:v9:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
       const result = await postgres.listProducts({
@@ -26073,6 +26122,15 @@ async function handleApi(req, res) {
         filters
       });
       if (result) {
+        const sourceMatches = isExactCatalogIdentifier(catalogQuery)
+          ? await readExactSourceCatalogMatches(catalogQuery)
+          : [];
+        const managedKeys = new Set((result.inventory || []).flatMap((item) => sourceCatalogLookupKeys(item)));
+        const sourceOnlyMatches = sourceMatches
+          .filter((item) => item.inProducts === false)
+          .filter((item) => !sourceCatalogLookupKeys(item).some((key) => managedKeys.has(key)))
+          .map((item) => ({ ...item, sourceOnly: true }));
+        const inventoryRows = [...sourceOnlyMatches, ...(result.inventory || [])].slice(0, Number(result.limit || url.searchParams.get("limit") || 100));
         // The compact grid is backed by indexed Shopify status rows in Postgres.
         // Avoid parsing the large legacy status-map file on a request path that can
         // run every time a user opens or filters the catalog.
@@ -26080,13 +26138,13 @@ async function handleApi(req, res) {
         const sourceEnrichmentMap = fastPage ? {} : readProductSourceEnrichmentSync();
         // The compact Products grid uses catalog fields already stored on the product row.
         // Source fallback enrichment remains available in the SKU detail and export workflows.
-        const sourceFallbackMap = fastPage ? new Map() : await sourceCatalogExportFallbackMap(result.inventory || []);
+        const sourceFallbackMap = fastPage ? new Map() : await sourceCatalogExportFallbackMap(inventoryRows);
         const systemSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
         const payload = {
-          inventory: (result.inventory || []).map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, sourceFallbackMap, systemSettings })),
+          inventory: inventoryRows.map((item) => publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap, sourceFallbackMap, systemSettings })),
           inventoryLoaded: true,
-          total: result.total,
-          totalQty: result.totalQty,
+          total: Number(result.total || 0) + sourceOnlyMatches.length,
+          totalQty: Number(result.totalQty || 0) + sourceOnlyMatches.reduce((sum, item) => sum + Number(item.stockQty ?? item.qty ?? 0), 0),
           page: result.page,
           limit: result.limit,
           hasMore: Boolean(result.hasMore),
