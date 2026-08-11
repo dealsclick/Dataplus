@@ -156,6 +156,7 @@ async function initRelationalSchema() {
     alter table products add column if not exists has_multiple_suppliers boolean not null default false;
     alter table products add column if not exists supplier_coverage_match_type text;
     alter table products add column if not exists supplier_coverage_updated_at timestamptz;
+    create index if not exists products_product_id_lower_idx on products (lower(product_id));
     create index if not exists products_sku_lower_idx on products (lower(sku));
     create index if not exists products_vendor_sku_idx on products (lower(vendor_sku));
     create index if not exists products_barcode_idx on products (barcode);
@@ -171,6 +172,10 @@ async function initRelationalSchema() {
     create index if not exists products_manufacturer_facet_idx on products ((coalesce(manufacturer, raw ->> 'manufacturer', raw ->> 'manufacturerName')));
     create index if not exists products_discontinued_idx on products (to_be_discontinued);
     create index if not exists products_multiple_suppliers_idx on products (has_multiple_suppliers, product_id);
+    create index if not exists products_shopify_id_lower_idx on products (lower(coalesce(raw ->> 'shopifyId', '')));
+    create index if not exists products_shopify_legacy_id_lower_idx on products (
+      lower(regexp_replace(coalesce(raw ->> 'shopifyId', ''), '^.*/Product/', ''))
+    );
     create index if not exists products_temu_direct_presence_idx on products (product_id)
       where raw ?| array['temuId', 'temuProductId', 'temuListingId', 'temuOfferId', 'temuSku'];
     create index if not exists products_temu_source_presence_idx on products (product_id)
@@ -294,6 +299,7 @@ async function initRelationalSchema() {
     alter table vendor_catalog_items add column if not exists has_multiple_suppliers boolean not null default false;
     alter table vendor_catalog_items add column if not exists supplier_coverage_match_type text;
     alter table vendor_catalog_items add column if not exists supplier_coverage_updated_at timestamptz;
+    create index if not exists vendor_catalog_items_source_sku_sort_idx on vendor_catalog_items (source_sku);
     create index if not exists vendor_catalog_items_source_sku_idx on vendor_catalog_items (lower(source_sku));
     create index if not exists vendor_catalog_items_internal_sku_idx on vendor_catalog_items (lower(internal_sku));
     create index if not exists vendor_catalog_items_vendor_sku_idx on vendor_catalog_items (lower(vendor_sku));
@@ -5621,18 +5627,25 @@ async function readProductsByKeys(keys = []) {
   const legacyKeys = normalized.map((key) => key.match(/\/Product\/(\d+)$/)?.[1] || key).filter(Boolean);
   const lowerLegacyKeys = [...new Set(legacyKeys.map((key) => String(key).toLowerCase()))];
   const result = await client.query(`
-    select *
+    with matched_product_ids as (
+      select product_id from products where lower(product_id) = any($1)
+      union
+      select product_id from products where lower(sku) = any($1)
+      union
+      select product_id from products where lower(coalesce(raw ->> 'shopifyId', '')) = any($1)
+      union
+      select product_id
+      from products
+      where lower(regexp_replace(coalesce(raw ->> 'shopifyId', ''), '^.*/Product/', '')) = any($2)
+      union
+      select product_id
+      from product_aliases
+      where lower(alias_sku) = any($1)
+        and active = true
+    )
+    select products.*
     from products
-    where lower(product_id) = any($1)
-      or lower(sku) = any($1)
-      or lower(coalesce(raw ->> 'shopifyId', '')) = any($1)
-      or lower(regexp_replace(coalesce(raw ->> 'shopifyId', ''), '^.*/Product/', '')) = any($2)
-      or product_id in (
-        select product_id
-        from product_aliases
-        where lower(alias_sku) = any($1)
-          and active = true
-      )
+    join matched_product_ids using (product_id)
   `, [lowerKeys, lowerLegacyKeys]);
   const products = result.rows.map(productRowToState);
   const productIds = products.map((product) => product.id).filter(Boolean);
