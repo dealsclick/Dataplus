@@ -23037,7 +23037,10 @@ async function scanCatalogFacets() {
       const facets = await postgres.vendorCatalogFacets();
       if (facets) {
         const sortValues = (values = [], limit = 500) => [...new Set(values.filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b))).slice(0, limit);
-        const suppliers = sortValues([...(facets.suppliers || []), ...sourceCatalogIndexSupplierNames()], 50000);
+        const suppliers = sortValues([
+          ...(facets.suppliers || []),
+          ...sourceCatalogIndexSupplierNames()
+        ].map((value) => canonicalCatalogSupplierName(value)), 50000);
         const stockStatuses = sortValues(facets.stockStatuses);
         const brands = sortValues((facets.brands || []).map(formatBrandName));
         const categories = sortValues((facets.categories || []).map(formatCategoryName));
@@ -23085,7 +23088,9 @@ async function scanCatalogFacets() {
       continue;
     }
     result.scanned += 1;
-    if (product.supplier || product.vendor) result.suppliers.add(String(product.supplier || product.vendor));
+    if (product.supplier || product.vendor) {
+      result.suppliers.add(canonicalCatalogSupplierName(product.supplier || product.vendor, product.supplierCode));
+    }
     if (product.stockStatus) result.stockStatuses.add(String(product.stockStatus));
     if (product.brand) result.brands.add(formatBrandName(product.brand));
     if (product.category) result.categories.add(formatCategoryName(product.category));
@@ -23123,7 +23128,7 @@ async function scanCatalogFacets() {
     return [...byKey.values()].sort((a, b) => a.localeCompare(b)).slice(0, limit);
   };
   const data = {
-    suppliers: sortValues(result.suppliers, 10000),
+    suppliers: sortValues([...result.suppliers].map((value) => canonicalCatalogSupplierName(value)), 10000),
     stockStatuses: sortValues(result.stockStatuses),
     brands: sortBrands(result.brands),
     categories: sortCategories(result.categories),
