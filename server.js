@@ -30646,6 +30646,16 @@ async function handleApi(req, res) {
     const db = await withOperationalSummary(lite
       ? (postgres.isPostgresEnabled() ? await postgres.readLiteState() : readDbLiteFast())
       : await readDbFast({ skipInventory: postgres.isPostgresEnabled() && !includeInventory }));
+    const supplierDirectoryMerge = mergeCanonicalSupplierDirectory(db);
+    if (supplierDirectoryMerge.changed && postgres.isPostgresEnabled()) {
+      await postgres.writeStateDocuments({
+        vendors: db.vendors || [],
+        brands: db.brands || [],
+        purchaseOrders: db.purchaseOrders || [],
+        vendorFeedSchedules: db.vendorFeedSchedules || [],
+        vendorCategoryMappings: db.vendorCategoryMappings || {}
+      });
+    }
     db.tablePreferences = await readUserTablePreferencesStore(db.tablePreferences || {});
     if (postgres.isPostgresEnabled()) {
       const text = JSON.stringify(publicState(db, { lite }));
