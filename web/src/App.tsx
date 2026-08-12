@@ -1015,6 +1015,24 @@ function jobCategory(job: ImportJob) {
   return job.category || job.section || "Operations"
 }
 
+function jobImportMode(job: ImportJob) {
+  const mode = String(job.workerPayload?.syncMode || "").toLowerCase()
+  if (mode === "reconciliation" || mode === "refresh") return "Refresh"
+  if (mode === "full") return "Full import"
+  if (mode === "catalog" || mode === "new-only") return "New SKUs"
+  if (mode === "split" || mode === "new-and-update") return "New + changed"
+  return ""
+}
+
+function jobImportModeDescription(job: ImportJob) {
+  const mode = String(job.workerPayload?.syncMode || "").toLowerCase()
+  if (mode === "reconciliation" || mode === "refresh") return "Existing catalog records are refreshed for changed inventory, pricing, and lifecycle fields."
+  if (mode === "full") return "The source is scanned for new records and approved changes across the catalog."
+  if (mode === "catalog" || mode === "new-only") return "Only new catalog records are eligible for import. Existing records are left unchanged."
+  if (mode === "split" || mode === "new-and-update") return "New records are added and existing records are updated only when their tracked data changed."
+  return ""
+}
+
 function jobSettingsHref(job: ImportJob) {
   const payload = job.workerPayload || {}
   const vendorId = String(payload.vendorId || payload.vendor_id || "").trim()
@@ -2052,9 +2070,45 @@ function JobsPage({
   const [startedAfter, setStartedAfter] = useState("")
   const [startedBefore, setStartedBefore] = useState("")
   const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false)
+  const [dataSourceFeeds, setDataSourceFeeds] = useState<VendorFeedSchedule[]>([])
   const shopify = channels.find((channel) => String(channel.name || "").toLowerCase() === "shopify")
   const shopifySettings = shopify?.settings || {}
+  useEffect(() => {
+    if (tab !== "scheduled") return
+    let cancelled = false
+    void api<{ feeds?: VendorFeedSchedule[] }>("/api/data-source-feeds")
+      .then((result) => {
+        if (!cancelled) setDataSourceFeeds(result.feeds || [])
+      })
+      .catch(() => {
+        if (!cancelled) setDataSourceFeeds([])
+      })
+    return () => { cancelled = true }
+  }, [tab])
+
+  const dataWarehouseScheduleRows = dataSourceFeeds.flatMap((feed) => [
+    {
+      name: `${feed.name || "DataWarehouse"} refresh`,
+      owner: feed.vendorName || "DataWarehouse",
+      enabled: Boolean(feed.refreshEnabled ?? feed.enabled),
+      timing: scheduleDescription(feed.refreshScheduleType || feed.scheduleType, feed.refreshScheduleTimes || feed.scheduleTimes, feed.refreshScheduleEveryHours || feed.scheduleEveryHours, "02:00"),
+      behavior: "Refreshes existing SKUs for changed inventory, pricing, availability, and discontinuation fields.",
+      location: "/settings?tab=data-sources",
+      managed: true,
+    },
+    {
+      name: `${feed.name || "DataWarehouse"} full import`,
+      owner: feed.vendorName || "DataWarehouse",
+      enabled: Boolean(feed.fullImportEnabled),
+      timing: scheduleDescription(feed.fullImportScheduleType, feed.fullImportScheduleTimes, feed.fullImportScheduleEveryHours, "01:00"),
+      behavior: "Discovers new SKUs and applies approved changed source records across the catalog.",
+      location: "/settings?tab=data-sources",
+      managed: true,
+    },
+  ])
+
   const scheduleRows = [
+    ...dataWarehouseScheduleRows,
     { name: "Shopify inventory update", owner: "Shopify", enabled: Boolean(shopifySettings.inventoryScheduleEnabled), timing: scheduleDescription(shopifySettings.inventoryScheduleType, shopifySettings.inventoryScheduleTimes, shopifySettings.inventoryScheduleEveryHours, "03:00, 13:00"), behavior: String(shopifySettings.inventoryScheduleMode || "dry-run") === "apply" ? "Pushes inventory to Shopify" : "Runs a Shopify inventory dry run", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify SKU pair audit", owner: "Shopify", enabled: Boolean(shopifySettings.shopifySkuMapScheduleEnabled), timing: `Daily at ${String(shopifySettings.shopifySkuMapScheduleTime || "02:00")}`, behavior: "Checks the Shopify product and variant pair for every mapped SKU", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify order reconciliation", owner: "Shopify", enabled: Boolean(shopifySettings.shopifyOrderImportEnabled) && Boolean(shopifySettings.shopifyOrderImportScheduleEnabled), timing: scheduleDescription(shopifySettings.shopifyOrderImportScheduleType, shopifySettings.shopifyOrderImportScheduleTimes, shopifySettings.shopifyOrderImportScheduleEveryHours, "04:00, 16:00"), behavior: `Imports allowed sources: ${String(shopifySettings.shopifyOrderImportSources || "Native Shopify sources")}`, location: "/channels?tab=setup#shopify-order-import", managed: true },
@@ -2257,6 +2311,7 @@ function JobsPage({
                           <p className="truncate font-medium">{job.operation || "Job"}</p>
                           <div className="flex items-center gap-1">
                             <span className="truncate font-mono text-[11px] text-muted-foreground">{jobReference(job)}</span>
+                            {jobImportMode(job) ? <Badge variant="outline" className="shrink-0 text-[10px]">{jobImportMode(job)}</Badge> : null}
                             <Button
                               variant="ghost"
                               size="icon"
@@ -2427,8 +2482,9 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
         <div className="flex items-start justify-between gap-3">
           <div>
             <CardTitle>{job.operation || "Job detail"}</CardTitle>
-            <div className="flex items-center gap-1">
+            <div className="flex flex-wrap items-center gap-1">
               <CardDescription>{jobReference(job)}</CardDescription>
+              {jobImportMode(job) ? <Badge variant="outline" className="text-[10px]">{jobImportMode(job)}</Badge> : null}
               <Button
                 variant="ghost"
                 size="icon"
@@ -2460,6 +2516,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
         <div className="grid grid-cols-2 gap-2">
           <Detail label="Category" value={jobCategory(job)} />
           <Detail label="Type" value={job.direction || job.type || "sync"} />
+          {jobImportMode(job) ? <Detail label="Import mode" value={jobImportMode(job)} /> : null}
           <Detail label="Started" value={dateLabel(job.startedAt || job.createdAt)} />
           <Detail label="Finished" value={dateLabel(job.finishedAt)} />
           <Detail label="Rows" value={numberLabel(job.totalRows)} />
@@ -2471,6 +2528,12 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
           <Detail label="Worker memory" value={job.processRssMb ? `${numberLabel(job.processRssMb)} MB RSS` : "Not reported"} />
           <Detail label="Retry source" value={job.retryOfJobId ? `Job ${job.retryOfJobId.slice(0, 8)}` : "Original run"} />
         </div>
+        {jobImportModeDescription(job) ? (
+          <div className="rounded-md border border-primary/20 bg-primary/5 p-3">
+            <p className="font-medium">What this run does</p>
+            <p className="mt-1 text-muted-foreground">{jobImportModeDescription(job)}</p>
+          </div>
+        ) : null}
         {job.currentFile && <div className="rounded-md border bg-muted/20 p-3"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Current file</p><p className="mt-1 break-all font-mono text-xs">{job.currentFile}</p></div>}
         {job.message && (
           <div className="rounded-md border bg-muted/45 p-3">
@@ -13257,6 +13320,17 @@ function SettingsPage({
                 <ToggleField label="Block discontinued launches" description="Prevent discontinued products from being sent to Shopify, eBay, or another channel." checked={boolValue("catalogDiscontinuedLaunchBlocked")} disabled={!editing} onCheckedChange={(next) => update("catalogDiscontinuedLaunchBlocked", next)} />
                 <ToggleField label="Require a main category to launch" description="Stop a marketplace launch until the system category is mapped." checked={boolValue("catalogRequireCategoryForLaunch")} disabled={!editing} onCheckedChange={(next) => update("catalogRequireCategoryForLaunch", next)} />
                 <ToggleField label="Require an image to launch" description="Use this when the channel requires a product image before publication." checked={boolValue("catalogRequireImageForLaunch")} disabled={!editing} onCheckedChange={(next) => update("catalogRequireImageForLaunch", next)} />
+                <Field label="Default source catalog import mode">
+                  <Select disabled={!editing} value={String(value("sourceCatalogDefaultImportMode") || "new-and-update")} onValueChange={(next) => update("sourceCatalogDefaultImportMode", next)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="new-and-update">New SKUs + changed existing records</SelectItem>
+                      <SelectItem value="new-only">New SKUs only</SelectItem>
+                      <SelectItem value="update-existing">Changed existing records only</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="mt-1 text-xs text-muted-foreground">Used as the default for manual source-catalog imports. Feed schedules can choose Full or Refresh separately.</p>
+                </Field>
                 <Field label="Source catalog import limit per job">
                   <Input disabled={!editing} type="number" min="1000" max="250000" step="1000" value={String(value("sourceCatalogImportBatchLimit") || 25000)} onChange={(event) => update("sourceCatalogImportBatchLimit", Number(event.target.value || 25000))} />
                   <p className="mt-1 text-xs text-muted-foreground">Allowed range: 1,000 to 250,000 records.</p>

@@ -13848,6 +13848,7 @@ function shopifyVariantPricePushRows(records = [], options = {}) {
 
 function shopifyProductCreateReadiness(db, item = {}) {
   const mapping = categoryMappingForProduct(db, item, "shopify") || {};
+  const settings = readSystemSettingsStore(db?.systemSettings || {});
   const productType = shopifyProductTypeForProduct(db, item);
   const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
   const available = Math.max(0, Number(item.qty ?? item.stockQty ?? 0) - Number(item.reserved || 0));
@@ -13855,22 +13856,23 @@ function shopifyProductCreateReadiness(db, item = {}) {
   if (!sourceTextValue(item.sku)) missing.push("SKU");
   if (!sourceTextValue(shopifyExportTitle(item))) missing.push("Title");
   if (!sourceTextValue(item.longDescription || item.shortDescription || item.description)) missing.push("Description");
-  if (!sourceTextValue(productType)) missing.push("Product type");
+  if (settings.catalogRequireCategoryForLaunch !== false && !sourceTextValue(productType)) missing.push("Main category");
   if (!sourceTextValue(item.vendor || item.supplier || item.brand)) missing.push("Vendor");
   if (!(price > 0)) missing.push("Price");
   if (!(available > 0)) missing.push("Inventory qty");
-  if (productBlockedFromShopifyWebsite(item)) missing.push("Discontinued with zero inventory");
-  if (!productImageUrls(item).length) missing.push("Images");
+  if (settings.catalogDiscontinuedLaunchBlocked !== false && productIsCloseout(item)) missing.push("Discontinued");
+  if (settings.catalogRequireImageForLaunch !== false && !productImageUrls(item).length) missing.push("Images");
   return { ready: !missing.length, missing, productType, available };
 }
 
 function shopifyProductCreateDraftMinimumReadiness(db, item = {}) {
+  const settings = readSystemSettingsStore(db?.systemSettings || {});
   const price = Number(item.websitePrice ?? item.price ?? shopifyVariantPrice(item) ?? 0);
   const missing = [];
   if (!sourceTextValue(item.sku)) missing.push("SKU");
   if (!sourceTextValue(shopifyExportTitle(item))) missing.push("Title");
   if (!(price > 0)) missing.push("Price");
-  if (productBlockedFromShopifyWebsite(item)) missing.push("Discontinued with zero inventory");
+  if (settings.catalogDiscontinuedLaunchBlocked !== false && productIsCloseout(item)) missing.push("Discontinued");
   return { ready: !missing.length, missing };
 }
 
@@ -22976,10 +22978,32 @@ function normalizeSourceImportMode(value = "") {
   return "new-and-update";
 }
 
+function catalogImportComparable(item = {}) {
+  const fields = [
+    "sku", "title", "marketplaceTitle", "shortDescription", "longDescription", "brand", "supplier", "supplierCode",
+    "vendor", "vendorSku", "mfrPartNumber", "barcode", "category", "mainCategory", "sourceCategory", "vendorCategory",
+    "uom", "uomQty", "minQuantity", "quantityIncrements", "stockQty", "qty", "stockStatus", "cost", "sourceCost",
+    "price", "websitePrice", "vendorWebsitePrice", "fobPrice", "msrp", "toBeDiscontinued", "closeoutEligible",
+    "packageLength", "packageWidth", "packageHeight", "packageWeight", "itemLength", "itemWidth", "itemHeight", "itemWeight",
+    "dimensionalWeight", "defaultImage", "originalImage"
+  ];
+  const normalized = {};
+  for (const field of fields) {
+    const value = item[field];
+    if (typeof value === "number") normalized[field] = Number.isFinite(value) ? Number(value.toFixed(4)) : 0;
+    else if (typeof value === "boolean") normalized[field] = value;
+    else if (Array.isArray(value)) normalized[field] = value.map((entry) => sourceTextValue(entry)).filter(Boolean).sort();
+    else normalized[field] = sourceTextValue(value);
+  }
+  return JSON.stringify(normalized);
+}
+
 async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query = "", filters = {}, limit = 0, db = null, importMode = "" } = {}) {
   if (!postgres.isPostgresEnabled()) return { matched: 0, requested: 0, importable: 0, existing: 0, newProducts: 0, closeouts: 0, limited: false, skus: [] };
   const settings = readSystemSettingsStore(db?.systemSettings || {});
-  const mode = normalizeSourceImportMode(importMode || settings.sourceCatalogDefaultImportMode);
+  let mode = normalizeSourceImportMode(importMode || settings.sourceCatalogDefaultImportMode);
+  const newSkusEnabled = settings.catalogImportNewSkusEnabled !== false;
+  if (!newSkusEnabled && mode !== "update-existing") mode = "update-existing";
   const batchLimit = sourceCatalogImportBatchLimit(settings);
   const effectiveLimit = Math.max(1, Math.min(batchLimit, Number(limit || batchLimit)));
   let sourceRows = [];
@@ -23014,8 +23038,13 @@ async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query
   } else if (mode === "update-existing") {
     sourceRows = sourceRows.filter((row) => sourceRowIsManaged(row));
   }
+  const discontinuedRows = sourceRows.filter((row) => row.toBeDiscontinued || row.closeoutEligible);
+  const skippedDiscontinued = settings.catalogMarkDiscontinuedRows === false ? discontinuedRows.length : 0;
+  if (settings.catalogMarkDiscontinuedRows === false) {
+    sourceRows = sourceRows.filter((row) => !row.toBeDiscontinued && !row.closeoutEligible);
+  }
   const filteredImportSkus = [...new Set(sourceRows.map((row) => row.sku).filter(Boolean))];
-  const closeouts = sourceRows.filter((row) => row.toBeDiscontinued || row.closeoutEligible).length;
+  const closeouts = discontinuedRows.length;
   return {
     matched,
     requested: allFiltered ? matched : skus.length,
@@ -23024,6 +23053,8 @@ async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query
     newProducts: newCount,
     skippedExisting: mode === "new-only" ? existingCount : 0,
     skippedNew: mode === "update-existing" ? newCount : 0,
+    newSkusDisabled: !newSkusEnabled,
+    skippedDiscontinued,
     closeouts,
     limited,
     batchLimit,
@@ -23035,8 +23066,12 @@ async function sourceCatalogImportImpact({ skus = [], allFiltered = false, query
 
 async function promoteSourceCatalogRows({ sourceRows = [], skus = [], progress, isCanceled } = {}) {
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const settings = readSystemSettingsStore(db.systemSettings || {});
   let rows = sourceRows;
   if (!rows.length && skus.length) rows = await postgres.readVendorCatalogItemsBySkus(skus);
+  if (settings.catalogMarkDiscontinuedRows === false) {
+    rows = rows.filter((row) => !row.toBeDiscontinued && !row.closeoutEligible);
+  }
   const importSkus = [...new Set(rows.map((row) => row.sku).filter(Boolean))];
   const importKeys = [...new Set(rows.flatMap((row) => sourceCatalogLookupKeys(row)))];
   const existingProducts = importKeys.length ? await postgres.readProductsByKeys(importKeys) : [];
@@ -23045,11 +23080,35 @@ async function promoteSourceCatalogRows({ sourceRows = [], skus = [], progress, 
   const changedItems = [];
   let created = 0;
   let updated = 0;
+  let skippedUnchanged = 0;
+  let skippedNew = 0;
   const existingByKey = managedProductLookup(existingProducts);
   for (let index = 0; index < products.length; index += 1) {
     if (isCanceled?.()) throw new Error("Source catalog import canceled.");
     const product = products[index];
-    const existed = Boolean(managedProductForSource(product, existingByKey));
+    const existing = managedProductForSource(product, existingByKey);
+    const existed = Boolean(existing);
+    const shouldReport = progress && (index % 250 === 0 || index === products.length - 1);
+    if (!existed && settings.catalogImportNewSkusEnabled === false) {
+      skippedNew += 1;
+      if (shouldReport) progress({
+        phase: "promoting_products",
+        processedRows: index + 1,
+        totalRows: products.length,
+        message: `Reviewed ${(index + 1).toLocaleString()} of ${products.length.toLocaleString()} source products (${skippedNew.toLocaleString()} new SKU${skippedNew === 1 ? "" : "s"} skipped by catalog settings).`
+      });
+      continue;
+    }
+    if (existed && settings.catalogUpdateChangedRowsOnly !== false && catalogImportComparable(existing) === catalogImportComparable(product)) {
+      skippedUnchanged += 1;
+      if (shouldReport) progress({
+        phase: "promoting_products",
+        processedRows: index + 1,
+        totalRows: products.length,
+        message: `Reviewed ${(index + 1).toLocaleString()} of ${products.length.toLocaleString()} source products (${skippedUnchanged.toLocaleString()} unchanged row${skippedUnchanged === 1 ? "" : "s"} skipped).`
+      });
+      continue;
+    }
     const upserted = upsertInventoryProductFromCatalog(db, product, {
       createdBy: "DataPlus",
       createdMethod: "Product import",
@@ -23058,12 +23117,12 @@ async function promoteSourceCatalogRows({ sourceRows = [], skus = [], progress, 
     if (upserted.item) changedItems.push(upserted.item);
     if (existed || upserted.existing) updated += 1;
     else created += 1;
-    if (progress && (index % 250 === 0 || index === products.length - 1)) {
+    if (shouldReport) {
       progress({
         phase: "promoting_products",
         processedRows: index + 1,
         totalRows: products.length,
-        message: `Promoted ${(index + 1).toLocaleString()} of ${products.length.toLocaleString()} source products.`
+        message: `Reviewed ${(index + 1).toLocaleString()} of ${products.length.toLocaleString()} source products; imported ${changedItems.length.toLocaleString()} changed.`
       });
     }
   }
@@ -23081,7 +23140,7 @@ async function promoteSourceCatalogRows({ sourceRows = [], skus = [], progress, 
     }
   }
   const summary = await postgres.readOperationalSummary();
-  return { changed: changedItems.length, created, updated, requested: importSkus.length, summary };
+  return { changed: changedItems.length, created, updated, skippedUnchanged, skippedNew, requested: importSkus.length, summary };
 }
 
 async function queueSourceCatalogImportJob(db, body = {}, impact = {}) {
@@ -23103,7 +23162,11 @@ async function queueSourceCatalogImportJob(db, body = {}, impact = {}) {
     details: [
       body.allFiltered ? "Scope: all filtered source catalog results." : "Scope: selected source catalog rows.",
       impact.importMode ? `Import mode: ${impact.importMode}.` : "",
-      impact.limited ? `Limited to first ${Number(impact.batchLimit || 25000).toLocaleString()} matches.` : ""
+      impact.limited ? `Limited to first ${Number(impact.batchLimit || 25000).toLocaleString()} matches.` : "",
+      impact.newSkusDisabled ? "New SKU creation is disabled by Catalog settings." : "",
+      impact.skippedNew ? `${Number(impact.skippedNew).toLocaleString()} new SKU${Number(impact.skippedNew) === 1 ? "" : "s"} will be skipped.` : "",
+      impact.skippedDiscontinued ? `${Number(impact.skippedDiscontinued).toLocaleString()} discontinued/closeout row${Number(impact.skippedDiscontinued) === 1 ? "" : "s"} will be skipped.` : "",
+      "Unchanged existing rows are skipped during the worker run when change-only updates are enabled."
     ].filter(Boolean).join(" ")
   };
   const duplicate = await findActiveDuplicateImportJob(db, attrs);
@@ -23167,14 +23230,14 @@ async function runSourceCatalogImportWorkerJob(job = {}, body = {}) {
   } catch (error) {
     analyzeResult = { tables: [], error: error.message || "Planner statistics refresh failed." };
   }
-  const status = impact.limited ? "warning" : "success";
-  const message = `Imported ${result.changed.toLocaleString()} source product${result.changed === 1 ? "" : "s"} into Products (${result.created.toLocaleString()} new, ${result.updated.toLocaleString()} updated).`;
+  const status = impact.limited || impact.skippedNew || result.skippedNew || impact.skippedDiscontinued ? "warning" : "success";
+  const message = `Reviewed ${result.requested.toLocaleString()} source product${result.requested === 1 ? "" : "s"}; imported ${result.changed.toLocaleString()} changed (${result.created.toLocaleString()} new, ${result.updated.toLocaleString()} updated).`;
   finishImportJob(job, {
     status,
     message,
-    details: [job.details, impact.limited ? `Only the first ${Number(impact.batchLimit || 25000).toLocaleString()} filtered matches were imported.` : "", analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
+    details: [job.details, result.skippedUnchanged ? `${result.skippedUnchanged.toLocaleString()} unchanged row${result.skippedUnchanged === 1 ? "" : "s"} skipped.` : "", result.skippedNew ? `${result.skippedNew.toLocaleString()} new SKU${result.skippedNew === 1 ? "" : "s"} skipped.` : "", impact.skippedDiscontinued ? `${impact.skippedDiscontinued.toLocaleString()} discontinued/closeout row${impact.skippedDiscontinued === 1 ? "" : "s"} skipped.` : "", impact.limited ? `Only the first ${Number(impact.batchLimit || 25000).toLocaleString()} filtered matches were reviewed.` : "", analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
     totalRows: result.requested,
-    processedRows: result.changed,
+    processedRows: result.requested,
     changed: result.changed,
     missingCount: 0,
     progressPercent: 100,
@@ -23239,14 +23302,14 @@ function startSourceCatalogImportJob(jobId, body = {}) {
       } catch (error) {
         analyzeResult = { tables: [], error: error.message || "Planner statistics refresh failed." };
       }
-      const status = impact.limited ? "warning" : "success";
-      const message = `Imported ${result.changed.toLocaleString()} source product${result.changed === 1 ? "" : "s"} into Products (${result.created.toLocaleString()} new, ${result.updated.toLocaleString()} updated).`;
+      const status = impact.limited || impact.skippedNew || result.skippedNew || impact.skippedDiscontinued ? "warning" : "success";
+      const message = `Reviewed ${result.requested.toLocaleString()} source product${result.requested === 1 ? "" : "s"}; imported ${result.changed.toLocaleString()} changed (${result.created.toLocaleString()} new, ${result.updated.toLocaleString()} updated).`;
       finishImportJob(job, {
         status,
         message,
-        details: [job.details, impact.limited ? `Only the first ${Number(impact.batchLimit || 25000).toLocaleString()} filtered matches were imported.` : "", analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
+        details: [job.details, result.skippedUnchanged ? `${result.skippedUnchanged.toLocaleString()} unchanged row${result.skippedUnchanged === 1 ? "" : "s"} skipped.` : "", result.skippedNew ? `${result.skippedNew.toLocaleString()} new SKU${result.skippedNew === 1 ? "" : "s"} skipped.` : "", impact.skippedDiscontinued ? `${impact.skippedDiscontinued.toLocaleString()} discontinued/closeout row${impact.skippedDiscontinued === 1 ? "" : "s"} skipped.` : "", impact.limited ? `Only the first ${Number(impact.batchLimit || 25000).toLocaleString()} filtered matches were reviewed.` : "", analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : ""].filter(Boolean).join(" "),
         totalRows: result.requested,
-        processedRows: result.changed,
+        processedRows: result.requested,
         changed: result.changed,
         missingCount: 0,
         progressPercent: 100,
@@ -32352,6 +32415,41 @@ async function handleApi(req, res) {
     if (!product) return notFound(res);
     const existing = await postgres.readProductByKey(product.sku || body.sku);
     const db = normalizeDb({ ...(await readDbFast({ skipInventory: true })), inventory: existing ? [existing] : [] });
+    const settings = readSystemSettingsStore(db.systemSettings || {});
+    if (settings.catalogMarkDiscontinuedRows === false && productIsCloseout(product)) {
+      const summary = await postgres.readOperationalSummary();
+      return sendJson(res, 200, {
+        changed: false,
+        skippedDiscontinued: true,
+        existing: Boolean(existing),
+        message: "Discontinued or closeout rows are excluded by Catalog settings.",
+        summary,
+        state: publicState({ ...db, inventory: [] }, { lite: true })
+      });
+    }
+    if (!existing && settings.catalogImportNewSkusEnabled === false) {
+      const summary = await postgres.readOperationalSummary();
+      return sendJson(res, 200, {
+        changed: false,
+        skippedNew: true,
+        existing: false,
+        message: "New SKU creation is disabled by Catalog settings.",
+        summary,
+        state: publicState({ ...db, inventory: [] }, { lite: true })
+      });
+    }
+    if (existing && settings.catalogUpdateChangedRowsOnly !== false && catalogImportComparable(existing) === catalogImportComparable(product)) {
+      const summary = await postgres.readOperationalSummary();
+      return sendJson(res, 200, {
+        changed: false,
+        skippedUnchanged: true,
+        existing: true,
+        item: existing,
+        message: "SKU is unchanged; no catalog write was needed.",
+        summary,
+        state: publicState({ ...db, inventory: [] }, { lite: true })
+      });
+    }
     const upserted = upsertInventoryProductFromCatalog(db, product, {
       createdBy: String(body.user || "DataPlus").trim() || "DataPlus",
       createdMethod: "Product import",
@@ -32367,28 +32465,37 @@ async function handleApi(req, res) {
     const skus = Array.isArray(body.skus) ? [...new Set(body.skus.map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, 5000) : [];
     if (!skus.length) return sendJson(res, 400, { error: "Select source catalog products first." });
     const db = normalizeDb(await readDbFast({ skipInventory: true }));
-    const existingProducts = await postgres.readProductsByKeys(skus);
-    db.inventory = existingProducts || [];
-    const products = (await postgres.readVendorCatalogItemsBySkus(skus)).map(normalizeCatalogProductForInventory).filter(Boolean);
-    const changedItems = [];
-    for (const product of products) {
-      const upserted = upsertInventoryProductFromCatalog(db, product, {
-        createdBy: String(body.user || "DataPlus").trim() || "DataPlus",
-        createdMethod: "Bulk product import",
-        createdSource: "Source catalog / data dump"
-      });
-      if (upserted.item) changedItems.push(upserted.item);
-    }
-    if (changedItems.length) await postgres.upsertProductsFromState(changedItems);
+    const impact = await sourceCatalogImportImpact({ skus, importMode: body.importMode || body.sourceImportMode || "", db });
+    const result = await promoteSourceCatalogRows({ sourceRows: impact.sourceRows || [], skus: impact.skus || [] });
     const summary = await postgres.readOperationalSummary();
-    return sendJson(res, 200, { changed: changedItems.length, summary, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+    return sendJson(res, 200, {
+      changed: result.changed,
+      created: result.created,
+      updated: result.updated,
+      skippedUnchanged: result.skippedUnchanged,
+      skippedNew: result.skippedNew,
+      summary,
+      state: publicState({ ...db, inventory: [] }, { lite: true })
+    });
   }
 
   if (req.method === "POST" && url.pathname === "/api/source-catalog/product-dump/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const settings = readSystemSettingsStore(db.systemSettings || {});
+    const dataSourceFeed = resolvedDataSourceFeeds(settings).find((feed) => String(feed.id || "") === "product-datadump");
     const dumpPath = String(body.path || body.filePath || process.env.DATAPLUS_PRODUCT_DUMP_PATH || "").trim();
     const limit = Math.max(0, Number(body.limit || 0) || 0);
+    const requestedMode = String(body.syncMode || body.mode || settings.sourceCatalogDefaultImportMode || "split").toLowerCase();
+    const syncMode = ["full", "split", "catalog", "reconciliation"].includes(requestedMode)
+      ? requestedMode
+      : requestedMode === "update-existing" ? "reconciliation" : requestedMode === "new-only" ? "catalog" : "split";
+    const postImportInventoryMode = ["disabled", "dry-run", "apply"].includes(String(body.postImportInventoryMode || "").toLowerCase())
+      ? String(body.postImportInventoryMode).toLowerCase()
+      : String(dataSourceFeed?.postImportInventoryMode || "dry-run").toLowerCase();
+    const postImportPriceMode = ["disabled", "dry-run", "apply"].includes(String(body.postImportPriceMode || "").toLowerCase())
+      ? String(body.postImportPriceMode).toLowerCase()
+      : String(dataSourceFeed?.postImportPriceMode || "dry-run").toLowerCase();
     const job = createImportJob(db, {
       section: "Source Catalog",
       operation: "Product dump import",
@@ -32400,10 +32507,10 @@ async function handleApi(req, res) {
       progressPercent: 0,
       phase: "queued",
       workerTask: "product-dump-import",
-      workerPayload: { path: dumpPath, postgresOnly: true, batchSize: 100, limit },
+      workerPayload: { path: dumpPath, postgresOnly: true, batchSize: 100, limit, syncMode, postImportInventoryMode, postImportPriceMode, feedId: dataSourceFeed?.id || "product-datadump" },
       message: limit
-        ? `Product dump sample import queued for ${limit.toLocaleString()} rows. The dump will stream into PostgreSQL and SQL change events will be recorded.`
-        : "Product dump import queued. The dump will stream into PostgreSQL and SQL change events will be recorded."
+        ? `Product dump ${syncMode} import queued for ${limit.toLocaleString()} rows. PostgreSQL change detection and saved post-import modes will be applied.`
+        : `Product dump ${syncMode} import queued. PostgreSQL change detection and saved post-import modes will be applied.`
     });
     upsertImportJobStore(job);
     return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: publicState({ ...db, inventory: [] }, { lite: true }), message: job.message });
@@ -32445,7 +32552,8 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/catalog/import-impact" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const batchLimit = sourceCatalogImportBatchLimit(readSystemSettingsStore(dbCache.data?.systemSettings || {}));
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const batchLimit = sourceCatalogImportBatchLimit(readSystemSettingsStore(db.systemSettings || {}));
     const skus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, batchLimit);
     const allFiltered = body.allFiltered === true || String(body.allFiltered || "").toLowerCase() === "true";
     if (!skus.length && !allFiltered) return sendJson(res, 400, { error: "Select source catalog products first." });
@@ -32455,7 +32563,8 @@ async function handleApi(req, res) {
       query: body.query || "",
       filters: body.filters || {},
       limit: Math.max(1, Math.min(batchLimit, Number(body.limit || batchLimit))),
-      importMode: body.importMode || body.sourceImportMode || ""
+      importMode: body.importMode || body.sourceImportMode || "",
+      db
     });
     const { sourceRows, ...publicImpact } = impact;
     return sendJson(res, 200, publicImpact);
@@ -35068,10 +35177,33 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const skus = Array.isArray(body.skus) ? body.skus.slice(0, 5000) : [];
     const products = await findCatalogProductsBySkus(skus, db);
-    for (const product of products) upsertInventoryProductFromCatalog(db, product);
+    const settings = readSystemSettingsStore(db.systemSettings || {});
+    const existingBySku = new Map((db.inventory || []).map((item) => [String(item.sku || "").trim().toLowerCase(), item]));
+    const changedProducts = [];
+    let skippedUnchanged = 0;
+    let skippedNew = 0;
+    for (const product of products) {
+      if (settings.catalogMarkDiscontinuedRows === false && (product.toBeDiscontinued || product.closeoutEligible)) continue;
+      const existing = existingBySku.get(String(product.sku || "").trim().toLowerCase());
+      if (!existing && settings.catalogImportNewSkusEnabled === false) {
+        skippedNew += 1;
+        continue;
+      }
+      const normalizedProduct = normalizeCatalogProductForInventory(product);
+      if (existing && settings.catalogUpdateChangedRowsOnly !== false && catalogImportComparable(existing) === catalogImportComparable(normalizedProduct)) {
+        skippedUnchanged += 1;
+        continue;
+      }
+      const upserted = upsertInventoryProductFromCatalog(db, normalizedProduct, {
+        createdBy: String(body.user || "DataPlus").trim() || "DataPlus",
+        createdMethod: "Bulk product import",
+        createdSource: "Source catalog / data dump"
+      });
+      if (upserted.item) changedProducts.push(upserted.item);
+    }
     const normalized = normalizeDb(db);
     await writeDb(normalized);
-    return sendJson(res, 200, { changed: products.length, state: publicState(normalized) });
+    return sendJson(res, 200, { changed: changedProducts.length, skippedUnchanged, skippedNew, state: publicState(normalized) });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/catalog/promote-csv') {
@@ -35156,11 +35288,29 @@ async function handleApi(req, res) {
     const skus = [...new Set((Array.isArray(body.skus) ? body.skus : []).map((sku) => String(sku || "").trim()).filter(Boolean))].slice(0, 25000);
     if (!skus.length) return sendJson(res, 400, { error: "Select source catalog products first." });
     if (action === "add-active") {
-      const products = await findCatalogProductsBySkus(skus, db);
-      for (const product of products) upsertInventoryProductFromCatalog(db, product);
+      const settings = readSystemSettingsStore(db.systemSettings || {});
+      const existingBySku = new Map((db.inventory || []).map((item) => [String(item.sku || "").trim().toLowerCase(), item]));
+      let skippedUnchanged = 0;
+      let skippedNew = 0;
+      let changed = 0;
+      for (const product of await findCatalogProductsBySkus(skus, db)) {
+        if (settings.catalogMarkDiscontinuedRows === false && (product.toBeDiscontinued || product.closeoutEligible)) continue;
+        const existing = existingBySku.get(String(product.sku || "").trim().toLowerCase());
+        if (!existing && settings.catalogImportNewSkusEnabled === false) {
+          skippedNew += 1;
+          continue;
+        }
+        const normalizedProduct = normalizeCatalogProductForInventory(product);
+        if (existing && settings.catalogUpdateChangedRowsOnly !== false && catalogImportComparable(existing) === catalogImportComparable(normalizedProduct)) {
+          skippedUnchanged += 1;
+          continue;
+        }
+        const upserted = upsertInventoryProductFromCatalog(db, normalizedProduct);
+        if (upserted.item) changed += 1;
+      }
       const normalized = normalizeDb(db);
       await writeDb(normalized);
-      return sendJson(res, 200, { changed: products.length, state: publicState(normalized) });
+      return sendJson(res, 200, { changed, skippedUnchanged, skippedNew, state: publicState(normalized) });
     }
     const statusByAction = {
       "set-active": { status: "Active", active: true, deleted: false },

@@ -1382,7 +1382,9 @@ async function runVendorFeedImportJob(job) {
 
 async function runProductDumpImportJob(job) {
   const payload = job.workerPayload || {};
-  const resourceProfile = dataplus.productDumpResourceProfile(dataplus.readSystemSettingsStore({}));
+  const currentDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const settings = dataplus.readSystemSettingsStore(currentDb.systemSettings || {});
+  const resourceProfile = dataplus.productDumpResourceProfile(settings);
   // The production Droplet has 8 GB RAM. Leave headroom for Postgres and the web app
   // while allowing BSON normalization enough working memory for the full supplier dump.
   const dumpNodeHeapMB = Math.max(1024, Math.min(4096, Number(process.env.PRODUCT_DUMP_NODE_MAX_OLD_SPACE_MB || resourceProfile.heapMb || 3072) || 3072));
