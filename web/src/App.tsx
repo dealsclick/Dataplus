@@ -12899,6 +12899,16 @@ function SettingsPage({
   const [testingSmtp, setTestingSmtp] = useState(false)
   const [testingAi, setTestingAi] = useState(false)
   const [catalogMaintenanceLoading, setCatalogMaintenanceLoading] = useState(false)
+  const [catalogMaintenanceConfirm, setCatalogMaintenanceConfirm] = useState<{
+    path: string
+    label: string
+    description: string
+    body?: Record<string, unknown>
+  } | null>(null)
+  const [catalogMaintenanceFeedback, setCatalogMaintenanceFeedback] = useState<{
+    kind: "success" | "error"
+    message: string
+  } | null>(null)
   const [aiUsage, setAiUsage] = useState<Record<string, unknown> | null>(null)
   const [loadingAiUsage, setLoadingAiUsage] = useState(false)
   const [runtime, setRuntime] = useState<Record<string, number> | null>(null)
@@ -12940,13 +12950,26 @@ function SettingsPage({
     setDraft((current) => ({ ...current, [field]: next }))
   }
 
-  async function runCatalogMaintenance(path: string, label: string) {
+  function requestCatalogMaintenance(request: NonNullable<typeof catalogMaintenanceConfirm>) {
+    setCatalogMaintenanceFeedback(null)
+    setCatalogMaintenanceConfirm(request)
+  }
+
+  async function runCatalogMaintenance(path: string, label: string, body: Record<string, unknown> = {}) {
     setCatalogMaintenanceLoading(true)
+    setCatalogMaintenanceFeedback(null)
     try {
-      const result = await api<{ job?: ImportJob; message?: string }>(path, { method: "POST", body: JSON.stringify({}) })
-      toast.success(result.message || `${label} queued.`)
+      const result = await api<{ job?: ImportJob; message?: string }>(path, { method: "POST", body: JSON.stringify(body) })
+      const jobReference = result.job?.jobNumber ? `Job ${result.job.jobNumber}` : result.job?.id ? `Job ${result.job.id}` : "the job queue"
+      const message = result.message || `${label} queued as ${jobReference}. Monitor it in Jobs.`
+      setCatalogMaintenanceFeedback({ kind: "success", message })
+      setCatalogMaintenanceConfirm(null)
+      toast.success(message)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : `Unable to start ${label.toLowerCase()}.`)
+      const message = error instanceof Error ? error.message : `Unable to start ${label.toLowerCase()}.`
+      setCatalogMaintenanceFeedback({ kind: "error", message })
+      setCatalogMaintenanceConfirm(null)
+      toast.error(message)
     } finally {
       setCatalogMaintenanceLoading(false)
     }
@@ -13210,45 +13233,100 @@ function SettingsPage({
         </TabsContent>
         <TabsContent value="catalog">
           <div className="grid gap-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Catalog behavior</CardTitle>
-              <CardDescription>Category defaults and source-catalog promotion safeguards.</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-4 md:grid-cols-2">
-              <ToggleField label="True Value source category as main category" checked={boolValue("trueValueSourceCategoryAsMainCategory")} disabled={!editing} onCheckedChange={(next) => update("trueValueSourceCategoryAsMainCategory", next)} />
-              <Field label="Source catalog import limit per job">
-                <Input disabled={!editing} type="number" min="1000" max="250000" step="1000" value={String(value("sourceCatalogImportBatchLimit") || 25000)} onChange={(event) => update("sourceCatalogImportBatchLimit", Number(event.target.value || 25000))} />
-                <p className="mt-1 text-xs text-muted-foreground">Maximum source SKUs promoted in one background import. Allowed range: 1,000 to 250,000.</p>
-              </Field>
-              <Field label="Shopify product launch limit per job">
-                <Input disabled={!editing} type="number" min="100" max="25000" step="100" value={String(value("shopifyProductLaunchBatchLimit") || 1000)} onChange={(event) => update("shopifyProductLaunchBatchLimit", Number(event.target.value || 1000))} />
-                <p className="mt-1 text-xs text-muted-foreground">Maximum catalog products queued for creation in Shopify per job. Keep this lower for shorter, easier-to-review launches. Allowed range: 100 to 25,000.</p>
-              </Field>
-              <Button variant="outline" onClick={() => api("/api/categories/summary-index/rebuild", { method: "POST", body: JSON.stringify({ scope: "both" }) }).then(() => toast.success("Category summary index rebuild queued/completed.")).catch((error) => toast.error(error.message))}>Rebuild category index</Button>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Catalog maintenance</CardTitle>
-              <CardDescription>Run the indexed catalog maintenance tasks manually. Each operation runs in the background and can be monitored from Jobs.</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-3 md:grid-cols-2">
-              <Button variant="outline" className="h-auto justify-start whitespace-normal p-4 text-left" disabled={catalogMaintenanceLoading} onClick={() => void runCatalogMaintenance("/api/catalog/source-search-index/build", "Keyword search index")}>
-                <div><p className="font-medium">Build keyword search index</p><p className="mt-1 text-xs text-muted-foreground">Enables broad text search across the full source feed.</p></div>
-              </Button>
-              <Button variant="outline" className="h-auto justify-start whitespace-normal p-4 text-left" disabled={catalogMaintenanceLoading} onClick={() => void runCatalogMaintenance("/api/catalog/performance-indexes/build", "Performance index build")}>
-                <div><p className="font-medium">Tune filter speed</p><p className="mt-1 text-xs text-muted-foreground">Builds PostgreSQL indexes for supplier, status, category, stock, and lifecycle filters.</p></div>
-              </Button>
-              <Button variant="outline" className="h-auto justify-start whitespace-normal p-4 text-left" disabled={catalogMaintenanceLoading} onClick={() => void runCatalogMaintenance("/api/catalog/facets/refresh", "Facet refresh")}>
-                <div><p className="font-medium">Refresh filter values</p><p className="mt-1 text-xs text-muted-foreground">Recounts supplier, brand, category, and stock-status options.</p></div>
-              </Button>
-              <Button variant="outline" className="h-auto justify-start whitespace-normal p-4 text-left" disabled={catalogMaintenanceLoading} onClick={() => void runCatalogMaintenance("/api/source-catalog/pricing-inventory/refresh", "Pricing and inventory refresh")}>
-                <div><p className="font-medium">Refresh pricing and inventory</p><p className="mt-1 text-xs text-muted-foreground">Imports cost, price, stock, promotions, and closeout changes from the product dump.</p></div>
-              </Button>
-            </CardContent>
-          </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Catalog participation</CardTitle>
+                <CardDescription>Control which suppliers and records are visible, searchable, and eligible for marketplace workflows.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2">
+                <ToggleField label="Show enabled vendors by default" description="The main catalog starts with suppliers included in catalog participation." checked={boolValue("catalogEnabledVendorsOnly")} disabled={!editing} onCheckedChange={(next) => update("catalogEnabledVendorsOnly", next)} />
+                <ToggleField label="Allow direct searches for excluded vendors" description="A deliberate SKU search can still reveal a record outside the default vendor scope." checked={boolValue("catalogAllowExplicitDisabledVendorSearch")} disabled={!editing} onCheckedChange={(next) => update("catalogAllowExplicitDisabledVendorSearch", next)} />
+                <ToggleField label="Refresh after enabling a vendor" description="Queue the catalog refresh immediately when a supplier is turned on." checked={boolValue("catalogAutoRefreshAfterVendorEnable")} disabled={!editing} onCheckedChange={(next) => update("catalogAutoRefreshAfterVendorEnable", next)} />
+                <ToggleField label="True Value category becomes main category" description="Use the verified True Value path as the system category when a mapping exists." checked={boolValue("trueValueSourceCategoryAsMainCategory")} disabled={!editing} onCheckedChange={(next) => update("trueValueSourceCategoryAsMainCategory", next)} />
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Import and launch safeguards</CardTitle>
+                <CardDescription>These switches define how refreshes treat new, changed, discontinued, and incomplete catalog records.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2">
+                <ToggleField label="Import new SKUs" description="Allow approved feed imports to create new catalog records." checked={boolValue("catalogImportNewSkusEnabled")} disabled={!editing} onCheckedChange={(next) => update("catalogImportNewSkusEnabled", next)} />
+                <ToggleField label="Update changed rows only" description="Skip unchanged records to reduce import time and database work." checked={boolValue("catalogUpdateChangedRowsOnly")} disabled={!editing} onCheckedChange={(next) => update("catalogUpdateChangedRowsOnly", next)} />
+                <ToggleField label="Track discontinued rows" description="Keep discontinuation changes visible for review instead of silently dropping them." checked={boolValue("catalogMarkDiscontinuedRows")} disabled={!editing} onCheckedChange={(next) => update("catalogMarkDiscontinuedRows", next)} />
+                <ToggleField label="Block discontinued launches" description="Prevent discontinued products from being sent to Shopify, eBay, or another channel." checked={boolValue("catalogDiscontinuedLaunchBlocked")} disabled={!editing} onCheckedChange={(next) => update("catalogDiscontinuedLaunchBlocked", next)} />
+                <ToggleField label="Require a main category to launch" description="Stop a marketplace launch until the system category is mapped." checked={boolValue("catalogRequireCategoryForLaunch")} disabled={!editing} onCheckedChange={(next) => update("catalogRequireCategoryForLaunch", next)} />
+                <ToggleField label="Require an image to launch" description="Use this when the channel requires a product image before publication." checked={boolValue("catalogRequireImageForLaunch")} disabled={!editing} onCheckedChange={(next) => update("catalogRequireImageForLaunch", next)} />
+                <Field label="Source catalog import limit per job">
+                  <Input disabled={!editing} type="number" min="1000" max="250000" step="1000" value={String(value("sourceCatalogImportBatchLimit") || 25000)} onChange={(event) => update("sourceCatalogImportBatchLimit", Number(event.target.value || 25000))} />
+                  <p className="mt-1 text-xs text-muted-foreground">Allowed range: 1,000 to 250,000 records.</p>
+                </Field>
+                <Field label="Shopify launch limit per job">
+                  <Input disabled={!editing} type="number" min="100" max="25000" step="100" value={String(value("shopifyProductLaunchBatchLimit") || 1000)} onChange={(event) => update("shopifyProductLaunchBatchLimit", Number(event.target.value || 1000))} />
+                  <p className="mt-1 text-xs text-muted-foreground">Allowed range: 100 to 25,000 products.</p>
+                </Field>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Matching and performance</CardTitle>
+                <CardDescription>Keep cross-supplier matching explainable while making repeated catalog searches lighter on the database.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2">
+                <ToggleField label="Match by UPC" description="Use UPC equality as the strongest supplier-product match." checked={boolValue("catalogMatchByUpcEnabled")} disabled={!editing} onCheckedChange={(next) => update("catalogMatchByUpcEnabled", next)} />
+                <ToggleField label="Match by manufacturer part number" description="Use manufacturer part number plus brand as a secondary match." checked={boolValue("catalogMatchByManufacturerPartEnabled")} disabled={!editing} onCheckedChange={(next) => update("catalogMatchByManufacturerPartEnabled", next)} />
+                <ToggleField label="Require approval for close matches" description="Keep uncertain supplier matches pending until a user approves them." checked={boolValue("catalogCloseMatchApprovalRequired")} disabled={!editing} onCheckedChange={(next) => update("catalogCloseMatchApprovalRequired", next)} />
+                <ToggleField label="Cache filter facets" description="Reuse indexed supplier, brand, category, and status values between visits." checked={boolValue("catalogFacetCacheEnabled")} disabled={!editing} onCheckedChange={(next) => update("catalogFacetCacheEnabled", next)} />
+                <Field label="Catalog cache lifetime (seconds)">
+                  <Input disabled={!editing} type="number" min="15" max="3600" step="15" value={String(value("catalogCacheTtlSeconds") || 300)} onChange={(event) => update("catalogCacheTtlSeconds", Number(event.target.value || 300))} />
+                  <p className="mt-1 text-xs text-muted-foreground">Allowed range: 15 to 3,600 seconds.</p>
+                </Field>
+                <Field label="Search debounce (milliseconds)">
+                  <Input disabled={!editing} type="number" min="100" max="1500" step="50" value={String(value("catalogSearchDebounceMs") || 350)} onChange={(event) => update("catalogSearchDebounceMs", Number(event.target.value || 350))} />
+                  <p className="mt-1 text-xs text-muted-foreground">Wait this long after typing before a broad search starts.</p>
+                </Field>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Catalog maintenance</CardTitle>
+                <CardDescription>These are background jobs. Every action is confirmed first, returns a job reference, and can be inspected from Jobs.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4">
+                {catalogMaintenanceFeedback && <Alert variant={catalogMaintenanceFeedback.kind === "error" ? "destructive" : "default"}>
+                  {catalogMaintenanceFeedback.kind === "error" ? <AlertCircle className="size-4" /> : <CheckCircle2 className="size-4" />}
+                  <AlertTitle>{catalogMaintenanceFeedback.kind === "error" ? "Maintenance could not start" : "Maintenance queued"}</AlertTitle>
+                  <AlertDescription>{catalogMaintenanceFeedback.message}</AlertDescription>
+                </Alert>}
+                <div className="grid gap-3 md:grid-cols-2">
+                  {[
+                    { path: "/api/catalog/source-search-index/build", label: "Keyword search index", description: "Enables broad text search across the full source feed.", icon: <Search className="size-4" /> },
+                    { path: "/api/catalog/performance-indexes/build", label: "Filter performance indexes", description: "Builds PostgreSQL indexes for supplier, status, category, stock, and lifecycle filters.", icon: <Database className="size-4" /> },
+                    { path: "/api/catalog/facets/refresh", label: "Refresh filter values", description: "Recounts supplier, brand, category, and stock-status options.", icon: <RefreshCw className="size-4" /> },
+                    { path: "/api/source-catalog/pricing-inventory/refresh", label: "Refresh pricing and inventory", description: "Imports cost, price, stock, promotions, and closeout changes from the product dump.", icon: <PackageSearch className="size-4" /> },
+                    { path: "/api/categories/summary-index/rebuild", label: "Rebuild category index", description: "Rebuilds category summaries used by the main catalog and category mappings.", icon: <RotateCcw className="size-4" />, body: { scope: "both" } },
+                  ].map((action) => <Button key={action.path} type="button" variant="outline" className="h-auto min-h-20 justify-start whitespace-normal p-4 text-left" disabled={catalogMaintenanceLoading} onClick={() => requestCatalogMaintenance({ ...action, description: action.description })}>
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-muted/50">{catalogMaintenanceLoading ? <Loader2 className="size-4 animate-spin" /> : action.icon}</span>
+                    <span className="min-w-0"><span className="block font-medium">{action.label}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">{action.description}</span></span>
+                  </Button>)}
+                </div>
+              </CardContent>
+            </Card>
           </div>
+          <AlertDialog open={Boolean(catalogMaintenanceConfirm)} onOpenChange={(open) => { if (!open && !catalogMaintenanceLoading) setCatalogMaintenanceConfirm(null) }}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Run {catalogMaintenanceConfirm?.label}?</AlertDialogTitle>
+                <AlertDialogDescription>{catalogMaintenanceConfirm?.description} This will create a background job and may take several minutes on the full catalog. You can monitor the job and cancel it from Jobs.</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={catalogMaintenanceLoading}>Cancel</AlertDialogCancel>
+                <AlertDialogAction disabled={catalogMaintenanceLoading} onClick={() => { if (catalogMaintenanceConfirm) void runCatalogMaintenance(catalogMaintenanceConfirm.path, catalogMaintenanceConfirm.label, catalogMaintenanceConfirm.body) }}>
+                  {catalogMaintenanceLoading ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Run maintenance
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </TabsContent>
         <TabsContent value="users">
           <Card>
@@ -13378,18 +13456,23 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function ToggleField({
   label,
+  description,
   checked,
   disabled,
   onCheckedChange,
 }: {
   label: string
+  description?: string
   checked: boolean
   disabled?: boolean
   onCheckedChange: (value: boolean) => void
 }) {
   return (
     <div className="flex items-center justify-between gap-4 rounded-md border bg-background p-3">
-      <Label className="text-sm font-medium">{label}</Label>
+      <div className="min-w-0">
+        <Label className="text-sm font-medium">{label}</Label>
+        {description && <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>}
+      </div>
       <Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
     </div>
   )

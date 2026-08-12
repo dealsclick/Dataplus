@@ -879,6 +879,21 @@ const DEFAULT_SYSTEM_SETTINGS = {
   sourceCatalogImportBatchLimit: 25000,
   shopifyProductLaunchBatchLimit: 1000,
   trueValueSourceCategoryAsMainCategory: true,
+  catalogEnabledVendorsOnly: true,
+  catalogAllowExplicitDisabledVendorSearch: true,
+  catalogAutoRefreshAfterVendorEnable: true,
+  catalogImportNewSkusEnabled: true,
+  catalogUpdateChangedRowsOnly: true,
+  catalogMarkDiscontinuedRows: true,
+  catalogDiscontinuedLaunchBlocked: true,
+  catalogMatchByUpcEnabled: true,
+  catalogMatchByManufacturerPartEnabled: true,
+  catalogCloseMatchApprovalRequired: true,
+  catalogRequireCategoryForLaunch: true,
+  catalogRequireImageForLaunch: false,
+  catalogFacetCacheEnabled: true,
+  catalogCacheTtlSeconds: 300,
+  catalogSearchDebounceMs: 350,
   skuChangeTrackedFields: ["cost", "price", "list_price", "qty", "stock_status", "to_be_discontinued", "brand", "mfr_part_number", "vendor_sku", "category", "default_image"],
   backupIncludeSourceCatalog: false,
   backupRetentionDays: 30,
@@ -4574,6 +4589,23 @@ function normalizeSystemSettings(settings = {}) {
   normalized.sourceCatalogDefaultImportMode = String(normalized.sourceCatalogDefaultImportMode || "new-and-update").toLowerCase();
   normalized.sourceCatalogImportBatchLimit = Math.max(1000, Math.min(250000, Number(normalized.sourceCatalogImportBatchLimit || 25000) || 25000));
   normalized.shopifyProductLaunchBatchLimit = Math.max(100, Math.min(25000, Number(normalized.shopifyProductLaunchBatchLimit || 1000) || 1000));
+  for (const field of [
+    "catalogEnabledVendorsOnly",
+    "catalogAllowExplicitDisabledVendorSearch",
+    "catalogAutoRefreshAfterVendorEnable",
+    "catalogImportNewSkusEnabled",
+    "catalogUpdateChangedRowsOnly",
+    "catalogMarkDiscontinuedRows",
+    "catalogDiscontinuedLaunchBlocked",
+    "catalogMatchByUpcEnabled",
+    "catalogMatchByManufacturerPartEnabled",
+    "catalogCloseMatchApprovalRequired",
+    "catalogRequireCategoryForLaunch",
+    "catalogRequireImageForLaunch",
+    "catalogFacetCacheEnabled"
+  ]) normalized[field] = normalized[field] !== false && String(normalized[field]).toLowerCase() !== "false";
+  normalized.catalogCacheTtlSeconds = Math.max(15, Math.min(3600, Number(normalized.catalogCacheTtlSeconds || 300) || 300));
+  normalized.catalogSearchDebounceMs = Math.max(100, Math.min(1500, Number(normalized.catalogSearchDebounceMs || 350) || 350));
   normalized.shopifyDailyInventoryUpdateEnabled = normalized.shopifyDailyInventoryUpdateEnabled === true || String(normalized.shopifyDailyInventoryUpdateEnabled).toLowerCase() === "true";
   normalized.shopifyDailyInventoryUpdateMode = String(normalized.shopifyDailyInventoryUpdateMode || "dry-run").toLowerCase() === "apply" ? "apply" : "dry-run";
   normalized.shopifyDailyInventoryRequireSuccessfulDump = normalized.shopifyDailyInventoryRequireSuccessfulDump !== false;
