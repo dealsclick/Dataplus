@@ -12408,18 +12408,6 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
             </div>
           </div>
           <div className="flex flex-wrap items-end justify-end gap-2">
-            <div className="grid min-w-44 gap-1 rounded-md border bg-muted/20 p-2">
-              <Label htmlFor="vendor-status" className="text-xs font-medium text-muted-foreground">Vendor status</Label>
-              {editing ? <Select value={String(draft.status ?? vendor.status ?? "active").toLowerCase() === "active" ? "active" : "inactive"} onValueChange={(next) => update("status", next)}>
-                <SelectTrigger id="vendor-status" className="h-9 bg-background" aria-label="Vendor status">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="active">Active</SelectItem>
-                  <SelectItem value="inactive">Inactive</SelectItem>
-                </SelectContent>
-              </Select> : <Badge variant={String(vendor.status || "active").toLowerCase() === "active" ? "success" : "outline"} className="w-fit">{String(vendor.status || "active").toLowerCase() === "active" ? "Active" : "Inactive"}</Badge>}
-            </div>
             {editing ? (
               <>
                 <Button variant="outline" onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
@@ -12432,6 +12420,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
 
       <Tabs defaultValue="summary">
         <TabsList className="flex flex-wrap">
+          <TabsTrigger value="settings">Settings</TabsTrigger>
           <TabsTrigger value="summary">Summary</TabsTrigger>
           <TabsTrigger value="contact">Contact</TabsTrigger>
           <TabsTrigger value="rules">Rules</TabsTrigger>
@@ -12439,6 +12428,47 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
           <TabsTrigger value="data-feed">Catalog & data</TabsTrigger>
           <TabsTrigger value="categories">Categories</TabsTrigger>
         </TabsList>
+        <TabsContent value="settings">
+          <div className="grid gap-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Vendor settings</CardTitle>
+                <CardDescription>Authoritative controls for whether this supplier participates in catalog workflows and how its source data is handled. Use Edit above, then Save changes.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2">
+                <Field label="Vendor status">
+                  <Select disabled={!editing} value={String(draft.status ?? vendor.status ?? "active").toLowerCase() === "active" ? "active" : "inactive"} onValueChange={(next) => update("status", next)}>
+                    <SelectTrigger aria-label="Vendor status"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="active">Active</SelectItem>
+                      <SelectItem value="inactive">Inactive</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="mt-1 text-xs text-muted-foreground">Inactive vendors remain available for review but are excluded from active catalog and workflow participation.</p>
+                </Field>
+                <ToggleField label="Include supplier in catalog" checked={Boolean(draft["catalogSettings.enabled"] ?? (catalogSettings.enabled !== false))} disabled={!editing} onCheckedChange={(next) => update("catalogSettings.enabled", next)} />
+                <Field label="Source / feed codes">
+                  <Input disabled={!editing} value={catalogSourceCodes} onChange={(event) => update("catalogSettings.sourceCodes", event.target.value.split(/[|,\n]/).map((entry) => entry.trim()).filter(Boolean))} placeholder="TRV | USS" />
+                  <p className="text-xs text-muted-foreground">Stable codes from incoming feeds are mapped to this supplier. Brands are not used as supplier identities.</p>
+                </Field>
+                <Field label="Catalog participation note">
+                  <Textarea disabled={!editing} value={String(draft["catalogSettings.note"] ?? catalogSettings.note ?? "")} onChange={(event) => update("catalogSettings.note", event.target.value)} placeholder="Explain why this supplier is included or excluded" />
+                </Field>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Feed precedence</CardTitle>
+                <CardDescription>Choose whether this supplier's direct feed overrides matching records from the universal DataWarehouse import.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2">
+                <ToggleField label="Prefer direct vendor feed" checked={Boolean(draft["sourcePriority.directFeedPriorityEnabled"] ?? sourcePriority.directFeedPriorityEnabled)} disabled={!editing} onCheckedChange={(next) => update("sourcePriority.directFeedPriorityEnabled", next)} />
+                <Field label="Priority note"><Input disabled={!editing} value={String(draft["sourcePriority.note"] ?? sourcePriority.note ?? "")} onChange={(event) => update("sourcePriority.note", event.target.value)} placeholder="Optional instruction for data operations" /></Field>
+              </CardContent>
+            </Card>
+            <VendorFeedScheduleManager vendors={[vendor]} vendor={vendor} />
+          </div>
+        </TabsContent>
         <TabsContent value="summary" className="grid gap-4">
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
             <MetricCard label="Catalog products" value={marketplaceLoading ? "Loading" : numberLabel(marketplaceCoverage.productCount)} icon={Boxes} />
@@ -12544,27 +12574,18 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
                   <Detail label="Shopify live" value={marketplaceLoading ? "Checking" : numberLabel(marketplaceCoverage.shopifyLive)} />
                   <Detail label="eBay live" value={marketplaceLoading ? "Checking" : numberLabel(marketplaceCoverage.ebayLive)} />
                 </div>
-                <ToggleField label="Include supplier in catalog" checked={Boolean(draft["catalogSettings.enabled"] ?? (catalogSettings.enabled === true))} disabled={!editing} onCheckedChange={(next) => update("catalogSettings.enabled", next)} />
-                <Field label="Source / feed codes">
-                  <Input disabled={!editing} value={catalogSourceCodes} onChange={(event) => update("catalogSettings.sourceCodes", event.target.value.split(/[|,\n]/).map((entry) => entry.trim()).filter(Boolean))} placeholder="TRV | USS" />
-                  <p className="text-xs text-muted-foreground">Use the stable supplier code from the incoming feed, never the product brand. A brand can be carried by more than one supplier.</p>
-                </Field>
-                <div className="md:col-span-2">
-                  <Field label="Catalog note">
-                    <Textarea disabled={!editing} value={String(draft["catalogSettings.note"] ?? catalogSettings.note ?? "")} onChange={(event) => update("catalogSettings.note", event.target.value)} placeholder="Why this supplier is included or excluded from the normal catalog" />
-                  </Field>
-                </div>
+                <Detail label="Catalog participation" value={catalogSettings.enabled !== false ? "Included" : "Excluded"} />
+                <Detail label="Source / feed codes" value={catalogSourceCodes || "Not configured"} />
+                <Detail label="Direct feed precedence" value={sourcePriority.directFeedPriorityEnabled ? "Preferred" : "Universal feed"} />
               </CardContent>
             </Card>
             <Card>
               <CardHeader><CardTitle className="text-base">Source precedence</CardTitle><CardDescription>When this supplier has a direct feed, decide whether it overrides the universal DataWarehouse import for this supplier's records.</CardDescription></CardHeader>
               <CardContent className="grid gap-4 md:grid-cols-2">
-                <ToggleField label="Prefer direct vendor feed" checked={Boolean(draft["sourcePriority.directFeedPriorityEnabled"] ?? sourcePriority.directFeedPriorityEnabled)} disabled={!editing} onCheckedChange={(next) => update("sourcePriority.directFeedPriorityEnabled", next)} />
                 <Field label="When enabled"><Input disabled value="Direct vendor FTP takes precedence over DataWarehouse" /></Field>
-                <Field label="Priority note"><Input disabled={!editing} value={String(draft["sourcePriority.note"] ?? sourcePriority.note ?? "")} onChange={(event) => update("sourcePriority.note", event.target.value)} placeholder="Optional instruction for buyers or data operations" /></Field>
+                <Field label="Priority note"><Input disabled value={String(sourcePriority.note || "Not configured")} /></Field>
               </CardContent>
             </Card>
-            <VendorFeedScheduleManager vendors={[vendor]} vendor={vendor} />
           </div>
         </TabsContent>
         <TabsContent value="categories">
