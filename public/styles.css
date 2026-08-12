@@ -2749,6 +2749,14 @@ tr:last-child td {
   font-weight: 900;
 }
 
+.vendor-profile-status-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
 .vendor-notes {
   max-width: 320px;
   color: var(--muted);

@@ -329,6 +329,8 @@ const LUCIDE_ICONS = {
   "panel-left-close": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/>',
   "panel-left-open": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/>',
   "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  "power": '<path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>',
+  "power-off": '<path d="M12 2v10"/><path d="m4.93 4.93 14.14 14.14"/><path d="M18.36 6.64a9 9 0 0 1-12.73 0"/>',
   "radio": '<path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2a6 6 0 0 1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/>',
   "refresh-cw": '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>',
   "ruler": '<path d="m16 2 6 6L8 22l-6-6Z"/><path d="m7.5 10.5 2 2"/><path d="m10.5 7.5 2 2"/><path d="m13.5 4.5 2 2"/><path d="m4.5 13.5 2 2"/>',
@@ -5456,6 +5458,12 @@ function renderVendorProfile() {
       <section class="full-card vendor-overview-card">
         <h3>Terms</h3>
         <div class="edit-stack compact-edit-stack">
+          <label>Vendor status
+            <select data-vendor-field="status" data-vendor-id="${vendor.id}">
+              <option value="active" ${String(vendor.status || "inactive") === "active" ? "selected" : ""}>Active</option>
+              <option value="inactive" ${String(vendor.status || "inactive") === "inactive" ? "selected" : ""}>Inactive</option>
+            </select>
+          </label>
           <label>Payment terms
             <select data-vendor-field="paymentTerms" data-vendor-id="${vendor.id}">
               ${["TBD", "Prepaid", "Due on receipt", "COD", "Net 7", "Net 10", "Net 15", "Net 30", "Net 45", "Net 60", "2% 10 Net 30"].map((term) => `<option value="${html(term)}" ${String(vendor.paymentTerms || "TBD") === term ? "selected" : ""}>${html(term)}</option>`).join("")}
@@ -5491,6 +5499,7 @@ function renderVendorProfile() {
       <section class="full-card vendor-overview-card locked">
         <h3>Terms</h3>
         <div class="vendor-locked-grid">
+          ${lockedField("Vendor status", vendor.status === "active" ? "Active" : "Inactive")}
           ${lockedField("Payment terms", vendor.paymentTerms || "TBD")}
           ${lockedField("Lead time", `${vendor.leadTimeDays} days`)}
           ${lockedField("Minimum order", vendor.moq)}
@@ -5810,9 +5819,14 @@ function renderVendorProfile() {
         <div>
           <p class="eyebrow">${html(vendor.vendorNumber)}</p>
           <h2>${html(vendor.name)}</h2>
-          <p class="muted">${html(vendor.type)} / ${html(vendor.status)}</p>
+          <div class="vendor-profile-status-line">
+            <span class="status ${html(vendor.status)}">${html(vendor.status === "active" ? "Active" : "Inactive")}</span>
+            <span class="muted">${html(vendor.type)} profile</span>
+            <span class="muted">Catalog ${vendor.catalogSettings?.enabled ? "included" : "excluded"}</span>
+          </div>
         </div>
         <div class="full-order-actions">
+          <button class="button ${vendor.status === "active" ? "secondary" : ""}" type="button" data-vendor-action="${vendor.status === "active" ? "inactive" : "active"}" data-vendor-id="${vendor.id}">${withIcon(vendor.status === "active" ? "power-off" : "power", vendor.status === "active" ? "Disable vendor" : "Enable vendor")}</button>
           <button class="button ${overviewEditing ? "" : "secondary"}" type="button" data-toggle-vendor-overview-edit>${withIcon(overviewEditing ? "check" : "lock", overviewEditing ? "Save overview" : "Edit")}</button>
           <button class="button secondary">Request quote</button>
           <button class="button">New PO</button>
