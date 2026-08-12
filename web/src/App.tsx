@@ -13305,10 +13305,13 @@ function SettingsPage({
                     { path: "/api/catalog/facets/refresh", label: "Refresh filter values", description: "Recounts supplier, brand, category, and stock-status options.", icon: <RefreshCw className="size-4" /> },
                     { path: "/api/source-catalog/pricing-inventory/refresh", label: "Refresh pricing and inventory", description: "Imports cost, price, stock, promotions, and closeout changes from the product dump.", icon: <PackageSearch className="size-4" /> },
                     { path: "/api/categories/summary-index/rebuild", label: "Rebuild category index", description: "Rebuilds category summaries used by the main catalog and category mappings.", icon: <RotateCcw className="size-4" />, body: { scope: "both" } },
-                  ].map((action) => <Button key={action.path} type="button" variant="outline" className="h-auto min-h-20 justify-start whitespace-normal p-4 text-left" disabled={catalogMaintenanceLoading} onClick={() => requestCatalogMaintenance({ ...action, description: action.description })}>
-                    <span className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-muted/50">{catalogMaintenanceLoading ? <Loader2 className="size-4 animate-spin" /> : action.icon}</span>
-                    <span className="min-w-0"><span className="block font-medium">{action.label}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">{action.description}</span></span>
-                  </Button>)}
+                  ].map((action) => <div key={action.path} className="flex min-h-20 items-center gap-3 rounded-md border bg-background p-4">
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-muted/50">{action.icon}</span>
+                    <span className="min-w-0 flex-1"><span className="block font-medium">{action.label}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">{action.description}</span></span>
+                    <Button type="button" size="sm" variant="outline" className="shrink-0" disabled={catalogMaintenanceLoading} onClick={() => requestCatalogMaintenance({ ...action, description: action.description })}>
+                      {catalogMaintenanceLoading ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Run
+                    </Button>
+                  </div>)}
                 </div>
               </CardContent>
             </Card>
@@ -13316,13 +13319,13 @@ function SettingsPage({
           <AlertDialog open={Boolean(catalogMaintenanceConfirm)} onOpenChange={(open) => { if (!open && !catalogMaintenanceLoading) setCatalogMaintenanceConfirm(null) }}>
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>Run {catalogMaintenanceConfirm?.label}?</AlertDialogTitle>
-                <AlertDialogDescription>{catalogMaintenanceConfirm?.description} This will create a background job and may take several minutes on the full catalog. You can monitor the job and cancel it from Jobs.</AlertDialogDescription>
+                <AlertDialogTitle>Are you sure you want to run this job?</AlertDialogTitle>
+                <AlertDialogDescription><span className="font-medium text-foreground">{catalogMaintenanceConfirm?.label}</span>: {catalogMaintenanceConfirm?.description} This will create a background job and may take several minutes on the full catalog. You can monitor the job and cancel it from Jobs.</AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogCancel disabled={catalogMaintenanceLoading}>Cancel</AlertDialogCancel>
                 <AlertDialogAction disabled={catalogMaintenanceLoading} onClick={() => { if (catalogMaintenanceConfirm) void runCatalogMaintenance(catalogMaintenanceConfirm.path, catalogMaintenanceConfirm.label, catalogMaintenanceConfirm.body) }}>
-                  {catalogMaintenanceLoading ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Run maintenance
+                  {catalogMaintenanceLoading ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Run job
                 </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
