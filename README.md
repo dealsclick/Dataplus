@@ -55,6 +55,19 @@ docker compose down
 docker compose up -d
 ```
 
+## Production deployment
+
+Production runs on the DigitalOcean Droplet at `/root/dataplus` with Docker Compose. The GitHub Actions workflow in `.github/workflows/deploy-production.yml` deploys every push to `master` and can also be started manually from the Actions tab. It pulls the exact commit, rebuilds the web and worker containers, and fails unless the app responds successfully on port `4173`.
+
+Add these repository secrets in GitHub under **Settings > Secrets and variables > Actions**:
+
+- `DEPLOY_HOST`: the Droplet public IP or hostname.
+- `DEPLOY_USER`: normally `root` for the current Droplet.
+- `DEPLOY_SSH_KEY`: the complete private SSH key used by GitHub Actions.
+- `DEPLOY_KNOWN_HOSTS`: output of `ssh-keyscan -H YOUR_DROPLET_IP`.
+
+The matching public key must be present in the Droplet user's `~/.ssh/authorized_keys`. Keep the private key and application `.env` only on the server or in GitHub Secrets; never commit them.
+
 The Docker port mapping is `4200:4173`, so your browser uses port `4200` and the app inside Docker uses port `4173`.
 
 When `DATABASE_URL` points at `localhost` or `127.0.0.1`, the Docker setup routes it to your Windows host automatically so the container can use the same local PostgreSQL database as the app on your PC.
