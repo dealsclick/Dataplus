@@ -12356,6 +12356,7 @@ function VendorsPage({ vendors, onSaveVendor }: { vendors: Vendor[]; onSaveVendo
 function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketplaceCoverage, marketplaceLoading = false }: { vendor: Vendor; onSave: (id: string, patch: Record<string, unknown>) => Promise<void>; marketplaceCoverage?: VendorMarketplaceCoverage; marketplaceLoading?: boolean }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
+  const [savingStatus, setSavingStatus] = useState(false)
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
   const value = (field: string, fallback = "") => String(draft[field] ?? (vendor as unknown as Record<string, unknown>)[field] ?? fallback)
   const addressValue = (field: string, fallback = "") => String(draft[`address.${field}`] ?? vendor.address?.[field as keyof NonNullable<Vendor["address"]>] ?? fallback)
@@ -12378,6 +12379,16 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
     await onSave(vendor.id, draft)
     setDraft({})
     setEditing(false)
+  }
+
+  async function changeVendorStatus(status: string) {
+    const nextStatus = status === "active" ? "active" : "inactive"
+    setSavingStatus(true)
+    try {
+      await onSave(vendor.id, { status: nextStatus })
+    } finally {
+      setSavingStatus(false)
+    }
   }
 
   const inventoryRules = vendor.inventoryRules || {}
@@ -12407,7 +12418,19 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
               </>}
             </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-end justify-end gap-2">
+            <div className="grid gap-1">
+              <Label htmlFor="vendor-status" className="text-xs text-muted-foreground">Vendor status</Label>
+              <Select value={String(draft.status ?? vendor.status ?? "active").toLowerCase() === "active" ? "active" : "inactive"} onValueChange={(next) => void changeVendorStatus(next)} disabled={savingStatus}>
+                <SelectTrigger id="vendor-status" className="min-w-36" aria-label="Vendor status">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="active">Active</SelectItem>
+                  <SelectItem value="inactive">Inactive</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             {editing ? (
               <>
                 <Button variant="outline" onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
