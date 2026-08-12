@@ -11618,6 +11618,104 @@ async function findActiveImportJobByWorkerTask(db = {}, workerTask = "") {
   }) || null;
 }
 
+async function queueSourceCatalogFacetsRefreshJob(db = {}, options = {}) {
+  if (!postgres.isPostgresEnabled()) return null;
+  const vendorName = String(options.vendorName || "").trim();
+  const reason = String(options.reason || "manual request").trim();
+  const sourceCodes = [...new Set((Array.isArray(options.sourceCodes) ? options.sourceCodes : [])
+    .map((code) => sourceTextValue(code).toLowerCase())
+    .filter(Boolean))];
+  const jobs = await mergedImportJobsAsync(db);
+  const existing = (jobs || []).find((job) => {
+    const status = String(job.status || "").toLowerCase();
+    if (!["queued", "running"].includes(status)) return false;
+    return String(job.workerTask || "").trim() === "source-facets-refresh"
+      || /source catalog facet|catalog refresh after vendor activation/i.test(String(job.operation || job.message || ""));
+  });
+  if (existing) return existing;
+
+  const job = createImportJob(db, {
+    section: "Source Catalog",
+    category: "Source Catalog",
+    operation: vendorName
+      ? `Refresh catalog after ${vendorName} activation`
+      : "Refresh source catalog facets & supplier coverage",
+    direction: "maintenance",
+    status: "queued",
+    fileName: "vendor_catalog_facets",
+    totalRows: 5,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "source-facets-refresh",
+    workerPayload: shouldRunJobsInline() ? {} : { vendorName, sourceCodes, reason },
+    message: vendorName
+      ? `Vendor ${vendorName} is active and included in the catalog. Refresh queued.`
+      : "Source catalog facet refresh queued.",
+    details: vendorName
+      ? `Refreshes indexed supplier coverage and catalog filter values after ${vendorName} became eligible. Reason: ${reason}.`
+      : "Recounts indexed supplier coverage and catalog filter values."
+  });
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  if (!shouldRunJobsInline()) return job;
+
+  activeJobRecords.set(job.id, normalizeImportJob(job));
+  setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: 5, processedRows: 0, progressPercent: 0 });
+  setTimeout(async () => {
+    const workJob = activeJobRecords.get(job.id) || job;
+    try {
+      workJob.status = "running";
+      workJob.startedAt = workJob.startedAt || new Date().toISOString();
+      workJob.message = vendorName
+        ? `Refreshing catalog after ${vendorName} activation...`
+        : "Refreshing source catalog facets...";
+      upsertImportJobStore(workJob);
+      const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(workJob.id)?.status || workJob.status || "").toLowerCase());
+      const result = await postgres.refreshVendorCatalogFacets({
+        isCanceled,
+        onProgress: (patch = {}) => {
+          const next = setActiveJobProgress(workJob.id, { ...patch, status: "running", startedAt: workJob.startedAt });
+          Object.assign(workJob, {
+            processedRows: next.processedRows,
+            totalRows: next.totalRows,
+            progressPercent: next.progressPercent,
+            estimatedSecondsRemaining: next.estimatedSecondsRemaining,
+            phase: next.phase,
+            message: next.message || workJob.message
+          });
+          activeJobRecords.set(workJob.id, normalizeImportJob(workJob));
+          upsertImportJobStore(workJob);
+        }
+      });
+      finishImportJob(workJob, {
+        status: "success",
+        message: vendorName
+          ? `Catalog refresh completed after ${vendorName} activation.`
+          : `Refreshed source catalog facets and stored supplier coverage for ${Number(result.total || 0).toLocaleString()} source rows.`,
+        totalRows: 5,
+        processedRows: 5,
+        changed: 5,
+        progressPercent: 100,
+        phase: "complete",
+        estimatedSecondsRemaining: 0
+      });
+    } catch (error) {
+      const wasCanceled = /canceled|cancelled|stopped/i.test(String(error.message || ""));
+      finishImportJob(workJob, {
+        status: wasCanceled ? "stopped" : "failed",
+        message: wasCanceled ? "Source catalog facet refresh was canceled." : error.message,
+        errors: wasCanceled ? [] : [error.message],
+        missingCount: wasCanceled ? 0 : 1,
+        phase: wasCanceled ? "stopped" : "failed"
+      });
+    } finally {
+      activeJobProgress.delete(workJob.id);
+      activeJobRecords.delete(workJob.id);
+    }
+  }, 10);
+  return job;
+}
+
 function finishImportJob(job, attrs = {}) {
   if (!job) return null;
   const now = new Date().toISOString();
@@ -29944,6 +30042,7 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     const vendor = findVendorById(db, parts[2]);
     if (!vendor) return notFound(res);
+    const previousVendor = JSON.parse(JSON.stringify(vendor));
     const allowedFields = new Set(["name", "code", "status", "type", "contactName", "email", "phone", "website", "paymentTerms", "leadTimeDays", "moq", "notes", "rating"]);
     const numericFields = new Set(["leadTimeDays", "moq", "rating"]);
     const submissionFields = new Set(["preferredMethod", "apiEnabled", "apiBaseUrl", "apiAuthType", "apiKeyReference", "ftpEnabled", "ftpHost", "ftpPort", "ftpUsername", "ftpPath", "emailEnabled", "emailTo", "emailCc", "emailSubjectTemplate", "attachCsv", "attachPdf"]);
@@ -30078,14 +30177,30 @@ async function handleApi(req, res) {
     const vendorIndex = (db.vendors || []).findIndex((entry) => entry.id === vendor.id);
     if (vendorIndex >= 0) db.vendors[vendorIndex] = normalizedVendor;
     await postgres.writeStateDocuments({ vendors: db.vendors || [] });
-    if (changes.some((change) => change.startsWith("catalogSettings.") || change.startsWith("code changed"))) {
+    if (changes.some((change) => change.startsWith("catalogSettings.") || change.startsWith("code changed") || change.startsWith("status changed"))) {
       await Promise.all([
         redisCache.deleteByPrefix("dataplus:products:"),
         redisCache.deleteByPrefix("dataplus:vendor-marketplace-summary:")
       ]);
     }
+    const previousStatus = String(previousVendor.status || "").trim().toLowerCase();
+    const nextStatus = String(normalizedVendor.status || "").trim().toLowerCase();
+    const catalogEligible = nextStatus === "active" && normalizedVendor.catalogSettings?.enabled === true;
+    const becameEligible = catalogEligible && (previousStatus !== "active" || previousVendor.catalogSettings?.enabled !== true);
+    const catalogSettingsChanged = changes.some((change) => change.startsWith("catalogSettings."));
+    const catalogRefreshJob = (becameEligible || (catalogSettingsChanged && catalogEligible))
+      ? await queueSourceCatalogFacetsRefreshJob(db, {
+        vendorName: normalizedVendor.name,
+        sourceCodes: normalizedVendor.catalogSettings?.sourceCodes || [],
+        reason: becameEligible ? "Vendor became active and catalog-included" : "Vendor catalog inclusion settings changed"
+      })
+      : null;
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { vendor: normalizedVendor, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, {
+      vendor: normalizedVendor,
+      state: publicState(stateDb, { lite: true }),
+      catalogRefreshJob: catalogRefreshJob ? clientImportJob(catalogRefreshJob) : null
+    });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "files" && postgres.isPostgresEnabled()) {

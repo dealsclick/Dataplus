@@ -1366,7 +1366,7 @@ function App() {
 
   async function saveVendor(vendorId: string, patch: Record<string, unknown>) {
     try {
-      const result = await api<{ vendor: Vendor; state?: LiteState }>(`/api/vendors/${encodeURIComponent(vendorId)}`, {
+      const result = await api<{ vendor: Vendor; state?: LiteState; catalogRefreshJob?: ImportJob | null }>(`/api/vendors/${encodeURIComponent(vendorId)}`, {
         method: "PATCH",
         body: JSON.stringify(patch),
       })
@@ -1377,7 +1377,9 @@ function App() {
           vendor.id === vendorId ? result.vendor : vendor
         )),
       }))
-      toast.success("Vendor settings saved.")
+      toast.success(result.catalogRefreshJob
+        ? `Vendor settings saved. Catalog refresh queued as ${jobReference(result.catalogRefreshJob)}.`
+        : "Vendor settings saved.")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to save vendor settings.")
       throw error
