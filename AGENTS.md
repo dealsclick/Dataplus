@@ -1,0 +1,346 @@
+# DataPlus AI Development Guide
+
+This repository is a production-oriented React application for catalog, marketplace, order, purchasing, inventory, warehouse, and automation workflows.
+
+## Non-negotiable scope rule
+
+The active application is the **new React application** under `web/`.
+
+- Build and modify the new UI in `web/src/`.
+- Use the shared backend in `server.js` and supporting modules under `lib/` and `scripts/` when an API or worker change is required.
+- Do **not** add new features to `public/app.js`, `public/index.html`, or other legacy UI files.
+- Do not copy a legacy screen into the new app without first checking whether the new React app already has a cleaner equivalent.
+- The old UI is retained only as a fallback/reference during migration. It is not the destination for new work.
+- Before editing, confirm the target component is imported by `web/src/App.tsx` and is reachable through the new app router.
+
+## Repository layout
+
+- `web/src/App.tsx`: current React application, routes, page components, shared UI composition, and client API calls.
+- `web/src/components/ui/`: shadcn/ui primitives and app-level component wrappers.
+- `web/src/index.css`: current theme tokens, typography, layout, and responsive styles.
+- `server.js`: HTTP API, PostgreSQL/JSON compatibility path, cache invalidation, marketplace actions, and worker job creation.
+- `lib/`: backend services such as database access, data quality, marketplace integrations, and shared helpers.
+- `scripts/dataplus-worker.js`: external worker for long-running jobs.
+- `scripts/`: imports, indexes, maintenance, backups, and repair operations.
+- `data/`: local development data and import state. Production source of truth is PostgreSQL when `DATABASE_URL` is configured.
+- `outputs/`: generated reports and job artifacts. Do not treat generated output as source code.
+- `public/`: legacy UI only. Do not extend it.
+- `Dockerfile` and `docker-compose.yml`: container build and runtime configuration.
+
+## Development and verification
+
+Run the new app locally:
+
+```powershell
+npm start
+```
+
+Build the React app:
+
+```powershell
+npm run web:build
+```
+
+The React build runs TypeScript first and then Vite. A native Tailwind compiler error on Windows can be an environment/dependency issue; run the TypeScript check directly from `web` to separate code errors from native build errors:
+
+```powershell
+cd web
+.\node_modules\.bin\tsc.cmd -b --pretty false
+```
+
+Before finishing a change:
+
+1. Run the TypeScript check.
+2. Run `git diff --check`.
+3. Verify the relevant API route exists in `server.js`.
+4. Test the route in the new UI, not the legacy fallback.
+5. Check desktop and narrow mobile layouts when the change touches tables, dialogs, camera/scanner flows, or fixed action areas.
+6. Do not include unrelated `.agents/`, `skills-lock.json`, generated output, database files, or user changes in a commit.
+
+## New UI design system rules
+
+- Use the existing shadcn/ui primitives and patterns in `web/src/components/ui/`.
+- Prefer `Button`, `DropdownMenu`, `Command`, `Dialog`, `AlertDialog`, `Tabs`, `Table`, `Sheet` only where appropriate, `ScrollArea`, `Collapsible`, `Tooltip`, `HoverCard`, `Popover`, `Calendar`, `DatePicker`, and `ResizablePanelGroup` over one-off controls.
+- Use a consistent compact operations style: clear labels, dense tables, readable status badges, stable column widths, and predictable spacing.
+- Use color to communicate state, not as decoration: green for ready/success/live, amber for review/warning, red for failed/blocked/not found, gray for disabled/not configured, and blue for primary actions or active navigation.
+- Active tabs must have visible contrast in both light and dark modes.
+- Use one contextual Actions command menu per page for page-level operations. Do not scatter duplicate action buttons across the page.
+- Table bulk actions belong in the selection toolbar that appears when rows are selected. Row-specific actions belong in the row action menu.
+- Detail-page actions belong near the page header or in the page Actions menu. Do not reintroduce the old floating action button unless a future product decision explicitly requires it.
+- Do not use inline edits for complex product/order/vendor records. Use organized dialogs with tabs and an explicit Edit/Save flow.
+- Product and marketplace images are clickable previews. Avoid making channel status icons open image zoom; channel icons should navigate to the listing when a listing URL exists.
+- Every modal must be responsive. On mobile, use full-width/full-height or a drawer-style layout when the content requires it; keep primary actions visible above the device safe area.
+- Never allow long labels, taxonomy paths, supplier names, or action groups to overflow their containers.
+
+## Navigation and major workspaces
+
+The new app is organized around these workspaces:
+
+- Overview/dashboard
+- Orders and order detail
+- Fulfillment
+- Purchasing and purchase-order detail
+- Warehouse, receiving, bins, pick lists, and warehouse audits
+- Catalog/products
+- Vendors and vendor profile detail
+- Brands
+- Categories and vendor-category mappings
+- Channels and channel detail/settings
+- Jobs/operations
+- AI assistant David
+- System Settings
+
+Catalog sub-navigation includes Products, Import Review, SKU Changes, Categories, Vendor Mappings, Attributes, Attribute Groups, Inventory, Templates, and Readiness. The old separate Source Catalog UI is being unified into the new Catalog workspace; preserve source/provenance filters without restoring a separate legacy-only product screen.
+
+## Catalog and product rules
+
+The catalog is the approved operational product system. A product can have source records, marketplace records, aliases, variants, identifiers, and multiple supplier relationships.
+
+### Product identity and supplier matching
+
+Match and retain supplier coverage in this order:
+
+1. Exact UPC/GTIN/identifier match.
+2. Exact manufacturer part number plus brand match.
+3. Approved/explicit alias or vendor SKU match.
+4. Close match only as a reviewable suggestion; never silently merge it.
+
+Products may belong to multiple suppliers. Show supplier coverage in the catalog and on the product detail page. Do not use a generic “Load alternates” workflow as the primary relationship model.
+
+Supplier names are canonical display values. Feed codes such as `DIB`, `RZ`, `MAR`, and `MSC` are source identifiers that must map to the canonical supplier profile when known. Do not create duplicate supplier profiles just because a feed uses a code.
+
+### Product detail
+
+The product detail page should remain a complete workspace with organized tabs/sections for:
+
+- Overview: SKU, title, supplier coverage, brand, manufacturer, identifiers, UOM, main category, vendor category, status, and creation provenance.
+- Content: short/long descriptions, bullets, SEO, tags, and media.
+- Commerce/pricing: cost, sell-unit cost, system price, live marketplace price, price formula, margins, last price update, and price source.
+- Shipping: item and package dimensions, weight, dimensional weight, shipping classification, and ground/parcel/freight eligibility.
+- Channels: per-channel listing identity, detected marketplace presence, status, published state, live price, live quantity, mapped category, and marketplace-specific fields.
+- Inventory: quick availability by warehouse, reserved/allocated quantity, replenishable state, movement summary, and a link to full SKU inventory detail.
+- Suppliers: all matched supplier records and the matching method.
+- Variants, identifiers, aliases, changes/audit history, and complete data view where available.
+
+SKU links open the full product page. A separate quick-view control may open a compact preview, but it must not replace the SKU link.
+
+### Product provenance
+
+New SKUs must retain creation date, created by, creation source, and source detail. Examples include manual by user, DataWarehouse/DataPlus import, vendor FTP/API import, warehouse audit creation, and marketplace import.
+
+### Pricing and UOM
+
+- Pricing must use the vendor pricing rules and the product's UOM/package quantity.
+- Cost basis and sell-unit calculations must be visible when possible.
+- Never price a multi-pack below its comparable single-unit price when that would create a pricing inversion.
+- Discontinued products must not be launched or pushed to a marketplace.
+- Essendant rule: do not create Shopify variations; follow the vendor UOM only.
+- True Value and other vendors may support individual and case-pack variants when the vendor rules allow it.
+- Marketplace-specific formulas are configured in the channel settings, not hardcoded into a page.
+
+## Vendor profile rules
+
+Vendor profile settings are the reusable source of truth for imports, pricing, UOM/variation behavior, inventory/replenishment, purchasing, category mapping, and channel actions.
+
+### Vendor status versus catalog inclusion
+
+These are separate controls:
+
+- **Vendor status**: Active or Inactive. It is changed in the new React vendor profile header using the Vendor status dropdown and saves through `PATCH /api/vendors/:id`.
+- **Catalog inclusion**: Include supplier in catalog or not. It is configured under the vendor's Catalog & data section.
+- **Marketplace coverage**: Separate from both status and catalog inclusion; it indicates detected channel records and listing coverage.
+
+Do not collapse these meanings into one field. Future workflows should honor inactive vendors as unavailable for new sourcing, feed participation, purchasing, or launch preparation unless an explicit override is being performed.
+
+Vendor profiles must support:
+
+- Canonical name and feed/source codes.
+- Contacts, address, payment terms, lead time, MOQ, notes, and product count.
+- Pricing rules and minimum-price protection.
+- Variation/UOM rules.
+- Replenishable inventory default and quantity.
+- Purchase-order automation, approval, budget, and overdue-reminder rules.
+- Category mappings and “add as main category” workflow.
+- Vendor-owned scheduled feed connection and status.
+- FTP/API/email source configuration where applicable.
+- Vendor-level enable/disable and catalog inclusion.
+
+## Feed and DataWarehouse rules
+
+DataWarehouse's universal Product Datadump is a third-party universal source, not a vendor profile. It may contain many suppliers.
+
+Treat its operations as distinct modes:
+
+1. **Full import**: discover new records, update source/catalog records, and apply approved product changes.
+2. **Refresh import**: focus on changed inventory, cost/price, active/discontinued status, and other changed fields.
+
+Only changed SKUs should receive downstream changes. Use stable source keys, hashes/change detection, and idempotent upserts. Do not rewrite every product or create duplicate supplier/product records.
+
+For each feed, preserve:
+
+- Source/feed name and supplier mapping.
+- FTP/API connection settings.
+- File path and file format.
+- DataPlus mapping profile.
+- Import target.
+- Full-import schedule and refresh schedule.
+- Inventory update mode: disabled, dry-run, or apply.
+- Price update mode: disabled, dry-run, or apply.
+- Notes, last run, last job, and test-connection result.
+
+Vendor-specific feeds are configured from the vendor profile and displayed in the scheduled feed registry. The universal DataWarehouse feed is configured under System Settings/Data sources and must not be represented as a vendor-owned feed.
+
+Every long-running import must create a job with a visible numeric reference, progress, phase, worker, status, notes, artifacts, and retry/stop behavior. Full and refresh runs must not overlap for the same feed.
+
+## Channels and marketplace rules
+
+Each marketplace channel has a master enable/disable switch. When a channel is disabled, all channel operations must be blocked: product launch, price updates, inventory updates, order import, status/fulfillment sync, webhooks, and marketplace notifications.
+
+When enabled, individual settings govern each operation.
+
+### Shopify
+
+Shopify supports product launch/linking, status and publication checks, price sync, inventory sync, order import, order webhooks, fulfillment/tracking sync, returns/refunds, shipping profiles, delivery quotes, shipping-label readiness, label purchase/void flows, collections, taxonomy, and channel-specific product fields.
+
+Shopify order imports must be filtered to native Shopify sources requested by the business, including Online Store, Shop, Draft-created orders, and POS. Do not import marketplace orders merely because eBay, Temu, or another marketplace is connected into Shopify.
+
+Shopify API scope/auth failures must be visible as actionable errors. Do not claim a successful connection means every scope is available.
+
+### eBay
+
+eBay supports connection/authentication, health verification, order imports with configurable lookback, SKU/listing synchronization, price/inventory synchronization, fulfillment reconciliation, listing launch, lifecycle operations, catalog import, business-policy sync, compliance audit, and marketplace-specific product fields.
+
+eBay product settings must support channel defaults with per-SKU overrides for:
+
+- Default quantity versus actual inventory.
+- Default pricing formula versus manual eBay price.
+- Profit/margin visibility.
+- Category and item specifics.
+- Product identifiers.
+- Payment, return, fulfillment/shipping policies.
+- Listing format, condition, images, best offer, dispatch time, and out-of-stock behavior.
+
+If a SKU exists on eBay, show a View on eBay action when a listing URL is available.
+
+### Other channels
+
+Temu, TikTok Shop, Whatnot, and future channels must follow the same shape: master channel gate, connection/settings tab, rules tab, mappings, product fields, import/export/sync actions, jobs, and channel logs. Do not force all marketplaces into Shopify's workflow.
+
+### Marketplace status presentation
+
+Catalog channel icons represent marketplace presence and state:
+
+- Gray: channel is not enabled for the SKU.
+- Green: SKU/listing is present and healthy/live.
+- Red/amber: present but has an issue, is unpublished, or needs attention.
+- The channel icon should link to the marketplace listing when available.
+- Use a small status tooltip/popover with explicit actions such as Filter and View source/store. Do not let hover status open image zoom.
+
+## Categories and taxonomy
+
+The system category/master category is the canonical internal category. Vendor categories map into it. Channel taxonomies map from the master category.
+
+- Main category is required for launch readiness where the channel requires it.
+- Vendor category mappings are reusable for future imports.
+- Shopify and Google taxonomy use the same taxonomy source in this application.
+- eBay taxonomy and item specifics are separate channel mappings.
+- Mappings must be editable and searchable, with full breadcrumb paths visible.
+- “Map all to eBay”/similar bulk actions must be explicit, reviewable, and job-backed.
+- Category attributes and required channel fields belong in the category/channel mapping model, not scattered duplicate product fields.
+- Do not silently replace an approved manual mapping with an AI suggestion.
+
+## Orders, fulfillment, and purchasing
+
+Orders have internal numbers separate from marketplace references. Preserve internal numbering rules: orders begin at the configured internal sequence (currently 1000), drafts use the draft sequence, and POs use the PO sequence (currently starting at PO#1001).
+
+### Order workflow
+
+The operational order queue is:
+
+1. Processing: payment cleared and ready for inventory/work review.
+2. Ready to ship: all required items are available or received and can be fulfilled.
+3. Waiting for PO: one or more items require purchasing.
+4. Shipped/fulfilled: shipment and tracking completed.
+5. Hold, canceled, returned, or other exception states as applicable.
+
+Order detail must include customer, billing, shipping, payments, line items, SKU/product match, supplier, cost, profit/loss, fulfillment, shipment/labels, POs, returns, documents, notes, channel, and activity timeline.
+
+Use the order Actions command menu for refresh, cancel, archive/delete where allowed, fulfillment, refunds, returns, shipping quotes/labels, notifications, and PO creation. Cancellations must distinguish local-only from local plus channel notification.
+
+### Fulfillment and warehouse
+
+Fulfillment is the operational workspace for pick lists, batches, scanning, packing, shipping labels, and shipment status. A pick list has its own ID and line-level picked status. Labels can be created only after required package data is complete and the relevant items are picked/selected.
+
+Warehouse supports receiving, bins/locations, stock movement, audits, manual receiving, and inventory detail per SKU. Warehouse audits are independent records with warehouse, bin, user, scan lines, review status, photos, unknown UPC handling, and a final apply/review step.
+
+Audit scanner rules:
+
+- Use the back camera by default where available, with a camera-switch control.
+- Barcode scan should immediately look up the catalog and give visible feedback, vibration/sound according to user settings, and be ready for the next scan.
+- Matched scans show a thumbnail, green check, clickable SKU, and preview/image enlargement.
+- Unknown scans show a compact red X/Not Found state and allow manual SKU creation without forcing AI lookup.
+- Manual SKU creation can use multiple photos and AI suggestions after all selected photos are present.
+- Current bin/location is selected from a dropdown and is applied to new scan lines and created SKUs.
+- Audit counts must be editable to correct overscans before submission.
+
+## Purchase orders
+
+Purchase requirements are grouped by supplier. One customer order may link to multiple supplier POs. Show linked POs inside the order with PO number, supplier, status, date placed, expected date, items, quantities, and total.
+
+PO creation is available from:
+
+- Bulk order selection.
+- An individual order's Actions menu.
+- Purchasing workspace.
+
+Auto-PO creation is controlled by supplier profile rules and must respect approval thresholds, budgets, supplier status, and duplicate prevention.
+
+## Jobs and workers
+
+Jobs are the audit trail for imports, exports, syncs, scans, index rebuilds, backups, and marketplace actions.
+
+- Jobs page has tabs for View all/queue and history, channel logs, and scheduled jobs.
+- Scheduled tab lists every schedule and links to the owning settings page.
+- Job detail is a new React page/side panel with numeric job ID, status, progress, rows, phase, worker, timestamps, status message, live worker output, operator notes, artifacts, CSV downloads, retry, and stop controls.
+- Keep job history for at least 60 days.
+- A queued/running duplicate for the same feed/channel operation should be prevented or reported as already queued.
+- If a worker restarts, persist progress and mark the job for retry/review rather than silently losing it.
+- Errors should be collected per row where possible, with an error CSV and a clear distinction between auto-fixable and human-review errors.
+- Jobs should run in an external worker for large imports and marketplace syncs; do not hold a browser request open for a large task.
+
+## AI assistant David
+
+David is the system AI assistant. AI integration settings must show provider status, token/usage information when available, model/configuration, and enabled scopes.
+
+AI actions must be scope-gated, logged, and confirmation-based for mutations. Examples include:
+
+- Search catalog by UPC and explain matching context.
+- Suggest product data from uploaded photos.
+- Review category mappings and propose marketplace taxonomy matches.
+- Prepare a Shopify/eBay launch plan for a SKU or selection.
+- Diagnose jobs and explain errors.
+
+David must not silently publish products, change pricing, modify inventory, create POs, send marketplace notifications, or change categories without an explicit confirmation and the relevant enabled action scope.
+
+## Caching, indexing, and performance
+
+The catalog is large. Prefer PostgreSQL queries and indexed views over loading the entire catalog into the browser.
+
+- Use PostgreSQL as the source of truth when configured.
+- Use Redis/cache invalidation for repeated catalog facets, attribute data, taxonomy data, and stable marketplace summaries.
+- Keep catalog filters server-side and indexed.
+- Use stored/indexed supplier coverage and multi-supplier status; do not calculate it live for every row.
+- Use paginated queries and bounded page sizes.
+- Keep expensive category/taxonomy data lazy-loaded until the user opens the relevant tab.
+- Invalidate affected cache keys after product, vendor, category, channel, feed, or marketplace changes.
+
+## Data safety and change discipline
+
+- Never change pricing, inventory, listing status, or vendor participation in bulk without a dry-run/review path unless the user explicitly asks for an apply run.
+- Respect discontinued and inactive rules before marketplace pushes.
+- Preserve source values and change provenance; do not overwrite source data with a derived display value.
+- Keep local-only and channel-notification actions distinct.
+- Do not expose secrets or write API tokens into the UI, logs, CSVs, or commits.
+- Do not alter database state with ad hoc scripts unless the operation is idempotent, logged, and reviewed.
+- Do not edit the legacy UI to solve a new-version bug.
+- When a new feature is added, update this file if it changes a workflow, setting, route, or safety rule.
