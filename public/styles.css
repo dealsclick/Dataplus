@@ -2757,6 +2757,20 @@ tr:last-child td {
   margin-top: 6px;
 }
 
+.vendor-status-control {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vendor-status-control select {
+  min-width: 112px;
+}
+
 .vendor-notes {
   max-width: 320px;
   color: var(--muted);

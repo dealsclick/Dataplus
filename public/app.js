@@ -5826,6 +5826,12 @@ function renderVendorProfile() {
           </div>
         </div>
         <div class="full-order-actions">
+          <label class="vendor-status-control">Vendor status
+            <select data-vendor-field="status" data-vendor-id="${vendor.id}" aria-label="Vendor status">
+              <option value="active" ${String(vendor.status || "inactive") === "active" ? "selected" : ""}>Active</option>
+              <option value="inactive" ${String(vendor.status || "inactive") === "inactive" ? "selected" : ""}>Inactive</option>
+            </select>
+          </label>
           <button class="button ${vendor.status === "active" ? "secondary" : ""}" type="button" data-vendor-action="${vendor.status === "active" ? "inactive" : "active"}" data-vendor-id="${vendor.id}">${withIcon(vendor.status === "active" ? "power-off" : "power", vendor.status === "active" ? "Disable vendor" : "Enable vendor")}</button>
           <button class="button ${overviewEditing ? "" : "secondary"}" type="button" data-toggle-vendor-overview-edit>${withIcon(overviewEditing ? "check" : "lock", overviewEditing ? "Save overview" : "Edit")}</button>
           <button class="button secondary">Request quote</button>
