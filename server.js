@@ -820,6 +820,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayWebhookOrderSyncEnabled: true,
   ebayWebhookEndpoint: "",
   ebayWebhookVerificationToken: "",
+  ebayNotificationAlertEmail: "",
   shopifyStoreDomain: "",
   shopifyAdminApiVersion: "2026-04",
   shopifyDefaultStatus: "draft",
@@ -4019,6 +4020,7 @@ function normalizeChannel(channel = {}) {
     : DEFAULT_CHANNEL_SETTINGS.ebayRoundingRule;
   settings.ebayWebhookEndpoint = String(settings.ebayWebhookEndpoint || "").trim().replace(/\/+$/, "");
   settings.ebayWebhookVerificationToken = String(settings.ebayWebhookVerificationToken || "").trim();
+  settings.ebayNotificationAlertEmail = String(settings.ebayNotificationAlertEmail || "").trim().toLowerCase();
   for (const field of ["ebayStoreCategories", "ebayListingTemplates", "ebayItemSpecificTemplates", "ebayShippingMethodMappings", "ebayCustomPolicies"]) {
     settings[field] = Array.isArray(settings[field]) ? settings[field] : [];
   }
@@ -23812,12 +23814,39 @@ function ebayNotificationPayload(topic = {}) {
   };
 }
 
+function isEbayNotificationConfigurationError(error) {
+  const status = Number(error?.status || error?.statusCode || 0);
+  const message = String(error?.message || error || "");
+  return status === 409 && /195003|configurations required for notifications/i.test(message);
+}
+
+function ebayNotificationConfigurationMessage() {
+  return "eBay Notification API configuration is required. Add an alert email in the eBay channel settings, save it, then sync the selected topics.";
+}
+
 async function fetchEbayNotificationStatus(db) {
-  const [topics, destinations, subscriptions] = await Promise.all([
+  const [topics, destinations] = await Promise.all([
     ebayRequest(db, "/commerce/notification/v1/topic", { tokenType: "app", operation: "Load eBay notification topics", timeoutMs: 15000 }),
-    ebayRequest(db, "/commerce/notification/v1/destination", { tokenType: "app", operation: "Load eBay webhook destinations", timeoutMs: 15000 }),
-    ebayRequest(db, "/commerce/notification/v1/subscription", { tokenType: "app", operation: "Load eBay webhook subscriptions", timeoutMs: 15000 })
+    ebayRequest(db, "/commerce/notification/v1/destination", { tokenType: "app", operation: "Load eBay webhook destinations", timeoutMs: 15000 })
   ]);
+  let notificationConfig = null;
+  let notificationConfigRequired = false;
+  let notificationConfigError = "";
+  try {
+    notificationConfig = await ebayRequest(db, "/commerce/notification/v1/config", { tokenType: "app", operation: "Load eBay notification configuration", timeoutMs: 15000 });
+  } catch (error) {
+    if (!isEbayNotificationConfigurationError(error)) throw error;
+    notificationConfigRequired = true;
+    notificationConfigError = ebayNotificationConfigurationMessage();
+  }
+  let subscriptions = { subscriptions: [] };
+  try {
+    subscriptions = await ebayRequest(db, "/commerce/notification/v1/subscription", { tokenType: "app", operation: "Load eBay webhook subscriptions", timeoutMs: 15000 });
+  } catch (error) {
+    if (!isEbayNotificationConfigurationError(error)) throw error;
+    notificationConfigRequired = true;
+    notificationConfigError = ebayNotificationConfigurationMessage();
+  }
   const topicRows = ebayNotificationArray(topics, "topics").map((topic) => ({
     ...topic,
     topicId: ebayNotificationTopicId(topic),
@@ -23831,7 +23860,7 @@ async function fetchEbayNotificationStatus(db) {
     ...subscription,
     subscriptionId: ebayNotificationSubscriptionId(subscription)
   })).filter((subscription) => subscription.subscriptionId);
-  return { topics: topicRows, destinations: destinationRows, subscriptions: subscriptionRows };
+  return { topics: topicRows, destinations: destinationRows, subscriptions: subscriptionRows, notificationConfig, notificationConfigRequired, notificationConfigError };
 }
 
 function ebayWebhookTopicDefaults(topics = []) {
@@ -23857,14 +23886,7 @@ async function syncEbayWebhookSubscriptions(db, req = null, requestedTopicIds = 
     ? requestedTopicIds.map((value) => String(value || "").trim()).filter(Boolean)
     : null;
   const topicIds = requested !== null ? requested : ebayWebhookTopicDefaults(current.topics);
-  const name = "DataPlus";
-  let destination = current.destinations.find((row) => String(row.name || "").trim().toLowerCase() === name.toLowerCase());
-  const destinationBody = {
-    name,
-    status: topicIds.length ? "ENABLED" : "DISABLED",
-    deliveryConfig: { endpoint, verificationToken }
-  };
-  if (!destination && !topicIds.length) {
+  if (!topicIds.length) {
     const verifiedAt = new Date().toISOString();
     ebayWebhookState(db, {
       ebayWebhookVerificationAt: verifiedAt,
@@ -23875,6 +23897,27 @@ async function syncEbayWebhookSubscriptions(db, req = null, requestedTopicIds = 
     });
     return { ...current, destinationId: "", selectedTopicIds: [], syncedAt: verifiedAt };
   }
+  if (current.notificationConfigRequired) {
+    const alertEmail = String(settings.ebayNotificationAlertEmail || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(alertEmail)) {
+      throw new Error(`${ebayNotificationConfigurationMessage()} A valid email address is required.`);
+    }
+    current.notificationConfig = await ebayRequest(db, "/commerce/notification/v1/config", {
+      method: "PUT",
+      body: { alertEmail },
+      tokenType: "app",
+      operation: "Configure eBay Notification API alerts"
+    });
+    current.notificationConfigRequired = false;
+    current.notificationConfigError = "";
+  }
+  const name = "DataPlus";
+  let destination = current.destinations.find((row) => String(row.name || "").trim().toLowerCase() === name.toLowerCase());
+  const destinationBody = {
+    name,
+    status: topicIds.length ? "ENABLED" : "DISABLED",
+    deliveryConfig: { endpoint, verificationToken }
+  };
   if (!destination) {
     destination = {
       ...await ebayRequest(db, "/commerce/notification/v1/destination", {

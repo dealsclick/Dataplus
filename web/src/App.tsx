@@ -291,6 +291,7 @@ type ChannelSettings = {
   ebayWebhookOrderSyncEnabled?: boolean
   ebayWebhookEndpoint?: string
   ebayWebhookVerificationToken?: string
+  ebayNotificationAlertEmail?: string
   roundingRule?: string
   [key: string]: unknown
 }
@@ -2688,7 +2689,7 @@ function ChannelDetail({
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [credentials, setCredentials] = useState<{ shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; clientIdPreview?: string; clientSecretPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean } | null>(null)
   const [ebayCredentials, setEbayCredentials] = useState<{ environment?: string; ruName?: string; scope?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; hasSellerAuthorization?: boolean; sellerAuthorizedAt?: string; accessTokenExpiresAt?: string; connectionVerifiedAt?: string; connectionVerificationMessage?: string; webhookEnabled?: boolean; webhookEndpoint?: string; webhookVerificationTokenConfigured?: boolean; webhookLastReceivedAt?: string; webhookLastTopic?: string; webhookLastSignatureVerifiedAt?: string; webhookVerificationAt?: string; webhookVerificationMessage?: string; clientIdPreview?: string; clientSecretPreview?: string; refreshTokenPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean; configured?: boolean } | null>(null)
-  const [ebayWebhookStatus, setEbayWebhookStatus] = useState<{ topics?: Array<Record<string, any>>; destinations?: Array<Record<string, any>>; subscriptions?: Array<Record<string, any>>; destinationId?: string; selectedTopicIds?: string[]; syncedAt?: string } | null>(null)
+  const [ebayWebhookStatus, setEbayWebhookStatus] = useState<{ topics?: Array<Record<string, any>>; destinations?: Array<Record<string, any>>; subscriptions?: Array<Record<string, any>>; notificationConfig?: Record<string, any> | null; notificationConfigRequired?: boolean; notificationConfigError?: string; destinationId?: string; selectedTopicIds?: string[]; syncedAt?: string } | null>(null)
   const [ebayWebhookSelectedTopics, setEbayWebhookSelectedTopics] = useState<string[]>([])
   const [credentialsOpen, setCredentialsOpen] = useState(false)
   const [ebayCredentialsOpen, setEbayCredentialsOpen] = useState(false)
@@ -2908,7 +2909,11 @@ function ChannelDetail({
       const saved = (result?.selectedTopicIds || []).filter((topicId) => available.includes(topicId))
       const recommended = available.filter((topicId) => /ORDER_CONFIRMATION|ORDER_CANCELLATION|ORDER_UPDATE|FULFILLMENT/i.test(topicId))
       setEbayWebhookSelectedTopics(saved.length ? saved : recommended)
-      if (showSuccess) toast.success("eBay notification topics and subscriptions loaded.")
+      if (showSuccess) {
+        toast.success(result?.notificationConfigRequired
+          ? "eBay topics loaded. Add the alert email before syncing subscriptions."
+          : "eBay notification topics and subscriptions loaded.")
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load eBay notification status.")
     } finally {
@@ -3358,6 +3363,7 @@ function ChannelDetail({
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="md:col-span-2"><Field label="Public HTTPS endpoint"><Input disabled={!editing} value={ebayWebhookEndpoint} placeholder={defaultEbayWebhookEndpoint} onChange={(event) => update("ebayWebhookEndpoint", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Register this exact URL as the eBay Notification API destination.</p></Field></div>
                     <div className="md:col-span-2"><Field label="Webhook verification token"><div className="flex gap-2"><Input disabled={!editing} type={editing ? "text" : "password"} value={editing ? String(settings.ebayWebhookVerificationToken || "") : settings.ebayWebhookVerificationToken ? "Configured" : ""} placeholder="Generate a 32-80 character token" onChange={(event) => update("ebayWebhookVerificationToken", event.target.value)} /><Button type="button" variant="outline" disabled={!editing} onClick={generateEbayWebhookToken}>Generate</Button></div><p className="mt-1 text-xs text-muted-foreground">Save after generating. Then paste the token into the eBay destination configuration.</p></Field></div>
+                    <div className="md:col-span-2"><Field label="eBay Notification alert email"><Input disabled={!editing} type="email" value={String(settings.ebayNotificationAlertEmail || "")} placeholder="alerts@yourcompany.com" onChange={(event) => update("ebayNotificationAlertEmail", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">eBay requires an app-level alert email before notification subscriptions can be read or created.</p></Field></div>
                     <ToggleField label="Enable signed eBay webhook processing" checked={Boolean(settings.ebayWebhookEnabled)} disabled={!editing} onCheckedChange={(value) => update("ebayWebhookEnabled", value)} />
                     <ToggleField label="Reconcile orders from Order Confirmation" checked={settings.ebayWebhookOrderSyncEnabled !== false} disabled={!editing || !Boolean(settings.ebayWebhookEnabled) || !Boolean(settings.ebayOrderImportEnabled)} onCheckedChange={(value) => update("ebayWebhookOrderSyncEnabled", value)} />
                   </div>
@@ -3369,6 +3375,7 @@ function ChannelDetail({
                       <Button type="button" size="sm" disabled={!ebayCredentials?.hasClientCredentials || ebayWebhookStatusLoading} onClick={() => void loadEbayWebhookStatus(true)}>{ebayWebhookStatusLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}Load topics</Button>
                     </div>
                     {ebayWebhookStatus ? <div className="grid gap-3 rounded-md border bg-muted/20 p-3 text-xs sm:col-span-2">
+                      {ebayWebhookStatus.notificationConfigRequired ? <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-950 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-100"><p className="font-medium">eBay notification configuration required</p><p className="mt-1">{ebayWebhookStatus.notificationConfigError || "Save a valid alert email, then sync selected topics."}</p></div> : null}
                       <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Notification subscriptions</p><p className="text-muted-foreground">DataPlus destination: {ebayWebhookStatus.destinationId || "Not created"}</p><p className="text-muted-foreground">{ebayWebhookSelectedTopics.length ? `${ebayWebhookSelectedTopics.length} topic${ebayWebhookSelectedTopics.length === 1 ? "" : "s"} selected` : "No topics selected; syncing will disable eBay subscriptions."}</p></div><Button type="button" size="sm" disabled={ebayWebhookSyncing || hasUnsavedChannelChanges || settings.ebayWebhookEnabled !== true} onClick={() => void syncEbayWebhookSubscriptions()}>{ebayWebhookSyncing ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}{ebayWebhookSelectedTopics.length ? "Sync selected topics" : "Disable all topics"}</Button></div>
                       <div className="grid gap-1 sm:grid-cols-2">{(ebayWebhookStatus.topics || []).map((topic) => { const topicId = String(topic.topicId || ""); const checked = ebayWebhookSelectedTopics.includes(topicId); const subscription = (ebayWebhookStatus.subscriptions || []).find((row) => String(row.topicId || "") === topicId && String(row.destinationId || "") === String(ebayWebhookStatus.destinationId || "")); return <label key={topicId} className="flex items-start gap-2 rounded border bg-background p-2"><Checkbox checked={checked} onCheckedChange={(value) => setEbayWebhookSelectedTopics((current) => value === true ? [...new Set([...current, topicId])] : current.filter((item) => item !== topicId))} /><span className="min-w-0 flex-1"><span className="block truncate font-medium">{topicId}</span><span className="text-muted-foreground">{subscription ? `Subscription ${String(subscription.status || "configured").toLowerCase()}` : "Not subscribed"}</span></span>{subscription && String(subscription.subscriptionId || "") ? <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={() => void testEbayWebhookSubscription(String(subscription.subscriptionId))}>Test</Button> : null}</label> })}</div>
                     </div> : null}
