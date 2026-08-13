@@ -15918,7 +15918,10 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
   }
 }
 
-async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
+// Retained for compatibility with older queued payloads. New dispatches use
+// the implementation below; keeping the name distinct avoids accidental
+// shadowing when the worker module is loaded.
+async function runEbayPriceInventorySyncWorkerJobLegacy(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
   const limit = Math.max(1, Math.min(25000, Number(payload.limit || job.totalRows || 1000) || 1000));
   const updateInventory = payload.updateInventory !== false;
@@ -23778,6 +23781,186 @@ async function verifyEbayWebhookSetup(db, req = null) {
   };
 }
 
+function ebayNotificationArray(payload = {}, key = "") {
+  if (Array.isArray(payload)) return payload;
+  if (key && Array.isArray(payload?.[key])) return payload[key];
+  for (const candidate of ["topics", "destinations", "subscriptions", "items", "data"]) {
+    if (Array.isArray(payload?.[candidate])) return payload[candidate];
+  }
+  return [];
+}
+
+function ebayNotificationTopicId(topic = {}) {
+  return String(topic.topicId || topic.id || topic.name || "").trim();
+}
+
+function ebayNotificationDestinationId(destination = {}) {
+  return String(destination.destinationId || destination.id || "").trim();
+}
+
+function ebayNotificationSubscriptionId(subscription = {}) {
+  return String(subscription.subscriptionId || subscription.id || "").trim();
+}
+
+function ebayNotificationPayload(topic = {}) {
+  const supported = Array.isArray(topic.supportedPayloads) ? topic.supportedPayloads : [];
+  const preferred = supported.find((item) => String(item.deliveryProtocol || "").toUpperCase() === "HTTPS" && String(item.format || "").toUpperCase() === "JSON") || supported[0] || {};
+  return {
+    deliveryProtocol: preferred.deliveryProtocol || "HTTPS",
+    format: preferred.format || "JSON",
+    ...(preferred.schemaVersion ? { schemaVersion: preferred.schemaVersion } : {})
+  };
+}
+
+async function fetchEbayNotificationStatus(db) {
+  const [topics, destinations, subscriptions] = await Promise.all([
+    ebayRequest(db, "/commerce/notification/v1/topic", { tokenType: "app", operation: "Load eBay notification topics", timeoutMs: 15000 }),
+    ebayRequest(db, "/commerce/notification/v1/destination", { tokenType: "app", operation: "Load eBay webhook destinations", timeoutMs: 15000 }),
+    ebayRequest(db, "/commerce/notification/v1/subscription", { tokenType: "app", operation: "Load eBay webhook subscriptions", timeoutMs: 15000 })
+  ]);
+  const topicRows = ebayNotificationArray(topics, "topics").map((topic) => ({
+    ...topic,
+    topicId: ebayNotificationTopicId(topic),
+    payloads: Array.isArray(topic.supportedPayloads) ? topic.supportedPayloads : []
+  })).filter((topic) => topic.topicId);
+  const destinationRows = ebayNotificationArray(destinations, "destinations").map((destination) => ({
+    ...destination,
+    destinationId: ebayNotificationDestinationId(destination)
+  })).filter((destination) => destination.destinationId);
+  const subscriptionRows = ebayNotificationArray(subscriptions, "subscriptions").map((subscription) => ({
+    ...subscription,
+    subscriptionId: ebayNotificationSubscriptionId(subscription)
+  })).filter((subscription) => subscription.subscriptionId);
+  return { topics: topicRows, destinations: destinationRows, subscriptions: subscriptionRows };
+}
+
+function ebayWebhookTopicDefaults(topics = []) {
+  const preferred = ["ORDER_CONFIRMATION", "ORDER_CANCELLATION", "ORDER_UPDATE", "FULFILLMENT"];
+  return topics.filter((topic) => {
+    const id = ebayNotificationTopicId(topic).toUpperCase();
+    return preferred.some((candidate) => id.includes(candidate));
+  }).map(ebayNotificationTopicId);
+}
+
+async function syncEbayWebhookSubscriptions(db, req = null, requestedTopicIds = null) {
+  const settings = ebayChannelSettings(db);
+  if (settings.ebayWebhookEnabled !== true) {
+    throw new Error("Enable signed eBay webhook processing and save the eBay channel settings before syncing notification subscriptions.");
+  }
+  const endpoint = ebayWebhookEndpoint(settings, req);
+  const verificationToken = String(settings.ebayWebhookVerificationToken || "").trim();
+  if (!/^https:\/\//i.test(endpoint)) throw new Error("Set a public HTTPS eBay webhook endpoint before syncing notification subscriptions.");
+  if (!ebayWebhookTokenIsValid(verificationToken)) throw new Error("Set a webhook verification token with 32-80 letters, numbers, underscores, or hyphens before syncing notification subscriptions.");
+
+  const current = await fetchEbayNotificationStatus(db);
+  const requested = Array.isArray(requestedTopicIds)
+    ? requestedTopicIds.map((value) => String(value || "").trim()).filter(Boolean)
+    : null;
+  const topicIds = requested !== null ? requested : ebayWebhookTopicDefaults(current.topics);
+  const name = "DataPlus";
+  let destination = current.destinations.find((row) => String(row.name || "").trim().toLowerCase() === name.toLowerCase());
+  const destinationBody = {
+    name,
+    status: topicIds.length ? "ENABLED" : "DISABLED",
+    deliveryConfig: { endpoint, verificationToken }
+  };
+  if (!destination && !topicIds.length) {
+    const verifiedAt = new Date().toISOString();
+    ebayWebhookState(db, {
+      ebayWebhookVerificationAt: verifiedAt,
+      ebayWebhookDestinationId: "",
+      ebayWebhookSubscriptionIds: [],
+      ebayWebhookTopicIds: [],
+      ebayWebhookVerificationMessage: "eBay notification subscriptions are disabled because no topics are selected."
+    });
+    return { ...current, destinationId: "", selectedTopicIds: [], syncedAt: verifiedAt };
+  }
+  if (!destination) {
+    destination = {
+      ...await ebayRequest(db, "/commerce/notification/v1/destination", {
+        method: "POST",
+        body: destinationBody,
+        tokenType: "app",
+        operation: "Create eBay webhook destination"
+      }),
+      ...destinationBody
+    };
+  } else {
+    const destinationId = ebayNotificationDestinationId(destination);
+    const updated = await ebayRequest(db, `/commerce/notification/v1/destination/${encodeURIComponent(destinationId)}`, {
+      method: "PUT",
+      body: destinationBody,
+      tokenType: "app",
+      operation: "Update eBay webhook destination"
+    });
+    destination = { ...destination, ...updated, ...destinationBody, destinationId };
+  }
+  const destinationId = ebayNotificationDestinationId(destination);
+  if (!destinationId) throw new Error("eBay did not return a destination ID after creating the DataPlus webhook destination.");
+
+  const subscriptions = [];
+  for (const topicId of topicIds) {
+    const topic = current.topics.find((row) => ebayNotificationTopicId(row) === topicId);
+    if (!topic) continue;
+    const payload = ebayNotificationPayload(topic);
+    const body = { destinationId, topicId, status: "ENABLED", payload };
+    const existing = current.subscriptions.find((row) => ebayNotificationTopicId(row) === topicId && String(row.destinationId || "") === destinationId);
+    if (existing && ebayNotificationSubscriptionId(existing)) {
+      const subscriptionId = ebayNotificationSubscriptionId(existing);
+      const updated = await ebayRequest(db, `/commerce/notification/v1/subscription/${encodeURIComponent(subscriptionId)}`, {
+        method: "PUT",
+        body,
+        tokenType: "app",
+        operation: `Enable eBay webhook subscription ${topicId}`
+      });
+      subscriptions.push({ ...existing, ...updated, ...body, subscriptionId });
+    } else {
+      const created = await ebayRequest(db, "/commerce/notification/v1/subscription", {
+        method: "POST",
+        body,
+        tokenType: "app",
+        operation: `Create eBay webhook subscription ${topicId}`
+      });
+      subscriptions.push({ ...created, ...body, subscriptionId: ebayNotificationSubscriptionId(created) });
+    }
+  }
+  // Keep eBay's enabled subscriptions aligned with the user's selection. This
+  // prevents a topic that was unchecked in DataPlus from continuing to deliver
+  // events in the background.
+  for (const existing of current.subscriptions) {
+    const existingDestinationId = String(existing.destinationId || "");
+    const existingTopicId = ebayNotificationTopicId(existing);
+    const subscriptionId = ebayNotificationSubscriptionId(existing);
+    if (existingDestinationId !== destinationId || !subscriptionId || topicIds.includes(existingTopicId)) continue;
+    await ebayRequest(db, `/commerce/notification/v1/subscription/${encodeURIComponent(subscriptionId)}/disable`, {
+      method: "POST",
+      body: {},
+      tokenType: "app",
+      operation: `Disable eBay webhook subscription ${existingTopicId || subscriptionId}`
+    });
+  }
+  const verifiedAt = new Date().toISOString();
+  ebayWebhookState(db, {
+    ebayWebhookVerificationAt: verifiedAt,
+    ebayWebhookDestinationId: destinationId,
+    ebayWebhookSubscriptionIds: subscriptions.map(ebayNotificationSubscriptionId).filter(Boolean),
+    ebayWebhookTopicIds: topicIds,
+    ebayWebhookVerificationMessage: `DataPlus destination is enabled with ${subscriptions.length} eBay notification subscription${subscriptions.length === 1 ? "" : "s"}.`
+  });
+  return { ...await fetchEbayNotificationStatus(db), destinationId, selectedTopicIds: topicIds, syncedAt: verifiedAt };
+}
+
+async function testEbayWebhookSubscription(db, subscriptionId) {
+  const id = String(subscriptionId || "").trim();
+  if (!id) throw new Error("A subscription ID is required to send an eBay webhook test.");
+  return ebayRequest(db, `/commerce/notification/v1/subscription/${encodeURIComponent(id)}/test`, {
+    method: "POST",
+    body: {},
+    tokenType: "app",
+    operation: `Test eBay webhook subscription ${id}`
+  });
+}
+
 function sanitizeApiLogMessage(value = "") {
   return String(value || "")
     .replace(/shpat_[A-Za-z0-9_\-]+/g, "[token]")
@@ -25846,6 +26029,39 @@ async function handleApi(req, res) {
       ...result,
       credentials: publicEbayConfigStatus(db)
     });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/ebay/webhooks/status") {
+    const db = postgres.isPostgresEnabled()
+      ? await readDbFast({ skipInventory: true })
+      : await readDb({ skipInventory: false });
+    const result = await fetchEbayNotificationStatus(db);
+    const connectorState = mergedConnectorState(db);
+    return sendJson(res, 200, {
+      ...result,
+      destinationId: connectorState.ebayWebhookDestinationId || "",
+      selectedTopicIds: Array.isArray(connectorState.ebayWebhookTopicIds) ? connectorState.ebayWebhookTopicIds : [],
+      syncedAt: connectorState.ebayWebhookVerificationAt || ""
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/webhooks/sync") {
+    const body = await parseBody(req);
+    const db = postgres.isPostgresEnabled()
+      ? await readDbFast({ skipInventory: true })
+      : await readDb({ skipInventory: false });
+    const requestedTopicIds = Object.prototype.hasOwnProperty.call(body, "topicIds") ? body.topicIds : null;
+    const result = await syncEbayWebhookSubscriptions(db, req, requestedTopicIds);
+    if (!postgres.isPostgresEnabled()) await writeDb(db);
+    return sendJson(res, 200, result);
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "ebay" && parts[2] === "webhooks" && parts[3] && parts[4] === "test" && parts.length === 5) {
+    const db = postgres.isPostgresEnabled()
+      ? await readDbFast({ skipInventory: true })
+      : await readDb({ skipInventory: false });
+    const result = await testEbayWebhookSubscription(db, decodeURIComponent(parts[3]));
+    return sendJson(res, 200, { tested: true, result });
   }
 
   if (parts[0] === "api" && parts[1] === "export-mappings" && !parts[3]) {

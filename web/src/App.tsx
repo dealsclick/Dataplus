@@ -2688,11 +2688,15 @@ function ChannelDetail({
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [credentials, setCredentials] = useState<{ shop?: string; apiVersion?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; clientIdPreview?: string; clientSecretPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean } | null>(null)
   const [ebayCredentials, setEbayCredentials] = useState<{ environment?: string; ruName?: string; scope?: string; hasAccessToken?: boolean; hasClientCredentials?: boolean; hasSellerAuthorization?: boolean; sellerAuthorizedAt?: string; accessTokenExpiresAt?: string; connectionVerifiedAt?: string; connectionVerificationMessage?: string; webhookEnabled?: boolean; webhookEndpoint?: string; webhookVerificationTokenConfigured?: boolean; webhookLastReceivedAt?: string; webhookLastTopic?: string; webhookLastSignatureVerifiedAt?: string; webhookVerificationAt?: string; webhookVerificationMessage?: string; clientIdPreview?: string; clientSecretPreview?: string; refreshTokenPreview?: string; accessTokenPreview?: string; runtimeManaged?: boolean; configured?: boolean } | null>(null)
+  const [ebayWebhookStatus, setEbayWebhookStatus] = useState<{ topics?: Array<Record<string, any>>; destinations?: Array<Record<string, any>>; subscriptions?: Array<Record<string, any>>; destinationId?: string; selectedTopicIds?: string[]; syncedAt?: string } | null>(null)
+  const [ebayWebhookSelectedTopics, setEbayWebhookSelectedTopics] = useState<string[]>([])
   const [credentialsOpen, setCredentialsOpen] = useState(false)
   const [ebayCredentialsOpen, setEbayCredentialsOpen] = useState(false)
   const [credentialSaving, setCredentialSaving] = useState(false)
   const [ebayVerifying, setEbayVerifying] = useState(false)
   const [ebayWebhookVerifying, setEbayWebhookVerifying] = useState(false)
+  const [ebayWebhookStatusLoading, setEbayWebhookStatusLoading] = useState(false)
+  const [ebayWebhookSyncing, setEbayWebhookSyncing] = useState(false)
   const [credentialDraft, setCredentialDraft] = useState({ storeDomain: "", apiVersion: "", clientId: "", clientSecret: "", accessToken: "" })
   const [ebayCredentialDraft, setEbayCredentialDraft] = useState({ environment: "production", ruName: "", scope: "", clientId: "", clientSecret: "", refreshToken: "", accessToken: "" })
   const [ebayOrderImportOpen, setEbayOrderImportOpen] = useState(false)
@@ -2748,6 +2752,11 @@ function ChannelDetail({
       .then((result) => setEbayCredentials(result.credentials || null))
       .catch(() => setEbayCredentials(null))
   }, [isEbay])
+
+  useEffect(() => {
+    if (!isEbay) return
+    void loadEbayWebhookStatus()
+  }, [isEbay, channel.id])
 
   useEffect(() => {
     if (!isEbay) return
@@ -2881,11 +2890,61 @@ function ChannelDetail({
       const result = await api<{ credentials?: typeof ebayCredentials; message?: string }>("/api/ebay/webhooks/verify", { method: "POST", body: JSON.stringify({}) })
       setEbayCredentials(result.credentials || null)
       toast.success(result.message || "eBay webhook setup verified.")
+      void loadEbayWebhookStatus()
       onRefreshData()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to verify eBay webhook setup.")
     } finally {
       setEbayWebhookVerifying(false)
+    }
+  }
+
+  async function loadEbayWebhookStatus(showSuccess = false) {
+    setEbayWebhookStatusLoading(true)
+    try {
+      const result = await api<typeof ebayWebhookStatus>("/api/ebay/webhooks/status")
+      setEbayWebhookStatus(result || null)
+      const available = (result?.topics || []).map((topic) => String(topic.topicId || "")).filter(Boolean)
+      const saved = (result?.selectedTopicIds || []).filter((topicId) => available.includes(topicId))
+      const recommended = available.filter((topicId) => /ORDER_CONFIRMATION|ORDER_CANCELLATION|ORDER_UPDATE|FULFILLMENT/i.test(topicId))
+      setEbayWebhookSelectedTopics(saved.length ? saved : recommended)
+      if (showSuccess) toast.success("eBay notification topics and subscriptions loaded.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load eBay notification status.")
+    } finally {
+      setEbayWebhookStatusLoading(false)
+    }
+  }
+
+  async function syncEbayWebhookSubscriptions() {
+    if (hasUnsavedChannelChanges) {
+      toast.error("Save the eBay channel changes before syncing notification subscriptions.")
+      return
+    }
+    if (settings.ebayWebhookEnabled !== true) {
+      toast.error("Enable signed eBay webhook processing and save the eBay channel settings before syncing topics.")
+      return
+    }
+    const topicIds = ebayWebhookSelectedTopics
+    setEbayWebhookSyncing(true)
+    try {
+      const result = await api<typeof ebayWebhookStatus>("/api/ebay/webhooks/sync", { method: "POST", body: JSON.stringify({ topicIds }) })
+      setEbayWebhookStatus(result || null)
+      toast.success("eBay webhook destination and subscriptions synchronized.")
+      onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to synchronize eBay webhook subscriptions.")
+    } finally {
+      setEbayWebhookSyncing(false)
+    }
+  }
+
+  async function testEbayWebhookSubscription(subscriptionId: string) {
+    try {
+      await api(`/api/ebay/webhooks/${encodeURIComponent(subscriptionId)}/test`, { method: "POST", body: JSON.stringify({}) })
+      toast.success("eBay test notification requested.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to test eBay webhook subscription.")
     }
   }
 
@@ -3305,7 +3364,14 @@ function ChannelDetail({
                   <div className="flex min-w-56 flex-col justify-between gap-3 rounded-md border bg-background p-3 text-sm">
                     <div><p className="font-medium">Webhook readiness</p><p className="mt-1 text-xs text-muted-foreground">{ebayCredentials?.webhookVerificationMessage || "Save a valid endpoint and token, then verify Notification API access."}</p></div>
                     <div className="space-y-1 text-xs text-muted-foreground"><p>{ebayCredentials?.webhookLastReceivedAt ? `Last event: ${new Date(ebayCredentials.webhookLastReceivedAt).toLocaleString()}` : "No event received yet."}</p>{ebayCredentials?.webhookLastTopic ? <p className="truncate">Topic: {ebayCredentials.webhookLastTopic}</p> : null}</div>
-                    <Button type="button" variant="outline" size="sm" disabled={!ebayCredentials?.hasClientCredentials || ebayWebhookVerifying || hasUnsavedChannelChanges} onClick={() => void verifyEbayWebhookSetup()}>{ebayWebhookVerifying ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}Verify webhook setup</Button>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <Button type="button" variant="outline" size="sm" disabled={!ebayCredentials?.hasClientCredentials || ebayWebhookVerifying || hasUnsavedChannelChanges} onClick={() => void verifyEbayWebhookSetup()}>{ebayWebhookVerifying ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}Verify access</Button>
+                      <Button type="button" size="sm" disabled={!ebayCredentials?.hasClientCredentials || ebayWebhookStatusLoading} onClick={() => void loadEbayWebhookStatus(true)}>{ebayWebhookStatusLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}Load topics</Button>
+                    </div>
+                    {ebayWebhookStatus ? <div className="grid gap-3 rounded-md border bg-muted/20 p-3 text-xs sm:col-span-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Notification subscriptions</p><p className="text-muted-foreground">DataPlus destination: {ebayWebhookStatus.destinationId || "Not created"}</p><p className="text-muted-foreground">{ebayWebhookSelectedTopics.length ? `${ebayWebhookSelectedTopics.length} topic${ebayWebhookSelectedTopics.length === 1 ? "" : "s"} selected` : "No topics selected; syncing will disable eBay subscriptions."}</p></div><Button type="button" size="sm" disabled={ebayWebhookSyncing || hasUnsavedChannelChanges || settings.ebayWebhookEnabled !== true} onClick={() => void syncEbayWebhookSubscriptions()}>{ebayWebhookSyncing ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}{ebayWebhookSelectedTopics.length ? "Sync selected topics" : "Disable all topics"}</Button></div>
+                      <div className="grid gap-1 sm:grid-cols-2">{(ebayWebhookStatus.topics || []).map((topic) => { const topicId = String(topic.topicId || ""); const checked = ebayWebhookSelectedTopics.includes(topicId); const subscription = (ebayWebhookStatus.subscriptions || []).find((row) => String(row.topicId || "") === topicId && String(row.destinationId || "") === String(ebayWebhookStatus.destinationId || "")); return <label key={topicId} className="flex items-start gap-2 rounded border bg-background p-2"><Checkbox checked={checked} onCheckedChange={(value) => setEbayWebhookSelectedTopics((current) => value === true ? [...new Set([...current, topicId])] : current.filter((item) => item !== topicId))} /><span className="min-w-0 flex-1"><span className="block truncate font-medium">{topicId}</span><span className="text-muted-foreground">{subscription ? `Subscription ${String(subscription.status || "configured").toLowerCase()}` : "Not subscribed"}</span></span>{subscription && String(subscription.subscriptionId || "") ? <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={() => void testEbayWebhookSubscription(String(subscription.subscriptionId))}>Test</Button> : null}</label> })}</div>
+                    </div> : null}
                     <a className="inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-4 hover:underline" href="https://developer.ebay.com/develop/api/sell/notification_api" target="_blank" rel="noreferrer">Open eBay Notification API <ExternalLink className="size-3" /></a>
                   </div>
                 </div>
