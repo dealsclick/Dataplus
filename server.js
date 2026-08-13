@@ -23817,7 +23817,8 @@ function ebayNotificationPayload(topic = {}) {
 function isEbayNotificationConfigurationError(error) {
   const status = Number(error?.status || error?.statusCode || 0);
   const message = String(error?.message || error || "");
-  return status === 409 && /195003|configurations required for notifications/i.test(message);
+  return (status === 409 && /195003|configurations required for notifications/i.test(message))
+    || (status === 404 && /195026|configuration not found/i.test(message));
 }
 
 function ebayNotificationConfigurationMessage() {
