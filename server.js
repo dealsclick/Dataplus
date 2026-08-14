@@ -26476,9 +26476,29 @@ function categoryMappingFingerprint(mapping = {}) {
   return JSON.stringify({
     categoryId: String(mapping.categoryId || ""),
     categoryPath: String(mapping.categoryPath || ""),
-    matchSource: String(mapping.matchSource || ""),
-    reviewedAt: String(mapping.reviewedAt || ""),
+    taxonomyVersion: String(mapping.taxonomyVersion || ""),
+    categoryTreeVersion: String(mapping.categoryTreeVersion || ""),
     locked: mapping.locked === true
+  });
+}
+
+function currentCategoryReviewMapping(db = {}, source = {}, channel = "ebay") {
+  const normalizedChannel = channel === "shopify" ? "shopify" : "ebay";
+  const sourceMapping = source.mappings?.[normalizedChannel] || {};
+  const category = normalizeCategorySettings(db.categorySettings).find((row) =>
+    row.categoryId === source.id ||
+    row.id === source.id ||
+    formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase()
+  );
+  const savedMapping = category?.mappings?.[normalizedChannel] || {};
+  return normalizeChannelCategoryMapping({
+    ...sourceMapping,
+    ...savedMapping,
+    categoryId: savedMapping.categoryId || sourceMapping.categoryId || "",
+    categoryPath: savedMapping.categoryPath || sourceMapping.categoryPath || "",
+    categoryHandle: savedMapping.categoryHandle || sourceMapping.categoryHandle || "",
+    taxonomyVersion: savedMapping.taxonomyVersion || sourceMapping.taxonomyVersion || "",
+    categoryTreeVersion: savedMapping.categoryTreeVersion || sourceMapping.categoryTreeVersion || ""
   });
 }
 
@@ -26534,7 +26554,7 @@ async function requestDavidCategoryDecision(settings = {}, input = {}) {
 
 async function davidCategoryReview(db, source = {}, channel = "ebay", settings = {}, scope = "main", options = {}) {
   const normalizedChannel = channel === "shopify" ? "shopify" : "ebay";
-  const current = normalizeChannelCategoryMapping(source.mappings?.[normalizedChannel] || {});
+  const current = currentCategoryReviewMapping(db, source, normalizedChannel);
   let candidates = [];
   if (normalizedChannel === "shopify") {
     candidates = rankShopifyTaxonomyMatches(source.name, 8).map((row) => ({
@@ -27945,13 +27965,7 @@ async function handleApi(req, res) {
         db.categorySettings.push(category);
       }
       const channel = proposal.channel === "shopify" ? "shopify" : "ebay";
-      const savedMapping = category.mappings?.[channel] || {};
-      const sourceMapping = source.mappings?.[channel] || {};
-      const current = normalizeChannelCategoryMapping(
-        savedMapping.categoryId || savedMapping.categoryPath || savedMapping.matchSource || savedMapping.reviewedAt
-          ? savedMapping
-          : sourceMapping
-      );
+      const current = currentCategoryReviewMapping(db, source, channel);
       if (categoryMappingFingerprint(current) !== proposal.currentFingerprint) {
         return sendJson(res, 409, { error: "This mapping changed after David reviewed it. Review the current category again before applying anything." });
       }
