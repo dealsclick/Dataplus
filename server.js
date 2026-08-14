@@ -26166,19 +26166,27 @@ async function requestDavidCategoryDecision(settings = {}, input = {}) {
     }
   };
   const instruction = `You are David's category-review engine. Review one DataPlus main category against a closed list of exact ${input.channel} taxonomy candidates. Never invent or alter a candidate ID. Choose only a candidateId supplied below. Prefer keep_current when the current mapping is semantically correct. Use no_match with an empty candidateId when none are accurate. Be conservative: broad categories, conflicting leaves, and weak semantic overlap require warnings and lower confidence. Return JSON only.\n\n${JSON.stringify(input)}`;
-  const response = aiConfig.provider === "google-ai-studio"
-    ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+  let response;
+  try {
+    response = aiConfig.provider === "google-ai-studio"
+      ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
       method: "POST",
       headers: { "x-goog-api-key": aiConfig.apiKey, "Content-Type": "application/json", "Api-Revision": "2026-05-20" },
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(18000),
       body: JSON.stringify({ model: aiConfig.model, store: false, input: instruction, response_format: { type: "text", mime_type: "application/json", schema } })
-    })
-    : await fetch("https://api.openai.com/v1/responses", {
+      })
+      : await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { Authorization: `Bearer ${aiConfig.apiKey}`, "Content-Type": "application/json" },
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(18000),
       body: JSON.stringify({ model: aiConfig.model, input: [{ role: "developer", content: [{ type: "input_text", text: instruction }] }], max_output_tokens: 700, text: { format: { type: "json_schema", name: "category_mapping_review", strict: true, schema } } })
-    });
+      });
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      throw new Error("David's AI provider did not respond within 18 seconds. The cached taxonomy is ready; retry the review or verify the AI provider and model in System Settings.");
+    }
+    throw error;
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(String(payload?.error?.message || "David could not review this category."));
   await recordAiUsage(aiConfig.provider, aiConfig.model, "category_mapping_review", payload).catch(() => {});

@@ -7009,26 +7009,40 @@ function CategoryRequirementsDataTable({ channel, attributes, mappings, onChange
 function DavidCategoryReviewCard({ profile, channel, scope, onApplied }: { profile: CategoryProfile; channel: "shopify" | "ebay"; scope: "main" | "source"; onApplied: (rows: CategoryProfile[]) => void }) {
   const [proposal, setProposal] = useState<CategoryAiReviewProposal | null>(null)
   const [reviewing, setReviewing] = useState(false)
+  const [reviewError, setReviewError] = useState("")
   const [applying, setApplying] = useState(false)
   const [approveOpen, setApproveOpen] = useState(false)
+  const resultRef = useRef<HTMLDivElement | null>(null)
   const profileId = profile.id || profile.categoryId || ""
   const current = profile.mappings?.[channel] || {}
   const confidence = Math.round(Number(proposal?.confidence || 0) * 100)
 
-  useEffect(() => { setProposal(null); setApproveOpen(false) }, [profileId, channel])
+  useEffect(() => { setProposal(null); setReviewError(""); setApproveOpen(false) }, [profileId, channel])
+
+  function revealResult() {
+    window.requestAnimationFrame(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }))
+  }
 
   async function review() {
     if (!profileId) return
     setReviewing(true)
+    setReviewError("")
+    setProposal(null)
+    revealResult()
     try {
       const result = await api<{ proposal?: CategoryAiReviewProposal }>(`/api/ai/categories/${encodeURIComponent(profileId)}/review`, {
         method: "POST",
         body: JSON.stringify({ scope, channel }),
       })
-      setProposal(result.proposal || null)
+      if (!result.proposal?.id || !result.proposal.state) throw new Error("David completed the request but returned no category review result. Please retry the review.")
+      setProposal(result.proposal)
+      revealResult()
       toast.success(`David reviewed the ${channel === "shopify" ? "Shopify" : "eBay"} mapping.`)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "David could not review this category.")
+      const message = error instanceof Error ? error.message : "David could not review this category."
+      setReviewError(message)
+      revealResult()
+      toast.error(message)
     } finally {
       setReviewing(false)
     }
@@ -7058,6 +7072,10 @@ function DavidCategoryReviewCard({ profile, channel, scope, onApplied }: { profi
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="flex min-w-0 items-start gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-md bg-primary/10 text-primary"><ShieldCheck className="size-4" /></div><div><p className="text-sm font-medium">David category review</p><p className="mt-0.5 text-xs text-muted-foreground">Independent AI review of the deterministic {channel === "shopify" ? "Shopify" : "eBay"} taxonomy match. Suggestions require your approval.</p></div></div>
       <Button variant="outline" size="sm" disabled={reviewing || applying} onClick={() => void review()}>{reviewing ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}{proposal ? "Review again" : "Ask David to review"}</Button>
+    </div>
+    <div ref={resultRef} className="scroll-mt-24" aria-live="polite" aria-busy={reviewing}>
+      {reviewing && <div className="mt-4 flex items-start gap-3 rounded-md border border-primary/30 bg-primary/5 p-3"><Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-primary" /><div><p className="text-sm font-medium">David is reviewing this category</p><p className="mt-0.5 text-xs text-muted-foreground">Comparing the current mapping with the locally cached {channel === "shopify" ? "Shopify / Google" : "eBay"} taxonomy. The result will appear here automatically.</p></div></div>}
+      {reviewError && !reviewing && <Alert variant="destructive" className="mt-4"><AlertCircle className="size-4" /><AlertTitle>David could not complete the review</AlertTitle><AlertDescription className="space-y-3"><p>{reviewError}</p><Button variant="outline" size="sm" onClick={() => void review()}><RefreshCw className="size-4" /> Retry review</Button></AlertDescription></Alert>}
     </div>
     {proposal && <div className="mt-4 grid gap-3">
       <div className="flex flex-wrap items-center gap-2"><Badge variant={proposal.state === "ready_for_approval" ? "secondary" : proposal.state === "keep_current" ? "default" : "outline"}>{stateLabel}</Badge><Badge variant="outline">{confidence}% confidence</Badge><span className="text-xs text-muted-foreground">{proposal.provider}{proposal.model ? ` / ${proposal.model}` : ""}</span></div>
