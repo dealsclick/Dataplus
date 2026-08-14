@@ -250,6 +250,10 @@ The system category/master category is the canonical internal category. Vendor c
 - “Map all to eBay”/similar bulk actions must be explicit, reviewable, and job-backed.
 - Category attributes and required channel fields belong in the category/channel mapping model, not scattered duplicate product fields.
 - Do not silently replace an approved manual mapping with an AI suggestion.
+- David can review all unlocked main-category mappings in a background worker using the locally cached Shopify/Google and eBay taxonomies.
+- The configurable automatic approval threshold defaults to 75%. Suggestions at or above the threshold are applied and locked; lower-confidence or no-match results stay in the category approval queue.
+- Background review must skip locked mappings and preserve approved manual mappings. Unlocking a mapping explicitly allows it to be reviewed or replaced again.
+- Background category-review jobs must expose progress and auto-approved, pending-review, skipped, and error artifacts in Jobs.
 
 ## Orders, fulfillment, and purchasing
 
@@ -323,6 +327,8 @@ AI actions must be scope-gated, logged, and confirmation-based for mutations. Ex
 - Diagnose jobs and explain errors.
 
 David must not silently publish products, change pricing, modify inventory, create POs, send marketplace notifications, or change categories without an explicit confirmation and the relevant enabled action scope.
+
+The configured category auto-approval threshold is a standing category-mapping policy and is the only exception to per-record category confirmation. It applies only to background taxonomy review, only to unlocked mappings, and every automatic decision must be logged and locked for later inspection.
 
 ## Caching, indexing, and performance
 

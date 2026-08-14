@@ -943,6 +943,11 @@ const DEFAULT_SYSTEM_SETTINGS = {
   aiRequireActionConfirmation: true,
   aiMaxActionItems: 25,
   aiAuditLoggingEnabled: true,
+  aiCategoryBackgroundReviewEnabled: true,
+  aiCategoryAutoApproveEnabled: true,
+  aiCategoryAutoApproveThreshold: 0.75,
+  aiCategoryReviewChannels: ["shopify", "ebay"],
+  aiCategoryReviewBatchSize: 10,
   aiToolScopes: Object.fromEntries(AI_TOOL_SCOPE_DEFINITIONS.map((scope) => [scope.id, scope.defaultEnabled])),
   warehouseImageAnalysisEnabled: true,
   warehouseImageAnalysisModel: "gpt-4o-mini",
@@ -4660,6 +4665,13 @@ function normalizeSystemSettings(settings = {}) {
   normalized.aiRequireActionConfirmation = true;
   normalized.aiMaxActionItems = Math.max(1, Math.min(100, Number(normalized.aiMaxActionItems || 25) || 25));
   normalized.aiAuditLoggingEnabled = normalized.aiAuditLoggingEnabled !== false;
+  normalized.aiCategoryBackgroundReviewEnabled = normalized.aiCategoryBackgroundReviewEnabled !== false;
+  normalized.aiCategoryAutoApproveEnabled = normalized.aiCategoryAutoApproveEnabled !== false;
+  normalized.aiCategoryAutoApproveThreshold = Math.max(0.5, Math.min(0.99, Number(normalized.aiCategoryAutoApproveThreshold || 0.75) || 0.75));
+  normalized.aiCategoryReviewChannels = [...new Set((Array.isArray(normalized.aiCategoryReviewChannels) ? normalized.aiCategoryReviewChannels : ["shopify", "ebay"])
+    .map((channel) => String(channel || "").trim().toLowerCase()).filter((channel) => ["shopify", "ebay"].includes(channel)))];
+  if (!normalized.aiCategoryReviewChannels.length) normalized.aiCategoryReviewChannels = ["shopify", "ebay"];
+  normalized.aiCategoryReviewBatchSize = Math.max(1, Math.min(50, Number(normalized.aiCategoryReviewBatchSize || 10) || 10));
   const submittedAiScopes = normalized.aiToolScopes && typeof normalized.aiToolScopes === "object" ? normalized.aiToolScopes : {};
   normalized.aiToolScopes = Object.fromEntries(AI_TOOL_SCOPE_DEFINITIONS.map((scope) => [
     scope.id,
@@ -7404,6 +7416,20 @@ function normalizeChannelCategoryMapping(mapping = {}) {
     aiModel: mapping.aiModel || "",
     aiProposalId: mapping.aiProposalId || "",
     aiRationale: mapping.aiRationale || "",
+    pendingSuggestion: mapping.pendingSuggestion && typeof mapping.pendingSuggestion === "object" ? {
+      action: String(mapping.pendingSuggestion.action || "suggest"),
+      categoryId: String(mapping.pendingSuggestion.categoryId || ""),
+      categoryPath: String(mapping.pendingSuggestion.categoryPath || ""),
+      categoryHandle: String(mapping.pendingSuggestion.categoryHandle || ""),
+      taxonomyVersion: String(mapping.pendingSuggestion.taxonomyVersion || ""),
+      categoryTreeVersion: String(mapping.pendingSuggestion.categoryTreeVersion || ""),
+      confidence: Number.isFinite(Number(mapping.pendingSuggestion.confidence)) ? Number(mapping.pendingSuggestion.confidence) : null,
+      rationale: String(mapping.pendingSuggestion.rationale || ""),
+      warnings: Array.isArray(mapping.pendingSuggestion.warnings) ? mapping.pendingSuggestion.warnings.map((value) => String(value || "")).filter(Boolean).slice(0, 5) : [],
+      provider: String(mapping.pendingSuggestion.provider || ""),
+      model: String(mapping.pendingSuggestion.model || ""),
+      reviewedAt: String(mapping.pendingSuggestion.reviewedAt || "")
+    } : null,
     locked: mapping.locked === true,
     lockedAt: mapping.lockedAt || "",
     lockedBy: mapping.lockedBy || "",
@@ -8602,6 +8628,280 @@ async function runEbayCategoryAutoMapWorkerJob(job = {}, attrs = {}) {
     finishedAt: new Date().toISOString()
   });
   await postgres.upsertOperationJob(job);
+  await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+  await Promise.all(job.artifacts.map((artifact) => postgres.upsertOperationArtifact(job, artifact.kind).catch(() => {})));
+  activeJobRecords.delete(job.id);
+  upsertImportJobStore(job);
+  return job;
+}
+
+function aiCategoryReviewChannels(settings = {}, options = {}) {
+  const requested = Array.isArray(options.channels) ? options.channels : settings.aiCategoryReviewChannels;
+  const channels = [...new Set((Array.isArray(requested) ? requested : ["shopify", "ebay"])
+    .map((channel) => String(channel || "").trim().toLowerCase())
+    .filter((channel) => ["shopify", "ebay"].includes(channel)))];
+  return channels.length ? channels : ["shopify", "ebay"];
+}
+
+function aiCategoryReviewWorkItems(db = {}, settings = {}, options = {}) {
+  const channels = aiCategoryReviewChannels(settings, options);
+  const refreshPending = options.refreshPending === true;
+  const rows = publicCategories(db, "", "main").categories || [];
+  const items = [];
+  const skipped = [];
+  for (const row of rows) {
+    for (const channel of channels) {
+      const mapping = normalizeChannelCategoryMapping(row.mappings?.[channel] || {});
+      if (categoryMappingIsLocked(mapping)) {
+        skipped.push({ categoryId: row.id, category: row.name, channel, reason: "locked" });
+        continue;
+      }
+      if (mapping.pendingSuggestion && !refreshPending) {
+        skipped.push({ categoryId: row.id, category: row.name, channel, reason: "already_pending_review" });
+        continue;
+      }
+      items.push({ categoryId: row.id, categoryName: row.name, channel });
+    }
+  }
+  return { items, skipped, channels };
+}
+
+function categoryConfidenceLevel(confidence = 0) {
+  return confidence >= 0.9 ? "high" : confidence >= 0.72 ? "medium" : "low";
+}
+
+async function applyDavidBackgroundCategoryDecision(db = {}, source = {}, proposal = {}, settings = {}) {
+  const channel = proposal.channel === "shopify" ? "shopify" : "ebay";
+  const category = findOrCreateCategorySetting(db, source.name);
+  const savedMapping = category.mappings?.[channel] || {};
+  const sourceMapping = source.mappings?.[channel] || {};
+  const current = normalizeChannelCategoryMapping(
+    savedMapping.categoryId || savedMapping.categoryPath || savedMapping.matchSource || savedMapping.reviewedAt || savedMapping.pendingSuggestion
+      ? savedMapping
+      : sourceMapping
+  );
+  if (categoryMappingIsLocked(current)) return { status: "skipped", reason: "locked", category: source.name, categoryId: source.id, channel };
+
+  const confidence = Math.max(0, Math.min(1, Number(proposal.confidence || 0)));
+  const threshold = Math.max(0.5, Math.min(0.99, Number(settings.aiCategoryAutoApproveThreshold || 0.75) || 0.75));
+  const suggested = proposal.state === "keep_current" && current.categoryId
+    ? current
+    : (proposal.suggestion?.categoryId ? { ...current, ...proposal.suggestion } : null);
+  const mayApply = settings.aiCategoryAutoApproveEnabled === true
+    && davidToolEnabled(settings, "categories.apply")
+    && suggested
+    && confidence >= threshold;
+  const now = new Date().toISOString();
+
+  if (mayApply) {
+    let approvedMapping = suggested;
+    if (channel === "shopify") approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
+    else approvedMapping = await enrichEbayCategoryMapping(db, approvedMapping);
+    category.mappings[channel] = normalizeChannelCategoryMapping({
+      ...approvedMapping,
+      status: "mapped",
+      confidence,
+      confidenceLevel: categoryConfidenceLevel(confidence),
+      matchSource: "david-background-review",
+      matchedAt: now,
+      reviewedBy: "David background review",
+      reviewedAt: now,
+      aiProvider: proposal.provider || "",
+      aiModel: proposal.model || "",
+      aiProposalId: proposal.id || "",
+      aiRationale: proposal.rationale || "",
+      pendingSuggestion: null,
+      locked: true,
+      lockedAt: now,
+      lockedBy: "David background review",
+      unlockedAt: "",
+      unlockedBy: ""
+    });
+    category.status = "mapped";
+    category.updatedBy = "David background review";
+    category.updatedAt = now;
+    return {
+      status: "auto_approved", category: source.name, categoryId: source.id, channel, confidence,
+      mappedCategoryId: category.mappings[channel].categoryId,
+      mappedCategoryPath: category.mappings[channel].categoryPath,
+      rationale: proposal.rationale || ""
+    };
+  }
+
+  const pendingCategory = proposal.suggestion?.categoryId
+    ? proposal.suggestion
+    : (proposal.state === "keep_current" && current.categoryId ? current : {});
+  category.mappings[channel] = normalizeChannelCategoryMapping({
+    ...current,
+    status: "needs_review",
+    confidence,
+    confidenceLevel: categoryConfidenceLevel(confidence),
+    aiProvider: proposal.provider || "",
+    aiModel: proposal.model || "",
+    aiProposalId: proposal.id || "",
+    aiRationale: proposal.rationale || "",
+    pendingSuggestion: {
+      action: proposal.state || "no_match",
+      categoryId: pendingCategory.categoryId || "",
+      categoryPath: pendingCategory.categoryPath || "",
+      categoryHandle: pendingCategory.categoryHandle || "",
+      taxonomyVersion: pendingCategory.taxonomyVersion || "",
+      categoryTreeVersion: pendingCategory.categoryTreeVersion || "",
+      confidence,
+      rationale: proposal.rationale || "",
+      warnings: proposal.warnings || [],
+      provider: proposal.provider || "",
+      model: proposal.model || "",
+      reviewedAt: now
+    },
+    locked: false
+  });
+  category.status = "needs_review";
+  category.updatedBy = "David background review";
+  category.updatedAt = now;
+  return {
+    status: "needs_approval", category: source.name, categoryId: source.id, channel, confidence,
+    suggestedCategoryId: pendingCategory.categoryId || "",
+    suggestedCategoryPath: pendingCategory.categoryPath || "",
+    rationale: proposal.rationale || "",
+    warnings: (proposal.warnings || []).join(" | ")
+  };
+}
+
+async function queueAiCategoryReviewJob(db = {}, options = {}) {
+  const settings = readSystemSettingsStore(db.systemSettings || {});
+  if (!settings.aiEnabled || !settings.aiCategoryBackgroundReviewEnabled || !davidToolEnabled(settings, "categories.review")) {
+    throw new Error("Enable David background category review and its category-review scope in System Settings first.");
+  }
+  const existing = options.force === true ? null : await findActiveImportJobByWorkerTask(db, "ai-category-review");
+  if (existing) return { duplicate: true, job: existing };
+  const work = aiCategoryReviewWorkItems(db, settings, options);
+  const payload = {
+    channels: work.channels,
+    refreshPending: options.refreshPending === true,
+    checkpointEvery: Math.max(1, Math.min(50, Number(options.checkpointEvery || settings.aiCategoryReviewBatchSize || 10) || 10))
+  };
+  const inline = shouldRunJobsInline();
+  const job = createImportJob(db, {
+    section: "Catalog",
+    category: "Categories",
+    operation: "David background category review",
+    direction: "review",
+    status: "queued",
+    fileName: "ai-category-review.json",
+    totalRows: work.items.length,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: inline ? "" : "ai-category-review",
+    workerPayload: inline ? {} : payload,
+    message: `Queued David to review ${work.items.length.toLocaleString()} unlocked category mapping${work.items.length === 1 ? "" : "s"}.`,
+    details: `Mappings at or above ${Math.round(settings.aiCategoryAutoApproveThreshold * 100)}% confidence can be approved and locked automatically. Lower-confidence results remain in the approval queue.`
+  });
+  if (inline) {
+    activeJobRecords.set(job.id, normalizeImportJob(job));
+    setImmediate(() => runAiCategoryReviewWorkerJob(job, payload).catch(async (error) => {
+      const message = error?.message || String(error);
+      finishImportJob(job, { status: "failed", phase: "failed", message, errors: [message], missingCount: 1, finishedAt: new Date().toISOString() });
+      activeJobRecords.delete(job.id);
+      upsertImportJobStore(job);
+      if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job).catch(() => {});
+    }));
+  }
+  return { duplicate: false, job, requested: work.items.length, skipped: work.skipped.length };
+}
+
+async function runAiCategoryReviewWorkerJob(job = {}, attrs = {}) {
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const startedAt = job.startedAt || new Date().toISOString();
+  const db = await readEbayCategoryAutoMapDb();
+  const settings = readSystemSettingsStore(db.systemSettings || {});
+  if (!settings.aiEnabled || !settings.aiCategoryBackgroundReviewEnabled || !davidToolEnabled(settings, "categories.review")) {
+    throw new Error("David background category review is disabled in System Settings.");
+  }
+  const work = aiCategoryReviewWorkItems(db, settings, payload);
+  const results = [];
+  const checkpointEvery = Math.max(1, Number(payload.checkpointEvery || settings.aiCategoryReviewBatchSize || 10));
+  job = await persistWorkerImportJob(job, {
+    status: "running", phase: "reviewing_categories", totalRows: work.items.length, processedRows: 0,
+    progressPercent: 0, startedAt, message: `David is reviewing ${work.items.length.toLocaleString()} unlocked category mappings from the local taxonomy indexes.`
+  });
+  let lastProgressAt = 0;
+  for (let index = 0; index < work.items.length; index += 1) {
+    const item = work.items[index];
+    try {
+      const source = findPublicCategory(db, item.categoryId, "main");
+      if (!source) throw new Error("Category no longer exists in the main category index.");
+      const proposal = await davidCategoryReview(db, source, item.channel, settings, "main", { persistProposal: false, recordAction: false });
+      const outcome = await applyDavidBackgroundCategoryDecision(db, source, proposal, settings);
+      results.push(outcome);
+      await recordDavidAction({
+        type: "category_mapping_background_review", categoryId: source.id, categoryName: source.name,
+        channel: item.channel, status: outcome.status, proposalId: proposal.id || "",
+        provider: proposal.provider || "", model: proposal.model || "",
+        message: outcome.status === "auto_approved" ? `Auto-approved at ${Math.round(outcome.confidence * 100)}% confidence.` : `Queued for approval at ${Math.round(outcome.confidence * 100)}% confidence.`
+      }).catch(() => {});
+    } catch (error) {
+      results.push({ status: "error", category: item.categoryName, categoryId: item.categoryId, channel: item.channel, message: error?.message || String(error) });
+    }
+    if ((index + 1) % checkpointEvery === 0) await persistEbayCategoryAutoMapDb(db, false);
+    const now = Date.now();
+    if (now - lastProgressAt >= 750 || index + 1 === work.items.length) {
+      lastProgressAt = now;
+      const approved = results.filter((row) => row.status === "auto_approved").length;
+      const pending = results.filter((row) => row.status === "needs_approval").length;
+      const failed = results.filter((row) => row.status === "error").length;
+      job = await persistWorkerImportJob(job, {
+        status: "running", phase: "reviewing_categories", totalRows: work.items.length, processedRows: index + 1,
+        changed: approved, missingCount: failed, progressPercent: progressPercent(index + 1, work.items.length),
+        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, index + 1, work.items.length),
+        message: `Reviewed ${(index + 1).toLocaleString()} of ${work.items.length.toLocaleString()}: ${approved.toLocaleString()} auto-approved, ${pending.toLocaleString()} need approval.`
+      });
+    }
+  }
+  await persistEbayCategoryAutoMapDb(db, true);
+  const report = {
+    threshold: settings.aiCategoryAutoApproveThreshold,
+    channels: work.channels,
+    requested: work.items.length,
+    autoApproved: results.filter((row) => row.status === "auto_approved").length,
+    needsApproval: results.filter((row) => row.status === "needs_approval").length,
+    skipped: work.skipped.length,
+    errors: results.filter((row) => row.status === "error").length,
+    results,
+    skippedRows: work.skipped
+  };
+  const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "ai-category-review"));
+  fs.mkdirSync(jobDir, { recursive: true });
+  const reportPath = path.join(jobDir, "ai-category-review.json");
+  const approvedPath = path.join(jobDir, "auto-approved.csv");
+  const pendingPath = path.join(jobDir, "needs-approval.csv");
+  const skippedPath = path.join(jobDir, "skipped.csv");
+  const errorsPath = path.join(jobDir, "errors.csv");
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  fs.writeFileSync(approvedPath, csvRecordsToText(results.filter((row) => row.status === "auto_approved")));
+  fs.writeFileSync(pendingPath, csvRecordsToText(results.filter((row) => row.status === "needs_approval")));
+  fs.writeFileSync(skippedPath, csvRecordsToText(work.skipped));
+  fs.writeFileSync(errorsPath, csvRecordsToText(results.filter((row) => row.status === "error")));
+  job.originalFilePath = reportPath;
+  job.originalFileName = path.basename(reportPath);
+  job.fileName = path.basename(reportPath);
+  job.artifacts = [
+    { kind: "approved", fileName: path.basename(approvedPath), filePath: approvedPath, contentType: "text/csv; charset=utf-8", rowCount: report.autoApproved, byteSize: fs.statSync(approvedPath).size },
+    { kind: "review", fileName: path.basename(pendingPath), filePath: pendingPath, contentType: "text/csv; charset=utf-8", rowCount: report.needsApproval, byteSize: fs.statSync(pendingPath).size },
+    { kind: "skipped", fileName: path.basename(skippedPath), filePath: skippedPath, contentType: "text/csv; charset=utf-8", rowCount: report.skipped, byteSize: fs.statSync(skippedPath).size },
+    { kind: "errors", fileName: path.basename(errorsPath), filePath: errorsPath, contentType: "text/csv; charset=utf-8", rowCount: report.errors, byteSize: fs.statSync(errorsPath).size }
+  ];
+  finishImportJob(job, {
+    status: report.errors || report.needsApproval ? "warning" : "success", phase: "complete",
+    totalRows: report.requested, processedRows: report.requested, changed: report.autoApproved,
+    missingCount: report.errors, progressPercent: 100, estimatedSecondsRemaining: 0,
+    message: `David category review completed: ${report.autoApproved.toLocaleString()} auto-approved, ${report.needsApproval.toLocaleString()} need approval, ${report.errors.toLocaleString()} failed.`,
+    details: `Approved mappings were locked at the configured ${Math.round(report.threshold * 100)}% threshold. Pending suggestions are available from Categories > Awaiting AI approval.`,
+    errors: results.filter((row) => row.status === "error").slice(0, 50).map((row) => `${row.category} (${row.channel}): ${row.message}`),
+    finishedAt: new Date().toISOString()
+  });
+  await postgres.upsertOperationJob(job).catch(() => {});
   await postgres.upsertOperationArtifact(job, "original").catch(() => {});
   await Promise.all(job.artifacts.map((artifact) => postgres.upsertOperationArtifact(job, artifact.kind).catch(() => {})));
   activeJobRecords.delete(job.id);
@@ -26232,7 +26532,7 @@ async function requestDavidCategoryDecision(settings = {}, input = {}) {
   return { decision: JSON.parse(outputText || "{}"), aiConfig };
 }
 
-async function davidCategoryReview(db, source = {}, channel = "ebay", settings = {}, scope = "main") {
+async function davidCategoryReview(db, source = {}, channel = "ebay", settings = {}, scope = "main", options = {}) {
   const normalizedChannel = channel === "shopify" ? "shopify" : "ebay";
   const current = normalizeChannelCategoryMapping(source.mappings?.[normalizedChannel] || {});
   let candidates = [];
@@ -26282,8 +26582,8 @@ async function davidCategoryReview(db, source = {}, channel = "ebay", settings =
     warnings: Array.isArray(decision.warnings) ? decision.warnings.map((value) => String(value || "").trim()).filter(Boolean).slice(0, 5) : [],
     provider: aiConfig.provider, model: aiConfig.model, expiresAt
   };
-  davidActionProposals.set(proposalId, { ...proposal, expiresAtMs: Date.parse(expiresAt) });
-  await recordDavidAction({ type: "category_mapping_review", categoryId: proposal.categoryId, categoryName: source.name, channel: normalizedChannel, status: proposal.state, proposalId, provider: aiConfig.provider, model: aiConfig.model });
+  if (options.persistProposal !== false) davidActionProposals.set(proposalId, { ...proposal, expiresAtMs: Date.parse(expiresAt) });
+  if (options.recordAction !== false) await recordDavidAction({ type: "category_mapping_review", categoryId: proposal.categoryId, categoryName: source.name, channel: normalizedChannel, status: proposal.state, proposalId, provider: aiConfig.provider, model: aiConfig.model });
   return proposal;
 }
 
@@ -27568,6 +27868,27 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/ai/categories/review-all") {
+    const body = await parseBody(req);
+    try {
+      const db = await readCategoryWorkflowDb();
+      const queued = await queueAiCategoryReviewJob(db, {
+        channels: Array.isArray(body.channels) ? body.channels : undefined,
+        refreshPending: body.refreshPending === true,
+        force: body.force === true
+      });
+      await persistCategoryWorkflowDb(db);
+      return sendJson(res, queued.duplicate ? 200 : 202, {
+        ...queued,
+        message: queued.duplicate
+          ? `David category review is already ${queued.job.status || "running"}.`
+          : `David category review queued as Job ${queued.job.displayId || queued.job.jobNumber || queued.job.id}.`
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : "Unable to queue David category review." });
+    }
+  }
+
   const davidCategoryReviewMatch = url.pathname.match(/^\/api\/ai\/categories\/([^/]+)\/review$/);
   if (req.method === "POST" && davidCategoryReviewMatch) {
     const body = await parseBody(req);
@@ -27592,8 +27913,8 @@ async function handleApi(req, res) {
   if (req.method === "POST" && davidCategoryApplyMatch) {
     const body = await parseBody(req);
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
-    if (!settings.aiEnabled || !settings.aiOperationalActionsEnabled || !davidToolEnabled(settings, "categories.apply")) {
-      return sendJson(res, 403, { error: "David approved category actions are disabled in System Settings." });
+    if (!settings.aiEnabled || !davidToolEnabled(settings, "categories.apply")) {
+      return sendJson(res, 403, { error: "David category approvals are disabled in System Settings." });
     }
     const proposalId = sourceTextValue(body.proposalId);
     const proposal = davidActionProposals.get(proposalId);
@@ -27655,6 +27976,7 @@ async function handleApi(req, res) {
         aiModel: proposal.model || "",
         aiProposalId: proposal.id,
         aiRationale: proposal.rationale || "",
+        pendingSuggestion: null,
         locked: true,
         lockedAt: now,
         lockedBy: sourceTextValue(body.reviewedBy) || "Luis",
@@ -27683,6 +28005,67 @@ async function handleApi(req, res) {
       });
     } catch (error) {
       return sendJson(res, 500, { error: error instanceof Error ? error.message : "Unable to apply David's category suggestion." });
+    }
+  }
+
+  const davidPendingCategoryApplyMatch = url.pathname.match(/^\/api\/ai\/categories\/([^/]+)\/pending\/apply$/);
+  if (req.method === "POST" && davidPendingCategoryApplyMatch) {
+    const body = await parseBody(req);
+    const channel = body.channel === "shopify" ? "shopify" : "ebay";
+    const reviewedBy = sourceTextValue(body.reviewedBy) || "Luis";
+    try {
+      const db = await readCategoryWorkflowDb();
+      const settings = readSystemSettingsStore(db.systemSettings || {});
+      if (!settings.aiEnabled || !davidToolEnabled(settings, "categories.apply")) {
+        return sendJson(res, 403, { error: "David category approvals are disabled in System Settings." });
+      }
+      const requestedCategoryId = decodeURIComponent(davidPendingCategoryApplyMatch[1]);
+      const source = findPublicCategory(db, requestedCategoryId, "main");
+      if (!source) return sendJson(res, 404, { error: "This category is no longer available." });
+      const category = findOrCreateCategorySetting(db, source.name);
+      const current = normalizeChannelCategoryMapping(category.mappings?.[channel] || source.mappings?.[channel] || {});
+      if (categoryMappingIsLocked(current)) return sendJson(res, 423, { error: "This category mapping is locked. Unlock it before applying another suggestion." });
+      const pending = current.pendingSuggestion;
+      if (!pending?.categoryId) return sendJson(res, 409, { error: "This pending review does not contain an applicable category. Search and select one manually." });
+      let approvedMapping = { ...current, ...pending, pendingSuggestion: null };
+      if (channel === "shopify") approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
+      else approvedMapping = await enrichEbayCategoryMapping(db, approvedMapping);
+      const now = new Date().toISOString();
+      category.mappings[channel] = normalizeChannelCategoryMapping({
+        ...approvedMapping,
+        status: "mapped",
+        confidence: pending.confidence,
+        confidenceLevel: categoryConfidenceLevel(Number(pending.confidence || 0)),
+        matchSource: "david-background-review-approved",
+        matchedAt: now,
+        reviewedBy,
+        reviewedAt: now,
+        aiProvider: pending.provider || current.aiProvider || "",
+        aiModel: pending.model || current.aiModel || "",
+        aiRationale: pending.rationale || current.aiRationale || "",
+        pendingSuggestion: null,
+        locked: true,
+        lockedAt: now,
+        lockedBy: reviewedBy,
+        unlockedAt: "",
+        unlockedBy: ""
+      });
+      category.status = "mapped";
+      category.updatedBy = reviewedBy;
+      category.updatedAt = now;
+      await persistCategoryWorkflowDb(db);
+      clearCategoryResponseCache();
+      await recordDavidAction({
+        type: "category_mapping_pending_apply", categoryId: source.id, categoryName: source.name,
+        channel, status: "applied", message: `Approved pending ${channel} category ${pending.categoryId}.`
+      });
+      return sendJson(res, 200, {
+        categories: publicCategories(db, "", "main").categories,
+        mapping: category.mappings[channel],
+        message: `David's pending ${channel} category suggestion was approved, saved, and locked.`
+      });
+    } catch (error) {
+      return sendJson(res, 500, { error: error instanceof Error ? error.message : "Unable to apply the pending category suggestion." });
     }
   }
 
@@ -39470,6 +39853,7 @@ module.exports = {
   queueEbayListingLaunchJob,
   queueEbayCategoryAutoMapJob,
   queueEbayTaxonomySyncJob,
+  queueAiCategoryReviewJob,
   readDbFast,
   readExportMappingsApiStore,
   readSystemSettingsStore,
@@ -39482,6 +39866,7 @@ module.exports = {
   runEbayPriceInventorySyncWorkerJob,
   runEbayListingLaunchWorkerJob,
   runEbayTaxonomySyncWorkerJob,
+  runAiCategoryReviewWorkerJob,
   runJobsRetentionCleanupWorkerJob,
   runMappedProductImportWorkerJob,
   runShopifyExistingVariantLinkWorkerJob,
