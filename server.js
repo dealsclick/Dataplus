@@ -27930,8 +27930,7 @@ async function handleApi(req, res) {
       return sendJson(res, 409, { error: "This review does not contain an applicable category suggestion." });
     }
     try {
-      const db = await readCategoryWorkflowDb();
-      const source = findPublicCategory(db, requestedCategoryId, proposal.scope || "main");
+      const { db, source } = await readCategoryReviewContext(requestedCategoryId, proposal.scope || "main");
       if (!source) return sendJson(res, 404, { error: "This category is no longer available." });
       db.categorySettings = normalizeCategorySettings(db.categorySettings);
       let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
@@ -27961,7 +27960,7 @@ async function handleApi(req, res) {
       }
       let approvedMapping = { ...current, ...proposal.suggestion };
       if (channel === "shopify") approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
-      else approvedMapping = await enrichEbayCategoryMapping(db, approvedMapping);
+      // Required eBay item specifics are loaded lazily after the local mapping is saved.
       const now = new Date().toISOString();
       category.mappings[channel] = normalizeChannelCategoryMapping({
         ...approvedMapping,
@@ -27986,10 +27985,10 @@ async function handleApi(req, res) {
       category.updatedBy = sourceTextValue(body.reviewedBy) || "Luis";
       category.updatedAt = now;
       if (category.status === "needs_review") category.status = "mapped";
-      await persistCategoryWorkflowDb(db);
+      await persistCategoryWorkflowDb(db, { category });
       clearCategoryResponseCache();
       davidActionProposals.delete(proposalId);
-      await recordDavidAction({
+      void recordDavidAction({
         type: "category_mapping_apply",
         categoryId: source.id,
         categoryName: source.name,
@@ -27997,9 +27996,8 @@ async function handleApi(req, res) {
         status: "applied",
         proposalId,
         message: `Approved ${channel} category ${proposal.suggestion.categoryId}.`
-      });
+      }).catch(() => {});
       return sendJson(res, 200, {
-        categories: publicCategories(db, "", proposal.scope || "main").categories,
         mapping: category.mappings[channel],
         message: `David's ${channel} category suggestion was approved and saved.`
       });
@@ -28014,13 +28012,12 @@ async function handleApi(req, res) {
     const channel = body.channel === "shopify" ? "shopify" : "ebay";
     const reviewedBy = sourceTextValue(body.reviewedBy) || "Luis";
     try {
-      const db = await readCategoryWorkflowDb();
-      const settings = readSystemSettingsStore(db.systemSettings || {});
+      const requestedCategoryId = decodeURIComponent(davidPendingCategoryApplyMatch[1]);
+      const { db, source } = await readCategoryReviewContext(requestedCategoryId, "main");
+      const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
       if (!settings.aiEnabled || !davidToolEnabled(settings, "categories.apply")) {
         return sendJson(res, 403, { error: "David category approvals are disabled in System Settings." });
       }
-      const requestedCategoryId = decodeURIComponent(davidPendingCategoryApplyMatch[1]);
-      const source = findPublicCategory(db, requestedCategoryId, "main");
       if (!source) return sendJson(res, 404, { error: "This category is no longer available." });
       const category = findOrCreateCategorySetting(db, source.name);
       const current = normalizeChannelCategoryMapping(category.mappings?.[channel] || source.mappings?.[channel] || {});
@@ -28029,7 +28026,7 @@ async function handleApi(req, res) {
       if (!pending?.categoryId) return sendJson(res, 409, { error: "This pending review does not contain an applicable category. Search and select one manually." });
       let approvedMapping = { ...current, ...pending, pendingSuggestion: null };
       if (channel === "shopify") approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
-      else approvedMapping = await enrichEbayCategoryMapping(db, approvedMapping);
+      // Required eBay item specifics are loaded lazily after the local mapping is saved.
       const now = new Date().toISOString();
       category.mappings[channel] = normalizeChannelCategoryMapping({
         ...approvedMapping,
@@ -28053,14 +28050,13 @@ async function handleApi(req, res) {
       category.status = "mapped";
       category.updatedBy = reviewedBy;
       category.updatedAt = now;
-      await persistCategoryWorkflowDb(db);
+      await persistCategoryWorkflowDb(db, { category });
       clearCategoryResponseCache();
-      await recordDavidAction({
+      void recordDavidAction({
         type: "category_mapping_pending_apply", categoryId: source.id, categoryName: source.name,
         channel, status: "applied", message: `Approved pending ${channel} category ${pending.categoryId}.`
-      });
+      }).catch(() => {});
       return sendJson(res, 200, {
-        categories: publicCategories(db, "", "main").categories,
         mapping: category.mappings[channel],
         message: `David's pending ${channel} category suggestion was approved, saved, and locked.`
       });
@@ -33075,8 +33071,15 @@ async function handleApi(req, res) {
     });
   }
 
-  async function persistCategoryWorkflowDb(db) {
+  async function persistCategoryWorkflowDb(db, options = {}) {
     if (postgres.isPostgresEnabled()) {
+      if (options.category) {
+        const position = Math.max(0, (db.categorySettings || []).findIndex((row) => row === options.category));
+        await postgres.upsertStateEntityDocument("categorySettings", options.category, position);
+        await postgres.upsertCategoryChannelMappingsFromState([options.category], { replace: false });
+        publicStateJsonCache = null;
+        return;
+      }
       await postgres.writeStateDocuments({
         categorySettings: db.categorySettings || [],
         vendorCategoryMappings: db.vendorCategoryMappings || {},
@@ -33329,7 +33332,7 @@ async function handleApi(req, res) {
     });
     category.updatedBy = updatedBy;
     category.updatedAt = now;
-    await persistCategoryWorkflowDb(db);
+    await persistCategoryWorkflowDb(db, { category });
     clearCategoryResponseCache();
     return sendJson(res, 200, {
       mapping: category.mappings[channel],
@@ -33411,7 +33414,7 @@ async function handleApi(req, res) {
     if (!category.createdSource) category.createdSource = body.createdSource || "manual";
     category.updatedBy = body.updatedBy || body.createdBy || category.updatedBy || "Manual";
     category.updatedAt = new Date().toISOString();
-    await persistCategoryWorkflowDb(db);
+    await persistCategoryWorkflowDb(db, { category });
     clearCategoryResponseCache();
     return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", scope));
   }
@@ -33438,7 +33441,7 @@ async function handleApi(req, res) {
     if (!category.createdSource) category.createdSource = body.createdSource || "manual";
     category.updatedBy = body.updatedBy || body.createdBy || category.updatedBy || "Manual";
     category.updatedAt = new Date().toISOString();
-    await persistCategoryWorkflowDb(db);
+    await persistCategoryWorkflowDb(db, { category });
     clearCategoryResponseCache();
     return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", scope));
   }

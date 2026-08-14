@@ -1317,6 +1317,33 @@ async function writeStateDocuments(state = {}) {
   return true;
 }
 
+async function upsertStateEntityDocument(collection, row, position = 0) {
+  const client = getPool();
+  if (!client) return false;
+  if (!ENTITY_DOCUMENT_COLLECTIONS.has(collection)) {
+    throw new Error(`Unsupported entity document collection: ${collection}`);
+  }
+  await initRelationalSchema();
+  const existing = await client.query("select count(*)::int as count from entity_documents where collection = $1", [collection]);
+  if (!Number(existing.rows[0]?.count || 0)) {
+    const legacyDocument = await client.query("select data from state_documents where doc_key = $1", [collection]);
+    if (Array.isArray(legacyDocument.rows[0]?.data)) {
+      await writeStateDocuments({ [collection]: legacyDocument.rows[0].data });
+    }
+  }
+  const entityId = entityDocumentId(collection, row, position);
+  await client.query(`
+    insert into entity_documents (collection, entity_id, position, data, updated_at)
+    values ($1, $2, $3, $4::jsonb, now())
+    on conflict (collection, entity_id) do update set
+      data = excluded.data,
+      position = excluded.position,
+      updated_at = now()
+  `, [collection, entityId, Math.max(0, Number(position || 0)), JSON.stringify(row || {})]);
+  await client.query("delete from state_documents where doc_key = $1", [collection]);
+  return true;
+}
+
 async function readAllProducts(options = {}) {
   const client = getPool();
   if (!client) return [];
@@ -3993,14 +4020,26 @@ async function upsertInventoryLevelsFromProducts(items = [], options = {}) {
   return { enabled: true, levels: levels.length };
 }
 
-async function upsertCategoryChannelMappingsFromState(categorySettings = []) {
+async function upsertCategoryChannelMappingsFromState(categorySettings = [], options = {}) {
   const client = getPool();
   if (!client) return { enabled: false, mappings: 0 };
   await initRelationalSchema();
   const records = categoryChannelMappingRecordsFromState(categorySettings);
   await client.query("begin");
   try {
-    await client.query("delete from category_channel_mappings");
+    if (options.replace === false) {
+      const categoryIds = [...new Set(categorySettings.map((category) => String(category?.categoryId || category?.id || "").trim()).filter(Boolean))];
+      const categoryNames = [...new Set(categorySettings.map((category) => String(category?.name || "").trim()).filter(Boolean))];
+      if (categoryIds.length || categoryNames.length) {
+        await client.query(`
+          delete from category_channel_mappings
+          where category_id = any($1::text[])
+             or category_name = any($2::text[])
+        `, [categoryIds, categoryNames]);
+      }
+    } else {
+      await client.query("delete from category_channel_mappings");
+    }
     const batchSize = 1000;
     for (let i = 0; i < records.length; i += batchSize) {
       await client.query(`
@@ -7930,6 +7969,7 @@ module.exports = {
   readStateFields,
   readUserTablePreferences,
   upsertCategoryChannelMappingsFromState,
+  upsertStateEntityDocument,
   upsertUserTablePreference,
   upsertProductSourceEnrichmentMap,
   upsertOperationArtifact,
