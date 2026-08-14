@@ -8273,7 +8273,9 @@ async function autoMapEbayCategories(db, options = {}) {
     const query = ebayCategoryAutoSearchQuery(row.name) || ebayCategorySearchQuery(row.name);
     try {
       const cacheKey = `${marketplaceId}:${query.toLowerCase()}`;
-      const search = searchCache.has(cacheKey) ? searchCache.get(cacheKey) : await searchEbayTaxonomy(db, query, 10, marketplaceId);
+      const search = searchCache.has(cacheKey)
+        ? searchCache.get(cacheKey)
+        : await searchEbayTaxonomy(db, query, 10, marketplaceId, { allowLive: false });
       searchCache.set(cacheKey, search);
       const ranked = rankEbayCategoryMatches(row.name, search.categories || []);
       const best = ranked[0];
@@ -26197,7 +26199,13 @@ async function davidCategoryReview(db, source = {}, channel = "ebay", settings =
     }));
   } else {
     const settingsForEbay = ebayChannelSettings(db);
-    const search = await searchEbayTaxonomy(db, ebayCategoryAutoSearchQuery(source.name), 10, settingsForEbay.ebayMarketplaceId || "EBAY_US");
+    const search = await searchEbayTaxonomy(
+      db,
+      ebayCategoryAutoSearchQuery(source.name),
+      10,
+      settingsForEbay.ebayMarketplaceId || "EBAY_US",
+      { allowLive: false }
+    );
     candidates = rankEbayCategoryMatches(source.name, search.categories || []).slice(0, 8).map((row) => ({
       categoryId: row.category.categoryId, categoryPath: row.category.fullName || row.category.name,
       categoryHandle: row.category.name || "", taxonomyVersion: search.categoryTreeId || "",
@@ -27679,7 +27687,7 @@ async function handleApi(req, res) {
       const categoryDb = await readCategoryWorkflowDb();
       const channelSettings = ebayChannelSettings(categoryDb);
       const marketplaceId = String(body.marketplaceId || channelSettings.ebayMarketplaceId || "EBAY_US");
-      const result = await searchEbayTaxonomy(categoryDb, query, 20, marketplaceId);
+      const result = await searchEbayTaxonomy(categoryDb, query, 20, marketplaceId, { allowLive: false });
       const categories = Array.isArray(result.categories) ? result.categories : [];
       return sendJson(res, 200, {
         ...result,
@@ -27694,8 +27702,8 @@ async function handleApi(req, res) {
         channel: "ebay",
         total: 0,
         categories: [],
-        warning: error instanceof Error ? error.message : "David could not search the eBay taxonomy.",
-        message: "David could not reach the live eBay taxonomy. Try again or enter a more specific category phrase."
+        warning: error instanceof Error ? error.message : "David could not search the cached eBay taxonomy.",
+        message: "David could not search the cached eBay taxonomy. Refresh the local taxonomy index and try again."
       });
     }
   }
@@ -27729,13 +27737,21 @@ async function handleApi(req, res) {
           .replace(/\s+/g, " ")
           .trim()
           .slice(0, 160);
-        if (query) ebayTaxonomyResearch = await searchEbayTaxonomy(categoryDb, query, 10, String(channelSettings.ebayMarketplaceId || "EBAY_US"));
+        if (query) {
+          ebayTaxonomyResearch = await searchEbayTaxonomy(
+            categoryDb,
+            query,
+            10,
+            String(channelSettings.ebayMarketplaceId || "EBAY_US"),
+            { allowLive: false }
+          );
+        }
       } catch (error) {
         ebayTaxonomyResearchError = error instanceof Error ? error.message : "The eBay taxonomy lookup failed.";
       }
     }
     const enabledScopes = AI_TOOL_SCOPE_DEFINITIONS.filter((scope) => davidToolEnabled(settings, scope.id)).map((scope) => scope.id);
-    const instruction = `You are David, DataPlus's concise internal operations assistant. Help users understand catalog, inventory, fulfillment, purchasing, warehouse, channel, and settings workflows. You have only these enabled capabilities: ${enabledScopes.join(", ") || "none"}. Some approved actions are available through separate DataPlus controls, but you never execute, claim to execute, or imply that you executed a system change yourself. For an action request, explain that DataPlus will run a readiness review and require explicit user approval. Use the supplied page context when it is relevant, never expose sensitive customer details, and say when information is unavailable. When authoritative eBay taxonomy results are supplied below, show the candidate category ID and full path clearly and tell the user to review before applying it.\n\nCurrent page context:\n${JSON.stringify(pageContext)}${ebayTaxonomyResearch ? `\n\nAuthoritative eBay taxonomy results for this question:\n${JSON.stringify(ebayTaxonomyResearch.categories || [])}` : ""}${ebayTaxonomyResearchError ? `\n\nThe authoritative eBay taxonomy lookup failed with this message:\n${ebayTaxonomyResearchError}` : ""}`;
+    const instruction = `You are David, DataPlus's concise internal operations assistant. Help users understand catalog, inventory, fulfillment, purchasing, warehouse, channel, and settings workflows. You have only these enabled capabilities: ${enabledScopes.join(", ") || "none"}. Some approved actions are available through separate DataPlus controls, but you never execute, claim to execute, or imply that you executed a system change yourself. For an action request, explain that DataPlus will run a readiness review and require explicit user approval. Use the supplied page context when it is relevant, never expose sensitive customer details, and say when information is unavailable. eBay taxonomy candidates supplied below come from the locally cached DataPlus taxonomy index. Use only the supplied category IDs and paths; never invent an eBay category or imply that a live eBay lookup occurred. Show the candidate category ID and full path clearly and tell the user to review before applying it.\n\nCurrent page context:\n${JSON.stringify(pageContext)}${ebayTaxonomyResearch ? `\n\nCached DataPlus eBay taxonomy results for this question:\n${JSON.stringify(ebayTaxonomyResearch.categories || [])}` : ""}${ebayTaxonomyResearchError ? `\n\nThe cached eBay taxonomy lookup failed with this message:\n${ebayTaxonomyResearchError}` : ""}`;
     try {
       const response = aiConfig.provider === "google-ai-studio"
         ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
