@@ -32749,7 +32749,7 @@ async function handleApi(req, res) {
         categories: [],
         source: "unavailable",
         warning: error instanceof Error ? error.message : "eBay taxonomy is temporarily unavailable.",
-        message: "Live eBay taxonomy is temporarily unavailable. Try again or use an indexed mapping."
+        message: "The local eBay taxonomy index could not be searched. Refresh the cached taxonomy and try again."
       });
     }
   }
@@ -35748,7 +35748,7 @@ async function handleApi(req, res) {
         categories: [],
         source: "unavailable",
         warning: error instanceof Error ? error.message : "eBay taxonomy is temporarily unavailable.",
-        message: "Live eBay taxonomy is temporarily unavailable. Try again or use an indexed mapping."
+        message: "The local eBay taxonomy index could not be searched. Refresh the cached taxonomy and try again."
       });
     }
   }
