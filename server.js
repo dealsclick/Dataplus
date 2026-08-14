@@ -4091,7 +4091,7 @@ function normalizeChannelScheduleTimes(value = "") {
 
 function findChannelByName(db, name = "") {
   const key = String(name).toLowerCase();
-  return (db.connections || []).find((channel) => String(channel.name || "").toLowerCase() === key);
+  return (db?.connections || []).find((channel) => String(channel.name || "").toLowerCase() === key);
 }
 
 function requireEnabledChannel(db, name = "") {
@@ -5071,9 +5071,9 @@ function pruneOrphanImportJobDirectories(jobs = []) {
 }
 
 function categoryMappingForProduct(db, item, channel = "shopify") {
-  const category = effectiveMainCategoryName(item, readSystemSettingsStore(db.systemSettings || {})).toLowerCase();
+  const category = effectiveMainCategoryName(item, readSystemSettingsStore(db?.systemSettings || {})).toLowerCase();
   if (!category) return null;
-  const settings = normalizeCategorySettings(db.categorySettings);
+  const settings = normalizeCategorySettings(db?.categorySettings);
   let index = categoryMappingIndexCache.get(settings);
   if (!index) {
     index = new Map();
