@@ -32770,6 +32770,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/ebay/refresh") {
+    const db = await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 });
     const body = await parseBody(req);
     const settings = ebayChannelSettings(db);
     const result = await queueEbayTaxonomySyncJob(db, {
