@@ -4114,6 +4114,31 @@ async function readCategorySummaryIndex(scope = "main", options = {}) {
   };
 }
 
+async function readCategorySummaryEntry(scope = "main", categoryKey = "") {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const normalizedScope = String(scope || "main").trim().toLowerCase() === "source" ? "source" : "main";
+  const key = String(categoryKey || "").trim();
+  if (!key) return null;
+  const result = await client.query(`
+    select data, generated_at
+    from category_summary_index
+    where scope = $1
+      and (
+        category_key = $2
+        or data ->> 'id' = $2
+        or data ->> 'categoryId' = $2
+      )
+    limit 1
+  `, [normalizedScope, key]);
+  if (!result.rows.length) return null;
+  return {
+    ...result.rows[0].data,
+    __indexGeneratedAt: result.rows[0].generated_at ? result.rows[0].generated_at.toISOString() : ""
+  };
+}
+
 function orderIsReportable(order = {}) {
   return !["void", "canceled", "cancelled", "deleted"].includes(String(order.status || "").trim().toLowerCase());
 }
@@ -7880,6 +7905,7 @@ module.exports = {
   countProducts,
   catalogWorkspaceCounts,
   listCategoryProductSamples,
+  readCategorySummaryEntry,
   readCategorySummaryIndex,
   replaceCategorySummaryIndex,
   listCategoryProductStats,

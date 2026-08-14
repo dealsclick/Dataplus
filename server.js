@@ -10743,6 +10743,32 @@ function findVendorByName(db, name) {
   return (db.vendors || []).find((vendor) => canonicalCatalogSupplierName(vendor.name, vendor.code).toLowerCase() === target);
 }
 
+async function readCategoryReviewContext(categoryId = "", scope = "main") {
+  const normalizedScope = scope === "source" ? "source" : "main";
+  const key = String(categoryId || "").trim();
+  if (!key) return { db: null, source: null };
+  if (postgres.isPostgresEnabled()) {
+    const [source, state] = await Promise.all([
+      postgres.readCategorySummaryEntry(normalizedScope, key),
+      postgres.readStateFields(["channels", "connections", "categorySettings"], { fallbackToLegacy: false })
+    ]);
+    if (!source) return { db: null, source: null };
+    const db = normalizeDb({
+      inventory: [],
+      channels: state.channels || [],
+      connections: state.connections || [],
+      categorySettings: state.categorySettings || []
+    });
+    return { db, source };
+  }
+  const db = await readCategoryWorkflowDbFallback();
+  return { db, source: findPublicCategory(db, key, normalizedScope) };
+}
+
+async function readCategoryWorkflowDbFallback() {
+  return normalizeDb(await readDbFast());
+}
+
 function mergeCanonicalSupplierDirectory(db) {
   const vendors = Array.isArray(db.vendors) ? db.vendors : [];
   const groups = new Map();
@@ -27542,9 +27568,8 @@ async function handleApi(req, res) {
     const scope = body.scope === "source" ? "source" : "main";
     const channel = body.channel === "shopify" ? "shopify" : "ebay";
     try {
-      const db = await readCategoryWorkflowDb();
       const categoryId = decodeURIComponent(davidCategoryReviewMatch[1]);
-      const source = findPublicCategory(db, categoryId, scope);
+      const { db, source } = await readCategoryReviewContext(categoryId, scope);
       if (!source) return sendJson(res, 404, { error: "This category is no longer available." });
       const proposal = await davidCategoryReview(db, source, channel, settings, scope);
       return sendJson(res, 200, { proposal });
