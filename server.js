@@ -7403,7 +7403,12 @@ function normalizeChannelCategoryMapping(mapping = {}) {
     aiProvider: mapping.aiProvider || "",
     aiModel: mapping.aiModel || "",
     aiProposalId: mapping.aiProposalId || "",
-    aiRationale: mapping.aiRationale || ""
+    aiRationale: mapping.aiRationale || "",
+    locked: mapping.locked === true,
+    lockedAt: mapping.lockedAt || "",
+    lockedBy: mapping.lockedBy || "",
+    unlockedAt: mapping.unlockedAt || "",
+    unlockedBy: mapping.unlockedBy || ""
   };
 }
 
@@ -9359,7 +9364,12 @@ function rawChannelMappingForList(mapping = {}) {
     collectionHandle: mapping.collectionHandle || "",
     attributeCount: Array.isArray(mapping.attributes) ? mapping.attributes.length : 0,
     status: mapping.status || (hasMapping ? "mapped" : "missing"),
-    review: hasReview
+    review: hasReview,
+    locked: mapping.locked === true,
+    lockedAt: mapping.lockedAt || "",
+    lockedBy: mapping.lockedBy || "",
+    unlockedAt: mapping.unlockedAt || "",
+    unlockedBy: mapping.unlockedBy || ""
   };
 }
 
@@ -26167,13 +26177,13 @@ function categoryMappingFingerprint(mapping = {}) {
     categoryId: String(mapping.categoryId || ""),
     categoryPath: String(mapping.categoryPath || ""),
     matchSource: String(mapping.matchSource || ""),
-    reviewedAt: String(mapping.reviewedAt || "")
+    reviewedAt: String(mapping.reviewedAt || ""),
+    locked: mapping.locked === true
   });
 }
 
-function categoryMappingIsManual(mapping = {}) {
-  const source = String(mapping.matchSource || "").toLowerCase();
-  return Boolean(mapping.categoryId) && (source === "manual" || source === "david-ai-review" || Boolean(mapping.reviewedBy));
+function categoryMappingIsLocked(mapping = {}) {
+  return mapping.locked === true;
 }
 
 async function requestDavidCategoryDecision(settings = {}, input = {}) {
@@ -27625,8 +27635,8 @@ async function handleApi(req, res) {
       if (categoryMappingFingerprint(current) !== proposal.currentFingerprint) {
         return sendJson(res, 409, { error: "This mapping changed after David reviewed it. Review the current category again before applying anything." });
       }
-      if (categoryMappingIsManual(current) && current.categoryId && current.categoryId !== proposal.suggestion.categoryId) {
-        return sendJson(res, 409, { error: "A human-approved mapping is protected. Clear or change it manually before applying a different AI suggestion." });
+      if (categoryMappingIsLocked(current) && current.categoryId !== proposal.suggestion.categoryId) {
+        return sendJson(res, 423, { error: "This category mapping is locked. Unlock it before approving a different taxonomy category." });
       }
       let approvedMapping = { ...current, ...proposal.suggestion };
       if (channel === "shopify") approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
@@ -27644,7 +27654,12 @@ async function handleApi(req, res) {
         aiProvider: proposal.provider || "",
         aiModel: proposal.model || "",
         aiProposalId: proposal.id,
-        aiRationale: proposal.rationale || ""
+        aiRationale: proposal.rationale || "",
+        locked: true,
+        lockedAt: now,
+        lockedBy: sourceTextValue(body.reviewedBy) || "Luis",
+        unlockedAt: "",
+        unlockedBy: ""
       });
       category.updatedBy = sourceTextValue(body.reviewedBy) || "Luis";
       category.updatedAt = now;
@@ -32896,6 +32911,49 @@ async function handleApi(req, res) {
     return sendJson(res, 200, publicCategories(db, url.searchParams.get("q") || "", scope));
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "categories" && parts[2] && parts[3] === "mappings" && ["shopify", "ebay"].includes(parts[4]) && parts[5] === "lock") {
+    const db = await readCategoryWorkflowDb();
+    const body = await parseBody(req);
+    const scope = body.scope || url.searchParams.get("scope") || "main";
+    const source = findPublicCategory(db, decodeURIComponent(parts[2]), scope);
+    if (!source) return notFound(res);
+    db.categorySettings = normalizeCategorySettings(db.categorySettings);
+    let category = db.categorySettings.find((row) => row.categoryId === source.id || row.id === source.id || formatCategoryName(row.name).toLowerCase() === formatCategoryName(source.name).toLowerCase());
+    if (!category) {
+      category = normalizeCategorySettings([{
+        categoryId: source.id,
+        name: source.name,
+        createdBy: body.updatedBy || "Manual",
+        updatedBy: body.updatedBy || "Manual",
+        createdSource: "manual"
+      }])[0];
+      db.categorySettings.push(category);
+    }
+    const channel = parts[4];
+    const current = normalizeChannelCategoryMapping({ ...(source.mappings?.[channel] || {}), ...(category.mappings?.[channel] || {}) });
+    const locked = body.locked === true;
+    if (locked && !current.categoryId && !current.categoryPath) {
+      return sendJson(res, 409, { error: "Save a category mapping before locking it." });
+    }
+    const now = new Date().toISOString();
+    const updatedBy = sourceTextValue(body.updatedBy) || "Luis";
+    category.mappings[channel] = normalizeChannelCategoryMapping({
+      ...current,
+      locked,
+      ...(locked
+        ? { lockedAt: now, lockedBy: updatedBy, unlockedAt: "", unlockedBy: "" }
+        : { unlockedAt: now, unlockedBy: updatedBy })
+    });
+    category.updatedBy = updatedBy;
+    category.updatedAt = now;
+    await persistCategoryWorkflowDb(db);
+    clearCategoryResponseCache();
+    return sendJson(res, 200, {
+      mapping: category.mappings[channel],
+      message: locked ? `${channel === "shopify" ? "Shopify" : "eBay"} category mapping locked.` : `${channel === "shopify" ? "Shopify" : "eBay"} category mapping unlocked for editing.`
+    });
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "categories" && parts[2]) {
     const db = await readCategoryWorkflowDb();
     const body = await parseBody(req);
@@ -32918,7 +32976,19 @@ async function handleApi(req, res) {
       if (body[field] !== undefined) category[field] = String(body[field] || "").trim();
     }
     if (body.channel && body.mapping && category.mappings[body.channel]) {
+      const currentMapping = normalizeChannelCategoryMapping(category.mappings[body.channel]);
+      const requestedCategoryId = String(body.mapping.categoryId || "");
+      const requestedCategoryPath = String(body.mapping.categoryPath || "");
+      const categoryChanged = requestedCategoryId !== String(currentMapping.categoryId || "") || requestedCategoryPath !== String(currentMapping.categoryPath || "");
+      if (categoryMappingIsLocked(currentMapping) && categoryChanged) {
+        return sendJson(res, 423, { error: "This category mapping is locked. Unlock it before replacing the taxonomy category." });
+      }
       let mapping = { ...body.mapping };
+      delete mapping.locked;
+      delete mapping.lockedAt;
+      delete mapping.lockedBy;
+      delete mapping.unlockedAt;
+      delete mapping.unlockedBy;
       if (mapping.matchSource === "manual") {
         mapping = {
           ...mapping,
@@ -32935,7 +33005,7 @@ async function handleApi(req, res) {
       }
       if (body.channel === "shopify" && mapping.categoryId) mapping = enrichShopifyCategoryMapping(mapping);
       if (body.channel === "ebay" && mapping.categoryId) mapping = await enrichEbayCategoryMapping(db, { ...category.mappings.ebay, ...mapping });
-      category.mappings[body.channel] = normalizeChannelCategoryMapping({ ...category.mappings[body.channel], ...mapping });
+      category.mappings[body.channel] = normalizeChannelCategoryMapping({ ...currentMapping, ...mapping });
       if (body.channel === "shopify") {
         category.smartCollection = normalizeSmartCollectionProfile({
           ...category.smartCollection,

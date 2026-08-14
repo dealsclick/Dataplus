@@ -22,6 +22,7 @@ import {
   FileWarning,
   History,
   Home,
+  LockKeyhole,
   Loader2,
   Link2,
   Mail,
@@ -47,6 +48,7 @@ import {
   Save,
   SendHorizontal,
   Trash2,
+  UnlockKeyhole,
 } from "lucide-react"
 import { Toaster, toast } from "sonner"
 
@@ -6848,6 +6850,11 @@ type CategoryChannelMapping = {
   aiModel?: string
   aiProposalId?: string
   aiRationale?: string
+  locked?: boolean
+  lockedAt?: string
+  lockedBy?: string
+  unlockedAt?: string
+  unlockedBy?: string
   googleCategory?: { id?: string; fullName?: string; breadcrumb?: string } | null
   attributes?: CategoryAttribute[]
   attributeMappings?: CategoryAttribute[]
@@ -7006,7 +7013,24 @@ function CategoryRequirementsDataTable({ channel, attributes, mappings, onChange
   return <div className="rounded-md border"><div className="flex flex-wrap items-center justify-between gap-3 border-b p-3"><div><p className="text-sm font-medium capitalize">{channel} requirements</p><p className="text-xs text-muted-foreground">{numberLabel(attributes.length)} taxonomy fields. Values are saved only when you save this channel.</p></div><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="h-9 w-56 pl-9" value={globalFilter} onChange={(event) => setGlobalFilter(event.target.value)} placeholder="Filter requirements" /></div></div><div className="overflow-x-auto"><Table><TableHeader>{table.getHeaderGroups().map((group) => <TableRow key={group.id}>{group.headers.map((header) => <TableHead key={header.id}>{header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}</TableHead>)}</TableRow>)}</TableHeader><TableBody>{table.getRowModel().rows.map((row) => <TableRow key={row.id}>{row.getVisibleCells().map((cell) => <TableCell key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</TableCell>)}</TableRow>)}{!table.getRowModel().rows.length && <TableRow><TableCell colSpan={4} className="py-8 text-center text-sm text-muted-foreground">{attributes.length ? "No requirements match this filter." : `This ${channel} taxonomy has no channel-specific attributes.`}</TableCell></TableRow>}</TableBody></Table></div></div>
 }
 
-function DavidCategoryReviewCard({ profile, channel, scope, onApplied }: { profile: CategoryProfile; channel: "shopify" | "ebay"; scope: "main" | "source"; onApplied: (rows: CategoryProfile[]) => void }) {
+function CategoryMappingLockControl({ channel, mapping, busy, onChange }: { channel: "shopify" | "ebay"; mapping: CategoryChannelMapping; busy: boolean; onChange: (locked: boolean) => Promise<boolean> }) {
+  const [unlockOpen, setUnlockOpen] = useState(false)
+  const locked = mapping.locked === true
+  const hasMapping = Boolean(mapping.categoryId || mapping.categoryPath)
+  const channelLabel = channel === "shopify" ? "Shopify / Google" : "eBay"
+  return <div className={cn("flex flex-wrap items-center justify-between gap-3 rounded-md border p-3", locked ? "border-emerald-500/30 bg-emerald-500/5" : "border-amber-500/30 bg-amber-500/5")}>
+    <div className="flex min-w-0 items-start gap-3">
+      <div className={cn("grid size-9 shrink-0 place-items-center rounded-md", locked ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" : "bg-amber-500/15 text-amber-700 dark:text-amber-300")}>{locked ? <LockKeyhole className="size-4" /> : <UnlockKeyhole className="size-4" />}</div>
+      <div><div className="flex flex-wrap items-center gap-2"><p className="text-sm font-medium">{channelLabel} mapping</p><Badge variant={locked ? "default" : "outline"}>{locked ? "Locked" : "Editable"}</Badge></div><p className="mt-0.5 text-xs text-muted-foreground">{locked ? `Protected${mapping.lockedBy ? ` by ${mapping.lockedBy}` : ""}. Unlock before replacing the taxonomy category.` : "Taxonomy changes are allowed. Lock the approved category to protect future imports and AI reviews."}</p></div>
+    </div>
+    {locked
+      ? <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => setUnlockOpen(true)}><UnlockKeyhole className="size-4" /> Unlock mapping</Button>
+      : <Button type="button" size="sm" variant="outline" disabled={busy || !hasMapping} onClick={() => void onChange(true)}><LockKeyhole className="size-4" /> Lock mapping</Button>}
+    <AlertDialog open={unlockOpen} onOpenChange={setUnlockOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Unlock this {channelLabel} mapping?</AlertDialogTitle><AlertDialogDescription>This allows a user or an approved David action to replace the current taxonomy category. The unlock is recorded with the user and timestamp.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={busy}>Keep locked</AlertDialogCancel><AlertDialogAction disabled={busy} onClick={(event) => { event.preventDefault(); void onChange(false).then((changed) => { if (changed) setUnlockOpen(false) }) }}>{busy ? <Loader2 className="size-4 animate-spin" /> : <UnlockKeyhole className="size-4" />} Unlock mapping</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+  </div>
+}
+
+function DavidCategoryReviewCard({ profile, channel, scope, onApplied }: { profile: CategoryProfile; channel: "shopify" | "ebay"; scope: "main" | "source"; onApplied: (mapping: CategoryChannelMapping) => void }) {
   const [proposal, setProposal] = useState<CategoryAiReviewProposal | null>(null)
   const [reviewing, setReviewing] = useState(false)
   const [reviewError, setReviewError] = useState("")
@@ -7052,11 +7076,12 @@ function DavidCategoryReviewCard({ profile, channel, scope, onApplied }: { profi
     if (!profileId || !proposal?.id) return
     setApplying(true)
     try {
-      const result = await api<{ categories?: CategoryProfile[]; message?: string }>(`/api/ai/categories/${encodeURIComponent(profileId)}/apply`, {
+      const result = await api<{ mapping?: CategoryChannelMapping; message?: string }>(`/api/ai/categories/${encodeURIComponent(profileId)}/apply`, {
         method: "POST",
         body: JSON.stringify({ proposalId: proposal.id, reviewedBy: "Luis" }),
       })
-      onApplied(result.categories || [])
+      if (!result.mapping) throw new Error("The mapping was saved, but the server did not return the approved record. Refresh and try again.")
+      onApplied(result.mapping)
       setApproveOpen(false)
       setProposal(null)
       toast.success(result.message || "David's category suggestion was approved and saved.")
@@ -7187,7 +7212,24 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     setProfile((current) => current ? { ...current, ...update } : current)
   }
 
+  function applySavedMapping(channel: "shopify" | "ebay", nextMapping: CategoryChannelMapping) {
+    setProfile((current) => current ? {
+      ...current,
+      mappings: { ...(current.mappings || {}), [channel]: { ...nextMapping } },
+    } : current)
+    setCategories((current) => current.map((row) => (row.id || row.categoryId) === (profile?.id || profile?.categoryId)
+      ? { ...row, mappings: { ...(row.mappings || {}), [channel]: { ...nextMapping } } }
+      : row))
+  }
+
   function updateMapping(channel: string, update: Partial<CategoryChannelMapping>) {
+    const currentMapping = profile?.mappings?.[channel] || {}
+    const replacesTaxonomy = (Object.prototype.hasOwnProperty.call(update, "categoryId") && update.categoryId !== currentMapping.categoryId) ||
+      (Object.prototype.hasOwnProperty.call(update, "categoryPath") && update.categoryPath !== currentMapping.categoryPath)
+    if (currentMapping.locked && replacesTaxonomy) {
+      toast.error("Unlock this mapping before replacing its taxonomy category.")
+      return
+    }
     const nextUpdate = Object.prototype.hasOwnProperty.call(update, "categoryId")
       ? { ...update, confidence: null, confidenceLevel: "", matchSource: "manual", matchedAt: new Date().toISOString(), reviewedBy: "Luis", reviewedAt: new Date().toISOString(), suggestionRank: null, aiProvider: "", aiModel: "", aiProposalId: "", aiRationale: "" }
       : update
@@ -7222,6 +7264,26 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   async function saveChannel(channel: "shopify" | "ebay") {
     if (!profile) return
     await save({ channel, mapping: profile.mappings?.[channel] || {}, smartCollection: channel === "shopify" ? profile.smartCollection : undefined })
+  }
+
+  async function setMappingLock(channel: "shopify" | "ebay", locked: boolean) {
+    if (!profile?.id && !profile?.categoryId) return false
+    setSaving(true)
+    try {
+      const result = await api<{ mapping?: CategoryChannelMapping; message?: string }>(`/api/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}/mappings/${channel}/lock?scope=${categoryScope}`, {
+        method: "POST",
+        body: JSON.stringify({ scope: categoryScope, locked, updatedBy: "Luis" }),
+      })
+      if (!result.mapping) throw new Error("The mapping state was not returned. Refresh and try again.")
+      applySavedMapping(channel, result.mapping)
+      toast.success(result.message || (locked ? "Category mapping locked." : "Category mapping unlocked."))
+      return true
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to change the mapping lock.")
+      return false
+    } finally {
+      setSaving(false)
+    }
   }
 
   async function loadChannelRequirements(channel: "shopify" | "ebay") {
@@ -7349,7 +7411,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     <div className={standalone ? "grid gap-5" : "grid gap-5 xl:grid-cols-[minmax(280px,0.72fr)_minmax(0,1.8fr)]"}>
       {!standalone && <Card className="h-fit xl:sticky xl:top-4"><CardHeader className="gap-3 border-b pb-4"><div><CardTitle className="text-sm">Main category index</CardTitle><CardDescription>{numberLabel(categories.length)} categories. Search changes the list only; it never changes catalog data.</CardDescription></div><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" placeholder="Search categories" value={query} onChange={(event) => setQuery(event.target.value)} /></div></CardHeader><CardContent className="max-h-[calc(100vh-20rem)] overflow-y-auto p-2">{loading ? <div className="grid gap-2 p-2"><Skeleton className="h-16" /><Skeleton className="h-16" /><Skeleton className="h-16" /></div> : visibleCategories.map((category) => { const id = category.id || category.categoryId || ""; const active = id === selectedId; return <button key={id} onClick={() => setSelectedId(id)} className={`grid w-full gap-1 rounded-md px-3 py-3 text-left transition-colors ${active ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}><div className="flex items-start justify-between gap-2"><span className="line-clamp-2 text-sm font-medium">{category.name}</span><Badge variant={active ? "secondary" : "outline"} className="shrink-0 text-[10px]">{numberLabel(category.productCount)}</Badge></div><div className={`flex items-center gap-2 text-xs ${active ? "text-primary-foreground/75" : "text-muted-foreground"}`}><span>{category.status?.replace(/_/g, " ")}</span><span>{numberLabel(category.mappingCount)} channel maps</span></div></button>})}{!loading && !visibleCategories.length && <p className="p-6 text-center text-sm text-muted-foreground">No categories match this search.</p>}</CardContent></Card>}
       <Card>{!profile ? <CardContent className="p-10 text-center text-sm text-muted-foreground">{loading ? "Loading category profile..." : "This category was not found."}</CardContent> : <><CardHeader className="gap-4 border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Badge>{profile.status?.replace(/_/g, " ") || "Needs review"}</Badge>{profile.lifecycle && <Badge variant="outline">{profile.lifecycle}</Badge>}<Badge variant="outline">{numberLabel(profile.productCount)} products</Badge></div><CardTitle className="text-lg">{profile.name}</CardTitle><CardDescription className="mt-1">Main category and product type authority. Products inherit this profile, then each channel receives its mapped taxonomy and requirements.</CardDescription></div><div className="flex gap-2">{!standalone && <Button variant="outline" size="sm" asChild><a href={`/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}`}>Open full profile</a></Button>}<Button size="sm" onClick={saveOverview} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save category</Button></div></div><div className="grid gap-2 sm:grid-cols-3"><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">Active products</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.activeProductCount)}</p></div><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">In stock</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.stockProductCount)}</p></div><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">Vendor paths mapped</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.sourceMappingCount)}</p></div></div></CardHeader>
-        <CardContent className="p-0"><Tabs value={standalone ? profileTab : "overview"} onValueChange={setProfileTab}><div className={standalone ? "overflow-x-auto border-b px-4" : "hidden"}><TabsList className="h-12 min-w-max bg-transparent p-0"><TabsTrigger value="overview" className="text-xs">Overview</TabsTrigger><TabsTrigger value="shopify" className="text-xs">Shopify</TabsTrigger><TabsTrigger value="ebay" className="text-xs">eBay</TabsTrigger><TabsTrigger value="attributes" className="text-xs">Attributes</TabsTrigger><TabsTrigger value="defaults" className="text-xs">Defaults</TabsTrigger><TabsTrigger value="collection" className="text-xs">Collection</TabsTrigger><TabsTrigger value="lifecycle" className="text-xs">Lifecycle</TabsTrigger></TabsList></div>{standalone && (profileTab === "shopify" || profileTab === "ebay") && <div className="border-b p-5"><DavidCategoryReviewCard profile={profile} channel={profileTab} scope={categoryScope} onApplied={(rows) => applyCategories(rows, profile.id || profile.categoryId || "")} /></div>}
+        <CardContent className="p-0"><Tabs value={standalone ? profileTab : "overview"} onValueChange={setProfileTab}><div className={standalone ? "overflow-x-auto border-b px-4" : "hidden"}><TabsList className="h-12 min-w-max bg-transparent p-0"><TabsTrigger value="overview" className="text-xs">Overview</TabsTrigger><TabsTrigger value="shopify" className="text-xs">Shopify</TabsTrigger><TabsTrigger value="ebay" className="text-xs">eBay</TabsTrigger><TabsTrigger value="attributes" className="text-xs">Attributes</TabsTrigger><TabsTrigger value="defaults" className="text-xs">Defaults</TabsTrigger><TabsTrigger value="collection" className="text-xs">Collection</TabsTrigger><TabsTrigger value="lifecycle" className="text-xs">Lifecycle</TabsTrigger></TabsList></div>{standalone && (profileTab === "shopify" || profileTab === "ebay") && <div className="grid gap-4 border-b p-5"><CategoryMappingLockControl channel={profileTab} mapping={mapping(profileTab)} busy={saving} onChange={(locked) => setMappingLock(profileTab, locked)} /><DavidCategoryReviewCard profile={profile} channel={profileTab} scope={categoryScope} onApplied={(nextMapping) => applySavedMapping(profileTab, nextMapping)} /></div>}
           <TabsContent value="overview" className="m-0 p-5"><div className="grid gap-5 lg:grid-cols-2"><section className="grid gap-4"><div className="grid gap-2"><Label>Status</Label><Select value={profile.status || "needs_review"} onValueChange={(value) => updateProfile({ status: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="needs_review">Needs review</SelectItem><SelectItem value="mapped">Mapped</SelectItem><SelectItem value="approved">Approved</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></div><div className="grid gap-2"><Label>Category owner</Label><Input value={profile.owner || ""} onChange={(event) => updateProfile({ owner: event.target.value })} placeholder="Responsible team member" /></div><div className="grid gap-2"><Label>Internal notes</Label><Textarea value={profile.notes || ""} onChange={(event) => updateProfile({ notes: event.target.value })} placeholder="Why this category is configured this way" /></div></section><section className="grid content-start gap-4 rounded-md border p-4"><div><p className="text-sm font-medium">Product type model</p><p className="mt-1 text-xs text-muted-foreground">This main category is the product type. There is no second editable product-type list to drift from the catalog hierarchy.</p></div><div className="rounded-md bg-muted/50 p-3"><p className="text-xs text-muted-foreground">Shopify product type</p><p className="mt-1 text-sm font-medium">{profile.smartCollection?.productType || profile.name}</p></div><div><p className="mb-2 text-xs text-muted-foreground">Mapped channels</p><div className="flex flex-wrap gap-2">{mappedChannels.length ? mappedChannels.map((channel) => <Badge key={channel} variant="outline">{channel}</Badge>) : <span className="text-sm text-muted-foreground">No channel taxonomies mapped yet.</span>}</div></div><div><p className="mb-2 text-xs text-muted-foreground">Required marketplace attributes</p><div className="flex flex-wrap gap-2">{required.length ? required.slice(0, 10).map((name) => <Badge key={name} variant="secondary">{name}</Badge>) : <span className="text-sm text-muted-foreground">Requirements will appear after mapping and synchronization.</span>}</div></div></section></div></TabsContent>
           <TabsContent value="shopify" className="m-0 p-5"><div className="grid gap-5"><section className="rounded-md border p-4"><div className="mb-3"><p className="text-sm font-medium">Shopify taxonomy</p><p className="text-xs text-muted-foreground">Map the canonical Shopify product category. It controls Shopify category attributes; it does not replace the main category.</p></div><div className="flex gap-2"><Input value={shopifyQuery} onChange={(event) => setShopifyQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") searchTaxonomy("shopify") }} placeholder={`Search Shopify taxonomy for ${profile.name}`} /><Button variant="outline" onClick={() => searchTaxonomy("shopify")} disabled={taxonomyLoading === "shopify"}>{taxonomyLoading === "shopify" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button></div>{mapping("shopify").categoryId && <div className="mt-3 rounded-md border bg-muted/30 p-3"><p className="text-xs text-muted-foreground">Selected Shopify category</p><p className="mt-1 text-sm font-medium">{mapping("shopify").categoryPath || mapping("shopify").categoryId}</p><p className="mt-1 text-xs text-muted-foreground">ID: {mapping("shopify").categoryId}{mapping("shopify").taxonomyVersion ? ` | Taxonomy ${mapping("shopify").taxonomyVersion}` : ""}</p></div>}{shopifyResults.length > 0 && <div className="mt-3 max-h-64 overflow-y-auto rounded-md border">{shopifyResults.map((result) => { const categoryId = result.categoryId || result.id || ""; const categoryPath = result.categoryPath || result.fullName || result.name || categoryId; return <button key={categoryId} onClick={() => { updateMapping("shopify", { categoryId, categoryPath, categoryHandle: result.categoryHandle || result.handle || "", taxonomyVersion: result.taxonomyVersion || "", googleCategory: result.googleCategory || null, attributes: result.attributes || [] }); setShopifyResults([]) }} className="block w-full border-b px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted"><p className="font-medium">{categoryPath}</p><p className="text-xs text-muted-foreground">{categoryId}</p>{result.googleCategory?.id && <p className="mt-1 text-xs text-muted-foreground">Google {result.googleCategory.id}: {result.googleCategory.breadcrumb || result.googleCategory.fullName || "Mapped taxonomy"}</p>}</button>})}</div>}</section><section className="grid gap-4 lg:grid-cols-2"><div className="grid gap-2"><Label>Collection handle</Label><Input value={mapping("shopify").collectionHandle || ""} onChange={(event) => updateMapping("shopify", { collectionHandle: event.target.value })} placeholder="Collection handle" /></div><div className="grid gap-2"><Label>Google taxonomy reference</Label><p className="text-xs text-muted-foreground">Choose a Shopify result above to load its linked Google taxonomy, or correct this reference manually.</p><Input value={mapping("shopify").googleCategory?.breadcrumb || mapping("shopify").googleCategory?.fullName || ""} onChange={(event) => updateMapping("shopify", { googleCategory: { ...(mapping("shopify").googleCategory || {}), breadcrumb: event.target.value, fullName: event.target.value } })} placeholder="Optional Google product category" /></div></section>{mapping("shopify").categoryId && <section className="rounded-md border"><div className="flex flex-wrap items-center justify-between gap-3 border-b p-4"><div><p className="text-sm font-medium">Shopify product attributes</p><p className="text-xs text-muted-foreground">Requirements for this selected Shopify taxonomy only.</p></div><Button variant="outline" size="sm" onClick={() => loadChannelRequirements("shopify")} disabled={requirementsLoading.shopify}><RefreshCw className={requirementsLoading.shopify ? "size-4 animate-spin" : "size-4"} /> Refresh</Button></div><div className="p-4">{requirementsLoading.shopify ? <div className="grid gap-2"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div> : <CategoryRequirementsDataTable channel="shopify" attributes={channelRequirements.shopify || mapping("shopify").attributes || []} mappings={mapping("shopify").attributeMappings || []} onChange={(next) => updateMapping("shopify", { attributeMappings: next })} />}</div></section>}<div className="flex justify-end"><Button onClick={() => saveChannel("shopify")} disabled={saving}><Save className="size-4" /> Save Shopify mapping</Button></div></div></TabsContent>
           <TabsContent value="ebay" className="m-0 p-5"><div className="grid gap-5"><section className="rounded-md border p-4"><div className="mb-3"><p className="text-sm font-medium">eBay taxonomy</p><p className="text-xs text-muted-foreground">Searches the eBay taxonomy cached in DataPlus; no live eBay request is made. Map a category here before loading its item-specific requirements.</p></div><div className="flex gap-2"><Input value={ebayQuery} onChange={(event) => setEbayQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") searchTaxonomy("ebay") }} placeholder={`Search cached eBay taxonomy for ${profile.name}`} /><Button variant="outline" onClick={() => searchTaxonomy("ebay")} disabled={taxonomyLoading === "ebay"}>{taxonomyLoading === "ebay" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search cached categories</Button></div>{(ebaySearchMessage || ebaySearchWarning) && <Alert className="mt-3 border-amber-500/40 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>Local taxonomy search</AlertTitle><AlertDescription>{ebaySearchMessage || ebaySearchWarning}</AlertDescription></Alert>}{mapping("ebay").categoryId && <div className="mt-3 rounded-md border bg-muted/30 p-3"><p className="text-xs text-muted-foreground">Selected eBay category</p><p className="mt-1 text-sm font-medium">{mapping("ebay").categoryPath || mapping("ebay").categoryId}</p><p className="mt-1 text-xs text-muted-foreground">ID: {mapping("ebay").categoryId}</p></div>}{ebayResults.length > 0 && <div className="mt-3 max-h-64 overflow-y-auto rounded-md border">{ebayResults.map((result) => { const categoryId = result.categoryId || result.id || ""; const categoryPath = result.categoryPath || result.fullName || result.name || categoryId; return <button key={categoryId} onClick={() => { updateMapping("ebay", { categoryId, categoryPath, taxonomyVersion: result.taxonomyVersion || "" }); setEbayResults([]) }} className="block w-full border-b px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted"><p className="font-medium">{categoryPath}</p><p className="text-xs text-muted-foreground">{categoryId}</p></button>})}</div>}</section>{mapping("ebay").categoryId && <section className="rounded-md border"><div className="flex flex-wrap items-center justify-between gap-3 border-b p-4"><div><p className="text-sm font-medium">eBay item specifics</p><p className="text-xs text-muted-foreground">Stored requirements for this category. Refresh explicitly when eBay changes its requirements.</p></div><Button variant="outline" size="sm" onClick={() => loadChannelRequirements("ebay")} disabled={requirementsLoading.ebay}><RefreshCw className={requirementsLoading.ebay ? "size-4 animate-spin" : "size-4"} /> Refresh from eBay</Button></div><div className="p-4">{requirementsLoading.ebay ? <div className="grid gap-2"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div> : <CategoryRequirementsDataTable channel="ebay" attributes={channelRequirements.ebay || mapping("ebay").attributes || []} mappings={mapping("ebay").attributeMappings || []} onChange={(next) => updateMapping("ebay", { attributeMappings: next })} />}</div></section>}<div className="flex justify-end"><Button onClick={() => saveChannel("ebay")} disabled={saving}><Save className="size-4" /> Save eBay mapping</Button></div></div></TabsContent>
