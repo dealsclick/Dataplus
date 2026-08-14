@@ -210,6 +210,8 @@ Shopify API scope/auth failures must be visible as actionable errors. Do not cla
 
 eBay supports connection/authentication, health verification, order imports with configurable lookback, SKU/listing synchronization, price/inventory synchronization, fulfillment reconciliation, listing launch, lifecycle operations, catalog import, business-policy sync, compliance audit, and marketplace-specific product fields.
 
+The complete eBay marketplace category tree is persisted locally per marketplace and refreshed through a background job. Category mapping searches use this local index first; the channel settings show the tree version, category count, last refresh, and downloadable JSON/CSV job artifacts.
+
 eBay product settings must support channel defaults with per-SKU overrides for:
 
 - Default quantity versus actual inventory.

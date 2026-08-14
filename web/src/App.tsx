@@ -7,6 +7,7 @@ import { useTheme } from "next-themes"
 import {
   Activity,
   AlertCircle,
+  AlertTriangle,
   Archive,
   Boxes,
   CheckCircle2,
@@ -54,7 +55,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Badge } from "@/components/ui/badge"
 import { ButtonGroup } from "@/components/ui/button-group"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Calendar } from "@/components/ui/calendar"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -624,6 +625,15 @@ type ProductItem = CatalogItem & {
     merchantLocationKey?: string
     categoryId?: string
     categoryPath?: string
+    categoryName?: string
+    localCategoryId?: string
+    localCategoryPath?: string
+    liveCategoryId?: string
+    liveCategoryPath?: string
+    liveCategoryName?: string
+    liveCategorySyncedAt?: string
+    sourceOfTruth?: string
+    importedFromEbayAt?: string
     taxonomyVersion?: string
     condition?: string
     quantity?: number
@@ -663,6 +673,12 @@ type ProductItem = CatalogItem & {
     itemSpecifics?: Record<string, string | string[]>
     updatedAt?: string
     attributesSyncedAt?: string
+  }
+  ebayCategoryComparison?: {
+    status?: string
+    live?: { id?: string; path?: string; name?: string; syncedAt?: string }
+    local?: { id?: string; path?: string; name?: string }
+    checkedAt?: string
   }
   shortDescription?: string
   longDescription?: string
@@ -2714,6 +2730,16 @@ function ChannelDetail({
     defaultsReady?: boolean
   } | null>(null)
   const [ebayHealthLoading, setEbayHealthLoading] = useState(false)
+  const [ebayTaxonomyStatus, setEbayTaxonomyStatus] = useState<{
+    indexed?: boolean
+    marketplaceId?: string
+    categoryCount?: number
+    categoryTreeId?: string
+    categoryTreeVersion?: string
+    syncedAt?: string
+    source?: string
+  } | null>(null)
+  const [ebayTaxonomyStatusLoading, setEbayTaxonomyStatusLoading] = useState(false)
   const isShopify = channel.name?.toLowerCase() === "shopify"
   const isEbay = channel.name?.toLowerCase() === "ebay"
   const settings = { ...(channel.settings || {}), ...draft }
@@ -2765,6 +2791,11 @@ function ChannelDetail({
       .then((result) => setEbayHealth(result || null))
       .catch(() => setEbayHealth(null))
   }, [isEbay, channel.id])
+
+  useEffect(() => {
+    if (!isEbay) return
+    void loadEbayTaxonomyStatus()
+  }, [isEbay, channel.id, settings.ebayMarketplaceId])
 
   useEffect(() => {
     if (!isEbay) return
@@ -2873,6 +2904,28 @@ function ChannelDetail({
     }
   }
 
+  async function loadEbayTaxonomyStatus(showSuccess = false) {
+    setEbayTaxonomyStatusLoading(true)
+    try {
+      const marketplaceId = String(settings.ebayMarketplaceId || "EBAY_US")
+      const result = await api<{
+        indexed?: boolean
+        marketplaceId?: string
+        categoryCount?: number
+        categoryTreeId?: string
+        categoryTreeVersion?: string
+        syncedAt?: string
+        source?: string
+      }>(`/api/channel-taxonomies/ebay/status?marketplaceId=${encodeURIComponent(marketplaceId)}`)
+      setEbayTaxonomyStatus(result || null)
+      if (showSuccess) toast.success(result?.indexed ? "Local eBay category index is ready." : "No local eBay category index has been downloaded yet.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to check the local eBay category index.")
+    } finally {
+      setEbayTaxonomyStatusLoading(false)
+    }
+  }
+
   function generateEbayWebhookToken() {
     const bytes = new Uint8Array(32)
     window.crypto.getRandomValues(bytes)
@@ -2953,7 +3006,7 @@ function ChannelDetail({
     }
   }
 
-  async function runEbayAction(kind: "authorize" | "account" | "catalog" | "compliance" | "reconcile" | "priceInventory") {
+  async function runEbayAction(kind: "authorize" | "account" | "catalog" | "compliance" | "reconcile" | "priceInventory" | "taxonomy") {
     try {
       if (kind === "authorize") {
         const returnTo = `${window.location.pathname}${window.location.search}`
@@ -2963,7 +3016,9 @@ function ChannelDetail({
         else toast.message("Continue with eBay in the sign-in window.")
         return
       }
-      const path = kind === "account"
+      const path = kind === "taxonomy"
+        ? "/api/channel-taxonomies/ebay/refresh"
+        : kind === "account"
         ? "/api/ebay/account-settings/sync"
         : kind === "catalog"
           ? "/api/ebay/catalog-import"
@@ -2972,8 +3027,10 @@ function ChannelDetail({
           : kind === "priceInventory"
             ? "/api/ebay/price-inventory/sync"
             : "/api/ebay/fulfillment/reconcile"
-      const result = await api<{ message?: string }>(path, { method: "POST", body: JSON.stringify({}) })
-      const message = kind === "account"
+      const result = await api<{ message?: string }>(path, { method: "POST", body: JSON.stringify(kind === "taxonomy" ? { marketplaceId: String(settings.ebayMarketplaceId || "EBAY_US") } : {}) })
+      const message = kind === "taxonomy"
+        ? "eBay category taxonomy refresh queued."
+        : kind === "account"
         ? "eBay account sync queued."
         : kind === "catalog"
           ? "eBay catalog sync queued."
@@ -2985,6 +3042,7 @@ function ChannelDetail({
       toast.success(result.message || message)
       onRefreshData()
       void refreshEbayHealth(false)
+      if (kind === "taxonomy") void loadEbayTaxonomyStatus()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to run eBay action.") }
   }
 
@@ -3588,6 +3646,31 @@ function ChannelDetail({
                   <Detail label="Tracking upload" value={ebayHealth?.workflows?.trackingUploadEnabled ? "Enabled" : "Disabled"} />
                   <Detail label="Webhook delivery" value={ebayHealth?.workflows?.webhookEnabled ? "Enabled" : "Disabled"} />
                   {ebayHealth?.account?.failures?.length ? <div className="col-span-full rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"><p className="font-medium">Account sync needs attention</p><ul className="mt-1 list-disc space-y-1 pl-5 text-xs">{ebayHealth.account.failures.slice(0, 4).map((failure) => <li key={failure}>{failure}</li>)}</ul></div> : null}
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Local eBay category index</CardTitle>
+                  <CardDescription>Mapping searches use the stored eBay marketplace tree first, so category lookups stay fast and do not call eBay on every search.</CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-3">
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <Detail label="Index status" value={ebayTaxonomyStatus?.indexed ? "Ready locally" : "Not downloaded"} />
+                    <Detail label="Categories" value={numberLabel(Number(ebayTaxonomyStatus?.categoryCount || 0))} />
+                    <Detail label="Tree version" value={String(ebayTaxonomyStatus?.categoryTreeVersion || ebayTaxonomyStatus?.categoryTreeId || "Not available")} />
+                    <Detail label="Last refreshed" value={ebayTaxonomyStatus?.syncedAt ? new Date(String(ebayTaxonomyStatus.syncedAt)).toLocaleString() : "Not yet"} />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button size="sm" onClick={() => void runEbayAction("taxonomy")} disabled={!ebayCredentials?.configured || ebayTaxonomyStatusLoading}>
+                      {ebayTaxonomyStatusLoading ? <Loader2 className="size-4 animate-spin" /> : <Database className="size-4" />}
+                      Refresh local categories
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => void loadEbayTaxonomyStatus(true)} disabled={ebayTaxonomyStatusLoading}>
+                      <RefreshCw className="size-4" />
+                      Check index status
+                    </Button>
+                    <span className="text-xs text-muted-foreground">The refresh runs as a background job and saves a JSON index plus CSV category list.</span>
+                  </div>
                 </CardContent>
               </Card>
               <Card>
@@ -4539,7 +4622,7 @@ function ProductDetailSheet({
                   <Detail label="Barcode" value={product.barcode || "-"} />
                   <Detail label="Shopify" value={product.shopifyStatus || "Not linked"} />
                 </div>
-                <div className="grid gap-1.5"><Label>Main category</Label><Input disabled={!editing} value={String(draft.mainCategory ?? "")} onChange={(event) => setDraftValue("mainCategory", event.target.value)} /></div>
+                <MainCategoryPicker disabled={!editing} value={String(draft.mainCategory ?? "")} onValueChange={(value) => setDraftValue("mainCategory", value)} />
                 <div className="grid grid-cols-2 gap-3 text-sm"><Detail label="Source category" value={product.sourceCategory || "-"} /><Detail label="Vendor category" value={product.vendorCategory || "-"} /></div>
                 {product.tags?.length ? <div className="flex flex-wrap gap-1">{product.tags.slice(0, 12).map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div> : null}
               </TabsContent>
@@ -4797,6 +4880,73 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
 
 function ProductReadinessPanel({ score, checks, discontinued }: { score: number; checks: ReadonlyArray<readonly [string, boolean]>; discontinued: boolean }) { const missing = checks.filter(([, ready]) => !ready).map(([label]) => label); const label = discontinued ? "Blocked" : score === 100 ? "Ready" : `${missing.length} item${missing.length === 1 ? "" : "s"} need attention`; return <Card className="order-first lg:absolute lg:right-5 lg:top-[72px] lg:z-10 lg:w-[44%]"><CardContent className="grid gap-3 p-4"><div className="flex items-center justify-between gap-3"><div><p className="text-sm font-semibold">Product readiness</p><p className="text-xs text-muted-foreground">{discontinued ? "Discontinued products cannot be published." : label}</p></div><Badge variant={discontinued ? "destructive" : score === 100 ? "success" : "warning"}>{discontinued ? "Blocked" : `${score}%`}</Badge></div><Progress value={score} className="h-2" /><div className="grid grid-cols-3 gap-x-3 gap-y-2 text-xs">{checks.map(([label, ready]) => <div key={label} className={ready ? "text-foreground" : "text-muted-foreground"}><span className={ready ? "mr-1 text-emerald-600" : "mr-1 text-amber-600"}>{ready ? "Ready" : "Needs"}</span>{label}</div>)}</div></CardContent></Card> }
 
+function EbayCategoryComparisonCard({ comparison }: { comparison?: ProductItem["ebayCategoryComparison"] }) {
+  const [query, setQuery] = useState("")
+  const [results, setResults] = useState<EbayCategoryCandidate[]>([])
+  const [searching, setSearching] = useState(false)
+  const [error, setError] = useState("")
+  const [notice, setNotice] = useState("")
+  const currentSku = decodeURIComponent(window.location.pathname.split("/").pop() || "")
+  const status = comparison?.status || "not-configured"
+  const state = status === "match"
+    ? { label: "Matched", className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200", description: "The current eBay category matches the local DataPlus mapping." }
+    : status === "different"
+      ? { label: "Needs review", className: "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-200", description: "eBay is using a different category than the local mapping." }
+      : status === "live-only"
+        ? { label: "Live only", className: "border-sky-500/40 bg-sky-500/10 text-sky-800 dark:text-sky-200", description: "eBay reported a category, but DataPlus has no local mapping yet." }
+        : status === "local-only"
+          ? { label: "Local only", className: "border-violet-500/40 bg-violet-500/10 text-violet-800 dark:text-violet-200", description: "DataPlus has a mapping, but no imported eBay category is available." }
+          : { label: "Not configured", className: "border-muted-foreground/30 bg-muted text-muted-foreground", description: "Run the eBay catalog sync or add a local eBay category mapping." }
+  const categoryText = (entry?: { id?: string; path?: string; name?: string }) => entry?.path || entry?.name || entry?.id || "Not available"
+  useEffect(() => {
+    setQuery((current) => current || comparison?.local?.path || comparison?.live?.path || "")
+  }, [comparison?.local?.path, comparison?.live?.path])
+  const search = async (viaDavid = false) => {
+    const value = query.trim()
+    if (!value) {
+      setError("Enter a product phrase or category first.")
+      return
+    }
+    setSearching(true)
+    setError("")
+    setNotice("")
+    try {
+      const result = await api<{ categories?: EbayCategoryCandidate[]; message?: string; warning?: string }>(
+        viaDavid ? "/api/ai/ebay-category-research" : `/api/channel-taxonomies/ebay/categories?q=${encodeURIComponent(value)}&limit=20&marketplaceId=EBAY_US`,
+        viaDavid ? { method: "POST", body: JSON.stringify({ query: value, marketplaceId: "EBAY_US", product: { sku: currentSku, title: value, mainCategory: value } }) } : undefined,
+      )
+      const categories = Array.isArray(result.categories) ? result.categories : []
+      setResults(categories)
+      setNotice(result.warning || "")
+      if (!categories.length) setError(result.message || "No eBay taxonomy matches were found.")
+      else toast.success(`${viaDavid ? "David found" : "eBay returned"} ${categories.length} category matches.`)
+    } catch (searchError) {
+      setResults([])
+      setError(searchError instanceof Error ? searchError.message : "Unable to search eBay categories.")
+    } finally {
+      setSearching(false)
+    }
+  }
+  const useCandidate = (candidate: EbayCategoryCandidate) => {
+    const categoryId = String(candidate.categoryId || candidate.id || "")
+    const categoryPath = ebayCategoryCandidatePath(candidate)
+    const selection = { ...candidate, categoryId, categoryPath, sku: currentSku }
+    try {
+      window.sessionStorage.setItem(`dataplus:ebay-category-selection:${currentSku}`, JSON.stringify(selection))
+    } catch {
+      // Session storage can be unavailable in embedded/private browser contexts.
+    }
+    window.dispatchEvent(new CustomEvent("dataplus:ebay-category-selected", { detail: selection }))
+    void navigator.clipboard?.writeText(`${categoryId} - ${categoryPath}`)
+    toast.success("eBay category selected. Open Edit eBay settings to review and save it.")
+  }
+  return <Card className="border-dashed">
+    <CardHeader className="gap-2 pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">eBay category comparison</CardTitle><CardDescription>{state.description}</CardDescription></div><div className="flex flex-wrap items-center gap-2"><Badge variant="outline" className={state.className}>{state.label}</Badge>{comparison?.local?.path ? <Button size="sm" variant="outline" className="h-8" asChild><a href={`/categories/${encodeURIComponent(comparison.local.path)}`}><ExternalLink className="size-3.5" /> View category</a></Button> : null}</div></div></CardHeader>
+    <CardContent className="grid gap-3 pt-0 sm:grid-cols-2"><div className="rounded-md border bg-muted/20 p-3"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Live eBay category</p><p className="mt-1 text-sm font-medium">{categoryText(comparison?.live)}</p><p className="mt-1 font-mono text-xs text-muted-foreground">{comparison?.live?.id ? `ID ${comparison.live.id}` : "No category ID returned"}</p></div><div className="rounded-md border bg-muted/20 p-3"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Local DataPlus category</p><p className="mt-1 text-sm font-medium">{categoryText(comparison?.local)}</p><p className="mt-1 font-mono text-xs text-muted-foreground">{comparison?.local?.id ? `ID ${comparison.local.id}` : "No local eBay mapping"}</p></div><div className="grid gap-2 border-t pt-3 sm:col-span-2"><div><p className="text-sm font-medium">Search eBay categories</p><p className="text-xs text-muted-foreground">Search the locally indexed taxonomy first, compare the live path, and select a candidate for the SKU editor.</p></div><div className="flex flex-col gap-2 sm:flex-row"><Input className="border-slate-300 bg-slate-100/80 shadow-sm focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30 dark:border-slate-600 dark:bg-slate-950/80" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void search() }} placeholder="e.g. cordless drill, hand tools" /><Button type="button" variant="outline" onClick={() => void search()} disabled={searching || !query.trim()}>{searching ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search eBay</Button><Button type="button" variant="secondary" onClick={() => void search(true)} disabled={searching || !query.trim()}><MessageSquare className="size-4" /> Ask David</Button></div>{notice ? <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">{notice}</p> : null}{error ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Category lookup failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}{results.length ? <div className="grid max-h-72 gap-2 overflow-y-auto rounded-md border p-2">{results.map((candidate, index) => { const id = String(candidate.categoryId || candidate.id || ""); const path = ebayCategoryCandidatePath(candidate); return <div key={`${id}-${index}`} className="rounded-md border bg-background p-3"><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="font-mono text-xs text-muted-foreground">ID {id || "Not returned"}</p><p className="mt-1 text-sm font-medium leading-5">{path}</p></div><Button type="button" size="sm" onClick={() => useCandidate(candidate)}><CheckCircle2 className="size-4" /> Use in eBay editor</Button></div></div> })}</div> : null}</div></CardContent>
+    {comparison?.checkedAt ? <CardFooter className="border-t pt-3 text-xs text-muted-foreground">Last checked {dateLabel(comparison.checkedAt)}</CardFooter> : null}
+  </Card>
+}
+
 function ProductChannelPanel({ channel, product, section, values, onEditEbay }: { channel: ChannelConnection; product: ProductItem; section: (title: string, description: string, children: React.ReactNode) => React.ReactNode; values: (rows: Array<[string, string]>) => React.ReactNode; onEditEbay?: () => void }) {
   const name = String(channel.name || "Channel")
   const kind = name.toLowerCase()
@@ -4829,10 +4979,11 @@ function ProductChannelPanel({ channel, product, section, values, onEditEbay }: 
     const paymentPolicyId = configuredValue("paymentPolicyId", "ebayPaymentPolicyId")
     const returnPolicyId = configuredValue("returnPolicyId", "ebayReturnPolicyId")
     const fulfillmentPolicyId = configuredValue("fulfillmentPolicyId", "ebayFulfillmentPolicyId")
-    const listingRows: Array<[string, string]> = [["Settings source", usesChannelDefaults ? "Channel defaults" : "SKU override"], ["Status", ebay.status || "Not listed"], ["Listing ID", ebay.listingId || "Not linked"], ["Offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", String(configuredValue("marketplaceId", "ebayMarketplaceId", "EBAY_US"))], ["Merchant location", locationKey], ["Category ID", ebay.categoryId || String(overrides.ebayCategoryId || "")], ["Category path", ebay.categoryPath || String(overrides.ebayCategoryPath || "")], ["Taxonomy version", ebay.taxonomyVersion || String(overrides.ebayTaxonomyVersion || "")], ["Condition", String(configuredValue("condition", "ebayDefaultCondition", product.condition || "New"))], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
+    const comparison = product.ebayCategoryComparison
+    const listingRows: Array<[string, string]> = [["Settings source", usesChannelDefaults ? "Channel defaults" : "SKU override"], ["Status", ebay.status || "Not listed"], ["Listing ID", ebay.listingId || "Not linked"], ["Offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", String(configuredValue("marketplaceId", "ebayMarketplaceId", "EBAY_US"))], ["Merchant location", locationKey], ["Local category ID", comparison?.local?.id || String(overrides.ebayCategoryId || "")], ["Local category path", comparison?.local?.path || String(overrides.ebayCategoryPath || "")], ["Live eBay category ID", comparison?.live?.id || ""], ["Live eBay category path", comparison?.live?.path || comparison?.live?.name || ""], ["Taxonomy version", ebay.taxonomyVersion || String(overrides.ebayTaxonomyVersion || "")], ["Condition", String(configuredValue("condition", "ebayDefaultCondition", product.condition || "New"))], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
     const commerceRows: Array<[string, string]> = [["Listing price", ebay.price === undefined ? "Not listed" : `${ebay.currency || configuredValue("currency", "ebayCurrency", "USD")} ${moneyLabel(ebay.price)}`], ["Listing quantity", ebay.quantity === undefined ? "Not listed" : numberLabel(ebay.quantity)], ["Price rule", String(effectiveSettings.ebayPricingMode || "cost-plus")], ["Markup", `${numberLabel(Number(effectiveSettings.ebayPriceMarkupPercent || 0))}%`], ["Minimum margin", `${numberLabel(Number(effectiveSettings.ebayMinMarginPercent || 0))}%`], ["Minimum price", moneyLabel(Number(effectiveSettings.ebayMinimumPrice || 0))], ["Rounding", String(effectiveSettings.ebayRoundingRule || "none")], ["Quantity rule", String(effectiveSettings.ebayQuantityMode || "available")], ["Best offer", configuredValue("bestOfferEnabled", "ebayBestOfferEnabled") ? "Enabled" : "Off"], ["Auto publish", effectiveSettings.ebayAutoPublish ? "Enabled" : "Off"], ["Require image", effectiveSettings.ebayRequireImage === false ? "Off" : "Enabled"], ["DataPlus price", moneyLabel(product.websitePrice ?? product.price)], ["Available quantity", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]
     const policyRows: Array<[string, string]> = [["Merchant location", location ? `${location.name || locationKey}${location.status ? ` / ${location.status}` : ""}` : locationKey || "Not selected"], ["Payment policy", policyLabel(settings.ebayPaymentPolicies, paymentPolicyId, "Not selected")], ["Return policy", policyLabel(settings.ebayReturnPolicies, returnPolicyId, "Not selected")], ["Shipping / fulfillment policy", policyLabel(settings.ebayFulfillmentPolicies, fulfillmentPolicyId, "Not selected")], ["Description source", String(effectiveSettings.ebayDescriptionSource || "longDescription")], ["Maximum images", numberLabel(Number(effectiveSettings.ebayMaxImages ?? 12))]]
-    return <><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 px-4 py-3"><div className="flex flex-wrap items-center gap-2"><Badge variant={usesChannelDefaults ? "outline" : "default"}>{usesChannelDefaults ? "Using eBay defaults" : "SKU override"}</Badge><p className="text-sm text-muted-foreground">Policies can inherit from eBay while pricing and quantity use their own SKU-level controls.</p></div><div className="flex flex-wrap items-center gap-2">{ebay.listingUrl ? <Button asChild type="button" size="sm" variant="outline"><a href={ebay.listingUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> View on eBay</a></Button> : null}{onEditEbay ? <Button type="button" size="sm" variant="outline" onClick={onEditEbay}><Pencil className="size-4" /> Edit eBay settings</Button> : null}</div></div>{section("eBay SKU controls", "The individual price and inventory behavior DataPlus will send with this offer.", values([["Pricing source", overrides.ebayUseDefaultPricingFormula !== false ? "eBay channel pricing formula" : "SKU eBay price"], ["SKU eBay price", overrides.ebayUseDefaultPricingFormula !== false ? "Not used" : moneyLabel(Number(overrides.ebayPrice ?? overrides.ebayManualPrice ?? 0))], ["Quantity source", overrides.ebayUseChannelDefaultQuantity !== false ? `eBay channel rule (${String(effectiveSettings.ebayQuantityMode || "available")})` : "Actual available inventory"], ["Actual available", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]))}{section("eBay listing connection", "Offer, listing, and category values associated with this SKU.", values(listingRows))}{section("eBay commercial settings", "Product-level pricing, quantity, and publishing behavior used for this listing.", values(commerceRows))}{section("eBay policy bundle", "Imported seller-account policies that will be used when this SKU is created or updated on eBay.", values(policyRows))}</>
+    return <><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 px-4 py-3"><div className="flex flex-wrap items-center gap-2"><Badge variant={usesChannelDefaults ? "outline" : "default"}>{usesChannelDefaults ? "Using eBay defaults" : "SKU override"}</Badge><p className="text-sm text-muted-foreground">Policies can inherit from eBay while pricing and quantity use their own SKU-level controls.</p></div><div className="flex flex-wrap items-center gap-2">{ebay.listingUrl ? <Button asChild type="button" size="sm" variant="outline"><a href={ebay.listingUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> View on eBay</a></Button> : null}{onEditEbay ? <Button type="button" size="sm" variant="outline" onClick={onEditEbay}><Pencil className="size-4" /> Edit eBay settings</Button> : null}</div></div><EbayCategoryComparisonCard comparison={comparison} />{section("eBay SKU controls", "The individual price and inventory behavior DataPlus will send with this offer.", values([["Pricing source", overrides.ebayUseDefaultPricingFormula !== false ? "eBay channel pricing formula" : "SKU eBay price"], ["SKU eBay price", overrides.ebayUseDefaultPricingFormula !== false ? "Not used" : moneyLabel(Number(overrides.ebayPrice ?? overrides.ebayManualPrice ?? 0))], ["Quantity source", overrides.ebayUseChannelDefaultQuantity !== false ? `eBay channel rule (${String(effectiveSettings.ebayQuantityMode || "available")})` : "Actual available inventory"], ["Actual available", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]))}{section("eBay listing connection", "Offer, listing, and category values associated with this SKU.", values(listingRows))}{section("eBay commercial settings", "Product-level pricing, quantity, and publishing behavior used for this listing.", values(commerceRows))}{section("eBay policy bundle", "Imported seller-account policies that will be used when this SKU is created or updated on eBay.", values(policyRows))}</>
   }
   const shadowRows = (product.shadowSkus || []).filter((shadow) => String(shadow.marketplace || shadow.company || "").toLowerCase() === kind)
   const channelRows: Array<[string, string]> = [["Connection", channel.connected ? "Enabled" : "Disabled"], ["Channel status", channel.status || "Active"], ["Default status", String(channel.settings?.defaultShadowStatus || "Draft")], ["Default handling days", String(channel.settings?.defaultHandlingTimeDays ?? "")], ["Default safety quantity", String(channel.settings?.defaultSafetyQty ?? "")], ["Default max sellable qty", String(channel.settings?.defaultMaxSellableQty ?? "")], ["Default shipping profile", String(channel.settings?.defaultShippingProfile || "")], ["Default shipping service", String(channel.settings?.defaultShippingService || "")]]
@@ -4891,25 +5042,74 @@ function ProductSupplierCoverage({ product, active }: { product: ProductItem; ac
 }
 type MainCategoryOption = { id?: string; name?: string; mappings?: { shopify?: { categoryPath?: string; status?: string } | null } }
 
-function MainCategoryPicker({ value, onValueChange }: { value: string; onValueChange: (value: string) => void }) {
+function MainCategoryPicker({ value, onValueChange, disabled = false }: { value: string; onValueChange: (value: string) => void; disabled?: boolean }) {
   const [options, setOptions] = useState<MainCategoryOption[]>([])
   const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState("")
   const [loading, setLoading] = useState(false)
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (disabled) return
+    setOpen(nextOpen)
+    if (nextOpen) setQuery(value)
+  }
+
   useEffect(() => {
     if (!open) return
+    const search = query.trim()
+    if (search.length < 2) {
+      setOptions([])
+      setLoading(false)
+      return
+    }
     const controller = new AbortController()
     const timeout = window.setTimeout(() => {
       setLoading(true)
-      api<{ categories?: MainCategoryOption[] }>(`/api/categories?scope=main&q=${encodeURIComponent(value.trim())}`, { signal: controller.signal })
+      api<{ categories?: MainCategoryOption[] }>(`/api/categories?scope=main&q=${encodeURIComponent(search)}`, { signal: controller.signal })
         .then((result) => setOptions((result.categories || []).slice(0, 40)))
         .catch(() => { if (!controller.signal.aborted) setOptions([]) })
         .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     }, 150)
     return () => { controller.abort(); window.clearTimeout(timeout) }
-  }, [open, value])
+  }, [open, query])
+
   const selected = options.find((option) => String(option.name || "").toLowerCase() === value.trim().toLowerCase())
   const shopifyMapping = selected?.mappings?.shopify
-  return <div className="relative grid gap-1.5"><Label>Main category</Label><Input value={value} onFocus={() => setOpen(true)} onChange={(event) => { onValueChange(event.target.value); setOpen(true) }} placeholder="Search approved main categories" autoComplete="off" />{selected && <p className="text-xs text-muted-foreground">Shopify: {shopifyMapping?.categoryPath ? shopifyMapping.categoryPath : "No Shopify mapping yet"}</p>}{open && <div className="absolute left-0 right-0 top-[70px] z-50 max-h-64 overflow-y-auto rounded-md border bg-popover p-1 shadow-lg">{loading ? <div className="px-3 py-2 text-sm text-muted-foreground">Searching main categories...</div> : options.length ? options.map((option) => <button key={option.id || option.name} type="button" className="grid w-full gap-0.5 rounded-sm px-3 py-2 text-left text-sm hover:bg-accent" onMouseDown={(event) => event.preventDefault()} onClick={() => { onValueChange(String(option.name || "")); setOpen(false) }}><span>{option.name}</span><span className="text-xs text-muted-foreground">Shopify: {option.mappings?.shopify?.categoryPath || "Not mapped"}</span></button>) : <div className="px-3 py-2 text-sm text-muted-foreground">No approved main categories match. Add it in Category Mappings first.</div>}</div>}</div>
+  return <div className="grid gap-1.5">
+    <Label>Main category</Label>
+    <Popover open={open} onOpenChange={handleOpenChange}>
+      <PopoverTrigger asChild>
+        <Button type="button" variant="outline" disabled={disabled} className="h-auto min-h-10 w-full justify-between gap-3 px-3 py-2 text-left font-normal">
+          <span className={value ? "min-w-0 whitespace-normal break-words" : "text-muted-foreground"}>{value || "Select approved main category"}</span>
+          <Search className="size-4 shrink-0 text-muted-foreground" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[min(560px,calc(100vw-2rem))] p-0">
+        <Command shouldFilter={false}>
+          <CommandInput value={query} onValueChange={setQuery} placeholder="Search full category path..." />
+          <CommandList className="max-h-72">
+            {query.trim().length < 2 && <CommandEmpty>Type at least 2 characters to search.</CommandEmpty>}
+            {query.trim().length >= 2 && loading && <CommandEmpty>Searching approved main categories...</CommandEmpty>}
+            {query.trim().length >= 2 && !loading && !options.length && <CommandEmpty>No approved main categories match. Add it in Category Mappings first.</CommandEmpty>}
+            {options.length > 0 && <CommandGroup heading="Approved main categories">
+              {options.map((option) => {
+                const name = String(option.name || "")
+                return <CommandItem key={option.id || name} value={name} onSelect={() => { onValueChange(name); setQuery(name); setOpen(false) }} className="items-start py-2">
+                  <div className="min-w-0">
+                    <div className="whitespace-normal break-words text-sm">{name}</div>
+                    <div className="mt-0.5 whitespace-normal break-words text-xs text-muted-foreground">Shopify: {option.mappings?.shopify?.categoryPath || "Not mapped"}</div>
+                  </div>
+                </CommandItem>
+              })}
+            </CommandGroup>}
+            {value && <><CommandSeparator /><CommandGroup><CommandItem value="clear-main-category" onSelect={() => { onValueChange(""); setQuery(""); setOpen(false) }}>Clear main category</CommandItem></CommandGroup></>}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+    {selected && <p className="text-xs text-muted-foreground">Shopify: {shopifyMapping?.categoryPath ? shopifyMapping.categoryPath : "No Shopify mapping yet"}</p>}
+    {!selected && value && <p className="text-xs text-amber-600 dark:text-amber-300">Choose an approved path from the category index to save this main category.</p>}
+  </div>
 }
 
 function ProductEditorDialog({ open, onOpenChange, initialTab, draft, setDraft, saving, onSave }: { open: boolean; onOpenChange: (open: boolean) => void; initialTab: "basics" | "content" | "pricing" | "shipping" | "audit"; draft: Record<string, string | boolean>; setDraft: React.Dispatch<React.SetStateAction<Record<string, string | boolean>>>; saving: boolean; onSave: () => void }) {
@@ -4961,8 +5161,8 @@ function ProductEbaySettingsDialogLegacy({ open, onOpenChange, product, channel,
       ebayAutoPublish: value("ebayAutoPublish", false) === true || String(value("ebayAutoPublish", false)).toLowerCase() === "true",
       ebayRequireImage: value("ebayRequireImage", true) !== false && String(value("ebayRequireImage", true)).toLowerCase() !== "false",
       ebayBestOfferEnabled: value("ebayBestOfferEnabled", false) === true || String(value("ebayBestOfferEnabled", false)).toLowerCase() === "true",
-      ebayCategoryId: String(overrides.ebayCategoryId ?? ebay.categoryId ?? ""),
-      ebayCategoryPath: String(overrides.ebayCategoryPath ?? ebay.categoryPath ?? ""),
+      ebayCategoryId: String(overrides.ebayCategoryId ?? ebay.localCategoryId ?? (ebay.sourceOfTruth === "ebay_catalog_sync" ? "" : ebay.categoryId) ?? ""),
+      ebayCategoryPath: String(overrides.ebayCategoryPath ?? ebay.localCategoryPath ?? (ebay.sourceOfTruth === "ebay_catalog_sync" ? "" : ebay.categoryPath) ?? ""),
       ebayTaxonomyVersion: String(overrides.ebayTaxonomyVersion ?? ebay.taxonomyVersion ?? ""),
       ebayItemSpecifics: String(storedSpecifics || ""),
     })
@@ -5078,8 +5278,8 @@ function ProductEbaySettingsDialog({ open, onOpenChange, product, channel, onUpd
       ebayAutoPublish: inherited("ebayAutoPublish", false) === true || String(inherited("ebayAutoPublish", false)).toLowerCase() === "true",
       ebayRequireImage: inherited("ebayRequireImage", true) !== false && String(inherited("ebayRequireImage", true)).toLowerCase() !== "false",
       ebayBestOfferEnabled: inherited("ebayBestOfferEnabled", false) === true || String(inherited("ebayBestOfferEnabled", false)).toLowerCase() === "true",
-      ebayCategoryId: String(overrides.ebayCategoryId ?? ebay.categoryId ?? ""),
-      ebayCategoryPath: String(overrides.ebayCategoryPath ?? ebay.categoryPath ?? ""),
+      ebayCategoryId: String(overrides.ebayCategoryId ?? ebay.localCategoryId ?? (ebay.sourceOfTruth === "ebay_catalog_sync" ? "" : ebay.categoryId) ?? ""),
+      ebayCategoryPath: String(overrides.ebayCategoryPath ?? ebay.localCategoryPath ?? (ebay.sourceOfTruth === "ebay_catalog_sync" ? "" : ebay.categoryPath) ?? ""),
       ebayTaxonomyVersion: String(overrides.ebayTaxonomyVersion ?? ebay.taxonomyVersion ?? ""),
       ebayItemSpecifics: String(storedSpecifics || ""),
     })
@@ -5156,6 +5356,26 @@ function ProductEbaySettingsDialog({ open, onOpenChange, product, channel, onUpd
 // drafts. New product pages use the listing workspace below.
 void ProductEbaySettingsDialog
 
+type EbayCategoryCandidate = {
+  id?: string
+  categoryId?: string
+  name?: string
+  fullName?: string
+  path?: Array<string | { categoryName?: string; name?: string }>
+  taxonomyVersion?: string
+  categoryTreeVersion?: string
+  source?: string
+}
+
+function ebayCategoryCandidatePath(candidate: EbayCategoryCandidate) {
+  if (candidate.fullName) return candidate.fullName
+  if (Array.isArray(candidate.path)) {
+    const parts = candidate.path.map((part) => typeof part === "string" ? part : part.categoryName || part.name || "").filter(Boolean)
+    if (parts.length) return parts.join(" > ")
+  }
+  return candidate.name || "Unnamed eBay category"
+}
+
 function EbayListingWorkspace({
   open,
   onOpenChange,
@@ -5181,6 +5401,11 @@ function EbayListingWorkspace({
   const [busy, setBusy] = useState(false);
   const [ending, setEnding] = useState(false);
   const [activeTab, setActiveTab] = useState("commerce");
+  const [categoryQuery, setCategoryQuery] = useState("");
+  const [categoryResults, setCategoryResults] = useState<EbayCategoryCandidate[]>([]);
+  const [categorySearching, setCategorySearching] = useState(false);
+  const [categorySearchError, setCategorySearchError] = useState("");
+  const [categorySearchNotice, setCategorySearchNotice] = useState("");
   const listing = product.ebayListing || {};
   const settings = channel.settings || {};
   const overrides = listing.settings || {};
@@ -5209,6 +5434,17 @@ function EbayListingWorkspace({
     : [];
 
   const text = (key: string) => String(draft[key] ?? "");
+  const editorInputClassName =
+    "border-slate-300 bg-slate-100/80 shadow-sm transition-colors focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30 dark:border-slate-600 dark:bg-slate-950/80";
+  const ebayMarketplaceId = String(
+    text("ebayMarketplaceId") || settings.ebayMarketplaceId || "EBAY_US",
+  )
+    .trim()
+    .toUpperCase();
+  const internalCategoryName = String(product.mainCategory || "").trim();
+  const categoryPageHref = internalCategoryName
+    ? `/categories/${encodeURIComponent(internalCategoryName)}`
+    : "/categories";
   const checked = (key: string, fallback = false) =>
     draft[key] === undefined ? fallback : draft[key] === true;
   const usesChannelDefaults = checked("useChannelDefaults", true);
@@ -5243,6 +5479,7 @@ function EbayListingWorkspace({
       <FieldLabel htmlFor={`ebay-workspace-${key}`}>{label}</FieldLabel>
       <Input
         id={`ebay-workspace-${key}`}
+        className={editorInputClassName}
         type={type}
         min={type === "number" ? 0 : undefined}
         step={type === "number" ? "0.01" : undefined}
@@ -5270,7 +5507,7 @@ function EbayListingWorkspace({
           value={value || "__none"}
           onValueChange={(next) => change(key, next === "__none" ? "" : next)}
         >
-          <SelectTrigger>
+          <SelectTrigger className={editorInputClassName}>
             <SelectValue placeholder="Not selected" />
           </SelectTrigger>
           <SelectContent>
@@ -5294,7 +5531,7 @@ function EbayListingWorkspace({
     key: string,
     fallback = false,
   ) => (
-    <div className="rounded-md border bg-card p-3">
+    <div className="rounded-md border border-slate-300 bg-slate-100/80 p-3 dark:border-slate-600 dark:bg-slate-950/80">
       <ToggleRow
         label={label}
         description={description}
@@ -5310,6 +5547,29 @@ function EbayListingWorkspace({
       overrides.useChannelDefaults !== false
         ? (settings[key] ?? fallback)
         : (overrides[key] ?? settings[key] ?? fallback);
+    let pendingCategory: EbayCategoryCandidate | null = null;
+    try {
+      const raw = window.sessionStorage.getItem(`dataplus:ebay-category-selection:${product.sku}`);
+      if (raw) pendingCategory = JSON.parse(raw) as EbayCategoryCandidate;
+    } catch {
+      pendingCategory = null;
+    }
+    const pendingCategoryId = pendingCategory?.categoryId || pendingCategory?.id || "";
+    const pendingCategoryPath = pendingCategory ? ebayCategoryCandidatePath(pendingCategory) : "";
+    setCategoryQuery(
+      pendingCategoryPath ||
+        String(
+          overrides.ebayCategoryPath ??
+            listing.localCategoryPath ??
+            listing.categoryPath ??
+            product.mainCategory ??
+            product.title ??
+            "",
+        ),
+    );
+    setCategoryResults([]);
+    setCategorySearchError("");
+    setCategorySearchNotice("");
     const specifics =
       overrides.ebayItemSpecifics ??
       (listing.itemSpecifics
@@ -5402,13 +5662,13 @@ function EbayListingWorkspace({
           "",
       ),
       ebayCategoryId: String(
-        overrides.ebayCategoryId ?? listing.categoryId ?? "",
+        overrides.ebayCategoryId ?? pendingCategoryId ?? listing.localCategoryId ?? (listing.sourceOfTruth === "ebay_catalog_sync" ? "" : listing.categoryId) ?? "",
       ),
       ebayCategoryPath: String(
-        overrides.ebayCategoryPath ?? listing.categoryPath ?? "",
+        overrides.ebayCategoryPath ?? pendingCategoryPath ?? listing.localCategoryPath ?? (listing.sourceOfTruth === "ebay_catalog_sync" ? "" : listing.categoryPath) ?? "",
       ),
       ebayTaxonomyVersion: String(
-        overrides.ebayTaxonomyVersion ?? listing.taxonomyVersion ?? "",
+        overrides.ebayTaxonomyVersion ?? pendingCategory?.taxonomyVersion ?? pendingCategory?.categoryTreeVersion ?? listing.taxonomyVersion ?? "",
       ),
       ebayItemSpecifics: String(specifics || ""),
       ebayIdentifierType: String(
@@ -5440,6 +5700,9 @@ function EbayListingWorkspace({
           ? listing.productCompliancePolicyIds.join(", ")
           : "",
     });
+    if (pendingCategory) {
+      try { window.sessionStorage.removeItem(`dataplus:ebay-category-selection:${product.sku}`); } catch { /* ignore unavailable storage */ }
+    }
   };
 
   const payload = () => {
@@ -5593,6 +5856,78 @@ function EbayListingWorkspace({
     } finally {
       setBusy(false);
     }
+  };
+  const searchEbayCategories = async (askDavid = false) => {
+    const query =
+      categoryQuery.trim() ||
+      text("ebayCategoryPath") ||
+      product.mainCategory ||
+      product.title ||
+      "";
+    if (!query) {
+      setCategorySearchError("Enter a product title or category phrase first.");
+      return;
+    }
+    setCategorySearching(true);
+    setCategorySearchError("");
+    setCategorySearchNotice("");
+    try {
+      const result = await api<{
+        categories?: EbayCategoryCandidate[];
+        message?: string;
+        warning?: string;
+      }>(
+        askDavid
+          ? "/api/ai/ebay-category-research"
+          : `/api/channel-taxonomies/ebay/categories?q=${encodeURIComponent(query)}&limit=20&marketplaceId=${encodeURIComponent(ebayMarketplaceId)}`,
+        askDavid
+          ? {
+              method: "POST",
+              body: JSON.stringify({
+                query,
+                marketplaceId: ebayMarketplaceId,
+                product: {
+                  sku: product.sku,
+                  title: product.title,
+                  mainCategory: product.mainCategory,
+                },
+              }),
+            }
+          : undefined,
+      );
+      const categories = Array.isArray(result.categories) ? result.categories : [];
+      setCategoryResults(categories);
+      setCategorySearchNotice(result.warning || "");
+      if (!categories.length) {
+        setCategorySearchError(
+          result.message || "No eBay category matches were returned.",
+        );
+      }
+    } catch (error) {
+      setCategoryResults([]);
+      setCategorySearchError(
+        error instanceof Error
+          ? error.message
+          : "Unable to search eBay categories.",
+      );
+    } finally {
+      setCategorySearching(false);
+    }
+  };
+  const chooseEbayCategory = (candidate: EbayCategoryCandidate) => {
+    const categoryId = String(candidate.categoryId || candidate.id || "");
+    const categoryPath = ebayCategoryCandidatePath(candidate);
+    change("ebayCategoryId", categoryId);
+    change("ebayCategoryPath", categoryPath);
+    change(
+      "ebayTaxonomyVersion",
+      String(candidate.taxonomyVersion || candidate.categoryTreeVersion || ""),
+    );
+    setCategoryQuery(categoryPath);
+    setCategoryResults([]);
+    setCategorySearchError("");
+    setCategorySearchNotice("");
+    toast.success(`Selected eBay category ${categoryId || categoryPath}.`);
   };
 
   const listingStatus = String(
@@ -6076,7 +6411,113 @@ function EbayListingWorkspace({
                 </div>
               </TabsContent>
               <TabsContent value="details" className="m-0 grid gap-5">
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <Card className="border-slate-300 bg-slate-50/90 dark:border-slate-700 dark:bg-slate-900/80">
+                  <CardHeader className="p-4 pb-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <CardTitle className="text-base">Find eBay category</CardTitle>
+                        <CardDescription>
+                          Search the locally cached eBay taxonomy, or ask David to suggest a category from this product.
+                          Selecting a result fills the ID, full path, and taxonomy version below.
+                        </CardDescription>
+                      </div>
+                      {internalCategoryName ? (
+                        <Button size="sm" variant="outline" className="h-8 shrink-0" asChild>
+                          <a href={categoryPageHref} onClick={() => onOpenChange(false)}>
+                            <ExternalLink className="size-3.5" />
+                            View category
+                          </a>
+                        </Button>
+                      ) : null}
+                    </div>
+                  </CardHeader>
+                  <CardContent className="grid gap-3 p-4 pt-0">
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <Input
+                        className={editorInputClassName}
+                        value={categoryQuery}
+                        onChange={(event) => setCategoryQuery(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void searchEbayCategories();
+                          }
+                        }}
+                        placeholder="Search eBay category, product, or taxonomy phrase"
+                        aria-label="Search eBay categories"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => void searchEbayCategories()}
+                        disabled={categorySearching}
+                      >
+                        {categorySearching ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Search className="size-4" />
+                        )}
+                        Search eBay
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => void searchEbayCategories(true)}
+                        disabled={categorySearching}
+                      >
+                        <MessageSquare className="size-4" />
+                        Ask David
+                      </Button>
+                    </div>
+                    {categorySearchNotice ? (
+                      <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+                        {categorySearchNotice}
+                      </p>
+                    ) : null}
+                    {categorySearchError ? (
+                      <Alert variant="destructive" className="py-3">
+                        <AlertCircle className="size-4" />
+                        <AlertDescription>{categorySearchError}</AlertDescription>
+                      </Alert>
+                    ) : null}
+                    {categoryResults.length ? (
+                      <div className="max-h-72 overflow-y-auto rounded-md border bg-background">
+                        <div className="border-b px-3 py-2 text-xs font-medium text-muted-foreground">
+                          {categoryResults.length} eBay category matches
+                        </div>
+                        <div className="divide-y">
+                          {categoryResults.map((candidate, index) => {
+                            const categoryId = String(
+                              candidate.categoryId || candidate.id || "",
+                            );
+                            const categoryPath = ebayCategoryCandidatePath(candidate);
+                            return (
+                              <div
+                                key={`${categoryId || categoryPath}-${index}`}
+                                className="flex flex-col gap-2 px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+                              >
+                                <div className="min-w-0">
+                                  <div className="font-medium">{categoryPath}</div>
+                                  <div className="font-mono text-xs text-muted-foreground">
+                                    Category ID {categoryId || "not returned"}
+                                  </div>
+                                </div>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  onClick={() => chooseEbayCategory(candidate)}
+                                >
+                                  Use category
+                                </Button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ) : null}
+                  </CardContent>
+                </Card>
+                <div className="grid gap-4 rounded-lg border border-slate-300 bg-slate-50/90 p-4 dark:border-slate-700 dark:bg-slate-900/80 md:grid-cols-2 xl:grid-cols-3">
                   {select("Product identifier type", "ebayIdentifierType", [
                     { value: "UPC", label: "UPC" },
                     { value: "EAN", label: "EAN" },
@@ -6088,7 +6529,22 @@ function EbayListingWorkspace({
                   {field("MPN", "ebayMpn")}
                   {field("eBay category ID", "ebayCategoryId")}
                   {field("Category path", "ebayCategoryPath")}
-                  {field("Category tree / taxonomy", "ebayTaxonomyVersion")}
+                  <FormField className="gap-1.5">
+                    <FieldLabel htmlFor="ebay-workspace-ebayTaxonomyVersion">
+                      Category tree / taxonomy
+                    </FieldLabel>
+                    <Input
+                      id="ebay-workspace-ebayTaxonomyVersion"
+                      className={editorInputClassName}
+                      value={text("ebayTaxonomyVersion")}
+                      onChange={(event) =>
+                        change("ebayTaxonomyVersion", event.target.value)
+                      }
+                    />
+                    <FieldDescription>
+                      eBay taxonomy version for this SKU. View category opens the internal main-category settings.
+                    </FieldDescription>
+                  </FormField>
                 </div>
                 {toggle(
                   "Identifier does not apply",
@@ -6103,12 +6559,13 @@ function EbayListingWorkspace({
                     )}
                   </div>
                 ) : null}
-                <FormField className="gap-1.5">
+                <FormField className="gap-1.5 rounded-lg border border-slate-300 bg-slate-50/90 p-4 dark:border-slate-700 dark:bg-slate-900/80">
                   <FieldLabel htmlFor="ebay-workspace-specifics">
                     Item specifics
                   </FieldLabel>
                   <Textarea
                     id="ebay-workspace-specifics"
+                    className={editorInputClassName}
                     rows={10}
                     value={text("ebayItemSpecifics")}
                     onChange={(event) =>
@@ -6124,7 +6581,7 @@ function EbayListingWorkspace({
                     Required aspects are shown below.
                   </FieldDescription>
                 </FormField>
-                <Card>
+                <Card className="border-slate-300 bg-slate-50/90 dark:border-slate-700 dark:bg-slate-900/80">
                   <CardHeader className="flex flex-row items-start justify-between gap-4">
                     <div>
                       <CardTitle className="text-base">
@@ -6177,6 +6634,7 @@ function EbayListingWorkspace({
                   </FieldLabel>
                   <Input
                     id="ebay-workspace-compliance"
+                    className={editorInputClassName}
                     value={text("ebayProductCompliancePolicyIds")}
                     onChange={(event) =>
                       change(
@@ -6628,6 +7086,8 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   const [shopifyResults, setShopifyResults] = useState<CategoryChannelMapping[]>([])
   const [ebayQuery, setEbayQuery] = useState("")
   const [ebayResults, setEbayResults] = useState<CategoryChannelMapping[]>([])
+  const [ebaySearchMessage, setEbaySearchMessage] = useState("")
+  const [ebaySearchWarning, setEbaySearchWarning] = useState("")
   const [taxonomyLoading, setTaxonomyLoading] = useState<"shopify" | "ebay" | "">("")
   const [channelRequirements, setChannelRequirements] = useState<Record<string, CategoryAttribute[]>>({})
   const [requirementsLoading, setRequirementsLoading] = useState<Record<string, boolean>>({})
@@ -6661,7 +7121,15 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   function applyCategories(rows: CategoryProfile[], nextId = categoryId || selectedId) {
     const normalizedRows = rows.map((row) => ({ ...row, missingMappings: categoryMissingCount(row.missingMappings) }))
     setCategories(normalizedRows)
-    const next = normalizedRows.find((row) => (row.id || row.categoryId) === nextId) || (!categoryId ? normalizedRows[0] : null)
+    let decodedNextId = nextId
+    try {
+      decodedNextId = decodeURIComponent(nextId)
+    } catch {
+      decodedNextId = nextId
+    }
+    const next = normalizedRows.find((row) => (row.id || row.categoryId) === nextId) ||
+      normalizedRows.find((row) => String(row.name || "").toLowerCase() === String(decodedNextId || "").toLowerCase()) ||
+      (!categoryId ? normalizedRows[0] : null)
     setSelectedId(next?.id || next?.categoryId || "")
     setProfile(next ? categoryProfileFrom(next) : null)
   }
@@ -6801,9 +7269,17 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     const value = channel === "shopify" ? shopifyQuery : ebayQuery
     if (!value.trim()) return
     setTaxonomyLoading(channel)
+    if (channel === "ebay") {
+      setEbaySearchMessage("")
+      setEbaySearchWarning("")
+    }
     try {
-      const result = await api<{ categories?: CategoryChannelMapping[] }>(`/api/channel-taxonomies/${channel}/categories?q=${encodeURIComponent(value)}&limit=12`)
+      const result = await api<{ categories?: CategoryChannelMapping[]; message?: string; warning?: string }>(`/api/channel-taxonomies/${channel}/categories?q=${encodeURIComponent(value)}&limit=12${channel === "ebay" ? "&live=0" : ""}`)
       channel === "shopify" ? setShopifyResults(result.categories || []) : setEbayResults(result.categories || [])
+      if (channel === "ebay") {
+        setEbaySearchMessage(result.message || "")
+        setEbaySearchWarning(result.warning || "")
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : `Unable to search ${channel} taxonomy.`)
     } finally {
@@ -6855,7 +7331,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
         <CardContent className="p-0"><Tabs value={standalone ? profileTab : "overview"} onValueChange={setProfileTab}><div className={standalone ? "overflow-x-auto border-b px-4" : "hidden"}><TabsList className="h-12 min-w-max bg-transparent p-0"><TabsTrigger value="overview" className="text-xs">Overview</TabsTrigger><TabsTrigger value="shopify" className="text-xs">Shopify</TabsTrigger><TabsTrigger value="ebay" className="text-xs">eBay</TabsTrigger><TabsTrigger value="attributes" className="text-xs">Attributes</TabsTrigger><TabsTrigger value="defaults" className="text-xs">Defaults</TabsTrigger><TabsTrigger value="collection" className="text-xs">Collection</TabsTrigger><TabsTrigger value="lifecycle" className="text-xs">Lifecycle</TabsTrigger></TabsList></div>{standalone && (profileTab === "shopify" || profileTab === "ebay") && <div className="border-b p-5"><DavidCategoryReviewCard profile={profile} channel={profileTab} scope={categoryScope} onApplied={(rows) => applyCategories(rows, profile.id || profile.categoryId || "")} /></div>}
           <TabsContent value="overview" className="m-0 p-5"><div className="grid gap-5 lg:grid-cols-2"><section className="grid gap-4"><div className="grid gap-2"><Label>Status</Label><Select value={profile.status || "needs_review"} onValueChange={(value) => updateProfile({ status: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="needs_review">Needs review</SelectItem><SelectItem value="mapped">Mapped</SelectItem><SelectItem value="approved">Approved</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></div><div className="grid gap-2"><Label>Category owner</Label><Input value={profile.owner || ""} onChange={(event) => updateProfile({ owner: event.target.value })} placeholder="Responsible team member" /></div><div className="grid gap-2"><Label>Internal notes</Label><Textarea value={profile.notes || ""} onChange={(event) => updateProfile({ notes: event.target.value })} placeholder="Why this category is configured this way" /></div></section><section className="grid content-start gap-4 rounded-md border p-4"><div><p className="text-sm font-medium">Product type model</p><p className="mt-1 text-xs text-muted-foreground">This main category is the product type. There is no second editable product-type list to drift from the catalog hierarchy.</p></div><div className="rounded-md bg-muted/50 p-3"><p className="text-xs text-muted-foreground">Shopify product type</p><p className="mt-1 text-sm font-medium">{profile.smartCollection?.productType || profile.name}</p></div><div><p className="mb-2 text-xs text-muted-foreground">Mapped channels</p><div className="flex flex-wrap gap-2">{mappedChannels.length ? mappedChannels.map((channel) => <Badge key={channel} variant="outline">{channel}</Badge>) : <span className="text-sm text-muted-foreground">No channel taxonomies mapped yet.</span>}</div></div><div><p className="mb-2 text-xs text-muted-foreground">Required marketplace attributes</p><div className="flex flex-wrap gap-2">{required.length ? required.slice(0, 10).map((name) => <Badge key={name} variant="secondary">{name}</Badge>) : <span className="text-sm text-muted-foreground">Requirements will appear after mapping and synchronization.</span>}</div></div></section></div></TabsContent>
           <TabsContent value="shopify" className="m-0 p-5"><div className="grid gap-5"><section className="rounded-md border p-4"><div className="mb-3"><p className="text-sm font-medium">Shopify taxonomy</p><p className="text-xs text-muted-foreground">Map the canonical Shopify product category. It controls Shopify category attributes; it does not replace the main category.</p></div><div className="flex gap-2"><Input value={shopifyQuery} onChange={(event) => setShopifyQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") searchTaxonomy("shopify") }} placeholder={`Search Shopify taxonomy for ${profile.name}`} /><Button variant="outline" onClick={() => searchTaxonomy("shopify")} disabled={taxonomyLoading === "shopify"}>{taxonomyLoading === "shopify" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button></div>{mapping("shopify").categoryId && <div className="mt-3 rounded-md border bg-muted/30 p-3"><p className="text-xs text-muted-foreground">Selected Shopify category</p><p className="mt-1 text-sm font-medium">{mapping("shopify").categoryPath || mapping("shopify").categoryId}</p><p className="mt-1 text-xs text-muted-foreground">ID: {mapping("shopify").categoryId}{mapping("shopify").taxonomyVersion ? ` | Taxonomy ${mapping("shopify").taxonomyVersion}` : ""}</p></div>}{shopifyResults.length > 0 && <div className="mt-3 max-h-64 overflow-y-auto rounded-md border">{shopifyResults.map((result) => { const categoryId = result.categoryId || result.id || ""; const categoryPath = result.categoryPath || result.fullName || result.name || categoryId; return <button key={categoryId} onClick={() => { updateMapping("shopify", { categoryId, categoryPath, categoryHandle: result.categoryHandle || result.handle || "", taxonomyVersion: result.taxonomyVersion || "", googleCategory: result.googleCategory || null, attributes: result.attributes || [] }); setShopifyResults([]) }} className="block w-full border-b px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted"><p className="font-medium">{categoryPath}</p><p className="text-xs text-muted-foreground">{categoryId}</p>{result.googleCategory?.id && <p className="mt-1 text-xs text-muted-foreground">Google {result.googleCategory.id}: {result.googleCategory.breadcrumb || result.googleCategory.fullName || "Mapped taxonomy"}</p>}</button>})}</div>}</section><section className="grid gap-4 lg:grid-cols-2"><div className="grid gap-2"><Label>Collection handle</Label><Input value={mapping("shopify").collectionHandle || ""} onChange={(event) => updateMapping("shopify", { collectionHandle: event.target.value })} placeholder="Collection handle" /></div><div className="grid gap-2"><Label>Google taxonomy reference</Label><p className="text-xs text-muted-foreground">Choose a Shopify result above to load its linked Google taxonomy, or correct this reference manually.</p><Input value={mapping("shopify").googleCategory?.breadcrumb || mapping("shopify").googleCategory?.fullName || ""} onChange={(event) => updateMapping("shopify", { googleCategory: { ...(mapping("shopify").googleCategory || {}), breadcrumb: event.target.value, fullName: event.target.value } })} placeholder="Optional Google product category" /></div></section>{mapping("shopify").categoryId && <section className="rounded-md border"><div className="flex flex-wrap items-center justify-between gap-3 border-b p-4"><div><p className="text-sm font-medium">Shopify product attributes</p><p className="text-xs text-muted-foreground">Requirements for this selected Shopify taxonomy only.</p></div><Button variant="outline" size="sm" onClick={() => loadChannelRequirements("shopify")} disabled={requirementsLoading.shopify}><RefreshCw className={requirementsLoading.shopify ? "size-4 animate-spin" : "size-4"} /> Refresh</Button></div><div className="p-4">{requirementsLoading.shopify ? <div className="grid gap-2"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div> : <CategoryRequirementsDataTable channel="shopify" attributes={channelRequirements.shopify || mapping("shopify").attributes || []} mappings={mapping("shopify").attributeMappings || []} onChange={(next) => updateMapping("shopify", { attributeMappings: next })} />}</div></section>}<div className="flex justify-end"><Button onClick={() => saveChannel("shopify")} disabled={saving}><Save className="size-4" /> Save Shopify mapping</Button></div></div></TabsContent>
-          <TabsContent value="ebay" className="m-0 p-5"><div className="grid gap-5"><section className="rounded-md border p-4"><div className="mb-3"><p className="text-sm font-medium">eBay taxonomy</p><p className="text-xs text-muted-foreground">Map an eBay category when this product type will be published to eBay. Required item specifics become available in Attributes.</p></div><div className="flex gap-2"><Input value={ebayQuery} onChange={(event) => setEbayQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") searchTaxonomy("ebay") }} placeholder={`Search eBay taxonomy for ${profile.name}`} /><Button variant="outline" onClick={() => searchTaxonomy("ebay")} disabled={taxonomyLoading === "ebay"}>{taxonomyLoading === "ebay" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button></div>{mapping("ebay").categoryId && <div className="mt-3 rounded-md border bg-muted/30 p-3"><p className="text-xs text-muted-foreground">Selected eBay category</p><p className="mt-1 text-sm font-medium">{mapping("ebay").categoryPath || mapping("ebay").categoryId}</p><p className="mt-1 text-xs text-muted-foreground">ID: {mapping("ebay").categoryId}</p></div>}{ebayResults.length > 0 && <div className="mt-3 max-h-64 overflow-y-auto rounded-md border">{ebayResults.map((result) => { const categoryId = result.categoryId || result.id || ""; const categoryPath = result.categoryPath || result.fullName || result.name || categoryId; return <button key={categoryId} onClick={() => { updateMapping("ebay", { categoryId, categoryPath, taxonomyVersion: result.taxonomyVersion || "" }); setEbayResults([]) }} className="block w-full border-b px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted"><p className="font-medium">{categoryPath}</p><p className="text-xs text-muted-foreground">{categoryId}</p></button>})}</div>}</section>{mapping("ebay").categoryId && <section className="rounded-md border"><div className="flex flex-wrap items-center justify-between gap-3 border-b p-4"><div><p className="text-sm font-medium">eBay item specifics</p><p className="text-xs text-muted-foreground">Requirements for this selected eBay category only.</p></div><Button variant="outline" size="sm" onClick={() => loadChannelRequirements("ebay")} disabled={requirementsLoading.ebay}><RefreshCw className={requirementsLoading.ebay ? "size-4 animate-spin" : "size-4"} /> Refresh</Button></div><div className="p-4">{requirementsLoading.ebay ? <div className="grid gap-2"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div> : <CategoryRequirementsDataTable channel="ebay" attributes={channelRequirements.ebay || mapping("ebay").attributes || []} mappings={mapping("ebay").attributeMappings || []} onChange={(next) => updateMapping("ebay", { attributeMappings: next })} />}</div></section>}<div className="flex justify-end"><Button onClick={() => saveChannel("ebay")} disabled={saving}><Save className="size-4" /> Save eBay mapping</Button></div></div></TabsContent>
+          <TabsContent value="ebay" className="m-0 p-5"><div className="grid gap-5"><section className="rounded-md border p-4"><div className="mb-3"><p className="text-sm font-medium">eBay taxonomy</p><p className="text-xs text-muted-foreground">Map an eBay category when this product type will be published to eBay. Required item specifics become available in Attributes.</p></div><div className="flex gap-2"><Input value={ebayQuery} onChange={(event) => setEbayQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") searchTaxonomy("ebay") }} placeholder={`Search eBay taxonomy for ${profile.name}`} /><Button variant="outline" onClick={() => searchTaxonomy("ebay")} disabled={taxonomyLoading === "ebay"}>{taxonomyLoading === "ebay" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button></div>{(ebaySearchMessage || ebaySearchWarning) && <Alert className="mt-3 border-amber-500/40 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>eBay taxonomy search</AlertTitle><AlertDescription>{ebaySearchMessage || ebaySearchWarning}</AlertDescription></Alert>}{mapping("ebay").categoryId && <div className="mt-3 rounded-md border bg-muted/30 p-3"><p className="text-xs text-muted-foreground">Selected eBay category</p><p className="mt-1 text-sm font-medium">{mapping("ebay").categoryPath || mapping("ebay").categoryId}</p><p className="mt-1 text-xs text-muted-foreground">ID: {mapping("ebay").categoryId}</p></div>}{ebayResults.length > 0 && <div className="mt-3 max-h-64 overflow-y-auto rounded-md border">{ebayResults.map((result) => { const categoryId = result.categoryId || result.id || ""; const categoryPath = result.categoryPath || result.fullName || result.name || categoryId; return <button key={categoryId} onClick={() => { updateMapping("ebay", { categoryId, categoryPath, taxonomyVersion: result.taxonomyVersion || "" }); setEbayResults([]) }} className="block w-full border-b px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted"><p className="font-medium">{categoryPath}</p><p className="text-xs text-muted-foreground">{categoryId}</p></button>})}</div>}</section>{mapping("ebay").categoryId && <section className="rounded-md border"><div className="flex flex-wrap items-center justify-between gap-3 border-b p-4"><div><p className="text-sm font-medium">eBay item specifics</p><p className="text-xs text-muted-foreground">Requirements for this selected eBay category only.</p></div><Button variant="outline" size="sm" onClick={() => loadChannelRequirements("ebay")} disabled={requirementsLoading.ebay}><RefreshCw className={requirementsLoading.ebay ? "size-4 animate-spin" : "size-4"} /> Refresh</Button></div><div className="p-4">{requirementsLoading.ebay ? <div className="grid gap-2"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div> : <CategoryRequirementsDataTable channel="ebay" attributes={channelRequirements.ebay || mapping("ebay").attributes || []} mappings={mapping("ebay").attributeMappings || []} onChange={(next) => updateMapping("ebay", { attributeMappings: next })} />}</div></section>}<div className="flex justify-end"><Button onClick={() => saveChannel("ebay")} disabled={saving}><Save className="size-4" /> Save eBay mapping</Button></div></div></TabsContent>
           <TabsContent value="attributes" className="m-0 p-5"><div className="grid gap-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-medium">Marketplace requirements and source mapping</p><p className="text-xs text-muted-foreground">Synchronize mapped channel requirements, then define where each value comes from before products are exported.</p></div><Button variant="outline" size="sm" onClick={syncAttributes} disabled={saving}><RefreshCw className="size-4" /> Sync requirements</Button></div>{["shopify", "ebay"].map((channel) => { const attributes = channelRequirements[channel] || mapping(channel).attributes || []; const mappings = mapping(channel).attributeMappings || []; return <section key={channel} className="rounded-md border"><div className="flex items-center justify-between border-b px-4 py-3"><div><p className="text-sm font-medium capitalize">{channel}</p><p className="text-xs text-muted-foreground">{numberLabel(attributes.length)} requirements discovered</p></div><Badge variant="outline">{mapping(channel).categoryId ? "Mapped" : "Not mapped"}</Badge></div>{!mapping(channel).categoryId ? <p className="p-4 text-sm text-muted-foreground">Map the {channel} taxonomy first.</p> : !attributes.length ? <p className="p-4 text-sm text-muted-foreground">No synchronized requirements yet. Use Sync requirements after the category is saved.</p> : <div className="divide-y">{attributes.map((attribute) => { const existing = mappings.find((row) => (row.attributeId || row.id) === (attribute.id || attribute.name)); return <div key={attribute.id || attribute.name} className="grid gap-3 p-4 lg:grid-cols-[minmax(180px,0.8fr)_minmax(180px,1fr)_minmax(160px,0.8fr)]"><div><p className="text-sm font-medium">{attribute.name}</p><p className="text-xs text-muted-foreground">{attribute.required ? "Required" : attribute.recommended ? "Recommended" : "Optional"}{attribute.description ? ` | ${attribute.description}` : ""}</p></div><Input defaultValue={existing?.sourceField || ""} placeholder="Source field, e.g. brand" onBlur={(event) => { const next = [...mappings.filter((row) => (row.attributeId || row.id) !== (attribute.id || attribute.name)), { ...attribute, ...existing, attributeId: attribute.id || attribute.name, attributeName: attribute.name, sourceField: event.target.value, enabled: true }]; updateMapping(channel, { attributeMappings: next }) }} /><Input defaultValue={existing?.fallbackValue || ""} placeholder="Fallback value" onBlur={(event) => { const currentMappings = mapping(channel).attributeMappings || []; const next = [...currentMappings.filter((row) => (row.attributeId || row.id) !== (attribute.id || attribute.name)), { ...attribute, ...existing, attributeId: attribute.id || attribute.name, attributeName: attribute.name, fallbackValue: event.target.value, enabled: true }]; updateMapping(channel, { attributeMappings: next }) }} /></div>})}</div>}</section>})}<div className="flex justify-end gap-2"><Button variant="outline" onClick={() => saveChannel("ebay")} disabled={saving}>Save eBay attributes</Button><Button onClick={() => saveChannel("shopify")} disabled={saving}>Save Shopify attributes</Button></div></div></TabsContent>
           <TabsContent value="defaults" className="m-0 p-5"><div className="grid gap-5 lg:grid-cols-2"><div className="grid gap-2"><Label>Default condition</Label><Select value={profile.defaults?.condition || "New"} onValueChange={(value) => updateProfile({ defaults: { ...profile.defaults, condition: value } })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="New">New</SelectItem><SelectItem value="Used">Used</SelectItem><SelectItem value="Refurbished">Refurbished</SelectItem></SelectContent></Select></div><div className="grid gap-2"><Label>Country of origin</Label><Input value={profile.defaults?.countryOfOrigin || ""} onChange={(event) => updateProfile({ defaults: { ...profile.defaults, countryOfOrigin: event.target.value } })} placeholder="e.g. US" /></div><div className="grid gap-2"><Label>Default shipping profile</Label><Input value={profile.defaults?.shippingProfile || ""} onChange={(event) => updateProfile({ defaults: { ...profile.defaults, shippingProfile: event.target.value } })} placeholder="Used if a product has no override" /></div><div className="grid gap-2"><Label>Default return policy</Label><Input value={profile.defaults?.returnPolicy || ""} onChange={(event) => updateProfile({ defaults: { ...profile.defaults, returnPolicy: event.target.value } })} placeholder="Used if a product has no override" /></div><div className="flex items-start justify-between rounded-md border p-4"><div><p className="text-sm font-medium">Hazardous items allowed</p><p className="text-xs text-muted-foreground">Allows products in this category to carry hazardous flags.</p></div><Switch checked={Boolean(profile.defaults?.hazardousAllowed)} onCheckedChange={(checked) => updateProfile({ defaults: { ...profile.defaults, hazardousAllowed: checked } })} /></div><div className="flex items-start justify-between rounded-md border p-4"><div><p className="text-sm font-medium">Package weight required</p><p className="text-xs text-muted-foreground">Keeps products from passing readiness without shipping weight.</p></div><Switch checked={profile.defaults?.packageWeightRequired !== false} onCheckedChange={(checked) => updateProfile({ defaults: { ...profile.defaults, packageWeightRequired: checked } })} /></div></div><div className="flex justify-end"><Button onClick={() => save({ defaults: profile.defaults || {} })} disabled={saving}><Save className="size-4" /> Save defaults</Button></div></TabsContent>
           <TabsContent value="collection" className="m-0 p-5"><div className="grid gap-5"><div className="flex items-start justify-between rounded-md border p-4"><div><p className="text-sm font-medium">Smart collection profile</p><p className="text-xs text-muted-foreground">Used for export and collection automation. It is a channel behavior attached to this main category.</p></div><Switch checked={Boolean(profile.smartCollection?.enabled)} onCheckedChange={(checked) => updateProfile({ smartCollection: { ...profile.smartCollection, enabled: checked } })} /></div><div className="grid gap-4 lg:grid-cols-2"><div className="grid gap-2"><Label>Shopify product type</Label><Input value={profile.smartCollection?.productType || profile.name || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, productType: event.target.value } })} /></div><div className="grid gap-2"><Label>Collection title</Label><Input value={profile.smartCollection?.title || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, title: event.target.value } })} placeholder={profile.name} /></div><div className="grid gap-2"><Label>Collection handle</Label><Input value={profile.smartCollection?.handle || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, handle: event.target.value } })} placeholder="Generated when left empty" /></div><div className="grid gap-2"><Label>Sort order</Label><Input value={profile.smartCollection?.sortOrder || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, sortOrder: event.target.value } })} placeholder="Best Selling" /></div><div className="grid gap-2"><Label>SEO title</Label><Input value={profile.smartCollection?.titleTag || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, titleTag: event.target.value } })} /></div><div className="grid gap-2"><Label>SEO description</Label><Input value={profile.smartCollection?.descriptionTag || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, descriptionTag: event.target.value } })} /></div></div><div className="grid gap-2"><Label>Collection description</Label><Textarea value={profile.smartCollection?.bodyHtml || ""} onChange={(event) => updateProfile({ smartCollection: { ...profile.smartCollection, bodyHtml: event.target.value } })} /></div><div className="flex justify-end"><Button onClick={() => save({ smartCollection: profile.smartCollection || {} })} disabled={saving}><Save className="size-4" /> Save collection profile</Button></div></div></TabsContent>
@@ -12836,10 +13312,11 @@ function createDavidTransport(): ChatTransport<UIMessage> {
         }),
       })
       const payload = await response.json().catch(() => ({})) as { reply?: string; error?: string }
-      if (!response.ok) throw new Error(payload.error || "David is unavailable right now.")
 
       const id = globalThis.crypto?.randomUUID?.() || `david-${Date.now()}`
-      const reply = String(payload.reply || "I couldn't prepare a response just now. Please try again.")
+      const reply = String(payload.reply || (response.ok
+        ? "I couldn't prepare a response just now. Please try again."
+        : `David could not respond: ${payload.error || `Request failed (${response.status}).`}`))
       const chunks: UIMessageChunk[] = [
         { type: "text-start", id },
         ...(reply.match(/\S+\s*/g) || [reply]).map((delta) => ({ type: "text-delta" as const, id, delta })),

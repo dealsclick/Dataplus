@@ -1127,6 +1127,7 @@ const STATE_DOCUMENT_KEYS = [
   "attributeGroups",
   "shopifySettings",
   "ebaySettings",
+  "ebayTaxonomyIndexes",
   "channelInventorySchedules",
   "channelSkuMapSchedules",
   "channelOrderImportSchedules",
@@ -1209,6 +1210,16 @@ async function readStateDocuments() {
     if (Array.isArray(docs[row.collection])) docs[row.collection].push(row.data);
   }
   return docs;
+}
+
+async function readStateDocument(docKey = "") {
+  const client = getPool();
+  if (!client) return null;
+  await initRelationalSchema();
+  const key = String(docKey || "").trim();
+  if (!key) return null;
+  const result = await client.query("select data from state_documents where doc_key = $1", [key]);
+  return result.rows[0]?.data ?? null;
 }
 
 async function readUserTablePreferences() {
@@ -7841,6 +7852,7 @@ module.exports = {
   readOperationJob,
   deleteOperationArtifactsForJob,
   readStateDocuments,
+  readStateDocument,
   claimQueuedOperationJob,
   createPostgresBackup,
   readChannelApiLogs,

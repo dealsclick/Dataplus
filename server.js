@@ -3350,6 +3350,9 @@ function normalizeDb(db) {
   db.sourceCatalogOverrides = normalizeSourceCatalogOverrides(db.sourceCatalogOverrides);
   db.vendorCategoryMappings = normalizeVendorCategoryMappings(db.vendorCategoryMappings);
   db.catalogImportReviews = normalizeCatalogImportReviews(db.catalogImportReviews);
+  db.ebayTaxonomyIndexes = db.ebayTaxonomyIndexes && typeof db.ebayTaxonomyIndexes === "object" && !Array.isArray(db.ebayTaxonomyIndexes)
+    ? db.ebayTaxonomyIndexes
+    : {};
   db.deletedOrders = Array.isArray(db.deletedOrders) ? db.deletedOrders : [];
   db.syncRuns = Array.isArray(db.syncRuns) ? db.syncRuns : [];
   db.importJobs = normalizeImportJobs(db.importJobs, db.syncRuns);
@@ -7885,8 +7888,12 @@ function enrichShopifyCategoryMapping(mapping = {}) {
   };
 }
 
-async function ebayDefaultCategoryTreeId(db, marketplaceId = "EBAY_US") {
-  const data = await ebayRequest(db, `/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=${encodeURIComponent(marketplaceId || "EBAY_US")}`, { tokenType: "app" });
+async function ebayDefaultCategoryTreeId(db, marketplaceId = "EBAY_US", options = {}) {
+  const data = await ebayRequest(db, `/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=${encodeURIComponent(marketplaceId || "EBAY_US")}`, {
+    tokenType: "app",
+    timeoutMs: Math.max(3000, Math.min(Number(options.timeoutMs || 10000), 120000)),
+    operation: "Search eBay category tree"
+  });
   return String(data.categoryTreeId || "").trim();
 }
 
@@ -7912,22 +7919,199 @@ function compactEbayCategorySuggestion(suggestion = {}, treeId = "", treeVersion
   };
 }
 
-async function searchEbayTaxonomy(db, query = "", limit = 12, marketplaceId = "EBAY_US") {
+const ebayTaxonomyIndexCache = new Map();
+
+// Keep interactive taxonomy searches bounded. A slow PostgreSQL read should not
+// hold a browser request open while the caller is only looking for suggestions.
+function resolveWithin(promise, timeoutMs, fallback) {
+  return Promise.race([
+    Promise.resolve(promise).catch(() => fallback),
+    new Promise((resolve) => setTimeout(() => resolve(fallback), Math.max(1, Number(timeoutMs) || 1500)))
+  ]);
+}
+
+async function readEbayTaxonomyIndex(db = {}, marketplaceId = "EBAY_US") {
+  const key = String(marketplaceId || "EBAY_US").trim().toUpperCase();
+  if (ebayTaxonomyIndexCache.has(key)) return ebayTaxonomyIndexCache.get(key);
+  let indexes = db?.ebayTaxonomyIndexes || {};
+  const localIndex = indexes && typeof indexes === "object" ? indexes[key] || null : null;
+  if (localIndex) {
+    ebayTaxonomyIndexCache.set(key, localIndex);
+    return localIndex;
+  }
+  if (postgres.isPostgresEnabled()) {
+    const stored = await resolveWithin(postgres.readStateDocument("ebayTaxonomyIndexes"), 1500, null);
+    if (stored && typeof stored === "object") indexes = stored.ebayTaxonomyIndexes || stored;
+  }
+  const index = indexes && typeof indexes === "object" ? indexes[key] || null : null;
+  if (index) ebayTaxonomyIndexCache.set(key, index);
+  return index;
+}
+
+async function persistEbayTaxonomyIndex(db = {}, index = {}) {
+  const key = String(index.marketplaceId || "EBAY_US").trim().toUpperCase();
+  ebayTaxonomyIndexCache.set(key, index);
+  if (postgres.isPostgresEnabled()) {
+    const stored = await postgres.readStateDocument("ebayTaxonomyIndexes").catch(() => null);
+    const indexes = stored && typeof stored === "object" ? (stored.ebayTaxonomyIndexes || stored) : {};
+    await postgres.writeStateDocuments({ ebayTaxonomyIndexes: { ...indexes, [key]: index } });
+    return index;
+  }
+  db.ebayTaxonomyIndexes = { ...(db.ebayTaxonomyIndexes || {}), [key]: index };
+  await writeDb(normalizeDb(db));
+  return index;
+}
+
+function flattenEbayCategoryTree(node, parentPath = [], parentCategoryId = "", rows = []) {
+  const category = node?.category || {};
+  const categoryId = String(category.categoryId || "").trim();
+  const name = String(category.categoryName || "").trim();
+  const path = [...parentPath, name].filter(Boolean);
+  const children = Array.isArray(node?.childCategoryTreeNodes) ? node.childCategoryTreeNodes : [];
+  if (categoryId && name) {
+    rows.push({
+      id: categoryId,
+      categoryId,
+      name,
+      fullName: path.join(" > "),
+      path,
+      parentCategoryId,
+      categoryTreeNodeLevel: Number(category.categoryTreeNodeLevel || path.length),
+      leafCategoryTreeNode: children.length === 0
+    });
+  }
+  children.forEach((child) => flattenEbayCategoryTree(child, path, categoryId, rows));
+  return rows;
+}
+
+async function fetchEbayTaxonomyIndex(db = {}, marketplaceId = "EBAY_US", options = {}) {
+  const normalizedMarketplaceId = String(marketplaceId || "EBAY_US").trim().toUpperCase();
+  const timeoutMs = Math.max(10000, Math.min(Number(options.timeoutMs || 60000), 120000));
+  const categoryTreeId = await ebayDefaultCategoryTreeId(db, normalizedMarketplaceId, { timeoutMs });
+  if (!categoryTreeId) throw new Error("eBay category tree ID was not returned.");
+  const data = await ebayRequest(db, `/commerce/taxonomy/v1/category_tree/${encodeURIComponent(categoryTreeId)}`, {
+    tokenType: "app",
+    timeoutMs,
+    operation: "Download eBay category tree"
+  });
+  const categories = flattenEbayCategoryTree(data.rootCategoryNode);
+  if (!categories.length) throw new Error("eBay returned an empty category tree.");
+  const index = {
+    schemaVersion: 1,
+    marketplaceId: normalizedMarketplaceId,
+    categoryTreeId,
+    categoryTreeVersion: String(data.categoryTreeVersion || "").trim(),
+    categoryCount: categories.length,
+    categories,
+    syncedAt: new Date().toISOString(),
+    source: "eBay Taxonomy API"
+  };
+  await persistEbayTaxonomyIndex(db, index);
+  return index;
+}
+
+function indexedEbayCategoryCandidates(db, query = "", limit = 12, marketplaceId = "EBAY_US", taxonomyIndex = null) {
+  const terms = String(query || "").toLowerCase().match(/[a-z0-9]+/g) || [];
+  if (!terms.length) return { channel: "ebay", marketplaceId, categoryTreeId: "", total: 0, categories: [], source: "local-index" };
+  const max = Math.max(1, Math.min(Number(limit || 12), 25));
+  const rows = [];
+  const indexedRows = Array.isArray(taxonomyIndex?.categories) ? taxonomyIndex.categories : [];
+  if (indexedRows.length) {
+    for (const category of indexedRows) {
+      const fullName = String(category.fullName || category.name || "").trim();
+      const haystack = fullName.toLowerCase();
+      const matched = terms.filter((term) => haystack.includes(term));
+      if (!matched.length) continue;
+      const exactPhrase = String(query || "").trim().toLowerCase();
+      rows.push({
+        id: String(category.categoryId || category.id || "").trim(),
+        categoryId: String(category.categoryId || category.id || "").trim(),
+        name: category.name || fullName.split(" > ").pop() || fullName,
+        fullName,
+        path: Array.isArray(category.path) ? category.path : fullName.split(" > ").filter(Boolean),
+        taxonomyVersion: String(taxonomyIndex.categoryTreeVersion || ""),
+        categoryTreeVersion: String(taxonomyIndex.categoryTreeVersion || ""),
+        source: "eBay local taxonomy index",
+        _score: (exactPhrase && haystack.includes(exactPhrase) ? 100 : 0) + matched.length * 10 + (haystack.endsWith(terms[terms.length - 1]) ? 2 : 0)
+      });
+    }
+    const categories = Array.from(new Map(rows.sort((a, b) => b._score - a._score || a.fullName.localeCompare(b.fullName)).map((row) => [row.categoryId, row])).values())
+      .slice(0, max)
+      .map(({ _score, ...row }) => row);
+    return {
+      channel: "ebay",
+      marketplaceId,
+      categoryTreeId: String(taxonomyIndex.categoryTreeId || ""),
+      categoryTreeVersion: String(taxonomyIndex.categoryTreeVersion || ""),
+      syncedAt: String(taxonomyIndex.syncedAt || ""),
+      total: categories.length,
+      categories,
+      source: "local-index",
+      indexed: true
+    };
+  }
+  for (const category of normalizeCategorySettings(db?.categorySettings || [])) {
+    const mapping = category?.mappings?.ebay || category?.ebay || {};
+    const categoryId = String(mapping.categoryId || mapping.ebayCategoryId || "").trim();
+    const fullName = String(mapping.categoryPath || mapping.fullName || mapping.name || "").trim();
+    if (!categoryId || !fullName) continue;
+    const haystack = fullName.toLowerCase();
+    const matched = terms.filter((term) => haystack.includes(term));
+    if (!matched.length) continue;
+    const path = fullName.split(" > ").map((part) => part.trim()).filter(Boolean);
+    rows.push({
+      id: categoryId,
+      categoryId,
+      name: path[path.length - 1] || fullName,
+      fullName,
+      path,
+      taxonomyVersion: String(mapping.taxonomyVersion || "").trim(),
+      categoryTreeVersion: String(mapping.categoryTreeVersion || "").trim(),
+      source: "DataPlus indexed mapping",
+      _score: matched.length * 10 + (haystack.endsWith(terms[terms.length - 1]) ? 2 : 0)
+    });
+  }
+  const categories = Array.from(new Map(rows.sort((a, b) => b._score - a._score || a.fullName.localeCompare(b.fullName)).map((row) => [row.categoryId, row])).values())
+    .slice(0, max)
+    .map(({ _score, ...row }) => row);
+  return { channel: "ebay", marketplaceId, categoryTreeId: "", total: categories.length, categories, source: "local-index", indexed: false };
+}
+
+async function searchEbayTaxonomy(db, query = "", limit = 12, marketplaceId = "EBAY_US", options = {}) {
   const q = String(query || "").trim();
   if (!q) return { channel: "ebay", marketplaceId, categoryTreeId: "", total: 0, categories: [] };
   const max = Math.max(1, Math.min(Number(limit || 12), 25));
-  const categoryTreeId = await ebayDefaultCategoryTreeId(db, marketplaceId);
-  if (!categoryTreeId) throw new Error("eBay category tree ID was not returned.");
-  const data = await ebayRequest(db, `/commerce/taxonomy/v1/category_tree/${encodeURIComponent(categoryTreeId)}/get_category_suggestions?q=${encodeURIComponent(q)}`, { tokenType: "app" });
-  const suggestions = Array.isArray(data.categorySuggestions) ? data.categorySuggestions : [];
-  return {
-    channel: "ebay",
-    marketplaceId,
-    categoryTreeId,
-    categoryTreeVersion: String(data.categoryTreeVersion || "").trim(),
-    total: suggestions.length,
-    categories: suggestions.slice(0, max).map((suggestion) => compactEbayCategorySuggestion(suggestion, categoryTreeId, data.categoryTreeVersion || "")).filter((row) => row.categoryId)
-  };
+  const taxonomyIndex = await readEbayTaxonomyIndex(db, marketplaceId);
+  const local = indexedEbayCategoryCandidates(db, q, max, marketplaceId, taxonomyIndex);
+  if (taxonomyIndex?.categories?.length) return local;
+  if (options.allowLive === false) {
+    return {
+      ...local,
+      source: "unavailable",
+      indexed: false,
+      message: "The local eBay taxonomy index is not ready yet. Run the eBay taxonomy refresh job, then search again."
+    };
+  }
+  try {
+    const categoryTreeId = await ebayDefaultCategoryTreeId(db, marketplaceId, { timeoutMs: 10000 });
+    if (!categoryTreeId) throw new Error("eBay category tree ID was not returned.");
+    const data = await ebayRequest(db, `/commerce/taxonomy/v1/category_tree/${encodeURIComponent(categoryTreeId)}/get_category_suggestions?q=${encodeURIComponent(q)}`, {
+      tokenType: "app",
+      timeoutMs: 10000,
+      operation: "Search eBay category suggestions"
+    });
+    const suggestions = Array.isArray(data.categorySuggestions) ? data.categorySuggestions : [];
+    const categories = suggestions.slice(0, max).map((suggestion) => compactEbayCategorySuggestion(suggestion, categoryTreeId, data.categoryTreeVersion || "")).filter((row) => row.categoryId);
+    if (!categories.length && local.categories.length) {
+      return { ...local, warning: "eBay returned no live suggestions; showing indexed DataPlus mappings for review." };
+    }
+    return { channel: "ebay", marketplaceId, categoryTreeId, categoryTreeVersion: String(data.categoryTreeVersion || "").trim(), total: categories.length, categories, source: "ebay" };
+  } catch (error) {
+    if (local.categories.length) {
+      return { ...local, warning: error instanceof Error ? error.message : "eBay taxonomy is temporarily unavailable.", message: "Live eBay taxonomy is temporarily unavailable. Showing indexed DataPlus mappings for review." };
+    }
+    throw error;
+  }
 }
 
 function compactEbayAspect(aspect = {}) {
@@ -8227,6 +8411,118 @@ function queueEbayCategoryAutoMapJob(db = {}, options = {}) {
     }));
   }
   return { job, requested };
+}
+
+async function queueEbayTaxonomySyncJob(db = {}, options = {}) {
+  requireEnabledChannel(db, "eBay");
+  const marketplaceId = String(options.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || "EBAY_US").trim().toUpperCase();
+  const existing = options.force === true ? null : await findActiveImportJobByWorkerTask(db, "ebay-taxonomy-sync");
+  if (existing) return { duplicate: true, job: existing, marketplaceId };
+  const inline = shouldRunJobsInline();
+  const job = createImportJob(db, {
+    section: "Channels",
+    category: "eBay",
+    operation: "Refresh eBay category taxonomy",
+    direction: "sync",
+    status: "queued",
+    fileName: "ebay-taxonomy-index.json",
+    totalRows: 1,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: inline ? "" : "ebay-taxonomy-sync",
+    workerPayload: inline ? {} : { marketplaceId },
+    message: `Queued the ${marketplaceId} eBay category tree download for local search.`,
+    details: "The complete eBay category tree is stored locally so product and category mapping searches do not call eBay for every query."
+  });
+  if (inline) {
+    activeJobRecords.set(job.id, normalizeImportJob(job));
+    setImmediate(() => runEbayTaxonomySyncWorkerJob(job, { marketplaceId }).catch(async (error) => {
+      const message = error?.message || String(error);
+      console.error("eBay taxonomy sync failed", message);
+      finishImportJob(job, {
+        status: "failed",
+        phase: "failed",
+        message: `eBay taxonomy refresh failed: ${message}`,
+        errors: [message],
+        missingCount: 1,
+        finishedAt: new Date().toISOString()
+      });
+      activeJobRecords.delete(job.id);
+      upsertImportJobStore(job);
+      if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job).catch(() => {});
+    }));
+  }
+  return { duplicate: false, job, marketplaceId };
+}
+
+async function runEbayTaxonomySyncWorkerJob(job = {}, attrs = {}) {
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const marketplaceId = String(payload.marketplaceId || "EBAY_US").trim().toUpperCase();
+  const startedAt = job.startedAt || new Date().toISOString();
+  let workDb = null;
+  try {
+    job = await persistWorkerImportJob(job, {
+      status: "running",
+      phase: "downloading_ebay_taxonomy",
+      totalRows: 1,
+      processedRows: 0,
+      progressPercent: 5,
+      startedAt,
+      message: `Downloading the complete ${marketplaceId} eBay category tree...`
+    });
+    workDb = await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 });
+    const index = await fetchEbayTaxonomyIndex(workDb, marketplaceId, { timeoutMs: 120000 });
+    const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "ebay-taxonomy-sync"));
+    fs.mkdirSync(jobDir, { recursive: true });
+    const reportPath = path.join(jobDir, "ebay-taxonomy-index.json");
+    const csvPath = path.join(jobDir, "ebay-taxonomy-categories.csv");
+    fs.writeFileSync(reportPath, JSON.stringify(index, null, 2));
+    fs.writeFileSync(csvPath, csvRecordsToText(index.categories));
+    job.originalFilePath = reportPath;
+    job.originalFileName = path.basename(reportPath);
+    job.fileName = path.basename(reportPath);
+    job.artifacts = [{
+      kind: "categories",
+      fileName: path.basename(csvPath),
+      filePath: csvPath,
+      contentType: "text/csv; charset=utf-8",
+      rowCount: index.categoryCount,
+      byteSize: fs.statSync(csvPath).size
+    }];
+    finishImportJob(job, {
+      status: "success",
+      phase: "complete",
+      totalRows: index.categoryCount,
+      processedRows: index.categoryCount,
+      changed: index.categoryCount,
+      missingCount: 0,
+      progressPercent: 100,
+      estimatedSecondsRemaining: 0,
+      message: `Stored ${index.categoryCount.toLocaleString()} ${marketplaceId} eBay categories locally for fast mapping searches.`,
+      details: `Category tree ${index.categoryTreeId}${index.categoryTreeVersion ? `, version ${index.categoryTreeVersion}` : ""}. Refresh this job when eBay publishes a newer tree.`,
+      finishedAt: new Date().toISOString()
+    });
+    await postgres.upsertOperationJob(job);
+    await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+    await postgres.upsertOperationArtifact(job, "categories").catch(() => {});
+    upsertImportJobStore(job);
+    if (!postgres.isPostgresEnabled() && workDb) await writeDb(normalizeDb(workDb));
+    return job;
+  } catch (error) {
+    const message = error?.message || String(error);
+    finishImportJob(job, {
+      status: "failed",
+      phase: "failed",
+      message: `eBay taxonomy refresh failed: ${message}`,
+      errors: [message],
+      missingCount: 1,
+      finishedAt: new Date().toISOString()
+    });
+    await postgres.upsertOperationJob(job).catch(() => {});
+    upsertImportJobStore(job);
+    throw error;
+  }
 }
 
 async function runEbayCategoryAutoMapWorkerJob(job = {}, attrs = {}) {
@@ -16704,6 +17000,15 @@ function publicEbayListing(listing = null) {
     merchantLocationKey: listing.merchantLocationKey || "",
     categoryId: listing.categoryId || "",
     categoryPath: listing.categoryPath || "",
+    categoryName: listing.categoryName || "",
+    localCategoryId: listing.localCategoryId || "",
+    localCategoryPath: listing.localCategoryPath || "",
+    liveCategoryId: listing.liveCategoryId || "",
+    liveCategoryPath: listing.liveCategoryPath || "",
+    liveCategoryName: listing.liveCategoryName || "",
+    liveCategorySyncedAt: listing.liveCategorySyncedAt || "",
+    sourceOfTruth: listing.sourceOfTruth || "",
+    importedFromEbayAt: listing.importedFromEbayAt || "",
     taxonomyVersion: listing.taxonomyVersion || "",
     condition: listing.condition || "",
     quantity: listing.quantity,
@@ -16871,6 +17176,7 @@ function publicInventoryItem(item = {}, context = {}) {
     defaultImage: item.defaultImage,
     images: Array.isArray(item.images) ? item.images : [],
     ebayListing: publicEbayListing(item.ebayListing),
+    ebayCategoryComparison: ebayCategoryComparison(rulesDb, item),
     productManagerFields: item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {},
     original: item.original || null,
     attributes: item.attributes && typeof item.attributes === "object" ? item.attributes : {},
@@ -16887,6 +17193,48 @@ function publicInventoryItem(item = {}, context = {}) {
     productCatalogSku: item.productCatalogSku || "",
     productCatalogStatus: item.productCatalogStatus || ""
   };
+}
+
+function ebayCategoryText(value = "") {
+  return String(value || "").trim();
+}
+
+function ebayCategoryPathLeaf(path = "") {
+  return ebayCategoryText(path).split(">").map((part) => part.trim()).filter(Boolean).pop() || "";
+}
+
+function ebayLocalCategoryInfo(db = {}, item = {}) {
+  const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const fields = item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {};
+  const mapping = categoryMappingForProduct(db, item, "ebay") || {};
+  const channelDefault = ebayChannelSettings(db).ebayDefaultCategoryId || "";
+  const importedFromEbay = listing.sourceOfTruth === "ebay_catalog_sync";
+  const id = ebayCategoryText(item.ebayCategoryId || fields.ebayCategoryId || listing.localCategoryId || (!importedFromEbay ? listing.categoryId : "") || mapping.categoryId || mapping.ebayCategoryId || channelDefault);
+  const path = ebayCategoryText(item.ebayCategoryPath || fields.ebayCategoryPath || listing.localCategoryPath || (!importedFromEbay ? listing.categoryPath : "") || mapping.categoryPath || mapping.path || "");
+  return { id, path, name: ebayCategoryPathLeaf(path) };
+}
+
+function ebayLiveCategoryInfo(item = {}) {
+  const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const live = listing.liveCategory && typeof listing.liveCategory === "object" ? listing.liveCategory : {};
+  const importedFromEbay = listing.sourceOfTruth === "ebay_catalog_sync";
+  const id = ebayCategoryText(item.ebayLiveCategoryId || listing.liveCategoryId || live.id || (importedFromEbay ? listing.categoryId : ""));
+  const path = ebayCategoryText(item.ebayLiveCategoryPath || listing.liveCategoryPath || live.path || (importedFromEbay ? listing.categoryPath : ""));
+  const name = ebayCategoryText(item.ebayLiveCategoryName || listing.liveCategoryName || live.name || ebayCategoryPathLeaf(path));
+  return { id, path, name, syncedAt: listing.liveCategorySyncedAt || listing.importedFromEbayAt || "" };
+}
+
+function ebayCategoryComparison(db = {}, item = {}) {
+  const live = ebayLiveCategoryInfo(item);
+  const local = ebayLocalCategoryInfo(db, item);
+  const normalize = (value) => ebayCategoryText(value).toLowerCase();
+  const matches = live.id && local.id
+    ? normalize(live.id) === normalize(local.id)
+    : Boolean(live.path && local.path && normalize(live.path) === normalize(local.path));
+  const hasLive = Boolean(live.id || live.path || live.name);
+  const hasLocal = Boolean(local.id || local.path || local.name);
+  const status = matches ? "match" : hasLive && hasLocal ? "different" : hasLive ? "live-only" : hasLocal ? "local-only" : "not-configured";
+  return { status, live, local, checkedAt: live.syncedAt || "" };
 }
 
 function publicInventoryContext() {
@@ -17033,6 +17381,7 @@ function publicInventoryListItem(item = {}, context = {}) {
     alternateVendorCount: Number(item.alternateVendorCount || 0),
     updatedAt: item.updatedAt || item.productDumpUpdatedAt || "",
     ebayListing: publicEbayListing(item.ebayListing),
+    ebayCategoryComparison: ebayCategoryComparison(rulesDb, item),
     aliasCount: Array.isArray(item.aliases) ? item.aliases.filter((alias) => alias.active !== false).length : 0,
     shadowSkuCount: Array.isArray(item.shadowSkus) ? item.shadowSkus.length : 0,
     inProducts: item.inProducts === undefined ? true : Boolean(item.inProducts),
@@ -18888,12 +19237,18 @@ function ebayProductCostForItems(db, items) {
 
 function ebayListingCategoryId(db, item, config = {}) {
   if (config.categoryId) return String(config.categoryId).trim();
-  if (item.ebayListing?.categoryId) return String(item.ebayListing.categoryId).trim();
-  const channelSettings = ebayChannelSettings(db);
-  if (channelSettings.ebayDefaultCategoryId) return String(channelSettings.ebayDefaultCategoryId).trim();
+  if (item.ebayCategoryId) return String(item.ebayCategoryId).trim();
+  if (item.productManagerFields?.ebayCategoryId) return String(item.productManagerFields.ebayCategoryId).trim();
+  const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const importedFromEbay = listing.sourceOfTruth === "ebay_catalog_sync";
+  if (listing.localCategoryId) return String(listing.localCategoryId).trim();
+  if (!importedFromEbay && listing.categoryId) return String(listing.categoryId).trim();
   const categoryName = formatCategoryName(item.category || item.mainCategory || "");
   const setting = (db.categorySettings || []).find((row) => formatCategoryName(row.name || row.category || "") === categoryName);
-  return String(setting?.mappings?.ebay?.categoryId || setting?.ebay?.categoryId || "").trim();
+  const mapped = setting?.mappings?.ebay?.categoryId || setting?.ebay?.categoryId || "";
+  if (mapped) return String(mapped).trim();
+  const channelSettings = ebayChannelSettings(db);
+  return String(channelSettings.ebayDefaultCategoryId || "").trim();
 }
 
 function ebayChannelSettings(db = {}) {
@@ -19712,6 +20067,22 @@ function ebayOfferCurrency(offer = {}) {
 
 function ebayCatalogOfferSnapshot(offer = {}) {
   const price = offer.pricingSummary?.price || offer.price || {};
+  const category = offer.category || offer.primaryCategory || offer.categorySummary || {};
+  const categoryPath = String(
+    offer.categoryPath
+    || offer.categoryPathName
+    || category.path
+    || category.categoryPath
+    || category.name
+    || ""
+  ).trim();
+  const categoryName = String(
+    offer.categoryName
+    || category.name
+    || category.categoryName
+    || ebayCategoryPathLeaf(categoryPath)
+    || ""
+  ).trim();
   return {
     sku: String(offer.sku || "").trim(),
     offerId: String(offer.offerId || "").trim(),
@@ -19719,6 +20090,8 @@ function ebayCatalogOfferSnapshot(offer = {}) {
     status: ebayOfferStatus(offer),
     marketplaceId: String(offer.marketplaceId || "").trim(),
     categoryId: String(offer.categoryId || "").trim(),
+    categoryPath,
+    categoryName,
     merchantLocationKey: String(offer.merchantLocationKey || "").trim(),
     availableQuantity: Number(offer.availableQuantity ?? offer.quantity ?? offer.inventory?.availableQuantity ?? 0) || 0,
     pricingSummary: { price: { value: price?.value ?? price ?? 0, currency: price?.currency || "" } },
@@ -19730,10 +20103,22 @@ function ebayCatalogOfferSnapshot(offer = {}) {
 
 function ebayCatalogInventorySnapshot(item = {}) {
   const product = item.product || {};
+  const category = item.category || product.category || item.primaryCategory || {};
+  const categoryPath = String(
+    item.categoryPath
+    || item.categoryPathName
+    || category.path
+    || category.categoryPath
+    || category.name
+    || ""
+  ).trim();
   const quantity = Number(item.availability?.shipToLocationAvailability?.quantity ?? item.availableQuantity ?? item.quantity ?? 0) || 0;
   return {
     sku: String(item.sku || "").trim(),
     condition: String(item.condition || "").trim(),
+    categoryId: String(item.categoryId || category.id || category.categoryId || "").trim(),
+    categoryPath,
+    categoryName: String(item.categoryName || category.name || category.categoryName || ebayCategoryPathLeaf(categoryPath) || "").trim(),
     availability: { shipToLocationAvailability: { quantity } },
     product: {
       title: String(product.title || "").trim(),
@@ -19826,6 +20211,8 @@ function ebayTradingListingRows(listing = {}, options = {}) {
     live: true,
     marketplaceId,
     categoryId: ebayTradingText(listing.PrimaryCategory?.CategoryID),
+    categoryPath: ebayTradingText(listing.PrimaryCategory?.CategoryPath || listing.PrimaryCategory?.CategoryName),
+    categoryName: ebayTradingText(listing.PrimaryCategory?.CategoryName),
     merchantLocationKey: "",
     quantity: baseQuantity,
     price: basePrice.value,
@@ -19951,6 +20338,8 @@ function mergeEbayCatalogRows(tradingRows = [], inventoryRows = []) {
     live: Boolean(existing.live || incoming.live),
     marketplaceId: incoming.marketplaceId || existing.marketplaceId || "",
     categoryId: incoming.categoryId || existing.categoryId || "",
+    categoryPath: incoming.categoryPath || existing.categoryPath || "",
+    categoryName: incoming.categoryName || existing.categoryName || "",
     merchantLocationKey: incoming.merchantLocationKey || existing.merchantLocationKey || "",
     quantity: Number.isFinite(Number(incoming.quantity)) ? Number(incoming.quantity) : Number(existing.quantity || 0),
     price: Number(incoming.price || 0) > 0 ? Number(incoming.price) : Number(existing.price || 0),
@@ -20017,7 +20406,9 @@ function ebayCatalogRowFromOffer(offer = {}, inventoryItem = {}) {
     status,
     live: Boolean(listingId) || /published|active|listed/i.test(status),
     marketplaceId,
-    categoryId: String(offer.categoryId || "").trim(),
+    categoryId: String(offer.categoryId || inventoryItem.categoryId || "").trim(),
+    categoryPath: String(offer.categoryPath || offer.categoryPathName || inventoryItem.categoryPath || "").trim(),
+    categoryName: String(offer.categoryName || inventoryItem.categoryName || ebayCategoryPathLeaf(offer.categoryPath || offer.categoryPathName || inventoryItem.categoryPath || "")).trim(),
     merchantLocationKey: String(offer.merchantLocationKey || "").trim(),
     quantity,
     price: ebayOfferPrice(offer),
@@ -20317,32 +20708,47 @@ function findInventoryByEbayCatalogRow(db = {}, row = {}) {
 
 function applyEbayCatalogRowToProduct(db, item, row, matchBy = "sku") {
   const now = new Date().toISOString();
-  const previous = JSON.stringify(item.ebayListing || {});
+  const existingListing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const importedFromEbay = existingListing.sourceOfTruth === "ebay_catalog_sync";
+  const previous = JSON.stringify(existingListing);
+  const localCategoryId = existingListing.localCategoryId || (!importedFromEbay ? existingListing.categoryId : "") || item.ebayCategoryId || item.productManagerFields?.ebayCategoryId || "";
+  const localCategoryPath = existingListing.localCategoryPath || (!importedFromEbay ? existingListing.categoryPath : "") || item.ebayCategoryPath || item.productManagerFields?.ebayCategoryPath || "";
+  const liveCategoryId = row.categoryId || existingListing.liveCategoryId || (importedFromEbay ? existingListing.categoryId : "") || "";
+  const liveCategoryPath = row.categoryPath || existingListing.liveCategoryPath || (importedFromEbay ? existingListing.categoryPath : "") || "";
+  const liveCategoryName = row.categoryName || existingListing.liveCategoryName || (importedFromEbay ? existingListing.categoryName : "") || ebayCategoryPathLeaf(liveCategoryPath);
   item.ebayListing = {
-    ...(item.ebayListing || {}),
+    ...existingListing,
     marketplaceId: row.marketplaceId,
-    merchantLocationKey: row.merchantLocationKey || item.ebayListing?.merchantLocationKey || "",
-    categoryId: row.categoryId || item.ebayListing?.categoryId || "",
-    merchantSku: row.sku || item.ebayListing?.merchantSku || item.sku || "",
-    price: row.price || item.ebayListing?.price || 0,
+    merchantLocationKey: row.merchantLocationKey || existingListing.merchantLocationKey || "",
+    // categoryId/categoryPath remain the local launch mapping for compatibility with
+    // eBay publishing. The marketplace snapshot is kept separately below.
+    categoryId: localCategoryId,
+    categoryPath: localCategoryPath,
+    localCategoryId,
+    localCategoryPath,
+    liveCategoryId,
+    liveCategoryPath,
+    liveCategoryName,
+    liveCategorySyncedAt: now,
+    merchantSku: row.sku || existingListing.merchantSku || item.sku || "",
+    price: row.price || existingListing.price || 0,
     quantity: row.quantity,
-    currency: row.currency || item.ebayListing?.currency || "USD",
-    offerId: row.offerId || item.ebayListing?.offerId || "",
-    listingId: row.listingId || item.ebayListing?.listingId || "",
-    listingUrl: row.listingUrl || item.ebayListing?.listingUrl || "",
+    currency: row.currency || existingListing.currency || "USD",
+    offerId: row.offerId || existingListing.offerId || "",
+    listingId: row.listingId || existingListing.listingId || "",
+    listingUrl: row.listingUrl || existingListing.listingUrl || "",
     status: row.live ? "published" : "offer",
     ebayStatus: row.status,
-    condition: row.condition || item.ebayListing?.condition || "",
-    currency: row.currency || item.ebayListing?.currency || "USD",
-    aspects: row.aspects || item.ebayListing?.aspects || {},
-    ePid: row.ePid || item.ebayListing?.ePid || "",
-    mpn: row.mpn || item.ebayListing?.mpn || "",
-    identifiers: row.identifiers || item.ebayListing?.identifiers || {},
-    paymentPolicyId: row.listingPolicies?.paymentPolicyId || item.ebayListing?.paymentPolicyId || "",
-    returnPolicyId: row.listingPolicies?.returnPolicyId || item.ebayListing?.returnPolicyId || "",
-    fulfillmentPolicyId: row.listingPolicies?.fulfillmentPolicyId || item.ebayListing?.fulfillmentPolicyId || "",
-    listingDuration: row.listingDuration || item.ebayListing?.listingDuration || "",
-    listingSource: row.listingSource || item.ebayListing?.listingSource || "",
+    condition: row.condition || existingListing.condition || "",
+    aspects: row.aspects || existingListing.aspects || {},
+    ePid: row.ePid || existingListing.ePid || "",
+    mpn: row.mpn || existingListing.mpn || "",
+    identifiers: row.identifiers || existingListing.identifiers || {},
+    paymentPolicyId: row.listingPolicies?.paymentPolicyId || existingListing.paymentPolicyId || "",
+    returnPolicyId: row.listingPolicies?.returnPolicyId || existingListing.returnPolicyId || "",
+    fulfillmentPolicyId: row.listingPolicies?.fulfillmentPolicyId || existingListing.fulfillmentPolicyId || "",
+    listingDuration: row.listingDuration || existingListing.listingDuration || "",
+    listingSource: row.listingSource || existingListing.listingSource || "",
     sourceOfTruth: "ebay_catalog_sync",
     importedFromEbayAt: now,
     matchBy
@@ -21222,7 +21628,11 @@ function applyInventoryPatch(item, body) {
     item.mainCategory = item.category;
     item.categoryVerified = true;
   }
-  if (body.mainCategory !== undefined) item.mainCategory = formatCategoryName(body.mainCategory);
+  if (body.mainCategory !== undefined) {
+    item.mainCategory = formatCategoryName(body.mainCategory);
+    item.category = item.mainCategory;
+    item.categoryVerified = Boolean(item.mainCategory);
+  }
   if (body.sourceCategory !== undefined) item.sourceCategory = formatCategoryName(body.sourceCategory);
   if (body.vendorCategory !== undefined) item.vendorCategory = formatCategoryName(body.vendorCategory);
   for (const field of numberFields) {
@@ -26485,6 +26895,16 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const item = await postgres.readProductByKey(parts[2]);
     if (!item) return notFound(res);
+    if (body.mainCategory !== undefined) {
+      const requestedMainCategory = formatCategoryName(body.mainCategory);
+      if (!requestedMainCategory) return sendJson(res, 400, { error: "Choose a main category from the category index." });
+      const categoryData = await publicCategoriesFast(requestedMainCategory, "main");
+      const knownCategory = (categoryData.categories || []).find((category) => formatCategoryName(category.name || "").toLowerCase() === requestedMainCategory.toLowerCase());
+      if (!knownCategory) return sendJson(res, 400, { error: `\"${requestedMainCategory}\" is not an approved main category. Choose an existing category or add it through Category Mappings first.` });
+      body.mainCategory = knownCategory.name;
+      body.category = knownCategory.name;
+      body.categoryVerified = true;
+    }
     const qtyBefore = Number(item.qty || 0);
     const reservedBefore = Number(item.reserved || 0);
     applyInventoryPatch(item, body);
@@ -26524,6 +26944,7 @@ async function handleApi(req, res) {
     await postgres.upsertProductsFromState([item]);
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
+    if (body.category !== undefined || body.mainCategory !== undefined) clearCategoryResponseCache();
     if (qtyBefore !== qtyAfter || reservedBefore !== reservedAfter || replenishableFieldsChanged) {
       await postgres.upsertInventoryLevelsFromProducts([item]);
     }
@@ -27244,6 +27665,41 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/ai/ebay-category-research") {
+    const body = await parseBody(req);
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (!settings.aiEnabled) return sendJson(res, 403, { error: "David is not enabled. Verify and enable an AI provider in System Settings first." });
+    const product = body.product && typeof body.product === "object" ? body.product : {};
+    const query = String(body.query || product.title || product.mainCategory || product.category || product.brand || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 160);
+    if (!query) return sendJson(res, 400, { error: "Enter a product title, category, or search phrase first." });
+    try {
+      const categoryDb = await readCategoryWorkflowDb();
+      const channelSettings = ebayChannelSettings(categoryDb);
+      const marketplaceId = String(body.marketplaceId || channelSettings.ebayMarketplaceId || "EBAY_US");
+      const result = await searchEbayTaxonomy(categoryDb, query, 20, marketplaceId);
+      const categories = Array.isArray(result.categories) ? result.categories : [];
+      return sendJson(res, 200, {
+        ...result,
+        query,
+        message: categories.length
+          ? `David found ${categories.length} eBay taxonomy candidates for '${query}'. Review the paths before applying one.`
+          : `David could not find an eBay taxonomy candidate for '${query}'. Try a more specific product phrase.`
+      });
+    } catch (error) {
+      return sendJson(res, 200, {
+        query,
+        channel: "ebay",
+        total: 0,
+        categories: [],
+        warning: error instanceof Error ? error.message : "David could not search the eBay taxonomy.",
+        message: "David could not reach the live eBay taxonomy. Try again or enter a more specific category phrase."
+      });
+    }
+  }
+
   if (req.method === "POST" && url.pathname === "/api/ai/chat") {
     const body = await parseBody(req);
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
@@ -27256,8 +27712,30 @@ async function handleApi(req, res) {
       .filter((message) => message.content);
     if (!messages.length || messages[messages.length - 1].role !== "user") return sendJson(res, 400, { error: "Ask David a question to begin." });
     const pageContext = await davidPageContextSnapshot(body.context || {}, settings).catch(() => ({}));
+    const latestUserMessage = messages[messages.length - 1].content;
+    let ebayTaxonomyResearch = null;
+    let ebayTaxonomyResearchError = "";
+    const asksForCategory = /\b(?:categor(?:y|ies)|taxonomy|classif(?:y|ication)|item specifics)\b/i.test(latestUserMessage);
+    const hasEbayContext = /\b(?:ebay|marketplace listing)\b/i.test(latestUserMessage)
+      || Boolean(body.context?.ebayCategoryQuery)
+      || pageContext.page === "product";
+    if (asksForCategory && hasEbayContext) {
+      try {
+        const categoryDb = await readCategoryWorkflowDb();
+        const channelSettings = ebayChannelSettings(categoryDb);
+        const contextQuery = body.context?.ebayCategoryQuery || body.context?.productTitle || body.context?.mainCategory || pageContext.title || pageContext.mainCategory;
+        const query = String(contextQuery || latestUserMessage)
+          .replace(/\b(?:can|could|would|you|please|ask|david|look|search|find|for|me|the|an|a|ebay|category|categories|taxonomy|classification|product|listing|what|is|best)\b/gi, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 160);
+        if (query) ebayTaxonomyResearch = await searchEbayTaxonomy(categoryDb, query, 10, String(channelSettings.ebayMarketplaceId || "EBAY_US"));
+      } catch (error) {
+        ebayTaxonomyResearchError = error instanceof Error ? error.message : "The eBay taxonomy lookup failed.";
+      }
+    }
     const enabledScopes = AI_TOOL_SCOPE_DEFINITIONS.filter((scope) => davidToolEnabled(settings, scope.id)).map((scope) => scope.id);
-    const instruction = `You are David, DataPlus's concise internal operations assistant. Help users understand catalog, inventory, fulfillment, purchasing, warehouse, channel, and settings workflows. You have only these enabled capabilities: ${enabledScopes.join(", ") || "none"}. Some approved actions are available through separate DataPlus controls, but you never execute, claim to execute, or imply that you executed a system change yourself. For an action request, explain that DataPlus will run a readiness review and require explicit user approval. Use the supplied page context when it is relevant, never expose sensitive customer details, and say when information is unavailable.\n\nCurrent page context:\n${JSON.stringify(pageContext)}`;
+    const instruction = `You are David, DataPlus's concise internal operations assistant. Help users understand catalog, inventory, fulfillment, purchasing, warehouse, channel, and settings workflows. You have only these enabled capabilities: ${enabledScopes.join(", ") || "none"}. Some approved actions are available through separate DataPlus controls, but you never execute, claim to execute, or imply that you executed a system change yourself. For an action request, explain that DataPlus will run a readiness review and require explicit user approval. Use the supplied page context when it is relevant, never expose sensitive customer details, and say when information is unavailable. When authoritative eBay taxonomy results are supplied below, show the candidate category ID and full path clearly and tell the user to review before applying it.\n\nCurrent page context:\n${JSON.stringify(pageContext)}${ebayTaxonomyResearch ? `\n\nAuthoritative eBay taxonomy results for this question:\n${JSON.stringify(ebayTaxonomyResearch.categories || [])}` : ""}${ebayTaxonomyResearchError ? `\n\nThe authoritative eBay taxonomy lookup failed with this message:\n${ebayTaxonomyResearchError}` : ""}`;
     try {
       const response = aiConfig.provider === "google-ai-studio"
         ? await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
@@ -27283,11 +27761,22 @@ async function handleApi(req, res) {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(String(payload?.error?.message || "David could not complete that request."));
       await recordAiUsage(aiConfig.provider, aiConfig.model, "david_chat", payload).catch(() => {});
-      const reply = (aiConfig.provider === "google-ai-studio" ? interactionOutputText(payload) : String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""))).trim();
+      const modelReply = (aiConfig.provider === "google-ai-studio" ? interactionOutputText(payload) : String(payload.output_text || (payload.output || []).flatMap((entry) => entry.content || []).map((content) => content.text || "").join(""))).trim();
+      const taxonomyAppendix = ebayTaxonomyResearch?.categories?.length
+        ? `eBay taxonomy results for review:\n${ebayTaxonomyResearch.categories.map((candidate, index) => `${index + 1}. ID ${candidate.categoryId || candidate.id || "not returned"} - ${candidate.fullName || candidate.path || candidate.name || "Unnamed category"}`).join("\n")}`
+        : ebayTaxonomyResearchError
+          ? `I could not query the eBay taxonomy: ${ebayTaxonomyResearchError}`
+          : "";
+      const reply = [modelReply, taxonomyAppendix].filter(Boolean).join("\n\n").trim();
       if (!reply) throw new Error("David returned an empty response. Please try again.");
       return sendJson(res, 200, { reply, provider: aiConfig.provider, model: aiConfig.model });
     } catch (error) {
-      return sendJson(res, 502, { error: error instanceof Error ? error.message : "David is unavailable right now." });
+      const message = error instanceof Error ? error.message : "David is unavailable right now.";
+      const taxonomyFallback = ebayTaxonomyResearch?.categories?.length
+        ? `I could not complete the AI explanation, but the eBay taxonomy lookup succeeded. Review these candidates:\n${ebayTaxonomyResearch.categories.map((candidate, index) => `${index + 1}. ID ${candidate.categoryId || candidate.id || "not returned"} - ${candidate.fullName || candidate.path || candidate.name || "Unnamed category"}`).join("\n")}`
+        : "";
+      if (taxonomyFallback) return sendJson(res, 200, { reply: taxonomyFallback, provider: aiConfig.provider, model: aiConfig.model, warning: message });
+      return sendJson(res, 200, { reply: `David could not respond: ${message}`, provider: aiConfig.provider, model: aiConfig.model, warning: message });
     }
   }
 
@@ -29799,7 +30288,7 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     db.inventory = [item];
     const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
-    const categoryId = String(listing.categoryId || ebayListingCategoryId(db, item, listing) || "").trim();
+    const categoryId = String(ebayListingCategoryId(db, item, listing) || "").trim();
     if (!categoryId) return sendJson(res, 400, { error: "Add an eBay category before loading attributes." });
     const attributes = await ebayCategoryAspects(db, categoryId, { categoryTreeId: listing.taxonomyVersion || "" });
     const now = new Date().toISOString();
@@ -32242,15 +32731,65 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/categories") {
-    const db = await readCategoryWorkflowDb();
-    const settings = ebayChannelSettings(db);
-    const result = await searchEbayTaxonomy(
-      db,
-      url.searchParams.get("q") || "",
-      url.searchParams.get("limit") || 12,
-      url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US"
+    const db = await resolveWithin(
+      readDbFast({ skipInventory: true }),
+      1500,
+      { channels: [], connections: [], systemSettings: {}, categorySettings: [], ebayTaxonomyIndexes: {} }
     );
-    return sendJson(res, 200, result);
+    const settings = ebayChannelSettings(db);
+    try {
+      const result = await searchEbayTaxonomy(
+        db,
+        url.searchParams.get("q") || "",
+        url.searchParams.get("limit") || 12,
+        url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US",
+        { allowLive: false }
+      );
+      return sendJson(res, 200, result);
+    } catch (error) {
+      return sendJson(res, 200, {
+        channel: "ebay",
+        marketplaceId: url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US",
+        total: 0,
+        categories: [],
+        source: "unavailable",
+        warning: error instanceof Error ? error.message : "eBay taxonomy is temporarily unavailable.",
+        message: "Live eBay taxonomy is temporarily unavailable. Try again or use an indexed mapping."
+      });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/status") {
+    const settings = ebayChannelSettings(db);
+    const marketplaceId = String(url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US").trim().toUpperCase();
+    const index = await readEbayTaxonomyIndex(db, marketplaceId);
+    return sendJson(res, 200, {
+      channel: "ebay",
+      marketplaceId,
+      indexed: Boolean(index?.categories?.length),
+      categoryCount: Number(index?.categoryCount || index?.categories?.length || 0),
+      categoryTreeId: index?.categoryTreeId || "",
+      categoryTreeVersion: index?.categoryTreeVersion || "",
+      syncedAt: index?.syncedAt || "",
+      source: index?.source || ""
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/ebay/refresh") {
+    const body = await parseBody(req);
+    const settings = ebayChannelSettings(db);
+    const result = await queueEbayTaxonomySyncJob(db, {
+      marketplaceId: body.marketplaceId || settings.ebayMarketplaceId || "EBAY_US",
+      force: body.force === true
+    });
+    if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(result.job);
+    else await writeDb(normalizeDb(db));
+    return sendJson(res, result.duplicate ? 200 : 202, {
+      ...result,
+      message: result.duplicate
+        ? `eBay taxonomy refresh is already running as Job ${result.job.jobNumber || result.job.id}.`
+        : `eBay taxonomy refresh queued as Job ${result.job.jobNumber || result.job.id}.`
+    });
   }
 
   if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/ebay/map-current") {
@@ -35197,13 +35736,59 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/categories") {
     const settings = ebayChannelSettings(db);
-    const result = await searchEbayTaxonomy(
-      db,
-      url.searchParams.get("q") || "",
-      url.searchParams.get("limit") || 12,
-      url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US"
-    );
-    return sendJson(res, 200, result);
+    try {
+      const result = await searchEbayTaxonomy(
+        db,
+        url.searchParams.get("q") || "",
+        url.searchParams.get("limit") || 12,
+        url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US",
+        { allowLive: false }
+      );
+      return sendJson(res, 200, result);
+    } catch (error) {
+      return sendJson(res, 200, {
+        channel: "ebay",
+        marketplaceId: url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US",
+        total: 0,
+        categories: [],
+        source: "unavailable",
+        warning: error instanceof Error ? error.message : "eBay taxonomy is temporarily unavailable.",
+        message: "Live eBay taxonomy is temporarily unavailable. Try again or use an indexed mapping."
+      });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/status") {
+    const settings = ebayChannelSettings(db);
+    const marketplaceId = String(url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US").trim().toUpperCase();
+    const index = await readEbayTaxonomyIndex(db, marketplaceId);
+    return sendJson(res, 200, {
+      channel: "ebay",
+      marketplaceId,
+      indexed: Boolean(index?.categories?.length),
+      categoryCount: Number(index?.categoryCount || index?.categories?.length || 0),
+      categoryTreeId: index?.categoryTreeId || "",
+      categoryTreeVersion: index?.categoryTreeVersion || "",
+      syncedAt: index?.syncedAt || "",
+      source: index?.source || ""
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/ebay/refresh") {
+    const body = await parseBody(req);
+    const settings = ebayChannelSettings(db);
+    const result = await queueEbayTaxonomySyncJob(db, {
+      marketplaceId: body.marketplaceId || settings.ebayMarketplaceId || "EBAY_US",
+      force: body.force === true
+    });
+    if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(result.job);
+    else await writeDb(normalizeDb(db));
+    return sendJson(res, result.duplicate ? 200 : 202, {
+      ...result,
+      message: result.duplicate
+        ? `eBay taxonomy refresh is already running as Job ${result.job.jobNumber || result.job.id}.`
+        : `eBay taxonomy refresh queued as Job ${result.job.jobNumber || result.job.id}.`
+    });
   }
 
   if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/ebay/map-current") {
@@ -36462,6 +37047,7 @@ async function handleApi(req, res) {
       });
     }
     await writeDb(db);
+    if (body.category !== undefined || body.mainCategory !== undefined) clearCategoryResponseCache();
     return sendJson(res, 200, { item, summary: summarize(db) });
   }
 
@@ -36539,7 +37125,7 @@ async function handleApi(req, res) {
     const item = db.inventory.find((row) => row.id === parts[2]);
     if (!item) return notFound(res);
     const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
-    const categoryId = String(listing.categoryId || ebayListingCategoryId(db, item, listing) || "").trim();
+    const categoryId = String(ebayListingCategoryId(db, item, listing) || "").trim();
     if (!categoryId) return sendJson(res, 400, { error: "Add an eBay category before loading attributes." });
     const attributes = await ebayCategoryAspects(db, categoryId, { categoryTreeId: listing.taxonomyVersion || "" });
     const now = new Date().toISOString();
@@ -38770,6 +39356,7 @@ module.exports = {
   queueEbayPriceInventorySyncJob,
   queueEbayListingLaunchJob,
   queueEbayCategoryAutoMapJob,
+  queueEbayTaxonomySyncJob,
   readDbFast,
   readExportMappingsApiStore,
   readSystemSettingsStore,
@@ -38781,6 +39368,7 @@ module.exports = {
   runEbayOrderImportWorkerJob,
   runEbayPriceInventorySyncWorkerJob,
   runEbayListingLaunchWorkerJob,
+  runEbayTaxonomySyncWorkerJob,
   runJobsRetentionCleanupWorkerJob,
   runMappedProductImportWorkerJob,
   runShopifyExistingVariantLinkWorkerJob,
