@@ -11058,16 +11058,17 @@ async function readCategoryReviewContext(categoryId = "", scope = "main") {
   const key = String(categoryId || "").trim();
   if (!key) return { db: null, source: null };
   if (postgres.isPostgresEnabled()) {
-    const [source, state] = await Promise.all([
+    const [source, state, categorySetting] = await Promise.all([
       postgres.readCategorySummaryEntry(normalizedScope, key),
-      postgres.readStateFields(["channels", "connections", "categorySettings"], { fallbackToLegacy: false })
+      postgres.readStateFields(["channels", "connections"], { fallbackToLegacy: false }),
+      postgres.readStateEntityDocument("categorySettings", key)
     ]);
     if (!source) return { db: null, source: null };
     const db = normalizeDb({
       inventory: [],
       channels: state.channels || [],
       connections: state.connections || [],
-      categorySettings: state.categorySettings || []
+      categorySettings: categorySetting ? [categorySetting] : []
     });
     return { db, source };
   }

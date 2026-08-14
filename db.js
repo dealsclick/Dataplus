@@ -1222,6 +1222,22 @@ async function readStateDocument(docKey = "") {
   return result.rows[0]?.data ?? null;
 }
 
+async function readStateEntityDocument(collection = "", entityId = "") {
+  const client = getPool();
+  if (!client) return null;
+  if (!ENTITY_DOCUMENT_COLLECTIONS.has(collection)) return null;
+  await initRelationalSchema();
+  const normalizedEntityId = String(entityId || "").trim();
+  if (!normalizedEntityId) return null;
+  const result = await client.query(`
+    select data
+    from entity_documents
+    where collection = $1 and entity_id = $2
+    limit 1
+  `, [collection, normalizedEntityId]);
+  return result.rows[0]?.data ?? null;
+}
+
 async function readUserTablePreferences() {
   const client = getPool();
   if (!client) return {};
@@ -7967,6 +7983,7 @@ module.exports = {
   readLiteState,
   readStateField,
   readStateFields,
+  readStateEntityDocument,
   readUserTablePreferences,
   upsertCategoryChannelMappingsFromState,
   upsertStateEntityDocument,
