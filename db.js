@@ -130,6 +130,12 @@ async function initRelationalSchema() {
       updated_at timestamptz not null default now(),
       primary key (collection, entity_id)
     );
+    create index if not exists entity_documents_category_id_idx
+      on entity_documents (collection, (data->>'categoryId'))
+      where collection = 'categorySettings';
+    create index if not exists entity_documents_category_public_id_idx
+      on entity_documents (collection, (data->>'id'))
+      where collection = 'categorySettings';
     create index if not exists entity_documents_collection_position_idx on entity_documents (collection, position);
     create index if not exists entity_documents_collection_updated_idx on entity_documents (collection, updated_at desc);
 
@@ -1232,7 +1238,12 @@ async function readStateEntityDocument(collection = "", entityId = "") {
   const result = await client.query(`
     select data
     from entity_documents
-    where collection = $1 and entity_id = $2
+    where collection = $1
+      and (
+        entity_id = $2
+        or ($1 = 'categorySettings' and data->>'categoryId' = $2)
+        or ($1 = 'categorySettings' and data->>'id' = $2)
+      )
     limit 1
   `, [collection, normalizedEntityId]);
   return result.rows[0]?.data ?? null;
