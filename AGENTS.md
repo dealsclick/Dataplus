@@ -250,6 +250,9 @@ The system category/master category is the canonical internal category. Vendor c
 - “Map all to eBay”/similar bulk actions must be explicit, reviewable, and job-backed.
 - Category attributes and required channel fields belong in the category/channel mapping model, not scattered duplicate product fields.
 - Do not silently replace an approved manual mapping with an AI suggestion.
+- After a channel category mapping is saved, let the user keep the mapping only, refresh affected DataPlus records immediately, or snooze the refresh until a visible future time.
+- Category refresh scope is explicit: existing SKU records, local channel records, or both. Every refresh is a durable job visible in Jobs and must survive an application restart.
+- A category refresh updates DataPlus metadata and readiness only. It must not publish products or alter a live marketplace listing without a separate confirmed channel action.
 - David can review all unlocked main-category mappings in a background worker using the locally cached Shopify/Google and eBay taxonomies.
 - The configurable automatic approval threshold defaults to 75%. Suggestions at or above the threshold are applied and locked; lower-confidence or no-match results stay in the category approval queue.
 - Background review must skip locked mappings and preserve approved manual mappings. Unlocking a mapping explicitly allows it to be reviewed or replaced again.

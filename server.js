@@ -11864,6 +11864,7 @@ function normalizeImportJob(job = {}) {
     estimatedProductRows: Number(job.estimatedProductRows ?? job.raw?.estimatedProductRows ?? 0) || 0,
     workerTask: job.workerTask || '',
     workerPayload: job.workerPayload && typeof job.workerPayload === "object" ? job.workerPayload : {},
+    scheduledFor: job.scheduledFor || job.raw?.scheduledFor || job.workerPayload?.scheduledFor || '',
     workerId: job.workerId || '',
     workerLastSeenAt: job.workerLastSeenAt || '',
     workerClaimedAt: job.workerClaimedAt || '',
@@ -12100,7 +12101,7 @@ async function mergedImportJobsAsync(db = {}) {
             estimatedSecondsRemaining: 0
           });
         }
-        if (["queued", "running"].includes(status) && !hasActiveWorker && updatedAt < SERVER_STARTED_AT && !isExternalWorkerJob(job)) {
+        if (["queued", "running"].includes(status) && !hasActiveWorker && updatedAt < SERVER_STARTED_AT && !isExternalWorkerJob(job) && !job.workerPayload?.categoryMappingRefresh) {
           if (activeJobLooksComplete(job)) {
             finishImportJob(job, {
               status: job.missingCount || (job.errors || []).length ? "done_with_warnings" : "success",
@@ -20196,53 +20197,116 @@ async function saveEbayListingDraft(db, item, body = {}) {
   return item.ebayListing;
 }
 
-function applyChannelCategoryMappingToProducts(db, source, channel = "ebay") {
-  const normalizedChannel = String(channel || "ebay").trim().toLowerCase();
-  if (normalizedChannel !== "ebay") throw new Error("Only eBay category refresh is supported right now.");
-  const category = findOrCreateCategorySetting(db, source.name);
-  const mapping = normalizeChannelCategoryMapping(category.mappings?.ebay || {});
-  if (!mapping.categoryId) throw new Error("Map and save the eBay category before refreshing SKUs.");
-  const now = new Date().toISOString();
+function categoryMappingRefreshOptions(options = {}) {
+  return {
+    updateExistingSkus: options.updateExistingSkus !== false,
+    updateChannelRecords: options.updateChannelRecords !== false,
+    force: options.force === true,
+    scheduledFor: String(options.scheduledFor || "").trim()
+  };
+}
+
+function applyCategoryMappingToProduct(item, source, mapping, channel, options, db, now) {
   const sourceName = formatCategoryName(source.name || "").toLowerCase();
+  const itemCategory = formatCategoryName(item.category || item.mainCategory || "").toLowerCase();
+  if (!itemCategory || itemCategory !== sourceName) return false;
+  const before = stableJsonKey({
+    categoryMappingRefresh: item.categoryMappingRefresh,
+    channelCategoryMappings: item.channelCategoryMappings,
+    ebayListing: channel === "ebay" ? item.ebayListing : undefined
+  });
+  const mappedCategory = {
+    categoryId: mapping.categoryId,
+    categoryPath: mapping.categoryPath || "",
+    categoryHandle: mapping.categoryHandle || "",
+    taxonomyVersion: mapping.taxonomyVersion || "",
+    mainCategory: source.name || "",
+    refreshedAt: now
+  };
+  if (options.updateExistingSkus) {
+    item.categoryMappingRefresh = {
+      ...(item.categoryMappingRefresh && typeof item.categoryMappingRefresh === "object" ? item.categoryMappingRefresh : {}),
+      [channel]: mappedCategory
+    };
+  }
+  if (options.updateChannelRecords) {
+    item.channelCategoryMappings = {
+      ...(item.channelCategoryMappings && typeof item.channelCategoryMappings === "object" ? item.channelCategoryMappings : {}),
+      [channel]: mappedCategory
+    };
+    if (channel === "ebay") {
+      const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+      if (options.force || !listing.categoryId) {
+        item.ebayListing = {
+          ...listing,
+          marketplaceId: listing.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US",
+          categoryId: mapping.categoryId,
+          categoryPath: mapping.categoryPath,
+          categoryHandle: mapping.categoryHandle,
+          taxonomyVersion: mapping.taxonomyVersion,
+          categoryAttributes: Array.isArray(mapping.attributes) ? mapping.attributes : listing.categoryAttributes || [],
+          status: listing.status || "draft",
+          draftSavedAt: listing.draftSavedAt || now,
+          updatedAt: now
+        };
+      }
+    }
+  }
+  const after = stableJsonKey({
+    categoryMappingRefresh: item.categoryMappingRefresh,
+    channelCategoryMappings: item.channelCategoryMappings,
+    ebayListing: channel === "ebay" ? item.ebayListing : undefined
+  });
+  if (before === after) return false;
+  item.updatedAt = now;
+  return true;
+}
+
+function applyChannelCategoryMappingToProducts(db, source, channel = "ebay", rawOptions = {}) {
+  const normalizedChannel = String(channel || "ebay").trim().toLowerCase();
+  if (!["shopify", "ebay"].includes(normalizedChannel)) throw new Error("Only Shopify and eBay category refreshes are supported.");
+  const category = findOrCreateCategorySetting(db, source.name);
+  const mapping = normalizeChannelCategoryMapping(category.mappings?.[normalizedChannel] || {});
+  if (!mapping.categoryId) throw new Error(`Map and save the ${normalizedChannel === "shopify" ? "Shopify" : "eBay"} category before refreshing SKUs.`);
+  const options = categoryMappingRefreshOptions(rawOptions);
+  const now = new Date().toISOString();
   let changed = 0;
   for (const item of db.inventory || []) {
-    const itemCategory = formatCategoryName(item.category || item.mainCategory || "").toLowerCase();
-    if (!itemCategory || itemCategory !== sourceName) continue;
-    const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
-    if (listing.categoryId) continue;
-    item.ebayListing = {
-      ...listing,
-      marketplaceId: listing.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US",
-      categoryId: mapping.categoryId,
-      categoryPath: mapping.categoryPath,
-      categoryHandle: mapping.categoryHandle,
-      taxonomyVersion: mapping.taxonomyVersion,
-      categoryAttributes: Array.isArray(mapping.attributes) ? mapping.attributes : listing.categoryAttributes || [],
-      status: listing.status || "draft",
-      draftSavedAt: listing.draftSavedAt || now,
-      updatedAt: now
-    };
-    item.updatedAt = now;
-    changed += 1;
+    if (applyCategoryMappingToProduct(item, source, mapping, normalizedChannel, options, db, now)) changed += 1;
   }
   return { changed, mapping };
 }
 
-function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", channel = "ebay") {
-  setTimeout(async () => {
+const categoryMappingJobTimers = new Map();
+
+function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", channel = "ebay", rawOptions = {}) {
+  const options = categoryMappingRefreshOptions(rawOptions);
+  const scheduledAt = options.scheduledFor ? new Date(options.scheduledFor).getTime() : Date.now();
+  const delay = Number.isFinite(scheduledAt) ? Math.max(0, scheduledAt - Date.now()) : 0;
+  if (categoryMappingJobTimers.has(jobId)) clearTimeout(categoryMappingJobTimers.get(jobId));
+  const timer = setTimeout(async () => {
+    categoryMappingJobTimers.delete(jobId);
     try {
       const db = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
-      const job = findImportJob(db, jobId);
+      const job = findImportJob(db, jobId)
+        || readImportJobStore().find((row) => row.id === jobId)
+        || activeJobRecords.get(jobId);
       if (!job) return;
+      if (["success", "warning", "failed", "stopped"].includes(String(job.status || "").toLowerCase())) return;
+      if (options.scheduledFor && new Date(options.scheduledFor).getTime() > Date.now() + 500) {
+        scheduleChannelCategoryMappingJob(jobId, sourceId, scope, channel, options);
+        return;
+      }
       job.status = "running";
       job.startedAt = job.startedAt || new Date().toISOString();
       job.updatedAt = new Date().toISOString();
-      job.message = job.message || "Refreshing SKU category mappings.";
+      job.phase = "running";
+      job.message = `Refreshing ${channel === "shopify" ? "Shopify" : "eBay"} category data for ${job.fileName || "this category"}.`;
       if (postgres.isPostgresEnabled()) upsertImportJobStore(job);
       else await writeDb(db);
 
       const workingDb = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
-      const workingJob = findImportJob(workingDb, jobId);
+      const workingJob = findImportJob(workingDb, jobId) || job;
       if (postgres.isPostgresEnabled()) {
         const categories = await publicCategoriesFast("", scope);
         workingDb.__mainCategoryRows = scope === "main" ? await postgres.listCategoryProductStats() : undefined;
@@ -20250,8 +20314,8 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
         if (!source) throw new Error("Master category was not found for SKU refresh.");
         const category = findOrCreateCategorySetting(workingDb, source.name);
         const mapping = normalizeChannelCategoryMapping(category.mappings?.[channel] || {});
-        if (channel !== "ebay") throw new Error("Only eBay category refresh is supported right now.");
-        if (!mapping.categoryId) throw new Error("Map and save the eBay category before refreshing SKUs.");
+        if (!["shopify", "ebay"].includes(channel)) throw new Error("Only Shopify and eBay category refreshes are supported.");
+        if (!mapping.categoryId) throw new Error(`Map and save the ${channel === "shopify" ? "Shopify" : "eBay"} category before refreshing SKUs.`);
         let changed = 0;
         let page = 1;
         const pageSize = 1000;
@@ -20261,23 +20325,10 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
           if (!products.length) break;
           const touched = [];
           for (const item of products) {
-            const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
-            if (listing.categoryId) continue;
-            item.ebayListing = {
-              ...listing,
-              marketplaceId: listing.marketplaceId || ebayChannelSettings(workingDb).ebayMarketplaceId || process.env.EBAY_MARKETPLACE_ID || "EBAY_US",
-              categoryId: mapping.categoryId,
-              categoryPath: mapping.categoryPath,
-              categoryHandle: mapping.categoryHandle,
-              taxonomyVersion: mapping.taxonomyVersion,
-              categoryAttributes: Array.isArray(mapping.attributes) ? mapping.attributes : listing.categoryAttributes || [],
-              status: listing.status || "draft",
-              draftSavedAt: listing.draftSavedAt || new Date().toISOString(),
-              updatedAt: new Date().toISOString()
-            };
-            item.updatedAt = new Date().toISOString();
-            touched.push(item);
-            changed += 1;
+            if (applyCategoryMappingToProduct(item, source, mapping, channel, options, workingDb, new Date().toISOString())) {
+              touched.push(item);
+              changed += 1;
+            }
           }
           if (touched.length) await postgres.upsertProductsFromState(touched);
           if (products.length < pageSize) break;
@@ -20307,7 +20358,7 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
       }
       const source = findPublicCategory(workingDb, sourceId, scope);
       if (!source) throw new Error("Master category was not found for SKU refresh.");
-      const result = applyChannelCategoryMappingToProducts(workingDb, source, channel);
+      const result = applyChannelCategoryMappingToProducts(workingDb, source, channel, options);
       const message = `Applied ${channel} category mapping to ${result.changed} SKU${result.changed === 1 ? "" : "s"} in ${source.name}.`;
       finishImportJob(workingJob, {
         status: "success",
@@ -20330,7 +20381,7 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
     } catch (error) {
       try {
         const db = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
-        const job = findImportJob(db, jobId);
+        const job = findImportJob(db, jobId) || readImportJobStore().find((row) => row.id === jobId) || activeJobRecords.get(jobId);
         if (job) {
           finishImportJob(job, {
             status: "failed",
@@ -20360,7 +20411,23 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
         console.error("Unable to finish category mapping job", writeError);
       }
     }
-  }, 0);
+  }, Math.min(delay, 2_147_000_000));
+  timer.unref?.();
+  categoryMappingJobTimers.set(jobId, timer);
+}
+
+async function recoverScheduledCategoryMappingJobs() {
+  try {
+    const db = normalizeDb(await readDbFast({ skipInventory: postgres.isPostgresEnabled() }));
+    const jobs = await mergedImportJobsAsync(db);
+    for (const job of jobs) {
+      const payload = job.workerPayload && typeof job.workerPayload === "object" ? job.workerPayload : {};
+      if (!["queued", "running"].includes(String(job.status || "").toLowerCase()) || !payload.categoryMappingRefresh || categoryMappingJobTimers.has(job.id)) continue;
+      scheduleChannelCategoryMappingJob(job.id, payload.sourceId, payload.scope || "main", payload.channel || "ebay", payload);
+    }
+  } catch (error) {
+    console.error(`Unable to recover scheduled category refresh jobs: ${error.message}`);
+  }
 }
 
 function ebayListingUrl(listingId, marketplaceId = "EBAY_US") {
@@ -36334,32 +36401,69 @@ async function handleApi(req, res) {
     const scope = body.scope || url.searchParams.get("scope") || "main";
     const source = findPublicCategory(db, parts[2], scope);
     if (!source) return notFound(res);
+    const channel = String(body.channel || "ebay").trim().toLowerCase();
+    if (!["shopify", "ebay"].includes(channel)) return sendJson(res, 400, { error: "Choose Shopify or eBay for this category refresh." });
+    const channelLabel = channel === "shopify" ? "Shopify" : "eBay";
+    const options = categoryMappingRefreshOptions({
+      updateExistingSkus: body.updateExistingSkus !== false,
+      updateChannelRecords: body.updateChannelRecords !== false,
+      force: body.force === true,
+      scheduledFor: body.scheduledFor
+    });
+    if (!options.updateExistingSkus && !options.updateChannelRecords) {
+      return sendJson(res, 400, { error: "Select existing SKU records, DataPlus channel records, or both." });
+    }
+    if (options.scheduledFor) {
+      const scheduledTime = new Date(options.scheduledFor).getTime();
+      if (!Number.isFinite(scheduledTime)) return sendJson(res, 400, { error: "Choose a valid scheduled time." });
+      if (scheduledTime <= Date.now()) return sendJson(res, 400, { error: "Choose a future scheduled time." });
+      options.scheduledFor = new Date(scheduledTime).toISOString();
+    }
     if (body.background === true || String(body.background || "").toLowerCase() === "true") {
       const category = findOrCreateCategorySetting(db, source.name);
-      const mapping = normalizeChannelCategoryMapping(category.mappings?.[body.channel || "ebay"] || {});
-      if (!mapping.categoryId) return sendJson(res, 400, { error: "Map and save the eBay category before refreshing SKUs." });
+      const mapping = normalizeChannelCategoryMapping(category.mappings?.[channel] || {});
+      if (!mapping.categoryId) return sendJson(res, 400, { error: `Map and save the ${channelLabel} category before refreshing SKUs.` });
+      const scheduledLabel = options.scheduledFor ? new Date(options.scheduledFor).toLocaleString("en-US", { timeZone: process.env.TZ || "America/New_York" }) : "";
       const job = createImportJob(db, {
         section: "Categories",
-        operation: "eBay category SKU refresh",
+        category: "Category mapping",
+        operation: `${channelLabel} category SKU refresh`,
         direction: "import",
         status: "queued",
+        phase: "queued",
+        startedAt: "",
         fileName: source.name,
-        message: `Queued SKU category refresh for ${source.name}.`,
-        details: `${source.name} | ${mapping.categoryId} | ${mapping.categoryPath || ""}`
+        scheduledFor: options.scheduledFor,
+        totalRows: Number(source.productCount || 0),
+        processedRows: 0,
+        progressPercent: 0,
+        message: options.scheduledFor
+          ? `Scheduled ${channelLabel} category refresh for ${source.name} at ${scheduledLabel}.`
+          : `Queued ${channelLabel} category refresh for ${source.name}.`,
+        details: `${source.name} | ${mapping.categoryId} | ${mapping.categoryPath || ""}`,
+        workerPayload: {
+          categoryMappingRefresh: true,
+          sourceId: source.id || source.categoryId,
+          scope,
+          channel,
+          ...options
+        }
       });
       const normalized = normalizeDb(db);
-      await writeDb(normalized);
+      if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+      else await writeDb(normalized);
       clearCategoryResponseCache();
-      scheduleChannelCategoryMappingJob(job.id, source.id, scope, body.channel || "ebay");
+      scheduleChannelCategoryMappingJob(job.id, source.id || source.categoryId, scope, channel, options);
       return sendJson(res, 202, {
         queued: true,
         job: normalized.importJobs.find((row) => row.id === job.id) || job,
+        message: job.message,
         state: publicState(normalized)
       });
     }
     let result;
     try {
-      result = applyChannelCategoryMappingToProducts(db, source, body.channel || "ebay");
+      result = applyChannelCategoryMappingToProducts(db, source, channel, options);
     } catch (error) {
       return sendJson(res, 400, { error: error.message });
     }
@@ -39837,6 +39941,10 @@ function startServer() {
     console.log(`DataPlus is running at http://localhost:${PORT}`);
   });
   reconcileSupplierDirectoryOnStartup();
+  const categoryRefreshRecovery = setTimeout(() => void recoverScheduledCategoryMappingJobs(), 2_000);
+  categoryRefreshRecovery.unref?.();
+  const categoryRefreshRecoveryInterval = setInterval(() => void recoverScheduledCategoryMappingJobs(), 60_000);
+  categoryRefreshRecoveryInterval.unref?.();
   return server;
 }
 
