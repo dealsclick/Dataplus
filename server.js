@@ -32731,25 +32731,20 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/categories") {
-    const db = await resolveWithin(
-      readDbFast({ skipInventory: true }),
-      1500,
-      { channels: [], connections: [], systemSettings: {}, categorySettings: [], ebayTaxonomyIndexes: {} }
-    );
-    const settings = ebayChannelSettings(db);
+    const marketplaceId = String(url.searchParams.get("marketplaceId") || "EBAY_US").trim().toUpperCase();
     try {
       const result = await searchEbayTaxonomy(
-        db,
+        {},
         url.searchParams.get("q") || "",
         url.searchParams.get("limit") || 12,
-        url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US",
+        marketplaceId,
         { allowLive: false }
       );
       return sendJson(res, 200, result);
     } catch (error) {
       return sendJson(res, 200, {
         channel: "ebay",
-        marketplaceId: url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US",
+        marketplaceId,
         total: 0,
         categories: [],
         source: "unavailable",
@@ -32760,9 +32755,8 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/status") {
-    const settings = ebayChannelSettings(db);
-    const marketplaceId = String(url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US").trim().toUpperCase();
-    const index = await readEbayTaxonomyIndex(db, marketplaceId);
+    const marketplaceId = String(url.searchParams.get("marketplaceId") || "EBAY_US").trim().toUpperCase();
+    const index = await readEbayTaxonomyIndex({}, marketplaceId);
     return sendJson(res, 200, {
       channel: "ebay",
       marketplaceId,
@@ -35735,20 +35729,20 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/categories") {
-    const settings = ebayChannelSettings(db);
+    const marketplaceId = String(url.searchParams.get("marketplaceId") || "EBAY_US").trim().toUpperCase();
     try {
       const result = await searchEbayTaxonomy(
-        db,
+        {},
         url.searchParams.get("q") || "",
         url.searchParams.get("limit") || 12,
-        url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US",
+        marketplaceId,
         { allowLive: false }
       );
       return sendJson(res, 200, result);
     } catch (error) {
       return sendJson(res, 200, {
         channel: "ebay",
-        marketplaceId: url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US",
+        marketplaceId,
         total: 0,
         categories: [],
         source: "unavailable",
@@ -35759,9 +35753,8 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/status") {
-    const settings = ebayChannelSettings(db);
-    const marketplaceId = String(url.searchParams.get("marketplaceId") || settings.ebayMarketplaceId || "EBAY_US").trim().toUpperCase();
-    const index = await readEbayTaxonomyIndex(db, marketplaceId);
+    const marketplaceId = String(url.searchParams.get("marketplaceId") || "EBAY_US").trim().toUpperCase();
+    const index = await readEbayTaxonomyIndex({}, marketplaceId);
     return sendJson(res, 200, {
       channel: "ebay",
       marketplaceId,
