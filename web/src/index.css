@@ -85,6 +85,9 @@ main img:not([data-no-image-preview]) {
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.62 0.16 258);
+    --ai-result-foreground: oklch(0.39 0.13 225);
+    --ai-result-background: oklch(0.965 0.025 220);
+    --ai-result-border: oklch(0.76 0.08 220);
 }
 
 .dark {
@@ -119,6 +122,19 @@ main img:not([data-no-image-preview]) {
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.72 0.16 258);
+    --ai-result-foreground: oklch(0.84 0.11 205);
+    --ai-result-background: oklch(0.23 0.04 220);
+    --ai-result-border: oklch(0.5 0.08 215);
+}
+
+.ai-result-text {
+  color: var(--ai-result-foreground);
+}
+
+.ai-result-surface {
+  border-color: var(--ai-result-border);
+  background-color: var(--ai-result-background);
+  color: var(--ai-result-foreground);
 }
 
 @layer base {

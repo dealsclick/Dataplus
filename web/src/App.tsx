@@ -4888,6 +4888,7 @@ function EbayCategoryComparisonCard({ comparison }: { comparison?: ProductItem["
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
+  const [resultsFromDavid, setResultsFromDavid] = useState(false)
   const currentSku = decodeURIComponent(window.location.pathname.split("/").pop() || "")
   const status = comparison?.status || "not-configured"
   const state = status === "match"
@@ -4919,11 +4920,13 @@ function EbayCategoryComparisonCard({ comparison }: { comparison?: ProductItem["
       )
       const categories = Array.isArray(result.categories) ? result.categories : []
       setResults(categories)
+      setResultsFromDavid(viaDavid && categories.length > 0)
       setNotice(result.warning || "")
       if (!categories.length) setError(result.message || "No eBay taxonomy matches were found.")
       else toast.success(`${viaDavid ? "David found" : "Local taxonomy found"} ${categories.length} category matches.`)
     } catch (searchError) {
       setResults([])
+      setResultsFromDavid(false)
       setError(searchError instanceof Error ? searchError.message : "Unable to search eBay categories.")
     } finally {
       setSearching(false)
@@ -4944,7 +4947,7 @@ function EbayCategoryComparisonCard({ comparison }: { comparison?: ProductItem["
   }
   return <Card className="border-dashed">
     <CardHeader className="gap-2 pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">eBay category comparison</CardTitle><CardDescription>{state.description}</CardDescription></div><div className="flex flex-wrap items-center gap-2"><Badge variant="outline" className={state.className}>{state.label}</Badge>{comparison?.local?.path ? <Button size="sm" variant="outline" className="h-8" asChild><a href={`/categories/${encodeURIComponent(comparison.local.path)}`}><ExternalLink className="size-3.5" /> View category</a></Button> : null}</div></div></CardHeader>
-    <CardContent className="grid gap-3 pt-0 sm:grid-cols-2"><div className="rounded-md border bg-muted/20 p-3"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Category on synced eBay listing</p><p className="mt-1 text-sm font-medium">{categoryText(comparison?.live)}</p><p className="mt-1 font-mono text-xs text-muted-foreground">{comparison?.live?.id ? `ID ${comparison.live.id}` : "No synced listing category"}</p></div><div className="rounded-md border bg-muted/20 p-3"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Selected DataPlus mapping</p><p className="mt-1 text-sm font-medium">{categoryText(comparison?.local)}</p><p className="mt-1 font-mono text-xs text-muted-foreground">{comparison?.local?.id ? `ID ${comparison.local.id}` : "No local eBay mapping"}</p></div><div className="grid gap-2 border-t pt-3 sm:col-span-2"><div><p className="text-sm font-medium">Search cached eBay taxonomy</p><p className="text-xs text-muted-foreground">Searches the eBay US category index stored in DataPlus. David ranks candidates from this same cache; neither action performs a live eBay lookup.</p></div><div className="flex flex-col gap-2 sm:flex-row"><Input className="border-slate-300 bg-slate-100/80 shadow-sm focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30 dark:border-slate-600 dark:bg-slate-950/80" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void search() }} placeholder="e.g. cordless drill, hand tools" /><Button type="button" variant="outline" onClick={() => void search()} disabled={searching || !query.trim()}>{searching ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search cached categories</Button><Button type="button" variant="secondary" onClick={() => void search(true)} disabled={searching || !query.trim()}><MessageSquare className="size-4" /> Ask David</Button></div>{notice ? <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">{notice}</p> : null}{error ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Local category lookup failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}{results.length ? <div className="grid max-h-72 gap-2 overflow-y-auto rounded-md border p-2">{results.map((candidate, index) => { const id = String(candidate.categoryId || candidate.id || ""); const path = ebayCategoryCandidatePath(candidate); return <div key={`${id}-${index}`} className="rounded-md border bg-background p-3"><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="font-mono text-xs text-muted-foreground">ID {id || "Not returned"}</p><p className="mt-1 text-sm font-medium leading-5">{path}</p></div><Button type="button" size="sm" onClick={() => useCandidate(candidate)}><CheckCircle2 className="size-4" /> Use in eBay editor</Button></div></div> })}</div> : null}</div></CardContent>
+    <CardContent className="grid gap-3 pt-0 sm:grid-cols-2"><div className="rounded-md border bg-muted/20 p-3"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Category on synced eBay listing</p><p className="mt-1 text-sm font-medium">{categoryText(comparison?.live)}</p><p className="mt-1 font-mono text-xs text-muted-foreground">{comparison?.live?.id ? `ID ${comparison.live.id}` : "No synced listing category"}</p></div><div className="rounded-md border bg-muted/20 p-3"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Selected DataPlus mapping</p><p className="mt-1 text-sm font-medium">{categoryText(comparison?.local)}</p><p className="mt-1 font-mono text-xs text-muted-foreground">{comparison?.local?.id ? `ID ${comparison.local.id}` : "No local eBay mapping"}</p></div><div className="grid gap-2 border-t pt-3 sm:col-span-2"><div><p className="text-sm font-medium">Search cached eBay taxonomy</p><p className="text-xs text-muted-foreground">Searches the eBay US category index stored in DataPlus. David ranks candidates from this same cache; neither action performs a live eBay lookup.</p></div><div className="flex flex-col gap-2 sm:flex-row"><Input className="border-slate-300 bg-slate-100/80 shadow-sm focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30 dark:border-slate-600 dark:bg-slate-950/80" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void search() }} placeholder="e.g. cordless drill, hand tools" /><Button type="button" variant="outline" onClick={() => void search()} disabled={searching || !query.trim()}>{searching ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search cached categories</Button><Button type="button" variant="secondary" onClick={() => void search(true)} disabled={searching || !query.trim()}><MessageSquare className="size-4" /> Ask David</Button></div>{notice ? <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">{notice}</p> : null}{error ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Local category lookup failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}{results.length ? <div className={`grid max-h-72 gap-2 overflow-y-auto rounded-md border p-2 ${resultsFromDavid ? "ai-result-surface" : ""}`}>{resultsFromDavid ? <p className="px-1 text-xs font-semibold">David's ranked results</p> : null}{results.map((candidate, index) => { const id = String(candidate.categoryId || candidate.id || ""); const path = ebayCategoryCandidatePath(candidate); return <div key={`${id}-${index}`} className={`rounded-md border p-3 ${resultsFromDavid ? "border-[color:var(--ai-result-border)] bg-background/60" : "bg-background"}`}><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className={`font-mono text-xs ${resultsFromDavid ? "ai-result-text" : "text-muted-foreground"}`}>ID {id || "Not returned"}</p><p className={`mt-1 text-sm font-medium leading-5 ${resultsFromDavid ? "ai-result-text" : ""}`}>{path}</p></div><Button type="button" size="sm" onClick={() => useCandidate(candidate)}><CheckCircle2 className="size-4" /> Use in eBay editor</Button></div></div> })}</div> : null}</div></CardContent>
     {comparison?.checkedAt ? <CardFooter className="border-t pt-3 text-xs text-muted-foreground">Last checked {dateLabel(comparison.checkedAt)}</CardFooter> : null}
   </Card>
 }
@@ -5408,6 +5411,7 @@ function EbayListingWorkspace({
   const [categorySearching, setCategorySearching] = useState(false);
   const [categorySearchError, setCategorySearchError] = useState("");
   const [categorySearchNotice, setCategorySearchNotice] = useState("");
+  const [categoryResultsFromDavid, setCategoryResultsFromDavid] = useState(false);
   const listing = product.ebayListing || {};
   const settings = channel.settings || {};
   const overrides = listing.settings || {};
@@ -5570,6 +5574,7 @@ function EbayListingWorkspace({
         ),
     );
     setCategoryResults([]);
+    setCategoryResultsFromDavid(false);
     setCategorySearchError("");
     setCategorySearchNotice("");
     const specifics =
@@ -5899,6 +5904,7 @@ function EbayListingWorkspace({
       );
       const categories = Array.isArray(result.categories) ? result.categories : [];
       setCategoryResults(categories);
+      setCategoryResultsFromDavid(askDavid && categories.length > 0);
       setCategorySearchNotice(result.warning || "");
       if (!categories.length) {
         setCategorySearchError(
@@ -5907,6 +5913,7 @@ function EbayListingWorkspace({
       }
     } catch (error) {
       setCategoryResults([]);
+      setCategoryResultsFromDavid(false);
       setCategorySearchError(
         error instanceof Error
           ? error.message
@@ -5927,6 +5934,7 @@ function EbayListingWorkspace({
     );
     setCategoryQuery(categoryPath);
     setCategoryResults([]);
+    setCategoryResultsFromDavid(false);
     setCategorySearchError("");
     setCategorySearchNotice("");
     toast.success(`Selected eBay category ${categoryId || categoryPath}.`);
@@ -6486,9 +6494,9 @@ function EbayListingWorkspace({
                       </Alert>
                     ) : null}
                     {categoryResults.length ? (
-                      <div className="max-h-72 overflow-y-auto rounded-md border bg-background">
-                        <div className="border-b px-3 py-2 text-xs font-medium text-muted-foreground">
-                          {categoryResults.length} eBay category matches
+                      <div className={`max-h-72 overflow-y-auto rounded-md border ${categoryResultsFromDavid ? "ai-result-surface" : "bg-background"}`}>
+                        <div className={`border-b px-3 py-2 text-xs font-medium ${categoryResultsFromDavid ? "ai-result-text" : "text-muted-foreground"}`}>
+                          {categoryResultsFromDavid ? "David ranked" : "Found"} {categoryResults.length} eBay category matches
                         </div>
                         <div className="divide-y">
                           {categoryResults.map((candidate, index) => {
@@ -6502,8 +6510,8 @@ function EbayListingWorkspace({
                                 className="flex flex-col gap-2 px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
                               >
                                 <div className="min-w-0">
-                                  <div className="font-medium">{categoryPath}</div>
-                                  <div className="font-mono text-xs text-muted-foreground">
+                                  <div className={`font-medium ${categoryResultsFromDavid ? "ai-result-text" : ""}`}>{categoryPath}</div>
+                                  <div className={`font-mono text-xs ${categoryResultsFromDavid ? "ai-result-text" : "text-muted-foreground"}`}>
                                     Category ID {categoryId || "not returned"}
                                   </div>
                                 </div>
@@ -7118,8 +7126,8 @@ function DavidCategoryReviewCard({ profile, channel, scope, onApplied }: { profi
     </div>
     {proposal && <div className="mt-4 grid gap-3">
       <div className="flex flex-wrap items-center gap-2"><Badge variant={proposal.state === "ready_for_approval" ? "secondary" : proposal.state === "keep_current" ? "default" : "outline"}>{stateLabel}</Badge><Badge variant="outline">{confidence}% confidence</Badge><span className="text-xs text-muted-foreground">{proposal.provider}{proposal.model ? ` / ${proposal.model}` : ""}</span></div>
-      <div className="grid gap-3 md:grid-cols-2"><div className="rounded-md border bg-background p-3"><p className="text-xs font-medium text-muted-foreground">Current mapping</p><p className="mt-1 text-sm font-medium">{proposal.current?.categoryPath || current.categoryPath || "Not mapped"}</p>{(proposal.current?.categoryId || current.categoryId) && <p className="mt-1 text-xs text-muted-foreground">ID: {proposal.current?.categoryId || current.categoryId}</p>}</div><div className="rounded-md border bg-background p-3"><p className="text-xs font-medium text-muted-foreground">David's result</p><p className="mt-1 text-sm font-medium">{proposal.state === "keep_current" ? "Keep the current mapping" : proposal.suggestion?.categoryPath || "No accurate taxonomy match found"}</p>{proposal.suggestion?.categoryId && <p className="mt-1 text-xs text-muted-foreground">ID: {proposal.suggestion.categoryId}</p>}</div></div>
-      {proposal.rationale && <div className="rounded-md bg-muted/50 p-3"><p className="text-xs font-medium">Why David chose this</p><p className="mt-1 text-sm text-muted-foreground">{proposal.rationale}</p></div>}
+      <div className="grid gap-3 md:grid-cols-2"><div className="rounded-md border bg-background p-3"><p className="text-xs font-medium text-muted-foreground">Current mapping</p><p className="mt-1 text-sm font-medium">{proposal.current?.categoryPath || current.categoryPath || "Not mapped"}</p>{(proposal.current?.categoryId || current.categoryId) && <p className="mt-1 text-xs text-muted-foreground">ID: {proposal.current?.categoryId || current.categoryId}</p>}</div><div className="ai-result-surface rounded-md border p-3"><p className="text-xs font-medium">David's result</p><p className="mt-1 text-sm font-semibold">{proposal.state === "keep_current" ? "Keep the current mapping" : proposal.suggestion?.categoryPath || "No accurate taxonomy match found"}</p>{proposal.suggestion?.categoryId && <p className="mt-1 text-xs">ID: {proposal.suggestion.categoryId}</p>}</div></div>
+      {proposal.rationale && <div className="ai-result-surface rounded-md border p-3"><p className="text-xs font-medium">Why David chose this</p><p className="mt-1 text-sm">{proposal.rationale}</p></div>}
       {Boolean(proposal.warnings?.length) && <Alert><AlertCircle className="size-4" /><AlertTitle>Review warnings</AlertTitle><AlertDescription>{proposal.warnings?.join(" ")}</AlertDescription></Alert>}
       {proposal.state === "ready_for_approval" && <div className="flex justify-end"><Button size="sm" onClick={() => setApproveOpen(true)}><CheckCircle2 className="size-4" /> Review and approve</Button></div>}
     </div>}
@@ -7161,8 +7169,8 @@ function PendingCategorySuggestionCard({ profile, channel, onApplied }: { profil
       {canApply && <Button size="sm" disabled={applying} onClick={() => setApproveOpen(true)}><CheckCircle2 className="size-4" /> Approve mapping</Button>}
     </div>
     <div className="mt-4 grid gap-3">
-      <div className="rounded-md border bg-background p-3"><p className="text-xs font-medium text-muted-foreground">Suggested {channel === "shopify" ? "Shopify / Google" : "eBay"} category</p><p className="mt-1 text-sm font-medium">{suggestion.categoryPath || suggestion.categoryId || "No accurate taxonomy match found"}</p>{suggestion.categoryId && <p className="mt-1 text-xs text-muted-foreground">ID: {suggestion.categoryId}</p>}</div>
-      {suggestion.rationale && <p className="text-sm text-muted-foreground">{suggestion.rationale}</p>}
+      <div className="ai-result-surface rounded-md border p-3"><p className="text-xs font-medium">Suggested {channel === "shopify" ? "Shopify / Google" : "eBay"} category</p><p className="mt-1 text-sm font-semibold">{suggestion.categoryPath || suggestion.categoryId || "No accurate taxonomy match found"}</p>{suggestion.categoryId && <p className="mt-1 text-xs">ID: {suggestion.categoryId}</p>}</div>
+      {suggestion.rationale && <p className="ai-result-text text-sm">{suggestion.rationale}</p>}
       {Boolean(suggestion.warnings?.length) && <p className="text-xs text-amber-800 dark:text-amber-200">{suggestion.warnings?.join(" ")}</p>}
       {!canApply && <p className="text-xs text-muted-foreground">No category was safe enough to suggest. Search the taxonomy manually or ask David to review this category again.</p>}
     </div>
@@ -9946,7 +9954,7 @@ function WarehouseAuditPanel({
                   </div>
                 </div>
                 {upcResearch && (
-                  <div className="grid gap-2 rounded-md border bg-background/70 p-3 text-sm">
+                  <div className="ai-result-surface grid gap-2 rounded-md border p-3 text-sm">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">
                         Online research {upcResearch.found === true ? "suggestion" : "found no reliable match"}
@@ -9958,7 +9966,7 @@ function WarehouseAuditPanel({
                       )}
                     </div>
                     {Boolean(upcResearch.summary) && (
-                      <p className="text-muted-foreground">{String(upcResearch.summary)}</p>
+                      <p>{String(upcResearch.summary)}</p>
                     )}
                     {Array.isArray(upcResearch.sources) && upcResearch.sources.length > 0 && (
                       <div className="flex flex-wrap gap-2">
@@ -10212,7 +10220,7 @@ function WarehouseAuditPanel({
                     </div>
                     <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">Point the camera at the item, barcode, or package details. Capture every side you need first. David will analyze the complete gallery only after you choose <span className="font-medium text-foreground">Use & analyze photos</span>.</div>
                     {(photoAnalysisBusy || photoAnalysisStatus === "analyzing") && <div className="flex items-center gap-2 rounded-md border border-primary/25 bg-primary/10 p-3 text-sm font-medium text-primary"><Loader2 className="size-4 animate-spin" /> David is analyzing all saved product photos and preparing editable product suggestions.</div>}
-                    {!photoAnalysisBusy && photoAnalysisStatus === "ready" && <div className="flex items-center gap-2 rounded-md border border-emerald-300 bg-emerald-50 p-3 text-sm font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"><CheckCircle2 className="size-4" /> Product suggestions are ready. Add another photo to replace the suggestion with a complete-gallery analysis.</div>}
+                    {!photoAnalysisBusy && photoAnalysisStatus === "ready" && <div className="ai-result-surface flex items-center gap-2 rounded-md border p-3 text-sm font-medium"><CheckCircle2 className="size-4" /> Product suggestions are ready. Add another photo to replace the suggestion with a complete-gallery analysis.</div>}
                     {manualPhotoUrls.length > 0 && <div className="flex gap-2 overflow-x-auto pb-1">{manualPhotoUrls.map((photo, index) => <img key={`${photo.slice(-24)}-${index}`} src={photo} alt={`Captured product photo ${index + 1}`} className="size-16 shrink-0 rounded-md border object-cover" />)}</div>}
                   </div>
                 </div>
@@ -13607,11 +13615,11 @@ function DavidConversation({
         {messages.map((message) => {
           const content = davidMessageText(message)
           if (!content) return null
-          return <div key={message.id} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground" : "mr-auto max-w-[88%] whitespace-pre-wrap rounded-lg border bg-background px-3 py-2 text-sm shadow-sm"}>
+          return <div key={message.id} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground" : "ai-result-surface mr-auto max-w-[88%] whitespace-pre-wrap rounded-lg border px-3 py-2 text-sm shadow-sm"}>
             <p className="mb-1 text-xs font-semibold opacity-70">{message.role === "user" ? "You" : "David"}</p>{content}
           </div>
         })}
-        {proposal ? <Card className="mr-auto max-w-[88%] border-primary/30 bg-primary/5 shadow-none">
+        {proposal ? <Card className="ai-result-surface mr-auto max-w-[88%] shadow-none">
           <CardContent className="grid gap-3 p-3">
             <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-semibold">Shopify launch review</p><p className="text-xs text-muted-foreground">{proposal.sku || "SKU"}{proposal.productName ? ` - ${proposal.productName}` : ""}</p></div><Badge variant={proposal.state === "ready_for_approval" ? "default" : proposal.state === "already_linked" ? "secondary" : "outline"}>{proposal.state === "ready_for_approval" ? "Ready for approval" : proposal.state === "already_linked" ? "Already linked" : proposal.state === "disabled" ? "Actions disabled" : "Needs information"}</Badge></div>
             {proposal.state === "ready_for_approval" ? <div className="grid gap-1 rounded-md border bg-background p-2 text-xs text-muted-foreground"><span>Product type: {proposal.productType || "Not set"}</span><span>Available: {Number(proposal.available || 0).toLocaleString()}</span><span>Price: {moneyLabel(proposal.price || 0)}</span>{proposal.expiresAt ? <span>Approval expires {dateLabel(proposal.expiresAt)}</span> : null}</div> : null}
