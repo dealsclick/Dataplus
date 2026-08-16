@@ -33392,18 +33392,16 @@ async function handleApi(req, res) {
   }
 
   async function readCategoryQueueDb() {
-    const [baseDb, categoryDb] = await Promise.all([
-      readDbFast({ skipInventory: true }),
-      postgres.isPostgresEnabled() ? postgres.readCategoryState() : Promise.resolve(null)
-    ]);
-    return normalizeDb({
-      ...baseDb,
-      ...(categoryDb || {}),
-      connections: baseDb.connections || [],
-      channels: baseDb.channels || [],
-      systemSettings: baseDb.systemSettings || {},
-      sequence: baseDb.sequence || {}
-    });
+    if (postgres.isPostgresEnabled()) {
+      return normalizeDb({
+        importJobs: [],
+        connections: [],
+        channels: [],
+        systemSettings: {},
+        sequence: {}
+      });
+    }
+    return normalizeDb(await readDbFast({ skipInventory: true }));
   }
 
   if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/ebay/refresh") {
@@ -33428,8 +33426,12 @@ async function handleApi(req, res) {
     const db = await readCategoryQueueDb();
     const body = await parseBody(req);
     const result = queueEbayCategoryAutoMapJob(db, body);
-    if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(result.job);
-    else await writeDb(normalizeDb(db));
+    if (postgres.isPostgresEnabled()) {
+      await postgres.upsertOperationJob(result.job);
+      result.job = await postgres.readOperationJob(result.job.id) || result.job;
+    } else {
+      await writeDb(normalizeDb(db));
+    }
     return sendJson(res, 202, {
       ...result,
       message: `eBay category mapping queued as Job ${result.job.jobNumber || result.job.id}. Track progress and download results from Jobs.`
