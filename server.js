@@ -8314,31 +8314,53 @@ async function autoMapEbayCategories(db, options = {}) {
         missing += 1;
         results.push({ category: row.name, productCount: row.productCount || 0, query, status: "missing", message: "No eBay suggestion returned." });
       } else {
-        const secondConfidence = Number(ranked[1]?.confidence || 0);
-        const margin = best.confidence - secondConfidence;
-        const approved = best.exactLeaf || (best.confidence >= autoApproveThreshold && margin >= 0.08);
+        const approved = best.exactLeaf || best.confidence >= autoApproveThreshold;
         const confidenceLevel = approved ? "high" : best.confidence >= 0.62 ? "medium" : "low";
         const status = approved ? "mapped" : "needs_review";
         const match = best.category;
         const setting = findOrCreateCategorySetting(db, row.name);
-        setting.mappings.ebay = normalizeChannelCategoryMapping({
-          ...(setting.mappings?.ebay || {}),
-          categoryId: match.categoryId,
-          categoryPath: match.fullName || match.name,
-          categoryHandle: match.name,
-          taxonomyVersion: search.categoryTreeId,
-          categoryTreeVersion: search.categoryTreeVersion || match.categoryTreeVersion || "",
-          status,
-          confidence: Number(best.confidence.toFixed(4)),
-          confidenceLevel,
-          matchSource: "ebay-ranked-suggestion",
-          matchedQuery: query,
-          matchedAt: new Date().toISOString(),
-          suggestionRank: best.rank,
-          notes: approved
-            ? `Auto-mapped from eBay's ranked taxonomy suggestions for "${query}" with ${Math.round(best.confidence * 100)}% confidence.`
-            : `Auto-suggested from eBay taxonomy for "${query}" with ${Math.round(best.confidence * 100)}% confidence. Review before publishing listings.`
-        });
+        const reviewedAt = new Date().toISOString();
+        const current = normalizeChannelCategoryMapping(setting.mappings?.ebay || {});
+        setting.mappings.ebay = approved
+          ? normalizeChannelCategoryMapping({
+              ...current,
+              categoryId: match.categoryId,
+              categoryPath: match.fullName || match.name,
+              categoryHandle: match.name,
+              taxonomyVersion: search.categoryTreeId,
+              categoryTreeVersion: search.categoryTreeVersion || match.categoryTreeVersion || "",
+              status,
+              confidence: Number(best.confidence.toFixed(4)),
+              confidenceLevel,
+              matchSource: "ebay-ranked-suggestion",
+              matchedQuery: query,
+              matchedAt: reviewedAt,
+              suggestionRank: best.rank,
+              locked: true,
+              lockedAt: reviewedAt,
+              lockedBy: "eBay automatic category mapping",
+              pendingSuggestion: null,
+              notes: `Auto-mapped from the locally cached eBay taxonomy for "${query}" with ${Math.round(best.confidence * 100)}% confidence.`
+            })
+          : normalizeChannelCategoryMapping({
+              ...current,
+              status: current.categoryId ? current.status : "needs_review",
+              pendingSuggestion: {
+                action: "suggest",
+                categoryId: match.categoryId,
+                categoryPath: match.fullName || match.name,
+                categoryHandle: match.name,
+                taxonomyVersion: search.categoryTreeId,
+                categoryTreeVersion: search.categoryTreeVersion || match.categoryTreeVersion || "",
+                confidence: Number(best.confidence.toFixed(4)),
+                rationale: `Closest locally cached eBay taxonomy match for "${query}".`,
+                warnings: ["Confidence is below the automatic approval threshold."],
+                provider: "DataPlus local taxonomy matcher",
+                model: "ranked-ebay-taxonomy",
+                reviewedAt
+              },
+              notes: current.notes || `An eBay category suggestion is waiting for approval.`
+            });
         if (!approved) setting.status = "needs_review";
         setting.updatedBy = "eBay category auto-map";
         setting.updatedAt = new Date().toISOString();
@@ -8347,6 +8369,7 @@ async function autoMapEbayCategories(db, options = {}) {
         else needsReview += 1;
         results.push({
           category: row.name,
+          categoryId: row.id,
           productCount: row.productCount || 0,
           query,
           status,
@@ -8407,7 +8430,8 @@ function queueEbayCategoryAutoMapJob(db = {}, options = {}) {
     overwrite: options.overwrite === true,
     refreshAutoSuggestions: options.refreshAutoSuggestions === true,
     autoApproveThreshold: Math.max(0.75, Math.min(0.99, Number(options.autoApproveThreshold || 0.9))),
-    checkpointEvery: Math.max(10, Math.min(100, Number(options.checkpointEvery || 25)))
+    checkpointEvery: Math.max(10, Math.min(100, Number(options.checkpointEvery || 25))),
+    refreshAffectedProducts: options.refreshAffectedProducts !== false
   };
   const inline = shouldRunJobsInline();
   const job = createImportJob(db, {
@@ -8424,7 +8448,9 @@ function queueEbayCategoryAutoMapJob(db = {}, options = {}) {
     workerTask: inline ? "" : "ebay-category-auto-map",
     workerPayload: inline ? {} : payload,
     message: `Queued eBay taxonomy matching for ${requested.toLocaleString()} unmapped categor${requested === 1 ? "y" : "ies"}.`,
-    details: "Manual eBay mappings are preserved. Strong matches are approved automatically; ambiguous suggestions are routed to review."
+    details: payload.refreshAffectedProducts
+      ? "Manual eBay mappings are preserved. Strong matches are approved automatically, ambiguous suggestions are persisted for review, and affected SKU records are refreshed after mapping."
+      : "Manual eBay mappings are preserved. Strong matches are approved automatically; ambiguous suggestions are persisted for review."
   });
   if (inline) {
     activeJobRecords.set(job.id, normalizeImportJob(job));
@@ -8594,6 +8620,67 @@ async function runEbayCategoryAutoMapWorkerJob(job = {}, attrs = {}) {
     onCheckpoint: async () => persistEbayCategoryAutoMapDb(db, false)
   });
   await persistEbayCategoryAutoMapDb(db, true);
+  let affectedProductRefresh = { requestedCategories: 0, refreshedCategories: 0, changedProducts: 0 };
+  if (payload.refreshAffectedProducts !== false && result.autoApproved > 0) {
+    const approvedRows = result.results.filter((row) => row.status === "mapped");
+    affectedProductRefresh.requestedCategories = approvedRows.length;
+    job = await persistWorkerImportJob(job, {
+      status: "running",
+      phase: "refreshing_affected_products",
+      totalRows: result.requested,
+      processedRows: result.requested,
+      changed: result.autoApproved,
+      progressPercent: 95,
+      estimatedSecondsRemaining: null,
+      message: `Category matching is complete. Refreshing SKU records under ${approvedRows.length.toLocaleString()} auto-approved eBay categor${approvedRows.length === 1 ? "y" : "ies"}...`
+    });
+    for (let index = 0; index < approvedRows.length; index += 1) {
+      const row = approvedRows[index];
+      const source = { id: row.categoryId || "", categoryId: row.categoryId || "", name: row.category || "" };
+      const category = findOrCreateCategorySetting(db, source.name);
+      const mapping = normalizeChannelCategoryMapping(category.mappings?.ebay || {});
+      if (!mapping.categoryId) continue;
+      let changed = 0;
+      if (postgres.isPostgresEnabled()) {
+        let page = 1;
+        const pageSize = 1000;
+        while (true) {
+          const pageResult = await postgres.listProducts({ page, limit: pageSize, filters: { category: formatCategoryName(source.name) } });
+          const products = pageResult?.inventory || [];
+          if (!products.length) break;
+          const touched = products.filter((item) => applyCategoryMappingToProduct(item, source, mapping, "ebay", {
+            updateExistingSkus: true,
+            updateChannelRecords: true,
+            force: false
+          }, db, new Date().toISOString()));
+          if (touched.length) await postgres.upsertProductsFromState(touched);
+          changed += touched.length;
+          if (products.length < pageSize) break;
+          page += 1;
+        }
+      } else {
+        for (const item of db.inventory || []) {
+          if (applyCategoryMappingToProduct(item, source, mapping, "ebay", {
+            updateExistingSkus: true,
+            updateChannelRecords: true,
+            force: false
+          }, db, new Date().toISOString())) changed += 1;
+        }
+      }
+      affectedProductRefresh.refreshedCategories += 1;
+      affectedProductRefresh.changedProducts += changed;
+      if ((index + 1) % 10 === 0 || index + 1 === approvedRows.length) {
+        await persistWorkerImportJob(job, {
+          status: "running",
+          phase: "refreshing_affected_products",
+          progressPercent: 95 + Math.round(((index + 1) / Math.max(1, approvedRows.length)) * 4),
+          message: `Refreshed ${(index + 1).toLocaleString()} of ${approvedRows.length.toLocaleString()} mapped categories and changed ${affectedProductRefresh.changedProducts.toLocaleString()} SKU records.`
+        });
+      }
+    }
+    if (!postgres.isPostgresEnabled()) await persistEbayCategoryAutoMapDb(db, false);
+  }
+  result.affectedProductRefresh = affectedProductRefresh;
   const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "ebay-category-auto-map"));
   fs.mkdirSync(jobDir, { recursive: true });
   const reportPath = path.join(jobDir, "ebay-category-auto-map-report.json");
@@ -8622,8 +8709,8 @@ async function runEbayCategoryAutoMapWorkerJob(job = {}, attrs = {}) {
     missingCount: result.missing + result.errors,
     progressPercent: 100,
     estimatedSecondsRemaining: 0,
-    message: `eBay category mapping completed: ${result.autoApproved.toLocaleString()} approved, ${result.needsReview.toLocaleString()} need review, and ${(result.missing + result.errors).toLocaleString()} unmatched or failed.`,
-    details: "Manual mappings were preserved. Download the mapped, review, and error CSV files for a complete audit trail.",
+    message: `eBay category mapping completed: ${result.autoApproved.toLocaleString()} approved, ${result.needsReview.toLocaleString()} need review, ${(result.missing + result.errors).toLocaleString()} unmatched or failed, and ${affectedProductRefresh.changedProducts.toLocaleString()} affected SKU records refreshed.`,
+    details: "Manual mappings were preserved. Lower-confidence suggestions remain stored for later approval. Download the mapped, review, and error CSV files for a complete audit trail.",
     errors: result.results.filter((row) => ["missing", "error"].includes(row.status)).slice(0, 50).map((row) => `${row.category}: ${row.message || row.status}`),
     finishedAt: new Date().toISOString()
   });

@@ -248,6 +248,7 @@ The system category/master category is the canonical internal category. Vendor c
 - eBay taxonomy and item specifics are separate channel mappings.
 - Mappings must be editable and searchable, with full breadcrumb paths visible.
 - “Map all to eBay”/similar bulk actions must be explicit, reviewable, and job-backed.
+- Bulk eBay category mapping uses the locally cached eBay taxonomy. Matches at or above the configured automatic-approval threshold (75% by default) may be saved and locked automatically; lower-confidence matches must be persisted as approval suggestions. The job may refresh affected local SKU/channel metadata as a second phase, but it must not publish or change live marketplace listings.
 - Category attributes and required channel fields belong in the category/channel mapping model, not scattered duplicate product fields.
 - Do not silently replace an approved manual mapping with an AI suggestion.
 - After a channel category mapping is saved, let the user keep the mapping only, refresh affected DataPlus records immediately, or snooze the refresh until a visible future time.
