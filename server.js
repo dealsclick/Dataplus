@@ -8303,6 +8303,28 @@ async function autoMapEbayCategories(db, options = {}) {
     const row = rows[index];
     const query = ebayCategoryAutoSearchQuery(row.name) || ebayCategorySearchQuery(row.name);
     try {
+      if (typeof options.loadCategorySetting === "function") {
+        const savedSetting = await options.loadCategorySetting(row);
+        db.categorySettings = savedSetting ? normalizeCategorySettings([savedSetting]) : [];
+        const savedMapping = normalizeChannelCategoryMapping(db.categorySettings[0]?.mappings?.ebay || {});
+        const shouldRefreshSavedSuggestion = options.refreshAutoSuggestions === true && ebayMappingWasAutoSuggested(savedMapping);
+        if (savedMapping.categoryId && options.overwrite !== true && !shouldRefreshSavedSuggestion) {
+          results.push({
+            category: row.name,
+            categoryId: row.id,
+            productCount: row.productCount || 0,
+            query,
+            status: "skipped",
+            ebayCategoryId: savedMapping.categoryId,
+            ebayCategoryPath: savedMapping.categoryPath || "",
+            message: "An approved eBay category mapping already exists."
+          });
+          if (typeof options.onProgress === "function") {
+            await options.onProgress({ index: index + 1, total: rows.length, row, results, mapped, autoApproved, needsReview, missing, errors });
+          }
+          continue;
+        }
+      }
       const cacheKey = `${marketplaceId}:${query.toLowerCase()}`;
       const search = searchCache.has(cacheKey)
         ? searchCache.get(cacheKey)
@@ -8364,6 +8386,7 @@ async function autoMapEbayCategories(db, options = {}) {
         if (!approved) setting.status = "needs_review";
         setting.updatedBy = "eBay category auto-map";
         setting.updatedAt = new Date().toISOString();
+        if (typeof options.saveCategorySetting === "function") await options.saveCategorySetting(setting, row);
         mapped += 1;
         if (approved) autoApproved += 1;
         else needsReview += 1;
@@ -8392,8 +8415,9 @@ async function autoMapEbayCategories(db, options = {}) {
   return { requested: rows.length, mapped, autoApproved, needsReview, missing, errors, results, scope, marketplaceId };
 }
 
-async function readEbayCategoryAutoMapDb() {
+async function readEbayCategoryAutoMapDb(options = {}) {
   const postgresEnabled = postgres.isPostgresEnabled();
+  const includeCategorySettings = options.includeCategorySettings === true;
   const [baseDb, categoryDb, categorySummaryIndex] = await Promise.all([
     postgresEnabled
       ? postgres.readStateFields([
@@ -8404,7 +8428,7 @@ async function readEbayCategoryAutoMapDb() {
         "ebaySettings"
       ], { fallbackToLegacy: false })
       : readDbFast(),
-    postgresEnabled
+    postgresEnabled && includeCategorySettings
       ? postgres.readStateFields(["categorySettings", "vendorCategoryMappings"], { fallbackToLegacy: false })
       : Promise.resolve(null),
     postgresEnabled
@@ -8417,7 +8441,8 @@ async function readEbayCategoryAutoMapDb() {
   }
   return normalizeDb({
     ...baseDb,
-    ...(categoryDb || {}),
+    categorySettings: postgresEnabled ? (categoryDb?.categorySettings || []) : baseDb.categorySettings,
+    vendorCategoryMappings: postgresEnabled ? (categoryDb?.vendorCategoryMappings || {}) : baseDb.vendorCategoryMappings,
     __mainCategoryRows: mainCategoryRows || undefined,
     connections: baseDb.connections || [],
     channels: baseDb.channels || [],
@@ -8490,6 +8515,26 @@ function queueEbayCategoryAutoMapJob(db = {}, options = {}) {
     }));
   }
   return { job, requested };
+}
+
+async function readEbayAutoMapCategorySetting(row = {}) {
+  if (!postgres.isPostgresEnabled()) return null;
+  const keys = [
+    String(row.id || row.categoryId || "").trim(),
+    categoryIdentity(row.name || "", "main").id
+  ].filter(Boolean);
+  for (const key of [...new Set(keys)]) {
+    const setting = await postgres.readStateEntityDocument("categorySettings", key);
+    if (setting) return setting;
+  }
+  return null;
+}
+
+async function persistEbayAutoMapCategorySetting(setting = {}) {
+  if (!postgres.isPostgresEnabled()) return;
+  await postgres.upsertStateEntityDocument("categorySettings", setting);
+  await postgres.upsertCategoryChannelMappingsFromState([setting], { replace: false });
+  publicStateJsonCache = null;
 }
 
 async function queueEbayTaxonomySyncJob(db = {}, options = {}) {
@@ -8629,6 +8674,8 @@ async function runEbayCategoryAutoMapWorkerJob(job = {}, attrs = {}) {
   let lastProgressAt = 0;
   const result = await autoMapEbayCategories(db, {
     ...payload,
+    loadCategorySetting: postgres.isPostgresEnabled() ? readEbayAutoMapCategorySetting : undefined,
+    saveCategorySetting: postgres.isPostgresEnabled() ? persistEbayAutoMapCategorySetting : undefined,
     onProgress: async (progress) => {
       const now = Date.now();
       if (now - lastProgressAt < 750 && progress.index < progress.total) return;
@@ -8645,9 +8692,10 @@ async function runEbayCategoryAutoMapWorkerJob(job = {}, attrs = {}) {
         message: `Matched ${progress.index.toLocaleString()} of ${progress.total.toLocaleString()} categories. ${progress.autoApproved.toLocaleString()} approved; ${progress.needsReview.toLocaleString()} need review.`
       });
     },
-    onCheckpoint: async () => persistEbayCategoryAutoMapDb(db, false)
+    onCheckpoint: postgres.isPostgresEnabled() ? undefined : async () => persistEbayCategoryAutoMapDb(db, false)
   });
-  await persistEbayCategoryAutoMapDb(db, true);
+  if (!postgres.isPostgresEnabled()) await persistEbayCategoryAutoMapDb(db, true);
+  clearCategoryResponseCache();
   let affectedProductRefresh = { requestedCategories: 0, refreshedCategories: 0, changedProducts: 0 };
   if (payload.refreshAffectedProducts !== false && result.autoApproved > 0) {
     const approvedRows = result.results.filter((row) => row.status === "mapped");
@@ -8665,8 +8713,17 @@ async function runEbayCategoryAutoMapWorkerJob(job = {}, attrs = {}) {
     for (let index = 0; index < approvedRows.length; index += 1) {
       const row = approvedRows[index];
       const source = { id: row.categoryId || "", categoryId: row.categoryId || "", name: row.category || "" };
-      const category = findOrCreateCategorySetting(db, source.name);
-      const mapping = normalizeChannelCategoryMapping(category.mappings?.ebay || {});
+      const mapping = normalizeChannelCategoryMapping({
+        categoryId: row.ebayCategoryId,
+        categoryPath: row.ebayCategoryPath,
+        taxonomyVersion: row.categoryTreeId,
+        categoryTreeVersion: row.categoryTreeVersion,
+        status: "mapped",
+        confidence: row.confidence,
+        confidenceLevel: row.confidenceLevel,
+        matchSource: "ebay-ranked-suggestion",
+        locked: true
+      });
       if (!mapping.categoryId) continue;
       let changed = 0;
       if (postgres.isPostgresEnabled()) {
@@ -8929,7 +8986,7 @@ async function queueAiCategoryReviewJob(db = {}, options = {}) {
 async function runAiCategoryReviewWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
   const startedAt = job.startedAt || new Date().toISOString();
-  const db = await readEbayCategoryAutoMapDb();
+  const db = await readEbayCategoryAutoMapDb({ includeCategorySettings: true });
   const settings = readSystemSettingsStore(db.systemSettings || {});
   if (!settings.aiEnabled || !settings.aiCategoryBackgroundReviewEnabled || !davidToolEnabled(settings, "categories.review")) {
     throw new Error("David background category review is disabled in System Settings.");
