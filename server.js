@@ -8474,16 +8474,20 @@ async function readEbayCategoryAutoMapDb(options = {}) {
   if (postgresEnabled && !mainCategoryRows?.length) {
     mainCategoryRows = await postgres.listCategoryProductStats();
   }
-  return normalizeDb({
-    ...baseDb,
-    categorySettings: postgresEnabled ? (categoryDb?.categorySettings || []) : baseDb.categorySettings,
-    vendorCategoryMappings: postgresEnabled ? (categoryDb?.vendorCategoryMappings || {}) : baseDb.vendorCategoryMappings,
-    __mainCategoryRows: mainCategoryRows || undefined,
-    connections: baseDb.connections || [],
-    channels: baseDb.channels || [],
-    systemSettings: baseDb.systemSettings || {},
-    sequence: baseDb.sequence || {}
-  });
+  if (!postgresEnabled) return normalizeDb(baseDb);
+  // Category workers only need category/channel state. Running normalizeDb here
+  // also normalizes every unrelated collection and makes large review jobs spend
+  // minutes on startup before their first progress update.
+  return {
+    connections: (baseDb.connections || []).map(normalizeChannel),
+    channels: (baseDb.channels || []).map(normalizeChannel),
+    systemSettings: readSystemSettingsStore(baseDb.systemSettings || {}),
+    sequence: baseDb.sequence || {},
+    ebaySettings: baseDb.ebaySettings || {},
+    categorySettings: normalizeCategorySettings(categoryDb?.categorySettings || []),
+    vendorCategoryMappings: normalizeVendorCategoryMappings(categoryDb?.vendorCategoryMappings || {}),
+    __mainCategoryRows: mainCategoryRows || []
+  };
 }
 
 async function persistEbayCategoryAutoMapDb(db, syncRelationalIndex = false) {
@@ -8853,7 +8857,11 @@ function aiCategoryReviewChannels(settings = {}, options = {}) {
 function aiCategoryReviewWorkItems(db = {}, settings = {}, options = {}) {
   const channels = aiCategoryReviewChannels(settings, options);
   const refreshPending = options.refreshPending === true;
-  const rows = publicCategories(db, "", "main").categories || [];
+  const rows = Array.isArray(options.categoryRows)
+    ? options.categoryRows
+    : (Array.isArray(db.__mainCategoryRows)
+      ? publicCategoriesLiteFromPostgresState(db, "", "main").categories
+      : publicCategories(db, "", "main").categories) || [];
   const items = [];
   const skipped = [];
   for (const row of rows) {
@@ -8867,7 +8875,7 @@ function aiCategoryReviewWorkItems(db = {}, settings = {}, options = {}) {
         skipped.push({ categoryId: row.id, category: row.name, channel, reason: "already_pending_review" });
         continue;
       }
-      items.push({ categoryId: row.id, categoryName: row.name, channel });
+      items.push({ categoryId: row.id, categoryName: row.name, channel, source: row });
     }
   }
   return { items, skipped, channels };
@@ -9021,6 +9029,10 @@ async function queueAiCategoryReviewJob(db = {}, options = {}) {
 async function runAiCategoryReviewWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
   const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running", phase: "loading_category_index", processedRows: 0,
+    progressPercent: 0, startedAt, message: "Loading the local category and channel-mapping indexes."
+  });
   const db = await readEbayCategoryAutoMapDb({ includeCategorySettings: true });
   const settings = readSystemSettingsStore(db.systemSettings || {});
   if (!settings.aiEnabled || !settings.aiCategoryBackgroundReviewEnabled || !davidToolEnabled(settings, "categories.review")) {
@@ -9037,7 +9049,7 @@ async function runAiCategoryReviewWorkerJob(job = {}, attrs = {}) {
   for (let index = 0; index < work.items.length; index += 1) {
     const item = work.items[index];
     try {
-      const source = findPublicCategory(db, item.categoryId, "main");
+      const source = item.source || findPublicCategory(db, item.categoryId, "main");
       if (!source) throw new Error("Category no longer exists in the main category index.");
       const proposal = await davidCategoryReview(db, source, item.channel, settings, "main", { persistProposal: false, recordAction: false });
       const outcome = await applyDavidBackgroundCategoryDecision(db, source, proposal, settings);
