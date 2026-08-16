@@ -6881,7 +6881,30 @@ type CategoryChannelMapping = {
   googleCategory?: { id?: string; fullName?: string; breadcrumb?: string } | null
   attributes?: CategoryAttribute[]
   attributeMappings?: CategoryAttribute[]
+  history?: Array<{
+    id?: string
+    action?: string
+    categoryId?: string
+    categoryPath?: string
+    previousCategoryId?: string
+    previousCategoryPath?: string
+    confidence?: number | null
+    source?: string
+    actor?: string
+    createdAt?: string
+  }>
 }
+
+type CategoryPageSummary = Record<"shopify" | "ebay", {
+  total: number
+  mapped: number
+  unmapped: number
+  "auto-applied": number
+  "awaiting-review": number
+  manual: number
+  highConfidence: number
+  collectionMapped: number
+}>
 
 type CategoryProfile = {
   id?: string
@@ -6970,6 +6993,27 @@ function CategoryMappingBadge({ channel, mapping }: { channel: "shopify" | "ebay
     <span className="text-[10px] font-semibold uppercase text-muted-foreground">{channel === "shopify" ? "Shopify / Google" : "eBay"}</span>
     <Badge variant="outline" className={`w-fit whitespace-nowrap ${className}`}>{label.trim()}</Badge>
   </div>
+}
+
+function CategoryMappingHistory({ profile }: { profile: CategoryProfile }) {
+  const rows = (["shopify", "ebay"] as const).flatMap((channel) => (profile.mappings?.[channel]?.history || []).map((entry) => ({ ...entry, channel })))
+    .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")))
+  if (!rows.length) return null
+  return <Card>
+    <CardHeader className="border-b"><CardTitle className="text-sm">Mapping history</CardTitle><CardDescription>Every approved, manual, lock, and unlock change retained for comparison.</CardDescription></CardHeader>
+    <CardContent className="p-0"><div className="overflow-x-auto"><Table>
+      <TableHeader><TableRow><TableHead>When</TableHead><TableHead>Channel</TableHead><TableHead>Change</TableHead><TableHead>Previous</TableHead><TableHead>Current</TableHead><TableHead>Confidence</TableHead><TableHead>Actor</TableHead></TableRow></TableHeader>
+      <TableBody>{rows.map((entry, index) => <TableRow key={entry.id || `${entry.channel}-${entry.createdAt}-${index}`}>
+        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{dateLabel(entry.createdAt)}</TableCell>
+        <TableCell><Badge variant="outline">{entry.channel === "shopify" ? "Shopify / Google" : "eBay"}</Badge></TableCell>
+        <TableCell className="whitespace-nowrap text-sm">{String(entry.action || "updated").replace(/-/g, " ")}</TableCell>
+        <TableCell className="max-w-72 truncate text-xs text-muted-foreground">{entry.previousCategoryPath || entry.previousCategoryId || "-"}</TableCell>
+        <TableCell className="max-w-72 truncate text-sm">{entry.categoryPath || entry.categoryId || "-"}</TableCell>
+        <TableCell>{entry.confidence == null ? "-" : `${Math.round(Number(entry.confidence) * 100)}%`}</TableCell>
+        <TableCell>{entry.actor || "System"}</TableCell>
+      </TableRow>)}</TableBody>
+    </Table></div></CardContent>
+  </Card>
 }
 
 const catalogWorkspaceTabs: Array<{ id: CatalogWorkspaceTab; label: string }> = [
@@ -7227,6 +7271,13 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   const [confidenceFilter, setConfidenceFilter] = useState("")
   const [lifecycleFilter, setLifecycleFilter] = useState("")
   const [minimumProducts, setMinimumProducts] = useState("")
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(50)
+  const [totalCategories, setTotalCategories] = useState(0)
+  const [pageCount, setPageCount] = useState(1)
+  const [categorySummary, setCategorySummary] = useState<CategoryPageSummary | null>(null)
+  const [selectedCategoryIds, setSelectedCategoryIds] = useState<Set<string>>(new Set())
+  const [bulkWorking, setBulkWorking] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -7253,11 +7304,14 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   const [refreshChannelRecords, setRefreshChannelRecords] = useState(true)
   const [refreshTiming, setRefreshTiming] = useState<"now" | "later">("now")
   const [refreshAt, setRefreshAt] = useState("")
+  const [refreshMarketplaceReview, setRefreshMarketplaceReview] = useState(false)
+  const [bulkRefreshOpen, setBulkRefreshOpen] = useState(false)
   const [refreshSubmitting, setRefreshSubmitting] = useState(false)
   const [lastCategoryRefresh, setLastCategoryRefresh] = useState<{ id?: string; jobNumber?: number; scheduledFor?: string; channel: string } | null>(null)
 
   const selected = useMemo(() => categories.find((row) => (row.id || row.categoryId) === selectedId) || null, [categories, selectedId])
   const visibleCategories = useMemo(() => {
+    if (!standalone) return categories
     const value = query.trim().toLowerCase()
     return categories.filter((row) => {
       const shopifyMapped = Boolean(row.mappings?.shopify?.categoryId)
@@ -7282,7 +7336,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
       if (Number(minimumProducts || 0) > Number(row.productCount || 0)) return false
       return !value || `${row.id} ${row.name} ${row.status} ${row.owner} ${Object.values(row.mappings || {}).map((mapping) => mapping.categoryPath).join(" ")} ${(row.topVendors || []).map((vendor) => vendor.name).join(" ")} ${(row.topBrands || []).map((brand) => brand.name).join(" ")}`.toLowerCase().includes(value)
     })
-  }, [categories, query, channelFilter, mappingFilter, reviewFilter, confidenceFilter, lifecycleFilter, minimumProducts])
+  }, [standalone, categories, query, channelFilter, mappingFilter, reviewFilter, confidenceFilter, lifecycleFilter, minimumProducts])
 
   function applyCategories(rows: CategoryProfile[], nextId = categoryId || selectedId) {
     const normalizedRows = rows.map((row) => ({ ...row, missingMappings: categoryMissingCount(row.missingMappings) }))
@@ -7303,8 +7357,29 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   async function load() {
     setLoading(true)
     try {
-      const result = await api<{ categories?: CategoryProfile[] }>(`/api/categories?scope=${categoryScope}`)
+      if (standalone) {
+        const result = await api<{ categories?: CategoryProfile[] }>(`/api/categories?scope=${categoryScope}`)
+        applyCategories(result.categories || [])
+        return
+      }
+      const params = new URLSearchParams({
+        scope: categoryScope,
+        q: query.trim(),
+        channel: channelFilter,
+        mapping: mappingFilter,
+        review: reviewFilter,
+        confidence: confidenceFilter,
+        lifecycle: lifecycleFilter,
+        minimumProducts,
+        page: String(page),
+        pageSize: String(pageSize),
+      })
+      const result = await api<{ categories?: CategoryProfile[]; total?: number; page?: number; pageCount?: number; summary?: CategoryPageSummary }>(`/api/categories/page?${params}`)
       applyCategories(result.categories || [])
+      setTotalCategories(Number(result.total || 0))
+      setPage(Number(result.page || 1))
+      setPageCount(Number(result.pageCount || 1))
+      setCategorySummary(result.summary || null)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load categories.")
     } finally {
@@ -7312,7 +7387,20 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     }
   }
 
-  useEffect(() => { load() }, [categoryScope])
+  useEffect(() => {
+    if (standalone) {
+      void load()
+      return
+    }
+    const timeout = window.setTimeout(() => void load(), 300)
+    return () => window.clearTimeout(timeout)
+  }, [standalone, categoryScope, query, channelFilter, mappingFilter, reviewFilter, confidenceFilter, lifecycleFilter, minimumProducts, page, pageSize])
+
+  useEffect(() => {
+    if (standalone) return
+    setPage(1)
+    setSelectedCategoryIds(new Set())
+  }, [standalone, categoryScope, query, channelFilter, mappingFilter, reviewFilter, confidenceFilter, lifecycleFilter, minimumProducts, pageSize])
 
   useEffect(() => { if (categoryId) setSelectedId(categoryId) }, [categoryId])
 
@@ -7385,6 +7473,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
           force: true,
           updateExistingSkus: refreshExistingSkus,
           updateChannelRecords: refreshChannelRecords,
+          createMarketplaceReview: refreshMarketplaceReview,
           scheduledFor,
         }),
       })
@@ -7566,6 +7655,80 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     }
   }
 
+  async function approveSelectedSuggestions() {
+    const channel = channelFilter === "ebay" ? "ebay" : "shopify"
+    const eligible = categories.filter((row) => selectedCategoryIds.has(row.id || row.categoryId || "") && row.mappings?.[channel]?.pendingSuggestion)
+    if (!eligible.length) {
+      toast.error(`None of the selected categories has a pending ${channel === "shopify" ? "Shopify / Google" : "eBay"} suggestion.`)
+      return
+    }
+    setBulkWorking(true)
+    let approved = 0
+    let failed = 0
+    for (const row of eligible) {
+      try {
+        await api(`/api/ai/categories/${encodeURIComponent(row.id || row.categoryId || "")}/pending/apply`, {
+          method: "POST",
+          body: JSON.stringify({ channel, scope: categoryScope, reviewedBy: "Luis" }),
+        })
+        approved += 1
+      } catch {
+        failed += 1
+      }
+    }
+    setBulkWorking(false)
+    setSelectedCategoryIds(new Set())
+    await load()
+    if (approved) toast.success(`${numberLabel(approved)} ${channel} suggestions approved and locked.`)
+    if (failed) toast.error(`${numberLabel(failed)} suggestions could not be approved. Review their category details.`)
+  }
+
+  async function refreshSelectedCategories() {
+    const channel = channelFilter === "ebay" ? "ebay" : "shopify"
+    const eligible = categories.filter((row) => selectedCategoryIds.has(row.id || row.categoryId || "") && row.mappings?.[channel]?.categoryId)
+    if (!eligible.length) {
+      toast.error(`None of the selected categories has a saved ${channel} mapping.`)
+      return
+    }
+    let scheduledFor = ""
+    if (refreshTiming === "later") {
+      const selectedTime = new Date(refreshAt)
+      if (!refreshAt || Number.isNaN(selectedTime.getTime()) || selectedTime.getTime() <= Date.now()) {
+        toast.error("Choose a future date and time for the category refresh.")
+        return
+      }
+      scheduledFor = selectedTime.toISOString()
+    }
+    setBulkWorking(true)
+    let queued = 0
+    let failed = 0
+    for (const row of eligible) {
+      try {
+        await api(`/api/categories/${encodeURIComponent(row.id || row.categoryId || "")}/apply-channel-to-products`, {
+          method: "POST",
+          body: JSON.stringify({
+            scope: categoryScope,
+            channel,
+            background: true,
+            force: true,
+            updateExistingSkus: true,
+            updateChannelRecords: true,
+            createMarketplaceReview: refreshMarketplaceReview,
+            scheduledFor,
+          }),
+        })
+        queued += 1
+      } catch {
+        failed += 1
+      }
+    }
+    setBulkWorking(false)
+    setBulkRefreshOpen(false)
+    setSelectedCategoryIds(new Set())
+    if (queued) toast.success(`${numberLabel(queued)} category refresh jobs ${scheduledFor ? "scheduled" : "queued"}. Live listings are not changed.`)
+    if (failed) toast.error(`${numberLabel(failed)} category refresh jobs could not be queued.`)
+  }
+
   async function searchTaxonomy(channel: "shopify" | "ebay") {
     const value = channel === "shopify" ? shopifyQuery : ebayQuery
     if (!value.trim()) return
@@ -7615,7 +7778,126 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
   }, [standalone, profile])
 
   if (!standalone) {
-    const clearFilters = () => { setQuery(""); setMappingFilter(""); setReviewFilter(""); setConfidenceFilter(""); setLifecycleFilter(""); setMinimumProducts(""); setChannelFilter("shopify") }
+    const clearFilters = () => {
+      setQuery("")
+      setMappingFilter("")
+      setReviewFilter("")
+      setConfidenceFilter("")
+      setLifecycleFilter("")
+      setMinimumProducts("")
+      setChannelFilter("shopify")
+      setPage(1)
+      setSelectedCategoryIds(new Set())
+    }
+    const channel = channelFilter === "ebay" ? "ebay" : "shopify"
+    const summary = categorySummary?.[channel]
+    const pageIds = categories.map((row) => row.id || row.categoryId || "").filter(Boolean)
+    const allPageSelected = Boolean(pageIds.length) && pageIds.every((id) => selectedCategoryIds.has(id))
+    const togglePage = (checked: boolean) => {
+      setSelectedCategoryIds((current) => {
+        const next = new Set(current)
+        pageIds.forEach((id) => checked ? next.add(id) : next.delete(id))
+        return next
+      })
+    }
+    const toggleRow = (id: string, checked: boolean) => {
+      setSelectedCategoryIds((current) => {
+        const next = new Set(current)
+        checked ? next.add(id) : next.delete(id)
+        return next
+      })
+    }
+    const summaryCards = [
+      ["Mapped", summary?.mapped || 0, "border-emerald-500/30 bg-emerald-500/5"],
+      ["Awaiting approval", summary?.["awaiting-review"] || 0, "border-amber-500/30 bg-amber-500/5"],
+      ["Auto-applied", summary?.["auto-applied"] || 0, "border-blue-500/30 bg-blue-500/5"],
+      ["Unmapped", summary?.unmapped || 0, "border-border bg-muted/20"],
+    ] as const
+
+    return <div className="grid gap-5">
+      <PageHeader
+        eyebrow="Catalog"
+        title="Categories"
+        description={categoryScope === "main" ? "Review internal categories and their Shopify / Google and eBay mapping state." : "Review supplier source categories before promoting or mapping them."}
+        action={<div className="flex flex-wrap gap-2">
+          <div className="flex rounded-md border p-0.5">
+            <Button size="sm" variant={categoryScope === "main" ? "secondary" : "ghost"} onClick={() => setCategoryScope("main")}>Main</Button>
+            <Button size="sm" variant={categoryScope === "source" ? "secondary" : "ghost"} onClick={() => setCategoryScope("source")}>Source</Button>
+          </div>
+          {categoryScope === "main" && <Button size="sm" onClick={() => setAiReviewOpen(true)}><ShieldCheck className="size-4" /> Review all with David</Button>}
+          {categoryScope === "main" && <Button size="sm" variant="outline" onClick={() => setEbayAutoMapOpen(true)}><Database className="size-4" /> Map all to eBay</Button>}
+          <Button variant="outline" size="sm" asChild><a href="/api/categories/export/master-category-mapping.csv"><FileDown className="size-4" /> Export</a></Button>
+          <Button variant="outline" size="sm" onClick={rebuildIndex} disabled={rebuilding}>{rebuilding ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Rebuild index</Button>
+        </div>}
+      />
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {summaryCards.map(([label, value, tone]) => <Card key={label} className={tone}><CardContent className="p-4"><p className="text-xs font-medium text-muted-foreground">{label}</p><p className="mt-1 text-2xl font-semibold">{numberLabel(value)}</p></CardContent></Card>)}
+      </div>
+
+      <Card>
+        <CardHeader className="gap-4 border-b">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div><CardTitle className="text-sm">Category mapping index</CardTitle><CardDescription>{numberLabel(totalCategories)} matching categories. Results are loaded from the stored category index.</CardDescription></div>
+            <Badge variant="outline">{channel === "shopify" ? "Shopify / Google" : "eBay"}</Badge>
+          </div>
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_180px_180px_180px_160px_auto]">
+            <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />{loading && <Loader2 className="absolute right-2.5 top-2.5 size-4 animate-spin text-primary" />}<Input className="px-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Category, vendor, or brand" /></div>
+            <Select value={channel} onValueChange={setChannelFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="shopify">Shopify / Google</SelectItem><SelectItem value="ebay">eBay</SelectItem></SelectContent></Select>
+            <Select value={reviewFilter || "all"} onValueChange={(value) => setReviewFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any review state</SelectItem><SelectItem value="auto-applied">Auto-applied</SelectItem><SelectItem value="awaiting-review">Awaiting approval</SelectItem><SelectItem value="manual">Manual / approved</SelectItem><SelectItem value="unmapped">Unmapped</SelectItem></SelectContent></Select>
+            <Select value={confidenceFilter || "all"} onValueChange={(value) => setConfidenceFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any confidence</SelectItem><SelectItem value="high">75% or higher</SelectItem><SelectItem value="medium">50% to 74%</SelectItem><SelectItem value="low">Below 50%</SelectItem><SelectItem value="none">No score</SelectItem></SelectContent></Select>
+            <Select value={lifecycleFilter || "all"} onValueChange={(value) => setLifecycleFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any lifecycle</SelectItem><SelectItem value="new">New</SelectItem><SelectItem value="current">Current</SelectItem><SelectItem value="outdated">Outdated</SelectItem></SelectContent></Select>
+            <Button variant="ghost" size="sm" onClick={clearFilters}>Clear</Button>
+          </div>
+          <div className="grid gap-2 md:grid-cols-[180px_180px_1fr]">
+            <Select value={mappingFilter || "all"} onValueChange={(value) => setMappingFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any mapping</SelectItem><SelectItem value="mapped">Mapped on channel</SelectItem><SelectItem value="missing">Missing on channel</SelectItem><SelectItem value="fully-mapped">Shopify, collection, eBay mapped</SelectItem><SelectItem value="missing-shopify">Missing Shopify</SelectItem><SelectItem value="missing-collection">Missing collection</SelectItem><SelectItem value="missing-ebay">Missing eBay</SelectItem></SelectContent></Select>
+            <Input type="number" min="0" value={minimumProducts} onChange={(event) => setMinimumProducts(event.target.value)} placeholder="Minimum products" />
+            <p className="self-center text-xs text-muted-foreground">Confidence and approval filters apply to the selected channel. TikTok and Whatnot are excluded.</p>
+          </div>
+        </CardHeader>
+
+        {selectedCategoryIds.size > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-primary/5 px-4 py-3">
+          <span className="text-sm font-medium">{numberLabel(selectedCategoryIds.size)} selected</span>
+          <Button size="sm" onClick={() => void approveSelectedSuggestions()} disabled={bulkWorking}>{bulkWorking ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Approve suggestions</Button>
+          <Button size="sm" variant="outline" onClick={() => { setRefreshTiming("now"); setRefreshAt(""); setBulkRefreshOpen(true) }} disabled={bulkWorking}><RefreshCw className="size-4" /> Refresh affected SKUs</Button>
+          <Button size="sm" variant="ghost" onClick={() => setSelectedCategoryIds(new Set())}>Clear</Button>
+          <span className="text-xs text-muted-foreground">Refreshes DataPlus records only; live listings are not published or changed.</span>
+        </div>}
+
+        <CardContent className="p-0">
+          {loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : categories.length === 0 ? <Empty className="py-12"><EmptyHeader><EmptyMedia variant="icon"><Search /></EmptyMedia><EmptyTitle>No categories found</EmptyTitle><EmptyDescription>Adjust the saved mapping filters or rebuild the category index.</EmptyDescription></EmptyHeader></Empty> : <div className="overflow-x-auto"><Table>
+            <TableHeader><TableRow><TableHead className="w-10"><Checkbox checked={allPageSelected} onCheckedChange={(checked) => togglePage(checked === true)} aria-label="Select this page" /></TableHead><TableHead>Category</TableHead><TableHead>Mapping state</TableHead><TableHead>Mapped category</TableHead><TableHead>Lifecycle</TableHead><TableHead className="text-right">Products</TableHead><TableHead className="w-24 text-right">Action</TableHead></TableRow></TableHeader>
+            <TableBody>{categories.map((row) => {
+              const id = row.id || row.categoryId || ""
+              const channelMapping = row.mappings?.[channel]
+              return <TableRow key={id} data-state={selectedCategoryIds.has(id) ? "selected" : undefined}>
+                <TableCell><Checkbox checked={selectedCategoryIds.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} aria-label={`Select ${row.name || id}`} /></TableCell>
+                <TableCell className="min-w-64"><a className="text-left font-medium text-primary hover:underline" href={`/categories/${encodeURIComponent(id)}?scope=${categoryScope}`}>{row.name || id}</a><p className="mt-1 max-w-xl truncate text-xs text-muted-foreground">{row.topVendors?.slice(0, 3).map((item) => item.name).filter(Boolean).join(" · ") || "No supplier summary"}</p></TableCell>
+                <TableCell><CategoryMappingBadge channel={channel} mapping={channelMapping} /></TableCell>
+                <TableCell className="max-w-md"><p className="truncate text-sm">{channelMapping?.categoryPath || channelMapping?.pendingSuggestion?.categoryPath || "Not mapped"}</p>{channelMapping?.locked && <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p>}</TableCell>
+                <TableCell><Badge variant="outline">{row.lifecycle || "current"}</Badge></TableCell>
+                <TableCell className="text-right tabular-nums">{numberLabel(row.productCount || 0)}</TableCell>
+                <TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/categories/${encodeURIComponent(id)}?scope=${categoryScope}`}>Open</a></Button></TableCell>
+              </TableRow>
+            })}</TableBody>
+          </Table></div>}
+        </CardContent>
+        <CardFooter className="flex flex-wrap items-center justify-between gap-3 border-t p-3">
+          <div className="flex items-center gap-2"><span className="text-xs text-muted-foreground">Rows</span><Select value={String(pageSize)} onValueChange={(value) => setPageSize(Number(value))}><SelectTrigger className="h-8 w-20"><SelectValue /></SelectTrigger><SelectContent>{[25, 50, 100, 250].map((size) => <SelectItem key={size} value={String(size)}>{size}</SelectItem>)}</SelectContent></Select></div>
+          <p className="text-xs text-muted-foreground">Page {page} of {pageCount}</p>
+          <div className="flex gap-2"><Button size="sm" variant="outline" disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</Button><Button size="sm" variant="outline" disabled={page >= pageCount || loading} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Next</Button></div>
+        </CardFooter>
+      </Card>
+
+      <Dialog open={bulkRefreshOpen} onOpenChange={(open) => { if (!bulkWorking) setBulkRefreshOpen(open) }}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Refresh selected category products</DialogTitle><DialogDescription>Queue one tracked job for each selected {channel === "shopify" ? "Shopify / Google" : "eBay"} category mapping. The jobs update DataPlus records only.</DialogDescription></DialogHeader><div className="grid gap-4 py-2"><Alert><ShieldCheck className="size-4" /><AlertTitle>No automatic marketplace changes</AlertTitle><AlertDescription>Products and live listings are not published or edited by this refresh.</AlertDescription></Alert><label className="flex cursor-pointer items-start gap-3 rounded-md border p-4"><Checkbox checked={refreshMarketplaceReview} onCheckedChange={(checked) => setRefreshMarketplaceReview(checked === true)} /><span><span className="block text-sm font-medium">Create marketplace follow-up review</span><span className="mt-1 block text-xs text-muted-foreground">After local records refresh, add a visible review-stage job for channel updates that a user may choose to run later.</span></span></label><div className="grid gap-3 rounded-md border p-4"><Label>When should these jobs run?</Label><div className="grid grid-cols-2 gap-2"><Button type="button" variant={refreshTiming === "now" ? "default" : "outline"} onClick={() => setRefreshTiming("now")}><RefreshCw className="size-4" /> Now</Button><Button type="button" variant={refreshTiming === "later" ? "default" : "outline"} onClick={() => setRefreshTiming("later")}><Clock3 className="size-4" /> Schedule</Button></div>{refreshTiming === "later" && <div className="grid gap-2"><Label htmlFor="bulk-category-refresh-time">Scheduled time</Label><Input id="bulk-category-refresh-time" type="datetime-local" value={refreshAt} min={new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)} onChange={(event) => setRefreshAt(event.target.value)} /></div>}</div></div><DialogFooter><Button variant="outline" onClick={() => setBulkRefreshOpen(false)} disabled={bulkWorking}>Cancel</Button><Button onClick={() => void refreshSelectedCategories()} disabled={bulkWorking}>{bulkWorking ? <Loader2 className="size-4 animate-spin" /> : refreshTiming === "later" ? <Clock3 className="size-4" /> : <RefreshCw className="size-4" />}{refreshTiming === "later" ? "Schedule jobs" : "Queue jobs"}</Button></DialogFooter></DialogContent></Dialog>
+
+      <Dialog open={ebayAutoMapOpen} onOpenChange={setEbayAutoMapOpen}><DialogContent><DialogHeader><DialogTitle>Map all categories to eBay?</DialogTitle><DialogDescription>This runs in the background from the local eBay taxonomy cache. Matches at 75% confidence or higher are approved and locked; lower-confidence suggestions remain reviewable.</DialogDescription></DialogHeader><label className="flex items-start gap-3 rounded-md border p-4"><Checkbox checked={refreshAfterEbayAutoMap} onCheckedChange={(checked) => setRefreshAfterEbayAutoMap(checked === true)} /><span><span className="block text-sm font-medium">Refresh affected DataPlus SKU records</span><span className="mt-1 block text-xs text-muted-foreground">This does not publish or modify live eBay listings.</span></span></label><DialogFooter><Button variant="outline" onClick={() => setEbayAutoMapOpen(false)}>Cancel</Button><Button onClick={() => void queueEbayAutoMap()} disabled={ebayAutoMapping}>{ebayAutoMapping ? <Loader2 className="size-4 animate-spin" /> : <Database className="size-4" />} Start mapping job</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={aiReviewOpen} onOpenChange={setAiReviewOpen}><DialogContent><DialogHeader><DialogTitle>Review all category mappings with David?</DialogTitle><DialogDescription>David reviews Shopify / Google and eBay against their local taxonomy caches. High-confidence matches are approved; the rest remain suggestions.</DialogDescription></DialogHeader><div className="grid gap-3"><label className="flex items-center gap-3 rounded-md border p-3"><Checkbox checked={aiReviewChannels.includes("shopify")} onCheckedChange={(checked) => setAiReviewChannels((current) => checked ? Array.from(new Set([...current, "shopify"])) : current.filter((item) => item !== "shopify"))} /> Shopify / Google</label><label className="flex items-center gap-3 rounded-md border p-3"><Checkbox checked={aiReviewChannels.includes("ebay")} onCheckedChange={(checked) => setAiReviewChannels((current) => checked ? Array.from(new Set([...current, "ebay"])) : current.filter((item) => item !== "ebay"))} /> eBay</label><label className="flex items-start gap-3 rounded-md border p-3"><Checkbox checked={refreshPendingAi} onCheckedChange={(checked) => setRefreshPendingAi(checked === true)} /><span><span className="block text-sm font-medium">Re-review existing pending suggestions</span><span className="text-xs text-muted-foreground">Useful after taxonomy or model changes.</span></span></label></div><DialogFooter><Button variant="outline" onClick={() => setAiReviewOpen(false)}>Cancel</Button><Button onClick={() => void queueAiReview()} disabled={aiReviewing}>{aiReviewing ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Queue review</Button></DialogFooter></DialogContent></Dialog>
+    </div>
+  }
+
+  if (false && !standalone) {
+    const clearFilters = () => { setQuery(""); setMappingFilter(""); setReviewFilter(""); setConfidenceFilter(""); setLifecycleFilter(""); setMinimumProducts(""); setChannelFilter("shopify"); setPage(1); setSelectedCategoryIds(new Set()) }
     return <><div className="grid gap-5">
       <PageHeader eyebrow="Catalog" title="Categories" description={categoryScope === "main" ? "Main catalog categories, their lifecycle, product coverage, and channel mapping health." : "Supplier source categories. Review this scope before adding new main categories."} action={<div className="flex flex-wrap gap-2"><div className="flex rounded-md border p-0.5"><Button size="sm" variant={categoryScope === "main" ? "secondary" : "ghost"} onClick={() => setCategoryScope("main")}>Main</Button><Button size="sm" variant={categoryScope === "source" ? "secondary" : "ghost"} onClick={() => setCategoryScope("source")}>Source</Button></div>{categoryScope === "main" && <Button size="sm" onClick={() => setAiReviewOpen(true)}><ShieldCheck className="size-4" /> Review all with David</Button>}{categoryScope === "main" && <Button size="sm" variant="outline" onClick={() => setEbayAutoMapOpen(true)}><Database className="size-4" /> Map all to eBay</Button>}<Button variant="outline" size="sm" asChild><a href="/api/categories/export/master-category-mapping.csv"><FileDown className="size-4" /> Export categories</a></Button><Button variant="outline" size="sm" onClick={rebuildIndex} disabled={rebuilding}>{rebuilding ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Rebuild index</Button></div>} />
       <Card><CardContent className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-[190px_190px_190px_minmax(180px,1fr)_auto]"><div className="grid gap-1"><Label className="text-xs">{channelFilter === "shopify" ? "Shopify / Google mapping" : `${channelFilter === "ebay" ? "eBay" : channelFilter} mapping`}</Label><Select value={reviewFilter || "all"} onValueChange={(value) => setReviewFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any mapping source</SelectItem><SelectItem value="auto-applied">Auto-applied</SelectItem><SelectItem value="awaiting-review">Awaiting approval</SelectItem><SelectItem value="manual">Manual / approved</SelectItem><SelectItem value="unmapped">Unmapped</SelectItem></SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">Channel confidence</Label><Select value={confidenceFilter || "all"} onValueChange={(value) => setConfidenceFilter(value === "all" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any confidence</SelectItem><SelectItem value="high">75% or higher</SelectItem><SelectItem value="medium">50% to 74%</SelectItem><SelectItem value="low">Below 50%</SelectItem><SelectItem value="none">No confidence score</SelectItem></SelectContent></Select></div><div className="grid gap-1"><Label className="text-xs">Minimum products</Label><Input type="number" min="0" value={minimumProducts} onChange={(event) => setMinimumProducts(event.target.value)} placeholder="0" /></div><div className="flex items-end"><p className="text-xs text-muted-foreground">Mapping source and confidence follow the channel selected in the category table filters below.</p></div><div className="flex items-end"><Button variant="ghost" size="sm" onClick={() => { setReviewFilter(""); setConfidenceFilter(""); setMinimumProducts("") }} disabled={!reviewFilter && !confidenceFilter && !minimumProducts}>Clear extra filters</Button></div></CardContent></Card>
@@ -7628,6 +7910,7 @@ function CategoriesWorkspace({ categoryId = "", standalone = false, initialScope
     <PageHeader eyebrow={standalone ? "Catalog / Categories" : "Catalog"} title={standalone ? (profile?.name || "Category") : "Categories"} description={standalone ? "Dedicated category profile for channel taxonomy, data requirements, defaults, and collection behavior." : "The authoritative product type, channel taxonomy, requirement, collection, and default-rule profile for every approved main category."} action={standalone ? <Button variant="outline" size="sm" asChild><a href="/categories">Back to categories</a></Button> : <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" asChild><a href="/api/categories/export/matrixify-smart-collections.csv"><FileDown className="size-4" /> Collections CSV</a></Button><Button variant="outline" size="sm" asChild><a href="/api/categories/export/master-category-mapping.csv"><FileDown className="size-4" /> Mappings CSV</a></Button><Button variant="outline" size="sm" onClick={rebuildIndex} disabled={rebuilding}>{rebuilding ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Rebuild index</Button></div>} />
     {standalone && profile?.mappings?.ebay?.categoryId && <Alert className={profile.mappings.ebay.status === "needs_review" ? "border-amber-500/40 bg-amber-500/5" : "border-emerald-500/40 bg-emerald-500/5"}><Database className="size-4" /><AlertTitle className="flex flex-wrap items-center gap-2">eBay category mapped <Badge variant={profile.mappings.ebay.status === "needs_review" ? "outline" : "secondary"}>{profile.mappings.ebay.confidence != null ? `${Math.round(Number(profile.mappings.ebay.confidence) * 100)}% confidence` : profile.mappings.ebay.matchSource === "manual" ? "Manual" : "Mapped"}</Badge></AlertTitle><AlertDescription>{profile.mappings.ebay.categoryPath || profile.mappings.ebay.categoryId}. {profile.mappings.ebay.status === "needs_review" ? "Review this suggestion before publishing eBay listings." : "This mapping is ready for eBay listing preparation."}</AlertDescription></Alert>}
     {lastCategoryRefresh && <Alert className="border-blue-500/40 bg-blue-500/5"><Clock3 className="size-4" /><AlertTitle>{lastCategoryRefresh.scheduledFor ? "Category refresh scheduled" : "Category refresh queued"}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-2"><span>{lastCategoryRefresh.jobNumber ? `Job #${lastCategoryRefresh.jobNumber}` : "Background job"} will refresh the selected {lastCategoryRefresh.channel} category data{lastCategoryRefresh.scheduledFor ? ` at ${dateLabel(lastCategoryRefresh.scheduledFor)}` : " as soon as a worker is available"}.</span><Button size="sm" variant="outline" asChild><a href={lastCategoryRefresh.id ? `/jobs/${lastCategoryRefresh.id}` : "/jobs"}>View job</a></Button></AlertDescription></Alert>}
+    {standalone && profile && profileTab === "lifecycle" && <CategoryMappingHistory profile={profile} />}
     <div className={standalone ? "grid gap-5" : "grid gap-5 xl:grid-cols-[minmax(280px,0.72fr)_minmax(0,1.8fr)]"}>
       {!standalone && <Card className="h-fit xl:sticky xl:top-4"><CardHeader className="gap-3 border-b pb-4"><div><CardTitle className="text-sm">Main category index</CardTitle><CardDescription>{numberLabel(categories.length)} categories. Search changes the list only; it never changes catalog data.</CardDescription></div><div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" placeholder="Search categories" value={query} onChange={(event) => setQuery(event.target.value)} /></div></CardHeader><CardContent className="max-h-[calc(100vh-20rem)] overflow-y-auto p-2">{loading ? <div className="grid gap-2 p-2"><Skeleton className="h-16" /><Skeleton className="h-16" /><Skeleton className="h-16" /></div> : visibleCategories.map((category) => { const id = category.id || category.categoryId || ""; const active = id === selectedId; return <button key={id} onClick={() => setSelectedId(id)} className={`grid w-full gap-1 rounded-md px-3 py-3 text-left transition-colors ${active ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}><div className="flex items-start justify-between gap-2"><span className="line-clamp-2 text-sm font-medium">{category.name}</span><Badge variant={active ? "secondary" : "outline"} className="shrink-0 text-[10px]">{numberLabel(category.productCount)}</Badge></div><div className={`flex items-center gap-2 text-xs ${active ? "text-primary-foreground/75" : "text-muted-foreground"}`}><span>{category.status?.replace(/_/g, " ")}</span><span>{numberLabel(category.mappingCount)} channel maps</span></div></button>})}{!loading && !visibleCategories.length && <p className="p-6 text-center text-sm text-muted-foreground">No categories match this search.</p>}</CardContent></Card>}
       <Card>{!profile ? <CardContent className="p-10 text-center text-sm text-muted-foreground">{loading ? "Loading category profile..." : "This category was not found."}</CardContent> : <><CardHeader className="gap-4 border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Badge>{profile.status?.replace(/_/g, " ") || "Needs review"}</Badge>{profile.lifecycle && <Badge variant="outline">{profile.lifecycle}</Badge>}<Badge variant="outline">{numberLabel(profile.productCount)} products</Badge>{(profileTab === "shopify" || profileTab === "ebay") && <Badge variant={mapping(profileTab).locked ? "secondary" : "outline"}>{mapping(profileTab).locked ? <LockKeyhole className="mr-1 size-3" /> : <UnlockKeyhole className="mr-1 size-3" />}{mapping(profileTab).locked ? `${profileTab} locked` : `${profileTab} unlocked`}</Badge>}{editing && <Badge className="bg-blue-600 text-white hover:bg-blue-600">Editing</Badge>}</div><CardTitle className="text-lg">{profile.name}</CardTitle><CardDescription className="mt-1">Main category and product type authority. Products inherit this profile, then each channel receives its mapped taxonomy and requirements.</CardDescription></div><div className="flex flex-wrap gap-2">{!standalone && <Button variant="outline" size="sm" asChild><a href={`/categories/${encodeURIComponent(profile.id || profile.categoryId || "")}`}>Open full profile</a></Button>}{editing ? <><Button variant="outline" size="sm" onClick={cancelEditing} disabled={saving}>Cancel</Button><Button size="sm" onClick={() => void saveActiveSection()} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save changes</Button></> : <Button size="sm" onClick={() => setEditing(true)}><Pencil className="size-4" /> Edit category</Button>}</div></div><div className="grid gap-2 sm:grid-cols-3"><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">Active products</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.activeProductCount)}</p></div><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">In stock</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.stockProductCount)}</p></div><div className="rounded-md border p-3"><p className="text-xs text-muted-foreground">Vendor paths mapped</p><p className="mt-1 text-lg font-semibold">{numberLabel(profile.sourceMappingCount)}</p></div></div></CardHeader>

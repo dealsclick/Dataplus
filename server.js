@@ -7434,8 +7434,43 @@ function normalizeChannelCategoryMapping(mapping = {}) {
     lockedAt: mapping.lockedAt || "",
     lockedBy: mapping.lockedBy || "",
     unlockedAt: mapping.unlockedAt || "",
-    unlockedBy: mapping.unlockedBy || ""
+    unlockedBy: mapping.unlockedBy || "",
+    history: Array.isArray(mapping.history) ? mapping.history.slice(-50).map((entry) => ({
+      id: entry.id || crypto.randomUUID(),
+      action: String(entry.action || "updated"),
+      categoryId: String(entry.categoryId || ""),
+      categoryPath: String(entry.categoryPath || ""),
+      previousCategoryId: String(entry.previousCategoryId || ""),
+      previousCategoryPath: String(entry.previousCategoryPath || ""),
+      confidence: Number.isFinite(Number(entry.confidence)) ? Number(entry.confidence) : null,
+      source: String(entry.source || ""),
+      actor: String(entry.actor || ""),
+      createdAt: String(entry.createdAt || "")
+    })) : []
   };
+}
+
+function categoryMappingHistoryEntry(previous = {}, next = {}, action = "updated", actor = "DataPlus") {
+  return {
+    id: crypto.randomUUID(),
+    action,
+    categoryId: String(next.categoryId || ""),
+    categoryPath: String(next.categoryPath || ""),
+    previousCategoryId: String(previous.categoryId || ""),
+    previousCategoryPath: String(previous.categoryPath || ""),
+    confidence: Number.isFinite(Number(next.confidence)) ? Number(next.confidence) : null,
+    source: String(next.matchSource || ""),
+    actor: String(actor || "DataPlus"),
+    createdAt: new Date().toISOString()
+  };
+}
+
+function withCategoryMappingHistory(previous = {}, next = {}, action = "updated", actor = "DataPlus") {
+  const history = Array.isArray(previous.history) ? previous.history.slice(-49) : [];
+  return normalizeChannelCategoryMapping({
+    ...next,
+    history: [...history, categoryMappingHistoryEntry(previous, next, action, actor)]
+  });
 }
 
 function attributeMappingStoreKey(categoryName = "", channel = "", mapping = {}) {
@@ -8839,7 +8874,7 @@ function aiCategoryReviewWorkItems(db = {}, settings = {}, options = {}) {
 }
 
 function categoryConfidenceLevel(confidence = 0) {
-  return confidence >= 0.9 ? "high" : confidence >= 0.72 ? "medium" : "low";
+  return confidence >= 0.9 ? "high" : confidence >= 0.75 ? "medium" : "low";
 }
 
 async function applyDavidBackgroundCategoryDecision(db = {}, source = {}, proposal = {}, settings = {}) {
@@ -8869,7 +8904,7 @@ async function applyDavidBackgroundCategoryDecision(db = {}, source = {}, propos
     let approvedMapping = suggested;
     if (channel === "shopify") approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
     else approvedMapping = await enrichEbayCategoryMapping(db, approvedMapping);
-    category.mappings[channel] = normalizeChannelCategoryMapping({
+    category.mappings[channel] = withCategoryMappingHistory(current, {
       ...approvedMapping,
       status: "mapped",
       confidence,
@@ -11223,6 +11258,84 @@ function preferredVendorForOrders(db, orders) {
 function findVendorByName(db, name) {
   const target = canonicalCatalogSupplierName(name).toLowerCase();
   return (db.vendors || []).find((vendor) => canonicalCatalogSupplierName(vendor.name, vendor.code).toLowerCase() === target);
+}
+
+function categoryMappingListState(mapping = {}) {
+  if (mapping?.pendingSuggestion || String(mapping?.status || "").toLowerCase().includes("review")) return "awaiting-review";
+  if (!mapping?.categoryId) return "unmapped";
+  const source = String(mapping?.matchSource || "").toLowerCase();
+  const status = String(mapping?.status || "").toLowerCase();
+  if (mapping?.aiProposalId || status.includes("auto") || ["david", "ai", "ranked", "auto"].some((value) => source.includes(value))) return "auto-applied";
+  return "manual";
+}
+
+function categoryMappingListConfidence(mapping = {}) {
+  const value = mapping?.pendingSuggestion?.confidence ?? mapping?.confidence;
+  return Number.isFinite(Number(value)) ? Math.max(0, Math.min(1, Number(value))) : null;
+}
+
+function categoryPageSummary(rows = []) {
+  const summarize = (channel) => rows.reduce((summary, row) => {
+    const mapping = row?.mappings?.[channel] || {};
+    const state = categoryMappingListState(mapping);
+    summary.total += 1;
+    summary[state] += 1;
+    if (mapping.categoryId) summary.mapped += 1;
+    if (categoryMappingListConfidence(mapping) >= 0.75) summary.highConfidence += 1;
+    if (channel === "shopify" && (mapping.collectionHandle || row?.smartCollection?.handle)) summary.collectionMapped += 1;
+    return summary;
+  }, { total: 0, mapped: 0, unmapped: 0, "auto-applied": 0, "awaiting-review": 0, manual: 0, highConfidence: 0, collectionMapped: 0 });
+  return { shopify: summarize("shopify"), ebay: summarize("ebay") };
+}
+
+async function publicCategoriesPage(params = {}) {
+  const scope = params.scope === "source" ? "source" : "main";
+  const query = String(params.q || "").trim().toLowerCase();
+  const channel = params.channel === "ebay" ? "ebay" : "shopify";
+  const pageSize = Math.max(10, Math.min(250, Number(params.pageSize || 50)));
+  const requestedPage = Math.max(1, Number(params.page || 1));
+  const source = await publicCategoriesFast("", scope);
+  let rows = Array.isArray(source.categories) ? source.categories : [];
+  rows = rows.filter((row) => {
+    const shopify = row?.mappings?.shopify || {};
+    const ebay = row?.mappings?.ebay || {};
+    const selected = row?.mappings?.[channel] || {};
+    const mapped = Boolean(selected.categoryId);
+    const collectionMapped = Boolean(shopify.collectionHandle || row?.smartCollection?.handle);
+    const mappingFilter = String(params.mapping || "");
+    if (mappingFilter === "mapped" && !mapped) return false;
+    if (mappingFilter === "missing" && mapped) return false;
+    if (mappingFilter === "fully-mapped" && !(shopify.categoryId && collectionMapped && ebay.categoryId)) return false;
+    if (mappingFilter === "missing-shopify" && shopify.categoryId) return false;
+    if (mappingFilter === "missing-collection" && collectionMapped) return false;
+    if (mappingFilter === "missing-ebay" && ebay.categoryId) return false;
+    const state = categoryMappingListState(selected);
+    if (params.review && state !== params.review) return false;
+    const confidence = categoryMappingListConfidence(selected);
+    if (params.confidence === "high" && (confidence === null || confidence < 0.75)) return false;
+    if (params.confidence === "medium" && (confidence === null || confidence < 0.5 || confidence >= 0.75)) return false;
+    if (params.confidence === "low" && (confidence === null || confidence >= 0.5)) return false;
+    if (params.confidence === "none" && confidence !== null) return false;
+    if (params.lifecycle && row.lifecycle !== params.lifecycle) return false;
+    if (Number(params.minimumProducts || 0) > Number(row.productCount || 0)) return false;
+    if (!query) return true;
+    return `${row.id || ""} ${row.name || ""} ${row.status || ""} ${row.owner || ""} ${Object.values(row.mappings || {}).map((mapping) => mapping?.categoryPath || "").join(" ")} ${(row.topVendors || []).map((vendor) => vendor.name).join(" ")} ${(row.topBrands || []).map((brand) => brand.name).join(" ")}`.toLowerCase().includes(query);
+  });
+  const summary = categoryPageSummary(rows);
+  const total = rows.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(requestedPage, pageCount);
+  const start = (page - 1) * pageSize;
+  return {
+    categories: rows.slice(start, start + pageSize),
+    total,
+    page,
+    pageSize,
+    pageCount,
+    summary,
+    scope,
+    indexGeneratedAt: source.indexGeneratedAt || ""
+  };
 }
 
 async function readCategoryReviewContext(categoryId = "", scope = "main") {
@@ -20373,9 +20486,38 @@ function categoryMappingRefreshOptions(options = {}) {
   return {
     updateExistingSkus: options.updateExistingSkus !== false,
     updateChannelRecords: options.updateChannelRecords !== false,
+    createMarketplaceReview: options.createMarketplaceReview === true,
     force: options.force === true,
     scheduledFor: String(options.scheduledFor || "").trim()
   };
+}
+
+function createCategoryMarketplaceReviewJob(db, parentJob, source, channel, mapping, changed) {
+  const channelLabel = channel === "shopify" ? "Shopify" : "eBay";
+  return createImportJob(db, {
+    section: "Categories",
+    category: "Marketplace review",
+    operation: `${channelLabel} category marketplace follow-up`,
+    direction: "review",
+    status: "warning",
+    phase: "awaiting_review",
+    startedAt: "",
+    fileName: source.name || parentJob.fileName || "Category mapping",
+    totalRows: Number(changed || 0),
+    processedRows: 0,
+    progressPercent: 0,
+    message: `${channelLabel} marketplace follow-up is ready for review. No live listings were changed.`,
+    details: `${source.name || parentJob.fileName || "Category"} | ${mapping.categoryId || ""} | ${mapping.categoryPath || ""}`,
+    parentJobId: parentJob.id,
+    workerPayload: {
+      marketplaceReview: true,
+      channel,
+      categoryId: source.id || source.categoryId || "",
+      categoryName: source.name || "",
+      mappingCategoryId: mapping.categoryId || "",
+      mappingCategoryPath: mapping.categoryPath || ""
+    }
+  });
 }
 
 function applyCategoryMappingToProduct(item, source, mapping, channel, options, db, now) {
@@ -20514,6 +20656,10 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
           totalRows: changed,
           changed
         });
+        if (options.createMarketplaceReview) {
+          const reviewJob = createCategoryMarketplaceReviewJob(workingDb, workingJob, source, channel, mapping, changed);
+          await postgres.upsertOperationJob(reviewJob);
+        }
         workingDb.syncRuns = Array.isArray(workingDb.syncRuns) ? workingDb.syncRuns : [];
         workingDb.syncRuns.unshift({
           id: crypto.randomUUID(),
@@ -20539,6 +20685,9 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
         totalRows: result.changed,
         changed: result.changed
       });
+      if (options.createMarketplaceReview) {
+        createCategoryMarketplaceReviewJob(workingDb, workingJob, source, channel, result.mapping, result.changed);
+      }
       workingDb.syncRuns = Array.isArray(workingDb.syncRuns) ? workingDb.syncRuns : [];
       workingDb.syncRuns.unshift({
         id: crypto.randomUUID(),
@@ -28216,7 +28365,7 @@ async function handleApi(req, res) {
       if (channel === "shopify") approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
       // Required eBay item specifics are loaded lazily after the local mapping is saved.
       const now = new Date().toISOString();
-      category.mappings[channel] = normalizeChannelCategoryMapping({
+      category.mappings[channel] = withCategoryMappingHistory(current, {
         ...approvedMapping,
         status: "mapped",
         confidence: proposal.confidence,
@@ -28235,7 +28384,7 @@ async function handleApi(req, res) {
         lockedBy: sourceTextValue(body.reviewedBy) || "Luis",
         unlockedAt: "",
         unlockedBy: ""
-      });
+      }, "approved-ai-mapping", sourceTextValue(body.reviewedBy) || "Luis");
       category.updatedBy = sourceTextValue(body.reviewedBy) || "Luis";
       category.updatedAt = now;
       if (category.status === "needs_review") category.status = "mapped";
@@ -28282,7 +28431,7 @@ async function handleApi(req, res) {
       if (channel === "shopify") approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
       // Required eBay item specifics are loaded lazily after the local mapping is saved.
       const now = new Date().toISOString();
-      category.mappings[channel] = normalizeChannelCategoryMapping({
+      category.mappings[channel] = withCategoryMappingHistory(current, {
         ...approvedMapping,
         status: "mapped",
         confidence: pending.confidence,
@@ -28300,7 +28449,7 @@ async function handleApi(req, res) {
         lockedBy: reviewedBy,
         unlockedAt: "",
         unlockedBy: ""
-      });
+      }, "approved-suggestion", reviewedBy);
       category.status = "mapped";
       category.updatedBy = reviewedBy;
       category.updatedAt = now;
@@ -32335,6 +32484,21 @@ async function handleApi(req, res) {
     return sendJsonText(res, 200, text, req);
   }
 
+  if (req.method === "GET" && url.pathname === "/api/categories/page") {
+    return sendJson(res, 200, await publicCategoriesPage({
+      scope: url.searchParams.get("scope") || "main",
+      q: url.searchParams.get("q") || "",
+      channel: url.searchParams.get("channel") || "shopify",
+      mapping: url.searchParams.get("mapping") || "",
+      review: url.searchParams.get("review") || "",
+      confidence: url.searchParams.get("confidence") || "",
+      lifecycle: url.searchParams.get("lifecycle") || "",
+      minimumProducts: url.searchParams.get("minimumProducts") || "",
+      page: url.searchParams.get("page") || "1",
+      pageSize: url.searchParams.get("pageSize") || "50"
+    }));
+  }
+
   if (req.method === "GET" && url.pathname === "/api/categories") {
     return sendJson(res, 200, await publicCategoriesFast(url.searchParams.get("q") || "", url.searchParams.get("scope") || "source"));
   }
@@ -33600,7 +33764,7 @@ async function handleApi(req, res) {
       ...(locked
         ? { lockedAt: now, lockedBy: updatedBy, unlockedAt: "", unlockedBy: "" }
         : { unlockedAt: now, unlockedBy: updatedBy })
-    });
+    }, locked ? "locked" : "unlocked", updatedBy);
     category.updatedBy = updatedBy;
     category.updatedAt = now;
     await persistCategoryWorkflowDb(db, { category });
@@ -33662,7 +33826,7 @@ async function handleApi(req, res) {
       }
       if (body.channel === "shopify" && mapping.categoryId) mapping = enrichShopifyCategoryMapping(mapping);
       if (body.channel === "ebay" && mapping.categoryId) mapping = await enrichEbayCategoryMapping(db, { ...category.mappings.ebay, ...mapping });
-      category.mappings[body.channel] = normalizeChannelCategoryMapping({ ...currentMapping, ...mapping });
+      category.mappings[body.channel] = withCategoryMappingHistory(currentMapping, { ...currentMapping, ...mapping }, "manual-update", body.updatedBy || body.createdBy || "Manual");
       if (body.channel === "shopify") {
         category.smartCollection = normalizeSmartCollectionProfile({
           ...category.smartCollection,
@@ -36596,6 +36760,7 @@ async function handleApi(req, res) {
     const options = categoryMappingRefreshOptions({
       updateExistingSkus: body.updateExistingSkus !== false,
       updateChannelRecords: body.updateChannelRecords !== false,
+      createMarketplaceReview: body.createMarketplaceReview === true,
       force: body.force === true,
       scheduledFor: body.scheduledFor
     });
