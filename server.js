@@ -8393,11 +8393,17 @@ async function autoMapEbayCategories(db, options = {}) {
 }
 
 async function readEbayCategoryAutoMapDb() {
-  const [baseDb, categoryDb, mainCategoryRows] = await Promise.all([
+  const [baseDb, categoryDb, categorySummaryIndex] = await Promise.all([
     readDbFast({ skipInventory: postgres.isPostgresEnabled() }),
     postgres.isPostgresEnabled() ? postgres.readCategoryState() : Promise.resolve(null),
-    postgres.isPostgresEnabled() ? postgres.listCategoryProductStats() : Promise.resolve(null)
+    postgres.isPostgresEnabled()
+      ? postgres.readCategorySummaryIndex("main", { limit: 100000 }).catch(() => null)
+      : Promise.resolve(null)
   ]);
+  let mainCategoryRows = Array.isArray(categorySummaryIndex?.rows) ? categorySummaryIndex.rows : null;
+  if (postgres.isPostgresEnabled() && !mainCategoryRows?.length) {
+    mainCategoryRows = await postgres.listCategoryProductStats();
+  }
   return normalizeDb({
     ...baseDb,
     ...(categoryDb || {}),
@@ -8590,6 +8596,14 @@ async function runEbayTaxonomySyncWorkerJob(job = {}, attrs = {}) {
 async function runEbayCategoryAutoMapWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
   const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "preparing_category_scope",
+    processedRows: 0,
+    progressPercent: 0,
+    startedAt,
+    message: "Loading the stored category summary and saved eBay mappings..."
+  });
   const db = await readEbayCategoryAutoMapDb();
   const totalRows = ebayAutoMapRows(db, payload).length;
   job = await persistWorkerImportJob(job, {
