@@ -8423,7 +8423,8 @@ async function persistEbayCategoryAutoMapDb(db, syncRelationalIndex = false) {
 
 function queueEbayCategoryAutoMapJob(db = {}, options = {}) {
   const scope = options.scope === "source" ? "source" : "main";
-  const requested = ebayAutoMapRows(db, { ...options, scope }).length;
+  const hasPreparedCategoryRows = Array.isArray(db.__mainCategoryRows) && db.__mainCategoryRows.length > 0;
+  const requested = hasPreparedCategoryRows ? ebayAutoMapRows(db, { ...options, scope }).length : 0;
   const payload = {
     scope,
     marketplaceId: options.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || "EBAY_US",
@@ -8447,7 +8448,9 @@ function queueEbayCategoryAutoMapJob(db = {}, options = {}) {
     phase: "queued",
     workerTask: inline ? "" : "ebay-category-auto-map",
     workerPayload: inline ? {} : payload,
-    message: `Queued eBay taxonomy matching for ${requested.toLocaleString()} unmapped categor${requested === 1 ? "y" : "ies"}.`,
+    message: requested > 0
+      ? `Queued eBay taxonomy matching for ${requested.toLocaleString()} unmapped categor${requested === 1 ? "y" : "ies"}.`
+      : `Queued eBay taxonomy matching for all missing ${scope === "main" ? "main" : "source"} categories. The worker will calculate the final scope.`,
     details: payload.refreshAffectedProducts
       ? "Manual eBay mappings are preserved. Strong matches are approved automatically, ambiguous suggestions are persisted for review, and affected SKU records are refreshed after mapping."
       : "Manual eBay mappings are preserved. Strong matches are approved automatically; ambiguous suggestions are persisted for review."
@@ -33388,6 +33391,21 @@ async function handleApi(req, res) {
     });
   }
 
+  async function readCategoryQueueDb() {
+    const [baseDb, categoryDb] = await Promise.all([
+      readDbFast({ skipInventory: true }),
+      postgres.isPostgresEnabled() ? postgres.readCategoryState() : Promise.resolve(null)
+    ]);
+    return normalizeDb({
+      ...baseDb,
+      ...(categoryDb || {}),
+      connections: baseDb.connections || [],
+      channels: baseDb.channels || [],
+      systemSettings: baseDb.systemSettings || {},
+      sequence: baseDb.sequence || {}
+    });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/ebay/refresh") {
     const db = await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 });
     const body = await parseBody(req);
@@ -33407,7 +33425,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/channel-taxonomies/ebay/map-current") {
-    const db = await readCategoryWorkflowDb();
+    const db = await readCategoryQueueDb();
     const body = await parseBody(req);
     const result = queueEbayCategoryAutoMapJob(db, body);
     if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(result.job);
