@@ -8982,9 +8982,9 @@ async function queueAiCategoryReviewJob(db = {}, options = {}) {
   }
   const existing = options.force === true ? null : await findActiveImportJobByWorkerTask(db, "ai-category-review");
   if (existing) return { duplicate: true, job: existing };
-  const work = aiCategoryReviewWorkItems(db, settings, options);
+  const channels = aiCategoryReviewChannels(settings, options);
   const payload = {
-    channels: work.channels,
+    channels,
     refreshPending: options.refreshPending === true,
     checkpointEvery: Math.max(1, Math.min(50, Number(options.checkpointEvery || settings.aiCategoryReviewBatchSize || 10) || 10))
   };
@@ -8996,13 +8996,13 @@ async function queueAiCategoryReviewJob(db = {}, options = {}) {
     direction: "review",
     status: "queued",
     fileName: "ai-category-review.json",
-    totalRows: work.items.length,
+    totalRows: 0,
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
     workerTask: inline ? "" : "ai-category-review",
     workerPayload: inline ? {} : payload,
-    message: `Queued David to review ${work.items.length.toLocaleString()} unlocked category mapping${work.items.length === 1 ? "" : "s"}.`,
+    message: `Queued David to discover and review unlocked ${channels.map((channel) => channel === "shopify" ? "Shopify/Google" : "eBay").join(" and ")} category mappings.`,
     details: `Mappings at or above ${Math.round(settings.aiCategoryAutoApproveThreshold * 100)}% confidence can be approved and locked automatically. Lower-confidence results remain in the approval queue.`
   });
   if (inline) {
@@ -9015,7 +9015,7 @@ async function queueAiCategoryReviewJob(db = {}, options = {}) {
       if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job).catch(() => {});
     }));
   }
-  return { duplicate: false, job, requested: work.items.length, skipped: work.skipped.length };
+  return { duplicate: false, job, requested: null, skipped: null };
 }
 
 async function runAiCategoryReviewWorkerJob(job = {}, attrs = {}) {
@@ -28280,13 +28280,25 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/ai/categories/review-all") {
     const body = await parseBody(req);
     try {
-      const db = await readCategoryWorkflowDb();
+      const db = postgres.isPostgresEnabled()
+        ? normalizeDb({
+          ...(await postgres.readStateFields(["systemSettings", "sequence"], { fallbackToLegacy: false })),
+          importJobs: [],
+          connections: [],
+          channels: []
+        })
+        : await readCategoryWorkflowDb();
       const queued = await queueAiCategoryReviewJob(db, {
         channels: Array.isArray(body.channels) ? body.channels : undefined,
         refreshPending: body.refreshPending === true,
         force: body.force === true
       });
-      await persistCategoryWorkflowDb(db);
+      if (postgres.isPostgresEnabled()) {
+        await postgres.upsertOperationJob(queued.job);
+        queued.job = await postgres.readOperationJob(queued.job.id) || queued.job;
+      } else {
+        await persistCategoryWorkflowDb(db);
+      }
       return sendJson(res, queued.duplicate ? 200 : 202, {
         ...queued,
         message: queued.duplicate
