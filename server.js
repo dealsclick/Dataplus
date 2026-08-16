@@ -8393,15 +8393,26 @@ async function autoMapEbayCategories(db, options = {}) {
 }
 
 async function readEbayCategoryAutoMapDb() {
+  const postgresEnabled = postgres.isPostgresEnabled();
   const [baseDb, categoryDb, categorySummaryIndex] = await Promise.all([
-    readDbFast({ skipInventory: postgres.isPostgresEnabled() }),
-    postgres.isPostgresEnabled() ? postgres.readCategoryState() : Promise.resolve(null),
-    postgres.isPostgresEnabled()
+    postgresEnabled
+      ? postgres.readStateFields([
+        "connections",
+        "channels",
+        "systemSettings",
+        "sequence",
+        "ebaySettings"
+      ], { fallbackToLegacy: false })
+      : readDbFast(),
+    postgresEnabled
+      ? postgres.readStateFields(["categorySettings", "vendorCategoryMappings"], { fallbackToLegacy: false })
+      : Promise.resolve(null),
+    postgresEnabled
       ? postgres.readCategorySummaryIndex("main", { limit: 100000 }).catch(() => null)
       : Promise.resolve(null)
   ]);
   let mainCategoryRows = Array.isArray(categorySummaryIndex?.rows) ? categorySummaryIndex.rows : null;
-  if (postgres.isPostgresEnabled() && !mainCategoryRows?.length) {
+  if (postgresEnabled && !mainCategoryRows?.length) {
     mainCategoryRows = await postgres.listCategoryProductStats();
   }
   return normalizeDb({
