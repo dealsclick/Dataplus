@@ -515,6 +515,12 @@ async function main() {
     generatedAt: new Date().toISOString(),
     locationId,
     locationName: locations.find((location) => location.id === locationId)?.name || "",
+    locations: locations.map((location) => ({
+      id: location.id,
+      name: location.name,
+      active: location.isActive !== false,
+      fulfillsOnlineOrders: location.fulfillsOnlineOrders === true
+    })),
     packMode,
     requestedSku,
     explicitQuantity,
