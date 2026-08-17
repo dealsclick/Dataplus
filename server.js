@@ -34002,7 +34002,7 @@ async function handleApi(req, res) {
       message: requestedSku
         ? `${dryRun ? "DataWarehouse inventory review" : "DataWarehouse inventory reclassification"} queued for ${requestedSku}.`
         : `${dryRun ? "DataWarehouse inventory review" : "DataWarehouse inventory reclassification"} queued for the full imported catalog.`,
-      details: "Supplier-feed quantity will be assigned to the virtual DataWarehouse location. Physical rows are retained only when supported by a receipt, completed audit, transfer/ledger event, return restock, or bin evidence."
+      details: "Supplier-feed quantity will be assigned to the virtual DataWarehouse location. Physical rows are retained only when supported by receiving, a completed warehouse audit, return restock, an inbound transfer, or an approved physical adjustment."
     });
     return sendJson(res, 202, { job: normalizeImportJob(job), message: job.message });
   }
