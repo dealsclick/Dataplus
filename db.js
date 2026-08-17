@@ -3921,7 +3921,7 @@ function aliasRecordsFromState(item = {}) {
 }
 
 function categoryChannelMappingRecordsFromState(categorySettings = []) {
-  const rows = [];
+  const rowsById = new Map();
   for (const category of Array.isArray(categorySettings) ? categorySettings : []) {
     const categoryName = nullableString(category.name || category.category);
     if (!categoryName) continue;
@@ -3934,8 +3934,9 @@ function categoryChannelMappingRecordsFromState(categorySettings = []) {
       const attributes = Array.isArray(mapping.attributes) ? mapping.attributes : [];
       const attributeMappings = Array.isArray(mapping.attributeMappings) ? mapping.attributeMappings : [];
       const storedStatus = nullableString(mapping.status);
-      rows.push({
-        mapping_id: crypto.createHash("sha1").update(`${categoryName.toLowerCase()}::${channelKey}`).digest("hex"),
+      const mappingId = crypto.createHash("sha1").update(`${categoryName.toLowerCase()}::${channelKey}`).digest("hex");
+      rowsById.set(mappingId, {
+        mapping_id: mappingId,
         category_id: categoryId,
         category_name: categoryName,
         channel: channelKey,
@@ -3949,7 +3950,7 @@ function categoryChannelMappingRecordsFromState(categorySettings = []) {
       });
     }
   }
-  return rows;
+  return [...rowsById.values()];
 }
 
 async function upsertProductAliasesFromState(items = [], options = {}) {
@@ -4083,11 +4084,19 @@ async function upsertCategoryChannelMappingsFromState(categorySettings = [], opt
         select mapping_id, category_id, category_name, channel, channel_category_id,
           channel_category_path, channel_category_handle, status, attribute_count,
           attribute_mapping_count, raw, now()
-        from jsonb_to_recordset($1::jsonb) as x(
-          mapping_id text, category_id text, category_name text, channel text,
-          channel_category_id text, channel_category_path text, channel_category_handle text,
-          status text, attribute_count integer, attribute_mapping_count integer, raw jsonb
-        )
+        from (
+          select distinct on (mapping_id)
+            mapping_id, category_id, category_name, channel, channel_category_id,
+            channel_category_path, channel_category_handle, status, attribute_count,
+            attribute_mapping_count, raw
+          from jsonb_to_recordset($1::jsonb) as mapping_rows(
+            mapping_id text, category_id text, category_name text, channel text,
+            channel_category_id text, channel_category_path text, channel_category_handle text,
+            status text, attribute_count integer, attribute_mapping_count integer, raw jsonb
+          )
+          where mapping_id is not null and mapping_id <> ''
+          order by mapping_id
+        ) as x
         on conflict (mapping_id) do update set
           category_id = excluded.category_id,
           category_name = excluded.category_name,
