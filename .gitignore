@@ -5,6 +5,7 @@ outputs/
 logos/
 logs/
 backups/
+generated/*.json
 
 # Local runtime data and backups
 data/

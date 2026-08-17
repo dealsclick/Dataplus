@@ -497,6 +497,33 @@ type SystemSettings = {
   [key: string]: unknown
 }
 
+type ReleaseChange = {
+  id: string
+  shortId: string
+  committedAt: string
+  author: string
+  title: string
+  notes?: string
+  type: string
+  tags?: string[]
+  files?: string[]
+  fileCount?: number
+  areas?: string[]
+  commitUrl?: string
+}
+
+type ReleaseHistoryResponse = {
+  generatedAt?: string
+  source?: string
+  repositoryUrl?: string
+  current?: ReleaseChange | null
+  total: number
+  filteredTotal: number
+  limit: number
+  offset: number
+  releases: ReleaseChange[]
+}
+
 type VendorFeedSchedule = {
   id: string
   name: string
@@ -15064,6 +15091,137 @@ function DavidChatPage({ settings, onOpenSettings }: { settings: SystemSettings;
   </div>
 }
 
+const releaseTypeLabels: Record<string, string> = {
+  data: "Data",
+  deployment: "Deployment",
+  documentation: "Documentation",
+  feature: "Feature",
+  fix: "Fix",
+  interface: "Interface",
+  maintenance: "Maintenance",
+  performance: "Performance",
+  security: "Security",
+}
+
+function releaseBadgeClass(type: string) {
+  if (type === "feature") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+  if (type === "fix") return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300"
+  if (type === "interface") return "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+  if (type === "performance") return "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300"
+  if (type === "data") return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+  if (type === "deployment") return "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300"
+  if (type === "security") return "border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-300"
+  return "border-border bg-muted text-muted-foreground"
+}
+
+function ReleaseHistorySettings({ active }: { active: boolean }) {
+  const [history, setHistory] = useState<ReleaseHistoryResponse | null>(null)
+  const [releases, setReleases] = useState<ReleaseChange[]>([])
+  const [query, setQuery] = useState("")
+  const [type, setType] = useState("all")
+  const [loading, setLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [error, setError] = useState("")
+  const [lastSeen, setLastSeen] = useState(() => window.localStorage.getItem("dataplus:last-seen-release") || "")
+
+  async function load(reset = true) {
+    const offset = reset ? 0 : releases.length
+    if (reset) setLoading(true)
+    else setLoadingMore(true)
+    setError("")
+    try {
+      const params = new URLSearchParams({ limit: "30", offset: String(offset), type })
+      if (query.trim()) params.set("q", query.trim())
+      const result = await api<ReleaseHistoryResponse>(`/api/system/releases?${params.toString()}`)
+      setHistory(result)
+      setReleases((current) => reset ? result.releases : [...current, ...result.releases])
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load release history.")
+    } finally {
+      setLoading(false)
+      setLoadingMore(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!active) return
+    const timer = window.setTimeout(() => void load(true), 250)
+    return () => window.clearTimeout(timer)
+  }, [active, query, type])
+
+  const viewingFilteredHistory = Boolean(query.trim() || type !== "all")
+  const lastSeenIndex = lastSeen ? releases.findIndex((release) => release.id === lastSeen) : -1
+  const newCount = viewingFilteredHistory || !lastSeen
+    ? 0
+    : lastSeenIndex >= 0
+      ? lastSeenIndex
+      : Math.min(releases.length, history?.total || releases.length)
+  const hasMore = Boolean(history && releases.length < history.filteredTotal)
+
+  function markViewed() {
+    const revision = history?.current?.id
+    if (!revision) return
+    window.localStorage.setItem("dataplus:last-seen-release", revision)
+    setLastSeen(revision)
+    toast.success("Release history marked as viewed.")
+  }
+
+  return <div className="grid gap-4">
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <MetricCard label="Current release" value={history?.current?.shortId || "Loading"} icon={History} />
+      <MetricCard label="Changes recorded" value={numberLabel(history?.total || 0)} icon={FileText} />
+      <MetricCard label="New since viewed" value={numberLabel(newCount)} icon={CheckCircle2} />
+      <MetricCard label="History updated" value={history?.generatedAt ? dateLabel(history.generatedAt) : "Loading"} icon={RefreshCw} />
+    </div>
+
+    <Card>
+      <CardHeader className="gap-4 border-b lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <CardTitle className="text-base">Releases and changes</CardTitle>
+          <CardDescription>Deployment-aware history generated from Git. New commits are added automatically during every production deployment.</CardDescription>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" onClick={() => void load(true)} disabled={loading}><RefreshCw className={cn("size-4", loading && "animate-spin")} /> Refresh</Button>
+          <Button variant="outline" size="sm" onClick={markViewed} disabled={!history?.current || newCount === 0}>Mark viewed</Button>
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-4 p-4">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
+          <div className="relative"><Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search releases, files, areas, or commit ID" /></div>
+          <Select value={type} onValueChange={setType}><SelectTrigger><SelectValue placeholder="All change types" /></SelectTrigger><SelectContent><SelectItem value="all">All change types</SelectItem>{Object.entries(releaseTypeLabels).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select>
+        </div>
+
+        {error && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Release history unavailable</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+        {loading && <div className="grid gap-2">{Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} className="h-20 w-full" />)}</div>}
+        {!loading && !error && <div className="overflow-hidden rounded-lg border">
+          {releases.map((release, index) => {
+            const isNew = Boolean(!viewingFilteredHistory && lastSeen && (lastSeenIndex === -1 || index < lastSeenIndex))
+            return <Collapsible key={release.id} className="border-b last:border-b-0">
+              <div className="flex flex-col gap-3 p-4 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2"><Badge variant="outline" className={releaseBadgeClass(release.type)}>{releaseTypeLabels[release.type] || release.type || "Change"}</Badge>{isNew && <Badge variant="info">New</Badge>}<span className="font-mono text-xs text-muted-foreground">#{release.shortId}</span>{(release.tags || []).map((tag) => <Badge key={tag} variant="secondary">{tag}</Badge>)}</div>
+                  <p className="font-medium text-foreground">{release.title}</p>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground"><span>{release.author || "Unknown author"}</span><span>{dateLabel(release.committedAt)}</span><span>{numberLabel(release.fileCount || release.files?.length || 0)} files</span><span>{(release.areas || []).join(" / ") || "Repository"}</span></div>
+                </div>
+                <div className="flex shrink-0 gap-2"><CollapsibleTrigger asChild><Button variant="outline" size="sm">Details</Button></CollapsibleTrigger>{release.commitUrl && <Button variant="outline" size="icon" asChild title="View commit"><a href={release.commitUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /></a></Button>}</div>
+              </div>
+              <CollapsibleContent className="border-t bg-muted/20 px-4 py-3">
+                {release.notes && <p className="mb-3 whitespace-pre-wrap text-sm text-muted-foreground">{release.notes}</p>}
+                <p className="mb-2 text-xs font-semibold uppercase text-muted-foreground">Changed files</p>
+                <div className="grid gap-1 font-mono text-xs text-muted-foreground sm:grid-cols-2">{(release.files || []).map((file) => <span key={file} className="truncate" title={file}>{file}</span>)}{!(release.files || []).length && <span>No file list recorded.</span>}</div>
+              </CollapsibleContent>
+            </Collapsible>
+          })}
+          {!releases.length && <Empty className="py-12"><EmptyHeader><EmptyMedia variant="icon"><History /></EmptyMedia><EmptyTitle>No matching releases</EmptyTitle><EmptyDescription>Adjust the search or change-type filter.</EmptyDescription></EmptyHeader></Empty>}
+        </div>}
+
+        {hasMore && <Button variant="outline" onClick={() => void load(false)} disabled={loadingMore}>{loadingMore && <Loader2 className="size-4 animate-spin" />} Load more changes</Button>}
+        {history && <p className="text-xs text-muted-foreground">Showing {numberLabel(releases.length)} of {numberLabel(history.filteredTotal)} matching changes. Source: {history.source === "git" ? "live repository history" : "deployment manifest"}.</p>}
+      </CardContent>
+    </Card>
+  </div>
+}
+
 function SettingsPage({
   settings,
   workerStatus,
@@ -15092,7 +15250,8 @@ function SettingsPage({
   const [loadingAiUsage, setLoadingAiUsage] = useState(false)
   const [runtime, setRuntime] = useState<Record<string, number> | null>(null)
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
-  const [activeTab, setActiveTab] = useState(requestedTab === "data-sources" ? "data-sources" : "operations")
+  const settingsTabs = new Set(["operations", "worker", "backups", "catalog", "data-sources", "barcode", "ai", "email", "users", "releases"])
+  const [activeTab, setActiveTab] = useState(settingsTabs.has(requestedTab || "") ? String(requestedTab) : "operations")
   const value = (field: string) => draft[field] ?? settings[field]
   const boolValue = (field: string) => Boolean(value(field))
   const aiProvider = String(value("aiProvider") || "openai") === "google-ai-studio" ? "google-ai-studio" : "openai"
@@ -15217,8 +15376,8 @@ function SettingsPage({
       <PageHeader
         eyebrow="Admin"
         title="System Settings"
-        description="Operations, workers, backups, retention, and safety rules in compact editable tabs."
-        action={editing ? (
+        description="Operations, workers, catalog controls, integrations, and deployment history in compact tabs."
+        action={activeTab === "releases" ? undefined : editing ? (
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
             <Button onClick={save}>Save changes</Button>
@@ -15237,7 +15396,9 @@ function SettingsPage({
           <TabsTrigger value="ai">AI integration</TabsTrigger>
           <TabsTrigger value="email">Email</TabsTrigger>
           <TabsTrigger value="users">Users</TabsTrigger>
+          <TabsTrigger value="releases">Releases</TabsTrigger>
         </TabsList>
+        <TabsContent value="releases"><ReleaseHistorySettings active={activeTab === "releases"} /></TabsContent>
         <TabsContent value="operations">
           <Card>
             <CardHeader>

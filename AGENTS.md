@@ -89,6 +89,7 @@ The new app is organized around these workspaces:
 - Jobs/operations
 - AI assistant David
 - System Settings
+- Releases and Changes under System Settings, generated from repository history during deployment
 
 Catalog sub-navigation includes Products, Import Review, SKU Changes, Categories, Vendor Mappings, Attributes, Attribute Groups, Inventory, Templates, and Readiness. The old separate Source Catalog UI is being unified into the new Catalog workspace; preserve source/provenance filters without restoring a separate legacy-only product screen.
 
@@ -340,6 +341,15 @@ Jobs are the audit trail for imports, exports, syncs, scans, index rebuilds, bac
 - If a worker restarts, persist progress and mark the job for retry/review rather than silently losing it.
 - Errors should be collected per row where possible, with an error CSV and a clear distinction between auto-fixable and human-review errors.
 - Jobs should run in an external worker for large imports and marketplace syncs; do not hold a browser request open for a large task.
+
+## Releases and change history
+
+- System Settings includes a Releases tab backed by `GET /api/system/releases`.
+- `scripts/generate-release-history.js` generates `generated/release-history.json` from the complete Git history before a production container is rebuilt. The generated JSON is runtime data and must not be committed or edited by hand.
+- Development may read Git history directly; production reads the generated manifest because `.git` is intentionally excluded from the image.
+- Every production deployment must regenerate this manifest after pulling the target revision and before `docker compose build`.
+- Commit messages should be concise, user-meaningful summaries because they become release titles in the application. Add a commit body when operators need rollout notes, migration context, or follow-up instructions.
+- Preserve searchable commit IDs, timestamps, authors, affected files, change areas, tags, and repository links so operators can trace a release back to source.
 
 ## AI assistant David
 

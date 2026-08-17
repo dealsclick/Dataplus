@@ -15,6 +15,7 @@ COPY server.js db.js ./
 COPY lib ./lib
 COPY public ./public
 COPY scripts ./scripts
+COPY generated ./generated
 COPY web ./web
 
 RUN cd web && npm run build

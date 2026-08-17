@@ -8,6 +8,7 @@ const { spawn } = require("child_process");
 const readline = require("readline");
 const zlib = require("zlib");
 const nodemailer = require("nodemailer");
+const { loadReleaseHistory } = require("./lib/release-history");
 const ftp = require("basic-ftp");
 const { XMLParser } = require("fast-xml-parser");
 const postgres = require("./db");
@@ -34131,6 +34132,31 @@ async function handleApi(req, res) {
       freeMemoryMb: Math.round(os.freemem() / 1024 / 1024),
       processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
       uptimeSeconds: Math.round(process.uptime())
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/system/releases") {
+    const history = loadReleaseHistory();
+    const query = sourceTextValue(url.searchParams.get("q") || "").toLowerCase();
+    const type = sourceTextValue(url.searchParams.get("type") || "").toLowerCase();
+    const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || 30) || 30));
+    const offset = Math.max(0, Number(url.searchParams.get("offset") || 0) || 0);
+    const filtered = (history.releases || []).filter((release) => {
+      if (type && type !== "all" && String(release.type || "") !== type) return false;
+      if (!query) return true;
+      return [release.title, release.notes, release.author, release.shortId, ...(release.tags || []), ...(release.files || []), ...(release.areas || [])]
+        .some((value) => String(value || "").toLowerCase().includes(query));
+    });
+    return sendJson(res, 200, {
+      generatedAt: history.generatedAt,
+      source: history.source,
+      repositoryUrl: history.repositoryUrl,
+      current: history.current,
+      total: Number(history.total || history.releases?.length || 0),
+      filteredTotal: filtered.length,
+      limit,
+      offset,
+      releases: filtered.slice(offset, offset + limit)
     });
   }
 
