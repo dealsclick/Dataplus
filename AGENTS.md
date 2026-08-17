@@ -285,6 +285,15 @@ Fulfillment is the operational workspace for pick lists, batches, scanning, pack
 
 Warehouse supports receiving, bins/locations, stock movement, audits, manual receiving, and inventory detail per SKU. Warehouse audits are independent records with warehouse, bin, user, scan lines, review status, photos, unknown UPC handling, and a final apply/review step.
 
+Inventory quantities must preserve their source and must never be blended silently:
+
+- Physical stock comes only from warehouse receipts, transfers, audits, and adjustments tied to a warehouse/location.
+- Supplier-feed availability is sourcing availability, not physical on-hand stock.
+- Marketplace quantities are channel snapshots, not warehouse stock.
+- Order allocations reserve physical warehouse stock and must show the order, warehouse, quantity, user/system actor, timestamp, and reason.
+- Channel UOM variants such as `-12PC` must resolve to the base catalog SKU with the correct unit multiplier when calculating demand.
+- Every receipt, adjustment, transfer, allocation, release, and fulfillment must append an inventory-ledger entry with before/after balances and provenance.
+
 Audit scanner rules:
 
 - Use the back camera by default where available, with a camera-switch control.

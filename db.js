@@ -4631,6 +4631,9 @@ async function listOrders(options = {}) {
           lower(coalesce(oli.sku, '')) = $${params.length}
           or lower(coalesce(oli.mapped_sku, '')) = $${params.length}
           or lower(coalesce(oli.original_sku, '')) = $${params.length}
+          or regexp_replace(lower(coalesce(oli.sku, '')), '[-_](?:[0-9]+(?:pc|pk|pack|ct|cs|case|bx|ea)|ea|each)$', '') = $${params.length}
+          or regexp_replace(lower(coalesce(oli.mapped_sku, '')), '[-_](?:[0-9]+(?:pc|pk|pack|ct|cs|case|bx|ea)|ea|each)$', '') = $${params.length}
+          or regexp_replace(lower(coalesce(oli.original_sku, '')), '[-_](?:[0-9]+(?:pc|pk|pack|ct|cs|case|bx|ea)|ea|each)$', '') = $${params.length}
         )
     )`);
   }

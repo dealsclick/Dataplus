@@ -10308,16 +10308,75 @@ function addInventoryLedger(db, item, event = {}) {
   });
 }
 
-function skuMatchesInventoryItem(value, item = {}) {
+function inventorySkuCandidates(item = {}) {
+  return [
+    { value: item.sku, matchedBy: "catalog SKU", multiplier: 1 },
+    { value: item.id, matchedBy: "product ID", multiplier: 1 },
+    ...(Array.isArray(item.aliases) ? item.aliases : []).flatMap((row) => [
+      { value: row.aliasSku, matchedBy: "SKU alias", multiplier: Number(row.uomQty || 1) },
+      { value: row.sku, matchedBy: "SKU alias", multiplier: Number(row.uomQty || 1) }
+    ]),
+    ...(Array.isArray(item.systemVariants) ? item.systemVariants : []).map((row) => ({ value: row.sku, matchedBy: "system variant", multiplier: Number(row.uomQty || 1) })),
+    ...(Array.isArray(item.shopifyPurchaseVariants) ? item.shopifyPurchaseVariants : []).map((row) => ({ value: row.sku, matchedBy: "channel variant", multiplier: Number(row.uomQty || row.quantity || 1) }))
+  ].filter((row) => String(row.value || "").trim());
+}
+
+function inventorySkuMatch(value, item = {}) {
   const key = String(value || "").trim().toLowerCase();
-  if (!key) return false;
-  return [item.sku, item.id, ...(item.aliases || []).map((row) => row.aliasSku)]
-    .filter(Boolean)
-    .some((candidate) => String(candidate).toLowerCase() === key);
+  if (!key) return { matches: false, multiplier: 1, matchedBy: "", matchedSku: "" };
+  const exact = inventorySkuCandidates(item).find((candidate) => String(candidate.value || "").trim().toLowerCase() === key);
+  if (exact) return { matches: true, multiplier: Math.max(1, Number(exact.multiplier || 1)), matchedBy: exact.matchedBy, matchedSku: String(value || "") };
+  const baseSku = String(item.sku || "").trim().toLowerCase();
+  const normalizedBase = String(orderSkuBaseFromUomVariant(key) || "").trim().toLowerCase();
+  if (baseSku && normalizedBase === baseSku) {
+    const suffix = /[-_](\d+)(?:PC|PK|PACK|CT|CS|CASE|BX|EA|EACH)$/i.exec(String(value || "").trim());
+    return { matches: true, multiplier: Math.max(1, Number(suffix?.[1] || 1)), matchedBy: "UOM variant", matchedSku: String(value || "") };
+  }
+  return { matches: false, multiplier: 1, matchedBy: "", matchedSku: "" };
+}
+
+function skuMatchesInventoryItem(value, item = {}) {
+  return inventorySkuMatch(value, item).matches;
 }
 
 function inventoryOrderLines(order = {}, item = {}) {
-  return orderLineItems(order).filter((line) => skuMatchesInventoryItem(line.sku || line.mappedSku || line.originalSku, item));
+  return orderLineItems(order).map((line) => {
+    const matches = [line.sku, line.mappedSku, line.originalSku, line.channelSku, line.variantSku]
+      .map((value) => inventorySkuMatch(value, item))
+      .filter((result) => result.matches)
+      .sort((left, right) => right.multiplier - left.multiplier);
+    return matches[0] ? { ...line, __inventoryMatch: matches[0] } : null;
+  }).filter(Boolean);
+}
+
+function inventoryStockSources(item = {}) {
+  const warehouseRows = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
+  const supplierRows = Array.isArray(item.vendorOffers) ? item.vendorOffers : [];
+  const physical = warehouseRows.map((row) => ({
+    id: `warehouse:${row.warehouseId || row.warehouseName || "unassigned"}:${row.locationBin || ""}`,
+    sourceType: "physical",
+    sourceName: row.warehouseName || row.warehouse || "Unassigned warehouse",
+    location: row.locationBin || "",
+    onHand: Number(row.qty || 0),
+    reserved: Number(row.reserved || 0),
+    available: Number(row.qty || 0) - Number(row.reserved || 0),
+    updatedAt: row.updatedAt || item.updatedAt || "",
+    countsTowardOnHand: true
+  }));
+  const suppliers = supplierRows.map((row, index) => ({
+    id: `supplier:${row.supplier || row.vendor || index}`,
+    sourceType: "supplier",
+    sourceName: row.supplier || row.vendor || "Supplier feed",
+    sourceSku: row.vendorSku || row.sku || "",
+    available: Number(row.stockQty ?? row.qty ?? 0),
+    cost: Number(row.cost || 0),
+    updatedAt: row.updatedAt || item.productDumpUpdatedAt || item.updatedAt || "",
+    countsTowardOnHand: false
+  }));
+  const marketplace = [];
+  if (item.shopifyId || item.shopifyVariantId || item.shopifyStatus) marketplace.push({ id: "marketplace:shopify", sourceType: "marketplace", sourceName: "Shopify", available: Number(item.shopifyLiveInventoryQuantity ?? 0), updatedAt: item.shopifyInventoryUpdatedAt || item.shopifySyncedAt || item.updatedAt || "", countsTowardOnHand: false });
+  if (item.ebayListing?.listingId || item.ebayListing?.offerId) marketplace.push({ id: "marketplace:ebay", sourceType: "marketplace", sourceName: "eBay", available: Number(item.ebayListing.quantity ?? 0), updatedAt: item.ebayListing.updatedAt || item.updatedAt || "", countsTowardOnHand: false });
+  return { physical, suppliers, marketplace, all: [...physical, ...suppliers, ...marketplace] };
 }
 
 function inventorySkuOperations(item = {}, orders = [], ledger = []) {
@@ -10326,14 +10385,18 @@ function inventorySkuOperations(item = {}, orders = [], ledger = []) {
   const terminal = new Set(["fulfilled", "shipped", "canceled", "cancelled", "void", "deleted", "refunded"]);
   const rows = orders.map((order) => {
     const lines = inventoryOrderLines(order, item);
-    const quantity = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
+    const quantity = lines.reduce((sum, line) => sum + Number(line.qty || line.quantity || 0) * Number(line.__inventoryMatch?.multiplier || 1), 0);
     const allocations = (Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : [])
       .filter((allocation) => skuMatchesInventoryItem(allocation.sku || allocation.productId, item) && allocation.status !== "released")
       .map((allocation) => ({ ...allocation, orderId: order.id, orderNumber: order.orderNumber, buyer: order.buyer, status: order.status }));
     const fulfilled = (Array.isArray(order.fulfillmentLines) ? order.fulfillmentLines : [])
-      .filter((line) => skuMatchesInventoryItem(line.sku, item))
-      .reduce((sum, line) => sum + Number(line.qtyFulfilled || 0), 0);
-    return { ...order, inventoryQuantity: quantity, inventoryFulfilledQty: fulfilled, inventoryAllocations: allocations };
+      .map((line) => ({ line, match: inventorySkuMatch(line.sku || line.mappedSku || line.originalSku, item) }))
+      .filter(({ match }) => match.matches)
+      .reduce((sum, { line, match }) => sum + Number(line.qtyFulfilled || line.qty || 0) * Number(match.multiplier || 1), 0);
+    const allocatedQty = allocations.reduce((sum, allocation) => sum + Number(allocation.qty || 0), 0);
+    const unfulfilledQty = Math.max(0, quantity - fulfilled);
+    const unallocatedQty = Math.max(0, unfulfilledQty - allocatedQty);
+    return { ...order, inventoryQuantity: quantity, inventoryFulfilledQty: fulfilled, inventoryAllocatedQty: allocatedQty, inventoryUnallocatedQty: unallocatedQty, inventoryMatchMethod: [...new Set(lines.map((line) => line.__inventoryMatch?.matchedBy).filter(Boolean))].join(", "), inventoryMatchedSku: [...new Set(lines.map((line) => line.__inventoryMatch?.matchedSku).filter(Boolean))].join(", "), inventoryAllocations: allocations };
   }).filter((order) => order.inventoryQuantity > 0 || order.inventoryAllocations.length > 0);
   const openOrders = rows.filter((order) => !terminal.has(String(order.status || "").toLowerCase()));
   const shippedRows = rows.filter((order) => order.inventoryFulfilledQty > 0 || terminal.has(String(order.status || "").toLowerCase()));
@@ -10343,16 +10406,37 @@ function inventorySkuOperations(item = {}, orders = [], ledger = []) {
   }, 0);
   const shipped30 = soldWithin(30);
   const shipped90 = soldWithin(90);
-  const available = Number(item.qty || 0) - Number(item.reserved || 0);
+  const sources = inventoryStockSources(item);
+  const recordedOnHand = Number(item.qty || 0);
+  const physicalOnHand = sources.physical.length ? sources.physical.reduce((sum, row) => sum + Number(row.onHand || 0), 0) : 0;
+  const supplierAvailable = sources.suppliers.reduce((sum, row) => sum + Number(row.available || 0), 0);
+  const reserved = Number(item.reserved || 0);
+  const available = recordedOnHand - reserved;
   const activeAllocations = rows.flatMap((order) => order.inventoryAllocations);
+  const filteredLedger = ledger.filter((row) => skuMatchesInventoryItem(row.sku || row.productId, item));
+  const changeLedger = (Array.isArray(item.recentChanges) ? item.recentChanges : [])
+    .filter((row) => /qty|stock|inventory|reserved|replenish/i.test(String(row.field || "")))
+    .map((row, index) => ({ id: row.id || `change:${index}:${row.updatedAt || row.createdAt || ""}`, createdAt: row.updatedAt || row.createdAt, type: "source update", source: row.source || item.creationSource || "catalog change", referenceNumber: row.referenceNumber || "", user: row.updatedBy || row.user || "System", quantityChange: Number(row.quantityChange || 0), reservedChange: Number(row.reservedChange || 0), qtyBefore: row.previousValue, qtyAfter: row.nextValue, reason: row.reason || `${row.field || "Inventory"} changed` }));
+  const movement = [...filteredLedger, ...changeLedger].sort((left, right) => new Date(right.createdAt || 0).getTime() - new Date(left.createdAt || 0).getTime()).slice(0, 250);
+  const openOrderUnits = openOrders.reduce((sum, order) => sum + Math.max(0, Number(order.inventoryQuantity || 0) - Number(order.inventoryFulfilledQty || 0)), 0);
+  const allocatedUnits = activeAllocations.reduce((sum, allocation) => sum + Number(allocation.qty || 0), 0);
   return {
     orders: rows,
     allocations: activeAllocations,
-    ledger: ledger.filter((row) => skuMatchesInventoryItem(row.sku || row.productId, item)).slice(0, 100),
+    stockSources: sources.all,
+    ledger: movement,
     metrics: {
       openOrderCount: openOrders.length,
-      openOrderUnits: openOrders.reduce((sum, order) => sum + Number(order.inventoryQuantity || 0), 0),
-      allocatedUnits: activeAllocations.reduce((sum, allocation) => sum + Number(allocation.qty || 0), 0),
+      openOrderUnits,
+      allocatedUnits,
+      unallocatedUnits: Math.max(0, openOrderUnits - allocatedUnits),
+      recordedOnHand,
+      physicalOnHand,
+      physicalAvailable: sources.physical.reduce((sum, row) => sum + Math.max(0, Number(row.available || 0)), 0),
+      supplierAvailable,
+      stockBasis: sources.physical.length ? "warehouse" : "legacy-blended",
+      shopifyQuantity: Number(sources.marketplace.find((row) => row.sourceName === "Shopify")?.available || 0),
+      ebayQuantity: Number(sources.marketplace.find((row) => row.sourceName === "eBay")?.available || 0),
       shippedOrderCount: shippedRows.length,
       shipped30,
       shipped90,
@@ -17990,6 +18074,16 @@ function publicInventoryListItem(item = {}, context = {}) {
       qty: Number(row.qty || 0),
       reserved: Number(row.reserved || 0),
       available: Number(row.available ?? (Number(row.qty || 0) - Number(row.reserved || 0))),
+      updatedAt: row.updatedAt || ""
+    })),
+    vendorOffers: (Array.isArray(item.vendorOffers) ? item.vendorOffers : []).map((row) => ({
+      supplier: canonicalCatalogSupplierName(row.supplier || row.vendor, row.supplierCode),
+      vendor: canonicalCatalogSupplierName(row.supplier || row.vendor, row.supplierCode),
+      sku: row.sku || "",
+      vendorSku: row.vendorSku || "",
+      cost: Number(row.cost || 0),
+      qty: Number(row.qty ?? row.stockQty ?? 0),
+      stockQty: Number(row.stockQty ?? row.qty ?? 0),
       updatedAt: row.updatedAt || ""
     })),
     price: websitePrice,
