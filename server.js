@@ -13,6 +13,13 @@ const { XMLParser } = require("fast-xml-parser");
 const postgres = require("./db");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
+const {
+  ensureDataWarehouseLocation,
+  isDataWarehouseImportedProduct,
+  isDataWarehouseLocation,
+  isPhysicalWarehouse,
+  upsertDataWarehouseStock
+} = require("./lib/inventory-locations");
 
 const PORT = process.env.PORT || 4173;
 const ROOT = __dirname;
@@ -3515,17 +3522,11 @@ function normalizeDb(db) {
     }
     const availableWarehouses = Array.isArray(db.warehouses) ? db.warehouses : [];
     if (!Array.isArray(merged.warehouseStock) || !merged.warehouseStock.length) {
-      const fallbackWarehouse = availableWarehouses.find((warehouse) => warehouse.isDefaultReceiving) || availableWarehouses[0];
-      merged.warehouseStock = [
-        normalizeWarehouseStockRow({
-          warehouseId: fallbackWarehouse?.id || "",
-          warehouseName: fallbackWarehouse?.name || "Unassigned",
-          qty: Number(item.qty || 0),
-          reserved: Number(item.reserved || 0),
-          reorderPoint: Number(item.reorderPoint || 0)
-        }, fallbackWarehouse, merged)
-      ];
-      changed = true;
+      merged.warehouseStock = [];
+      if (isDataWarehouseImportedProduct(merged)) {
+        upsertDataWarehouseStock(merged, merged.stockQty ?? item.stockQty ?? item.qty ?? 0, merged.productDumpUpdatedAt || merged.updatedAt);
+        changed = true;
+      }
     } else {
       merged.warehouseStock = merged.warehouseStock.map((row) => {
         const warehouse = availableWarehouses.find((item) => item.id === row.warehouseId);
@@ -3637,39 +3638,33 @@ function normalizeDb(db) {
     db.warehouses = seedWarehouses();
     changed = true;
   }
-  db.warehouses = (db.warehouses || []).map((warehouse) => normalizeWarehouse(warehouse));
-  const fallbackWarehouse = db.warehouses.find((warehouse) => warehouse.isDefaultReceiving) || db.warehouses[0];
+  const warehouseCountBeforeDataWarehouse = db.warehouses.length;
+  db.warehouses = ensureDataWarehouseLocation(db.warehouses).map((warehouse) => normalizeWarehouse(warehouse));
+  if (db.warehouses.length !== warehouseCountBeforeDataWarehouse) changed = true;
   db.inventory = (db.inventory || []).map((item) => {
     item.warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
-    if (!item.warehouseStock.length && fallbackWarehouse) {
-      item.warehouseStock = [normalizeWarehouseStockRow({
-        warehouseId: fallbackWarehouse.id,
-        warehouseName: fallbackWarehouse.name,
-        qty: Number(item.qty || 0),
-        reserved: Number(item.reserved || 0),
-        reorderPoint: Number(item.reorderPoint || 0)
-      }, fallbackWarehouse, item)];
+    if (!item.warehouseStock.length && isDataWarehouseImportedProduct(item)) {
+      upsertDataWarehouseStock(item, item.stockQty ?? item.qty ?? 0, item.productDumpUpdatedAt || item.updatedAt);
       changed = true;
     }
     item.warehouseStock = item.warehouseStock.map((row) => {
-      const warehouse = db.warehouses.find((item) => item.id === row.warehouseId) || (row.warehouseId ? null : fallbackWarehouse);
-      const normalized = normalizeWarehouseStockRow(row, warehouse, item);
-      if (!normalized.warehouseId && fallbackWarehouse) {
-        normalized.warehouseId = fallbackWarehouse.id;
-        normalized.warehouseName = fallbackWarehouse.name;
-      }
-      return normalized;
+      const warehouse = db.warehouses.find((warehouseItem) => warehouseItem.id === row.warehouseId || (isDataWarehouseLocation(row) && isDataWarehouseLocation(warehouseItem)));
+      return normalizeWarehouseStockRow(row, warehouse, item);
     });
     syncInventoryTotalsFromWarehouses(item);
     return item;
   });
   if (db.warehouses.length && !db.warehouses.some((warehouse) => warehouse.isDefaultReceiving)) {
-    db.warehouses[0].isDefaultReceiving = true;
+    const firstPhysicalWarehouse = db.warehouses.find(isPhysicalWarehouse);
+    if (firstPhysicalWarehouse) firstPhysicalWarehouse.isDefaultReceiving = true;
     changed = true;
   }
   if (db.warehouses.length && !db.warehouses.some((warehouse) => warehouse.isDefaultReturns)) {
-    db.warehouses[0].isDefaultReturns = true;
-    changed = true;
+    const firstPhysicalWarehouse = db.warehouses.find(isPhysicalWarehouse);
+    if (firstPhysicalWarehouse) {
+      firstPhysicalWarehouse.isDefaultReturns = true;
+      changed = true;
+    }
   }
 
   if (!Array.isArray(db.returns)) {
@@ -3680,8 +3675,8 @@ function normalizeDb(db) {
         orderNumber: "TT-90221",
         source: "TikTok Shop",
         sku: "DP-BEAUTY-014",
-        warehouseId: db.warehouses[0]?.id || "",
-        warehouseName: db.warehouses[0]?.name || "",
+        warehouseId: db.warehouses.find(isPhysicalWarehouse)?.id || "",
+        warehouseName: db.warehouses.find(isPhysicalWarehouse)?.name || "",
         reason: "Changed mind",
         amount: 19.99,
         status: "requested",
@@ -3768,14 +3763,15 @@ function normalizeDb(db) {
   const brandResult = normalizeBrands(db);
   if (brandResult.changed) changed = true;
 
+  const defaultPhysicalWarehouse = db.warehouses.find(isPhysicalWarehouse) || null;
   db.purchaseOrders = db.purchaseOrders.map((po) => ({
     id: po.id || crypto.randomUUID(),
     poNumber: po.poNumber || nextPoNumber(db),
     status: po.status || "draft",
     vendorId: po.vendorId || findVendorByName(db, po.supplier)?.id || "",
     supplier: po.supplier || findVendorById(db, po.vendorId)?.name || "Unassigned supplier",
-    warehouseId: po.warehouseId || db.warehouses[0]?.id || "",
-    warehouseName: po.warehouseName || (db.warehouses.find((warehouse) => warehouse.id === po.warehouseId)?.name || db.warehouses[0]?.name || ""),
+    warehouseId: po.warehouseId || defaultPhysicalWarehouse?.id || "",
+    warehouseName: po.warehouseName || (db.warehouses.find((warehouse) => warehouse.id === po.warehouseId && isPhysicalWarehouse(warehouse))?.name || defaultPhysicalWarehouse?.name || ""),
     source: po.source || "manual",
     orderIds: Array.isArray(po.orderIds) ? po.orderIds : [],
     orderNumbers: Array.isArray(po.orderNumbers) ? po.orderNumbers : [],
@@ -10352,7 +10348,7 @@ function inventoryOrderLines(order = {}, item = {}) {
 function inventoryStockSources(item = {}) {
   const warehouseRows = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
   const supplierRows = Array.isArray(item.vendorOffers) ? item.vendorOffers : [];
-  const physical = warehouseRows.map((row) => ({
+  const physical = warehouseRows.filter(isPhysicalWarehouse).map((row) => ({
     id: `warehouse:${row.warehouseId || row.warehouseName || "unassigned"}:${row.locationBin || ""}`,
     sourceType: "physical",
     sourceName: row.warehouseName || row.warehouse || "Unassigned warehouse",
@@ -10363,7 +10359,17 @@ function inventoryStockSources(item = {}) {
     updatedAt: row.updatedAt || item.updatedAt || "",
     countsTowardOnHand: true
   }));
-  const suppliers = supplierRows.map((row, index) => ({
+  const feedLocations = warehouseRows.filter(isDataWarehouseLocation).map((row) => ({
+    id: `supplier-location:${row.warehouseId || "datawarehouse"}`,
+    sourceType: "supplier",
+    sourceName: row.warehouseName || "DataWarehouse",
+    sourceSku: item.sku || "",
+    available: Number(row.qty || 0),
+    updatedAt: row.updatedAt || item.productDumpUpdatedAt || item.updatedAt || "",
+    countsTowardOnHand: true,
+    aggregate: true
+  }));
+  const suppliers = (feedLocations.length ? feedLocations : supplierRows.map((row, index) => ({
     id: `supplier:${row.supplier || row.vendor || index}`,
     sourceType: "supplier",
     sourceName: row.supplier || row.vendor || "Supplier feed",
@@ -10372,7 +10378,7 @@ function inventoryStockSources(item = {}) {
     cost: Number(row.cost || 0),
     updatedAt: row.updatedAt || item.productDumpUpdatedAt || item.updatedAt || "",
     countsTowardOnHand: false
-  }));
+  })));
   const marketplace = [];
   if (item.shopifyId || item.shopifyVariantId || item.shopifyStatus) marketplace.push({ id: "marketplace:shopify", sourceType: "marketplace", sourceName: "Shopify", available: Number(item.shopifyLiveInventoryQuantity ?? 0), updatedAt: item.shopifyInventoryUpdatedAt || item.shopifySyncedAt || item.updatedAt || "", countsTowardOnHand: false });
   if (item.ebayListing?.listingId || item.ebayListing?.offerId) marketplace.push({ id: "marketplace:ebay", sourceType: "marketplace", sourceName: "eBay", available: Number(item.ebayListing.quantity ?? 0), updatedAt: item.ebayListing.updatedAt || item.updatedAt || "", countsTowardOnHand: false });
@@ -10391,7 +10397,9 @@ function withResolvedInventoryWarehouses(item = {}, warehouses = []) {
     return {
       ...row,
       warehouseName: warehouse.name || row.warehouseName || "Unassigned warehouse",
-      warehouseCode: warehouse.code || row.warehouseCode || ""
+      warehouseCode: warehouse.code || row.warehouseCode || "",
+      inventorySourceType: warehouse.inventorySourceType || row.inventorySourceType || "physical",
+      isPhysical: isPhysicalWarehouse(warehouse)
     };
   });
   return { ...item, warehouseStock };
@@ -10452,7 +10460,7 @@ function inventorySkuOperations(item = {}, orders = [], ledger = []) {
       physicalOnHand,
       physicalAvailable: sources.physical.reduce((sum, row) => sum + Math.max(0, Number(row.available || 0)), 0),
       supplierAvailable,
-      stockBasis: sources.physical.length ? "warehouse" : "legacy-blended",
+      stockBasis: sources.physical.length && sources.suppliers.length ? "physical-and-supplier" : sources.physical.length ? "physical" : sources.suppliers.length ? "supplier-feed" : "unavailable",
       shopifyQuantity: Number(sources.marketplace.find((row) => row.sourceName === "Shopify")?.available || 0),
       ebayQuantity: Number(sources.marketplace.find((row) => row.sourceName === "eBay")?.available || 0),
       shippedOrderCount: shippedRows.length,
@@ -10934,6 +10942,10 @@ function normalizeWarehouseStockRow(row = {}, warehouse, item) {
   return {
     warehouseId: row.warehouseId || warehouse?.id || "",
     warehouseName: row.warehouseName || warehouse?.name || "Unassigned",
+    warehouseCode: row.warehouseCode || warehouse?.code || "",
+    inventorySourceType: row.inventorySourceType || warehouse?.inventorySourceType || (isDataWarehouseLocation(row) ? "supplier_feed" : "physical"),
+    isPhysical: warehouse ? isPhysicalWarehouse(warehouse) : !isDataWarehouseLocation(row) && row.isPhysical !== false,
+    aggregate: Boolean(row.aggregate || isDataWarehouseLocation(row)),
     locationBin: String(row.locationBin || "").trim(),
     qty: Number(row.qty || 0),
     reserved: Number(row.reserved || 0),
@@ -10962,12 +10974,17 @@ function formatWarehouseAddress(warehouse) {
 
 function normalizeWarehouse(warehouse) {
   const legacyAddressLine = String(warehouse.addressLine || "").trim();
+  const dataWarehouseLocation = isDataWarehouseLocation(warehouse);
   const normalized = {
     id: warehouse.id || crypto.randomUUID(),
     code: warehouse.code || "",
     name: warehouse.name || "Unnamed warehouse",
     status: warehouse.status || "active",
-    warehouseType: warehouse.warehouseType || warehouse.type || "Warehouse",
+    warehouseType: dataWarehouseLocation ? "Virtual supplier network" : (warehouse.warehouseType || warehouse.type || "Warehouse"),
+    inventorySourceType: dataWarehouseLocation ? "supplier_feed" : (warehouse.inventorySourceType || "physical"),
+    isPhysical: dataWarehouseLocation ? false : warehouse.isPhysical !== false,
+    allowReceiving: dataWarehouseLocation ? false : warehouse.allowReceiving !== false,
+    allowAudits: dataWarehouseLocation ? false : warehouse.allowAudits !== false,
     contactName: warehouse.contactName || "",
     managerName: warehouse.managerName || "",
     phone: warehouse.phone || "",
@@ -10982,18 +10999,18 @@ function normalizeWarehouse(warehouse) {
     state: warehouse.state || warehouse.address?.state || "",
     postalCode: warehouse.postalCode || warehouse.address?.postalCode || "",
     country: warehouse.country || warehouse.address?.country || "US",
-    isDefaultReceiving: Boolean(warehouse.isDefaultReceiving),
-    isDefaultReturns: Boolean(warehouse.isDefaultReturns),
+    isDefaultReceiving: dataWarehouseLocation ? false : Boolean(warehouse.isDefaultReceiving),
+    isDefaultReturns: dataWarehouseLocation ? false : Boolean(warehouse.isDefaultReturns),
     requireAppointment: warehouse.requireAppointment === undefined ? false : Boolean(warehouse.requireAppointment),
     allowBlindReceipts: warehouse.allowBlindReceipts === undefined ? true : Boolean(warehouse.allowBlindReceipts),
     requireSerialScan: warehouse.requireSerialScan === undefined ? false : Boolean(warehouse.requireSerialScan),
     requirePhotoForDamage: warehouse.requirePhotoForDamage === undefined ? false : Boolean(warehouse.requirePhotoForDamage),
     autoRouteReturns: warehouse.autoRouteReturns === undefined ? false : Boolean(warehouse.autoRouteReturns),
-    requireBinValidation: warehouse.requireBinValidation === undefined ? false : Boolean(warehouse.requireBinValidation),
+    requireBinValidation: dataWarehouseLocation ? false : (warehouse.requireBinValidation === undefined ? false : Boolean(warehouse.requireBinValidation)),
     shopifyLocationId: normalizeShopifyLocationGid(warehouse.shopifyLocationId || ""),
     shopifyLocationName: warehouse.shopifyLocationName || "",
-    shopifyInventoryPushEnabled: warehouse.shopifyInventoryPushEnabled === undefined ? false : Boolean(warehouse.shopifyInventoryPushEnabled),
-    bins: Array.isArray(warehouse.bins) ? warehouse.bins.map((bin, index) => normalizeWarehouseBin(bin, index)) : [],
+    shopifyInventoryPushEnabled: dataWarehouseLocation ? false : (warehouse.shopifyInventoryPushEnabled === undefined ? false : Boolean(warehouse.shopifyInventoryPushEnabled)),
+    bins: dataWarehouseLocation ? [] : (Array.isArray(warehouse.bins) ? warehouse.bins.map((bin, index) => normalizeWarehouseBin(bin, index)) : []),
     notes: warehouse.notes || "",
     createdAt: warehouse.createdAt || new Date().toISOString(),
     updatedAt: warehouse.updatedAt || warehouse.createdAt || new Date().toISOString()
@@ -22617,12 +22634,11 @@ function ensureInventoryWarehouseStock(item, warehouse) {
   item.warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
   let row = item.warehouseStock.find((entry) => entry.warehouseId === warehouse.id);
   if (!row) {
-    const isFirstWarehouseRow = item.warehouseStock.length === 0;
     row = normalizeWarehouseStockRow({
       warehouseId: warehouse.id,
       warehouseName: warehouse.name,
-      qty: isFirstWarehouseRow ? Number(item.qty ?? item.stockQty ?? 0) : 0,
-      reserved: isFirstWarehouseRow ? Number(item.reserved || 0) : 0,
+      qty: 0,
+      reserved: 0,
       reorderPoint: 0
     }, warehouse, item);
     item.warehouseStock.push(row);
@@ -22632,9 +22648,10 @@ function ensureInventoryWarehouseStock(item, warehouse) {
 
 function findPreferredOrderWarehouse(db, order) {
   const preferredId = order.fulfillmentWarehouseId || order.reservationWarehouseId || order.returnWarehouseId || "";
-  return (db.warehouses || []).find((warehouse) => warehouse.id === preferredId)
-    || (db.warehouses || []).find((warehouse) => warehouse.isDefaultReceiving)
-    || (db.warehouses || [])[0]
+  const physicalWarehouses = (db.warehouses || []).filter((warehouse) => warehouse.status !== "inactive" && isPhysicalWarehouse(warehouse));
+  return physicalWarehouses.find((warehouse) => warehouse.id === preferredId)
+    || physicalWarehouses.find((warehouse) => warehouse.isDefaultReceiving)
+    || physicalWarehouses[0]
     || null;
 }
 
@@ -27696,7 +27713,7 @@ async function handleApi(req, res) {
     );
     return sendJson(res, 200, {
       item: publicInventoryItem(resolvedItem, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
-      warehouses: (warehouses || []).filter((warehouse) => warehouse.status !== "inactive"),
+      warehouses: (warehouses || []).filter((warehouse) => warehouse.status !== "inactive" && isPhysicalWarehouse(warehouse)),
       ...operations
     });
   }
@@ -27712,6 +27729,7 @@ async function handleApi(req, res) {
     const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId) || findPreferredOrderWarehouse(db, order);
     const targetQty = Number(body.qty || 0);
     if (!warehouse) return sendJson(res, 400, { error: "Warehouse is required." });
+    if (!isPhysicalWarehouse(warehouse)) return sendJson(res, 400, { error: "Supplier-feed availability cannot be allocated as physical warehouse stock." });
     if (!(targetQty > 0)) return sendJson(res, 400, { error: "Allocation quantity must be greater than zero." });
     order.inventoryAllocations = Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : [];
     let allocation = order.inventoryAllocations.find((row) => skuMatchesInventoryItem(row.sku || row.productId, item) && row.warehouseId === warehouse.id && row.status !== "released");
@@ -29016,6 +29034,9 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     const requestedWarehouse = String(body.warehouseId || body.warehouseName || "").trim().toLowerCase();
     const warehouse = (db.warehouses || []).find((row) => String(row.id || "").toLowerCase() === requestedWarehouse || String(row.name || "").toLowerCase() === requestedWarehouse) || null;
+    if (!warehouse || !isPhysicalWarehouse(warehouse) || warehouse.allowAudits === false) {
+      return sendJson(res, 400, { error: "Choose a physical warehouse for this audit. DataWarehouse is supplier-feed availability, not countable physical stock." });
+    }
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const highest = Math.max(122, ...audits.map((audit) => Number(String(audit.auditNumber || "").replace(/\D/g, "")) || 0));
     const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
@@ -29431,9 +29452,9 @@ async function handleApi(req, res) {
     if (!product) return sendJson(res, 404, { error: `No catalog SKU matches ${lookup}. Add it to the catalog before receiving it.` });
 
     const requestedWarehouse = String(body.warehouseId || body.warehouseName || "").trim().toLowerCase();
-    const warehouse = (db.warehouses || []).find((row) => String(row.id || "").toLowerCase() === requestedWarehouse || String(row.name || "").toLowerCase() === requestedWarehouse)
-      || (db.warehouses || []).find((row) => row.isDefaultReceiving)
-      || (db.warehouses || [])[0]
+    const warehouse = (db.warehouses || []).find((row) => isPhysicalWarehouse(row) && (String(row.id || "").toLowerCase() === requestedWarehouse || String(row.name || "").toLowerCase() === requestedWarehouse))
+      || (db.warehouses || []).find((row) => isPhysicalWarehouse(row) && row.isDefaultReceiving)
+      || (db.warehouses || []).find(isPhysicalWarehouse)
       || null;
     if (!warehouse) return sendJson(res, 400, { error: "Create or select a receiving warehouse before posting inventory." });
 
@@ -29453,7 +29474,6 @@ async function handleApi(req, res) {
     stockRow.locationBin = locationBin || stockRow.locationBin || "";
     stockRow.updatedAt = now;
     syncInventoryTotalsFromWarehouses(product);
-    product.stockQty = Number(product.qty || 0);
     product.stockStatus = "Received";
     product.stockUpdatedAt = now;
     product.updatedAt = now;
@@ -30383,6 +30403,7 @@ async function handleApi(req, res) {
     if (body.warehouseId !== undefined) {
       const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId);
       if (!warehouse) return sendJson(res, 400, { error: "Warehouse not found." });
+      if (!isPhysicalWarehouse(warehouse)) return sendJson(res, 400, { error: "Purchase orders can only be received into a physical warehouse." });
       const previous = po.warehouseName || "Unassigned warehouse";
       po.warehouseId = warehouse.id;
       po.warehouseName = warehouse.name;
@@ -30541,7 +30562,8 @@ async function handleApi(req, res) {
     const note = String(body.note || "").trim();
     const mode = String(body.mode || "final").toLowerCase() === "draft" ? "draft" : "final";
     const defaultLocationBin = String(body.defaultLocationBin || "").trim();
-    const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId || row.id === po.warehouseId) || null;
+    const warehouse = (db.warehouses || []).find((row) => isPhysicalWarehouse(row) && (row.id === body.warehouseId || row.id === po.warehouseId)) || null;
+    if (mode === "final" && !warehouse) return sendJson(res, 400, { error: "Choose a physical receiving warehouse. DataWarehouse cannot receive physical PO stock." });
     const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReceiptAttachment(file, body.user || "Luis"));
     const touchedProducts = [];
     let totalReceived = 0;
@@ -30625,7 +30647,6 @@ async function handleApi(req, res) {
       } else {
         product.qty = Number(product.qty || 0) + qtyReceived;
       }
-      product.stockQty = Number(product.qty || 0);
       product.stockStatus = varianceStatus === "damaged" ? "Received with damage" : "Received";
       product.stockUpdatedAt = receivedAt;
       product.updatedAt = new Date().toISOString();
@@ -30764,6 +30785,7 @@ async function handleApi(req, res) {
     const toWarehouse = (db.warehouses || []).find((row) => row.id === body.toWarehouseId);
     const qty = Number(body.qty || 0);
     if (!fromWarehouse || !toWarehouse) return sendJson(res, 400, { error: "Both warehouses are required." });
+    if (!isPhysicalWarehouse(fromWarehouse) || !isPhysicalWarehouse(toWarehouse)) return sendJson(res, 400, { error: "Transfers can only move physical stock between physical warehouses." });
     if (fromWarehouse.id === toWarehouse.id) return sendJson(res, 400, { error: "Choose different source and destination warehouses." });
     if (!(qty > 0)) return sendJson(res, 400, { error: "Transfer quantity must be greater than zero." });
     const fromRow = ensureInventoryWarehouseStock(item, fromWarehouse);
@@ -30778,7 +30800,6 @@ async function handleApi(req, res) {
     fromRow.updatedAt = new Date().toISOString();
     toRow.updatedAt = new Date().toISOString();
     syncInventoryTotalsFromWarehouses(item);
-    item.stockQty = Number(item.qty || 0);
     item.updatedAt = new Date().toISOString();
     const referenceNumber = `${fromWarehouse.code || fromWarehouse.name} -> ${toWarehouse.code || toWarehouse.name}`;
     addInventoryLedger(db, item, {
@@ -30976,7 +30997,7 @@ async function handleApi(req, res) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
-    const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId) || findPreferredOrderWarehouse(db, order);
+    const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId && isPhysicalWarehouse(row)) || findPreferredOrderWarehouse(db, order);
     if (!warehouse) return sendJson(res, 400, { error: "Warehouse is required." });
     const primarySku = String(order.sku || orderLineItems(order)[0]?.sku || "").trim();
     const item = primarySku ? await postgres.readProductByKey(primarySku) : null;
@@ -30990,7 +31011,6 @@ async function handleApi(req, res) {
     stockRow.reserved = reservedBefore + qty;
     stockRow.updatedAt = new Date().toISOString();
     syncInventoryTotalsFromWarehouses(item);
-    item.stockQty = Number(item.qty || 0);
     item.updatedAt = new Date().toISOString();
     order.reservationWarehouseId = warehouse.id;
     order.reservationWarehouseName = warehouse.name;
@@ -31633,7 +31653,7 @@ async function handleApi(req, res) {
     let restocked = false;
     const touchedProducts = [];
     if (["resolved", "done"].includes(String(record.status || "").toLowerCase()) && record.disposition === "restock" && !record.restockedAt) {
-      const warehouse = (db.warehouses || []).find((row) => row.id === record.warehouseId);
+      const warehouse = (db.warehouses || []).find((row) => row.id === record.warehouseId && isPhysicalWarehouse(row));
       for (const line of record.items) {
         const item = await postgres.readProductByKey(line.sku);
         if (!item) continue;
@@ -31646,7 +31666,6 @@ async function handleApi(req, res) {
           stockRow.updatedAt = new Date().toISOString();
         }
         syncInventoryTotalsFromWarehouses(item);
-        item.stockQty = Number(item.qty || 0);
         item.updatedAt = new Date().toISOString();
         addInventoryLedger(db, item, {
           type: "return_restock",
@@ -39122,7 +39141,10 @@ async function handleApi(req, res) {
     const note = String(body.note || "").trim();
     const mode = String(body.mode || "final").toLowerCase() === "draft" ? "draft" : "final";
     const defaultLocationBin = String(body.defaultLocationBin || "").trim();
-    const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId || row.id === po.warehouseId) || null;
+    const warehouse = (db.warehouses || []).find((row) => (row.id === body.warehouseId || row.id === po.warehouseId) && isPhysicalWarehouse(row)) || null;
+    if (mode === "final" && !warehouse) {
+      return sendJson(res, 400, { error: "Choose a physical receiving warehouse. DataWarehouse supplier-feed availability cannot receive a purchase order." });
+    }
     const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReceiptAttachment(file, body.user || "Luis"));
     let totalReceived = 0;
     const receipt = {
@@ -39202,7 +39224,6 @@ async function handleApi(req, res) {
         warehouseStockRow.updatedAt = new Date().toISOString();
       }
       syncInventoryTotalsFromWarehouses(product);
-      product.stockQty = Number(product.stockQty || 0) + qtyReceived;
       product.stockStatus = varianceStatus === "damaged" ? "Received with damage" : "Received";
       product.stockUpdatedAt = receivedAt;
       product.updatedAt = new Date().toISOString();

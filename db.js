@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
+const { isDataWarehouseLocation } = require("./lib/inventory-locations");
 
 let pool;
 let relationalSchemaReady = false;
@@ -6001,7 +6002,10 @@ async function readProductByKey(key) {
   if (levels.rows.length) {
     item.warehouseStock = levels.rows.map(inventoryLevelRowToState);
     item.qty = item.warehouseStock.reduce((sum, row) => sum + Number(row.qty || 0), 0);
-    item.stockQty = item.qty;
+    const dataWarehouseRows = item.warehouseStock.filter(isDataWarehouseLocation);
+    if (dataWarehouseRows.length) {
+      item.stockQty = dataWarehouseRows.reduce((sum, row) => sum + Number(row.qty || 0), 0);
+    }
     item.reserved = item.warehouseStock.reduce((sum, row) => sum + Number(row.reserved || 0), 0);
     item.available = item.warehouseStock.reduce((sum, row) => sum + Number(row.available || 0), 0);
   }

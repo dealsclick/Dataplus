@@ -15,6 +15,10 @@ const {
   upsertVendorCatalogItemsFromProducts,
   writeState
 } = require("../db");
+const {
+  ensureDataWarehouseLocation,
+  upsertDataWarehouseStock
+} = require("../lib/inventory-locations");
 
 const ROOT = path.join(__dirname, "..");
 const DATA_DIR = path.join(ROOT, "data");
@@ -1046,6 +1050,7 @@ function mergeProduct(existing, product, state) {
   next.shadowSkus = Array.isArray(existing.shadowSkus) ? existing.shadowSkus : [];
   next.serialUnits = Array.isArray(existing.serialUnits) ? existing.serialUnits : [];
   next.warehouseStock = Array.isArray(existing.warehouseStock) ? existing.warehouseStock : [];
+  upsertDataWarehouseStock(next, product.stockQty ?? product.qty ?? 0, product.productDumpUpdatedAt || product.updatedAt);
   next.updatedAt = new Date().toISOString();
   return next;
 }
@@ -1297,6 +1302,7 @@ async function importInventoryState(dumpPath, options) {
   const { state, write } = await readAppState();
 
   state.inventory = Array.isArray(state.inventory) ? state.inventory : [];
+  state.warehouses = ensureDataWarehouseLocation(state.warehouses);
   state.catalogImportReviews = normalizeCatalogImportReviews(state.catalogImportReviews);
   const bySku = new Map(state.inventory.map((item, index) => [String(item.sku || "").toLowerCase(), { item, index }]));
   const stats = { read: 0, importable: 0, created: 0, updated: 0, skipped: 0 };
@@ -1323,7 +1329,7 @@ async function importInventoryState(dumpPath, options) {
         if (!options.dryRun) state.inventory[existing.index] = mergeProduct(existing.item, product, state);
         stats.updated += 1;
       } else {
-        const next = { id: crypto.randomUUID(), ...product };
+        const next = upsertDataWarehouseStock({ id: crypto.randomUUID(), ...product }, product.stockQty ?? product.qty ?? 0, product.productDumpUpdatedAt || product.updatedAt);
         if (!options.dryRun) state.inventory.push(next);
         bySku.set(key, { item: next, index: options.dryRun ? state.inventory.length : state.inventory.length - 1 });
         stats.created += 1;
