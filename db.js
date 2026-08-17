@@ -2157,6 +2157,8 @@ function vendorCatalogRowToState(row = {}) {
     ...(row.raw || {}),
     id: row.source_sku || row.raw?.id,
     sku: row.source_sku || row.raw?.sku,
+    sourceSku: row.source_sku || row.raw?.sourceSku || row.raw?.sku,
+    internalSku: row.internal_sku || row.raw?.internalSku || row.raw?.productCatalogSku || row.source_sku,
     externalId: row.raw?._id || row.raw?.externalId || row.source_sku,
     title: row.title ?? row.raw?.title,
     marketplaceTitle: row.title ?? row.raw?.marketplaceTitle ?? row.raw?.title,
@@ -5868,9 +5870,12 @@ function offerRowToState(row = {}) {
 }
 
 function inventoryLevelRowToState(row = {}) {
+  const locationKey = row.location_key || "";
+  const dataWarehouse = isDataWarehouseLocation({ warehouseId: locationKey, warehouseName: locationKey });
   return {
-    warehouseId: row.location_key || "",
-    warehouseName: row.location_key || "",
+    warehouseId: locationKey,
+    warehouseName: dataWarehouse ? "DataWarehouse" : locationKey,
+    locationType: dataWarehouse ? "supplier_feed" : "physical",
     qty: Number(row.on_hand || 0),
     available: Number(row.available || 0),
     reserved: Number(row.reserved || 0),

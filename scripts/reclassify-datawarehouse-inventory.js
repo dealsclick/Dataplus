@@ -38,6 +38,8 @@ function collectPhysicalEvidence(state = {}) {
   const evidence = new Set();
   for (const entry of state.inventoryLedger || []) {
     if (isDataWarehouseLocation(entry)) continue;
+    const eventType = normalized(entry.type || entry.eventType || entry.source);
+    if (!/(receipt|receiv|warehouse_audit|return_restock|transfer_in|manual_adjustment)/.test(eventType)) continue;
     addEvidence(evidence, entry.sku, entry.warehouseId || entry.warehouseName);
   }
   for (const receipt of state.manualWarehouseReceipts || []) {
@@ -51,7 +53,6 @@ function collectPhysicalEvidence(state = {}) {
 }
 
 function hasPhysicalEvidence(item, row, evidence) {
-  if (String(row.locationBin || "").trim()) return true;
   const sku = item.sku || item.id;
   const keys = [row.warehouseId, row.warehouseName, row.warehouseCode].filter(Boolean);
   return keys.some((key) => evidence.has(evidenceKey(sku, key)));
@@ -60,6 +61,25 @@ function hasPhysicalEvidence(item, row, evidence) {
 function finiteQty(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : Math.max(0, Number(fallback || 0));
+}
+
+function sourceTimestamp(row = {}) {
+  const value = Date.parse(row.lastSeenAt || row.updatedAt || row.productDumpUpdatedAt || "");
+  return Number.isFinite(value) ? value : 0;
+}
+
+function sourceKeys(row = {}) {
+  return [row.sourceSku, row.internalSku, row.sku, row.vendorSku, row.raw?.sourceSku, row.raw?.internalSku]
+    .map(normalized)
+    .filter(Boolean);
+}
+
+function latestSourceRecord(item = {}, batchSources = []) {
+  const itemKeys = new Set([item.sku, item.id, item.internalSku].map(normalized).filter(Boolean));
+  const candidates = [...(item.sourceCatalogMatches || []), ...batchSources]
+    .filter((row) => sourceKeys(row).some((key) => itemKeys.has(key)))
+    .sort((a, b) => sourceTimestamp(b) - sourceTimestamp(a));
+  return candidates[0] || null;
 }
 
 function summarizeRows(rows = []) {
@@ -71,16 +91,23 @@ function summarizeRows(rows = []) {
   }));
 }
 
-function repairProduct(item, evidence) {
+function repairProduct(item, evidence, sourceRecord = null) {
   const existingRows = Array.isArray(item.warehouseStock) ? item.warehouseStock.filter(Boolean) : [];
   const existingFeedRow = existingRows.find(isDataWarehouseLocation);
-  const sourceQty = finiteQty(item.stockQty, existingFeedRow?.qty ?? item.qty ?? 0);
+  const hasCurrentSourceQty = sourceRecord && sourceRecord.qty !== null && sourceRecord.qty !== undefined && sourceRecord.qty !== "";
+  const sourceQty = hasCurrentSourceQty
+    ? finiteQty(sourceRecord.qty)
+    : finiteQty(existingFeedRow?.qty, item.stockQty ?? item.qty ?? 0);
   const keptPhysicalRows = existingRows.filter((row) => isPhysicalWarehouse(row) && hasPhysicalEvidence(item, row, evidence));
   const removedPhysicalRows = existingRows.filter((row) => isPhysicalWarehouse(row) && !hasPhysicalEvidence(item, row, evidence));
   const before = summarizeRows(existingRows);
 
   item.warehouseStock = keptPhysicalRows;
-  upsertDataWarehouseStock(item, sourceQty, item.productDumpUpdatedAt || item.stockUpdatedAt || item.updatedAt);
+  upsertDataWarehouseStock(
+    item,
+    sourceQty,
+    sourceRecord?.lastSeenAt || sourceRecord?.updatedAt || item.productDumpUpdatedAt || item.stockUpdatedAt || item.updatedAt
+  );
 
   const allRows = item.warehouseStock || [];
   const physicalRows = allRows.filter(isPhysicalWarehouse);
@@ -135,11 +162,13 @@ async function main() {
   async function processRows(rows) {
     const changed = [];
     stats.scanned += rows.length;
+    const batchSources = await postgres.readVendorCatalogItemsBySkus(rows.map((item) => item.sku || item.id)) || [];
 
     for (const item of rows) {
       if (!isDataWarehouseImportedProduct(item)) continue;
       stats.dataWarehouseProducts += 1;
-      const result = repairProduct(item, evidence);
+      const sourceRecord = latestSourceRecord(item, batchSources);
+      const result = repairProduct(item, evidence, sourceRecord);
       stats.removedUnsupportedPhysicalRows += result.removedPhysicalRows.length;
       stats.preservedPhysicalRows += (item.warehouseStock || []).filter(isPhysicalWarehouse).length;
       stats.supplierUnits += result.sourceQty;
