@@ -46,4 +46,4 @@ jobs:
             -o BatchMode=yes \
             -o ConnectTimeout=15 \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            'set -euo pipefail; cd /root/dataplus; git pull --ff-only origin master; node scripts/generate-release-history.js; docker compose up -d --build --remove-orphans; docker compose ps; curl --fail --silent --show-error http://127.0.0.1:4173/ > /dev/null'
+            'set -euo pipefail; cd /root/dataplus; git pull --ff-only origin master; bash scripts/deploy-production.sh'
