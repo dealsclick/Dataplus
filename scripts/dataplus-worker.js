@@ -36,6 +36,7 @@ const SUPPORTED_TASKS = [
   "source-search-index",
   "source-performance-indexes",
   "source-facets-refresh",
+  "datawarehouse-inventory-reclassification",
   "jobs-retention-cleanup",
   "mapped-product-export",
   "category-export",
@@ -1351,6 +1352,70 @@ async function runEbayCategoryAutoMapJob(job) {
   return dataplus.runEbayCategoryAutoMapWorkerJob(job, job.workerPayload || {});
 }
 
+async function runDataWarehouseInventoryReclassificationJob(job) {
+  const payload = job.workerPayload || {};
+  const dryRun = payload.dryRun === true;
+  const reportDirectory = path.join(ROOT, "outputs", "jobs", String(job.id || "datawarehouse-inventory"));
+  const reportPath = path.join(reportDirectory, dryRun ? "datawarehouse-inventory-review.json" : "datawarehouse-inventory-reclassification.json");
+  const args = ["scripts/reclassify-datawarehouse-inventory.js"];
+  if (dryRun) args.push("--dry-run");
+  if (payload.sku) args.push("--sku", String(payload.sku));
+  if (payload.batchSize) args.push("--batch-size", String(Math.max(100, Math.min(5000, Number(payload.batchSize) || 1000))));
+  args.push("--report", reportPath);
+
+  let current = await persistJob(job, {
+    status: "running",
+    phase: dryRun ? "reviewing_inventory_locations" : "reclassifying_inventory_locations",
+    message: dryRun
+      ? "Worker is reviewing DataWarehouse inventory location classifications..."
+      : "Worker is moving imported supplier inventory into the DataWarehouse virtual location...",
+    startedAt: job.startedAt || new Date().toISOString()
+  });
+  const stdout = [];
+  const stderr = [];
+  await new Promise((resolve, reject) => {
+    const heartbeatTimer = setInterval(() => {
+      writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh DataWarehouse reclassification heartbeat:", error.message || error));
+    }, Math.max(1000, Math.min(HEARTBEAT_MS, 5000)));
+    const child = spawn(process.execPath, args, { cwd: ROOT, env: process.env, windowsHide: true });
+    child.stdout.on("data", (chunk) => stdout.push(chunk.toString()));
+    child.stderr.on("data", (chunk) => stderr.push(chunk.toString()));
+    child.on("error", (error) => {
+      clearInterval(heartbeatTimer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearInterval(heartbeatTimer);
+      if (code) reject(new Error(`DataWarehouse inventory reclassification exited with code ${code}. ${stderr.join("").slice(-2000)}`));
+      else resolve();
+    });
+  });
+
+  const outputText = stdout.join("").trim();
+  const report = outputText ? JSON.parse(outputText) : {};
+  current = await persistJob(current, {
+    status: "success",
+    phase: "complete",
+    fileName: path.basename(report.reportPath || reportPath),
+    originalFileName: path.basename(report.reportPath || reportPath),
+    originalFilePath: report.reportPath || reportPath,
+    message: dryRun
+      ? `Reviewed ${Number(report.dataWarehouseProducts || 0).toLocaleString()} DataWarehouse product${Number(report.dataWarehouseProducts || 0) === 1 ? "" : "s"}; ${Number(report.changed || 0).toLocaleString()} need reclassification.`
+      : `Reclassified ${Number(report.changed || 0).toLocaleString()} product${Number(report.changed || 0) === 1 ? "" : "s"} into the DataWarehouse supplier-feed location.`,
+    details: `${Number(report.removedUnsupportedPhysicalRows || 0).toLocaleString()} unsupported physical row${Number(report.removedUnsupportedPhysicalRows || 0) === 1 ? "" : "s"} ${dryRun ? "identified" : "removed"}; ${Number(report.preservedPhysicalRows || 0).toLocaleString()} evidence-backed physical row${Number(report.preservedPhysicalRows || 0) === 1 ? "" : "s"} preserved.`,
+    totalRows: Number(report.scanned || 0),
+    processedRows: Number(report.scanned || 0),
+    changed: Number(report.changed || 0),
+    missingCount: 0,
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString(),
+    dataWarehouseInventoryReport: report
+  });
+  if (fs.existsSync(report.reportPath || reportPath)) await postgres.upsertOperationArtifact(current, "original");
+  return current;
+}
+
 async function runAiCategoryReviewJob(job) {
   return dataplus.runAiCategoryReviewWorkerJob(job, job.workerPayload || {});
 }
@@ -1651,6 +1716,7 @@ async function runJob(job) {
   if (task === "postgres-backup") return runBackupJob(job);
   if (task === "data-quality-scan") return runDataQualityScanJob(job);
   if (task === "source-search-index") return runSourceSearchIndexJob(job);
+  if (task === "datawarehouse-inventory-reclassification") return runDataWarehouseInventoryReclassificationJob(job);
   if (task === "source-performance-indexes") return runSourcePerformanceIndexesJob(job);
   if (task === "source-facets-refresh") return runSourceFacetsRefreshJob(job);
   if (task === "jobs-retention-cleanup") return runJobsRetentionCleanupJob(job);

@@ -33970,6 +33970,43 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/catalog/datawarehouse-inventory/reclassify") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 400, { error: "Postgres is required for DataWarehouse inventory reclassification." });
+    const body = await parseBody(req);
+    const dryRun = body.dryRun === true;
+    const requestedSku = sourceTextValue(body.sku || "").trim();
+    const existingJobs = await postgres.readOperationJobs(250);
+    const active = existingJobs.find((job) => String(job.workerTask || "") === "datawarehouse-inventory-reclassification"
+      && ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+    if (active) return sendJson(res, 200, { job: normalizeImportJob(active), message: "A DataWarehouse inventory reclassification job is already queued or running." });
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const job = createImportJob(db, {
+      section: "Inventory",
+      category: "Inventory",
+      operation: dryRun ? "Review DataWarehouse inventory classification" : "Reclassify DataWarehouse inventory",
+      direction: "maintenance",
+      type: "maintenance",
+      source: "datawarehouse-inventory-classification",
+      status: "queued",
+      phase: "queued",
+      fileName: dryRun ? "datawarehouse-inventory-review.json" : "datawarehouse-inventory-reclassification.json",
+      totalRows: requestedSku ? 1 : 0,
+      processedRows: 0,
+      progressPercent: 0,
+      workerTask: "datawarehouse-inventory-reclassification",
+      workerPayload: {
+        dryRun,
+        sku: requestedSku,
+        batchSize: Math.max(100, Math.min(5000, Number(body.batchSize || 1000) || 1000))
+      },
+      message: requestedSku
+        ? `${dryRun ? "DataWarehouse inventory review" : "DataWarehouse inventory reclassification"} queued for ${requestedSku}.`
+        : `${dryRun ? "DataWarehouse inventory review" : "DataWarehouse inventory reclassification"} queued for the full imported catalog.`,
+      details: "Supplier-feed quantity will be assigned to the virtual DataWarehouse location. Physical rows are retained only when supported by a receipt, completed audit, transfer/ledger event, return restock, or bin evidence."
+    });
+    return sendJson(res, 202, { job: normalizeImportJob(job), message: job.message });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/status") {
     const marketplaceId = String(url.searchParams.get("marketplaceId") || "EBAY_US").trim().toUpperCase();
     const index = await readEbayTaxonomyIndex({}, marketplaceId);

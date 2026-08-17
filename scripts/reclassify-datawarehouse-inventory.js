@@ -1,3 +1,5 @@
+const fs = require("fs");
+const path = require("path");
 const postgres = require("../db");
 const {
   ensureDataWarehouseLocation,
@@ -13,6 +15,8 @@ const skuIndex = args.indexOf("--sku");
 const requestedSku = skuIndex >= 0 ? String(args[skuIndex + 1] || "").trim().toLowerCase() : "";
 const batchIndex = args.indexOf("--batch-size");
 const batchSize = Math.max(100, Math.min(5000, Number(batchIndex >= 0 ? args[batchIndex + 1] : 1000) || 1000));
+const reportIndex = args.indexOf("--report");
+const reportPath = reportIndex >= 0 ? String(args[reportIndex + 1] || "").trim() : "";
 
 function normalized(value) {
   return String(value || "").trim().toLowerCase();
@@ -162,6 +166,12 @@ async function main() {
   }
 
   if (!dryRun) await postgres.writeStateDocuments({ warehouses });
+  if (reportPath) {
+    const absoluteReportPath = path.resolve(reportPath);
+    fs.mkdirSync(path.dirname(absoluteReportPath), { recursive: true });
+    fs.writeFileSync(absoluteReportPath, `${JSON.stringify(stats, null, 2)}\n`);
+    stats.reportPath = absoluteReportPath;
+  }
   process.stdout.write(`${JSON.stringify(stats, null, 2)}\n`);
 }
 
