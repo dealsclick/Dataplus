@@ -289,6 +289,8 @@ Fulfillment is the operational workspace for pick lists, batches, scanning, pack
 
 Warehouse supports receiving, bins/locations, stock movement, audits, manual receiving, and inventory detail per SKU. Warehouse audits are independent records with warehouse, bin, user, scan lines, review status, photos, unknown UPC handling, and a final apply/review step.
 
+Warehouse type is a controlled setting, not free text. Supported types are Physical Warehouse, Distribution Center, Fulfillment Center, Retail Store / Pickup, Returns Center, Cross-Dock, Overflow Storage, 3PL / Partner Warehouse, Transfer / In Transit, and Virtual Inventory Source. Physical types can support bins, receiving, and audits; transfer and virtual types cannot. The DataWarehouse supplier-feed location is a protected virtual source and its type cannot be changed from the UI.
+
 Each warehouse has a dedicated workspace with Overview, Bins, Settings, and Activity views. Warehouse settings and bin changes must create warehouse-local activity events, while the Activity view also combines that history with inventory movements, receipts, and audits for the same location. Virtual supplier locations such as DataWarehouse do not use physical bins, receiving, or warehouse audits.
 
 `DataWarehouse` is a virtual supplier-feed location, not a physical warehouse. All availability imported from the universal Product Datadump belongs to this location. Physical warehouse stock may only be created by a warehouse audit, PO receipt, return receipt, transfer, or explicit manual adjustment. Supplier-feed availability must never be allocated to orders as physical on-hand stock.

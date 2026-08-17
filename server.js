@@ -11025,19 +11025,83 @@ function formatWarehouseAddress(warehouse) {
   return parts.join(" | ");
 }
 
+const WAREHOUSE_TYPE_DEFINITIONS = [
+  { label: "Physical Warehouse", inventorySourceType: "physical", isPhysical: true, allowReceiving: true, allowAudits: true },
+  { label: "Distribution Center", inventorySourceType: "physical", isPhysical: true, allowReceiving: true, allowAudits: true },
+  { label: "Fulfillment Center", inventorySourceType: "physical", isPhysical: true, allowReceiving: true, allowAudits: true },
+  { label: "Retail Store / Pickup", inventorySourceType: "physical", isPhysical: true, allowReceiving: true, allowAudits: true },
+  { label: "Returns Center", inventorySourceType: "physical", isPhysical: true, allowReceiving: true, allowAudits: true },
+  { label: "Cross-Dock", inventorySourceType: "physical", isPhysical: true, allowReceiving: true, allowAudits: true },
+  { label: "Overflow Storage", inventorySourceType: "physical", isPhysical: true, allowReceiving: true, allowAudits: true },
+  { label: "3PL / Partner Warehouse", inventorySourceType: "third_party", isPhysical: true, allowReceiving: false, allowAudits: false },
+  { label: "Transfer / In Transit", inventorySourceType: "transfer", isPhysical: false, allowReceiving: false, allowAudits: false },
+  { label: "Virtual Inventory Source", inventorySourceType: "virtual", isPhysical: false, allowReceiving: false, allowAudits: false }
+];
+
+function warehouseTypeDefinition(value) {
+  const normalized = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const aliases = {
+    warehouse: "physicalwarehouse",
+    physical: "physicalwarehouse",
+    virtual: "virtualinventorysource",
+    virtualsuppliernetwork: "virtualinventorysource",
+    transfer: "transferintransit",
+    transit: "transferintransit",
+    intransit: "transferintransit",
+    thirdparty: "3plpartnerwarehouse",
+    thirdpartywarehouse: "3plpartnerwarehouse",
+    partnerwarehouse: "3plpartnerwarehouse",
+    store: "retailstorepickup",
+    retail: "retailstorepickup"
+  };
+  const lookup = aliases[normalized] || normalized || "physicalwarehouse";
+  return WAREHOUSE_TYPE_DEFINITIONS.find((option) => option.label.toLowerCase().replace(/[^a-z0-9]+/g, "") === lookup)
+    || WAREHOUSE_TYPE_DEFINITIONS[0];
+}
+
+function applyWarehouseTypeBehavior(warehouse, { preserveExplicitRules = true } = {}) {
+  if (isDataWarehouseLocation(warehouse)) {
+    warehouse.warehouseType = "Virtual supplier network";
+    warehouse.inventorySourceType = "supplier_feed";
+    warehouse.isPhysical = false;
+    warehouse.allowReceiving = false;
+    warehouse.allowAudits = false;
+    warehouse.isDefaultReceiving = false;
+    warehouse.isDefaultReturns = false;
+    warehouse.requireBinValidation = false;
+    return warehouse;
+  }
+  const definition = warehouseTypeDefinition(warehouse.warehouseType || warehouse.type);
+  warehouse.warehouseType = definition.label;
+  warehouse.inventorySourceType = definition.inventorySourceType;
+  warehouse.isPhysical = definition.isPhysical;
+  warehouse.allowReceiving = definition.isPhysical
+    ? (preserveExplicitRules && warehouse.allowReceiving !== undefined ? Boolean(warehouse.allowReceiving) : definition.allowReceiving)
+    : false;
+  warehouse.allowAudits = definition.isPhysical
+    ? (preserveExplicitRules && warehouse.allowAudits !== undefined ? Boolean(warehouse.allowAudits) : definition.allowAudits)
+    : false;
+  if (!definition.isPhysical) {
+    warehouse.isDefaultReceiving = false;
+    warehouse.isDefaultReturns = false;
+    warehouse.requireBinValidation = false;
+  }
+  return warehouse;
+}
+
 function normalizeWarehouse(warehouse) {
   const legacyAddressLine = String(warehouse.addressLine || "").trim();
   const dataWarehouseLocation = isDataWarehouseLocation(warehouse);
-  const normalized = {
+  const normalized = applyWarehouseTypeBehavior({
     id: warehouse.id || crypto.randomUUID(),
     code: warehouse.code || "",
     name: warehouse.name || "Unnamed warehouse",
     status: warehouse.status || "active",
-    warehouseType: dataWarehouseLocation ? "Virtual supplier network" : (warehouse.warehouseType || warehouse.type || "Warehouse"),
-    inventorySourceType: dataWarehouseLocation ? "supplier_feed" : (warehouse.inventorySourceType || "physical"),
-    isPhysical: dataWarehouseLocation ? false : warehouse.isPhysical !== false,
-    allowReceiving: dataWarehouseLocation ? false : warehouse.allowReceiving !== false,
-    allowAudits: dataWarehouseLocation ? false : warehouse.allowAudits !== false,
+    warehouseType: dataWarehouseLocation ? "Virtual supplier network" : (warehouse.warehouseType || warehouse.type || "Physical Warehouse"),
+    inventorySourceType: warehouse.inventorySourceType,
+    isPhysical: warehouse.isPhysical,
+    allowReceiving: warehouse.allowReceiving,
+    allowAudits: warehouse.allowAudits,
     contactName: warehouse.contactName || "",
     managerName: warehouse.managerName || "",
     phone: warehouse.phone || "",
@@ -11068,7 +11132,7 @@ function normalizeWarehouse(warehouse) {
     notes: warehouse.notes || "",
     createdAt: warehouse.createdAt || new Date().toISOString(),
     updatedAt: warehouse.updatedAt || warehouse.createdAt || new Date().toISOString()
-  };
+  });
   if (!normalized.city && !normalized.state && legacyAddressLine.includes(",")) {
     normalized.addressLine1 = legacyAddressLine;
   }
@@ -31941,7 +32005,9 @@ async function handleApi(req, res) {
       code: String(body.code || nextWarehouseCode(db)).trim(),
       name,
       status: String(body.status || "active"),
-      warehouseType: String(body.warehouseType || "Warehouse").trim(),
+      warehouseType: String(body.warehouseType || "Physical Warehouse").trim(),
+      inventorySourceType: body.inventorySourceType,
+      isPhysical: body.isPhysical,
       allowReceiving: body.allowReceiving === undefined ? true : Boolean(body.allowReceiving),
       allowAudits: body.allowAudits === undefined ? true : Boolean(body.allowAudits),
       contactName: String(body.contactName || "").trim(),
@@ -31989,7 +32055,7 @@ async function handleApi(req, res) {
     const warehouse = (db.warehouses || []).find((row) => row.id === parts[2]);
     if (!warehouse) return notFound(res);
     const fields = [
-      "code", "name", "status", "warehouseType", "contactName", "managerName", "phone", "email", "timezone",
+      "code", "name", "status", "warehouseType", "inventorySourceType", "isPhysical", "contactName", "managerName", "phone", "email", "timezone",
       "operatingHours", "carrierCutoffTime", "receivingInstructions", "addressLine1", "addressLine2", "city",
       "state", "postalCode", "country", "isDefaultReceiving", "isDefaultReturns", "requireAppointment",
       "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyLocationId",
@@ -31999,7 +32065,7 @@ async function handleApi(req, res) {
     for (const field of fields) {
       if (body[field] === undefined) continue;
       const previousValue = warehouse[field];
-      if (["isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyInventoryPushEnabled", "allowReceiving", "allowAudits"].includes(field)) {
+      if (["isPhysical", "isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyInventoryPushEnabled", "allowReceiving", "allowAudits"].includes(field)) {
         warehouse[field] = Boolean(body[field]);
       } else if (field === "shopifyLocationId") {
         warehouse[field] = normalizeShopifyLocationGid(body[field]);
@@ -32008,6 +32074,7 @@ async function handleApi(req, res) {
       }
       if (String(previousValue ?? "") !== String(warehouse[field] ?? "")) changedFields.push(field);
     }
+    if (body.warehouseType !== undefined && !isDataWarehouseLocation(warehouse)) applyWarehouseTypeBehavior(warehouse, { preserveExplicitRules: false });
     if (body.isDefaultReceiving) (db.warehouses || []).forEach((item) => { if (item.id !== warehouse.id) item.isDefaultReceiving = false; });
     if (body.isDefaultReturns) (db.warehouses || []).forEach((item) => { if (item.id !== warehouse.id) item.isDefaultReturns = false; });
     warehouse.addressLine = formatWarehouseAddress(warehouse);
@@ -40527,7 +40594,9 @@ async function handleApi(req, res) {
       code: String(body.code || nextWarehouseCode(db)).trim(),
       name,
       status: String(body.status || "active"),
-      warehouseType: String(body.warehouseType || "Warehouse").trim(),
+      warehouseType: String(body.warehouseType || "Physical Warehouse").trim(),
+      inventorySourceType: body.inventorySourceType,
+      isPhysical: body.isPhysical,
       allowReceiving: body.allowReceiving === undefined ? true : Boolean(body.allowReceiving),
       allowAudits: body.allowAudits === undefined ? true : Boolean(body.allowAudits),
       contactName: String(body.contactName || "").trim(),
@@ -40577,6 +40646,8 @@ async function handleApi(req, res) {
       "name",
       "status",
       "warehouseType",
+      "inventorySourceType",
+      "isPhysical",
       "contactName",
       "managerName",
       "phone",
@@ -40610,6 +40681,7 @@ async function handleApi(req, res) {
     for (const field of fields) {
       if (body[field] === undefined) continue;
       if ([
+        "isPhysical",
         "isDefaultReceiving",
         "isDefaultReturns",
         "requireAppointment",
@@ -40635,6 +40707,7 @@ async function handleApi(req, res) {
         if (String(previousValue ?? "") !== String(warehouse[field] ?? "")) changedFields.push(field);
       }
     }
+    if (body.warehouseType !== undefined && !isDataWarehouseLocation(warehouse)) applyWarehouseTypeBehavior(warehouse, { preserveExplicitRules: false });
     if (body.isDefaultReceiving) {
       (db.warehouses || []).forEach((item) => {
         if (item.id !== warehouse.id) item.isDefaultReceiving = false;
