@@ -10379,6 +10379,24 @@ function inventoryStockSources(item = {}) {
   return { physical, suppliers, marketplace, all: [...physical, ...suppliers, ...marketplace] };
 }
 
+function withResolvedInventoryWarehouses(item = {}, warehouses = []) {
+  const warehouseById = new Map(
+    (Array.isArray(warehouses) ? warehouses : [])
+      .filter((warehouse) => warehouse?.id)
+      .map((warehouse) => [String(warehouse.id), warehouse])
+  );
+  const warehouseStock = (Array.isArray(item.warehouseStock) ? item.warehouseStock : []).map((row) => {
+    const warehouse = warehouseById.get(String(row?.warehouseId || ""));
+    if (!warehouse) return { ...row };
+    return {
+      ...row,
+      warehouseName: warehouse.name || row.warehouseName || "Unassigned warehouse",
+      warehouseCode: warehouse.code || row.warehouseCode || ""
+    };
+  });
+  return { ...item, warehouseStock };
+}
+
 function inventorySkuOperations(item = {}, orders = [], ledger = []) {
   const now = Date.now();
   const day = 24 * 60 * 60 * 1000;
@@ -27670,13 +27688,14 @@ async function handleApi(req, res) {
       postgres.listPurchaseOrders({ sku: item.sku, limit: 250 }),
       postgres.readStateField("returns")
     ]);
+    const resolvedItem = withResolvedInventoryWarehouses(item, warehouses || []);
     const operations = enrichInventoryOperations(
-      inventorySkuOperations(item, orders || [], ledger || []),
-      inventoryPurchaseOrderRows(purchaseOrders || [], item),
-      inventoryReturnRows(returns || [], item)
+      inventorySkuOperations(resolvedItem, orders || [], ledger || []),
+      inventoryPurchaseOrderRows(purchaseOrders || [], resolvedItem),
+      inventoryReturnRows(returns || [], resolvedItem)
     );
     return sendJson(res, 200, {
-      item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
+      item: publicInventoryItem(resolvedItem, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
       warehouses: (warehouses || []).filter((warehouse) => warehouse.status !== "inactive"),
       ...operations
     });
