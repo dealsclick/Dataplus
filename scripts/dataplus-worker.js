@@ -479,11 +479,25 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
       continue;
     }
     try {
+      const warehouseMappings = Array.isArray(channelSettings.shopifyWarehouseMappings) && channelSettings.shopifyWarehouseMappings.length
+        ? channelSettings.shopifyWarehouseMappings
+        : [{
+            id: "shopify-datawarehouse-zsi",
+            enabled: true,
+            sourceWarehouseId: "datawarehouse",
+            sourceWarehouseName: "DataWarehouse",
+            destinationLocationId: "gid://shopify/Location/108946260272",
+            destinationLocationName: "zSi Warehouse"
+          }];
+      const scheduledMapping = warehouseMappings.find((row) => row?.enabled !== false && String(row?.sourceWarehouseId || "").toLowerCase() === "datawarehouse")
+        || warehouseMappings.find((row) => row?.enabled !== false)
+        || null;
       const result = await dataplus.queueShopifyInventoryUpdateJob(stateDb, {
         apply,
         dryRun: !apply,
-        warehouseId: channelSettings.shopifyInventoryWarehouseId || "",
-        locationId: channelSettings.shopifyInventoryLocationId || ""
+        mappingId: scheduledMapping?.id || "",
+        warehouseId: scheduledMapping?.sourceWarehouseId || channelSettings.shopifyInventoryWarehouseId || "",
+        locationId: scheduledMapping?.destinationLocationId || channelSettings.shopifyInventoryLocationId || ""
       }, {
         scheduled: true,
         scheduleKey: scheduleId,

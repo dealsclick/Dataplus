@@ -857,6 +857,14 @@ const DEFAULT_CHANNEL_SETTINGS = {
   shopifyInventoryPushEnabled: false,
   shopifyInventoryWarehouseId: "",
   shopifyInventoryLocationId: "",
+  shopifyWarehouseMappings: [{
+    id: "shopify-datawarehouse-zsi",
+    enabled: true,
+    sourceWarehouseId: "datawarehouse",
+    sourceWarehouseName: "DataWarehouse",
+    destinationLocationId: "gid://shopify/Location/108946260272",
+    destinationLocationName: "zSi Warehouse"
+  }],
   inventoryScheduleEnabled: false,
   inventoryScheduleMode: "dry-run",
   inventoryScheduleType: "times",
@@ -4037,6 +4045,11 @@ function normalizeChannel(channel = {}) {
   settings.shopifySkuMapScheduleTime = normalizeChannelScheduleTimes(settings.shopifySkuMapScheduleTime || DEFAULT_CHANNEL_SETTINGS.shopifySkuMapScheduleTime).split(",")[0];
   settings.shopifyShippingProfiles = normalizeShopifyShippingProfiles(settings.shopifyShippingProfiles);
   settings.shopifyShippingProfilesSyncedAt = String(settings.shopifyShippingProfilesSyncedAt || "");
+  settings.shopifyWarehouseMappings = normalizeShopifyWarehouseMappings(
+    rawSettings.shopifyWarehouseMappings === undefined
+      ? DEFAULT_CHANNEL_SETTINGS.shopifyWarehouseMappings
+      : rawSettings.shopifyWarehouseMappings
+  );
   return {
     id: channel.id || crypto.randomUUID(),
     name: channel.name || "Marketplace",
@@ -4090,6 +4103,27 @@ function findChannelByName(db, name = "") {
   return (db?.connections || []).find((channel) => String(channel.name || "").toLowerCase() === key);
 }
 
+function normalizeShopifyWarehouseMappings(value = []) {
+  const rows = Array.isArray(value) ? value : [];
+  const bySource = new Map();
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const sourceWarehouseId = String(row.sourceWarehouseId || row.warehouseId || "").trim();
+    const destinationLocationId = normalizeShopifyLocationGid(row.destinationLocationId || row.locationId || "");
+    if (!sourceWarehouseId && !destinationLocationId) continue;
+    const normalized = {
+      id: String(row.id || `shopify-${sourceWarehouseId || shopifyLegacyId(destinationLocationId) || crypto.randomUUID()}`).trim(),
+      enabled: row.enabled !== false && String(row.enabled ?? "true").toLowerCase() !== "false",
+      sourceWarehouseId,
+      sourceWarehouseName: String(row.sourceWarehouseName || row.warehouseName || "").trim(),
+      destinationLocationId,
+      destinationLocationName: String(row.destinationLocationName || row.locationName || "").trim()
+    };
+    bySource.set(sourceWarehouseId || normalized.id, normalized);
+  }
+  return [...bySource.values()];
+}
+
 function requireEnabledChannel(db, name = "") {
   const channel = findChannelByName(db, name);
   if (!channel) {
@@ -4108,20 +4142,32 @@ function requireEnabledChannel(db, name = "") {
 function resolveShopifyInventoryLocation(db, body = {}) {
   const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
   const warehouses = Array.isArray(db.warehouses) ? db.warehouses.map(normalizeWarehouse) : [];
-  const requestedWarehouse = warehouses.find((warehouse) => warehouse.id === body.warehouseId)
-    || warehouses.find((warehouse) => warehouse.id === settings.shopifyInventoryWarehouseId)
+  const mappings = normalizeShopifyWarehouseMappings(settings.shopifyWarehouseMappings);
+  const requestedMapping = mappings.find((mapping) => mapping.id === body.mappingId)
+    || mappings.find((mapping) => mapping.sourceWarehouseId === body.warehouseId)
+    || mappings.find((mapping) => mapping.enabled && mapping.sourceWarehouseId === "datawarehouse")
+    || mappings.find((mapping) => mapping.enabled)
+    || null;
+  const requestedWarehouseId = String(body.warehouseId || requestedMapping?.sourceWarehouseId || settings.shopifyInventoryWarehouseId || "").trim();
+  const requestedWarehouse = warehouses.find((warehouse) => warehouse.id === requestedWarehouseId)
     || null;
   const enabledWarehouse = warehouses.find((warehouse) => warehouse.shopifyInventoryPushEnabled && normalizeShopifyLocationGid(warehouse.shopifyLocationId));
   const defaultReceivingWarehouse = warehouses.find((warehouse) => warehouse.isDefaultReceiving && normalizeShopifyLocationGid(warehouse.shopifyLocationId));
-  const warehouse = requestedWarehouse || enabledWarehouse || defaultReceivingWarehouse || null;
+  const warehouse = requestedWarehouse
+    || (requestedWarehouseId === "datawarehouse" ? { id: "datawarehouse", name: "DataWarehouse", inventorySourceType: "supplier_feed", isPhysical: false } : null)
+    || enabledWarehouse
+    || defaultReceivingWarehouse
+    || null;
   const locationId = normalizeShopifyLocationGid(body.locationId)
+    || normalizeShopifyLocationGid(requestedMapping?.destinationLocationId)
     || normalizeShopifyLocationGid(settings.shopifyInventoryLocationId)
     || normalizeShopifyLocationGid(warehouse?.shopifyLocationId);
   return {
     settings,
     warehouse,
     locationId,
-    locationName: warehouse?.shopifyLocationName || ""
+    locationName: requestedMapping?.destinationLocationName || warehouse?.shopifyLocationName || "",
+    mapping: requestedMapping
   };
 }
 
@@ -4154,6 +4200,7 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
     warehouseId: inventoryTarget.warehouse?.id || "",
     warehouseName: inventoryTarget.warehouse?.name || "",
     locationName: inventoryTarget.locationName || "",
+    mappingId: inventoryTarget.mapping?.id || "",
     scheduleKey: options.scheduleKey || "",
     scheduled: options.scheduled === true
   };
@@ -25924,6 +25971,25 @@ async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}, webho
   return { order: merged, created: !existing };
 }
 
+async function fetchShopifyLocations() {
+  const data = await shopifyGraphqlRequestAuto(`
+    query DataPlusLocations {
+      locations(first: 250) {
+        nodes { id name isActive fulfillsOnlineOrders }
+      }
+    }
+  `, {}, { operation: "Fetch Shopify locations" });
+  return (data.locations?.nodes || [])
+    .map((row) => ({
+      id: normalizeShopifyLocationGid(row.id),
+      name: String(row.name || row.id || "Shopify location").trim(),
+      isActive: row.isActive !== false,
+      fulfillsOnlineOrders: row.fulfillsOnlineOrders === true
+    }))
+    .filter((row) => row.id)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 const SHOPIFY_WEBHOOK_MAX_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.DATAPLUS_SHOPIFY_WEBHOOK_CONCURRENCY || 3) || 3));
 let shopifyWebhookInFlight = 0;
 
@@ -26619,7 +26685,7 @@ function normalizeShopifyLocationGid(value = "") {
   const text = String(value || "").trim();
   if (!text) return "";
   if (/^gid:\/\/shopify\/Location\/\d+$/i.test(text)) return text;
-  const id = text.match(/Location\/(\d+)/i)?.[1] || text.match(/^\d+$/)?.[0] || "";
+  const id = text.match(/Locations?\/(\d+)/i)?.[1] || text.match(/^\d+$/)?.[0] || "";
   return id ? `gid://shopify/Location/${id}` : text;
 }
 
@@ -32545,7 +32611,9 @@ async function handleApi(req, res) {
     channel.settings = { ...(channel.settings || DEFAULT_CHANNEL_SETTINGS) };
     for (const field of Object.keys(DEFAULT_CHANNEL_SETTINGS)) {
       if (body[field] === undefined) continue;
-      if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "boolean") channel.settings[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
+      if (Array.isArray(DEFAULT_CHANNEL_SETTINGS[field])) channel.settings[field] = Array.isArray(body[field]) ? body[field] : [];
+      else if (DEFAULT_CHANNEL_SETTINGS[field] && typeof DEFAULT_CHANNEL_SETTINGS[field] === "object") channel.settings[field] = body[field] && typeof body[field] === "object" && !Array.isArray(body[field]) ? body[field] : {};
+      else if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "boolean") channel.settings[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
       else if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "number") channel.settings[field] = Number(body[field] || 0);
       else channel.settings[field] = String(body[field] || "");
     }
@@ -37078,6 +37146,17 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "GET" && url.pathname === "/api/shopify/locations") {
+    try {
+      const db = await readDbFast({ skipInventory: true });
+      requireEnabledChannel(db, "Shopify");
+      const locations = await fetchShopifyLocations();
+      return sendJson(res, 200, { locations, count: locations.length });
+    } catch (error) {
+      return sendJson(res, Number(error.statusCode || 400), { error: error.message || "Unable to load Shopify locations." });
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/api/channel-taxonomies/ebay/status") {
     const marketplaceId = String(url.searchParams.get("marketplaceId") || "EBAY_US").trim().toUpperCase();
     const index = await readEbayTaxonomyIndex({}, marketplaceId);
@@ -38873,7 +38952,9 @@ async function handleApi(req, res) {
     const settingFields = Object.keys(DEFAULT_CHANNEL_SETTINGS);
     for (const field of settingFields) {
       if (body[field] === undefined) continue;
-      if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "boolean") channel.settings[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
+      if (Array.isArray(DEFAULT_CHANNEL_SETTINGS[field])) channel.settings[field] = Array.isArray(body[field]) ? body[field] : [];
+      else if (DEFAULT_CHANNEL_SETTINGS[field] && typeof DEFAULT_CHANNEL_SETTINGS[field] === "object") channel.settings[field] = body[field] && typeof body[field] === "object" && !Array.isArray(body[field]) ? body[field] : {};
+      else if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "boolean") channel.settings[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
       else if (typeof DEFAULT_CHANNEL_SETTINGS[field] === "number") channel.settings[field] = Number(body[field] || 0);
       else channel.settings[field] = String(body[field] || "");
     }

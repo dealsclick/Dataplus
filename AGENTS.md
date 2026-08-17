@@ -204,6 +204,8 @@ When enabled, individual settings govern each operation.
 
 Shopify supports product launch/linking, status and publication checks, price sync, inventory sync, order import, order webhooks, fulfillment/tracking sync, returns/refunds, shipping profiles, delivery quotes, shipping-label readiness, label purchase/void flows, collections, taxonomy, and channel-specific product fields.
 
+Shopify warehouse mappings are configured under the channel Rules tab. Each DataPlus inventory location maps independently to a Shopify location and can be changed without code or environment edits. The default supplier-feed mapping is `DataWarehouse` to Shopify `zSi Warehouse` (`gid://shopify/Location/108946260272`). This mapping controls where imported supplier availability is published; it does not convert supplier-feed stock into physical warehouse stock.
+
 Shopify order imports must be filtered to native Shopify sources requested by the business, including Online Store, Shop, Draft-created orders, and POS. Do not import marketplace orders merely because eBay, Temu, or another marketplace is connected into Shopify.
 
 Shopify API scope/auth failures must be visible as actionable errors. Do not claim a successful connection means every scope is available.

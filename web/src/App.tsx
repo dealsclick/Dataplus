@@ -188,6 +188,15 @@ type UniversalSearchResult = {
   href: string
 }
 
+type ShopifyWarehouseMapping = {
+  id: string
+  enabled: boolean
+  sourceWarehouseId: string
+  sourceWarehouseName?: string
+  destinationLocationId: string
+  destinationLocationName?: string
+}
+
 type ChannelSettings = {
   channelEnabled?: boolean
   defaultShadowStatus?: string
@@ -224,6 +233,7 @@ type ChannelSettings = {
   shopifyInventoryPushEnabled?: boolean
   shopifyInventoryWarehouseId?: string
   shopifyInventoryLocationId?: string
+  shopifyWarehouseMappings?: ShopifyWarehouseMapping[]
   inventoryScheduleEnabled?: boolean
   inventoryScheduleMode?: string
   inventoryScheduleType?: string
@@ -2733,6 +2743,8 @@ function ChannelDetail({
     defaultsReady?: boolean
   } | null>(null)
   const [ebayHealthLoading, setEbayHealthLoading] = useState(false)
+  const [shopifyLocations, setShopifyLocations] = useState<Array<{ id: string; name: string; isActive?: boolean; fulfillsOnlineOrders?: boolean }>>([])
+  const [shopifyLocationsLoading, setShopifyLocationsLoading] = useState(false)
   const [ebayTaxonomyStatus, setEbayTaxonomyStatus] = useState<{
     indexed?: boolean
     marketplaceId?: string
@@ -2756,13 +2768,38 @@ function ChannelDetail({
   const orderImportScheduleTimes = String(settings.shopifyOrderImportScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
   const ebayOrderImportScheduleTimes = String(settings.ebayOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
   const ebayPriceInventorySyncScheduleTimes = String(settings.ebayPriceInventorySyncScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
-  const selectedWarehouseId = String(settings.shopifyInventoryWarehouseId || "")
+  const shopifyWarehouseMappings: ShopifyWarehouseMapping[] = Array.isArray(settings.shopifyWarehouseMappings)
+    ? settings.shopifyWarehouseMappings as ShopifyWarehouseMapping[]
+    : [{ id: "shopify-datawarehouse-zsi", enabled: true, sourceWarehouseId: "datawarehouse", sourceWarehouseName: "DataWarehouse", destinationLocationId: "gid://shopify/Location/108946260272", destinationLocationName: "zSi Warehouse" }]
+  const shopifySourceWarehouses = useMemo(() => {
+    const rows = warehouses.map((warehouse) => ({
+      id: String(warehouse.id || ""),
+      name: String(warehouse.name || warehouse.code || warehouse.id || "Warehouse"),
+    })).filter((warehouse) => warehouse.id)
+    if (!rows.some((warehouse) => warehouse.id.toLowerCase() === "datawarehouse")) {
+      rows.unshift({ id: "datawarehouse", name: "DataWarehouse" })
+    }
+    return rows
+  }, [warehouses])
   const ebayOAuthCallbackUrl = `${window.location.origin}/auth/ebay/callback`
   const defaultEbayWebhookEndpoint = `${window.location.origin}/api/webhooks/ebay`
   const ebayWebhookEndpoint = String(settings.ebayWebhookEndpoint || ebayCredentials?.webhookEndpoint || defaultEbayWebhookEndpoint)
   const hasUnsavedChannelChanges = Object.keys(draft).length > 0
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const [activeTab, setActiveTab] = useState(requestedTab === "setup" || requestedTab === "actions" ? requestedTab : "overview")
+
+  const mappedShopifyLocations = useMemo(() => {
+    const byId = new Map(shopifyLocations.map((location) => [location.id, location]))
+    for (const mapping of shopifyWarehouseMappings) {
+      if (!mapping.destinationLocationId || byId.has(mapping.destinationLocationId)) continue
+      byId.set(mapping.destinationLocationId, {
+        id: mapping.destinationLocationId,
+        name: mapping.destinationLocationName || mapping.destinationLocationId,
+        isActive: true,
+      })
+    }
+    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name))
+  }, [shopifyLocations, shopifyWarehouseMappings])
 
   useEffect(() => {
     setDraft({})
@@ -2775,6 +2812,11 @@ function ChannelDetail({
       .then((result) => setCredentials(result.credentials || null))
       .catch(() => setCredentials(null))
   }, [isShopify])
+
+  useEffect(() => {
+    if (!isShopify || activeTab !== "rules" || shopifyLocations.length) return
+    void loadShopifyLocations()
+  }, [isShopify, activeTab, channel.id])
 
   useEffect(() => {
     if (!isEbay) return
@@ -2824,6 +2866,34 @@ function ChannelDetail({
 
   function update(field: string, value: unknown) {
     setDraft((current) => ({ ...current, [field]: value }))
+  }
+
+  function updateShopifyWarehouseMapping(id: string, patch: Partial<ShopifyWarehouseMapping>) {
+    update("shopifyWarehouseMappings", shopifyWarehouseMappings.map((mapping) => mapping.id === id ? { ...mapping, ...patch } : mapping))
+  }
+
+  function addShopifyWarehouseMapping() {
+    update("shopifyWarehouseMappings", [
+      ...shopifyWarehouseMappings,
+      { id: `shopify-warehouse-${Date.now()}`, enabled: true, sourceWarehouseId: "", sourceWarehouseName: "", destinationLocationId: "", destinationLocationName: "" },
+    ])
+  }
+
+  function removeShopifyWarehouseMapping(id: string) {
+    update("shopifyWarehouseMappings", shopifyWarehouseMappings.filter((mapping) => mapping.id !== id))
+  }
+
+  async function loadShopifyLocations() {
+    setShopifyLocationsLoading(true)
+    try {
+      const result = await api<{ locations?: Array<{ id: string; name: string; isActive?: boolean; fulfillsOnlineOrders?: boolean }> }>("/api/shopify/locations")
+      setShopifyLocations(result.locations || [])
+      toast.success(`Loaded ${(result.locations || []).length.toLocaleString()} Shopify locations.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load Shopify locations.")
+    } finally {
+      setShopifyLocationsLoading(false)
+    }
   }
 
   async function save() {
@@ -3123,8 +3193,10 @@ function ChannelDetail({
   }
 
   function queueShopifyAction(kind: string, apply = false) {
-    const inventoryLocationId = String(settings.shopifyInventoryLocationId || "")
-    const inventoryWarehouseId = String(settings.shopifyInventoryWarehouseId || "")
+    const inventoryMapping = shopifyWarehouseMappings.find((mapping) => mapping.enabled && mapping.sourceWarehouseId === "datawarehouse")
+      || shopifyWarehouseMappings.find((mapping) => mapping.enabled)
+    const inventoryLocationId = String(inventoryMapping?.destinationLocationId || settings.shopifyInventoryLocationId || "")
+    const inventoryWarehouseId = String(inventoryMapping?.sourceWarehouseId || settings.shopifyInventoryWarehouseId || "")
     const actionMap: Record<string, { path: string; body: Record<string, unknown>; confirmMessage?: string; successMessage: string }> = {
       status: {
         path: "/api/shopify/status-sync-all",
@@ -3148,12 +3220,12 @@ function ChannelDetail({
       },
       inventoryDryRun: {
         path: "/api/shopify/inventory-update",
-        body: { apply: false, dryRun: true, warehouseId: inventoryWarehouseId, locationId: inventoryLocationId },
+        body: { apply: false, dryRun: true, mappingId: inventoryMapping?.id || "", warehouseId: inventoryWarehouseId, locationId: inventoryLocationId },
         successMessage: "Shopify inventory dry run queued.",
       },
       inventoryApply: {
         path: "/api/shopify/inventory-update",
-        body: { apply: true, dryRun: false, warehouseId: inventoryWarehouseId, locationId: inventoryLocationId },
+        body: { apply: true, dryRun: false, mappingId: inventoryMapping?.id || "", warehouseId: inventoryWarehouseId, locationId: inventoryLocationId },
         confirmMessage: "Push inventory updates to live Shopify now? This should only be used after the dry run looks good.",
         successMessage: "Shopify inventory update queued.",
       },
@@ -3873,24 +3945,41 @@ function ChannelDetail({
                 </Field>
               </>}
               {isShopify && <>
-                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shopify inventory push</p></div>
-                <Field label="DataPlus warehouse">
-                  <Select disabled={!editing} value={selectedWarehouseId || "none"} onValueChange={(value) => update("shopifyInventoryWarehouseId", value === "none" ? "" : value)}>
-                    <SelectTrigger><SelectValue placeholder="Select warehouse" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">Select mapped warehouse</SelectItem>
-                      {warehouses.map((warehouse) => {
-                        const id = String(warehouse.id || "")
-                        const name = String(warehouse.name || warehouse.code || "Warehouse")
-                        const location = String(warehouse.shopifyLocationName || warehouse.shopifyLocationId || "no Shopify location")
-                        return id ? <SelectItem key={id} value={id}>{name} / {location}</SelectItem> : null
-                      })}
-                    </SelectContent>
-                  </Select>
-                </Field>
-                <Field label="Fallback Shopify location GID">
-                  <Input disabled={!editing} value={String(settings.shopifyInventoryLocationId || "")} placeholder="gid://shopify/Location/..." onChange={(event) => update("shopifyInventoryLocationId", event.target.value)} />
-                </Field>
+                <div className="col-span-full pt-2">
+                  <Separator />
+                  <div className="flex flex-wrap items-start justify-between gap-3 pt-3">
+                    <div><p className="text-sm font-semibold">Shopify warehouse mappings</p><p className="mt-1 text-xs text-muted-foreground">Choose where each DataPlus inventory source is published in Shopify. Supplier-feed stock remains virtual inventory.</p></div>
+                    <div className="flex gap-2">
+                      <Button type="button" size="sm" variant="outline" onClick={() => void loadShopifyLocations()} disabled={shopifyLocationsLoading}>{shopifyLocationsLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}Refresh locations</Button>
+                      {editing && <Button type="button" size="sm" variant="outline" onClick={addShopifyWarehouseMapping}>Add mapping</Button>}
+                    </div>
+                  </div>
+                </div>
+                <div className="col-span-full grid gap-2">
+                  {shopifyWarehouseMappings.map((mapping) => (
+                    <div key={mapping.id} className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[minmax(180px,1fr)_auto_minmax(220px,1fr)_auto_auto] md:items-center">
+                      <Select disabled={!editing} value={mapping.sourceWarehouseId || "none"} onValueChange={(value) => {
+                        const warehouse = shopifySourceWarehouses.find((row) => row.id === value)
+                        updateShopifyWarehouseMapping(mapping.id, { sourceWarehouseId: value === "none" ? "" : value, sourceWarehouseName: value === "none" ? "" : String(warehouse?.name || value) })
+                      }}>
+                        <SelectTrigger><SelectValue placeholder="DataPlus warehouse" /></SelectTrigger>
+                        <SelectContent><SelectItem value="none">Select DataPlus warehouse</SelectItem>{shopifySourceWarehouses.map((warehouse) => <SelectItem key={warehouse.id} value={warehouse.id}>{warehouse.name}</SelectItem>)}</SelectContent>
+                      </Select>
+                      <span className="hidden text-xs font-medium text-muted-foreground md:block">maps to</span>
+                      <Select disabled={!editing} value={mapping.destinationLocationId || "none"} onValueChange={(value) => {
+                        const location = mappedShopifyLocations.find((row) => row.id === value)
+                        updateShopifyWarehouseMapping(mapping.id, { destinationLocationId: value === "none" ? "" : value, destinationLocationName: value === "none" ? "" : String(location?.name || value) })
+                      }}>
+                        <SelectTrigger><SelectValue placeholder="Shopify location" /></SelectTrigger>
+                        <SelectContent><SelectItem value="none">Select Shopify location</SelectItem>{mappedShopifyLocations.map((location) => <SelectItem key={location.id} value={location.id}>{location.name}{location.isActive === false ? " (inactive)" : ""}</SelectItem>)}</SelectContent>
+                      </Select>
+                      <div className="flex items-center gap-2"><Switch disabled={!editing} checked={mapping.enabled} onCheckedChange={(enabled) => updateShopifyWarehouseMapping(mapping.id, { enabled })} /><span className="text-xs">{mapping.enabled ? "Enabled" : "Disabled"}</span></div>
+                      {editing && <Button type="button" size="icon" variant="ghost" title="Remove mapping" onClick={() => removeShopifyWarehouseMapping(mapping.id)}><Trash2 className="size-4" /></Button>}
+                    </div>
+                  ))}
+                  {!shopifyWarehouseMappings.length && <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">No warehouse mappings configured.</div>}
+                  <p className="text-xs text-muted-foreground">Current default: DataWarehouse inventory publishes to zSi Warehouse (`locations/108946260272`). Scheduled and manual inventory jobs use the enabled DataWarehouse mapping first.</p>
+                </div>
                 <Field label="Schedule type">
                   <Select disabled={!editing} value={String(settings.inventoryScheduleType || "times")} onValueChange={(value) => update("inventoryScheduleType", value)}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
