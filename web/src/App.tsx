@@ -923,6 +923,7 @@ const catalogSidebarItems: Array<{ label: string; path: string; icon: React.Comp
 ]
 
 const warehouseSidebarItems: Array<{ label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { label: "Warehouses", path: "/warehouse/warehouses", icon: Warehouse },
   { label: "Receiving", path: "/warehouse/receiving", icon: Archive },
   { label: "Warehouse Audits", path: "/warehouse/audits", icon: CheckCircle2 },
   { label: "Bins", path: "/warehouse/bins", icon: Boxes },
@@ -942,7 +943,7 @@ const viewPaths: Record<AppView, string> = {
   channels: "/channels",
   catalog: "/products",
   operations: "/orders",
-  warehouse: "/warehouse/receiving",
+  warehouse: "/warehouse/warehouses",
   fulfillment: "/fulfillment",
   purchasing: "/purchasing",
   "po-detail": "/purchasing",
@@ -9565,6 +9566,160 @@ function FulfillmentPage() {
   )
 }
 
+type WarehouseRegisterRecord = {
+  id?: string
+  code?: string
+  name?: string
+  status?: string
+  warehouseType?: string
+  inventorySourceType?: string
+  isPhysical?: boolean
+  bins?: Array<Record<string, unknown>>
+  addressLine1?: string
+  addressLine2?: string
+  city?: string
+  state?: string
+  postalCode?: string
+  country?: string
+  isDefaultReceiving?: boolean
+  isDefaultReturns?: boolean
+  requireBinValidation?: boolean
+  shopifyLocationId?: string
+  shopifyLocationName?: string
+  shopifyInventoryPushEnabled?: boolean
+  notes?: string
+  updatedAt?: string
+}
+
+const emptyWarehouseForm = {
+  name: "",
+  code: "",
+  status: "active",
+  warehouseType: "Warehouse",
+  addressLine1: "",
+  addressLine2: "",
+  city: "",
+  state: "",
+  postalCode: "",
+  country: "US",
+  isDefaultReceiving: false,
+  isDefaultReturns: false,
+  requireBinValidation: false,
+  notes: "",
+}
+
+function WarehouseRegister() {
+  const [warehouses, setWarehouses] = useState<WarehouseRegisterRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [editing, setEditing] = useState<WarehouseRegisterRecord | null>(null)
+  const [query, setQuery] = useState("")
+  const [form, setForm] = useState(emptyWarehouseForm)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const result = await api<LiteState>("/api/state?lite=1")
+      setWarehouses((result.warehouses || []) as WarehouseRegisterRecord[])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load warehouses.")
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { void load() }, [])
+
+  const isVirtual = (warehouse: WarehouseRegisterRecord) => warehouse.isPhysical === false || String(warehouse.inventorySourceType || "").toLowerCase() === "supplier_feed"
+  const shown = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    if (!needle) return warehouses
+    return warehouses.filter((warehouse) => [warehouse.name, warehouse.code, warehouse.warehouseType, warehouse.city, warehouse.state].some((value) => String(value || "").toLowerCase().includes(needle)))
+  }, [query, warehouses])
+  const physicalCount = warehouses.filter((warehouse) => !isVirtual(warehouse)).length
+  const activeCount = warehouses.filter((warehouse) => String(warehouse.status || "active").toLowerCase() !== "inactive").length
+  const binCount = warehouses.reduce((sum, warehouse) => sum + (Array.isArray(warehouse.bins) ? warehouse.bins.length : 0), 0)
+
+  const openCreate = () => {
+    setEditing(null)
+    setForm(emptyWarehouseForm)
+    setDialogOpen(true)
+  }
+  const openEdit = (warehouse: WarehouseRegisterRecord) => {
+    setEditing(warehouse)
+    setForm({
+      name: String(warehouse.name || ""),
+      code: String(warehouse.code || ""),
+      status: String(warehouse.status || "active"),
+      warehouseType: String(warehouse.warehouseType || "Warehouse"),
+      addressLine1: String(warehouse.addressLine1 || ""),
+      addressLine2: String(warehouse.addressLine2 || ""),
+      city: String(warehouse.city || ""),
+      state: String(warehouse.state || ""),
+      postalCode: String(warehouse.postalCode || ""),
+      country: String(warehouse.country || "US"),
+      isDefaultReceiving: warehouse.isDefaultReceiving === true,
+      isDefaultReturns: warehouse.isDefaultReturns === true,
+      requireBinValidation: warehouse.requireBinValidation === true,
+      notes: String(warehouse.notes || ""),
+    })
+    setDialogOpen(true)
+  }
+  const save = async () => {
+    if (!form.name.trim()) { toast.error("Warehouse name is required."); return }
+    setSaving(true)
+    try {
+      const url = editing?.id ? `/api/warehouses/${encodeURIComponent(String(editing.id))}` : "/api/warehouses"
+      await api(url, { method: editing?.id ? "PATCH" : "POST", body: JSON.stringify(form) })
+      toast.success(editing ? "Warehouse settings saved." : "Warehouse created.")
+      setDialogOpen(false)
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save warehouse.")
+    } finally {
+      setSaving(false)
+    }
+  }
+  const address = (warehouse: WarehouseRegisterRecord) => [warehouse.addressLine1, warehouse.city, warehouse.state, warehouse.postalCode].filter(Boolean).join(", ") || "No address recorded"
+
+  return <div className="grid gap-4">
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <Detail label="All warehouses" value={numberLabel(warehouses.length)} />
+      <Detail label="Physical locations" value={numberLabel(physicalCount)} />
+      <Detail label="Active locations" value={numberLabel(activeCount)} />
+      <Detail label="Configured bins" value={numberLabel(binCount)} />
+    </div>
+    <Card>
+      <CardHeader className="flex-row items-start justify-between gap-3 border-b">
+        <div><CardTitle className="text-base">Warehouse register</CardTitle><CardDescription>Physical facilities and virtual inventory sources are listed separately so supplier-feed availability is never mistaken for stock on the shelf.</CardDescription></div>
+        <div className="flex shrink-0 gap-2"><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button><Button size="sm" onClick={openCreate}>Add warehouse</Button></div>
+      </CardHeader>
+      <CardContent className="p-0">
+        <div className="border-b p-3"><div className="relative max-w-lg"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search warehouse, code, type, or location" /></div></div>
+        <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Warehouse</TableHead><TableHead>Type</TableHead><TableHead>Status</TableHead><TableHead>Location</TableHead><TableHead>Bins</TableHead><TableHead>Defaults</TableHead><TableHead>Shopify mapping</TableHead><TableHead>Updated</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>
+          {shown.map((warehouse) => { const virtual = isVirtual(warehouse); const bins = Array.isArray(warehouse.bins) ? warehouse.bins : []; const activeBins = bins.filter((bin) => bin.active !== false).length; return <TableRow key={String(warehouse.id || warehouse.code)}>
+            <TableCell><p className="font-medium">{String(warehouse.name || "Unnamed warehouse")}</p><p className="text-xs text-muted-foreground">{String(warehouse.code || warehouse.id || "No code")}</p></TableCell>
+            <TableCell><Badge variant="outline" className={virtual ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300" : "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300"}>{virtual ? "Virtual supplier feed" : String(warehouse.warehouseType || "Physical warehouse")}</Badge></TableCell>
+            <TableCell><Badge variant={String(warehouse.status || "active").toLowerCase() === "inactive" ? "secondary" : "default"}>{String(warehouse.status || "active")}</Badge></TableCell>
+            <TableCell><p className="max-w-64 truncate">{virtual ? "Supplier network" : address(warehouse)}</p></TableCell>
+            <TableCell>{virtual ? <span className="text-muted-foreground">Not applicable</span> : <span>{numberLabel(activeBins)} active / {numberLabel(bins.length)} total</span>}</TableCell>
+            <TableCell><div className="flex flex-wrap gap-1">{warehouse.isDefaultReceiving && <Badge variant="secondary">Receiving</Badge>}{warehouse.isDefaultReturns && <Badge variant="secondary">Returns</Badge>}{!warehouse.isDefaultReceiving && !warehouse.isDefaultReturns && <span className="text-muted-foreground">-</span>}</div></TableCell>
+            <TableCell>{warehouse.shopifyLocationName || warehouse.shopifyLocationId ? <div><p>{String(warehouse.shopifyLocationName || "Shopify location")}</p><p className="max-w-48 truncate text-xs text-muted-foreground">{String(warehouse.shopifyLocationId || "")}</p></div> : <span className="text-muted-foreground">Not mapped</span>}</TableCell>
+            <TableCell>{dateLabel(String(warehouse.updatedAt || ""))}</TableCell>
+            <TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="outline" title="Warehouse actions"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>{String(warehouse.name || "Warehouse")}</DropdownMenuLabel>{!virtual && <DropdownMenuItem asChild><a href={`/warehouse/bins?warehouseId=${encodeURIComponent(String(warehouse.id || ""))}`}><Boxes className="size-4" /> View bins</a></DropdownMenuItem>}<DropdownMenuItem onSelect={() => openEdit(warehouse)}><Pencil className="size-4" /> Edit settings</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell>
+          </TableRow> })}
+          {!loading && !shown.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No warehouses match this search.</TableCell></TableRow>}
+          {loading && <TableRow><TableCell colSpan={9} className="h-28 text-center"><Loader2 className="mx-auto size-5 animate-spin text-primary" /></TableCell></TableRow>}
+        </TableBody></Table></div>
+      </CardContent>
+    </Card>
+    <Dialog open={dialogOpen} onOpenChange={setDialogOpen}><DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"><DialogHeader><DialogTitle>{editing ? "Edit warehouse" : "Add warehouse"}</DialogTitle><DialogDescription>Configure the location identity, operating status, address, and inventory-control defaults.</DialogDescription></DialogHeader>
+      <div className="grid gap-4 sm:grid-cols-2"><Field label="Warehouse name"><Input value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Staten Island 2" /></Field><Field label="Warehouse code"><Input value={form.code} onChange={(event) => setForm((current) => ({ ...current, code: event.target.value.toUpperCase() }))} placeholder="SI2" /></Field><Field label="Status"><Select value={form.status} onValueChange={(status) => setForm((current) => ({ ...current, status }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field><Field label="Warehouse type"><Input value={form.warehouseType} onChange={(event) => setForm((current) => ({ ...current, warehouseType: event.target.value }))} placeholder="Warehouse" /></Field><Field label="Address line 1"><Input value={form.addressLine1} onChange={(event) => setForm((current) => ({ ...current, addressLine1: event.target.value }))} /></Field><Field label="Address line 2"><Input value={form.addressLine2} onChange={(event) => setForm((current) => ({ ...current, addressLine2: event.target.value }))} /></Field><Field label="City"><Input value={form.city} onChange={(event) => setForm((current) => ({ ...current, city: event.target.value }))} /></Field><div className="grid grid-cols-2 gap-3"><Field label="State"><Input value={form.state} onChange={(event) => setForm((current) => ({ ...current, state: event.target.value.toUpperCase() }))} /></Field><Field label="Postal code"><Input value={form.postalCode} onChange={(event) => setForm((current) => ({ ...current, postalCode: event.target.value }))} /></Field></div><div className="grid gap-3 rounded-md border bg-muted/20 p-3 sm:col-span-2 sm:grid-cols-3"><div className="flex items-center gap-2"><Switch id="warehouse-default-receiving" checked={form.isDefaultReceiving} onCheckedChange={(isDefaultReceiving) => setForm((current) => ({ ...current, isDefaultReceiving }))} /><Label htmlFor="warehouse-default-receiving">Default receiving</Label></div><div className="flex items-center gap-2"><Switch id="warehouse-default-returns" checked={form.isDefaultReturns} onCheckedChange={(isDefaultReturns) => setForm((current) => ({ ...current, isDefaultReturns }))} /><Label htmlFor="warehouse-default-returns">Default returns</Label></div><div className="flex items-center gap-2"><Switch id="warehouse-bin-validation" checked={form.requireBinValidation} onCheckedChange={(requireBinValidation) => setForm((current) => ({ ...current, requireBinValidation }))} /><Label htmlFor="warehouse-bin-validation">Require bins</Label></div></div><div className="sm:col-span-2"><Field label="Notes"><Textarea value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Handling, access, or operational notes" /></Field></div></div>
+      <DialogFooter><Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button><Button disabled={saving || !form.name.trim()} onClick={() => void save()}>{saving && <Loader2 className="size-4 animate-spin" />} Save warehouse</Button></DialogFooter>
+    </DialogContent></Dialog>
+  </div>
+}
+
 function WarehouseBinManager() {
   type Bin = { id?: string; code?: string; name?: string; type?: string; section?: string; aisle?: string; nickname?: string; active?: boolean; isDefault?: boolean; notes?: string }
   type WarehouseRecord = { id?: string; name?: string; code?: string; bins?: Bin[]; requireBinValidation?: boolean }
@@ -9582,7 +9737,8 @@ function WarehouseBinManager() {
       const result = await api<LiteState>("/api/state?lite=1")
       const rows = (result.warehouses || []) as WarehouseRecord[]
       setWarehouses(rows)
-      setWarehouseId((current) => current || String(rows[0]?.id || ""))
+      const requestedWarehouseId = new URLSearchParams(window.location.search).get("warehouseId") || ""
+      setWarehouseId((current) => current || (rows.some((row) => String(row.id) === requestedWarehouseId) ? requestedWarehouseId : String(rows[0]?.id || "")))
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load warehouse locations.") }
   }
   useEffect(() => { void load() }, [])
@@ -9639,12 +9795,12 @@ function WarehouseBinManager() {
 function WarehouseWorkspace() {
   const path = window.location.pathname.replace(/\/+$/, "")
   if (path.startsWith("/warehouse/audits/")) return <WarehouseAuditDetailPage />
-  const [tab, setTab] = useState(path.endsWith("/audits") ? "audits" : path.endsWith("/bins") ? "bins" : "receiving")
+  const [tab, setTab] = useState(path.endsWith("/audits") ? "audits" : path.endsWith("/bins") ? "bins" : path.endsWith("/receiving") ? "receiving" : "warehouses")
   const selectTab = (next: string) => {
     setTab(next)
-    window.history.replaceState({}, "", next === "audits" ? "/warehouse/audits" : next === "bins" ? "/warehouse/bins" : "/warehouse/receiving")
+    window.history.replaceState({}, "", next === "audits" ? "/warehouse/audits" : next === "bins" ? "/warehouse/bins" : next === "receiving" ? "/warehouse/receiving" : "/warehouse/warehouses")
   }
-  return <div className="grid gap-5"><PageHeader eyebrow="Warehouse operations" title="Warehouse" description="Receive inventory, manage counts, and keep an auditable record of every physical-stock change." /><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="receiving">Receiving</TabsTrigger><TabsTrigger value="audits">Warehouse audits</TabsTrigger><TabsTrigger value="bins">Bins</TabsTrigger></TabsList></div><TabsContent value="receiving" className="mt-4 grid gap-4"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"><Detail label="Manual receipts" value="Receive arrivals without a PO" /><Detail label="PO receipts" value="Receive supplier orders in Purchasing" /><Detail label="Return receipts" value="Inspect and restock from the order" /></div><ManualReceivingPanel /><Card><CardHeader className="flex-row items-center justify-between gap-3"><div><CardTitle className="text-sm">Purchase-order receiving</CardTitle><CardDescription>Receive expected supplier deliveries against their PO to update remaining quantities and release linked fulfillment demand.</CardDescription></div><Button size="sm" variant="outline" asChild><a href="/purchasing">Open purchasing</a></Button></CardHeader></Card></TabsContent><TabsContent value="audits" className="mt-4 grid gap-4"><WarehouseAuditHistory /><WarehouseAuditPanel createOnly /></TabsContent><TabsContent value="bins" className="mt-4"><WarehouseBinManager /></TabsContent></Tabs></div>
+  return <div className="grid gap-5"><PageHeader eyebrow="Warehouse operations" title="Warehouse" description="See every location, receive inventory, manage counts, and keep an auditable record of physical-stock changes." /><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="warehouses">Warehouses</TabsTrigger><TabsTrigger value="receiving">Receiving</TabsTrigger><TabsTrigger value="audits">Warehouse audits</TabsTrigger><TabsTrigger value="bins">Bins</TabsTrigger></TabsList></div><TabsContent value="warehouses" className="mt-4"><WarehouseRegister /></TabsContent><TabsContent value="receiving" className="mt-4 grid gap-4"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"><Detail label="Manual receipts" value="Receive arrivals without a PO" /><Detail label="PO receipts" value="Receive supplier orders in Purchasing" /><Detail label="Return receipts" value="Inspect and restock from the order" /></div><ManualReceivingPanel /><Card><CardHeader className="flex-row items-center justify-between gap-3"><div><CardTitle className="text-sm">Purchase-order receiving</CardTitle><CardDescription>Receive expected supplier deliveries against their PO to update remaining quantities and release linked fulfillment demand.</CardDescription></div><Button size="sm" variant="outline" asChild><a href="/purchasing">Open purchasing</a></Button></CardHeader></Card></TabsContent><TabsContent value="audits" className="mt-4 grid gap-4"><WarehouseAuditHistory /><WarehouseAuditPanel createOnly /></TabsContent><TabsContent value="bins" className="mt-4"><WarehouseBinManager /></TabsContent></Tabs></div>
 }
 
 function WarehouseAuditDetailPage() {
