@@ -4140,7 +4140,8 @@ function requireEnabledChannel(db, name = "") {
 }
 
 function resolveShopifyInventoryLocation(db, body = {}) {
-  const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+  const shopifyChannel = findChannelByName(db, "Shopify");
+  const settings = shopifyChannel ? normalizeChannel(shopifyChannel).settings : { ...DEFAULT_CHANNEL_SETTINGS };
   const warehouses = Array.isArray(db.warehouses) ? db.warehouses.map(normalizeWarehouse) : [];
   const mappings = normalizeShopifyWarehouseMappings(settings.shopifyWarehouseMappings);
   const requestedMapping = mappings.find((mapping) => mapping.id === body.mappingId)
