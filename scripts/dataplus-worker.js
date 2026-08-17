@@ -479,8 +479,10 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
       continue;
     }
     try {
-      const warehouseMappings = Array.isArray(channelSettings.shopifyWarehouseMappings) && channelSettings.shopifyWarehouseMappings.length
-        ? channelSettings.shopifyWarehouseMappings
+      const warehouseMappings = Array.isArray(channelSettings.warehouseMappings) && channelSettings.warehouseMappings.length
+        ? channelSettings.warehouseMappings
+        : Array.isArray(channelSettings.shopifyWarehouseMappings) && channelSettings.shopifyWarehouseMappings.length
+          ? channelSettings.shopifyWarehouseMappings
         : [{
             id: "shopify-datawarehouse-zsi",
             enabled: true,
@@ -497,7 +499,12 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
         dryRun: !apply,
         mappingId: scheduledMapping?.id || "",
         warehouseId: scheduledMapping?.sourceWarehouseId || channelSettings.shopifyInventoryWarehouseId || "",
-        locationId: scheduledMapping?.destinationLocationId || channelSettings.shopifyInventoryLocationId || ""
+        locationId: scheduledMapping?.destinationLocationId || channelSettings.shopifyInventoryLocationId || "",
+        inventoryMode: scheduledMapping?.inventoryMode || "pooled",
+        allocationPercent: Number(scheduledMapping?.allocationPercent ?? 100),
+        safetyQty: Number(scheduledMapping?.safetyQty ?? channelSettings.defaultSafetyQty ?? 0),
+        maxSellableQty: Number(scheduledMapping?.maxSellableQty ?? channelSettings.defaultMaxSellableQty ?? 0),
+        fixedQty: Number(scheduledMapping?.fixedQty ?? 0)
       }, {
         scheduled: true,
         scheduleKey: scheduleId,
@@ -1230,6 +1237,11 @@ async function runShopifyInventoryUpdateJob(job) {
   args.push(`--batch-size=${Math.max(1, Math.min(250, Number(payload.batchSize || 100) || 100))}`);
   if (payload.locationId) args.push(`--location=${payload.locationId}`);
   if (["export", "divide"].includes(String(payload.packMode || "").toLowerCase())) args.push(`--pack-mode=${String(payload.packMode).toLowerCase()}`);
+  args.push(`--inventory-mode=${String(payload.inventoryMode || "pooled")}`);
+  args.push(`--allocation-percent=${Math.max(0, Math.min(100, Number(payload.allocationPercent ?? 100) || 0))}`);
+  args.push(`--safety-qty=${Math.max(0, Math.floor(Number(payload.safetyQty || 0)))}`);
+  args.push(`--max-sellable-qty=${Math.max(0, Math.floor(Number(payload.maxSellableQty || 0)))}`);
+  args.push(`--fixed-qty=${Math.max(0, Math.floor(Number(payload.fixedQty || 0)))}`);
 
   let current = await persistJob(job, {
     status: "running",

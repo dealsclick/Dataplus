@@ -746,6 +746,11 @@ const DEFAULT_CHANNEL_SETTINGS = {
   defaultHandlingTimeDays: 2,
   defaultSafetyQty: 0,
   defaultMaxSellableQty: 0,
+  restrictInventoryUsage: false,
+  defaultShipFromWarehouseId: "",
+  fallbackWarehouseIds: [],
+  warehouseMappings: [],
+  warehouseRoutingRules: [],
   defaultShippingProfile: "Standard",
   defaultShippingService: "Marketplace Standard",
   priceUpdateEnabled: true,
@@ -4055,6 +4060,19 @@ function normalizeChannel(channel = {}) {
       ? DEFAULT_CHANNEL_SETTINGS.shopifyWarehouseMappings
       : rawSettings.shopifyWarehouseMappings
   );
+  settings.warehouseMappings = normalizeChannelWarehouseMappings(
+    rawSettings.warehouseMappings === undefined
+      ? (isShopify ? settings.shopifyWarehouseMappings : DEFAULT_CHANNEL_SETTINGS.warehouseMappings)
+      : rawSettings.warehouseMappings,
+    String(channel.name || "Marketplace")
+  );
+  // Keep the legacy Shopify key synchronized while workers and older saved
+  // settings migrate to the channel-neutral mapping model.
+  if (isShopify) settings.shopifyWarehouseMappings = settings.warehouseMappings.map((row) => ({ ...row }));
+  settings.warehouseRoutingRules = normalizeWarehouseRoutingRules(settings.warehouseRoutingRules);
+  settings.fallbackWarehouseIds = [...new Set((Array.isArray(settings.fallbackWarehouseIds) ? settings.fallbackWarehouseIds : []).map((value) => String(value || "").trim()).filter(Boolean))];
+  settings.defaultShipFromWarehouseId = String(settings.defaultShipFromWarehouseId || "").trim();
+  settings.restrictInventoryUsage = settings.restrictInventoryUsage === true || String(settings.restrictInventoryUsage).toLowerCase() === "true";
   return {
     id: channel.id || crypto.randomUUID(),
     name: channel.name || "Marketplace",
@@ -4127,6 +4145,102 @@ function normalizeShopifyWarehouseMappings(value = []) {
     bySource.set(sourceWarehouseId || normalized.id, normalized);
   }
   return [...bySource.values()];
+}
+
+function normalizeChannelWarehouseMappings(value = [], channelName = "Marketplace") {
+  const rows = Array.isArray(value) ? value : [];
+  const bySource = new Map();
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const sourceWarehouseId = String(row.sourceWarehouseId || row.warehouseId || "").trim();
+    const destinationLocationId = String(row.destinationLocationId || row.locationId || row.externalWarehouseCode || "").trim();
+    if (!sourceWarehouseId && !destinationLocationId) continue;
+    const mode = ["pooled", "exclusive", "fixed", "disabled"].includes(String(row.inventoryMode || "").toLowerCase())
+      ? String(row.inventoryMode).toLowerCase()
+      : "pooled";
+    const normalized = {
+      id: String(row.id || `${String(channelName || "channel").toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${sourceWarehouseId || crypto.randomUUID()}`).trim(),
+      enabled: row.enabled !== false && String(row.enabled ?? "true").toLowerCase() !== "false",
+      sourceWarehouseId,
+      sourceWarehouseName: String(row.sourceWarehouseName || row.warehouseName || "").trim(),
+      destinationLocationId: String(channelName).toLowerCase() === "shopify" ? normalizeShopifyLocationGid(destinationLocationId) : destinationLocationId,
+      destinationLocationName: String(row.destinationLocationName || row.locationName || "").trim(),
+      externalWarehouseCode: String(row.externalWarehouseCode || "").trim(),
+      inventoryMode: mode,
+      allocationPercent: Math.max(0, Math.min(100, Number(row.allocationPercent ?? 100) || 0)),
+      safetyQty: Math.max(0, Math.floor(Number(row.safetyQty || 0) || 0)),
+      maxSellableQty: Math.max(0, Math.floor(Number(row.maxSellableQty || 0) || 0)),
+      fixedQty: Math.max(0, Math.floor(Number(row.fixedQty || 0) || 0)),
+      exportInventoryEnabled: row.exportInventoryEnabled !== false,
+      importInventoryEnabled: row.importInventoryEnabled === true,
+      orderRoutingPriority: Math.max(0, Math.floor(Number(row.orderRoutingPriority || 100) || 100)),
+      lastSyncedAt: String(row.lastSyncedAt || ""),
+      lastSentQty: Number.isFinite(Number(row.lastSentQty)) ? Number(row.lastSentQty) : null,
+      lastError: String(row.lastError || "")
+    };
+    bySource.set(sourceWarehouseId || normalized.id, normalized);
+  }
+  return [...bySource.values()].sort((a, b) => a.orderRoutingPriority - b.orderRoutingPriority);
+}
+
+function normalizeWarehouseRoutingRules(value = []) {
+  return (Array.isArray(value) ? value : []).filter((row) => row && typeof row === "object").map((row, index) => ({
+    id: String(row.id || crypto.randomUUID()),
+    name: String(row.name || `Routing rule ${index + 1}`).trim(),
+    enabled: row.enabled !== false,
+    priority: Math.max(0, Math.floor(Number(row.priority ?? index + 1) || index + 1)),
+    warehouseId: String(row.warehouseId || "").trim(),
+    fallbackWarehouseIds: [...new Set((Array.isArray(row.fallbackWarehouseIds) ? row.fallbackWarehouseIds : []).map((value) => String(value || "").trim()).filter(Boolean))],
+    destinationCountry: String(row.destinationCountry || "").trim().toUpperCase(),
+    destinationState: String(row.destinationState || "").trim().toUpperCase(),
+    postalPrefix: String(row.postalPrefix || "").trim().toUpperCase(),
+    shippingClass: String(row.shippingClass || "").trim().toLowerCase(),
+    orderType: String(row.orderType || "").trim().toLowerCase(),
+    supplier: String(row.supplier || "").trim().toLowerCase(),
+    requireAvailableStock: row.requireAvailableStock !== false
+  })).sort((a, b) => a.priority - b.priority);
+}
+
+function mappedInventoryQuantity(quantity, mapping = {}, defaults = {}) {
+  const available = Math.max(0, Math.floor(Number(quantity || 0)));
+  if (mapping.enabled === false || mapping.inventoryMode === "disabled" || mapping.exportInventoryEnabled === false) return 0;
+  if (mapping.inventoryMode === "fixed") return Math.max(0, Math.floor(Number(mapping.fixedQty || 0)));
+  const percentage = Math.max(0, Math.min(100, Number(mapping.allocationPercent ?? 100) || 0));
+  const safetyQty = Math.max(0, Math.floor(Number(mapping.safetyQty ?? defaults.defaultSafetyQty ?? 0) || 0));
+  const maxSellableQty = Math.max(0, Math.floor(Number(mapping.maxSellableQty ?? defaults.defaultMaxSellableQty ?? 0) || 0));
+  const result = Math.max(0, Math.floor(available * percentage / 100) - safetyQty);
+  return maxSellableQty > 0 ? Math.min(result, maxSellableQty) : result;
+}
+
+function reconcileChannelWarehouseMappings(db = {}, rawChannel = {}) {
+  const channel = normalizeChannel(rawChannel);
+  const warehouses = (db.warehouses || []).map(normalizeWarehouse);
+  const warehouseById = new Map(warehouses.map((row) => [String(row.id || ""), row]));
+  const now = new Date().toISOString();
+  const mappings = normalizeChannelWarehouseMappings(channel.settings?.warehouseMappings || channel.settings?.shopifyWarehouseMappings, channel.name || "Marketplace").map((mapping) => {
+    const warehouse = warehouseById.get(String(mapping.sourceWarehouseId || ""));
+    const issues = [];
+    if (!mapping.sourceWarehouseId) issues.push("Source warehouse is missing");
+    else if (!warehouse) issues.push("Source warehouse was not found");
+    else {
+      if (warehouse.status === "inactive") issues.push("Source warehouse is inactive");
+      if (warehouse.isSellable === false) issues.push("Source warehouse is excluded from order routing");
+    }
+    if (!mapping.destinationLocationId && !mapping.externalWarehouseCode) issues.push("Channel destination is missing");
+    if (mapping.enabled === false) issues.push("Mapping is disabled");
+    return {
+      ...mapping,
+      sourceWarehouseName: mapping.sourceWarehouseName || warehouse?.name || mapping.sourceWarehouseId,
+      lastSyncedAt: now,
+      lastError: issues.join("; ")
+    };
+  });
+  return {
+    mappings,
+    checkedAt: now,
+    healthy: mappings.length > 0 && mappings.every((row) => !row.lastError),
+    issues: mappings.filter((row) => row.lastError).map((row) => ({ mappingId: row.id, sourceWarehouseName: row.sourceWarehouseName, message: row.lastError }))
+  };
 }
 
 function requireEnabledChannel(db, name = "") {
@@ -11105,6 +11219,10 @@ function normalizeWarehouse(warehouse) {
     warehouseType: dataWarehouseLocation ? "Virtual supplier network" : (warehouse.warehouseType || warehouse.type || "Physical Warehouse"),
     inventorySourceType: warehouse.inventorySourceType,
     isPhysical: warehouse.isPhysical,
+    isSellable: warehouse.isSellable === undefined ? true : Boolean(warehouse.isSellable),
+    capacityUnits: Math.max(0, Math.floor(Number(warehouse.capacityUnits || 0) || 0)),
+    fulfillmentNetwork: String(warehouse.fulfillmentNetwork || (supplierFeedLocation ? "supplier" : "internal")).trim().toLowerCase(),
+    dropshipVendorId: String(warehouse.dropshipVendorId || warehouse.vendorId || "").trim(),
     allowReceiving: warehouse.allowReceiving,
     allowAudits: warehouse.allowAudits,
     managedByVendorFeed: warehouse.managedByVendorFeed === true,
@@ -19316,31 +19434,112 @@ function recalculateOrderOperationalStatus(order = {}) {
   return next;
 }
 
+function orderChannelPolicy(db = {}, order = {}) {
+  const candidates = [order.channelId, order.channel, order.source, order.channelSource, order.marketplace]
+    .map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+  const raw = (db.connections || db.channels || []).find((channel) => candidates.includes(String(channel.id || "").toLowerCase())
+    || candidates.includes(String(channel.name || "").toLowerCase())
+    || candidates.some((candidate) => String(channel.name || "").toLowerCase().includes(candidate)));
+  return raw ? normalizeChannel(raw) : null;
+}
+
+function routingRuleMatches(rule = {}, order = {}, line = {}, product = {}) {
+  if (rule.enabled === false) return false;
+  const address = order.shippingAddress || order.shipTo || {};
+  const country = String(address.countryCode || address.country || order.shippingCountry || "").toLowerCase();
+  const state = String(address.provinceCode || address.state || address.province || order.shippingState || "").toLowerCase();
+  const postal = String(address.zip || address.postalCode || order.shippingPostalCode || "").toLowerCase();
+  const shippingClass = String(product.shippingClassification || product.shippingType || line.shippingClass || "").toLowerCase();
+  const supplier = String(product.vendorId || product.vendor || product.supplier || line.vendorId || line.vendor || "").toLowerCase();
+  const orderType = String(order.orderType || order.type || "online").toLowerCase();
+  if (rule.countryCodes?.length && !rule.countryCodes.map((value) => String(value).toLowerCase()).includes(country)) return false;
+  if (rule.stateCodes?.length && !rule.stateCodes.map((value) => String(value).toLowerCase()).includes(state)) return false;
+  if (rule.postalPrefixes?.length && !rule.postalPrefixes.some((value) => postal.startsWith(String(value).toLowerCase()))) return false;
+  if (rule.shippingClasses?.length && !rule.shippingClasses.map((value) => String(value).toLowerCase()).includes(shippingClass)) return false;
+  if (rule.orderTypes?.length && !rule.orderTypes.map((value) => String(value).toLowerCase()).includes(orderType)) return false;
+  if (rule.supplierIds?.length && !rule.supplierIds.map((value) => String(value).toLowerCase()).includes(supplier)) return false;
+  return true;
+}
+
+function fulfillmentWarehousePlan(db = {}, order = {}, line = {}, product = {}) {
+  const channel = orderChannelPolicy(db, order);
+  const settings = channel?.settings || {};
+  const mappings = normalizeChannelWarehouseMappings(settings.warehouseMappings || settings.shopifyWarehouseMappings, channel?.name || "Marketplace")
+    .filter((mapping) => mapping.enabled !== false && mapping.inventoryMode !== "disabled");
+  const mappingByWarehouse = new Map(mappings.map((mapping) => [String(mapping.sourceWarehouseId || "").toLowerCase(), mapping]));
+  const rules = normalizeWarehouseRoutingRules(settings.warehouseRoutingRules);
+  const matchedRule = rules.find((rule) => routingRuleMatches(rule, order, line, product));
+  const requested = [order.warehouseId, line.warehouseId, matchedRule?.warehouseId, settings.defaultShipFromWarehouseId,
+    ...(matchedRule?.fallbackWarehouseIds || []), ...(settings.fallbackWarehouseIds || []),
+    ...mappings.sort((left, right) => left.orderRoutingPriority - right.orderRoutingPriority).map((mapping) => mapping.sourceWarehouseId)]
+    .map((value) => String(value || "").trim()).filter(Boolean);
+  const priority = new Map([...new Set(requested)].map((id, index) => [id.toLowerCase(), index]));
+  const restrict = settings.restrictInventoryUsage === true;
+  const warehouses = (db.warehouses || []).filter((warehouse) => {
+    if (warehouse.status && String(warehouse.status).toLowerCase() !== "active") return false;
+    if (warehouse.isSellable === false) return false;
+    if (restrict && !mappingByWarehouse.has(String(warehouse.id || "").toLowerCase())) return false;
+    return true;
+  }).sort((left, right) => {
+    const leftPriority = priority.get(String(left.id || "").toLowerCase()) ?? 9999;
+    const rightPriority = priority.get(String(right.id || "").toLowerCase()) ?? 9999;
+    return leftPriority - rightPriority || String(left.name || "").localeCompare(String(right.name || ""));
+  });
+  return { channel, settings, mappings, mappingByWarehouse, matchedRule, warehouses, restrict };
+}
+
 async function routeOrderForFulfillment(db, order, body = {}) {
   if (["canceled", "cancelled", "void", "deleted"].includes(String(order.status || "").toLowerCase())) return { routes: [], skipped: true, reason: "Order is canceled." };
   if (!isOrderPaymentCleared(order) && body.force !== true) {
     recalculateOrderOperationalStatus(order);
     return { routes: [], skipped: true, reason: "Payment has not cleared." };
   }
-  const warehouses = [...(db.warehouses || [])];
   const created = []; const touchedProducts = [];
+  order.routingExplanation = Array.isArray(order.routingExplanation) ? order.routingExplanation : [];
   for (let lineIndex = 0; lineIndex < orderLineItems(order).length; lineIndex += 1) {
     const line = orderLineItems(order)[lineIndex];
     let remaining = openLineQuantity(line, (order.fulfillmentRoutes || []).filter((route) => route.lineIndex === lineIndex));
     if (!remaining) continue;
     const product = await postgres.readProductByKey(String(line.sku || "").trim());
+    const plan = fulfillmentWarehousePlan(db, order, line, product || {});
+    const explanation = {
+      id: crypto.randomUUID(), lineIndex, sku: line.sku, createdAt: new Date().toISOString(),
+      channel: plan.channel?.name || order.channel || order.source || "Direct",
+      ruleId: plan.matchedRule?.id || "", ruleName: plan.matchedRule?.name || "",
+      restrictInventoryUsage: plan.restrict, consideredWarehouses: plan.warehouses.map((warehouse) => warehouse.name || warehouse.id), decisions: []
+    };
+    order.routingExplanation = order.routingExplanation.filter((entry) => entry.lineIndex !== lineIndex);
+    order.routingExplanation.push(explanation);
+    const warehouses = plan.warehouses;
     for (const warehouse of warehouses) {
       if (!product || remaining <= 0) break;
+      const sourceType = String(warehouse.inventorySourceType || "").toLowerCase();
+      const supplierSource = sourceType === "supplier_feed" || warehouse.fulfillmentNetwork === "supplier";
+      if (supplierSource) {
+        const warehouseVendor = String(warehouse.dropshipVendorId || warehouse.vendorId || "").toLowerCase();
+        const productVendor = String(product.vendorId || product.vendor || product.supplier || "").toLowerCase();
+        if (warehouseVendor && productVendor && warehouseVendor !== productVendor) {
+          explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "skipped", reason: "Supplier warehouse does not match the product supplier." });
+          continue;
+        }
+      }
       const stock = ensureInventoryWarehouseStock(product, warehouse);
       const available = Math.max(0, Number(stock.qty || 0) - Number(stock.reserved || 0));
       const qty = Math.min(remaining, available);
-      if (!qty) continue;
+      if (!qty) { explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "skipped", reason: "No available quantity." }); continue; }
+      if (supplierSource) {
+        created.push(createWorkflowRoute(order, { type: "drop_ship", status: "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku, qty, warehouseId: warehouse.id, warehouseName: warehouse.name, vendorId: warehouse.dropshipVendorId || product.vendorId || "", vendorName: product.vendor || product.supplier || warehouse.vendorName || "" }));
+        explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "drop_ship", qty, reason: "Supplier-feed inventory is available and matched to this product." });
+        remaining -= qty;
+        continue;
+      }
       stock.reserved = Number(stock.reserved || 0) + qty;
       stock.updatedAt = new Date().toISOString();
       syncInventoryTotalsFromWarehouses(product);
       product.updatedAt = new Date().toISOString();
       touchedProducts.push(product);
       created.push(createWorkflowRoute(order, { type: "warehouse", status: "allocated", lineIndex, sku: line.sku, title: line.title || line.sku, qty, warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id }));
+      explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "warehouse", qty, reason: plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name}.` : "Selected by channel warehouse priority and available stock." });
       addInventoryLedger(db, product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: qty, reason: `Workflow allocation for ${order.orderNumber}`, user: body.user || "System" });
       remaining -= qty;
     }
@@ -19348,10 +19547,13 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       const vendorName = String(line.vendor || product?.vendor || "").trim();
       if (product?.dropShipEligible === true || product?.fulfillmentMethod === "drop_ship") {
         created.push(createWorkflowRoute(order, { type: "drop_ship", status: "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku, qty: remaining, vendorId: product?.vendorId || "", vendorName }));
+        explanation.decisions.push({ status: "routed", routeType: "drop_ship", qty: remaining, reason: "Product permits vendor drop shipment." });
       } else if (vendorName || product?.vendorId) {
         created.push(createWorkflowRoute(order, { type: "purchase", status: "new", lineIndex, sku: line.sku, title: line.title || line.sku, qty: remaining, vendorId: product?.vendorId || "", vendorName }));
+        explanation.decisions.push({ status: "routed", routeType: "purchase", qty: remaining, reason: "Available warehouse stock was insufficient; purchasing is required." });
       } else {
         createOrderException(order, { type: "no_fulfillment_source", lineIndex, sku: line.sku, description: `${line.sku || "This line"} has no allocatable inventory or assigned vendor.` });
+        explanation.decisions.push({ status: "blocked", qty: remaining, reason: "No sellable warehouse inventory or assigned supplier." });
       }
     }
   }
@@ -19379,13 +19581,9 @@ function orderShipmentSummary(order = {}) {
 }
 
 async function allocateOrderInventory(db, order, body = {}) {
-  const settings = await readOrderWorkflowSettings();
-  const warehouses = [...(db.warehouses || [])].sort((a, b) => {
-    const priority = settings.allocationPolicy.warehousePriority || [];
-    const left = priority.indexOf(a.id); const right = priority.indexOf(b.id);
-    return (left < 0 ? 9999 : left) - (right < 0 ? 9999 : right) || String(a.name || "").localeCompare(String(b.name || ""));
-  });
+  const workflowSettings = await readOrderWorkflowSettings();
   order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+  order.routingExplanation = Array.isArray(order.routingExplanation) ? order.routingExplanation : [];
   const shipment = { id: crypto.randomUUID(), status: "allocated", createdAt: new Date().toISOString(), warehouseId: "", warehouseName: "", lines: [], packages: [] };
   const backorders = [];
   const touched = [];
@@ -19393,13 +19591,32 @@ async function allocateOrderInventory(db, order, body = {}) {
     const line = orderLineItems(order)[lineIndex]; const sku = String(line.sku || "").trim(); const requested = Number(line.qty || 0);
     if (!sku || requested <= 0) continue;
     const product = await postgres.readProductByKey(sku);
+    const plan = fulfillmentWarehousePlan(db, order, line, product || {});
+    const warehouses = plan.warehouses || [];
+    const explanation = {
+      lineIndex,
+      sku,
+      channel: plan.channel?.name || order.source || order.channel || "",
+      restrictedToMappings: Boolean(plan.restrictInventoryUsage),
+      ruleId: plan.matchedRule?.id || "",
+      ruleName: plan.matchedRule?.name || "",
+      consideredWarehouses: [],
+      decidedAt: new Date().toISOString()
+    };
     let remaining = requested;
     for (const warehouse of warehouses) {
       if (!product || remaining <= 0) break;
+      if (warehouse.inventorySourceType === "supplier_feed" || warehouse.fulfillmentNetwork === "supplier") {
+        explanation.consideredWarehouses.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, decision: "drop_ship", reason: "Supplier inventory is routed through the drop-ship workflow and is not reserved as physical stock." });
+        continue;
+      }
       const stock = ensureInventoryWarehouseStock(product, warehouse);
       const available = Math.max(0, Number(stock.qty || 0) - Number(stock.reserved || 0));
       const qty = Math.min(remaining, available);
-      if (!qty) continue;
+      if (!qty) {
+        explanation.consideredWarehouses.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, available, decision: "skipped", reason: "No available physical inventory." });
+        continue;
+      }
       stock.reserved = Number(stock.reserved || 0) + qty; stock.updatedAt = new Date().toISOString();
       syncInventoryTotalsFromWarehouses(product); product.updatedAt = new Date().toISOString(); touched.push(product);
       let target = shipment;
@@ -19409,10 +19626,16 @@ async function allocateOrderInventory(db, order, body = {}) {
       }
       target.warehouseId = warehouse.id; target.warehouseName = warehouse.name;
       target.lines.push({ lineIndex, sku, title: line.title || sku, qtyAllocated: qty, qtyFulfilled: 0 });
+      explanation.consideredWarehouses.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, available, allocated: qty, decision: "allocated", reason: plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name || plan.matchedRule.id}.` : "Selected by channel warehouse priority." });
       remaining -= qty;
       addInventoryLedger(db, product, { type: "order_reservation", source: "order", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: qty, reason: `Allocated ${qty} for ${order.orderNumber}`, user: body.user || "System" });
-      if (!settings.allocationPolicy.allowSplitShipments) break;
+      if (!workflowSettings.allocationPolicy.allowSplitShipments) break;
     }
+    if (!warehouses.length) explanation.consideredWarehouses.push({ decision: "blocked", reason: plan.restrictInventoryUsage ? "No enabled warehouse mapping is available for this channel." : "No active sellable warehouse is available." });
+    explanation.allocatedQty = requested - remaining;
+    explanation.unallocatedQty = remaining;
+    order.routingExplanation = order.routingExplanation.filter((row) => !(Number(row.lineIndex) === lineIndex && String(row.sku || "").toLowerCase() === sku.toLowerCase()));
+    order.routingExplanation.push(explanation);
     if (remaining) backorders.push({ id: crypto.randomUUID(), lineIndex, sku, title: line.title || sku, qty: remaining, status: "unallocated", createdAt: new Date().toISOString() });
   }
   if (shipment.lines.length) order.shipments.push(shipment);
@@ -28313,6 +28536,57 @@ async function handleApi(req, res) {
     return sendJson(res, 200, payload);
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "channel-availability" && postgres.isPostgresEnabled()) {
+    const product = await postgres.readProductByKey(parts[2]);
+    if (!product) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const warehouseById = new Map((db.warehouses || []).map((row) => [String(row.id || ""), row]));
+    const stockByWarehouse = new Map((product.warehouseStock || []).map((row) => [String(row.warehouseId || ""), row]));
+    const channels = [...(db.connections || []), ...(db.channels || [])]
+      .filter((row, index, rows) => row?.id && rows.findIndex((candidate) => candidate.id === row.id) === index)
+      .map(normalizeChannel)
+      .filter((row) => row.settings?.channelEnabled !== false && row.status !== "inactive");
+    const availability = channels.map((channel) => {
+      const settings = channel.settings || {};
+      const mappings = normalizeChannelWarehouseMappings(settings.warehouseMappings || settings.shopifyWarehouseMappings, channel.name || "Marketplace");
+      const rows = mappings.map((mapping) => {
+        const warehouse = warehouseById.get(String(mapping.sourceWarehouseId || ""));
+        const stock = stockByWarehouse.get(String(mapping.sourceWarehouseId || ""));
+        const onHand = Number(stock?.qty || 0);
+        const reserved = Number(stock?.reserved || 0);
+        const available = Math.max(0, onHand - reserved);
+        const sellable = mapping.enabled !== false && mapping.exportInventoryEnabled !== false && warehouse?.status !== "inactive" && warehouse?.isSellable !== false
+          ? mappedInventoryQuantity(available, mapping, settings)
+          : 0;
+        const issues = [];
+        if (!mapping.sourceWarehouseId) issues.push("Source warehouse is missing");
+        else if (!warehouse) issues.push("Source warehouse was not found");
+        else if (warehouse.status === "inactive") issues.push("Source warehouse is inactive");
+        else if (warehouse.isSellable === false) issues.push("Source warehouse is excluded from order routing");
+        if (!mapping.destinationLocationId && !mapping.externalWarehouseCode) issues.push("Channel destination is missing");
+        if (mapping.enabled === false) issues.push("Mapping is disabled");
+        return {
+          ...mapping,
+          sourceWarehouseName: mapping.sourceWarehouseName || warehouse?.name || mapping.sourceWarehouseId,
+          onHand,
+          reserved,
+          available,
+          sellable,
+          healthy: issues.length === 0,
+          issues
+        };
+      });
+      return {
+        channelId: channel.id,
+        channelName: channel.name,
+        enabled: settings.channelEnabled !== false,
+        sellableQty: rows.reduce((sum, row) => sum + Number(row.sellable || 0), 0),
+        mappings: rows
+      };
+    });
+    return sendJson(res, 200, { sku: product.sku || parts[2], availability });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "supplier-matches" && parts[4] && parts[5] === "review" && postgres.isPostgresEnabled()) {
     const product = await postgres.readProductByKey(parts[2]);
     if (!product) return notFound(res);
@@ -32126,6 +32400,10 @@ async function handleApi(req, res) {
       shopifyLocationId: normalizeShopifyLocationGid(body.shopifyLocationId || ""),
       shopifyLocationName: String(body.shopifyLocationName || "").trim(),
       shopifyInventoryPushEnabled: Boolean(body.shopifyInventoryPushEnabled),
+      isSellable: body.isSellable === undefined ? true : Boolean(body.isSellable),
+      capacityUnits: Math.max(0, Math.floor(Number(body.capacityUnits || 0) || 0)),
+      fulfillmentNetwork: String(body.fulfillmentNetwork || "internal").trim().toLowerCase(),
+      dropshipVendorId: String(body.dropshipVendorId || "").trim(),
       bins: [],
       notes: String(body.notes || "").trim(),
       createdAt: new Date().toISOString(),
@@ -32150,14 +32428,17 @@ async function handleApi(req, res) {
       "operatingHours", "carrierCutoffTime", "receivingInstructions", "addressLine1", "addressLine2", "city",
       "state", "postalCode", "country", "isDefaultReceiving", "isDefaultReturns", "requireAppointment",
       "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyLocationId",
-      "shopifyLocationName", "shopifyInventoryPushEnabled", "allowReceiving", "allowAudits", "notes"
+      "shopifyLocationName", "shopifyInventoryPushEnabled", "allowReceiving", "allowAudits", "isSellable", "capacityUnits",
+      "fulfillmentNetwork", "dropshipVendorId", "notes"
     ];
     const changedFields = [];
     for (const field of fields) {
       if (body[field] === undefined) continue;
       const previousValue = warehouse[field];
-      if (["isPhysical", "isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyInventoryPushEnabled", "allowReceiving", "allowAudits"].includes(field)) {
+      if (["isPhysical", "isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyInventoryPushEnabled", "allowReceiving", "allowAudits", "isSellable"].includes(field)) {
         warehouse[field] = Boolean(body[field]);
+      } else if (field === "capacityUnits") {
+        warehouse[field] = Math.max(0, Math.floor(Number(body[field] || 0) || 0));
       } else if (field === "shopifyLocationId") {
         warehouse[field] = normalizeShopifyLocationGid(body[field]);
       } else {
@@ -32915,6 +33196,19 @@ async function handleApi(req, res) {
       if (sendImportJobFile(res, job, "manifest", { inline: url.searchParams.get("inline") === "1" })) return;
       return sendJson(res, 404, { error: "This job has no manifest file." });
     }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "channels" && parts[2] && parts[3] === "warehouse-mappings" && parts[4] === "reconcile" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    const channel = (db.connections || []).find((row) => row.id === parts[2]);
+    if (!channel) return notFound(res);
+    const result = reconcileChannelWarehouseMappings(db, channel);
+    channel.settings = { ...(channel.settings || {}), warehouseMappings: result.mappings };
+    if (String(channel.name || "").toLowerCase() === "shopify") channel.settings.shopifyWarehouseMappings = result.mappings;
+    Object.assign(channel, normalizeChannel(channel));
+    await postgres.writeStateDocuments({ connections: db.connections || [] });
+    appendChannelApiLog({ kind: "activity", channel: channel.name || "Channel", actionGroup: "warehouse_mapping", operation: "Warehouse mappings reconciled", status: result.healthy ? "success" : "warning", ok: result.healthy, entityType: "channel", entityId: channel.id, actor: "DataPlus", trigger: "manual", message: result.healthy ? `${result.mappings.length} warehouse mapping(s) passed validation.` : `${result.issues.length} warehouse mapping issue(s) require attention.` });
+    return sendJson(res, 200, { channel, ...result });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "channels" && parts[2] && postgres.isPostgresEnabled()) {
@@ -39279,6 +39573,18 @@ async function handleApi(req, res) {
       return sendJson(res, 200, { template, state: publicState(db) });
     }
     return sendJson(res, 400, { error: "Unsupported template action." });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "channels" && parts[2] && parts[3] === "warehouse-mappings" && parts[4] === "reconcile") {
+    const channel = (db.connections || []).find((row) => row.id === parts[2]);
+    if (!channel) return notFound(res);
+    const result = reconcileChannelWarehouseMappings(db, channel);
+    channel.settings = { ...(channel.settings || {}), warehouseMappings: result.mappings };
+    if (String(channel.name || "").toLowerCase() === "shopify") channel.settings.shopifyWarehouseMappings = result.mappings;
+    Object.assign(channel, normalizeChannel(channel));
+    await writeDb(db);
+    appendChannelApiLog({ kind: "activity", channel: channel.name || "Channel", actionGroup: "warehouse_mapping", operation: "Warehouse mappings reconciled", status: result.healthy ? "success" : "warning", ok: result.healthy, entityType: "channel", entityId: channel.id, actor: "DataPlus", trigger: "manual", message: result.healthy ? `${result.mappings.length} warehouse mapping(s) passed validation.` : `${result.issues.length} warehouse mapping issue(s) require attention.` });
+    return sendJson(res, 200, { channel, ...result });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "channels" && parts[2]) {

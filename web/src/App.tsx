@@ -219,6 +219,34 @@ type ShopifyWarehouseMapping = {
   sourceWarehouseName?: string
   destinationLocationId: string
   destinationLocationName?: string
+  externalWarehouseCode?: string
+  inventoryMode?: "pooled" | "exclusive" | "fixed" | "disabled"
+  allocationPercent?: number
+  safetyQty?: number
+  maxSellableQty?: number
+  fixedQty?: number
+  exportInventoryEnabled?: boolean
+  importInventoryEnabled?: boolean
+  orderRoutingPriority?: number
+  lastSyncedAt?: string
+  lastSentQty?: number
+  lastError?: string
+}
+
+type WarehouseRoutingRule = {
+  id: string
+  name: string
+  enabled: boolean
+  priority: number
+  warehouseId: string
+  fallbackWarehouseIds?: string[]
+  countryCodes?: string[]
+  stateCodes?: string[]
+  postalPrefixes?: string[]
+  shippingClasses?: string[]
+  orderTypes?: string[]
+  supplierIds?: string[]
+  requireAvailableStock?: boolean
 }
 
 type ChannelSettings = {
@@ -258,6 +286,11 @@ type ChannelSettings = {
   shopifyInventoryWarehouseId?: string
   shopifyInventoryLocationId?: string
   shopifyWarehouseMappings?: ShopifyWarehouseMapping[]
+  warehouseMappings?: ShopifyWarehouseMapping[]
+  warehouseRoutingRules?: WarehouseRoutingRule[]
+  restrictInventoryUsage?: boolean
+  defaultShipFromWarehouseId?: string
+  fallbackWarehouseIds?: string[]
   inventoryScheduleEnabled?: boolean
   inventoryScheduleMode?: string
   inventoryScheduleType?: string
@@ -2890,6 +2923,7 @@ function ChannelDetail({
   const [ebayHealthLoading, setEbayHealthLoading] = useState(false)
   const [shopifyLocations, setShopifyLocations] = useState<Array<{ id: string; name: string; isActive?: boolean; fulfillsOnlineOrders?: boolean }>>([])
   const [shopifyLocationsLoading, setShopifyLocationsLoading] = useState(false)
+  const [warehouseReconcileBusy, setWarehouseReconcileBusy] = useState(false)
   const [ebayTaxonomyStatus, setEbayTaxonomyStatus] = useState<{
     indexed?: boolean
     marketplaceId?: string
@@ -2913,9 +2947,12 @@ function ChannelDetail({
   const orderImportScheduleTimes = String(settings.shopifyOrderImportScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
   const ebayOrderImportScheduleTimes = String(settings.ebayOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
   const ebayPriceInventorySyncScheduleTimes = String(settings.ebayPriceInventorySyncScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
-  const shopifyWarehouseMappings: ShopifyWarehouseMapping[] = Array.isArray(settings.shopifyWarehouseMappings)
-    ? settings.shopifyWarehouseMappings as ShopifyWarehouseMapping[]
+  const shopifyWarehouseMappings: ShopifyWarehouseMapping[] = Array.isArray(settings.warehouseMappings) && settings.warehouseMappings.length
+    ? settings.warehouseMappings as ShopifyWarehouseMapping[]
+    : Array.isArray(settings.shopifyWarehouseMappings)
+      ? settings.shopifyWarehouseMappings as ShopifyWarehouseMapping[]
     : [{ id: "shopify-datawarehouse-zsi", enabled: true, sourceWarehouseId: "datawarehouse", sourceWarehouseName: "DataWarehouse", destinationLocationId: "gid://shopify/Location/108946260272", destinationLocationName: "zSi Warehouse" }]
+  const warehouseRoutingRules: WarehouseRoutingRule[] = Array.isArray(settings.warehouseRoutingRules) ? settings.warehouseRoutingRules as WarehouseRoutingRule[] : []
   const shopifySourceWarehouses = useMemo(() => {
     const rows = warehouses.map((warehouse) => ({
       id: String(warehouse.id || ""),
@@ -3014,18 +3051,40 @@ function ChannelDetail({
   }
 
   function updateShopifyWarehouseMapping(id: string, patch: Partial<ShopifyWarehouseMapping>) {
-    update("shopifyWarehouseMappings", shopifyWarehouseMappings.map((mapping) => mapping.id === id ? { ...mapping, ...patch } : mapping))
+    const mappings = shopifyWarehouseMappings.map((mapping) => mapping.id === id ? { ...mapping, ...patch } : mapping)
+    setDraft((current) => ({ ...current, warehouseMappings: mappings, ...(isShopify ? { shopifyWarehouseMappings: mappings } : {}) }))
   }
 
   function addShopifyWarehouseMapping() {
-    update("shopifyWarehouseMappings", [
+    const mappings = [
       ...shopifyWarehouseMappings,
-      { id: `shopify-warehouse-${Date.now()}`, enabled: true, sourceWarehouseId: "", sourceWarehouseName: "", destinationLocationId: "", destinationLocationName: "" },
-    ])
+      { id: `${String(channel.name || "channel").toLowerCase()}-warehouse-${Date.now()}`, enabled: true, sourceWarehouseId: "", sourceWarehouseName: "", destinationLocationId: "", destinationLocationName: "", inventoryMode: "pooled" as const, allocationPercent: 100, safetyQty: Number(settings.defaultSafetyQty || 0), maxSellableQty: Number(settings.defaultMaxSellableQty || 0), exportInventoryEnabled: true, importInventoryEnabled: false, orderRoutingPriority: shopifyWarehouseMappings.length + 1 },
+    ]
+    setDraft((current) => ({ ...current, warehouseMappings: mappings, ...(isShopify ? { shopifyWarehouseMappings: mappings } : {}) }))
   }
 
   function removeShopifyWarehouseMapping(id: string) {
-    update("shopifyWarehouseMappings", shopifyWarehouseMappings.filter((mapping) => mapping.id !== id))
+    const mappings = shopifyWarehouseMappings.filter((mapping) => mapping.id !== id)
+    setDraft((current) => ({ ...current, warehouseMappings: mappings, ...(isShopify ? { shopifyWarehouseMappings: mappings } : {}) }))
+  }
+
+  function updateWarehouseRoutingRule(id: string, patch: Partial<WarehouseRoutingRule>) {
+    update("warehouseRoutingRules", warehouseRoutingRules.map((rule) => rule.id === id ? { ...rule, ...patch } : rule))
+  }
+
+  function addWarehouseRoutingRule() {
+    update("warehouseRoutingRules", [...warehouseRoutingRules, {
+      id: `route-${Date.now()}`,
+      name: `Routing rule ${warehouseRoutingRules.length + 1}`,
+      enabled: true,
+      priority: (warehouseRoutingRules.length + 1) * 10,
+      warehouseId: "",
+      requireAvailableStock: true,
+    }])
+  }
+
+  function removeWarehouseRoutingRule(id: string) {
+    update("warehouseRoutingRules", warehouseRoutingRules.filter((rule) => rule.id !== id))
   }
 
   async function loadShopifyLocations() {
@@ -3038,6 +3097,20 @@ function ChannelDetail({
       toast.error(error instanceof Error ? error.message : "Unable to load Shopify locations.")
     } finally {
       setShopifyLocationsLoading(false)
+    }
+  }
+
+  async function reconcileWarehouseMappings() {
+    setWarehouseReconcileBusy(true)
+    try {
+      const result = await api<{ healthy?: boolean; issues?: Array<{ message?: string }>; message?: string }>(`/api/channels/${encodeURIComponent(channel.id)}/warehouse-mappings/reconcile`, { method: "POST" })
+      if (result.healthy) toast.success(result.message || "Warehouse mappings are healthy.")
+      else toast.error(result.message || `${(result.issues || []).length} warehouse mapping issue(s) require attention.`)
+      onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to reconcile warehouse mappings.")
+    } finally {
+      setWarehouseReconcileBusy(false)
     }
   }
 
@@ -4089,20 +4162,29 @@ function ChannelDetail({
                   </Select>
                 </Field>
               </>}
-              {isShopify && <>
+              <>
                 <div className="col-span-full pt-2">
                   <Separator />
                   <div className="flex flex-wrap items-start justify-between gap-3 pt-3">
-                    <div><p className="text-sm font-semibold">Shopify warehouse mappings</p><p className="mt-1 text-xs text-muted-foreground">Choose where each DataPlus inventory source is published in Shopify. Supplier-feed stock remains virtual inventory.</p></div>
+                    <div><p className="text-sm font-semibold">Warehouse and channel inventory</p><p className="mt-1 text-xs text-muted-foreground">Control which DataPlus locations this channel can use, where inventory is published, and how sellable quantity is calculated.</p></div>
                     <div className="flex gap-2">
-                      <Button type="button" size="sm" variant="outline" onClick={() => void loadShopifyLocations()} disabled={shopifyLocationsLoading}>{shopifyLocationsLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}Refresh locations</Button>
+                      {isShopify && <Button type="button" size="sm" variant="outline" onClick={() => void loadShopifyLocations()} disabled={shopifyLocationsLoading}>{shopifyLocationsLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}Refresh locations</Button>}
+                      <Button type="button" size="sm" variant="outline" onClick={() => void reconcileWarehouseMappings()} disabled={warehouseReconcileBusy}>{warehouseReconcileBusy ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}Reconcile</Button>
                       {editing && <Button type="button" size="sm" variant="outline" onClick={addShopifyWarehouseMapping}>Add mapping</Button>}
                     </div>
                   </div>
                 </div>
+                <ToggleField label="Restrict channel to mapped warehouses" checked={Boolean(settings.restrictInventoryUsage)} disabled={!editing} onCheckedChange={(value) => update("restrictInventoryUsage", value)} />
+                <Field label="Default ship-from warehouse">
+                  <Select disabled={!editing} value={String(settings.defaultShipFromWarehouseId || "none")} onValueChange={(value) => update("defaultShipFromWarehouseId", value === "none" ? "" : value)}>
+                    <SelectTrigger><SelectValue placeholder="Use routing priority" /></SelectTrigger>
+                    <SelectContent><SelectItem value="none">Use routing priority</SelectItem>{shopifySourceWarehouses.map((warehouse) => <SelectItem key={warehouse.id} value={warehouse.id}>{warehouse.name}</SelectItem>)}</SelectContent>
+                  </Select>
+                </Field>
                 <div className="col-span-full grid gap-2">
                   {shopifyWarehouseMappings.map((mapping) => (
-                    <div key={mapping.id} className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[minmax(180px,1fr)_auto_minmax(220px,1fr)_auto_auto] md:items-center">
+                    <div key={mapping.id} className="grid gap-3 rounded-md border bg-muted/30 p-3">
+                      <div className="grid gap-3 md:grid-cols-[minmax(180px,1fr)_auto_minmax(220px,1fr)_auto_auto] md:items-center">
                       <Select disabled={!editing} value={mapping.sourceWarehouseId || "none"} onValueChange={(value) => {
                         const warehouse = shopifySourceWarehouses.find((row) => row.id === value)
                         updateShopifyWarehouseMapping(mapping.id, { sourceWarehouseId: value === "none" ? "" : value, sourceWarehouseName: value === "none" ? "" : String(warehouse?.name || value) })
@@ -4111,20 +4193,54 @@ function ChannelDetail({
                         <SelectContent><SelectItem value="none">Select DataPlus warehouse</SelectItem>{shopifySourceWarehouses.map((warehouse) => <SelectItem key={warehouse.id} value={warehouse.id}>{warehouse.name}</SelectItem>)}</SelectContent>
                       </Select>
                       <span className="hidden text-xs font-medium text-muted-foreground md:block">maps to</span>
-                      <Select disabled={!editing} value={mapping.destinationLocationId || "none"} onValueChange={(value) => {
+                      {isShopify ? <Select disabled={!editing} value={mapping.destinationLocationId || "none"} onValueChange={(value) => {
                         const location = mappedShopifyLocations.find((row) => row.id === value)
                         updateShopifyWarehouseMapping(mapping.id, { destinationLocationId: value === "none" ? "" : value, destinationLocationName: value === "none" ? "" : String(location?.name || value) })
                       }}>
                         <SelectTrigger><SelectValue placeholder="Shopify location" /></SelectTrigger>
                         <SelectContent><SelectItem value="none">Select Shopify location</SelectItem>{mappedShopifyLocations.map((location) => <SelectItem key={location.id} value={location.id}>{location.name}{location.isActive === false ? " (inactive)" : ""}</SelectItem>)}</SelectContent>
-                      </Select>
+                      </Select> : <Input disabled={!editing} value={mapping.externalWarehouseCode || mapping.destinationLocationId || ""} placeholder={`${channel.name || "Channel"} warehouse code`} onChange={(event) => updateShopifyWarehouseMapping(mapping.id, { externalWarehouseCode: event.target.value, destinationLocationId: event.target.value })} />}
                       <div className="flex items-center gap-2"><Switch disabled={!editing} checked={mapping.enabled} onCheckedChange={(enabled) => updateShopifyWarehouseMapping(mapping.id, { enabled })} /><span className="text-xs">{mapping.enabled ? "Enabled" : "Disabled"}</span></div>
                       {editing && <Button type="button" size="icon" variant="ghost" title="Remove mapping" onClick={() => removeShopifyWarehouseMapping(mapping.id)}><Trash2 className="size-4" /></Button>}
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                        <Field label="Quantity mode"><Select disabled={!editing} value={mapping.inventoryMode || "pooled"} onValueChange={(value) => updateShopifyWarehouseMapping(mapping.id, { inventoryMode: value as ShopifyWarehouseMapping["inventoryMode"] })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pooled">Available inventory</SelectItem><SelectItem value="exclusive">Exclusive warehouse</SelectItem><SelectItem value="fixed">Fixed channel quantity</SelectItem><SelectItem value="disabled">Do not publish</SelectItem></SelectContent></Select></Field>
+                        <Field label="Allocation percent"><Input disabled={!editing || mapping.inventoryMode === "fixed"} type="number" min="0" max="100" value={String(mapping.allocationPercent ?? 100)} onChange={(event) => updateShopifyWarehouseMapping(mapping.id, { allocationPercent: Number(event.target.value || 0) })} /></Field>
+                        <Field label="Safety quantity"><Input disabled={!editing || mapping.inventoryMode === "fixed"} type="number" min="0" value={String(mapping.safetyQty ?? settings.defaultSafetyQty ?? 0)} onChange={(event) => updateShopifyWarehouseMapping(mapping.id, { safetyQty: Number(event.target.value || 0) })} /></Field>
+                        <Field label="Maximum sellable"><Input disabled={!editing || mapping.inventoryMode === "fixed"} type="number" min="0" value={String(mapping.maxSellableQty ?? settings.defaultMaxSellableQty ?? 0)} onChange={(event) => updateShopifyWarehouseMapping(mapping.id, { maxSellableQty: Number(event.target.value || 0) })} /></Field>
+                        <Field label={mapping.inventoryMode === "fixed" ? "Fixed quantity" : "Routing priority"}><Input disabled={!editing} type="number" min="0" value={String(mapping.inventoryMode === "fixed" ? mapping.fixedQty ?? 0 : mapping.orderRoutingPriority ?? 100)} onChange={(event) => updateShopifyWarehouseMapping(mapping.id, mapping.inventoryMode === "fixed" ? { fixedQty: Number(event.target.value || 0) } : { orderRoutingPriority: Number(event.target.value || 0) })} /></Field>
+                      </div>
+                      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground"><span>{mapping.lastSyncedAt ? `Last sync ${dateLabel(mapping.lastSyncedAt)}` : "Not synchronized yet"}</span>{mapping.lastSentQty !== undefined && <span>Last quantity: {numberLabel(mapping.lastSentQty)}</span>}{mapping.lastError && <span className="text-destructive">{mapping.lastError}</span>}</div>
                     </div>
                   ))}
                   {!shopifyWarehouseMappings.length && <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">No warehouse mappings configured.</div>}
-                  <p className="text-xs text-muted-foreground">Current default: DataWarehouse inventory publishes to zSi Warehouse (`locations/108946260272`). Scheduled and manual inventory jobs use the enabled DataWarehouse mapping first.</p>
+                  <p className="text-xs text-muted-foreground">Mappings are reused by inventory publication and order routing. Supplier-feed locations remain virtual and route as drop shipments instead of physical picks.</p>
                 </div>
+                <div className="col-span-full pt-2">
+                  <Separator />
+                  <div className="flex flex-wrap items-start justify-between gap-3 pt-3"><div><p className="text-sm font-semibold">Conditional order routing</p><p className="mt-1 text-xs text-muted-foreground">Higher-priority matching rules choose the first eligible warehouse with sellable stock. Leave conditions empty to create a general preference.</p></div>{editing && <Button type="button" size="sm" variant="outline" onClick={addWarehouseRoutingRule}>Add routing rule</Button>}</div>
+                </div>
+                <div className="col-span-full grid gap-2">
+                  {warehouseRoutingRules.map((rule) => <div key={rule.id} className="grid gap-3 rounded-md border bg-muted/30 p-3">
+                    <div className="grid gap-3 md:grid-cols-[minmax(180px,1fr)_110px_minmax(200px,1fr)_auto_auto] md:items-end">
+                      <Field label="Rule name"><Input disabled={!editing} value={rule.name} onChange={(event) => updateWarehouseRoutingRule(rule.id, { name: event.target.value })} /></Field>
+                      <Field label="Priority"><Input disabled={!editing} type="number" min="0" value={String(rule.priority ?? 100)} onChange={(event) => updateWarehouseRoutingRule(rule.id, { priority: Number(event.target.value || 0) })} /></Field>
+                      <Field label="Route to"><Select disabled={!editing} value={rule.warehouseId || "none"} onValueChange={(value) => updateWarehouseRoutingRule(rule.id, { warehouseId: value === "none" ? "" : value })}><SelectTrigger><SelectValue placeholder="Select warehouse" /></SelectTrigger><SelectContent><SelectItem value="none">Select warehouse</SelectItem>{shopifySourceWarehouses.map((warehouse) => <SelectItem key={warehouse.id} value={warehouse.id}>{warehouse.name}</SelectItem>)}</SelectContent></Select></Field>
+                      <div className="flex h-10 items-center gap-2"><Switch disabled={!editing} checked={rule.enabled !== false} onCheckedChange={(enabled) => updateWarehouseRoutingRule(rule.id, { enabled })} /><span className="text-xs">{rule.enabled !== false ? "Enabled" : "Disabled"}</span></div>
+                      {editing && <Button type="button" size="icon" variant="ghost" title="Remove routing rule" onClick={() => removeWarehouseRoutingRule(rule.id)}><Trash2 className="size-4" /></Button>}
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                      <Field label="Countries"><Input disabled={!editing} value={(rule.countryCodes || []).join(", ")} placeholder="US, CA" onChange={(event) => updateWarehouseRoutingRule(rule.id, { countryCodes: event.target.value.split(",").map((value) => value.trim().toUpperCase()).filter(Boolean) })} /></Field>
+                      <Field label="States"><Input disabled={!editing} value={(rule.stateCodes || []).join(", ")} placeholder="NY, NJ" onChange={(event) => updateWarehouseRoutingRule(rule.id, { stateCodes: event.target.value.split(",").map((value) => value.trim().toUpperCase()).filter(Boolean) })} /></Field>
+                      <Field label="Postal prefixes"><Input disabled={!editing} value={(rule.postalPrefixes || []).join(", ")} placeholder="10, 11, 12" onChange={(event) => updateWarehouseRoutingRule(rule.id, { postalPrefixes: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) })} /></Field>
+                      <Field label="Shipping classes"><Input disabled={!editing} value={(rule.shippingClasses || []).join(", ")} placeholder="parcel, freight" onChange={(event) => updateWarehouseRoutingRule(rule.id, { shippingClasses: event.target.value.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean) })} /></Field>
+                    </div>
+                    <div className="flex items-center justify-between gap-3 rounded-md border bg-background p-3"><div><p className="text-sm font-medium">Require available stock</p><p className="text-xs text-muted-foreground">If disabled, this warehouse can be selected before inventory is available.</p></div><Switch disabled={!editing} checked={rule.requireAvailableStock !== false} onCheckedChange={(requireAvailableStock) => updateWarehouseRoutingRule(rule.id, { requireAvailableStock })} /></div>
+                  </div>)}
+                  {!warehouseRoutingRules.length && <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">No conditional routing rules. Orders use the default ship-from warehouse and mapping priority.</div>}
+                </div>
+              </>
+              {isShopify && <>
                 <Field label="Schedule type">
                   <Select disabled={!editing} value={String(settings.inventoryScheduleType || "times")} onValueChange={(value) => update("inventoryScheduleType", value)}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
@@ -4927,7 +5043,13 @@ type InventoryLedgerEntry = { id?: string; createdAt?: string; type?: string; so
 type InventoryPurchaseOrder = { id?: string; poNumber?: string; supplier?: string; status?: string; warehouseId?: string; warehouseName?: string; orderedQty?: number; receivedQty?: number; openQty?: number; unitCost?: number; expectedAt?: string; placedAt?: string; updatedAt?: string; orderNumbers?: string[] }
 type InventoryReturn = { id?: string; returnNumber?: string; orderId?: string; orderNumber?: string; source?: string; status?: string; condition?: string; disposition?: string; reason?: string; qty?: number; warehouseName?: string; createdAt?: string; receivedAt?: string; restockedAt?: string; updatedAt?: string }
 type InventoryHealthSignal = { id?: string; severity?: "success" | "warning" | "critical"; title?: string; detail?: string; tab?: string }
-type InventoryOperationData = { item?: ProductItem; warehouses?: Array<{ id?: string; name?: string; code?: string }>; orders?: InventoryOperationOrder[]; allocations?: Array<{ id?: string; orderId?: string; orderNumber?: string; buyer?: string; warehouseName?: string; warehouseId?: string; qty?: number; status?: string; assignedAt?: string; updatedAt?: string }>; stockSources?: InventoryStockSource[]; ledger?: InventoryLedgerEntry[]; purchaseOrders?: InventoryPurchaseOrder[]; returns?: InventoryReturn[]; health?: InventoryHealthSignal[]; metrics?: { openOrderCount?: number; openOrderUnits?: number; allocatedUnits?: number; unallocatedUnits?: number; recordedOnHand?: number; physicalOnHand?: number; physicalAvailable?: number; supplierAvailable?: number; stockBasis?: string; shopifyQuantity?: number; ebayQuantity?: number; shippedOrderCount?: number; shipped30?: number; shipped90?: number; averageDaily30?: number; averageDaily90?: number; daysOfCover?: number | null; available?: number; incomingUnits?: number; openPurchaseOrderCount?: number; openReturnCount?: number; returned30?: number; returned90?: number; returnRate90?: number; sellThrough30?: number; projectedAvailable?: number; staleAllocationCount?: number; lastMovementAt?: string } }
+type InventoryChannelAvailability = { channelId?: string; channelName?: string; enabled?: boolean; sellableQty?: number; mappings?: Array<ShopifyWarehouseMapping & { onHand?: number; reserved?: number; available?: number; sellable?: number; healthy?: boolean; issues?: string[] }> }
+type InventoryOperationData = { item?: ProductItem; warehouses?: Array<{ id?: string; name?: string; code?: string }>; orders?: InventoryOperationOrder[]; allocations?: Array<{ id?: string; orderId?: string; orderNumber?: string; buyer?: string; warehouseName?: string; warehouseId?: string; qty?: number; status?: string; assignedAt?: string; updatedAt?: string }>; stockSources?: InventoryStockSource[]; ledger?: InventoryLedgerEntry[]; purchaseOrders?: InventoryPurchaseOrder[]; returns?: InventoryReturn[]; health?: InventoryHealthSignal[]; channelAvailability?: InventoryChannelAvailability[]; metrics?: { openOrderCount?: number; openOrderUnits?: number; allocatedUnits?: number; unallocatedUnits?: number; recordedOnHand?: number; physicalOnHand?: number; physicalAvailable?: number; supplierAvailable?: number; stockBasis?: string; shopifyQuantity?: number; ebayQuantity?: number; shippedOrderCount?: number; shipped30?: number; shipped90?: number; averageDaily30?: number; averageDaily90?: number; daysOfCover?: number | null; available?: number; incomingUnits?: number; openPurchaseOrderCount?: number; openReturnCount?: number; returned30?: number; returned90?: number; returnRate90?: number; sellThrough30?: number; projectedAvailable?: number; staleAllocationCount?: number; lastMovementAt?: string } }
+
+function InventoryChannelAvailabilityTable({ rows }: { rows: InventoryChannelAvailability[] }) {
+  const mappings = rows.flatMap((channel) => (channel.mappings || []).map((mapping) => ({ channel, mapping })))
+  return <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Channel</TableHead><TableHead>Source warehouse</TableHead><TableHead>Channel location</TableHead><TableHead>On hand</TableHead><TableHead>Reserved</TableHead><TableHead>Available</TableHead><TableHead>Publish qty</TableHead><TableHead>Health</TableHead></TableRow></TableHeader><TableBody>{mappings.map(({ channel, mapping }) => <TableRow key={`${channel.channelId}:${mapping.id}`}><TableCell><div className="flex items-center gap-2"><span className="font-medium">{channel.channelName || "Channel"}</span>{channel.enabled === false && <Badge variant="secondary">Disabled</Badge>}</div></TableCell><TableCell>{mapping.sourceWarehouseName || mapping.sourceWarehouseId || "-"}</TableCell><TableCell><p>{mapping.destinationLocationName || mapping.externalWarehouseCode || "Unmapped"}</p><p className="max-w-48 truncate font-mono text-xs text-muted-foreground">{mapping.destinationLocationId || "No destination ID"}</p></TableCell><TableCell>{numberLabel(mapping.onHand)}</TableCell><TableCell>{numberLabel(mapping.reserved)}</TableCell><TableCell>{numberLabel(mapping.available)}</TableCell><TableCell className="font-semibold">{numberLabel(mapping.sellable)}</TableCell><TableCell><Badge variant={mapping.healthy ? "outline" : "destructive"} className={mapping.healthy ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : ""} title={(mapping.issues || []).join("; ")}>{mapping.healthy ? "Ready" : `${(mapping.issues || []).length || 1} issue`}</Badge></TableCell></TableRow>)}{!mappings.length && <TableRow><TableCell colSpan={8} className="h-24 text-center text-muted-foreground">No enabled channel warehouse mappings are configured for this SKU.</TableCell></TableRow>}</TableBody></Table></div>
+}
 
 function InventorySourceAwareSummary({ data }: { data: InventoryOperationData }) {
   const metrics = data.metrics || {}
@@ -4994,7 +5116,11 @@ function InventorySkuDetailWorkspace() {
   const load = async () => {
     setLoading(true)
     try {
-      setData(await api<InventoryOperationData>(`/api/inventory/${encodeURIComponent(sku)}/operations`))
+      const [operations, channelResult] = await Promise.all([
+        api<InventoryOperationData>(`/api/inventory/${encodeURIComponent(sku)}/operations`),
+        api<{ availability?: InventoryChannelAvailability[] }>(`/api/inventory/${encodeURIComponent(sku)}/channel-availability`).catch(() => ({ availability: [] })),
+      ])
+      setData({ ...operations, channelAvailability: channelResult.availability || [] })
       setError("")
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to load SKU inventory.")
@@ -5056,7 +5182,7 @@ function InventorySkuDetailWorkspace() {
     <Card><CardContent className="grid gap-4 p-5 lg:grid-cols-[minmax(0,1fr)_auto]"><div><p className="text-xs font-semibold uppercase text-muted-foreground">Inventory control / SKU</p><h1 className="mt-1 text-2xl font-semibold">{item.sku}</h1><p className="mt-1 max-w-3xl text-sm text-muted-foreground">{item.marketplaceTitle || item.title || "Untitled product"}</p><div className="mt-3 flex flex-wrap gap-2"><Badge variant={available > 0 ? "default" : "destructive"}>{numberLabel(available)} physical available</Badge><Badge variant="outline">{numberLabel(metrics.allocatedUnits)} allocated</Badge><Badge variant="outline">{numberLabel(metrics.incomingUnits)} incoming</Badge><Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">{numberLabel(metrics.supplierAvailable)} supplier feed</Badge>{item.replenishable && <Badge variant="secondary">Replenishable</Badge>}</div></div><div className="grid grid-cols-2 gap-2 text-sm"><Detail label="Supplier" value={item.supplier || item.vendor || "-"} /><Detail label="Last movement" value={dateLabel(metrics.lastMovementAt)} /></div></CardContent></Card>
     <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{(data.health || []).map((signal) => <button key={signal.id} type="button" onClick={() => setTab(signal.tab || "overview")} className={`rounded-md border p-3 text-left transition-colors hover:border-primary ${signalTone(signal.severity)}`}><div className="flex items-start gap-2">{signal.severity === "success" ? <CheckCircle2 className="mt-0.5 size-4 text-emerald-600" /> : <AlertTriangle className={`mt-0.5 size-4 ${signal.severity === "critical" ? "text-red-600" : "text-amber-600"}`} />}<div><p className="text-sm font-semibold">{signal.title}</p><p className="mt-1 text-xs text-muted-foreground">{signal.detail}</p></div></div></button>)}</div>
     <Tabs value={tab} onValueChange={setTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="allocations">Allocations ({(data.allocations || []).length})</TabsTrigger><TabsTrigger value="orders">Orders ({(data.orders || []).length})</TabsTrigger><TabsTrigger value="purchase-orders">Purchase orders ({(data.purchaseOrders || []).length})</TabsTrigger><TabsTrigger value="returns">Returns ({(data.returns || []).length})</TabsTrigger><TabsTrigger value="movement">Change log</TabsTrigger></TabsList></div>
-      <TabsContent value="overview" className="mt-4 grid gap-4"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6"><Detail label="Available to promise" value={numberLabel(metrics.physicalAvailable)} /><Detail label="Open demand" value={numberLabel(metrics.openOrderUnits)} /><Detail label="Projected after POs" value={numberLabel(metrics.projectedAvailable)} /><Detail label="30-day sales" value={numberLabel(metrics.shipped30)} /><Detail label="Daily sell rate" value={Number(metrics.averageDaily30 || 0).toFixed(2)} /><Detail label="Days of cover" value={metrics.daysOfCover == null ? "No sales signal" : `${Number(metrics.daysOfCover).toFixed(1)} days`} /><Detail label="30-day sell-through" value={`${(Number(metrics.sellThrough30 || 0) * 100).toFixed(1)}%`} /><Detail label="90-day returns" value={numberLabel(metrics.returned90)} /><Detail label="90-day return rate" value={`${(Number(metrics.returnRate90 || 0) * 100).toFixed(1)}%`} /><Detail label="Open POs" value={numberLabel(metrics.openPurchaseOrderCount)} /><Detail label="Open returns" value={numberLabel(metrics.openReturnCount)} /><Detail label="Stale allocations" value={numberLabel(metrics.staleAllocationCount)} /></div><InventorySourceAwareSummary data={data} /><Card><CardHeader><CardTitle className="text-sm">Warehouse availability</CardTitle><CardDescription>Physical on hand, committed reservations, and available-to-promise by location.</CardDescription></CardHeader><CardContent><ProductWarehouseTable rows={item.warehouseStock || []} /></CardContent></Card></TabsContent>
+      <TabsContent value="overview" className="mt-4 grid gap-4"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6"><Detail label="Available to promise" value={numberLabel(metrics.physicalAvailable)} /><Detail label="Open demand" value={numberLabel(metrics.openOrderUnits)} /><Detail label="Projected after POs" value={numberLabel(metrics.projectedAvailable)} /><Detail label="30-day sales" value={numberLabel(metrics.shipped30)} /><Detail label="Daily sell rate" value={Number(metrics.averageDaily30 || 0).toFixed(2)} /><Detail label="Days of cover" value={metrics.daysOfCover == null ? "No sales signal" : `${Number(metrics.daysOfCover).toFixed(1)} days`} /><Detail label="30-day sell-through" value={`${(Number(metrics.sellThrough30 || 0) * 100).toFixed(1)}%`} /><Detail label="90-day returns" value={numberLabel(metrics.returned90)} /><Detail label="90-day return rate" value={`${(Number(metrics.returnRate90 || 0) * 100).toFixed(1)}%`} /><Detail label="Open POs" value={numberLabel(metrics.openPurchaseOrderCount)} /><Detail label="Open returns" value={numberLabel(metrics.openReturnCount)} /><Detail label="Stale allocations" value={numberLabel(metrics.staleAllocationCount)} /></div><InventorySourceAwareSummary data={data} /><Card><CardHeader><CardTitle className="text-sm">Warehouse availability</CardTitle><CardDescription>Physical on hand, committed reservations, and available-to-promise by location.</CardDescription></CardHeader><CardContent><ProductWarehouseTable rows={item.warehouseStock || []} /></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Channel availability</CardTitle><CardDescription>Explains the quantity each enabled channel can publish after reservations, safety stock, allocation percentage, fixed quantity, and maximum caps.</CardDescription></CardHeader><CardContent><InventoryChannelAvailabilityTable rows={data.channelAvailability || []} /></CardContent></Card></TabsContent>
       <TabsContent value="allocations" className="mt-4"><Card><CardHeader className="flex-row items-center justify-between"><div><CardTitle className="text-sm">Order allocations</CardTitle><CardDescription>Reassign stock that has not shipped, or release it back to available inventory.</CardDescription></div><Button size="sm" onClick={openAllocation}>Assign stock</Button></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Customer</TableHead><TableHead>Warehouse</TableHead><TableHead>Qty</TableHead><TableHead>Age</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>{(data.allocations || []).map((allocation) => <TableRow key={allocation.id}><TableCell className="font-medium"><a className="text-primary hover:underline" href={`/orders/${encodeURIComponent(allocation.orderId || "")}`}>{allocation.orderNumber || allocation.orderId}</a></TableCell><TableCell>{allocation.buyer || "-"}</TableCell><TableCell>{allocation.warehouseName || "-"}</TableCell><TableCell>{numberLabel(allocation.qty)}</TableCell><TableCell>{dateLabel(allocation.updatedAt || allocation.assignedAt)}</TableCell><TableCell><div className="flex justify-end gap-2"><Button size="sm" variant="outline" disabled={saving || !eligibleOrders.some((order) => order.id !== allocation.orderId)} onClick={() => openReassign(allocation)}>Reassign</Button><Button size="sm" variant="outline" disabled={saving} onClick={() => allocation.id && void release(allocation.id)}>Release</Button></div></TableCell></TableRow>)}{!(data.allocations || []).length && <TableRow><TableCell colSpan={6} className="h-24 text-center text-muted-foreground">No active order allocations for this SKU.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="orders" className="mt-4"><Card><CardHeader><CardTitle className="text-sm">Order demand</CardTitle><CardDescription>Open and completed demand, catalog matching, allocation, and fulfillment history.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Customer</TableHead><TableHead>Channel</TableHead><TableHead>Status</TableHead><TableHead>Required</TableHead><TableHead>Allocated</TableHead><TableHead>Unallocated</TableHead><TableHead>Matched by</TableHead></TableRow></TableHeader><TableBody>{(data.orders || []).map((order) => <TableRow key={order.id}><TableCell className="font-medium"><a className="text-primary hover:underline" href={`/orders/${encodeURIComponent(order.id || "")}`}>{order.orderNumber || order.id}</a></TableCell><TableCell>{order.buyer || "-"}</TableCell><TableCell>{order.source || "-"}</TableCell><TableCell><Badge variant={String(order.status || "").toLowerCase().includes("fulfill") ? "default" : "outline"}>{order.status || "Open"}</Badge></TableCell><TableCell>{numberLabel(Number(order.inventoryQuantity || 0) - Number(order.inventoryFulfilledQty || 0))}</TableCell><TableCell>{numberLabel(order.inventoryAllocatedQty)}</TableCell><TableCell><Badge variant={Number(order.inventoryUnallocatedQty || 0) > 0 ? "destructive" : "outline"}>{numberLabel(order.inventoryUnallocatedQty)}</Badge></TableCell><TableCell>{order.inventoryMatchMethod || "Exact SKU"}</TableCell></TableRow>)}{!(data.orders || []).length && <TableRow><TableCell colSpan={8} className="h-24 text-center text-muted-foreground">No orders reference this SKU.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="purchase-orders" className="mt-4"><Card><CardHeader><CardTitle className="text-sm">Purchase-order supply</CardTitle><CardDescription>Latest supplier orders, receipts, open incoming units, cost, and expected arrival.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Status</TableHead><TableHead>Ordered</TableHead><TableHead>Received</TableHead><TableHead>Open</TableHead><TableHead>Unit cost</TableHead><TableHead>Expected</TableHead></TableRow></TableHeader><TableBody>{(data.purchaseOrders || []).map((po) => <TableRow key={`${po.id}:${po.poNumber}`}><TableCell className="font-medium"><a className="text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(po.id || "")}`}>{po.poNumber || po.id}</a></TableCell><TableCell>{po.supplier || "-"}</TableCell><TableCell><Badge variant="outline">{po.status || "Draft"}</Badge></TableCell><TableCell>{numberLabel(po.orderedQty)}</TableCell><TableCell>{numberLabel(po.receivedQty)}</TableCell><TableCell>{numberLabel(po.openQty)}</TableCell><TableCell>{moneyLabel(po.unitCost)}</TableCell><TableCell>{dateLabel(po.expectedAt || po.placedAt)}</TableCell></TableRow>)}{!(data.purchaseOrders || []).length && <TableRow><TableCell colSpan={8} className="h-24 text-center text-muted-foreground">No purchase orders contain this SKU.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
@@ -8614,6 +8740,7 @@ function ShipmentGroupPanel({ orderId, order, onUpdated }: { orderId: string; or
 function OrderOperationsPanel({ orderId, order, onUpdated }: { orderId: string; order: Record<string, unknown>; onUpdated: () => Promise<void> }) {
   const [routing, setRouting] = useState(false)
   const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
+  const routingExplanations = Array.isArray(order.routingExplanation) ? order.routingExplanation as Array<Record<string, unknown>> : []
   const exceptions = (Array.isArray(order.workflowExceptions) ? order.workflowExceptions as Array<Record<string, unknown>> : []).filter((entry) => String(entry.status || "open").toLowerCase() !== "resolved")
   const route = async () => {
     setRouting(true)
@@ -8626,6 +8753,15 @@ function OrderOperationsPanel({ orderId, order, onUpdated }: { orderId: string; 
   return <div className="grid gap-4">
     <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Operational routing</p><p className="text-sm text-muted-foreground">Inventory is reserved per order line; unallocated supply is routed to purchasing or review.</p></div><Button size="sm" variant="outline" disabled={routing} onClick={() => void route()}>{routing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh routing</Button></div>
     <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.42fr)]"><Card><CardHeader><CardTitle className="text-sm">Line allocations</CardTitle><CardDescription>Every route is tied to an order line, warehouse, vendor, or purchase order.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Line</TableHead><TableHead>Route</TableHead><TableHead>Source</TableHead><TableHead>Quantity</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{routes.map((route) => <TableRow key={String(route.id)}><TableCell><p className="font-medium">{String(route.sku || "Unmatched SKU")}</p><p className="max-w-56 truncate text-xs text-muted-foreground">{String(route.title || "")}</p></TableCell><TableCell>{String(route.type || "warehouse").replace(/_/g, " ")}</TableCell><TableCell>{String(route.warehouseName || route.vendorName || route.purchaseOrderNumber || "Unassigned")}</TableCell><TableCell>{numberLabel(Number(route.qty || 0))}</TableCell><TableCell><Badge variant={String(route.status || "").toLowerCase() === "exception" ? "destructive" : "outline"}>{String(route.status || "new").replace(/_/g, " ")}</Badge></TableCell></TableRow>)}{!routes.length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No routes exist yet. Refresh routing to allocate stock or create supply requirements.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">Exceptions</CardTitle><CardDescription>Blocking issues are held here before warehouse work or purchasing begins.</CardDescription></CardHeader><CardContent className="grid gap-2">{exceptions.map((entry) => <div key={String(entry.id)} className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm"><div className="flex items-center justify-between gap-2"><p className="font-medium">{String(entry.sku || entry.type || "Order exception")}</p><Badge variant="destructive">{String(entry.severity || "blocking")}</Badge></div><p className="mt-1 text-muted-foreground">{String(entry.description || "This line requires operational review.")}</p></div>)}{!exceptions.length && <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm text-muted-foreground">No unresolved operational exceptions.</div>}</CardContent></Card></div>
+    <Card><CardHeader><CardTitle className="text-sm">Routing decisions</CardTitle><CardDescription>Why each line was assigned to a warehouse, supplier, or purchasing workflow.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Channel</TableHead><TableHead>Rule</TableHead><TableHead>Warehouses considered</TableHead><TableHead>Decision</TableHead></TableRow></TableHeader><TableBody>{routingExplanations.map((entry, index) => {
+      const considered = Array.isArray(entry.consideredWarehouses) ? entry.consideredWarehouses as Array<string | Record<string, unknown>> : []
+      const decisions = Array.isArray(entry.decisions) ? entry.decisions as Array<Record<string, unknown>> : []
+      const decisionText = decisions.length
+        ? decisions.map((decision) => `${String(decision.warehouseName || decision.routeType || decision.status || "Route")}: ${String(decision.reason || "Selected")}`).join("; ")
+        : considered.filter((row): row is Record<string, unknown> => typeof row === "object" && row !== null).map((row) => `${String(row.warehouseName || row.warehouseId || "Warehouse")}: ${String(row.reason || row.decision || "considered")}`).join("; ")
+      const warehouseText = considered.map((row) => typeof row === "string" ? row : String(row.warehouseName || row.warehouseId || "Warehouse")).join(", ")
+      return <TableRow key={String(entry.id || `${entry.sku || "line"}-${index}`)}><TableCell className="font-medium">{String(entry.sku || "-")}</TableCell><TableCell>{String(entry.channel || "Direct")}</TableCell><TableCell>{String(entry.ruleName || "Default priority")}</TableCell><TableCell className="max-w-72"><p className="truncate" title={warehouseText}>{warehouseText || "No eligible warehouse"}</p></TableCell><TableCell className="min-w-80 text-sm text-muted-foreground">{decisionText || "Routing evaluated; no detailed decision was retained."}</TableCell></TableRow>
+    })}{!routingExplanations.length && <TableRow><TableCell colSpan={5} className="h-20 text-center text-muted-foreground">Routing details appear after the order is evaluated.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
   </div>
 }
 
@@ -9576,6 +9712,10 @@ type WarehouseRegisterRecord = {
   isPhysical?: boolean
   allowReceiving?: boolean
   allowAudits?: boolean
+  isSellable?: boolean
+  capacityUnits?: number
+  fulfillmentNetwork?: string
+  dropshipVendorId?: string
   managedByVendorFeed?: boolean
   sourceManaged?: boolean
   vendorId?: string
@@ -9664,6 +9804,10 @@ const emptyWarehouseForm = {
   isPhysical: true,
   allowReceiving: true,
   allowAudits: true,
+  isSellable: true,
+  capacityUnits: 0,
+  fulfillmentNetwork: "default",
+  dropshipVendorId: "",
   addressLine1: "",
   addressLine2: "",
   city: "",
@@ -9724,6 +9868,10 @@ function WarehouseRegister() {
       isPhysical: warehouse.isPhysical !== false,
       allowReceiving: warehouse.allowReceiving !== false,
       allowAudits: warehouse.allowAudits !== false,
+      isSellable: warehouse.isSellable !== false,
+      capacityUnits: Number(warehouse.capacityUnits || 0),
+      fulfillmentNetwork: String(warehouse.fulfillmentNetwork || "default"),
+      dropshipVendorId: String(warehouse.dropshipVendorId || warehouse.vendorId || ""),
       addressLine1: String(warehouse.addressLine1 || ""),
       addressLine2: String(warehouse.addressLine2 || ""),
       city: String(warehouse.city || ""),
@@ -9762,6 +9910,7 @@ function WarehouseRegister() {
       isPhysical: option.isPhysical,
       allowReceiving: option.allowReceiving,
       allowAudits: option.allowAudits,
+      isSellable: option.inventorySourceType !== "transfer",
       ...(!option.isPhysical ? { isDefaultReceiving: false, isDefaultReturns: false, requireBinValidation: false } : {}),
     }))
   }
@@ -9817,6 +9966,12 @@ function WarehouseRegister() {
           <div className="flex items-center gap-2"><Switch id="warehouse-default-receiving" disabled={!form.isPhysical} checked={form.isDefaultReceiving} onCheckedChange={(isDefaultReceiving) => setForm((current) => ({ ...current, isDefaultReceiving }))} /><Label htmlFor="warehouse-default-receiving">Default receiving</Label></div>
           <div className="flex items-center gap-2"><Switch id="warehouse-default-returns" disabled={!form.isPhysical} checked={form.isDefaultReturns} onCheckedChange={(isDefaultReturns) => setForm((current) => ({ ...current, isDefaultReturns }))} /><Label htmlFor="warehouse-default-returns">Default returns</Label></div>
           <div className="flex items-center gap-2"><Switch id="warehouse-bin-validation" disabled={!form.isPhysical} checked={form.requireBinValidation} onCheckedChange={(requireBinValidation) => setForm((current) => ({ ...current, requireBinValidation }))} /><Label htmlFor="warehouse-bin-validation">Require bins</Label></div>
+        </div>
+        <div className="grid gap-4 rounded-md border bg-muted/20 p-3 sm:col-span-2 sm:grid-cols-2">
+          <div className="flex items-center gap-2"><Switch id="warehouse-sellable" checked={form.isSellable} onCheckedChange={(isSellable) => setForm((current) => ({ ...current, isSellable }))} /><Label htmlFor="warehouse-sellable">Available for order routing</Label></div>
+          <Field label="Capacity (units)"><Input type="number" min="0" value={form.capacityUnits} onChange={(event) => setForm((current) => ({ ...current, capacityUnits: Math.max(0, Number(event.target.value || 0)) }))} /><p className="mt-1 text-xs text-muted-foreground">Use 0 when capacity is not limited.</p></Field>
+          <Field label="Fulfillment network"><Input value={form.fulfillmentNetwork} onChange={(event) => setForm((current) => ({ ...current, fulfillmentNetwork: event.target.value }))} placeholder="default" /></Field>
+          <Field label="Dropship vendor ID"><Input value={form.dropshipVendorId} onChange={(event) => setForm((current) => ({ ...current, dropshipVendorId: event.target.value }))} placeholder={form.inventorySourceType === "supplier_feed" ? "Required for direct supplier routing" : "Optional"} /></Field>
         </div>
         <div className="sm:col-span-2"><Field label="Notes"><Textarea value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Handling, access, or operational notes" /></Field></div>
       </div>
@@ -9928,7 +10083,7 @@ function WarehouseDetailPage({ warehouseId }: { warehouseId: string }) {
   const virtual = virtualRecord?.isPhysical === false || ["supplier_feed", "virtual", "transfer"].includes(String(virtualRecord?.inventorySourceType || "").toLowerCase())
   const draftVirtual = draft?.isPhysical === false || ["supplier_feed", "virtual", "transfer"].includes(String(draft?.inventorySourceType || "").toLowerCase())
   const address = [warehouse?.addressLine1, warehouse?.addressLine2, warehouse?.city, warehouse?.state, warehouse?.postalCode, warehouse?.country].filter(Boolean).join(", ") || (supplierFeed ? "Supplier network" : virtual ? "Non-physical inventory location" : "Address not configured")
-  const updateDraft = (field: keyof WarehouseRegisterRecord, value: string | boolean) => setDraft((current) => current ? { ...current, [field]: value } : current)
+  const updateDraft = (field: keyof WarehouseRegisterRecord, value: string | boolean | number) => setDraft((current) => current ? { ...current, [field]: value } : current)
   const selectWarehouseType = (warehouseType: string) => {
     const option = warehouseTypeOption(warehouseType)
     setDraft((current) => current ? {
@@ -9936,6 +10091,7 @@ function WarehouseDetailPage({ warehouseId }: { warehouseId: string }) {
       warehouseType: option.value,
       inventorySourceType: option.inventorySourceType,
       isPhysical: option.isPhysical,
+      isSellable: option.value !== "Transfer / In Transit",
       allowReceiving: option.allowReceiving,
       allowAudits: option.allowAudits,
       ...(!option.isPhysical ? { isDefaultReceiving: false, isDefaultReturns: false, requireBinValidation: false } : {}),
@@ -9969,6 +10125,7 @@ function WarehouseDetailPage({ warehouseId }: { warehouseId: string }) {
 
   const summary = detail?.summary || {}
   const toggleRows: Array<[keyof WarehouseRegisterRecord, string, string]> = [
+    ["isSellable", "Available for order routing", "Allow paid orders to reserve and fulfill inventory from this location."],
     ["allowReceiving", "Receiving enabled", "Allow receipts and PO arrivals into this warehouse."],
     ["allowAudits", "Warehouse audits enabled", "Allow cycle counts and physical inventory audits."],
     ["isDefaultReceiving", "Default receiving location", "Use this warehouse when a receipt has no explicit destination."],
@@ -9984,10 +10141,10 @@ function WarehouseDetailPage({ warehouseId }: { warehouseId: string }) {
 
   return <div className="grid gap-5">
     <PageHeader eyebrow="Warehouse operations / location" title={String(warehouse.name || "Warehouse")} description={`${String(warehouse.code || warehouse.id || "No code")} / ${String(warehouse.warehouseType || (virtual ? "Virtual inventory source" : "Physical warehouse"))}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/warehouse/warehouses">Back to warehouses</a></Button>{editing ? <><Button size="sm" variant="outline" onClick={() => { setDraft(warehouse); setEditing(false) }}>Cancel</Button><Button size="sm" disabled={saving} onClick={() => void save()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save changes</Button></> : <Button size="sm" onClick={() => { setDraft(warehouse); setEditing(true); setTab("settings") }}><Pencil className="size-4" /> Edit warehouse</Button>}</div>} />
-    <div className="flex flex-wrap items-center gap-2"><Badge variant={String(warehouse.status || "active") === "inactive" ? "secondary" : "default"}>{String(warehouse.status || "active")}</Badge>{virtual ? <Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">Virtual source</Badge> : <Badge variant="outline" className="border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300">Physical location</Badge>}{warehouse.isDefaultReceiving && <Badge variant="outline">Default receiving</Badge>}{warehouse.isDefaultReturns && <Badge variant="outline">Default returns</Badge>}</div>
+    <div className="flex flex-wrap items-center gap-2"><Badge variant={String(warehouse.status || "active") === "inactive" ? "secondary" : "default"}>{String(warehouse.status || "active")}</Badge>{virtual ? <Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">Virtual source</Badge> : <Badge variant="outline" className="border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300">Physical location</Badge>}<Badge variant="outline" className={warehouse.isSellable === false ? "border-slate-400/40 text-muted-foreground" : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"}>{warehouse.isSellable === false ? "Not sellable" : "Order routing enabled"}</Badge>{warehouse.isDefaultReceiving && <Badge variant="outline">Default receiving</Badge>}{warehouse.isDefaultReturns && <Badge variant="outline">Default returns</Badge>}</div>
     <Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger>{!virtual && <TabsTrigger value="bins">Bins ({numberLabel(summary.totalBins || 0)})</TabsTrigger>}<TabsTrigger value="settings">Settings</TabsTrigger><TabsTrigger value="activity">Activity ({numberLabel((detail?.activity || []).length)})</TabsTrigger></TabsList></div>
       <TabsContent value="overview" className="mt-4 grid gap-4">
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6"><Detail label="Active bins" value={virtual ? "Not applicable" : `${numberLabel(summary.activeBins || 0)} / ${numberLabel(summary.totalBins || 0)}`} /><Detail label="Audits" value={virtual ? "Not applicable" : `${numberLabel(summary.openAudits || 0)} open`} /><Detail label="Receipts" value={virtual ? "Not applicable" : numberLabel(summary.receipts || 0)} /><Detail label="Movements" value={numberLabel(summary.movements || 0)} /><Detail label="Receiving" value={warehouse.allowReceiving === false ? "Disabled" : "Enabled"} /><Detail label="Inventory sync" value={warehouse.shopifyInventoryPushEnabled ? "Shopify enabled" : "Local only"} /></div>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Active bins" value={virtual ? "Not applicable" : `${numberLabel(summary.activeBins || 0)} / ${numberLabel(summary.totalBins || 0)}`} /><Detail label="Audits" value={virtual ? "Not applicable" : `${numberLabel(summary.openAudits || 0)} open`} /><Detail label="Movements" value={numberLabel(summary.movements || 0)} /><Detail label="Order routing" value={warehouse.isSellable === false ? "Excluded" : "Sellable"} /><Detail label="Capacity" value={Number(warehouse.capacityUnits || 0) > 0 ? `${numberLabel(warehouse.capacityUnits)} units` : "Unlimited"} /><Detail label="Network" value={warehouse.fulfillmentNetwork || "default"} /><Detail label="Receiving" value={warehouse.allowReceiving === false ? "Disabled" : "Enabled"} /><Detail label="Inventory sync" value={warehouse.shopifyInventoryPushEnabled ? "Shopify enabled" : "Local only"} /></div>
         {supplierFeed && <Alert><Database className="size-4" /><AlertTitle>Virtual supplier inventory</AlertTitle><AlertDescription>This location represents imported DataWarehouse availability. Physical bins, receiving, and warehouse audits belong to a physical warehouse.</AlertDescription></Alert>}
         {virtual && !supplierFeed && <Alert><Warehouse className="size-4" /><AlertTitle>{String(warehouse.warehouseType || "Non-physical inventory")}</AlertTitle><AlertDescription>This location tracks inventory without physical receiving, bins, or audits. Use it for virtual availability or stock moving between facilities.</AlertDescription></Alert>}
         <div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader><CardTitle className="text-base">Location and ownership</CardTitle><CardDescription>Who operates this location and where work happens.</CardDescription></CardHeader><CardContent className="grid gap-3 text-sm"><div><p className="text-xs font-medium uppercase text-muted-foreground">Address</p><p>{address}</p></div><Separator /><div className="grid gap-3 sm:grid-cols-2"><div><p className="text-xs font-medium uppercase text-muted-foreground">Manager</p><p>{warehouse.managerName || "Not assigned"}</p></div><div><p className="text-xs font-medium uppercase text-muted-foreground">Contact</p><p>{warehouse.contactName || warehouse.email || warehouse.phone || "Not configured"}</p></div><div><p className="text-xs font-medium uppercase text-muted-foreground">Timezone</p><p>{warehouse.timezone || "America/New_York"}</p></div><div><p className="text-xs font-medium uppercase text-muted-foreground">Operating hours</p><p>{warehouse.operatingHours || "Not configured"}</p></div></div></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Operational rules</CardTitle><CardDescription>Receiving controls and connected inventory destination.</CardDescription></CardHeader><CardContent className="grid gap-3 text-sm"><div className="grid gap-2 sm:grid-cols-2"><Badge variant="outline">{warehouse.requireAppointment ? "Appointment required" : "Open receiving"}</Badge><Badge variant="outline">{warehouse.requireBinValidation ? "Bin validation on" : "Bin validation off"}</Badge><Badge variant="outline">{warehouse.requireSerialScan ? "Serial scan on" : "Serial scan off"}</Badge><Badge variant="outline">{warehouse.requirePhotoForDamage ? "Damage photo required" : "Damage photo optional"}</Badge></div><Separator /><div><p className="text-xs font-medium uppercase text-muted-foreground">Shopify location</p><p>{warehouse.shopifyLocationName || "Not mapped"}</p><p className="text-xs text-muted-foreground">{warehouse.shopifyLocationId || "No location GID"}</p></div><div><p className="text-xs font-medium uppercase text-muted-foreground">Carrier cutoff</p><p>{warehouse.carrierCutoffTime || "Not configured"}</p></div></CardContent></Card></div>
@@ -10022,7 +10179,7 @@ function WarehouseDetailPage({ warehouseId }: { warehouseId: string }) {
             <Field label="Country"><Input disabled={!editing || draftVirtual} value={String(draft.country || "US")} onChange={(event) => updateDraft("country", event.target.value.toUpperCase())} /></Field>
           </CardContent>
         </Card>
-        <Card><CardHeader><CardTitle className="text-base">Operations and controls</CardTitle><CardDescription>Settings used by receiving, returns, audits, scanning, and connected channels.</CardDescription></CardHeader><CardContent className="grid gap-4"><div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"><Field label="Operating hours"><Input disabled={!editing || virtual} value={String(draft.operatingHours || "")} onChange={(event) => updateDraft("operatingHours", event.target.value)} placeholder="Mon-Fri 08:00-17:00" /></Field><Field label="Carrier cutoff"><Input disabled={!editing || virtual} type="time" value={String(draft.carrierCutoffTime || "")} onChange={(event) => updateDraft("carrierCutoffTime", event.target.value)} /></Field><Field label="Shopify location name"><Input disabled={!editing} value={String(draft.shopifyLocationName || "")} onChange={(event) => updateDraft("shopifyLocationName", event.target.value)} /></Field><div className="sm:col-span-2 lg:col-span-3"><Field label="Shopify location GID"><Input disabled={!editing} value={String(draft.shopifyLocationId || "")} onChange={(event) => updateDraft("shopifyLocationId", event.target.value)} placeholder="gid://shopify/Location/..." /></Field></div></div><div className="grid gap-3 md:grid-cols-2">{toggleRows.map(([field, title, description]) => <div key={String(field)} className={cn("flex items-start justify-between gap-4 rounded-md border p-3", !editing && "bg-muted/20")}><div><Label htmlFor={`warehouse-${String(field)}`}>{title}</Label><p className="mt-1 text-xs text-muted-foreground">{description}</p></div><Switch id={`warehouse-${String(field)}`} disabled={!editing || (virtual && !["shopifyInventoryPushEnabled"].includes(String(field)))} checked={draft[field] === true} onCheckedChange={(checked) => updateDraft(field, checked)} /></div>)}</div><Field label="Receiving instructions"><Textarea disabled={!editing || virtual} value={String(draft.receivingInstructions || "")} onChange={(event) => updateDraft("receivingInstructions", event.target.value)} /></Field><Field label="Warehouse notes"><Textarea disabled={!editing} value={String(draft.notes || "")} onChange={(event) => updateDraft("notes", event.target.value)} /></Field>{editing && <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => { setDraft(warehouse); setEditing(false) }}>Cancel</Button><Button disabled={saving} onClick={() => void save()}>{saving && <Loader2 className="size-4 animate-spin" />} Save changes</Button></div>}</CardContent></Card>
+        <Card><CardHeader><CardTitle className="text-base">Operations and controls</CardTitle><CardDescription>Settings used by routing, receiving, returns, audits, scanning, and connected channels.</CardDescription></CardHeader><CardContent className="grid gap-4"><div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"><Field label="Operating hours"><Input disabled={!editing || virtual} value={String(draft.operatingHours || "")} onChange={(event) => updateDraft("operatingHours", event.target.value)} placeholder="Mon-Fri 08:00-17:00" /></Field><Field label="Carrier cutoff"><Input disabled={!editing || virtual} type="time" value={String(draft.carrierCutoffTime || "")} onChange={(event) => updateDraft("carrierCutoffTime", event.target.value)} /></Field><Field label="Capacity units"><Input disabled={!editing} type="number" min="0" value={String(draft.capacityUnits || 0)} onChange={(event) => updateDraft("capacityUnits", Number(event.target.value || 0))} /><p className="mt-1 text-xs text-muted-foreground">Use 0 for unlimited capacity.</p></Field><Field label="Fulfillment network"><Input disabled={!editing} value={String(draft.fulfillmentNetwork || "default")} onChange={(event) => updateDraft("fulfillmentNetwork", event.target.value)} placeholder="default" /></Field><Field label="Dropship vendor ID"><Input disabled={!editing || !supplierFeed} value={String(draft.dropshipVendorId || "")} onChange={(event) => updateDraft("dropshipVendorId", event.target.value)} placeholder="Vendor profile ID" /></Field><Field label="Shopify location name"><Input disabled={!editing} value={String(draft.shopifyLocationName || "")} onChange={(event) => updateDraft("shopifyLocationName", event.target.value)} /></Field><div className="sm:col-span-2 lg:col-span-3"><Field label="Shopify location GID"><Input disabled={!editing} value={String(draft.shopifyLocationId || "")} onChange={(event) => updateDraft("shopifyLocationId", event.target.value)} placeholder="gid://shopify/Location/..." /></Field></div></div><div className="grid gap-3 md:grid-cols-2">{toggleRows.map(([field, title, description]) => <div key={String(field)} className={cn("flex items-start justify-between gap-4 rounded-md border p-3", !editing && "bg-muted/20")}><div><Label htmlFor={`warehouse-${String(field)}`}>{title}</Label><p className="mt-1 text-xs text-muted-foreground">{description}</p></div><Switch id={`warehouse-${String(field)}`} disabled={!editing || (virtual && !["shopifyInventoryPushEnabled", "isSellable"].includes(String(field)))} checked={draft[field] === true} onCheckedChange={(checked) => updateDraft(field, checked)} /></div>)}</div><Field label="Receiving instructions"><Textarea disabled={!editing || virtual} value={String(draft.receivingInstructions || "")} onChange={(event) => updateDraft("receivingInstructions", event.target.value)} /></Field><Field label="Warehouse notes"><Textarea disabled={!editing} value={String(draft.notes || "")} onChange={(event) => updateDraft("notes", event.target.value)} /></Field>{editing && <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => { setDraft(warehouse); setEditing(false) }}>Cancel</Button><Button disabled={saving} onClick={() => void save()}>{saving && <Loader2 className="size-4 animate-spin" />} Save changes</Button></div>}</CardContent></Card>
       </TabsContent>
       <TabsContent value="activity" className="mt-4"><Card><CardHeader className="gap-3 border-b"><div><CardTitle className="text-base">Warehouse activity</CardTitle><CardDescription>A combined log of settings, bins, inventory movements, receiving, and audits for this location.</CardDescription></div><div className="flex flex-col gap-2 sm:flex-row"><div className="relative flex-1"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={activityQuery} onChange={(event) => setActivityQuery(event.target.value)} placeholder="Search event, SKU, reference, source, or user" /></div><Select value={activityType} onValueChange={setActivityType}><SelectTrigger className="sm:w-52"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All activity</SelectItem><SelectItem value="settings">Settings</SelectItem><SelectItem value="bin">Bins</SelectItem><SelectItem value="inventory">Inventory</SelectItem><SelectItem value="receipt">Receiving</SelectItem><SelectItem value="audit">Audits</SelectItem></SelectContent></Select><Button variant="outline" size="sm" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Date</TableHead><TableHead>Event</TableHead><TableHead>Details</TableHead><TableHead>Source</TableHead><TableHead>Reference</TableHead><TableHead>User</TableHead></TableRow></TableHeader><TableBody>{activity.map((row) => <TableRow key={String(row.id)}><TableCell className="whitespace-nowrap">{dateLabel(row.createdAt)}</TableCell><TableCell><div className="flex items-center gap-2">{row.type === "inventory" ? <Activity className="size-4 text-blue-600" /> : row.type === "audit" ? <CheckCircle2 className="size-4 text-emerald-600" /> : row.type === "receipt" ? <Truck className="size-4 text-violet-600" /> : row.type === "bin" ? <Boxes className="size-4 text-amber-600" /> : <Settings className="size-4 text-muted-foreground" />}<span className="font-medium">{row.title || "Warehouse updated"}</span></div></TableCell><TableCell className="min-w-72">{row.message || "-"}</TableCell><TableCell><Badge variant="outline">{row.source || "Warehouse"}</Badge></TableCell><TableCell>{row.reference || "-"}</TableCell><TableCell>{row.user || "System"}</TableCell></TableRow>)}{!activity.length && <TableRow><TableCell colSpan={6} className="h-28 text-center text-muted-foreground">No warehouse activity matches this view.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
     </Tabs>

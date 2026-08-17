@@ -104,6 +104,19 @@ function variantSku(baseSku = "", suffix = "EA") {
   return sku && !sku.toUpperCase().endsWith(`-${suffix}`) ? `${sku}-${suffix}` : sku;
 }
 
+function channelSellableQuantity(quantity = 0, options = {}) {
+  const mode = textValue(options.inventoryMode || "pooled").toLowerCase();
+  if (mode === "disabled") return 0;
+  if (mode === "fixed") return Math.max(0, Math.floor(numberValue(options.fixedQty, 0)));
+  const safetyQty = Math.max(0, Math.floor(numberValue(options.safetyQty, 0)));
+  const allocationPercent = Math.max(0, Math.min(100, numberValue(options.allocationPercent, 100)));
+  const maximum = Math.max(0, Math.floor(numberValue(options.maxSellableQty, 0)));
+  let sellable = Math.max(0, Math.floor(numberValue(quantity, 0)) - safetyQty);
+  sellable = Math.floor(sellable * (allocationPercent / 100));
+  if (maximum > 0) sellable = Math.min(sellable, maximum);
+  return sellable;
+}
+
 function baseSkuCandidates(item = {}) {
   return [...new Set([item.sku, item.vendor_sku, item.vendorSku, item.mfr_part_number, item.mfrPartNumber]
     .map(textValue)
@@ -131,7 +144,7 @@ function expectedVariantQuantities(item = {}, options = {}) {
     : 0;
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved);
+  const availableEach = channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options);
   const uomQty = productUomQty(item);
   if (!baseSku) return [];
   if (uomQty <= 1) return [{ sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }];
@@ -149,7 +162,7 @@ function expectedVariantQuantitiesForShopify(item = {}, variants = [], options =
     : 0;
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved);
+  const availableEach = channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options);
   const bySku = new Map((variants || []).map((variant) => [textValue(variant.sku).toLowerCase(), variant]));
   const expected = expectedVariantQuantities(item, options);
   const matchedExpected = expected.filter((row) => bySku.has(textValue(row.sku).toLowerCase()));
@@ -544,6 +557,13 @@ async function main() {
   const explicitLocation = normalizeGid(argValue("location", ""), "Location");
   const batchSize = Math.max(1, Math.min(250, Number(argValue("batch-size", "100")) || 100));
   const packMode = ["divide", "export"].includes(argValue("pack-mode", "export")) ? argValue("pack-mode", "export") : "export";
+  const quantityPolicy = {
+    inventoryMode: argValue("inventory-mode", "pooled"),
+    allocationPercent: numberValue(argValue("allocation-percent", "100"), 100),
+    safetyQty: numberValue(argValue("safety-qty", "0"), 0),
+    maxSellableQty: numberValue(argValue("max-sellable-qty", "0"), 0),
+    fixedQty: numberValue(argValue("fixed-qty", "0"), 0)
+  };
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const reportPath = path.join(OUTPUT_DIR, `shopify-inventory-${apply ? "applied" : "dry-run"}-${timestamp}.json`);
   const token = await shopifyToken();
@@ -566,6 +586,7 @@ async function main() {
       fulfillsOnlineOrders: location.fulfillsOnlineOrders === true
     })),
     packMode,
+    quantityPolicy,
     requestedSku,
     explicitQuantity,
     productsLoaded: products.length,
@@ -611,7 +632,7 @@ async function main() {
       if (!productId) continue;
       const variants = variantsByProduct.get(productId) || [];
       const bySku = new Map(variants.map((variant) => [textValue(variant.sku).toLowerCase(), variant]));
-      const expectedRows = expectedVariantQuantitiesForShopify(product, variants, { packMode });
+      const expectedRows = expectedVariantQuantitiesForShopify(product, variants, { packMode, ...quantityPolicy });
       let matched = 0;
       for (const expected of expectedRows) {
         const variant = bySku.get(expected.sku.toLowerCase());
@@ -648,7 +669,7 @@ async function main() {
           sku: product.sku || "",
           vendorSku: product.vendor_sku || "",
           shopifyId: productId,
-          expectedSkus: expectedRows.length ? expectedRows.map((expected) => expected.sku) : expectedVariantQuantities(product, { packMode }).map((expected) => expected.sku),
+          expectedSkus: expectedRows.length ? expectedRows.map((expected) => expected.sku) : expectedVariantQuantities(product, { packMode, ...quantityPolicy }).map((expected) => expected.sku),
           shopifyVariantSkus: variants.map((variant) => variant.sku).filter(Boolean)
         });
       }
