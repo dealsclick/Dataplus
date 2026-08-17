@@ -9576,6 +9576,13 @@ type WarehouseRegisterRecord = {
   isPhysical?: boolean
   allowReceiving?: boolean
   allowAudits?: boolean
+  managedByVendorFeed?: boolean
+  sourceManaged?: boolean
+  vendorId?: string
+  vendorName?: string
+  vendorFeedIds?: string[]
+  sourceFeedNames?: string[]
+  sourceFeedTransport?: string
   contactName?: string
   managerName?: string
   phone?: string
@@ -9637,12 +9644,13 @@ const WAREHOUSE_TYPE_OPTIONS = [
   { value: "Overflow Storage", description: "Supplemental physical storage used when primary capacity is limited.", inventorySourceType: "physical", isPhysical: true, allowReceiving: true, allowAudits: true },
   { value: "3PL / Partner Warehouse", description: "Inventory held by an external logistics or fulfillment partner.", inventorySourceType: "third_party", isPhysical: true, allowReceiving: false, allowAudits: false },
   { value: "Transfer / In Transit", description: "Temporary inventory location for stock moving between facilities.", inventorySourceType: "transfer", isPhysical: false, allowReceiving: false, allowAudits: false },
+  { value: "Virtual Supplier Feed", description: "System-managed availability supplied by a vendor's direct feed.", inventorySourceType: "supplier_feed", isPhysical: false, allowReceiving: false, allowAudits: false },
   { value: "Virtual Inventory Source", description: "Non-physical availability used for feeds, dropship, or pooled stock.", inventorySourceType: "virtual", isPhysical: false, allowReceiving: false, allowAudits: false },
 ] as const
 
 function warehouseTypeOption(value?: string) {
   const key = String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "")
-  const aliases: Record<string, string> = { warehouse: "physicalwarehouse", physical: "physicalwarehouse", virtual: "virtualinventorysource", transfer: "transferintransit", transit: "transferintransit", store: "retailstorepickup", retail: "retailstorepickup" }
+  const aliases: Record<string, string> = { warehouse: "physicalwarehouse", physical: "physicalwarehouse", virtual: "virtualinventorysource", supplierfeed: "virtualsupplierfeed", virtualsuppliernetwork: "virtualsupplierfeed", transfer: "transferintransit", transit: "transferintransit", store: "retailstorepickup", retail: "retailstorepickup" }
   const normalized = aliases[key] || key || "physicalwarehouse"
   return WAREHOUSE_TYPE_OPTIONS.find((option) => option.value.toLowerCase().replace(/[^a-z0-9]+/g, "") === normalized) || WAREHOUSE_TYPE_OPTIONS[0]
 }
@@ -9777,7 +9785,7 @@ function WarehouseRegister() {
             <TableCell><a className="font-medium text-primary hover:underline" href={`/warehouse/warehouses/${encodeURIComponent(String(warehouse.id || ""))}`}>{String(warehouse.name || "Unnamed warehouse")}</a><p className="text-xs text-muted-foreground">{String(warehouse.code || warehouse.id || "No code")}</p></TableCell>
             <TableCell><Badge variant="outline" className={virtual ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300" : "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300"}>{String(warehouse.warehouseType || (virtual ? "Virtual inventory source" : "Physical warehouse"))}</Badge></TableCell>
             <TableCell><Badge variant={String(warehouse.status || "active").toLowerCase() === "inactive" ? "secondary" : "default"}>{String(warehouse.status || "active")}</Badge></TableCell>
-            <TableCell><p className="max-w-64 truncate">{String(warehouse.inventorySourceType || "").toLowerCase() === "supplier_feed" ? "Supplier network" : String(warehouse.inventorySourceType || "").toLowerCase() === "transfer" ? "In transit" : virtual ? "Virtual inventory" : address(warehouse)}</p></TableCell>
+            <TableCell><p className="max-w-64 truncate" title={warehouse.managedByVendorFeed ? `${warehouse.vendorName || "Vendor"}: ${(warehouse.sourceFeedNames || []).join(", ")}` : undefined}>{String(warehouse.inventorySourceType || "").toLowerCase() === "supplier_feed" ? (warehouse.managedByVendorFeed ? warehouse.vendorName || "Vendor direct feed" : "DataWarehouse supplier network") : String(warehouse.inventorySourceType || "").toLowerCase() === "transfer" ? "In transit" : virtual ? "Virtual inventory" : address(warehouse)}</p></TableCell>
             <TableCell>{virtual ? <span className="text-muted-foreground">Not applicable</span> : <span>{numberLabel(activeBins)} active / {numberLabel(bins.length)} total</span>}</TableCell>
             <TableCell><div className="flex flex-wrap gap-1">{warehouse.isDefaultReceiving && <Badge variant="secondary">Receiving</Badge>}{warehouse.isDefaultReturns && <Badge variant="secondary">Returns</Badge>}{!warehouse.isDefaultReceiving && !warehouse.isDefaultReturns && <span className="text-muted-foreground">-</span>}</div></TableCell>
             <TableCell>{warehouse.shopifyLocationName || warehouse.shopifyLocationId ? <div><p>{String(warehouse.shopifyLocationName || "Shopify location")}</p><p className="max-w-48 truncate text-xs text-muted-foreground">{String(warehouse.shopifyLocationId || "")}</p></div> : <span className="text-muted-foreground">Not mapped</span>}</TableCell>
@@ -9793,13 +9801,13 @@ function WarehouseRegister() {
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Warehouse name"><Input value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Staten Island 2" /></Field>
         <Field label="Warehouse code"><Input value={form.code} onChange={(event) => setForm((current) => ({ ...current, code: event.target.value.toUpperCase() }))} placeholder="SI2" /></Field>
-        <Field label="Status"><Select value={form.status} onValueChange={(status) => setForm((current) => ({ ...current, status }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
+        <Field label="Status"><Select disabled={editing?.managedByVendorFeed === true} value={form.status} onValueChange={(status) => setForm((current) => ({ ...current, status }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select>{editing?.managedByVendorFeed && <p className="mt-1 text-xs text-muted-foreground">Status follows the vendor profile.</p>}</Field>
         <Field label="Warehouse type">
           <Select disabled={String(editing?.inventorySourceType || "").toLowerCase() === "supplier_feed"} value={warehouseTypeOption(form.warehouseType).value} onValueChange={selectWarehouseType}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>{WAREHOUSE_TYPE_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.value}</SelectItem>)}</SelectContent>
           </Select>
-          <p className="mt-1 text-xs text-muted-foreground">{String(editing?.inventorySourceType || "").toLowerCase() === "supplier_feed" ? "Managed by the DataWarehouse supplier feed." : warehouseTypeOption(form.warehouseType).description}</p>
+          <p className="mt-1 text-xs text-muted-foreground">{String(editing?.inventorySourceType || "").toLowerCase() === "supplier_feed" ? (editing?.managedByVendorFeed ? `Managed by ${editing.vendorName || "the vendor"}'s direct feed.` : "Managed by the DataWarehouse universal supplier feed.") : warehouseTypeOption(form.warehouseType).description}</p>
         </Field>
         <Field label="Address line 1"><Input value={form.addressLine1} onChange={(event) => setForm((current) => ({ ...current, addressLine1: event.target.value }))} /></Field>
         <Field label="Address line 2"><Input value={form.addressLine2} onChange={(event) => setForm((current) => ({ ...current, addressLine2: event.target.value }))} /></Field>
@@ -9993,13 +10001,13 @@ function WarehouseDetailPage({ warehouseId }: { warehouseId: string }) {
           <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <Field label="Warehouse name"><Input disabled={!editing} value={String(draft.name || "")} onChange={(event) => updateDraft("name", event.target.value)} /></Field>
             <Field label="Code"><Input disabled={!editing} value={String(draft.code || "")} onChange={(event) => updateDraft("code", event.target.value.toUpperCase())} /></Field>
-            <Field label="Status"><Select disabled={!editing} value={String(draft.status || "active")} onValueChange={(value) => updateDraft("status", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
+            <Field label="Status"><Select disabled={!editing || warehouse?.managedByVendorFeed === true} value={String(draft.status || "active")} onValueChange={(value) => updateDraft("status", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select>{warehouse?.managedByVendorFeed && <p className="mt-1 text-xs text-muted-foreground">Status follows the vendor profile.</p>}</Field>
             <Field label="Warehouse type">
               <Select disabled={!editing || supplierFeed} value={warehouseTypeOption(draft.warehouseType).value} onValueChange={selectWarehouseType}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>{WAREHOUSE_TYPE_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.value}</SelectItem>)}</SelectContent>
               </Select>
-              <p className="mt-1 text-xs text-muted-foreground">{supplierFeed ? "Managed by the DataWarehouse supplier feed." : warehouseTypeOption(draft.warehouseType).description}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{supplierFeed ? (warehouse?.managedByVendorFeed ? `Managed by ${warehouse.vendorName || "the vendor"}'s direct feed. Contributing feed${(warehouse.sourceFeedNames || []).length === 1 ? "" : "s"}: ${(warehouse.sourceFeedNames || []).join(", ") || "configured vendor feed"}.` : "Managed by the DataWarehouse universal supplier feed.") : warehouseTypeOption(draft.warehouseType).description}</p>
             </Field>
             <Field label="Manager"><Input disabled={!editing || draftVirtual} value={String(draft.managerName || "")} onChange={(event) => updateDraft("managerName", event.target.value)} /></Field>
             <Field label="Primary contact"><Input disabled={!editing || draftVirtual} value={String(draft.contactName || "")} onChange={(event) => updateDraft("contactName", event.target.value)} /></Field>

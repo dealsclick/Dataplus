@@ -190,6 +190,8 @@ For each feed, preserve:
 
 Vendor-specific feeds are configured from the vendor profile and displayed in the scheduled feed registry. The universal DataWarehouse feed is configured under System Settings/Data sources and must not be represented as a vendor-owned feed.
 
+Each canonical vendor with one or more mapped direct feeds has exactly one system-managed warehouse of type **Virtual Supplier Feed**. The warehouse is keyed to the vendor, aggregates all of that vendor's direct-feed IDs, follows the vendor's active/inactive status, and cannot be used for physical receiving, audits, bins, or transfers. Do not create one warehouse per feed or treat the universal DataWarehouse feed as vendor-owned.
+
 Every long-running import must create a job with a visible numeric reference, progress, phase, worker, status, notes, artifacts, and retry/stop behavior. Full and refresh runs must not overlap for the same feed.
 
 Automatic marketplace inventory apply jobs must stop when the newest universal datadump attempt failed or is still incomplete. A prior successful dump is not sufficient when a newer attempt failed; dry runs may continue for diagnosis, but stale supplier quantities must never be republished automatically.

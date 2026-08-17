@@ -3770,6 +3770,8 @@ function normalizeDb(db) {
   db.vendors = db.vendors.map((vendor) => normalizeVendor(db, vendor));
   const supplierDirectoryMerge = mergeCanonicalSupplierDirectory(db);
   if (supplierDirectoryMerge.changed) changed = true;
+  const vendorFeedWarehouseSync = syncVendorFeedWarehouses(db);
+  if (vendorFeedWarehouseSync.changed) changed = true;
 
   const brandResult = normalizeBrands(db);
   if (brandResult.changed) changed = true;
@@ -11035,6 +11037,7 @@ const WAREHOUSE_TYPE_DEFINITIONS = [
   { label: "Overflow Storage", inventorySourceType: "physical", isPhysical: true, allowReceiving: true, allowAudits: true },
   { label: "3PL / Partner Warehouse", inventorySourceType: "third_party", isPhysical: true, allowReceiving: false, allowAudits: false },
   { label: "Transfer / In Transit", inventorySourceType: "transfer", isPhysical: false, allowReceiving: false, allowAudits: false },
+  { label: "Virtual Supplier Feed", inventorySourceType: "supplier_feed", isPhysical: false, allowReceiving: false, allowAudits: false },
   { label: "Virtual Inventory Source", inventorySourceType: "virtual", isPhysical: false, allowReceiving: false, allowAudits: false }
 ];
 
@@ -11044,7 +11047,8 @@ function warehouseTypeDefinition(value) {
     warehouse: "physicalwarehouse",
     physical: "physicalwarehouse",
     virtual: "virtualinventorysource",
-    virtualsuppliernetwork: "virtualinventorysource",
+    virtualsuppliernetwork: "virtualsupplierfeed",
+    supplierfeed: "virtualsupplierfeed",
     transfer: "transferintransit",
     transit: "transferintransit",
     intransit: "transferintransit",
@@ -11060,8 +11064,8 @@ function warehouseTypeDefinition(value) {
 }
 
 function applyWarehouseTypeBehavior(warehouse, { preserveExplicitRules = true } = {}) {
-  if (isDataWarehouseLocation(warehouse)) {
-    warehouse.warehouseType = "Virtual supplier network";
+  if (isDataWarehouseLocation(warehouse) || warehouse.managedByVendorFeed === true || String(warehouse.inventorySourceType || "").toLowerCase() === "supplier_feed") {
+    warehouse.warehouseType = isDataWarehouseLocation(warehouse) ? "Virtual supplier network" : "Virtual Supplier Feed";
     warehouse.inventorySourceType = "supplier_feed";
     warehouse.isPhysical = false;
     warehouse.allowReceiving = false;
@@ -11092,6 +11096,7 @@ function applyWarehouseTypeBehavior(warehouse, { preserveExplicitRules = true } 
 function normalizeWarehouse(warehouse) {
   const legacyAddressLine = String(warehouse.addressLine || "").trim();
   const dataWarehouseLocation = isDataWarehouseLocation(warehouse);
+  const supplierFeedLocation = dataWarehouseLocation || warehouse.managedByVendorFeed === true || String(warehouse.inventorySourceType || "").toLowerCase() === "supplier_feed";
   const normalized = applyWarehouseTypeBehavior({
     id: warehouse.id || crypto.randomUUID(),
     code: warehouse.code || "",
@@ -11102,6 +11107,13 @@ function normalizeWarehouse(warehouse) {
     isPhysical: warehouse.isPhysical,
     allowReceiving: warehouse.allowReceiving,
     allowAudits: warehouse.allowAudits,
+    managedByVendorFeed: warehouse.managedByVendorFeed === true,
+    vendorId: String(warehouse.vendorId || ""),
+    vendorName: String(warehouse.vendorName || ""),
+    vendorFeedIds: [...new Set((Array.isArray(warehouse.vendorFeedIds) ? warehouse.vendorFeedIds : []).map((value) => String(value || "").trim()).filter(Boolean))],
+    sourceFeedNames: [...new Set((Array.isArray(warehouse.sourceFeedNames) ? warehouse.sourceFeedNames : []).map((value) => String(value || "").trim()).filter(Boolean))],
+    sourceFeedTransport: String(warehouse.sourceFeedTransport || ""),
+    sourceManaged: warehouse.sourceManaged === true,
     contactName: warehouse.contactName || "",
     managerName: warehouse.managerName || "",
     phone: warehouse.phone || "",
@@ -11127,7 +11139,7 @@ function normalizeWarehouse(warehouse) {
     shopifyLocationId: normalizeShopifyLocationGid(warehouse.shopifyLocationId || ""),
     shopifyLocationName: warehouse.shopifyLocationName || "",
     shopifyInventoryPushEnabled: warehouse.shopifyInventoryPushEnabled === undefined ? false : Boolean(warehouse.shopifyInventoryPushEnabled),
-    bins: dataWarehouseLocation ? [] : (Array.isArray(warehouse.bins) ? warehouse.bins.map((bin, index) => normalizeWarehouseBin(bin, index)) : []),
+    bins: supplierFeedLocation ? [] : (Array.isArray(warehouse.bins) ? warehouse.bins.map((bin, index) => normalizeWarehouseBin(bin, index)) : []),
     activity: Array.isArray(warehouse.activity) ? warehouse.activity.slice(0, 1000) : [],
     notes: warehouse.notes || "",
     createdAt: warehouse.createdAt || new Date().toISOString(),
@@ -11139,6 +11151,85 @@ function normalizeWarehouse(warehouse) {
   if (!normalized.bins.some((bin) => bin.isDefault) && normalized.bins.length) normalized.bins[0].isDefault = true;
   normalized.addressLine = formatWarehouseAddress(normalized);
   return normalized;
+}
+
+function syncVendorFeedWarehouses(db, configuredFeeds) {
+  if (!db || typeof db !== "object") return { changed: false, warehouses: [] };
+  if (!Array.isArray(db.warehouses)) db.warehouses = [];
+  const vendors = Array.isArray(db.vendors) ? db.vendors : [];
+  const feeds = Array.isArray(configuredFeeds)
+    ? configuredFeeds.map((feed, index) => normalizeVendorFeedSchedule(feed, index))
+    : resolvedVendorFeedSchedules(db.systemSettings || {}, vendors);
+  const vendorById = new Map(vendors.map((vendor) => [String(vendor.id || ""), vendor]));
+  const vendorByIdentity = new Map();
+  for (const vendor of vendors) {
+    const identities = [vendor.name, vendor.code, vendor.vendorCode, ...(Array.isArray(vendor.catalogSettings?.sourceCodes) ? vendor.catalogSettings.sourceCodes : [])];
+    for (const identity of identities) {
+      const key = String(identity || "").trim().toLowerCase();
+      if (key && !vendorByIdentity.has(key)) vendorByIdentity.set(key, vendor);
+    }
+  }
+  const grouped = new Map();
+  for (const feed of feeds) {
+    const vendor = vendorById.get(String(feed.vendorId || ""))
+      || vendorByIdentity.get(String(feed.vendorName || "").trim().toLowerCase());
+    if (!vendor?.id) continue;
+    const key = String(vendor.id);
+    if (!grouped.has(key)) grouped.set(key, { vendor, feeds: [] });
+    grouped.get(key).feeds.push(feed);
+  }
+
+  const now = new Date().toISOString();
+  const activeVendorIds = new Set(grouped.keys());
+  const synchronized = [];
+  let changed = false;
+  for (const { vendor, feeds: vendorFeeds } of grouped.values()) {
+    const vendorId = String(vendor.id);
+    const existingIndex = db.warehouses.findIndex((warehouse) => warehouse.managedByVendorFeed === true && String(warehouse.vendorId || "") === vendorId);
+    const existing = existingIndex >= 0 ? db.warehouses[existingIndex] : null;
+    const feedIds = [...new Set(vendorFeeds.map((feed) => String(feed.id || "")).filter(Boolean))].sort();
+    const feedNames = [...new Set(vendorFeeds.map((feed) => String(feed.name || "")).filter(Boolean))].sort();
+    const vendorActive = !["inactive", "disabled"].includes(String(vendor.status || "active").toLowerCase());
+    const next = normalizeWarehouse({
+      ...(existing || {}),
+      id: existing?.id || `vendor-feed-${vendorId}`,
+      code: existing?.code || `VF-${String(vendor.code || vendor.vendorCode || vendor.name || vendorId).replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 28).toUpperCase()}`,
+      name: `${String(vendor.name || vendor.code || "Vendor")} Supplier Feed`,
+      status: vendorActive ? "active" : "inactive",
+      warehouseType: "Virtual Supplier Feed",
+      inventorySourceType: "supplier_feed",
+      isPhysical: false,
+      allowReceiving: false,
+      allowAudits: false,
+      managedByVendorFeed: true,
+      sourceManaged: true,
+      vendorId,
+      vendorName: String(vendor.name || vendor.code || "Vendor"),
+      vendorFeedIds: feedIds,
+      sourceFeedNames: feedNames,
+      sourceFeedTransport: [...new Set(vendorFeeds.map((feed) => String(feed.transport || "ftp")).filter(Boolean))].join(", "),
+      bins: [],
+      notes: `System-managed virtual inventory source for ${String(vendor.name || vendor.code || "this vendor")}. Contributing direct feed${feedNames.length === 1 ? "" : "s"}: ${feedNames.join(", ") || "configured vendor feed"}.`,
+      activity: existing?.activity?.length ? existing.activity : [{ id: crypto.randomUUID(), type: "vendor_feed", title: "Virtual supplier feed created", message: `Created from the direct feed mapping for ${String(vendor.name || vendor.code || "vendor")}.`, source: "Vendor feed", user: "System", createdAt: now }],
+      createdAt: existing?.createdAt || now,
+      updatedAt: existing?.updatedAt || now
+    });
+    const comparable = (warehouse) => JSON.stringify({ name: warehouse.name, code: warehouse.code, status: warehouse.status, warehouseType: warehouse.warehouseType, inventorySourceType: warehouse.inventorySourceType, vendorId: warehouse.vendorId, vendorName: warehouse.vendorName, vendorFeedIds: warehouse.vendorFeedIds, sourceFeedNames: warehouse.sourceFeedNames, sourceFeedTransport: warehouse.sourceFeedTransport, notes: warehouse.notes });
+    if (!existing || comparable(existing) !== comparable(next)) {
+      next.updatedAt = now;
+      if (existingIndex >= 0) db.warehouses[existingIndex] = next;
+      else db.warehouses.push(next);
+      changed = true;
+    }
+    synchronized.push(next);
+  }
+
+  db.warehouses = db.warehouses.map((warehouse) => {
+    if (warehouse.managedByVendorFeed !== true || activeVendorIds.has(String(warehouse.vendorId || "")) || String(warehouse.status || "").toLowerCase() === "inactive") return warehouse;
+    changed = true;
+    return normalizeWarehouse({ ...warehouse, status: "inactive", updatedAt: now, notes: `${String(warehouse.notes || "").replace(/\s*No direct feeds are currently mapped\.$/i, "").trim()} No direct feeds are currently mapped.`.trim() });
+  });
+  return { changed, warehouses: synchronized };
 }
 
 function normalizeVendor(db, vendor) {
@@ -33111,14 +33202,18 @@ async function handleApi(req, res) {
       ? (postgres.isPostgresEnabled() ? await postgres.readLiteState() : readDbLiteFast())
       : await readDbFast({ skipInventory: postgres.isPostgresEnabled() && !includeInventory }));
     const supplierDirectoryMerge = mergeCanonicalSupplierDirectory(db);
-    if (supplierDirectoryMerge.changed && postgres.isPostgresEnabled()) {
+    const vendorFeedWarehouseSync = syncVendorFeedWarehouses(db);
+    if ((supplierDirectoryMerge.changed || vendorFeedWarehouseSync.changed) && postgres.isPostgresEnabled()) {
       await postgres.writeStateDocuments({
         vendors: db.vendors || [],
         brands: db.brands || [],
         purchaseOrders: db.purchaseOrders || [],
         vendorFeedSchedules: db.vendorFeedSchedules || [],
-        vendorCategoryMappings: db.vendorCategoryMappings || {}
+        vendorCategoryMappings: db.vendorCategoryMappings || {},
+        warehouses: db.warehouses || []
       });
+    } else if (vendorFeedWarehouseSync.changed) {
+      await writeDb(db);
     }
     db.tablePreferences = await readUserTablePreferencesStore(db.tablePreferences || {});
     if (postgres.isPostgresEnabled()) {
@@ -33551,9 +33646,15 @@ async function handleApi(req, res) {
     });
     current.vendorFeedSchedules = feeds;
     const systemSettings = writeSystemSettingsStore(current);
+    db.systemSettings = systemSettings;
+    const warehouseSync = syncVendorFeedWarehouses(db, feeds);
+    if (warehouseSync.changed) {
+      if (postgres.isPostgresEnabled()) await postgres.writeStateDocuments({ warehouses: db.warehouses || [] });
+      else await writeDb(db);
+    }
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
-    return sendJson(res, 200, { feeds: feeds.map(publicVendorFeedSchedule) });
+    return sendJson(res, 200, { feeds: feeds.map(publicVendorFeedSchedule), warehouses: warehouseSync.warehouses });
   }
 
   if (req.method === "GET" && url.pathname === "/api/data-source-feeds") {
