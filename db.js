@@ -1803,9 +1803,14 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
   await initRelationalSchema();
   const client = await pool.connect();
   const sourceProducts = Array.isArray(products) ? products : [];
-  const records = sourceProducts.map((item) => vendorCatalogRecordFromProduct(item, feedRunId, options)).filter(Boolean);
-  const commercialRecords = sourceProducts.map((item) => productDumpCommercialRecordFromProduct(item)).filter(Boolean);
-  const systemRecords = sourceProducts.map((item) => productDumpSystemRecordFromProduct(item)).filter(Boolean);
+  const recordKey = (record = {}) => `${String(record.vendor_id || "").trim().toLowerCase()}\u0000${String(record.source_sku || "").trim().toLowerCase()}`;
+  const dedupeRecords = (items = []) => [...new Map(items.map((record) => [recordKey(record), record])).values()];
+  // A universal feed can repeat the same supplier SKU in one batch. PostgreSQL
+  // rejects duplicate conflict targets in a single INSERT, so retain the last
+  // occurrence before writing snapshots and current-state tables.
+  const records = dedupeRecords(sourceProducts.map((item) => vendorCatalogRecordFromProduct(item, feedRunId, options)).filter(Boolean));
+  const commercialByKey = new Map(dedupeRecords(sourceProducts.map((item) => productDumpCommercialRecordFromProduct(item)).filter(Boolean)).map((record) => [recordKey(record), record]));
+  const systemByKey = new Map(dedupeRecords(sourceProducts.map((item) => productDumpSystemRecordFromProduct(item)).filter(Boolean)).map((record) => [recordKey(record), record]));
   if (!records.length) {
     client.release();
     return { enabled: true, items: 0, changes: 0 };
@@ -1984,7 +1989,7 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
           )
         ${mainConflictClause}
       `, [JSON.stringify(batch), reconciliationOnly]);
-      const commercialBatch = commercialRecords.slice(i, i + batchSize);
+      const commercialBatch = batch.map((record) => commercialByKey.get(recordKey(record))).filter(Boolean);
       if (commercialBatch.length) {
         await client.query(`
           insert into product_dump_commercial_fields (
@@ -2058,7 +2063,7 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
             updated_at = now()
         `, [JSON.stringify(commercialBatch), feedRunId]);
       }
-      const systemBatch = systemRecords.slice(i, i + batchSize);
+      const systemBatch = batch.map((record) => systemByKey.get(recordKey(record))).filter(Boolean);
       if (systemBatch.length) {
         await client.query(`
           insert into product_dump_system_fields (

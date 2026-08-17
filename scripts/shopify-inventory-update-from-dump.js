@@ -437,12 +437,18 @@ async function setInventory(batch, locationId, token, reference) {
   return data.inventorySetQuantities || {};
 }
 
-async function loadLinkedProducts(limit) {
+async function loadLinkedProducts(limit, requestedSku = "") {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   try {
     const params = [];
-    const limitSql = limit > 0 ? `limit $1` : "";
-    if (limit > 0) params.push(limit);
+    const requested = textValue(requestedSku);
+    const skuSql = requested
+      ? `and (
+          lower(p.sku) = lower($${params.push(requested)})
+          or lower(coalesce(p.vendor_sku, '')) = lower($${params.length})
+        )`
+      : "";
+    const limitSql = limit > 0 ? `limit $${params.push(limit)}` : "";
     const result = await pool.query(`
       select
         p.product_id,
@@ -471,6 +477,7 @@ async function loadLinkedProducts(limit) {
         limit 1
       ) vci on true
       where coalesce(sps.shopify_id, p.raw->>'shopifyId', '') <> ''
+      ${skuSql}
       order by p.sku
       ${limitSql}
     `, params);
@@ -486,6 +493,10 @@ async function main() {
   const dryRun = hasFlag("dry-run");
   const apply = hasFlag("apply") && !dryRun;
   const limit = Math.max(0, Number(argValue("limit", "0")) || 0);
+  const requestedSku = textValue(argValue("sku", ""));
+  const requestedQuantity = argValue("quantity", "");
+  const explicitQuantity = requestedQuantity === "" ? null : Math.max(0, Math.floor(numberValue(requestedQuantity, 0)));
+  if (explicitQuantity !== null && !requestedSku) throw new Error("--quantity requires a targeted --sku value.");
   const explicitLocation = normalizeGid(argValue("location", ""), "Location");
   const batchSize = Math.max(1, Math.min(250, Number(argValue("batch-size", "100")) || 100));
   const packMode = ["divide", "export"].includes(argValue("pack-mode", "export")) ? argValue("pack-mode", "export") : "export";
@@ -497,13 +508,16 @@ async function main() {
   const locationId = explicitLocation || activeLocations[0]?.id || locations[0]?.id || "";
   if (!locationId) throw new Error("No Shopify location found for inventory update.");
 
-  const products = await loadLinkedProducts(limit);
+  const products = await loadLinkedProducts(limit, requestedSku);
+  if (explicitQuantity !== null) products.forEach((product) => { product.source_qty = explicitQuantity; });
   const report = {
     mode: apply ? "apply" : "dry-run",
     generatedAt: new Date().toISOString(),
     locationId,
     locationName: locations.find((location) => location.id === locationId)?.name || "",
     packMode,
+    requestedSku,
+    explicitQuantity,
     productsLoaded: products.length,
     variantsPrepared: 0,
     variantsChanged: 0,
