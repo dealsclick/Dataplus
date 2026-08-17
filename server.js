@@ -57,7 +57,7 @@ const CATALOG_CHANGE_SNAPSHOT_FILE = path.join(DATA_DIR, "catalog", "change-snap
 const CATALOG_CLOSEOUT_FILE = path.join(DATA_DIR, "catalog", "closeout-skus.csv");
 const SHOPIFY_TAXONOMY_INDEX_FILE = path.join(DATA_DIR, "channel-taxonomies", "shopify", "taxonomy-index.json");
 const CHANNEL_API_LOG_FILE = path.join(DATA_DIR, "channel-api-log.ndjson");
-const CHANNEL_API_LOG_RETENTION_DAYS = Math.max(60, Number(process.env.CHANNEL_API_LOG_RETENTION_DAYS || 60) || 60);
+const CHANNEL_API_LOG_RETENTION_DAYS = Math.max(365, Number(process.env.CHANNEL_API_LOG_RETENTION_DAYS || 365) || 365);
 const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
 const ORDER_ATTACHMENT_DIR = path.join(DATA_DIR, "order-attachments");
 const IMPORT_JOB_STORE_FILE = path.join(DATA_DIR, "import-jobs.json");
@@ -66,8 +66,8 @@ const ENV_FILE = path.join(ROOT, ".env");
 const SHOPIFY_RUNTIME_CREDENTIALS_FILE = path.join(DATA_DIR, "shopify-runtime-credentials.json");
 const EBAY_RUNTIME_CREDENTIALS_FILE = path.join(DATA_DIR, "ebay-runtime-credentials.json");
 const BACKGROUND_EXPORT_PAGE_SIZE = 100;
-const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(60, Number(process.env.IMPORT_JOB_FILE_RETENTION_DAYS || 60) || 60);
-const IMPORT_JOB_HISTORY_LIMIT = Math.max(1000, Math.min(5000, Number(process.env.IMPORT_JOB_HISTORY_LIMIT || 1000) || 1000));
+const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(1, Number(process.env.IMPORT_JOB_FILE_RETENTION_DAYS || 7) || 7);
+const IMPORT_JOB_HISTORY_LIMIT = Math.max(5000, Math.min(25000, Number(process.env.IMPORT_JOB_HISTORY_LIMIT || 10000) || 10000));
 const REDIS_CATALOG_CACHE_TTL_SECONDS = Math.max(15, Math.min(600, Number(process.env.REDIS_CATALOG_CACHE_TTL_SECONDS || 90) || 90));
 const REDIS_PRODUCTS_CACHE_TTL_SECONDS = Math.max(30, Math.min(900, Number(process.env.REDIS_PRODUCTS_CACHE_TTL_SECONDS || 120) || 120));
 const REDIS_UNIVERSAL_SEARCH_CACHE_TTL_SECONDS = Math.max(5, Math.min(120, Number(process.env.REDIS_UNIVERSAL_SEARCH_CACHE_TTL_SECONDS || 30) || 30));
@@ -76,6 +76,7 @@ const REDIS_CATEGORY_REQUIREMENTS_CACHE_TTL_SECONDS = Math.max(300, Math.min(864
 const SERVER_STARTED_AT = new Date();
 const activeJobProgress = new Map();
 const activeJobRecords = new Map();
+const channelJobActivityState = new Map();
 const davidActionProposals = new Map();
 let dbCache = { mtimeMs: 0, data: null };
 let shopifyRuntimeCredentialsCache = { mtimeMs: 0, value: {} };
@@ -914,6 +915,8 @@ const DEFAULT_SYSTEM_SETTINGS = {
   backupIncludeSourceCatalog: false,
   backupRetentionDays: 30,
   jobsRetentionDays: IMPORT_JOB_FILE_RETENTION_DAYS,
+  channelLogRetentionDays: CHANNEL_API_LOG_RETENTION_DAYS,
+  jobArtifactRetentionDays: IMPORT_JOB_FILE_RETENTION_DAYS,
   jobsRetentionAutoCleanupEnabled: true,
   shopifyDailyInventoryUpdateEnabled: false,
   shopifyDailyInventoryUpdateTime: "06:00",
@@ -4666,6 +4669,8 @@ function normalizeSystemSettings(settings = {}) {
   normalized.shopifyDailyInventoryUpdateTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(normalized.shopifyDailyInventoryUpdateTime || "")) ? String(normalized.shopifyDailyInventoryUpdateTime) : "06:00";
   normalized.backupRetentionDays = Math.max(1, Math.min(365, Number(normalized.backupRetentionDays || 30) || 30));
   normalized.jobsRetentionDays = IMPORT_JOB_FILE_RETENTION_DAYS;
+  normalized.channelLogRetentionDays = CHANNEL_API_LOG_RETENTION_DAYS;
+  normalized.jobArtifactRetentionDays = IMPORT_JOB_FILE_RETENTION_DAYS;
   normalized.jobsRetentionAutoCleanupEnabled = normalized.jobsRetentionAutoCleanupEnabled !== false;
   normalized.warehouseAuditAdminPinHash = String(normalized.warehouseAuditAdminPinHash || "");
   normalized.warehouseAuditAdminPinSalt = String(normalized.warehouseAuditAdminPinSalt || "");
@@ -12317,6 +12322,57 @@ function inferImportJobApiChannel(job = {}) {
   return "System";
 }
 
+function inferImportJobChannel(job = {}) {
+  const explicit = String(job.channel || job.apiChannel || job.marketplace || "").trim();
+  if (explicit && explicit.toLowerCase() !== "system") return explicit;
+  const text = importJobApiText(job);
+  if (/ebay|\/sell\/inventory|\/sell\/account/i.test(text)) return "eBay";
+  if (/shopify|graphql|myshopify/i.test(text)) return "Shopify";
+  if (/temu/i.test(text)) return "Temu";
+  if (/tiktok/i.test(text)) return "TikTok Shop";
+  if (/whatnot/i.test(text)) return "Whatnot";
+  return "";
+}
+
+function inferChannelActionGroup(value = "") {
+  const text = String(value || "").toLowerCase();
+  if (/order|draft|refund|return/.test(text)) return "orders";
+  if (/fulfill|shipment|shipping|tracking|label/.test(text)) return "fulfillment";
+  if (/inventory|stock|quantity/.test(text)) return "inventory";
+  if (/price|pricing|cost/.test(text)) return "pricing";
+  if (/categor|taxonomy|specific/.test(text)) return "categories";
+  if (/product|catalog|sku|listing|offer|publication/.test(text)) return "products";
+  if (/webhook|notification|subscription/.test(text)) return "webhooks";
+  if (/setting|credential|oauth|connection|policy|profile/.test(text)) return "settings";
+  return "other";
+}
+
+function recordChannelJobActivity(job = {}) {
+  const channel = inferImportJobChannel(job);
+  if (!channel || !job.id) return;
+  const status = normalizeImportJobStatus(job.status);
+  const terminal = ["success", "warning", "failed", "stopped"].includes(status);
+  const phase = String(job.phase || "").trim().toLowerCase();
+  const signature = terminal ? `${status}:${phase}:${job.message || ""}` : status;
+  if (channelJobActivityState.get(job.id) === signature) return;
+  channelJobActivityState.set(job.id, signature);
+  appendChannelApiLog({
+    kind: "activity",
+    channel,
+    actionGroup: inferChannelActionGroup(`${job.operation || ""} ${job.section || ""} ${job.source || ""}`),
+    operation: String(job.operation || job.type || "Channel job").trim(),
+    status,
+    ok: ["success", "warning"].includes(status),
+    jobId: String(job.id),
+    entityType: "job",
+    entityId: String(job.id),
+    trigger: job.scheduled === true || /scheduled/i.test(String(job.source || job.operation || "")) ? "scheduled" : "manual",
+    actor: String(job.createdBy || job.updatedBy || job.user || "DataPlus").trim(),
+    phase: String(job.phase || "").trim(),
+    message: String(job.message || job.details || `${job.operation || "Channel job"} is ${status}.`).trim()
+  });
+}
+
 function inferImportJobApiEndpoint(job = {}) {
   if (!importJobLooksApiRelated(job)) return "";
   if (job.apiEndpoint && String(job.apiEndpoint) !== "Unknown endpoint") return String(job.apiEndpoint || "");
@@ -12589,10 +12645,12 @@ function writeImportJobStore(jobs = []) {
 
 function upsertImportJobStore(job = {}) {
   if (!job?.id) return job;
+  const normalizedJob = normalizeImportJob(job);
+  recordChannelJobActivity(normalizedJob);
   const externalWorkerJob = Boolean(job.workerTask) && !shouldRunJobsInline();
-  if (!externalWorkerJob) activeJobRecords.set(job.id, normalizeImportJob(job));
+  if (!externalWorkerJob) activeJobRecords.set(job.id, normalizedJob);
   if (postgres.isPostgresEnabled()) {
-    postgres.upsertOperationJob(normalizeImportJob(job)).catch((error) => {
+    postgres.upsertOperationJob(normalizedJob).catch((error) => {
       console.error("Unable to write Postgres job store", error.message || error);
     });
     return job;
@@ -12600,7 +12658,7 @@ function upsertImportJobStore(job = {}) {
   const jobs = readImportJobStore();
   const index = jobs.findIndex((row) => row.id === job.id);
   if (index >= 0) jobs[index] = normalizeImportJob({ ...jobs[index], ...job });
-  else jobs.unshift(normalizeImportJob(job));
+  else jobs.unshift(normalizedJob);
   writeImportJobStore(jobs);
   return job;
 }
@@ -25481,6 +25539,9 @@ function appendChannelApiLog(entry = {}) {
       id: entry.id || crypto.randomUUID(),
       createdAt: entry.createdAt || new Date().toISOString(),
       channel: entry.channel || "Shopify",
+      kind: entry.kind || "api",
+      actionGroup: entry.actionGroup || inferChannelActionGroup(`${entry.operation || ""} ${entry.path || ""}`),
+      status: entry.status || (entry.ok ? "success" : "failed"),
       transport: entry.transport || "",
       method: entry.method || "",
       path: entry.path || "",
@@ -25490,6 +25551,11 @@ function appendChannelApiLog(entry = {}) {
       durationMs: Math.max(0, Number(entry.durationMs || 0)),
       requestId: entry.requestId || "",
       jobId: entry.jobId || "",
+      entityType: entry.entityType || "",
+      entityId: entry.entityId || "",
+      actor: entry.actor || "",
+      trigger: entry.trigger || "",
+      phase: entry.phase || "",
       message: sanitizeApiLogMessage(entry.message || entry.error || "")
     };
     fs.appendFileSync(CHANNEL_API_LOG_FILE, `${JSON.stringify(row)}\n`);
@@ -25503,11 +25569,23 @@ function appendChannelApiLog(entry = {}) {
   }
 }
 
-function readFileChannelApiLogs({ channel = "", days = 30, limit = 250, jobId = "" } = {}) {
+function channelLogMatches(row = {}, { channel = "", jobId = "", kind = "", actionGroup = "", status = "", query = "" } = {}) {
+  const matches = (actual, expected) => !String(expected || "").trim()
+    || String(actual || "").trim().toLowerCase() === String(expected || "").trim().toLowerCase();
+  if (!matches(row.channel, channel) || !matches(row.jobId, jobId) || !matches(row.kind || "api", kind)) return false;
+  if (!matches(row.actionGroup || inferChannelActionGroup(`${row.operation || ""} ${row.path || ""}`), actionGroup)) return false;
+  if (!matches(row.status || (row.ok ? "success" : "failed"), status)) return false;
+  const needle = String(query || "").trim().toLowerCase();
+  if (!needle) return true;
+  return [row.channel, row.operation, row.message, row.path, row.jobId, row.entityId, row.actor]
+    .some((value) => String(value || "").toLowerCase().includes(needle));
+}
+
+function readFileChannelApiLogs({ channel = "", days = 365, limit = 1000, jobId = "", kind = "", actionGroup = "", status = "", query = "" } = {}) {
   if (!fs.existsSync(CHANNEL_API_LOG_FILE)) return [];
   const channelKey = String(channel || "").trim().toLowerCase();
   const jobKey = String(jobId || "").trim();
-  const minTime = Date.now() - Math.max(1, Number(days || 30)) * 24 * 60 * 60 * 1000;
+  const minTime = Date.now() - Math.max(1, Number(days || 365)) * 24 * 60 * 60 * 1000;
   const maxRows = Math.max(1, Math.min(1000, Number(limit || 250)));
   const rows = [];
   const lines = fs.readFileSync(CHANNEL_API_LOG_FILE, "utf8").split(/\r?\n/).filter(Boolean);
@@ -25516,8 +25594,7 @@ function readFileChannelApiLogs({ channel = "", days = 30, limit = 250, jobId = 
       const row = JSON.parse(lines[index]);
       const time = Date.parse(row.createdAt || "");
       if (!Number.isFinite(time) || time < minTime) continue;
-      if (channelKey && String(row.channel || "").trim().toLowerCase() !== channelKey) continue;
-      if (jobKey && String(row.jobId || "").trim() !== jobKey) continue;
+      if (!channelLogMatches(row, { channel: channelKey, jobId: jobKey, kind, actionGroup, status, query })) continue;
       rows.push(row);
     } catch {
       // Ignore malformed log lines.
@@ -25526,11 +25603,12 @@ function readFileChannelApiLogs({ channel = "", days = 30, limit = 250, jobId = 
   return rows;
 }
 
-async function readChannelApiLogs({ channel = "", days = 30, limit = 250, jobId = "" } = {}) {
-  const fileRows = readFileChannelApiLogs({ channel, days, limit, jobId });
+async function readChannelApiLogs({ channel = "", days = 365, limit = 1000, jobId = "", kind = "", actionGroup = "", status = "", query = "" } = {}) {
+  const fileRows = readFileChannelApiLogs({ channel, days, limit, jobId, kind, actionGroup, status, query });
   if (!postgres.isPostgresEnabled()) return fileRows;
   try {
-    const pgRows = await postgres.readChannelApiLogs({ channel, days, limit, jobId });
+    const pgRows = (await postgres.readChannelApiLogs({ channel, days, limit, jobId }))
+      .filter((row) => channelLogMatches(row, { channel, jobId, kind, actionGroup, status, query }));
     const byKey = new Map();
     for (const row of [...pgRows, ...fileRows]) {
       const key = `${row.createdAt}|${row.channel}|${row.transport || ""}|${row.method}|${row.path}|${row.statusCode}|${row.ok}|${row.requestId || ""}|${row.jobId || ""}|${row.message}`;
@@ -27671,8 +27749,12 @@ async function handleApi(req, res) {
       logs: await readChannelApiLogs({
         channel: url.searchParams.get("channel") || "",
         jobId: url.searchParams.get("jobId") || "",
-        days: url.searchParams.get("days") || 30,
-        limit: url.searchParams.get("limit") || 250
+        kind: url.searchParams.get("kind") || "",
+        actionGroup: url.searchParams.get("actionGroup") || "",
+        status: url.searchParams.get("status") || "",
+        query: url.searchParams.get("query") || "",
+        days: url.searchParams.get("days") || CHANNEL_API_LOG_RETENTION_DAYS,
+        limit: url.searchParams.get("limit") || 1000
       })
     });
   }
@@ -32620,6 +32702,19 @@ async function handleApi(req, res) {
     }
     Object.assign(channel, normalizeChannel(channel));
     await postgres.writeStateDocuments({ connections: db.connections || [] });
+    appendChannelApiLog({
+      kind: "activity",
+      channel: channel.name || "Channel",
+      actionGroup: "settings",
+      operation: "Channel settings updated",
+      status: "success",
+      ok: true,
+      entityType: "channel",
+      entityId: channel.id,
+      actor: body.updatedBy || body.user || "DataPlus",
+      trigger: "manual",
+      message: `${channel.name || "Channel"} settings were updated.`
+    });
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { channel, state: publicState(stateDb, { lite: true }) });
   }
@@ -38962,6 +39057,19 @@ async function handleApi(req, res) {
     const normalized = normalizeChannel(channel);
     Object.assign(channel, normalized);
     await writeDb(db);
+    appendChannelApiLog({
+      kind: "activity",
+      channel: channel.name || "Channel",
+      actionGroup: "settings",
+      operation: "Channel settings updated",
+      status: "success",
+      ok: true,
+      entityType: "channel",
+      entityId: channel.id,
+      actor: body.updatedBy || body.user || "DataPlus",
+      trigger: "manual",
+      message: `${channel.name || "Channel"} settings were updated.`
+    });
     return sendJson(res, 200, { channel, state: publicState(db) });
   }
 

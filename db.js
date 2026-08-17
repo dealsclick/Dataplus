@@ -653,6 +653,8 @@ async function initRelationalSchema() {
       created_at timestamptz not null default now()
     );
     create index if not exists channel_api_logs_channel_created_idx on channel_api_logs (channel, created_at desc);
+    create index if not exists channel_api_logs_job_created_idx on channel_api_logs (job_id, created_at desc);
+    create index if not exists channel_api_logs_kind_created_idx on channel_api_logs ((raw->>'kind'), created_at desc);
 
     create table if not exists product_change_events (
       event_id bigserial primary key,
@@ -5697,14 +5699,14 @@ async function insertChannelApiLog(entry = {}) {
   return true;
 }
 
-async function readChannelApiLogs({ channel = "", days = 30, limit = 250, jobId = "" } = {}) {
+async function readChannelApiLogs({ channel = "", days = 365, limit = 1000, jobId = "" } = {}) {
   const client = getPool();
   if (!client) return [];
   await initRelationalSchema();
   const channelKey = nullableString(channel);
   const jobKey = nullableString(jobId);
-  const maxRows = Math.max(1, Math.min(1000, Number(limit || 250)));
-  const daysBack = Math.max(1, Math.min(365, Number(days || 30)));
+  const maxRows = Math.max(1, Math.min(1000, Number(limit || 1000)));
+  const daysBack = Math.max(1, Math.min(365, Number(days || 365)));
   const params = [daysBack, maxRows];
   let channelClause = "";
   if (channelKey) {
@@ -5728,11 +5730,11 @@ async function readChannelApiLogs({ channel = "", days = 30, limit = 250, jobId 
   return result.rows.map(channelApiLogRowToState);
 }
 
-async function pruneChannelApiLogs(days = 30) {
+async function pruneChannelApiLogs(days = 365) {
   const client = getPool();
   if (!client) return 0;
   await initRelationalSchema();
-  const daysBack = Math.max(1, Math.min(365, Number(days || 30)));
+  const daysBack = Math.max(1, Math.min(365, Number(days || 365)));
   const result = await client.query(`
     delete from channel_api_logs
     where created_at < now() - ($1::int * interval '1 day')

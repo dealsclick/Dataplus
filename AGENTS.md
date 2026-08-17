@@ -200,6 +200,8 @@ Each marketplace channel has a master enable/disable switch. When a channel is d
 
 When enabled, individual settings govern each operation.
 
+Every channel-related action belongs in the channel activity ledger, including API calls, settings changes, manual and scheduled jobs, webhooks, imports, launches, inventory and price updates, order actions, and fulfillment changes. Lightweight channel activity metadata is retained for 365 days. Large downloadable artifacts such as CSV exports and error files are retained for 7 days, while their parent activity and job records remain visible after file expiration.
+
 ### Shopify
 
 Shopify supports product launch/linking, status and publication checks, price sync, inventory sync, order import, order webhooks, fulfillment/tracking sync, returns/refunds, shipping profiles, delivery quotes, shipping-label readiness, label purchase/void flows, collections, taxonomy, and channel-specific product fields.
@@ -327,7 +329,7 @@ Jobs are the audit trail for imports, exports, syncs, scans, index rebuilds, bac
 - Jobs page has tabs for View all/queue and history, channel logs, and scheduled jobs.
 - Scheduled tab lists every schedule and links to the owning settings page.
 - Job detail is a new React page/side panel with numeric job ID, status, progress, rows, phase, worker, timestamps, status message, live worker output, operator notes, artifacts, CSV downloads, retry, and stop controls.
-- Keep job history for at least 60 days.
+- Keep lightweight channel activity metadata for 365 days. Keep large downloadable job artifacts for 7 days, and preserve the parent job/activity record after artifact deletion.
 - A queued/running duplicate for the same feed/channel operation should be prevented or reported as already queued.
 - If a worker restarts, persist progress and mark the job for retry/review rather than silently losing it.
 - Errors should be collected per row where possible, with an error CSV and a clear distinction between auto-fixable and human-review errors.

@@ -170,6 +170,30 @@ type ImportJob = {
   artifacts?: Array<{ kind?: string; fileName?: string; filePath?: string; contentType?: string; rowCount?: number; byteSize?: number }>
 }
 
+type ChannelLogEntry = {
+  id: string
+  createdAt?: string
+  channel?: string
+  kind?: string
+  actionGroup?: string
+  operation?: string
+  status?: string
+  ok?: boolean
+  transport?: string
+  method?: string
+  path?: string
+  statusCode?: number
+  durationMs?: number
+  requestId?: string
+  jobId?: string
+  message?: string
+  trigger?: string
+  actor?: string
+  entityType?: string
+  entityId?: string
+  phase?: string
+}
+
 type WorkerStatus = {
   online?: boolean
   workerId?: string
@@ -428,6 +452,8 @@ type SystemSettings = {
   backupRetentionDays?: number
   jobsRetentionDays?: number
   jobsRetentionAutoCleanupEnabled?: boolean
+  channelLogRetentionDays?: number
+  jobArtifactRetentionDays?: number
   sourceCatalogImportBatchLimit?: number
   shopifyProductLaunchBatchLimit?: number
   trueValueSourceCategoryAsMainCategory?: boolean
@@ -1036,11 +1062,6 @@ function isAttentionJob(job: ImportJob) {
   return ["failed", "warning", "stopped"].includes(String(job.status || "").toLowerCase())
 }
 
-function isShopifyInventoryJob(job: ImportJob) {
-  const haystack = `${job.operation || ""} ${job.fileName || ""} ${job.workerTask || ""}`.toLowerCase()
-  return haystack.includes("shopify") && haystack.includes("inventory")
-}
-
 function jobCategory(job: ImportJob) {
   return job.category || job.section || "Operations"
 }
@@ -1526,7 +1547,6 @@ function App() {
     [state.connections],
   )
   const attentionJobs = jobs.filter(isAttentionJob)
-  const shopifyInventoryJobs = jobs.filter(isShopifyInventoryJob)
   const selectedJob = jobs.find((job) => job.id === selectedJobId) || (selectedJobId ? undefined : attentionJobs[0] || jobs[0])
 
   return (
@@ -1703,7 +1723,6 @@ function App() {
                   <ChannelsPage
                     channels={state.connections || []}
                     warehouses={state.warehouses || []}
-                    jobs={shopifyInventoryJobs}
                     auth={shopifyAuth}
                     checking={checkingShopify}
                     onCheckShopify={checkShopifyConnection}
@@ -2055,6 +2074,132 @@ function VendorFeedScheduleManager({ vendors, vendor, dataSource, jobs = [], onS
   )
 }
 
+function channelLogStatusTone(entry: ChannelLogEntry): "success" | "destructive" | "warning" | "secondary" | "outline" {
+  const status = String(entry.status || "").toLowerCase()
+  if (entry.ok === false || ["failed", "error", "blocked"].includes(status)) return "destructive"
+  if (["warning", "review", "stopped", "canceled"].includes(status)) return "warning"
+  if (entry.ok === true || ["success", "completed", "done"].includes(status)) return "success"
+  if (["queued", "running", "processing"].includes(status)) return "secondary"
+  return "outline"
+}
+
+function channelLogStatusLabel(entry: ChannelLogEntry) {
+  if (entry.status) return String(entry.status).replace(/_/g, " ")
+  if (entry.ok === true) return "success"
+  if (entry.ok === false) return "failed"
+  return "recorded"
+}
+
+function ChannelLogsPanel({ channel = "" }: { channel?: string }) {
+  const [logs, setLogs] = useState<ChannelLogEntry[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+  const [selected, setSelected] = useState<ChannelLogEntry | null>(null)
+  const [channelFilter, setChannelFilter] = useState(channel || "all")
+  const [kind, setKind] = useState("all")
+  const [actionGroup, setActionGroup] = useState("all")
+  const [status, setStatus] = useState("all")
+  const [query, setQuery] = useState("")
+
+  const loadLogs = async () => {
+    setLoading(true)
+    setError("")
+    try {
+      const params = new URLSearchParams({ days: "365", limit: "1000" })
+      const effectiveChannel = channel || (channelFilter === "all" ? "" : channelFilter)
+      if (effectiveChannel) params.set("channel", effectiveChannel)
+      if (kind !== "all") params.set("kind", kind)
+      if (actionGroup !== "all") params.set("actionGroup", actionGroup)
+      if (status !== "all") params.set("status", status)
+      if (query.trim()) params.set("query", query.trim())
+      const result = await api<{ logs?: ChannelLogEntry[] }>(`/api/channel-api-logs?${params.toString()}`)
+      setLogs(result.logs || [])
+    } catch (loadError) {
+      setLogs([])
+      setError(loadError instanceof Error ? loadError.message : "Unable to load channel activity.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void loadLogs() }, [channel, channelFilter, kind, actionGroup, status])
+
+  const channels = useMemo(() => [...new Set([
+    "Shopify",
+    "eBay",
+    "Temu",
+    "TikTok Shop",
+    "Whatnot",
+    ...logs.map((entry) => String(entry.channel || "").trim()).filter(Boolean),
+  ])].sort(), [logs])
+
+  return (
+    <Card>
+      <CardHeader className="border-b py-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-base">{channel ? `${channel} activity` : "Channel activity"}</CardTitle>
+            <CardDescription>Settings changes, jobs, syncs, webhooks, and API outcomes share one searchable history.</CardDescription>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge variant="outline">1 year history</Badge>
+            <Badge variant="outline">Files 7 days</Badge>
+            <Button size="sm" variant="outline" onClick={() => void loadLogs()} disabled={loading}><RefreshCw className={cn("size-4", loading && "animate-spin")} /> Refresh</Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="p-0">
+        <div className="grid gap-2 border-b p-3 md:grid-cols-[minmax(14rem,1fr)_repeat(4,minmax(8rem,12rem))_auto]">
+          <InputGroup>
+            <InputGroupAddon><Search className="size-4" /></InputGroupAddon>
+            <InputGroupInput value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void loadLogs() }} placeholder="Search activity, job, path, message" />
+          </InputGroup>
+          {!channel && <Select value={channelFilter} onValueChange={setChannelFilter}><SelectTrigger><SelectValue placeholder="All channels" /></SelectTrigger><SelectContent><SelectItem value="all">All channels</SelectItem>{channels.map((name) => <SelectItem key={name} value={name}>{name}</SelectItem>)}</SelectContent></Select>}
+          <Select value={kind} onValueChange={setKind}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All event types</SelectItem><SelectItem value="activity">Activity</SelectItem><SelectItem value="api">API request</SelectItem><SelectItem value="webhook">Webhook</SelectItem></SelectContent></Select>
+          <Select value={actionGroup} onValueChange={setActionGroup}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All workflows</SelectItem>{["orders", "fulfillment", "inventory", "pricing", "products", "categories", "webhooks", "settings", "other"].map((value) => <SelectItem key={value} value={value}>{value.replace(/^./, (letter) => letter.toUpperCase())}</SelectItem>)}</SelectContent></Select>
+          <Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem><SelectItem value="success">Success</SelectItem><SelectItem value="running">Running</SelectItem><SelectItem value="queued">Queued</SelectItem><SelectItem value="warning">Warning</SelectItem><SelectItem value="failed">Failed</SelectItem><SelectItem value="stopped">Stopped</SelectItem></SelectContent></Select>
+          <Button size="sm" onClick={() => void loadLogs()} disabled={loading}>Apply</Button>
+        </div>
+        {error && <Alert variant="destructive" className="m-3"><AlertCircle className="size-4" /><AlertTitle>Channel history unavailable</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+        <ScrollArea className="h-[34rem]">
+          <Table>
+            <TableHeader><TableRow><TableHead>Time</TableHead>{!channel && <TableHead>Channel</TableHead>}<TableHead>Activity</TableHead><TableHead>Workflow</TableHead><TableHead>Type</TableHead><TableHead>Status</TableHead><TableHead>Reference</TableHead></TableRow></TableHeader>
+            <TableBody>
+              {logs.map((entry) => <TableRow key={entry.id} className="cursor-pointer" onClick={() => setSelected(entry)}>
+                <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{dateLabel(entry.createdAt)}</TableCell>
+                {!channel && <TableCell><Badge variant="outline">{entry.channel || "Channel"}</Badge></TableCell>}
+                <TableCell className="max-w-[34rem]"><p className="truncate font-medium">{entry.operation || "Channel event"}</p><p className="truncate text-xs text-muted-foreground">{entry.message || entry.path || "No additional message"}</p></TableCell>
+                <TableCell className="capitalize text-sm">{entry.actionGroup || "other"}</TableCell>
+                <TableCell className="capitalize text-sm text-muted-foreground">{entry.kind || "api"}</TableCell>
+                <TableCell><Badge variant={channelLogStatusTone(entry)} className="capitalize">{channelLogStatusLabel(entry)}</Badge></TableCell>
+                <TableCell>{entry.jobId ? <Button asChild size="sm" variant="outline" onClick={(event) => event.stopPropagation()}><a href={`/jobs/${encodeURIComponent(entry.jobId)}`}>Open job</a></Button> : <span className="font-mono text-xs text-muted-foreground">{entry.requestId || entry.entityId || "-"}</span>}</TableCell>
+              </TableRow>)}
+              {!logs.length && !loading && <TableRow><TableCell colSpan={channel ? 6 : 7} className="h-32 text-center text-muted-foreground">No channel activity matches these filters.</TableCell></TableRow>}
+              {loading && <TableRow><TableCell colSpan={channel ? 6 : 7} className="h-32 text-center"><Loader2 className="mx-auto size-5 animate-spin text-primary" /><p className="mt-2 text-sm text-muted-foreground">Loading channel activity...</p></TableCell></TableRow>}
+            </TableBody>
+          </Table>
+        </ScrollArea>
+        <div className="border-t px-4 py-3 text-xs text-muted-foreground">Showing the latest {numberLabel(logs.length)} matching events. Lightweight event metadata remains searchable for 365 days; large artifacts expire after 7 days.</div>
+      </CardContent>
+      <Dialog open={Boolean(selected)} onOpenChange={(open) => { if (!open) setSelected(null) }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader><DialogTitle>{selected?.operation || "Channel activity detail"}</DialogTitle><DialogDescription>{selected?.channel || "Channel"} · {dateLabel(selected?.createdAt)}</DialogDescription></DialogHeader>
+          {selected && <div className="grid gap-3 text-sm sm:grid-cols-2">
+            <Detail label="Status" value={channelLogStatusLabel(selected)} /><Detail label="Workflow" value={selected.actionGroup || "other"} />
+            <Detail label="Event type" value={selected.kind || "api"} /><Detail label="Trigger" value={selected.trigger || "system"} />
+            <Detail label="Actor" value={selected.actor || "system"} /><Detail label="Phase" value={selected.phase || "-"} />
+            <Detail label="HTTP" value={(selected.method || selected.statusCode) ? `${selected.method || ""} ${selected.statusCode || ""}`.trim() : "-"} /><Detail label="Duration" value={selected.durationMs ? `${numberLabel(selected.durationMs)} ms` : "-"} />
+            <div className="sm:col-span-2"><Detail label="Message" value={selected.message || "No message recorded."} /></div>
+            {selected.path && <div className="sm:col-span-2"><Detail label="Endpoint" value={selected.path} /></div>}
+            <Detail label="Request ID" value={selected.requestId || "-"} /><Detail label="Entity" value={[selected.entityType, selected.entityId].filter(Boolean).join(" · ") || "-"} />
+          </div>}
+          <DialogFooter>{selected?.jobId && <Button asChild><a href={`/jobs/${encodeURIComponent(selected.jobId)}`}>Open job detail</a></Button>}<Button variant="outline" onClick={() => setSelected(null)}>Close</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  )
+}
+
 function JobsPage({
   jobs,
   activeJobs,
@@ -2239,7 +2384,7 @@ function JobsPage({
             <TabsTrigger value="logs">Channel logs</TabsTrigger>
             <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
           </TabsList>
-          <div className="flex flex-wrap items-center gap-2">
+          {!['logs', 'scheduled'].includes(tab) && <div className="flex flex-wrap items-center gap-2">
             <InputGroup className="w-72">
               <InputGroupAddon><Search className="size-4" /></InputGroupAddon>
               <InputGroupInput placeholder="Search jobs, files, messages" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onLoadJobs({ page: 1, query, status }) }} />
@@ -2283,8 +2428,12 @@ function JobsPage({
                 <div className="mt-3 flex justify-end"><Button size="sm" variant="ghost" onClick={() => { setStartedAfter(""); setStartedBefore("") }}>Clear dates</Button></div>
               </CollapsibleContent>
             </Collapsible>
-          </div>
+          </div>}
         </div>
+
+        <TabsContent value="logs" className="mt-4">
+          <ChannelLogsPanel />
+        </TabsContent>
 
         <TabsContent value="scheduled" className="mt-4">
           <div className="mb-4"><VendorFeedScheduleManager vendors={[]} dataSource jobs={jobs} onSelectJob={onSelectJob} /></div>
@@ -2295,13 +2444,13 @@ function JobsPage({
           </Card>
         </TabsContent>
 
-        {tab !== "scheduled" && <div className="mt-4">
+        {!['logs', 'scheduled'].includes(tab) && <div className="mt-4">
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
             <Card>
               <CardHeader className="border-b py-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <CardTitle className="text-base">{tab === "logs" ? "Channel logs" : tab === "active" ? "Active jobs" : tab === "review" ? "Jobs needing review" : tab === "completed" ? "Completed jobs" : "All jobs"}</CardTitle>
+                    <CardTitle className="text-base">{tab === "active" ? "Active jobs" : tab === "review" ? "Jobs needing review" : tab === "completed" ? "Completed jobs" : "All jobs"}</CardTitle>
                     <CardDescription>{totalJobs ? `${numberLabel(visibleJobs.length)} shown on this page · ${(page - 1) * pageSize + 1}-${Math.min(page * pageSize, totalJobs)} of ${numberLabel(totalJobs)} jobs` : "No jobs found"}</CardDescription>
                   </div>
                   <ButtonGroup>
@@ -2611,7 +2760,6 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
 function ChannelsPage({
   channels,
   warehouses,
-  jobs,
   auth,
   checking,
   onCheckShopify,
@@ -2622,7 +2770,6 @@ function ChannelsPage({
 }: {
   channels: ChannelConnection[]
   warehouses: Array<Record<string, unknown>>
-  jobs: ImportJob[]
   auth: ShopifyAuthCheck | null
   checking: boolean
   onCheckShopify: () => void
@@ -2674,7 +2821,6 @@ function ChannelsPage({
           <ChannelDetail
             channel={selectedChannel}
             warehouses={warehouses}
-            jobs={jobs}
             auth={auth}
             checking={checking}
             onCheckShopify={onCheckShopify}
@@ -2694,7 +2840,6 @@ function ChannelsPage({
 function ChannelDetail({
   channel,
   warehouses,
-  jobs,
   auth,
   checking,
   onCheckShopify,
@@ -2705,7 +2850,6 @@ function ChannelDetail({
 }: {
   channel: ChannelConnection
   warehouses: Array<Record<string, unknown>>
-  jobs: ImportJob[]
   auth: ShopifyAuthCheck | null
   checking: boolean
   onCheckShopify: () => void
@@ -4058,24 +4202,7 @@ function ChannelDetail({
         </TabsContent>
 
         <TabsContent value="logs">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Recent channel logs</CardTitle>
-              <CardDescription>Shopify inventory and API jobs connected to this channel.</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-2">
-              {jobs.slice(0, 10).map((job) => (
-                <div key={job.id} className="grid gap-1 rounded-md border p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="font-medium">{job.operation || "Shopify job"}</p>
-                    <Badge variant={jobStatusTone(job.status)}>{job.status}</Badge>
-                  </div>
-                  <p className="line-clamp-2 text-xs text-muted-foreground">{job.message || job.fileName}</p>
-                </div>
-              ))}
-              {!jobs.length && <p className="text-sm text-muted-foreground">No Shopify inventory jobs found.</p>}
-            </CardContent>
-          </Card>
+          <ChannelLogsPanel channel={channel.name || ""} />
         </TabsContent>
       </Tabs>
     </div>
@@ -14576,9 +14703,14 @@ function SettingsPage({
                 </Select>
               </Field>
               <ToggleField label="Auto quality scan after imports" checked={boolValue("autoDataQualityScanAfterImports")} disabled={!editing} onCheckedChange={(next) => update("autoDataQualityScanAfterImports", next)} />
-              <ToggleField label="Clean expired job files" checked={boolValue("jobsRetentionAutoCleanupEnabled")} disabled={!editing} onCheckedChange={(next) => update("jobsRetentionAutoCleanupEnabled", next)} />
-              <Field label="Jobs retention days">
-                <Input disabled={!editing} type="number" value={String(value("jobsRetentionDays") || 60)} onChange={(event) => update("jobsRetentionDays", Number(event.target.value || 0))} />
+              <ToggleField label="Clean expired job artifacts" checked={boolValue("jobsRetentionAutoCleanupEnabled")} disabled={!editing} onCheckedChange={(next) => update("jobsRetentionAutoCleanupEnabled", next)} />
+              <Field label="Channel activity retention">
+                <Input disabled value={`${String(value("channelLogRetentionDays") || 365)} days`} />
+                <p className="mt-1 text-xs text-muted-foreground">Searchable channel activity metadata is retained for one year.</p>
+              </Field>
+              <Field label="Download and artifact retention">
+                <Input disabled value={`${String(value("jobArtifactRetentionDays") || 7)} days`} />
+                <p className="mt-1 text-xs text-muted-foreground">Large CSVs, exports, and job downloads expire after seven days.</p>
               </Field>
               <ToggleField label="Admin confirmation for deletes" checked={boolValue("requireAdminConfirmationForDeletes")} disabled={!editing} onCheckedChange={(next) => update("requireAdminConfirmationForDeletes", next)} />
               <Field label={Boolean(settings.warehouseAuditAdminPinConfigured) ? "Warehouse audit administrator PIN (set to replace)" : "Warehouse audit administrator PIN"}>
