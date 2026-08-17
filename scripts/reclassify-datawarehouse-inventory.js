@@ -132,15 +132,11 @@ async function main() {
     samples: []
   };
 
-  let offset = 0;
-  while (true) {
-    const rows = await postgres.readAllProducts({ limit: batchSize, offset });
-    if (!rows.length) break;
-    stats.scanned += rows.length;
+  async function processRows(rows) {
     const changed = [];
+    stats.scanned += rows.length;
 
     for (const item of rows) {
-      if (requestedSku && normalized(item.sku) !== requestedSku) continue;
       if (!isDataWarehouseImportedProduct(item)) continue;
       stats.dataWarehouseProducts += 1;
       const result = repairProduct(item, evidence);
@@ -161,7 +157,19 @@ async function main() {
       await postgres.upsertProductsFromState(changed, { batchSize });
       await postgres.upsertInventoryLevelsFromProducts(changed, { batchSize, replace: true });
     }
-    if (requestedSku || rows.length < batchSize) break;
+  }
+
+  if (requestedSku) {
+    const product = await postgres.readProductByKey(requestedSku);
+    if (product) await processRows([product]);
+  }
+
+  let offset = 0;
+  while (!requestedSku) {
+    const rows = await postgres.readAllProducts({ limit: batchSize, offset });
+    if (!rows.length) break;
+    await processRows(rows);
+    if (rows.length < batchSize) break;
     offset += rows.length;
   }
 
