@@ -406,6 +406,50 @@ async function fetchProductsVariants(productIds, locationId, token) {
   return map;
 }
 
+async function fetchProductInventoryLevels(productId, token) {
+  const query = `
+    query DataPlusProductInventoryLevels($id: ID!) {
+      node(id: $id) {
+        ... on Product {
+          id
+          variants(first: 100) {
+            nodes {
+              id
+              sku
+              inventoryQuantity
+              inventoryItem {
+                id
+                tracked
+                inventoryLevels(first: 100) {
+                  nodes {
+                    location { id name isActive fulfillsOnlineOrders }
+                    quantities(names: ["available"]) { name quantity }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const data = await graphql(query, { id: productId }, token);
+  return (data.node?.variants?.nodes || []).map((variant) => ({
+    sku: textValue(variant.sku),
+    variantId: variant.id || "",
+    inventoryItemId: variant.inventoryItem?.id || "",
+    inventoryQuantity: numberValue(variant.inventoryQuantity, 0),
+    tracked: variant.inventoryItem?.tracked !== false,
+    levels: (variant.inventoryItem?.inventoryLevels?.nodes || []).map((level) => ({
+      locationId: level.location?.id || "",
+      locationName: level.location?.name || "",
+      active: level.location?.isActive !== false,
+      fulfillsOnlineOrders: level.location?.fulfillsOnlineOrders === true,
+      available: numberValue((level.quantities || []).find((quantity) => quantity.name === "available")?.quantity, 0)
+    }))
+  }));
+}
+
 async function setInventory(batch, locationId, token, reference) {
   const query = `
     mutation DataPlusInventorySet($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
@@ -532,8 +576,20 @@ async function main() {
     skippedUntracked: 0,
     shopifyRetryStats: graphqlRetryStats,
     errors: [],
-    samples: []
+    samples: [],
+    variantInventoryLevels: []
   };
+
+  if (requestedSku && products.length === 1) {
+    try {
+      report.variantInventoryLevels = await fetchProductInventoryLevels(
+        normalizeGid(products[0].shopify_id, "Product"),
+        token
+      );
+    } catch (error) {
+      report.errors.push({ stage: "inventory-level-inspection", error: error.message });
+    }
+  }
 
   const updates = [];
   const missingProducts = [];

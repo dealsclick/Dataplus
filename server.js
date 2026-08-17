@@ -26468,8 +26468,31 @@ function shopifyStatusPayloadFromProduct(product = {}, item = {}) {
     shopifySyncSource: "graphql",
     shopifyOnlineStoreUrl: product.onlineStoreUrl || "",
     shopifyVariantSku: matchedVariant?.sku || "",
+    shopifyLiveInventoryQuantity: Number.isFinite(Number(matchedVariant?.inventoryQuantity)) ? Number(matchedVariant.inventoryQuantity) : null,
+    shopifyVariantInventoryQuantity: Number.isFinite(Number(matchedVariant?.inventoryQuantity)) ? Number(matchedVariant.inventoryQuantity) : null,
     shopifyVariantCount: variants.length
   };
+}
+
+function shopifyStatusMapPatchFromProduct(product = {}, item = {}, payload = {}) {
+  const variants = Array.isArray(product.variants?.nodes) ? product.variants.nodes : [];
+  const patch = {};
+  for (const variant of variants) {
+    const sku = String(variant?.sku || "").trim();
+    if (!sku) continue;
+    const inventoryQuantity = Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null;
+    patch[sku.toLowerCase()] = {
+      ...payload,
+      sku,
+      shopifyVariantId: variant?.id ? normalizeShopifyVariantGid(variant.id) : "",
+      shopifyVariantSku: sku,
+      shopifyLiveInventoryQuantity: inventoryQuantity,
+      shopifyVariantInventoryQuantity: inventoryQuantity
+    };
+  }
+  const itemSku = String(item?.sku || "").trim();
+  if (itemSku && !patch[itemSku.toLowerCase()]) patch[itemSku.toLowerCase()] = { ...payload, sku: itemSku };
+  return patch;
 }
 
 function shopifyStatusPayloadFromVariantNode(variant = {}) {
@@ -26543,7 +26566,7 @@ async function syncInventoryItemShopifyStatus(item = {}, gidOverride = "", optio
   if (!gid) throw new Error(`Product ${item.sku || item.id || ""} does not have a Shopify Product GID yet.`);
   const product = await fetchShopifyProductStatusByGid(gid, { jobId: options.jobId, operation: "Sync Shopify product status" });
   const payload = shopifyStatusPayloadFromProduct(product, item);
-  const fields = ["shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublished", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource", "shopifyOnlineStoreUrl", "shopifyVariantSku", "shopifyVariantCount"];
+  const fields = ["shopifyId", "shopifyVariantId", "shopifyHandle", "shopifyStatus", "shopifyPublished", "shopifyPublishedAt", "shopifyUpdatedAt", "shopifySyncedAt", "shopifySyncSource", "shopifyOnlineStoreUrl", "shopifyVariantSku", "shopifyLiveInventoryQuantity", "shopifyVariantCount"];
   const changed = [];
   for (const field of fields) {
     if (payload[field] !== undefined && payload[field] !== "" && item[field] !== payload[field]) {
@@ -31198,7 +31221,7 @@ async function handleApi(req, res) {
       const result = await syncInventoryItemShopifyStatus(item, gid);
       await postgres.upsertProductsFromState([item]);
       await postgres.upsertInventoryLevelsFromProducts([item]);
-      if (item.sku) mergeShopifyStatusMapSync({ [String(item.sku || "").toLowerCase()]: result.payload });
+      mergeShopifyStatusMapSync(shopifyStatusMapPatchFromProduct(result.product, item, result.payload));
       const updated = await postgres.readProductByKey(item.id || item.sku);
       const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
       return sendJson(res, 200, {
@@ -36281,7 +36304,7 @@ async function handleApi(req, res) {
       const result = await syncInventoryItemShopifyStatus(item, gid);
       if (postgres.isPostgresEnabled()) {
         await postgres.upsertProductsFromState([item]);
-        mergeShopifyStatusMapSync({ [String(item.sku || "").toLowerCase()]: result.payload });
+        mergeShopifyStatusMapSync(shopifyStatusMapPatchFromProduct(result.product, item, result.payload));
       } else {
         const db = normalizeDb(await readDbFast());
         const existing = (db.inventory || []).find((row) => row.id === item.id || String(row.sku || "").toLowerCase() === String(item.sku || "").toLowerCase());
@@ -36320,7 +36343,7 @@ async function handleApi(req, res) {
       try {
         const result = await syncInventoryItemShopifyStatus(item);
         synced += 1;
-        statusMap[String(item.sku || "").toLowerCase()] = result.payload;
+        Object.assign(statusMap, shopifyStatusMapPatchFromProduct(result.product, item, result.payload));
         if (result.changed.length) {
           changed += 1;
           changedItems.push(item);
