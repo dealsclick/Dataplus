@@ -4747,13 +4747,29 @@ async function listPurchaseOrders(options = {}) {
   if (!client) return null;
   await initRelationalSchema();
   const limit = Math.max(1, Math.min(10000, Number(options.limit || 5000)));
+  const sku = nullableString(options.sku);
+  const params = [];
+  const where = ["lower(coalesce(status, '')) <> 'deleted'"];
+  if (sku) {
+    params.push(sku.toLowerCase());
+    where.push(`exists (
+      select 1 from purchase_order_line_items poli
+      where poli.po_id = purchase_order_records.po_id
+        and (
+          lower(coalesce(poli.sku, '')) = $${params.length}
+          or regexp_replace(lower(coalesce(poli.sku, '')), '-[0-9]+(pc|pk|pack|case|ct)$', '', 'i')
+            = regexp_replace($${params.length}, '-[0-9]+(pc|pk|pack|case|ct)$', '', 'i')
+        )
+    )`);
+  }
+  params.push(limit);
   const result = await client.query(`
     select *
     from purchase_order_records
-    where lower(coalesce(status, '')) <> 'deleted'
+    where ${where.join(" and ")}
     order by coalesce(created_at, updated_at) desc, po_number desc
-    limit $1
-  `, [limit]);
+    limit $${params.length}
+  `, params);
   const ids = result.rows.map((row) => row.po_id).filter(Boolean);
   let lineRows = [];
   if (ids.length) {

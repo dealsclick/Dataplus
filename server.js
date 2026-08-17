@@ -11434,6 +11434,98 @@ async function publicCategoriesPage(params = {}) {
   };
 }
 
+function inventoryPurchaseOrderRows(purchaseOrders = [], item = {}) {
+  return purchaseOrders.flatMap((po) => {
+    const receiptItems = [...(po.receipts || []), ...(po.receiptDrafts || [])]
+      .flatMap((receipt) => (receipt.items || []).map((line) => ({ ...line, receiptNumber: receipt.receiptNumber, receivedAt: receipt.receivedAt, receiptStatus: receipt.status })));
+    return (po.items || po.lines || []).filter((line) => inventorySkuMatch(line.sku, item).matches).map((line) => {
+      const receivedFromReceipts = receiptItems.filter((receiptLine) => inventorySkuMatch(receiptLine.sku, item).matches && receiptLine.receiptStatus !== "draft").reduce((sum, receiptLine) => sum + Number(receiptLine.qtyReceived || 0), 0);
+      const orderedQty = Number(line.qty || line.quantity || 0);
+      const receivedQty = Math.max(Number(line.receivedQty || line.qtyReceived || 0), receivedFromReceipts);
+      return {
+        id: po.id,
+        poNumber: po.poNumber,
+        supplier: po.supplier || po.vendorName || "Supplier",
+        status: po.status || "draft",
+        warehouseId: po.warehouseId || "",
+        warehouseName: po.warehouseName || "",
+        orderedQty,
+        receivedQty,
+        openQty: Math.max(0, orderedQty - receivedQty),
+        unitCost: Number(line.unitCost ?? line.estimatedUnitCost ?? 0),
+        expectedAt: po.expectedAt || po.expectedDate || po.estimatedArrivalAt || "",
+        placedAt: po.placedAt || po.submittedAt || po.createdAt || "",
+        updatedAt: po.updatedAt || po.createdAt || "",
+        orderNumbers: line.orderNumbers || po.orderNumbers || [],
+        latestReceipt: receiptItems.filter((receiptLine) => inventorySkuMatch(receiptLine.sku, item).matches).sort((left, right) => new Date(right.receivedAt || 0).getTime() - new Date(left.receivedAt || 0).getTime())[0] || null
+      };
+    });
+  }).sort((left, right) => new Date(right.updatedAt || right.placedAt || 0).getTime() - new Date(left.updatedAt || left.placedAt || 0).getTime());
+}
+
+function inventoryReturnRows(returns = [], item = {}) {
+  return returns.flatMap((record) => {
+    const lines = Array.isArray(record.items) && record.items.length ? record.items : [record];
+    return lines.filter((line) => inventorySkuMatch(line.sku || record.sku, item).matches).map((line) => ({
+      id: record.id,
+      returnNumber: record.returnNumber || record.id,
+      orderId: record.orderId || "",
+      orderNumber: record.orderNumber || "",
+      source: record.source || "",
+      status: record.status || "open",
+      condition: line.condition || record.condition || record.inspectionCondition || "",
+      disposition: line.disposition || record.disposition || "",
+      reason: line.reason || record.reason || "",
+      qty: Number(line.qty || line.quantity || record.qty || 0),
+      warehouseName: record.warehouseName || "",
+      createdAt: record.createdAt || "",
+      receivedAt: record.receivedAt || "",
+      restockedAt: record.restockedAt || "",
+      updatedAt: record.updatedAt || record.receivedAt || record.createdAt || ""
+    }));
+  }).sort((left, right) => new Date(right.updatedAt || 0).getTime() - new Date(left.updatedAt || 0).getTime());
+}
+
+function enrichInventoryOperations(operations = {}, purchaseOrders = [], returns = []) {
+  const now = Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  const poTerminal = new Set(["received", "closed", "canceled", "cancelled", "rejected", "deleted"]);
+  const returnOpen = new Set(["open", "requested", "approved", "in_transit", "received", "inspection"]);
+  const openPurchaseOrders = purchaseOrders.filter((row) => !poTerminal.has(String(row.status || "").toLowerCase()) && Number(row.openQty || 0) > 0);
+  const returnedWithin = (days) => returns.reduce((sum, row) => {
+    const timestamp = new Date(row.receivedAt || row.createdAt || 0).getTime();
+    return timestamp && now - timestamp <= days * day ? sum + Number(row.qty || 0) : sum;
+  }, 0);
+  const returned30 = returnedWithin(30);
+  const returned90 = returnedWithin(90);
+  const metrics = { ...(operations.metrics || {}) };
+  const projectedAvailable = Number(metrics.physicalAvailable || 0) + openPurchaseOrders.reduce((sum, row) => sum + Number(row.openQty || 0), 0) - Number(metrics.unallocatedUnits || 0);
+  const staleAllocations = (operations.allocations || []).filter((row) => {
+    const timestamp = new Date(row.updatedAt || row.assignedAt || 0).getTime();
+    return timestamp && now - timestamp > 7 * day;
+  });
+  Object.assign(metrics, {
+    incomingUnits: openPurchaseOrders.reduce((sum, row) => sum + Number(row.openQty || 0), 0),
+    openPurchaseOrderCount: new Set(openPurchaseOrders.map((row) => row.id)).size,
+    openReturnCount: new Set(returns.filter((row) => returnOpen.has(String(row.status || "").toLowerCase())).map((row) => row.id)).size,
+    returned30,
+    returned90,
+    returnRate90: Number(metrics.shipped90 || 0) > 0 ? returned90 / Number(metrics.shipped90 || 0) : 0,
+    sellThrough30: Number(metrics.shipped30 || 0) + Math.max(0, Number(metrics.available || 0)) > 0 ? Number(metrics.shipped30 || 0) / (Number(metrics.shipped30 || 0) + Math.max(0, Number(metrics.available || 0))) : 0,
+    projectedAvailable,
+    staleAllocationCount: staleAllocations.length,
+    lastMovementAt: operations.ledger?.[0]?.createdAt || ""
+  });
+  const health = [];
+  if (Number(metrics.unallocatedUnits || 0) > 0) health.push({ id: "unallocated-demand", severity: "critical", title: "Orders need inventory", detail: `${metrics.unallocatedUnits} unit(s) are not allocated to a warehouse.`, tab: "orders" });
+  if (staleAllocations.length) health.push({ id: "stale-allocations", severity: "warning", title: "Allocated stock has not shipped", detail: `${staleAllocations.length} allocation(s) are older than 7 days and may be reassigned.`, tab: "allocations" });
+  if (Number(metrics.daysOfCover || 0) > 0 && Number(metrics.daysOfCover || 0) < 14) health.push({ id: "low-cover", severity: "warning", title: "Low days of cover", detail: `At the recent sell rate, physical inventory covers about ${Number(metrics.daysOfCover).toFixed(1)} days.`, tab: "purchase-orders" });
+  if (Number(metrics.returnRate90 || 0) >= 0.1) health.push({ id: "return-rate", severity: "warning", title: "Elevated return rate", detail: `${(Number(metrics.returnRate90) * 100).toFixed(1)}% of units shipped in the last 90 days have return records.`, tab: "returns" });
+  if (Number(metrics.physicalAvailable || 0) < 0) health.push({ id: "negative-atp", severity: "critical", title: "Negative available inventory", detail: "Physical reservations exceed warehouse on-hand inventory.", tab: "allocations" });
+  if (!health.length) health.push({ id: "healthy", severity: "success", title: "Inventory signals look healthy", detail: "No unallocated demand, stale reservations, or urgent coverage risks were detected.", tab: "overview" });
+  return { ...operations, purchaseOrders, returns, metrics, health };
+}
+
 async function readCategoryReviewContext(categoryId = "", scope = "main") {
   const normalizedScope = scope === "source" ? "source" : "main";
   const key = String(categoryId || "").trim();
@@ -27571,20 +27663,26 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "operations" && postgres.isPostgresEnabled()) {
     const item = await postgres.readProductByKey(parts[2]);
     if (!item) return notFound(res);
-    const [orders, db, ledger] = await Promise.all([
+    const [orders, warehouses, ledger, purchaseOrders, returns] = await Promise.all([
       postgres.listOrders({ sku: item.sku, limit: 500 }),
-      readDbFast({ skipInventory: true }),
-      postgres.readStateField("inventoryLedger")
+      postgres.readStateField("warehouses"),
+      postgres.readStateField("inventoryLedger"),
+      postgres.listPurchaseOrders({ sku: item.sku, limit: 250 }),
+      postgres.readStateField("returns")
     ]);
-    const operations = inventorySkuOperations(item, orders || [], ledger || []);
+    const operations = enrichInventoryOperations(
+      inventorySkuOperations(item, orders || [], ledger || []),
+      inventoryPurchaseOrderRows(purchaseOrders || [], item),
+      inventoryReturnRows(returns || [], item)
+    );
     return sendJson(res, 200, {
       item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }),
-      warehouses: (db.warehouses || []).filter((warehouse) => warehouse.status !== "inactive"),
+      warehouses: (warehouses || []).filter((warehouse) => warehouse.status !== "inactive"),
       ...operations
     });
   }
 
-  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "allocations" && postgres.isPostgresEnabled()) {
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "allocations" && !parts[4] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const item = await postgres.readProductByKey(parts[2]);
     const order = await postgres.readOrderByKey(body.orderId);
@@ -27631,6 +27729,77 @@ async function handleApi(req, res) {
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
     return sendJson(res, 200, { allocation, order, item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "allocations" && parts[4] && parts[5] === "reassign" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const item = await postgres.readProductByKey(parts[2]);
+    if (!item) return notFound(res);
+    const orders = await postgres.listOrders({ sku: item.sku, limit: 500 });
+    const sourceOrder = (orders || []).find((row) => (row.inventoryAllocations || []).some((allocation) => allocation.id === parts[4] && allocation.status !== "released"));
+    const targetOrder = (orders || []).find((row) => String(row.id) === String(body.targetOrderId));
+    if (!sourceOrder) return sendJson(res, 404, { error: "Active allocation not found." });
+    if (!targetOrder) return sendJson(res, 404, { error: "Target order not found for this SKU." });
+    if (String(sourceOrder.id) === String(targetOrder.id)) return sendJson(res, 400, { error: "Choose a different target order." });
+    const targetStatus = String(targetOrder.status || "").toLowerCase();
+    if (["fulfilled", "shipped", "canceled", "cancelled", "void", "deleted", "refunded"].includes(targetStatus)) return sendJson(res, 400, { error: "Inventory cannot be reassigned to a completed or canceled order." });
+    const sourceAllocation = (sourceOrder.inventoryAllocations || []).find((row) => row.id === parts[4]);
+    const transferQty = Number(body.qty || sourceAllocation.qty || 0);
+    if (!(transferQty > 0) || transferQty > Number(sourceAllocation.qty || 0)) return sendJson(res, 400, { error: "Transfer quantity must be within the active allocation quantity." });
+    const targetDemand = inventorySkuOperations(item, [targetOrder], []).orders[0];
+    if (!targetDemand || Number(targetDemand.inventoryUnallocatedQty || 0) < transferQty) return sendJson(res, 400, { error: `The target order only needs ${Number(targetDemand?.inventoryUnallocatedQty || 0)} unallocated unit(s).` });
+    const db = await readDbFast({ skipInventory: true });
+    const sourceWarehouse = (db.warehouses || []).find((row) => row.id === sourceAllocation.warehouseId);
+    const targetWarehouse = (db.warehouses || []).find((row) => row.id === (body.warehouseId || sourceAllocation.warehouseId)) || sourceWarehouse;
+    if (!sourceWarehouse || !targetWarehouse) return sendJson(res, 400, { error: "The source or target warehouse is unavailable." });
+    const sourceStock = ensureInventoryWarehouseStock(item, sourceWarehouse);
+    const targetStock = ensureInventoryWarehouseStock(item, targetWarehouse);
+    if (sourceWarehouse.id !== targetWarehouse.id) {
+      const targetAvailable = Number(targetStock.qty || 0) - Number(targetStock.reserved || 0);
+      if (targetAvailable < transferQty) return sendJson(res, 400, { error: `Only ${targetAvailable} available in ${targetWarehouse.name}.` });
+    }
+    const sourceReservedBefore = Number(sourceStock.reserved || 0);
+    const targetReservedBefore = Number(targetStock.reserved || 0);
+    if (sourceWarehouse.id !== targetWarehouse.id) {
+      sourceStock.reserved = Math.max(0, sourceReservedBefore - transferQty);
+      targetStock.reserved = targetReservedBefore + transferQty;
+    }
+    const remainingSourceQty = Number(sourceAllocation.qty || 0) - transferQty;
+    if (remainingSourceQty > 0) {
+      sourceAllocation.qty = remainingSourceQty;
+      sourceAllocation.updatedAt = new Date().toISOString();
+    } else {
+      sourceAllocation.status = "released";
+      sourceAllocation.releasedAt = new Date().toISOString();
+      sourceAllocation.releaseReason = `Reassigned to ${targetOrder.orderNumber || targetOrder.id}`;
+    }
+    targetOrder.inventoryAllocations = Array.isArray(targetOrder.inventoryAllocations) ? targetOrder.inventoryAllocations : [];
+    let targetAllocation = targetOrder.inventoryAllocations.find((row) => skuMatchesInventoryItem(row.sku || row.productId, item) && row.warehouseId === targetWarehouse.id && row.status !== "released");
+    if (targetAllocation) {
+      targetAllocation.qty = Number(targetAllocation.qty || 0) + transferQty;
+      targetAllocation.updatedAt = new Date().toISOString();
+    } else {
+      targetAllocation = { id: crypto.randomUUID(), sku: item.sku, productId: item.id, warehouseId: targetWarehouse.id, warehouseName: targetWarehouse.name, qty: transferQty, status: "reserved", assignedAt: new Date().toISOString(), note: String(body.note || `Reassigned from ${sourceOrder.orderNumber || sourceOrder.id}`).trim() };
+      targetOrder.inventoryAllocations.push(targetAllocation);
+    }
+    for (const order of [sourceOrder, targetOrder]) {
+      order.reservedQty = (order.inventoryAllocations || []).filter((row) => row.status !== "released").reduce((sum, row) => sum + Number(row.qty || 0), 0);
+      order.updatedAt = new Date().toISOString();
+    }
+    sourceStock.updatedAt = new Date().toISOString();
+    targetStock.updatedAt = sourceStock.updatedAt;
+    syncInventoryTotalsFromWarehouses(item);
+    item.updatedAt = new Date().toISOString();
+    addInventoryLedger(db, item, { type: "order_allocation_reassign", source: "order", referenceId: targetOrder.id, referenceNumber: `${sourceOrder.orderNumber || sourceOrder.id} -> ${targetOrder.orderNumber || targetOrder.id}`, warehouseId: targetWarehouse.id, warehouseName: targetWarehouse.name, locationBin: targetStock.locationBin || "", quantityChange: 0, reservedChange: sourceWarehouse.id === targetWarehouse.id ? 0 : transferQty, qtyBefore: Number(targetStock.qty || 0), qtyAfter: Number(targetStock.qty || 0), reservedBefore: targetReservedBefore, reservedAfter: Number(targetStock.reserved || 0), reason: String(body.note || `Reassigned ${transferQty} unit(s) between orders`).trim(), user: body.user || "Luis" });
+    addOrderTimeline(sourceOrder, { type: "allocation", title: "Inventory reassigned", message: `${transferQty} unit(s) of ${item.sku} moved to ${targetOrder.orderNumber || targetOrder.id}.`, user: body.user || "Luis" });
+    addOrderTimeline(targetOrder, { type: "allocation", title: "Inventory received from another order", message: `${transferQty} unit(s) of ${item.sku} moved from ${sourceOrder.orderNumber || sourceOrder.id}.`, user: body.user || "Luis" });
+    await postgres.upsertProductsFromState([item]);
+    await postgres.upsertInventoryLevelsFromProducts([item]);
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    await Promise.all([postgres.saveOrder(sourceOrder), postgres.saveOrder(targetOrder)]);
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    return sendJson(res, 200, { reassigned: true, allocation: targetAllocation, sourceOrder, targetOrder });
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "allocations" && parts[4] && postgres.isPostgresEnabled()) {
