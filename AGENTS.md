@@ -192,6 +192,8 @@ Vendor-specific feeds are configured from the vendor profile and displayed in th
 
 Every long-running import must create a job with a visible numeric reference, progress, phase, worker, status, notes, artifacts, and retry/stop behavior. Full and refresh runs must not overlap for the same feed.
 
+Automatic marketplace inventory apply jobs must stop when the newest universal datadump attempt failed or is still incomplete. A prior successful dump is not sufficient when a newer attempt failed; dry runs may continue for diagnosis, but stale supplier quantities must never be republished automatically.
+
 ## Channels and marketplace rules
 
 Each marketplace channel has a master enable/disable switch. When a channel is disabled, all channel operations must be blocked: product launch, price updates, inventory updates, order import, status/fulfillment sync, webhooks, and marketplace notifications.

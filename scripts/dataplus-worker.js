@@ -401,6 +401,13 @@ function latestSuccessfulProductDumpJob(jobs = []) {
     .sort((a, b) => new Date(b.finishedAt || b.updatedAt || b.createdAt || 0) - new Date(a.finishedAt || a.updatedAt || a.createdAt || 0))[0] || null;
 }
 
+function latestProductDumpJob(jobs = []) {
+  return (jobs || [])
+    .filter((job) => String(job.workerTask || "").toLowerCase() === "product-dump-import"
+      || /product dump|product datadump/i.test(`${job.operation || ""} ${job.name || ""}`))
+    .sort((a, b) => new Date(b.finishedAt || b.updatedAt || b.createdAt || 0) - new Date(a.finishedAt || a.updatedAt || a.createdAt || 0))[0] || null;
+}
+
 async function checkScheduledShopifyInventoryUpdate(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastScheduleCheckAt < 60000) return false;
@@ -420,6 +427,7 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
   const today = localDateKey(now);
   const jobs = await postgres.readOperationJobs(500).catch(() => []) || [];
   const latestDump = latestSuccessfulProductDumpJob(jobs);
+  const latestDumpAttempt = latestProductDumpJob(jobs);
   const latestDumpFinishedAt = latestDump?.finishedAt || latestDump?.updatedAt || "";
   const scheduleState = docs.channelInventorySchedules && typeof docs.channelInventorySchedules === "object" ? docs.channelInventorySchedules : {};
   let queued = false;
@@ -445,6 +453,30 @@ async function checkScheduledShopifyInventoryUpdate(force = false) {
     const apply = isLegacyShopify
       ? settings.shopifyDailyInventoryUpdateMode === "apply"
       : String(channelSettings.inventoryScheduleMode || "dry-run").toLowerCase() === "apply";
+    const latestAttemptStatus = String(latestDumpAttempt?.status || "").toLowerCase();
+    const latestAttemptAt = new Date(latestDumpAttempt?.finishedAt || latestDumpAttempt?.updatedAt || latestDumpAttempt?.createdAt || 0).getTime();
+    const latestSuccessAt = new Date(latestDumpFinishedAt || 0).getTime();
+    const latestAttemptIsUnusable = latestDumpAttempt
+      && latestAttemptAt >= latestSuccessAt
+      && latestAttemptStatus !== "success";
+    if (apply && latestAttemptIsUnusable) {
+      const attemptLabel = latestDumpAttempt.jobNumber ? `Job ${latestDumpAttempt.jobNumber}` : "The latest product dump";
+      scheduleState[scheduleId] = {
+        ...previous,
+        channelId: channel.id || "",
+        channelName: channel.name || "",
+        time: dueSlot,
+        lastCheckedAt: new Date(nowMs).toISOString(),
+        lastAttemptedAt: new Date(nowMs).toISOString(),
+        lastAttemptedDate: today,
+        lastDumpJobId: latestDumpAttempt.id || "",
+        lastDumpFinishedAt: latestDumpAttempt.finishedAt || latestDumpAttempt.updatedAt || "",
+        lastSkipReason: `${attemptLabel} is ${latestAttemptStatus || "not complete"}. Automatic inventory apply is blocked to prevent stale stock from reaching Shopify.`,
+        lastError: ""
+      };
+      console.warn(`[${WORKER_ID}] blocked scheduled ${channel.name || "channel"} inventory apply: ${scheduleState[scheduleId].lastSkipReason}`);
+      continue;
+    }
     try {
       const result = await dataplus.queueShopifyInventoryUpdateJob(stateDb, {
         apply,
