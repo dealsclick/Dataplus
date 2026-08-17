@@ -11062,8 +11062,9 @@ function normalizeWarehouse(warehouse) {
     requireBinValidation: dataWarehouseLocation ? false : (warehouse.requireBinValidation === undefined ? false : Boolean(warehouse.requireBinValidation)),
     shopifyLocationId: normalizeShopifyLocationGid(warehouse.shopifyLocationId || ""),
     shopifyLocationName: warehouse.shopifyLocationName || "",
-    shopifyInventoryPushEnabled: dataWarehouseLocation ? false : (warehouse.shopifyInventoryPushEnabled === undefined ? false : Boolean(warehouse.shopifyInventoryPushEnabled)),
+    shopifyInventoryPushEnabled: warehouse.shopifyInventoryPushEnabled === undefined ? false : Boolean(warehouse.shopifyInventoryPushEnabled),
     bins: dataWarehouseLocation ? [] : (Array.isArray(warehouse.bins) ? warehouse.bins.map((bin, index) => normalizeWarehouseBin(bin, index)) : []),
+    activity: Array.isArray(warehouse.activity) ? warehouse.activity.slice(0, 1000) : [],
     notes: warehouse.notes || "",
     createdAt: warehouse.createdAt || new Date().toISOString(),
     updatedAt: warehouse.updatedAt || warehouse.createdAt || new Date().toISOString()
@@ -11442,6 +11443,55 @@ function preferredVendorForOrders(db, orders) {
 function findVendorByName(db, name) {
   const target = canonicalCatalogSupplierName(name).toLowerCase();
   return (db.vendors || []).find((vendor) => canonicalCatalogSupplierName(vendor.name, vendor.code).toLowerCase() === target);
+}
+
+function addWarehouseActivity(warehouse, event = {}) {
+  const activity = {
+    id: event.id || crypto.randomUUID(),
+    type: String(event.type || "update"),
+    title: String(event.title || "Warehouse updated"),
+    message: String(event.message || ""),
+    reference: String(event.reference || ""),
+    user: String(event.user || "System"),
+    createdAt: event.createdAt || new Date().toISOString()
+  };
+  warehouse.activity = [activity, ...(Array.isArray(warehouse.activity) ? warehouse.activity : [])].slice(0, 1000);
+  return activity;
+}
+
+function warehouseRecordMatches(record, warehouse) {
+  const warehouseId = String(warehouse.id || "").trim().toLowerCase();
+  const warehouseName = String(warehouse.name || "").trim().toLowerCase();
+  return String(record?.warehouseId || "").trim().toLowerCase() === warehouseId
+    || String(record?.warehouseName || record?.warehouse || "").trim().toLowerCase() === warehouseName;
+}
+
+function buildWarehouseDetailPayload(warehouse, records = {}) {
+  const movements = (Array.isArray(records.inventoryLedger) ? records.inventoryLedger : []).filter((row) => warehouseRecordMatches(row, warehouse));
+  const audits = (Array.isArray(records.warehouseAudits) ? records.warehouseAudits : []).filter((row) => warehouseRecordMatches(row, warehouse));
+  const receipts = (Array.isArray(records.manualWarehouseReceipts) ? records.manualWarehouseReceipts : []).filter((row) => warehouseRecordMatches(row, warehouse));
+  const activity = [
+    ...(Array.isArray(warehouse.activity) ? warehouse.activity.map((row) => ({ ...row, source: "Warehouse" })) : []),
+    ...movements.map((row) => ({ id: `movement-${row.id}`, type: "inventory", title: row.type === "receipt" ? "Inventory received" : "Inventory changed", message: `${row.sku || "SKU"}: ${Number(row.quantityChange || 0) >= 0 ? "+" : ""}${Number(row.quantityChange || 0)}${row.reason ? ` - ${row.reason}` : ""}`, reference: row.referenceNumber || row.referenceId || "", user: row.user || "System", source: "Inventory", createdAt: row.createdAt })),
+    ...audits.map((row) => ({ id: `audit-${row.id}`, type: "audit", title: `${row.auditNumber || "Audit"} ${String(row.status || "updated").replace(/_/g, " ")}`, message: `${Array.isArray(row.lines) ? row.lines.length : 0} catalog SKU${Array.isArray(row.lines) && row.lines.length === 1 ? "" : "s"} counted`, reference: row.auditNumber || row.id || "", user: row.approvedBy || row.createdBy || "System", source: "Warehouse audit", createdAt: row.completedAt || row.updatedAt || row.createdAt })),
+    ...receipts.map((row) => ({ id: `receipt-${row.id}`, type: "receipt", title: `${row.receiptNumber || "Receipt"} posted`, message: `${row.sku || "SKU"}: ${Number(row.quantity || 0)} unit${Number(row.quantity || 0) === 1 ? "" : "s"}${row.locationBin ? ` to ${row.locationBin}` : ""}`, reference: row.receiptNumber || row.id || "", user: row.receivedBy || row.user || "System", source: "Receiving", createdAt: row.createdAt || row.receivedAt })),
+  ].filter((row) => row.createdAt).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 1000);
+  const bins = Array.isArray(warehouse.bins) ? warehouse.bins : [];
+  return {
+    warehouse,
+    summary: {
+      totalBins: bins.length,
+      activeBins: bins.filter((bin) => bin.active !== false).length,
+      totalAudits: audits.length,
+      openAudits: audits.filter((row) => ["in_progress", "pending_review"].includes(String(row.status))).length,
+      receipts: receipts.length,
+      movements: movements.length
+    },
+    activity,
+    audits: audits.slice(0, 100),
+    receipts: receipts.slice(0, 100),
+    movements: movements.slice(0, 200)
+  };
 }
 
 function categoryMappingListState(mapping = {}) {
@@ -31864,6 +31914,22 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { return: record, state: publicState(stateDb, { lite: true }) });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouses" && parts[2] && parts[3] === "detail") {
+    const db = await readDbFast({ skipInventory: true });
+    const warehouse = (db.warehouses || []).find((row) => String(row.id) === String(parts[2]));
+    if (!warehouse) return notFound(res);
+    const records = postgres.isPostgresEnabled() ? {
+      inventoryLedger: await postgres.readStateField("inventoryLedger").catch(() => []),
+      warehouseAudits: await postgres.readStateField("warehouseAudits").catch(() => []),
+      manualWarehouseReceipts: await postgres.readStateField("manualWarehouseReceipts").catch(() => [])
+    } : {
+      inventoryLedger: db.inventoryLedger || [],
+      warehouseAudits: db.warehouseAudits || [],
+      manualWarehouseReceipts: db.manualWarehouseReceipts || []
+    };
+    return sendJson(res, 200, buildWarehouseDetailPayload(warehouse, records));
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouses" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const name = String(body.name || "").trim();
@@ -31876,6 +31942,8 @@ async function handleApi(req, res) {
       name,
       status: String(body.status || "active"),
       warehouseType: String(body.warehouseType || "Warehouse").trim(),
+      allowReceiving: body.allowReceiving === undefined ? true : Boolean(body.allowReceiving),
+      allowAudits: body.allowAudits === undefined ? true : Boolean(body.allowAudits),
       contactName: String(body.contactName || "").trim(),
       managerName: String(body.managerName || "").trim(),
       phone: String(body.phone || "").trim(),
@@ -31906,6 +31974,7 @@ async function handleApi(req, res) {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     });
+    addWarehouseActivity(warehouse, { type: "created", title: "Warehouse created", message: `${warehouse.name} was added to DataPlus.`, user: body.user || body.createdBy || "System" });
     if (warehouse.isDefaultReceiving) db.warehouses.forEach((item) => { item.isDefaultReceiving = false; });
     if (warehouse.isDefaultReturns) db.warehouses.forEach((item) => { item.isDefaultReturns = false; });
     db.warehouses.unshift(warehouse);
@@ -31924,22 +31993,26 @@ async function handleApi(req, res) {
       "operatingHours", "carrierCutoffTime", "receivingInstructions", "addressLine1", "addressLine2", "city",
       "state", "postalCode", "country", "isDefaultReceiving", "isDefaultReturns", "requireAppointment",
       "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyLocationId",
-      "shopifyLocationName", "shopifyInventoryPushEnabled", "notes"
+      "shopifyLocationName", "shopifyInventoryPushEnabled", "allowReceiving", "allowAudits", "notes"
     ];
+    const changedFields = [];
     for (const field of fields) {
       if (body[field] === undefined) continue;
-      if (["isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyInventoryPushEnabled"].includes(field)) {
+      const previousValue = warehouse[field];
+      if (["isDefaultReceiving", "isDefaultReturns", "requireAppointment", "allowBlindReceipts", "requireSerialScan", "requirePhotoForDamage", "autoRouteReturns", "requireBinValidation", "shopifyInventoryPushEnabled", "allowReceiving", "allowAudits"].includes(field)) {
         warehouse[field] = Boolean(body[field]);
       } else if (field === "shopifyLocationId") {
         warehouse[field] = normalizeShopifyLocationGid(body[field]);
       } else {
         warehouse[field] = String(body[field] ?? "").trim();
       }
+      if (String(previousValue ?? "") !== String(warehouse[field] ?? "")) changedFields.push(field);
     }
     if (body.isDefaultReceiving) (db.warehouses || []).forEach((item) => { if (item.id !== warehouse.id) item.isDefaultReceiving = false; });
     if (body.isDefaultReturns) (db.warehouses || []).forEach((item) => { if (item.id !== warehouse.id) item.isDefaultReturns = false; });
     warehouse.addressLine = formatWarehouseAddress(warehouse);
     warehouse.updatedAt = new Date().toISOString();
+    if (changedFields.length) addWarehouseActivity(warehouse, { type: "settings", title: "Warehouse settings updated", message: `Changed ${changedFields.join(", ")}.`, user: body.user || body.updatedBy || "System" });
     await postgres.writeStateDocuments({ warehouses: db.warehouses || [] });
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { warehouse, state: publicState(stateDb, { lite: true }) });
@@ -31966,6 +32039,7 @@ async function handleApi(req, res) {
     if (bin.isDefault) warehouse.bins.forEach((item) => { item.isDefault = false; });
     warehouse.bins.push(bin);
     warehouse.updatedAt = new Date().toISOString();
+    addWarehouseActivity(warehouse, { type: "bin", title: `Bin ${bin.code} created`, message: `${bin.name || bin.type || "Bin"} was added${bin.aisle ? ` in aisle ${bin.aisle}` : ""}.`, reference: bin.code, user: body.user || body.createdBy || "System" });
     await postgres.writeStateDocuments({ warehouses: db.warehouses || [] });
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { warehouse, bin, state: publicState(stateDb, { lite: true }) });
@@ -31979,17 +32053,20 @@ async function handleApi(req, res) {
     warehouse.bins = Array.isArray(warehouse.bins) ? warehouse.bins : [];
     const bin = warehouse.bins.find((item) => item.id === parts[4]);
     if (!bin) return notFound(res);
+    const changedFields = [];
     for (const field of ["code", "name", "type", "section", "aisle", "nickname", "notes"]) {
-      if (body[field] !== undefined) bin[field] = String(body[field] ?? "").trim();
+      if (body[field] !== undefined) { const previousValue = bin[field]; bin[field] = String(body[field] ?? "").trim(); if (String(previousValue ?? "") !== String(bin[field] ?? "")) changedFields.push(field); }
     }
-    if (body.active !== undefined) bin.active = Boolean(body.active);
+    if (body.active !== undefined) { const previousValue = bin.active; bin.active = Boolean(body.active); if (previousValue !== bin.active) changedFields.push("active"); }
     if (body.isDefault !== undefined) {
       const nextDefault = Boolean(body.isDefault);
       if (nextDefault) warehouse.bins.forEach((item) => { item.isDefault = false; });
       bin.isDefault = nextDefault;
+      changedFields.push("default bin");
     }
     if (!warehouse.bins.some((item) => item.isDefault) && warehouse.bins.length) warehouse.bins[0].isDefault = true;
     warehouse.updatedAt = new Date().toISOString();
+    if (changedFields.length) addWarehouseActivity(warehouse, { type: "bin", title: `Bin ${bin.code} updated`, message: `Changed ${changedFields.join(", ")}.`, reference: bin.code, user: body.user || body.updatedBy || "System" });
     await postgres.writeStateDocuments({ warehouses: db.warehouses || [] });
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { warehouse, bin, state: publicState(stateDb, { lite: true }) });
@@ -40451,6 +40528,8 @@ async function handleApi(req, res) {
       name,
       status: String(body.status || "active"),
       warehouseType: String(body.warehouseType || "Warehouse").trim(),
+      allowReceiving: body.allowReceiving === undefined ? true : Boolean(body.allowReceiving),
+      allowAudits: body.allowAudits === undefined ? true : Boolean(body.allowAudits),
       contactName: String(body.contactName || "").trim(),
       managerName: String(body.managerName || "").trim(),
       phone: String(body.phone || "").trim(),
@@ -40477,6 +40556,7 @@ async function handleApi(req, res) {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     });
+    addWarehouseActivity(warehouse, { type: "created", title: "Warehouse created", message: `${warehouse.name} was added to DataPlus.`, user: body.user || body.createdBy || "System" });
     if (warehouse.isDefaultReceiving) {
       db.warehouses.forEach((item) => { item.isDefaultReceiving = false; });
     }
@@ -40488,7 +40568,7 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { warehouse, state: publicState(db) });
   }
 
-  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "warehouses" && parts[2]) {
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "warehouses" && parts[2] && !parts[3]) {
     const body = await parseBody(req);
     const warehouse = (db.warehouses || []).find((row) => row.id === parts[2]);
     if (!warehouse) return notFound(res);
@@ -40518,8 +40598,15 @@ async function handleApi(req, res) {
       "requireSerialScan",
       "requirePhotoForDamage",
       "autoRouteReturns",
+      "allowReceiving",
+      "allowAudits",
+      "requireBinValidation",
+      "shopifyLocationId",
+      "shopifyLocationName",
+      "shopifyInventoryPushEnabled",
       "notes"
     ];
+    const changedFields = [];
     for (const field of fields) {
       if (body[field] === undefined) continue;
       if ([
@@ -40529,11 +40616,23 @@ async function handleApi(req, res) {
         "allowBlindReceipts",
         "requireSerialScan",
         "requirePhotoForDamage",
-        "autoRouteReturns"
+        "autoRouteReturns",
+        "allowReceiving",
+        "allowAudits",
+        "requireBinValidation",
+        "shopifyInventoryPushEnabled"
       ].includes(field)) {
+        const previousValue = warehouse[field];
         warehouse[field] = Boolean(body[field]);
+        if (previousValue !== warehouse[field]) changedFields.push(field);
+      } else if (field === "shopifyLocationId") {
+        const previousValue = warehouse[field];
+        warehouse[field] = normalizeShopifyLocationGid(body[field]);
+        if (String(previousValue || "") !== String(warehouse[field] || "")) changedFields.push(field);
       } else {
+        const previousValue = warehouse[field];
         warehouse[field] = String(body[field] ?? "").trim();
+        if (String(previousValue ?? "") !== String(warehouse[field] ?? "")) changedFields.push(field);
       }
     }
     if (body.isDefaultReceiving) {
@@ -40548,6 +40647,7 @@ async function handleApi(req, res) {
     }
     warehouse.addressLine = formatWarehouseAddress(warehouse);
     warehouse.updatedAt = new Date().toISOString();
+    if (changedFields.length) addWarehouseActivity(warehouse, { type: "settings", title: "Warehouse settings updated", message: `Changed ${changedFields.join(", ")}.`, user: body.user || body.updatedBy || "System" });
     await writeDb(db);
     return sendJson(res, 200, { warehouse, state: publicState(db) });
   }
@@ -40562,6 +40662,9 @@ async function handleApi(req, res) {
       code: body.code,
       name: body.name,
       type: body.type,
+      section: body.section,
+      aisle: body.aisle,
+      nickname: body.nickname,
       isDefault: body.isDefault,
       active: body.active === undefined ? true : body.active,
       notes: body.notes
@@ -40569,6 +40672,7 @@ async function handleApi(req, res) {
     if (bin.isDefault) warehouse.bins.forEach((item) => { item.isDefault = false; });
     warehouse.bins.push(bin);
     warehouse.updatedAt = new Date().toISOString();
+    addWarehouseActivity(warehouse, { type: "bin", title: `Bin ${bin.code} created`, message: `${bin.name || bin.type || "Bin"} was added${bin.aisle ? ` in aisle ${bin.aisle}` : ""}.`, reference: bin.code, user: body.user || body.createdBy || "System" });
     await writeDb(db);
     return sendJson(res, 200, { warehouse, bin, state: publicState(db) });
   }
@@ -40580,18 +40684,21 @@ async function handleApi(req, res) {
     warehouse.bins = Array.isArray(warehouse.bins) ? warehouse.bins : [];
     const bin = warehouse.bins.find((item) => item.id === parts[4]);
     if (!bin) return notFound(res);
-    const fields = ["code", "name", "type", "notes"];
+    const fields = ["code", "name", "type", "section", "aisle", "nickname", "notes"];
+    const changedFields = [];
     for (const field of fields) {
-      if (body[field] !== undefined) bin[field] = String(body[field] ?? "").trim();
+      if (body[field] !== undefined) { const previousValue = bin[field]; bin[field] = String(body[field] ?? "").trim(); if (String(previousValue ?? "") !== String(bin[field] ?? "")) changedFields.push(field); }
     }
-    if (body.active !== undefined) bin.active = Boolean(body.active);
+    if (body.active !== undefined) { const previousValue = bin.active; bin.active = Boolean(body.active); if (previousValue !== bin.active) changedFields.push("active"); }
     if (body.isDefault !== undefined) {
       const nextDefault = Boolean(body.isDefault);
       if (nextDefault) warehouse.bins.forEach((item) => { item.isDefault = false; });
       bin.isDefault = nextDefault;
+      changedFields.push("default bin");
     }
     if (!warehouse.bins.some((item) => item.isDefault) && warehouse.bins.length) warehouse.bins[0].isDefault = true;
     warehouse.updatedAt = new Date().toISOString();
+    if (changedFields.length) addWarehouseActivity(warehouse, { type: "bin", title: `Bin ${bin.code} updated`, message: `Changed ${changedFields.join(", ")}.`, reference: bin.code, user: body.user || body.updatedBy || "System" });
     await writeDb(db);
     return sendJson(res, 200, { warehouse, bin, state: publicState(db) });
   }

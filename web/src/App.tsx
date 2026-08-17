@@ -9574,6 +9574,16 @@ type WarehouseRegisterRecord = {
   warehouseType?: string
   inventorySourceType?: string
   isPhysical?: boolean
+  allowReceiving?: boolean
+  allowAudits?: boolean
+  contactName?: string
+  managerName?: string
+  phone?: string
+  email?: string
+  timezone?: string
+  operatingHours?: string
+  carrierCutoffTime?: string
+  receivingInstructions?: string
   bins?: Array<Record<string, unknown>>
   addressLine1?: string
   addressLine2?: string
@@ -9583,12 +9593,38 @@ type WarehouseRegisterRecord = {
   country?: string
   isDefaultReceiving?: boolean
   isDefaultReturns?: boolean
+  requireAppointment?: boolean
+  allowBlindReceipts?: boolean
+  requireSerialScan?: boolean
+  requirePhotoForDamage?: boolean
+  autoRouteReturns?: boolean
   requireBinValidation?: boolean
   shopifyLocationId?: string
   shopifyLocationName?: string
   shopifyInventoryPushEnabled?: boolean
   notes?: string
+  createdAt?: string
   updatedAt?: string
+}
+
+type WarehouseActivityRecord = {
+  id?: string
+  type?: string
+  title?: string
+  message?: string
+  reference?: string
+  user?: string
+  source?: string
+  createdAt?: string
+}
+
+type WarehouseDetailPayload = {
+  warehouse: WarehouseRegisterRecord
+  summary?: { totalBins?: number; activeBins?: number; totalAudits?: number; openAudits?: number; receipts?: number; movements?: number }
+  activity?: WarehouseActivityRecord[]
+  audits?: Array<Record<string, unknown>>
+  receipts?: Array<Record<string, unknown>>
+  movements?: Array<Record<string, unknown>>
 }
 
 const emptyWarehouseForm = {
@@ -9698,7 +9734,7 @@ function WarehouseRegister() {
         <div className="border-b p-3"><div className="relative max-w-lg"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search warehouse, code, type, or location" /></div></div>
         <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Warehouse</TableHead><TableHead>Type</TableHead><TableHead>Status</TableHead><TableHead>Location</TableHead><TableHead>Bins</TableHead><TableHead>Defaults</TableHead><TableHead>Shopify mapping</TableHead><TableHead>Updated</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>
           {shown.map((warehouse) => { const virtual = isVirtual(warehouse); const bins = Array.isArray(warehouse.bins) ? warehouse.bins : []; const activeBins = bins.filter((bin) => bin.active !== false).length; return <TableRow key={String(warehouse.id || warehouse.code)}>
-            <TableCell><p className="font-medium">{String(warehouse.name || "Unnamed warehouse")}</p><p className="text-xs text-muted-foreground">{String(warehouse.code || warehouse.id || "No code")}</p></TableCell>
+            <TableCell><a className="font-medium text-primary hover:underline" href={`/warehouse/warehouses/${encodeURIComponent(String(warehouse.id || ""))}`}>{String(warehouse.name || "Unnamed warehouse")}</a><p className="text-xs text-muted-foreground">{String(warehouse.code || warehouse.id || "No code")}</p></TableCell>
             <TableCell><Badge variant="outline" className={virtual ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300" : "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300"}>{virtual ? "Virtual supplier feed" : String(warehouse.warehouseType || "Physical warehouse")}</Badge></TableCell>
             <TableCell><Badge variant={String(warehouse.status || "active").toLowerCase() === "inactive" ? "secondary" : "default"}>{String(warehouse.status || "active")}</Badge></TableCell>
             <TableCell><p className="max-w-64 truncate">{virtual ? "Supplier network" : address(warehouse)}</p></TableCell>
@@ -9706,7 +9742,7 @@ function WarehouseRegister() {
             <TableCell><div className="flex flex-wrap gap-1">{warehouse.isDefaultReceiving && <Badge variant="secondary">Receiving</Badge>}{warehouse.isDefaultReturns && <Badge variant="secondary">Returns</Badge>}{!warehouse.isDefaultReceiving && !warehouse.isDefaultReturns && <span className="text-muted-foreground">-</span>}</div></TableCell>
             <TableCell>{warehouse.shopifyLocationName || warehouse.shopifyLocationId ? <div><p>{String(warehouse.shopifyLocationName || "Shopify location")}</p><p className="max-w-48 truncate text-xs text-muted-foreground">{String(warehouse.shopifyLocationId || "")}</p></div> : <span className="text-muted-foreground">Not mapped</span>}</TableCell>
             <TableCell>{dateLabel(String(warehouse.updatedAt || ""))}</TableCell>
-            <TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="outline" title="Warehouse actions"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>{String(warehouse.name || "Warehouse")}</DropdownMenuLabel>{!virtual && <DropdownMenuItem asChild><a href={`/warehouse/bins?warehouseId=${encodeURIComponent(String(warehouse.id || ""))}`}><Boxes className="size-4" /> View bins</a></DropdownMenuItem>}<DropdownMenuItem onSelect={() => openEdit(warehouse)}><Pencil className="size-4" /> Edit settings</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell>
+            <TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="outline" title="Warehouse actions"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>{String(warehouse.name || "Warehouse")}</DropdownMenuLabel><DropdownMenuItem asChild><a href={`/warehouse/warehouses/${encodeURIComponent(String(warehouse.id || ""))}`}><Warehouse className="size-4" /> Open warehouse</a></DropdownMenuItem>{!virtual && <DropdownMenuItem asChild><a href={`/warehouse/warehouses/${encodeURIComponent(String(warehouse.id || ""))}#bins`}><Boxes className="size-4" /> View bins</a></DropdownMenuItem>}<DropdownMenuItem onSelect={() => openEdit(warehouse)}><Pencil className="size-4" /> Quick edit</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell>
           </TableRow> })}
           {!loading && !shown.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No warehouses match this search.</TableCell></TableRow>}
           {loading && <TableRow><TableCell colSpan={9} className="h-28 text-center"><Loader2 className="mx-auto size-5 animate-spin text-primary" /></TableCell></TableRow>}
@@ -9720,7 +9756,7 @@ function WarehouseRegister() {
   </div>
 }
 
-function WarehouseBinManager() {
+function WarehouseBinManager({ fixedWarehouseId = "", onChanged }: { fixedWarehouseId?: string; onChanged?: () => void | Promise<void> } = {}) {
   type Bin = { id?: string; code?: string; name?: string; type?: string; section?: string; aisle?: string; nickname?: string; active?: boolean; isDefault?: boolean; notes?: string }
   type WarehouseRecord = { id?: string; name?: string; code?: string; bins?: Bin[]; requireBinValidation?: boolean }
   const [warehouses, setWarehouses] = useState<WarehouseRecord[]>([])
@@ -9737,11 +9773,11 @@ function WarehouseBinManager() {
       const result = await api<LiteState>("/api/state?lite=1")
       const rows = (result.warehouses || []) as WarehouseRecord[]
       setWarehouses(rows)
-      const requestedWarehouseId = new URLSearchParams(window.location.search).get("warehouseId") || ""
+      const requestedWarehouseId = fixedWarehouseId || new URLSearchParams(window.location.search).get("warehouseId") || ""
       setWarehouseId((current) => current || (rows.some((row) => String(row.id) === requestedWarehouseId) ? requestedWarehouseId : String(rows[0]?.id || "")))
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load warehouse locations.") }
   }
-  useEffect(() => { void load() }, [])
+  useEffect(() => { void load() }, [fixedWarehouseId])
   const openCreate = () => { setEditing(null); setForm({ code: "", name: "", type: "Storage", section: "Storage", aisle: "", nickname: "", notes: "", active: true, isDefault: !(selected?.bins || []).length }); setDialogOpen(true) }
   const openEdit = (bin: Bin) => { setEditing(bin); setForm({ code: String(bin.code || ""), name: String(bin.name || ""), type: String(bin.type || "Storage"), section: String(bin.section || "Storage"), aisle: String(bin.aisle || ""), nickname: String(bin.nickname || ""), notes: String(bin.notes || ""), active: bin.active !== false, isDefault: bin.isDefault === true }); setDialogOpen(true) }
   const save = async () => {
@@ -9753,23 +9789,24 @@ function WarehouseBinManager() {
       toast.success(editing ? "Bin updated." : "Bin created.")
       setDialogOpen(false)
       await load()
+      await onChanged?.()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save bin.") } finally { setBusy(false) }
   }
   const updateBin = async (bin: Bin, changes: Record<string, unknown>) => {
     if (!selected?.id || !bin.id) return
     setBusy(true)
-    try { await api(`/api/warehouses/${encodeURIComponent(String(selected.id))}/bins/${encodeURIComponent(String(bin.id))}`, { method: "PATCH", body: JSON.stringify(changes) }); await load(); toast.success("Bin updated.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update bin.") } finally { setBusy(false) }
+    try { await api(`/api/warehouses/${encodeURIComponent(String(selected.id))}/bins/${encodeURIComponent(String(bin.id))}`, { method: "PATCH", body: JSON.stringify(changes) }); await load(); await onChanged?.(); toast.success("Bin updated.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update bin.") } finally { setBusy(false) }
   }
   const updateWarehouse = async (changes: Record<string, unknown>) => {
     if (!selected?.id) return
     setBusy(true)
-    try { await api(`/api/warehouses/${encodeURIComponent(String(selected.id))}`, { method: "PATCH", body: JSON.stringify(changes) }); await load(); toast.success("Warehouse location rules saved.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save warehouse rule.") } finally { setBusy(false) }
+    try { await api(`/api/warehouses/${encodeURIComponent(String(selected.id))}`, { method: "PATCH", body: JSON.stringify(changes) }); await load(); await onChanged?.(); toast.success("Warehouse location rules saved.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save warehouse rule.") } finally { setBusy(false) }
   }
   const bins = selected?.bins || []
   const sections = Array.from(new Set(bins.map((bin) => String(bin.section || "Storage").trim() || "Storage"))).sort()
   const binsBySection = sections.map((section) => ({ section, aisles: Array.from(new Set(bins.filter((bin) => String(bin.section || "Storage").trim() === section).map((bin) => String(bin.aisle || "Unassigned").trim() || "Unassigned"))).sort() }))
   return <div className="grid gap-4">
-    <Card><CardHeader className="flex-row items-start justify-between gap-3"><div><CardTitle className="text-base">Bin master</CardTitle><CardDescription>Use the table for detailed setup, or the bird's-eye view to see the working layout by section and aisle.</CardDescription></div><Button size="sm" onClick={openCreate} disabled={!selected || busy}>Add bin</Button></CardHeader><CardContent className="grid gap-4"><div className="flex flex-wrap items-center gap-3"><Field label="Warehouse"><Select value={String(selected?.id || "")} onValueChange={setWarehouseId}><SelectTrigger className="w-64"><SelectValue placeholder="Select warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field><div className="flex items-center gap-2 pt-6"><Switch id="require-bin-validation" checked={selected?.requireBinValidation === true} disabled={!selected || busy} onCheckedChange={(checked) => void updateWarehouse({ requireBinValidation: checked })} /><Label htmlFor="require-bin-validation" className="text-sm">Require active bin on scan and manual receiving</Label></div><Button size="sm" variant="outline" className="mt-6" disabled={busy} onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button></div>
+    <Card id="bins"><CardHeader className="flex-row items-start justify-between gap-3"><div><CardTitle className="text-base">Bin master</CardTitle><CardDescription>Use the table for detailed setup, or the bird's-eye view to see the working layout by section and aisle.</CardDescription></div><Button size="sm" onClick={openCreate} disabled={!selected || busy}>Add bin</Button></CardHeader><CardContent className="grid gap-4"><div className="flex flex-wrap items-center gap-3">{!fixedWarehouseId && <Field label="Warehouse"><Select value={String(selected?.id || "")} onValueChange={setWarehouseId}><SelectTrigger className="w-64"><SelectValue placeholder="Select warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field>}<div className={`flex items-center gap-2 ${fixedWarehouseId ? "" : "pt-6"}`}><Switch id={`require-bin-validation-${fixedWarehouseId || "all"}`} checked={selected?.requireBinValidation === true} disabled={!selected || busy} onCheckedChange={(checked) => void updateWarehouse({ requireBinValidation: checked })} /><Label htmlFor={`require-bin-validation-${fixedWarehouseId || "all"}`} className="text-sm">Require active bin on scan and manual receiving</Label></div><Button size="sm" variant="outline" className={fixedWarehouseId ? "" : "mt-6"} disabled={busy} onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button></div>
       {selected?.requireBinValidation === true && !bins.filter((bin) => bin.active !== false).length && <Alert><AlertCircle className="size-4" /><AlertTitle>No active bins</AlertTitle><AlertDescription>Add and activate at least one bin before enabling strict bin validation in day-to-day warehouse work.</AlertDescription></Alert>}
       <Tabs value={view} onValueChange={(value) => setView(value as "table" | "layout")}><TabsList><TabsTrigger value="table">Regular table</TabsTrigger><TabsTrigger value="layout">Bird's-eye view</TabsTrigger></TabsList><TabsContent value="table" className="mt-4"><div className="overflow-hidden rounded-md border"><Table><TableHeader><TableRow><TableHead>Code</TableHead><TableHead>Section / aisle</TableHead><TableHead>Name</TableHead><TableHead>Type</TableHead><TableHead>Status</TableHead><TableHead>Notes</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{bins.map((bin) => <TableRow key={String(bin.id || bin.code)}><TableCell className="font-medium">{String(bin.code || "-")}{bin.isDefault && <Badge variant="secondary" className="ml-2">Default</Badge>}</TableCell><TableCell>{String(bin.section || "Storage")} / {String(bin.aisle || "-")}</TableCell><TableCell>{String(bin.name || "-")}</TableCell><TableCell>{String(bin.type || "Storage")}</TableCell><TableCell><Badge variant={bin.active === false ? "outline" : "secondary"}>{bin.active === false ? "Inactive" : "Active"}</Badge></TableCell><TableCell className="max-w-[200px] truncate">{String(bin.notes || "-")}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-1"><Button size="sm" variant="ghost" onClick={() => openEdit(bin)}>Edit</Button><Button size="sm" variant="ghost" disabled={busy || bin.active === false} onClick={() => void updateBin(bin, { isDefault: true })}>Default</Button><Button size="sm" variant="ghost" disabled={busy || bin.isDefault === true} onClick={() => void updateBin(bin, { active: bin.active === false })}>{bin.active === false ? "Activate" : "Deactivate"}</Button></div></TableCell></TableRow>)}{!bins.length && <TableRow><TableCell colSpan={7} className="h-24 text-center text-muted-foreground">No bins are configured for this warehouse yet.</TableCell></TableRow>}</TableBody></Table></div></TabsContent><TabsContent value="layout" className="mt-4"><div className="grid gap-4 xl:grid-cols-2">{binsBySection.map(({ section, aisles }) => <Card key={section} className="overflow-hidden"><CardHeader className="border-b bg-muted/30 py-3"><CardTitle className="text-sm">{section}</CardTitle><CardDescription>{aisles.length} aisle{aisles.length === 1 ? "" : "s"} / {bins.filter((bin) => String(bin.section || "Storage").trim() === section).length} bins</CardDescription></CardHeader><CardContent className="grid gap-3 p-3">{aisles.map((aisle) => <div key={aisle} className="rounded-md border bg-background p-3"><div className="mb-2 flex items-center justify-between"><p className="text-sm font-medium">Aisle {aisle}</p><Badge variant="outline">{bins.filter((bin) => String(bin.section || "Storage").trim() === section && (String(bin.aisle || "Unassigned").trim() || "Unassigned") === aisle).length} bins</Badge></div><div className="flex flex-wrap gap-2">{bins.filter((bin) => String(bin.section || "Storage").trim() === section && (String(bin.aisle || "Unassigned").trim() || "Unassigned") === aisle).map((bin) => <button type="button" key={String(bin.id || bin.code)} onClick={() => openEdit(bin)} className={`min-w-24 rounded-md border px-3 py-2 text-left text-xs transition-colors hover:bg-muted ${bin.active === false ? "border-dashed text-muted-foreground" : "bg-card"}`}><span className="block font-semibold">{String(bin.code || "-")}</span><span className="block truncate text-muted-foreground">{String(bin.name || bin.type || "Bin")}</span></button>)}</div></div>)}</CardContent></Card>)}{!bins.length && <div className="rounded-md border border-dashed p-10 text-center text-sm text-muted-foreground xl:col-span-2">Add bins, then assign each one to a section and aisle to create the layout.</div>}</div></TabsContent></Tabs>
     </CardContent></Card>
@@ -9792,9 +9829,101 @@ function WarehouseBinManager() {
   </div>
 }
 
+function WarehouseDetailPage({ warehouseId }: { warehouseId: string }) {
+  const [detail, setDetail] = useState<WarehouseDetailPayload | null>(null)
+  const [draft, setDraft] = useState<WarehouseRegisterRecord | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [tab, setTab] = useState(window.location.hash === "#bins" ? "bins" : "overview")
+  const [activityQuery, setActivityQuery] = useState("")
+  const [activityType, setActivityType] = useState("all")
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const result = await api<WarehouseDetailPayload>(`/api/warehouses/${encodeURIComponent(warehouseId)}/detail`)
+      setDetail(result)
+      setDraft(result.warehouse)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load this warehouse.")
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { void load() }, [warehouseId])
+
+  const warehouse = detail?.warehouse
+  const virtual = warehouse?.isPhysical === false || String(warehouse?.inventorySourceType || "").toLowerCase() === "supplier_feed"
+  const address = [warehouse?.addressLine1, warehouse?.addressLine2, warehouse?.city, warehouse?.state, warehouse?.postalCode, warehouse?.country].filter(Boolean).join(", ") || (virtual ? "Supplier network" : "Address not configured")
+  const updateDraft = (field: keyof WarehouseRegisterRecord, value: string | boolean) => setDraft((current) => current ? { ...current, [field]: value } : current)
+  const save = async () => {
+    if (!draft?.name?.trim()) { toast.error("Warehouse name is required."); return }
+    setSaving(true)
+    try {
+      await api(`/api/warehouses/${encodeURIComponent(warehouseId)}`, { method: "PATCH", body: JSON.stringify({ ...draft, user: "Warehouse admin" }) })
+      toast.success("Warehouse settings saved.")
+      setEditing(false)
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save warehouse settings.")
+    } finally {
+      setSaving(false)
+    }
+  }
+  const selectTab = (next: string) => {
+    setTab(next)
+    window.history.replaceState({}, "", `${window.location.pathname}${next === "bins" ? "#bins" : ""}`)
+  }
+  const activity = useMemo(() => {
+    const needle = activityQuery.trim().toLowerCase()
+    return (detail?.activity || []).filter((row) => (activityType === "all" || String(row.type || "update") === activityType) && (!needle || [row.title, row.message, row.reference, row.user, row.source].some((value) => String(value || "").toLowerCase().includes(needle))))
+  }, [activityQuery, activityType, detail?.activity])
+
+  if (loading && !warehouse) return <div className="grid min-h-72 place-items-center"><Loader2 className="size-7 animate-spin text-primary" /></div>
+  if (!warehouse || !draft) return <Empty className="min-h-72"><EmptyHeader><EmptyMedia variant="icon"><Warehouse className="size-4" /></EmptyMedia><EmptyTitle>Warehouse not found</EmptyTitle><EmptyDescription>This location may have been removed or is no longer available.</EmptyDescription></EmptyHeader><Button variant="outline" asChild><a href="/warehouse/warehouses">Back to warehouses</a></Button></Empty>
+
+  const summary = detail?.summary || {}
+  const toggleRows: Array<[keyof WarehouseRegisterRecord, string, string]> = [
+    ["allowReceiving", "Receiving enabled", "Allow receipts and PO arrivals into this warehouse."],
+    ["allowAudits", "Warehouse audits enabled", "Allow cycle counts and physical inventory audits."],
+    ["isDefaultReceiving", "Default receiving location", "Use this warehouse when a receipt has no explicit destination."],
+    ["isDefaultReturns", "Default returns location", "Route inspected returns here by default."],
+    ["requireAppointment", "Receiving appointment required", "Flag inbound deliveries that need an appointment."],
+    ["allowBlindReceipts", "Allow blind receiving", "Permit receipts without displaying expected quantities."],
+    ["requireSerialScan", "Require serial scan", "Capture serial numbers for controlled products."],
+    ["requirePhotoForDamage", "Damage photo required", "Require evidence when receiving damaged inventory."],
+    ["autoRouteReturns", "Auto-route returns", "Apply this warehouse's return routing automatically."],
+    ["requireBinValidation", "Require active bin", "Validate the bin during scans and manual receiving."],
+    ["shopifyInventoryPushEnabled", "Push inventory to Shopify", "Send this warehouse's available quantity to its mapped Shopify location."],
+  ]
+
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Warehouse operations / location" title={String(warehouse.name || "Warehouse")} description={`${String(warehouse.code || warehouse.id || "No code")} / ${virtual ? "Virtual supplier inventory" : String(warehouse.warehouseType || "Physical warehouse")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/warehouse/warehouses">Back to warehouses</a></Button>{editing ? <><Button size="sm" variant="outline" onClick={() => { setDraft(warehouse); setEditing(false) }}>Cancel</Button><Button size="sm" disabled={saving} onClick={() => void save()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save changes</Button></> : <Button size="sm" onClick={() => { setDraft(warehouse); setEditing(true); setTab("settings") }}><Pencil className="size-4" /> Edit warehouse</Button>}</div>} />
+    <div className="flex flex-wrap items-center gap-2"><Badge variant={String(warehouse.status || "active") === "inactive" ? "secondary" : "default"}>{String(warehouse.status || "active")}</Badge>{virtual ? <Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">Virtual source</Badge> : <Badge variant="outline" className="border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300">Physical location</Badge>}{warehouse.isDefaultReceiving && <Badge variant="outline">Default receiving</Badge>}{warehouse.isDefaultReturns && <Badge variant="outline">Default returns</Badge>}</div>
+    <Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger>{!virtual && <TabsTrigger value="bins">Bins ({numberLabel(summary.totalBins || 0)})</TabsTrigger>}<TabsTrigger value="settings">Settings</TabsTrigger><TabsTrigger value="activity">Activity ({numberLabel((detail?.activity || []).length)})</TabsTrigger></TabsList></div>
+      <TabsContent value="overview" className="mt-4 grid gap-4">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6"><Detail label="Active bins" value={virtual ? "Not applicable" : `${numberLabel(summary.activeBins || 0)} / ${numberLabel(summary.totalBins || 0)}`} /><Detail label="Audits" value={virtual ? "Not applicable" : `${numberLabel(summary.openAudits || 0)} open`} /><Detail label="Receipts" value={virtual ? "Not applicable" : numberLabel(summary.receipts || 0)} /><Detail label="Movements" value={numberLabel(summary.movements || 0)} /><Detail label="Receiving" value={warehouse.allowReceiving === false ? "Disabled" : "Enabled"} /><Detail label="Inventory sync" value={warehouse.shopifyInventoryPushEnabled ? "Shopify enabled" : "Local only"} /></div>
+        {virtual && <Alert><Database className="size-4" /><AlertTitle>Virtual supplier inventory</AlertTitle><AlertDescription>This location represents imported DataWarehouse availability. Physical bins, receiving, and warehouse audits belong to a physical warehouse.</AlertDescription></Alert>}
+        <div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader><CardTitle className="text-base">Location and ownership</CardTitle><CardDescription>Who operates this location and where work happens.</CardDescription></CardHeader><CardContent className="grid gap-3 text-sm"><div><p className="text-xs font-medium uppercase text-muted-foreground">Address</p><p>{address}</p></div><Separator /><div className="grid gap-3 sm:grid-cols-2"><div><p className="text-xs font-medium uppercase text-muted-foreground">Manager</p><p>{warehouse.managerName || "Not assigned"}</p></div><div><p className="text-xs font-medium uppercase text-muted-foreground">Contact</p><p>{warehouse.contactName || warehouse.email || warehouse.phone || "Not configured"}</p></div><div><p className="text-xs font-medium uppercase text-muted-foreground">Timezone</p><p>{warehouse.timezone || "America/New_York"}</p></div><div><p className="text-xs font-medium uppercase text-muted-foreground">Operating hours</p><p>{warehouse.operatingHours || "Not configured"}</p></div></div></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Operational rules</CardTitle><CardDescription>Receiving controls and connected inventory destination.</CardDescription></CardHeader><CardContent className="grid gap-3 text-sm"><div className="grid gap-2 sm:grid-cols-2"><Badge variant="outline">{warehouse.requireAppointment ? "Appointment required" : "Open receiving"}</Badge><Badge variant="outline">{warehouse.requireBinValidation ? "Bin validation on" : "Bin validation off"}</Badge><Badge variant="outline">{warehouse.requireSerialScan ? "Serial scan on" : "Serial scan off"}</Badge><Badge variant="outline">{warehouse.requirePhotoForDamage ? "Damage photo required" : "Damage photo optional"}</Badge></div><Separator /><div><p className="text-xs font-medium uppercase text-muted-foreground">Shopify location</p><p>{warehouse.shopifyLocationName || "Not mapped"}</p><p className="text-xs text-muted-foreground">{warehouse.shopifyLocationId || "No location GID"}</p></div><div><p className="text-xs font-medium uppercase text-muted-foreground">Carrier cutoff</p><p>{warehouse.carrierCutoffTime || "Not configured"}</p></div></CardContent></Card></div>
+        <Card><CardHeader className="flex-row items-center justify-between"><div><CardTitle className="text-base">Recent activity</CardTitle><CardDescription>Latest inventory, receiving, audit, bin, and settings changes.</CardDescription></div><Button size="sm" variant="outline" onClick={() => setTab("activity")}>View full log</Button></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Date</TableHead><TableHead>Event</TableHead><TableHead>Details</TableHead><TableHead>Source</TableHead></TableRow></TableHeader><TableBody>{(detail?.activity || []).slice(0, 8).map((row) => <TableRow key={String(row.id)}><TableCell className="whitespace-nowrap">{dateLabel(row.createdAt)}</TableCell><TableCell className="font-medium">{row.title || "Warehouse updated"}</TableCell><TableCell>{row.message || "-"}</TableCell><TableCell><Badge variant="outline">{row.source || "Warehouse"}</Badge></TableCell></TableRow>)}{!(detail?.activity || []).length && <TableRow><TableCell colSpan={4} className="h-24 text-center text-muted-foreground">Warehouse activity will appear here as work is completed.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
+      </TabsContent>
+      {!virtual && <TabsContent value="bins" className="mt-4"><WarehouseBinManager fixedWarehouseId={warehouseId} onChanged={load} /></TabsContent>}
+      <TabsContent value="settings" className="mt-4 grid gap-4">
+        {!editing && <Alert><LockKeyhole className="size-4" /><AlertTitle>Settings are locked</AlertTitle><AlertDescription>Select Edit warehouse to change location rules. Every saved change is retained in Activity.</AlertDescription></Alert>}
+        <Card><CardHeader><CardTitle className="text-base">Identity and address</CardTitle><CardDescription>Core location identity, operating state, and contact information.</CardDescription></CardHeader><CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"><Field label="Warehouse name"><Input disabled={!editing} value={String(draft.name || "")} onChange={(event) => updateDraft("name", event.target.value)} /></Field><Field label="Code"><Input disabled={!editing} value={String(draft.code || "")} onChange={(event) => updateDraft("code", event.target.value.toUpperCase())} /></Field><Field label="Status"><Select disabled={!editing} value={String(draft.status || "active")} onValueChange={(value) => updateDraft("status", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field><Field label="Warehouse type"><Input disabled={!editing || virtual} value={String(draft.warehouseType || "Warehouse")} onChange={(event) => updateDraft("warehouseType", event.target.value)} /></Field><Field label="Manager"><Input disabled={!editing || virtual} value={String(draft.managerName || "")} onChange={(event) => updateDraft("managerName", event.target.value)} /></Field><Field label="Primary contact"><Input disabled={!editing || virtual} value={String(draft.contactName || "")} onChange={(event) => updateDraft("contactName", event.target.value)} /></Field><Field label="Phone"><Input disabled={!editing || virtual} value={String(draft.phone || "")} onChange={(event) => updateDraft("phone", event.target.value)} /></Field><Field label="Email"><Input disabled={!editing || virtual} value={String(draft.email || "")} onChange={(event) => updateDraft("email", event.target.value)} /></Field><Field label="Timezone"><Input disabled={!editing} value={String(draft.timezone || "America/New_York")} onChange={(event) => updateDraft("timezone", event.target.value)} /></Field><Field label="Address line 1"><Input disabled={!editing || virtual} value={String(draft.addressLine1 || "")} onChange={(event) => updateDraft("addressLine1", event.target.value)} /></Field><Field label="Address line 2"><Input disabled={!editing || virtual} value={String(draft.addressLine2 || "")} onChange={(event) => updateDraft("addressLine2", event.target.value)} /></Field><Field label="City"><Input disabled={!editing || virtual} value={String(draft.city || "")} onChange={(event) => updateDraft("city", event.target.value)} /></Field><Field label="State"><Input disabled={!editing || virtual} value={String(draft.state || "")} onChange={(event) => updateDraft("state", event.target.value.toUpperCase())} /></Field><Field label="Postal code"><Input disabled={!editing || virtual} value={String(draft.postalCode || "")} onChange={(event) => updateDraft("postalCode", event.target.value)} /></Field><Field label="Country"><Input disabled={!editing || virtual} value={String(draft.country || "US")} onChange={(event) => updateDraft("country", event.target.value.toUpperCase())} /></Field></CardContent></Card>
+        <Card><CardHeader><CardTitle className="text-base">Operations and controls</CardTitle><CardDescription>Settings used by receiving, returns, audits, scanning, and connected channels.</CardDescription></CardHeader><CardContent className="grid gap-4"><div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"><Field label="Operating hours"><Input disabled={!editing || virtual} value={String(draft.operatingHours || "")} onChange={(event) => updateDraft("operatingHours", event.target.value)} placeholder="Mon-Fri 08:00-17:00" /></Field><Field label="Carrier cutoff"><Input disabled={!editing || virtual} type="time" value={String(draft.carrierCutoffTime || "")} onChange={(event) => updateDraft("carrierCutoffTime", event.target.value)} /></Field><Field label="Shopify location name"><Input disabled={!editing} value={String(draft.shopifyLocationName || "")} onChange={(event) => updateDraft("shopifyLocationName", event.target.value)} /></Field><div className="sm:col-span-2 lg:col-span-3"><Field label="Shopify location GID"><Input disabled={!editing} value={String(draft.shopifyLocationId || "")} onChange={(event) => updateDraft("shopifyLocationId", event.target.value)} placeholder="gid://shopify/Location/..." /></Field></div></div><div className="grid gap-3 md:grid-cols-2">{toggleRows.map(([field, title, description]) => <div key={String(field)} className={cn("flex items-start justify-between gap-4 rounded-md border p-3", !editing && "bg-muted/20")}><div><Label htmlFor={`warehouse-${String(field)}`}>{title}</Label><p className="mt-1 text-xs text-muted-foreground">{description}</p></div><Switch id={`warehouse-${String(field)}`} disabled={!editing || (virtual && !["shopifyInventoryPushEnabled"].includes(String(field)))} checked={draft[field] === true} onCheckedChange={(checked) => updateDraft(field, checked)} /></div>)}</div><Field label="Receiving instructions"><Textarea disabled={!editing || virtual} value={String(draft.receivingInstructions || "")} onChange={(event) => updateDraft("receivingInstructions", event.target.value)} /></Field><Field label="Warehouse notes"><Textarea disabled={!editing} value={String(draft.notes || "")} onChange={(event) => updateDraft("notes", event.target.value)} /></Field>{editing && <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => { setDraft(warehouse); setEditing(false) }}>Cancel</Button><Button disabled={saving} onClick={() => void save()}>{saving && <Loader2 className="size-4 animate-spin" />} Save changes</Button></div>}</CardContent></Card>
+      </TabsContent>
+      <TabsContent value="activity" className="mt-4"><Card><CardHeader className="gap-3 border-b"><div><CardTitle className="text-base">Warehouse activity</CardTitle><CardDescription>A combined log of settings, bins, inventory movements, receiving, and audits for this location.</CardDescription></div><div className="flex flex-col gap-2 sm:flex-row"><div className="relative flex-1"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={activityQuery} onChange={(event) => setActivityQuery(event.target.value)} placeholder="Search event, SKU, reference, source, or user" /></div><Select value={activityType} onValueChange={setActivityType}><SelectTrigger className="sm:w-52"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All activity</SelectItem><SelectItem value="settings">Settings</SelectItem><SelectItem value="bin">Bins</SelectItem><SelectItem value="inventory">Inventory</SelectItem><SelectItem value="receipt">Receiving</SelectItem><SelectItem value="audit">Audits</SelectItem></SelectContent></Select><Button variant="outline" size="sm" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Date</TableHead><TableHead>Event</TableHead><TableHead>Details</TableHead><TableHead>Source</TableHead><TableHead>Reference</TableHead><TableHead>User</TableHead></TableRow></TableHeader><TableBody>{activity.map((row) => <TableRow key={String(row.id)}><TableCell className="whitespace-nowrap">{dateLabel(row.createdAt)}</TableCell><TableCell><div className="flex items-center gap-2">{row.type === "inventory" ? <Activity className="size-4 text-blue-600" /> : row.type === "audit" ? <CheckCircle2 className="size-4 text-emerald-600" /> : row.type === "receipt" ? <Truck className="size-4 text-violet-600" /> : row.type === "bin" ? <Boxes className="size-4 text-amber-600" /> : <Settings className="size-4 text-muted-foreground" />}<span className="font-medium">{row.title || "Warehouse updated"}</span></div></TableCell><TableCell className="min-w-72">{row.message || "-"}</TableCell><TableCell><Badge variant="outline">{row.source || "Warehouse"}</Badge></TableCell><TableCell>{row.reference || "-"}</TableCell><TableCell>{row.user || "System"}</TableCell></TableRow>)}{!activity.length && <TableRow><TableCell colSpan={6} className="h-28 text-center text-muted-foreground">No warehouse activity matches this view.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
+    </Tabs>
+  </div>
+}
+
 function WarehouseWorkspace() {
   const path = window.location.pathname.replace(/\/+$/, "")
   if (path.startsWith("/warehouse/audits/")) return <WarehouseAuditDetailPage />
+  const warehouseDetailMatch = path.match(/^\/warehouse\/warehouses\/([^/]+)$/)
+  if (warehouseDetailMatch) return <WarehouseDetailPage warehouseId={decodeURIComponent(warehouseDetailMatch[1])} />
   const [tab, setTab] = useState(path.endsWith("/audits") ? "audits" : path.endsWith("/bins") ? "bins" : path.endsWith("/receiving") ? "receiving" : "warehouses")
   const selectTab = (next: string) => {
     setTab(next)
