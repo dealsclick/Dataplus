@@ -339,9 +339,9 @@ PO creation is available from:
 
 Auto-PO creation is controlled by supplier profile rules and must respect approval thresholds, budgets, supplier status, and duplicate prevention.
 
-Eligible supplier demand is pooled by canonical supplier and physical receiving warehouse until the configured cutoff, which defaults to 3:00 PM in the configured timezone. Demand received after cutoff rolls into the next eligible business-day pool. The scheduler creates draft or approval-required POs only for suppliers with auto-creation enabled; buyers may explicitly run due pools or force-create selected pooled demand from Purchasing.
+Every eligible supplier purchase route immediately opens or appends to one numbered **Waiting for PO** draft per canonical supplier and physical receiving warehouse. Appends are idempotent: a customer-order route may appear only once in the draft. The same draft keeps collecting new orders and SKU quantities until it is submitted, placed, approved, rejected, canceled, or otherwise frozen; later demand then opens the next numbered draft.
 
-Purchasing presents pooled demand as one row per canonical supplier. The dedicated `/purchasing/supplier-pools/:supplierKey` workspace lists every linked customer order and SKU, while preserving separate PO groups for incompatible receiving destinations or cutoff windows.
+The supplier cutoff, which defaults to 3:00 PM in the configured timezone, marks an open Waiting for PO draft as ready for buyer review or automatic submission when the supplier rules explicitly allow it. Cutoff does not delay draft creation. Buyers control submission unless the supplier profile has an explicit auto-submit rule. Purchasing groups Waiting for PO drafts by canonical supplier, and `/purchasing/waiting-for-po/:supplierKey` shows each numbered draft with its linked customer orders, SKUs, quantities, images, destination, cost, and review state.
 
 PO receiving posts stock to the PO's physical destination warehouse, appends inventory provenance, and reroutes linked customer orders. Received lines may then reserve the new physical stock and move into fulfillment. Supplier POs must never use a virtual supplier-feed warehouse as their receiving destination.
 
