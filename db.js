@@ -5054,17 +5054,6 @@ async function clearPurchaseOrders() {
         data = jsonb_set(coalesce(state_documents.data, '{}'::jsonb), '{po}', '1000'::jsonb, true),
         updated_at = now()
     `);
-    await client.query(`
-      update app_state
-      set data = jsonb_set(
-        jsonb_set(data::jsonb, '{purchaseOrders}', '[]'::jsonb, true),
-        '{sequence}',
-        coalesce(data::jsonb -> 'sequence', '{}'::jsonb) || '{"po":1000}'::jsonb,
-        true
-      )::json,
-      updated_at = now()
-      where id = 1
-    `);
     await client.query("commit");
     return summary;
   } catch (error) {
