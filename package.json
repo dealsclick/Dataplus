@@ -15,6 +15,7 @@
     "catalog:index": "node scripts/build-source-catalog-index.js",
     "catalog:rehydrate-products": "node scripts/rehydrate-products-from-catalog.js",
     "inventory:reclassify-datawarehouse": "node scripts/reclassify-datawarehouse-inventory.js",
+    "purchasing:clear": "node scripts/clear-purchase-orders.js",
     "releases:generate": "node scripts/generate-release-history.js",
     "shopify:truevalue-variation-dry-run": "node scripts/truevalue-variation-repair-dry-run.js",
     "shopify:truevalue-variation-repair": "node scripts/truevalue-variation-repair-apply.js"

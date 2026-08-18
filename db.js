@@ -4929,6 +4929,152 @@ async function savePurchaseOrder(po = {}) {
   return upsertPurchaseOrdersFromState([po], { replace: false });
 }
 
+function clearOrderPurchaseOrderLinks(order = {}) {
+  let changed = false;
+  const clearField = (target, key) => {
+    if (target && Object.prototype.hasOwnProperty.call(target, key)) {
+      delete target[key];
+      changed = true;
+    }
+  };
+
+  for (const key of ["purchaseOrderIds", "purchaseOrderNumbers", "linkedPurchaseOrders"]) {
+    if (Array.isArray(order[key]) && order[key].length) changed = true;
+    order[key] = [];
+  }
+  clearField(order, "purchaseGroupId");
+  if (order.hasPurchaseOrder === true) {
+    order.hasPurchaseOrder = false;
+    changed = true;
+  }
+
+  for (const route of Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []) {
+    const hadPurchaseOrder = Boolean(route?.purchaseOrderId || route?.purchaseOrderNumber || route?.purchaseGroupId);
+    clearField(route, "purchaseOrderId");
+    clearField(route, "purchaseOrderNumber");
+    clearField(route, "purchaseGroupId");
+    if (hadPurchaseOrder && route.type === "purchase" && !["received", "closed", "canceled"].includes(String(route.status || "").toLowerCase())) {
+      route.status = "pooled";
+      route.updatedAt = new Date().toISOString();
+      changed = true;
+    }
+  }
+
+  for (const line of Array.isArray(order.items) ? order.items : []) {
+    const hadPurchaseOrder = Boolean(line?.purchaseOrderId || line?.purchaseOrderNumber || line?.purchaseGroupId);
+    clearField(line, "purchaseOrderId");
+    clearField(line, "purchaseOrderNumber");
+    clearField(line, "purchaseGroupId");
+    if (hadPurchaseOrder && /^(po_|buyer_review|awaiting_approval)/i.test(String(line.status || ""))) {
+      line.status = "unfulfilled";
+      changed = true;
+    }
+  }
+
+  const activeRoutes = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [])
+    .filter((route) => !["shipped", "delivered", "canceled", "closed"].includes(String(route?.status || "").toLowerCase()));
+  const hasPurchase = activeRoutes.some((route) => route?.type === "purchase");
+  const hasDropShip = activeRoutes.some((route) => route?.type === "drop_ship");
+  const hasWarehouse = activeRoutes.some((route) => route?.type === "warehouse");
+  if (hasPurchase) {
+    const nextStatus = hasWarehouse || hasDropShip ? "split_fulfillment" : "waiting_for_po";
+    if (order.operationalStatus !== nextStatus || order.workflowStatus !== nextStatus) changed = true;
+    order.operationalStatus = nextStatus;
+    order.workflowStatus = nextStatus;
+  } else if (["waiting_for_po", "split_fulfillment"].includes(String(order.operationalStatus || "").toLowerCase())) {
+    const nextStatus = hasWarehouse ? "ready_to_ship" : hasDropShip ? "waiting_supplier" : "processing";
+    order.operationalStatus = nextStatus;
+    order.workflowStatus = nextStatus;
+    changed = true;
+  }
+  if (changed) {
+    order.workflowUpdatedAt = new Date().toISOString();
+    order.updatedAt = order.workflowUpdatedAt;
+  }
+  return changed;
+}
+
+async function clearPurchaseOrders() {
+  const dbPool = getPool();
+  if (!dbPool) return { enabled: false, purchaseOrdersDeleted: 0, purchaseOrderLinesDeleted: 0, ordersUpdated: 0 };
+  await initRelationalSchema();
+  const client = await dbPool.connect();
+  const summary = {
+    enabled: true,
+    purchaseOrdersDeleted: 0,
+    purchaseOrderLinesDeleted: 0,
+    ordersUpdated: 0,
+    orderLinesUpdated: 0,
+    orderDocumentsUpdated: 0,
+    nextPoNumber: "PO#1001"
+  };
+  try {
+    await client.query("begin");
+    const [poCount, poLineCount] = await Promise.all([
+      client.query("select count(*)::int as count from purchase_order_records"),
+      client.query("select count(*)::int as count from purchase_order_line_items")
+    ]);
+    summary.purchaseOrdersDeleted = Number(poCount.rows[0]?.count || 0);
+    summary.purchaseOrderLinesDeleted = Number(poLineCount.rows[0]?.count || 0);
+
+    const orders = await client.query("select order_id, raw from order_records for update");
+    for (const row of orders.rows) {
+      const order = row.raw && typeof row.raw === "object" ? row.raw : {};
+      if (!clearOrderPurchaseOrderLinks(order)) continue;
+      await client.query("update order_records set raw = $2::jsonb, updated_at = now() where order_id = $1", [row.order_id, JSON.stringify(order)]);
+      summary.ordersUpdated += 1;
+      const items = Array.isArray(order.items) ? order.items : [];
+      for (let index = 0; index < items.length; index += 1) {
+        const result = await client.query(
+          "update order_line_items set raw = $3::jsonb where order_id = $1 and line_index = $2",
+          [row.order_id, index, JSON.stringify(items[index] || {})]
+        );
+        summary.orderLinesUpdated += Number(result.rowCount || 0);
+      }
+    }
+
+    const orderDocuments = await client.query("select entity_id, data from entity_documents where collection = 'orders' for update");
+    for (const row of orderDocuments.rows) {
+      const order = row.data && typeof row.data === "object" ? row.data : {};
+      if (!clearOrderPurchaseOrderLinks(order)) continue;
+      await client.query(
+        "update entity_documents set data = $2::jsonb, updated_at = now() where collection = 'orders' and entity_id = $1",
+        [row.entity_id, JSON.stringify(order)]
+      );
+      summary.orderDocumentsUpdated += 1;
+    }
+
+    await client.query("delete from purchase_order_records");
+    await client.query("delete from entity_documents where collection = 'purchaseOrders'");
+    await client.query("delete from state_documents where doc_key = 'purchaseOrders'");
+    await client.query(`
+      insert into state_documents (doc_key, data, updated_at)
+      values ('sequence', '{"po":1000}'::jsonb, now())
+      on conflict (doc_key) do update set
+        data = jsonb_set(coalesce(state_documents.data, '{}'::jsonb), '{po}', '1000'::jsonb, true),
+        updated_at = now()
+    `);
+    await client.query(`
+      update app_state
+      set data = jsonb_set(
+        jsonb_set(data::jsonb, '{purchaseOrders}', '[]'::jsonb, true),
+        '{sequence}',
+        coalesce(data::jsonb -> 'sequence', '{}'::jsonb) || '{"po":1000}'::jsonb,
+        true
+      )::json,
+      updated_at = now()
+      where id = 1
+    `);
+    await client.query("commit");
+    return summary;
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function upsertProductsFromState(items = [], options = {}) {
   const client = getPool();
   if (!client) return { enabled: false, products: 0, vendors: 0, identifiers: 0, offers: 0 };
@@ -8054,6 +8200,7 @@ module.exports = {
   replaceProductQualityRows,
   saveOrder,
   savePurchaseOrder,
+  clearPurchaseOrders,
   upsertVendorCatalogItemsFromProducts,
   upsertOrdersFromState,
   upsertPurchaseOrdersFromState,
