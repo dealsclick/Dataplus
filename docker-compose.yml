@@ -68,7 +68,7 @@ services:
       - "4173:4173"
     volumes:
       - ./data:/app/data
-      - ./generated:/app/generated:ro
+      - ./generated:/app/generated
       - ./logos:/app/logos
       - ./logs:/app/logs
       - ./outputs:/app/outputs

@@ -9,7 +9,6 @@ DEPLOY_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 record_deployment_status() {
   local status="$1"
   docker compose run --rm --no-deps \
-    -v "$PWD/generated:/app/generated" \
     dataplus node scripts/write-deployment-status.js "$status" "$DEPLOY_REVISION" "$DEPLOY_STARTED_AT"
 }
 
@@ -25,7 +24,6 @@ docker compose build
 echo "Generating release history from the checked-out repository..."
 docker compose run --rm --no-deps \
   -v "$PWD/.git:/app/.git:ro" \
-  -v "$PWD/generated:/app/generated" \
   dataplus node scripts/generate-release-history.js
 
 record_deployment_status deploying
