@@ -346,8 +346,10 @@ Jobs are the audit trail for imports, exports, syncs, scans, index rebuilds, bac
 
 - System Settings includes a Releases tab backed by `GET /api/system/releases`.
 - `scripts/generate-release-history.js` generates `generated/release-history.json` from the complete Git history before a production container is rebuilt. The generated JSON is runtime data and must not be committed or edited by hand.
+- Release history is grouped into human-readable daily releases while preserving the individual commits beneath each release for troubleshooting and auditability.
 - Development may read Git history directly; production reads the generated manifest because `.git` is intentionally excluded from the image.
 - Every production deployment must regenerate this manifest after pulling the target revision and before `docker compose build`.
+- `scripts/write-deployment-status.js` records the live production revision, health, timestamps, and deployment duration in `generated/deployment-status.json`. This is runtime state and must not be committed or edited by hand.
 - Commit messages should be concise, user-meaningful summaries because they become release titles in the application. Add a commit body when operators need rollout notes, migration context, or follow-up instructions.
 - Preserve searchable commit IDs, timestamps, authors, affected files, change areas, tags, and repository links so operators can trace a release back to source.
 

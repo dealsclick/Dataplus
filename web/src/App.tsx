@@ -512,15 +512,52 @@ type ReleaseChange = {
   commitUrl?: string
 }
 
+type ReleaseGroup = {
+  id: string
+  version: string
+  name: string
+  date: string
+  publishedAt?: string
+  firstCommitAt?: string
+  revision?: string
+  shortRevision?: string
+  primaryType: string
+  changeCount: number
+  fileCount: number
+  areas?: string[]
+  types?: Record<string, number>
+  tags?: string[]
+  current?: boolean
+  changes: ReleaseChange[]
+}
+
+type DeploymentStatus = {
+  environment?: string
+  serviceUrl?: string
+  status?: string
+  revision?: string
+  shortRevision?: string
+  startedAt?: string
+  deployedAt?: string
+  failedAt?: string
+  updatedAt?: string
+  durationSeconds?: number | null
+  revisionMatchesHistory?: boolean
+}
+
 type ReleaseHistoryResponse = {
   generatedAt?: string
   source?: string
   repositoryUrl?: string
   current?: ReleaseChange | null
+  currentGroup?: ReleaseGroup | null
+  deployment?: DeploymentStatus | null
   total: number
   filteredTotal: number
+  releaseGroupTotal?: number
   limit: number
   offset: number
+  releaseGroups: ReleaseGroup[]
   releases: ReleaseChange[]
 }
 
@@ -15119,6 +15156,7 @@ function ReleaseHistorySettings({ active }: { active: boolean }) {
   const [releases, setReleases] = useState<ReleaseChange[]>([])
   const [query, setQuery] = useState("")
   const [type, setType] = useState("all")
+  const [view, setView] = useState<"releases" | "changes">("releases")
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState("")
@@ -15157,6 +15195,8 @@ function ReleaseHistorySettings({ active }: { active: boolean }) {
       ? lastSeenIndex
       : Math.min(releases.length, history?.total || releases.length)
   const hasMore = Boolean(history && releases.length < history.filteredTotal)
+  const deploymentStatus = String(history?.deployment?.status || "unknown").toLowerCase()
+  const deploymentHealthy = deploymentStatus === "healthy" && history?.deployment?.revisionMatchesHistory !== false
 
   function markViewed() {
     const revision = history?.current?.id
@@ -15168,11 +15208,23 @@ function ReleaseHistorySettings({ active }: { active: boolean }) {
 
   return <div className="grid gap-4">
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      <MetricCard label="Current release" value={history?.current?.shortId || "Loading"} icon={History} />
+      <MetricCard label="Current release" value={history?.currentGroup?.version || history?.current?.shortId || "Loading"} icon={History} />
       <MetricCard label="Changes recorded" value={numberLabel(history?.total || 0)} icon={FileText} />
-      <MetricCard label="New since viewed" value={numberLabel(newCount)} icon={CheckCircle2} />
-      <MetricCard label="History updated" value={history?.generatedAt ? dateLabel(history.generatedAt) : "Loading"} icon={RefreshCw} />
+      <MetricCard label="Production" value={history?.deployment ? (deploymentHealthy ? "Healthy" : deploymentStatus) : "Not reported"} icon={deploymentHealthy ? CheckCircle2 : AlertTriangle} />
+      <MetricCard label="Deployed" value={history?.deployment?.deployedAt ? dateLabel(history.deployment.deployedAt) : "Not reported"} icon={RefreshCw} />
     </div>
+
+    {history?.deployment && <Alert className={deploymentHealthy ? "border-emerald-500/30 bg-emerald-500/5" : "border-amber-500/40 bg-amber-500/5"}>
+      {deploymentHealthy ? <CheckCircle2 className="size-4 text-emerald-600" /> : <AlertTriangle className="size-4 text-amber-600" />}
+      <AlertTitle>{deploymentHealthy ? "Production deployment is healthy" : `Production deployment is ${deploymentStatus}`}</AlertTitle>
+      <AlertDescription className="flex flex-wrap gap-x-4 gap-y-1">
+        <span>Revision #{history.deployment.shortRevision || history.deployment.revision?.slice(0, 7) || "unknown"}</span>
+        <span>Environment: {history.deployment.environment || "production"}</span>
+        {history.deployment.durationSeconds !== null && history.deployment.durationSeconds !== undefined && <span>Duration: {numberLabel(history.deployment.durationSeconds)} seconds</span>}
+        {history.deployment.revisionMatchesHistory === false && <span className="font-medium text-amber-700 dark:text-amber-300">A newer repository revision is waiting to deploy.</span>}
+        {history.deployment.serviceUrl && <a className="font-medium text-primary hover:underline" href={history.deployment.serviceUrl} target="_blank" rel="noreferrer">Open production</a>}
+      </AlertDescription>
+    </Alert>}
 
     <Card>
       <CardHeader className="gap-4 border-b lg:flex-row lg:items-center lg:justify-between">
@@ -15186,6 +15238,9 @@ function ReleaseHistorySettings({ active }: { active: boolean }) {
         </div>
       </CardHeader>
       <CardContent className="grid gap-4 p-4">
+        <Tabs value={view} onValueChange={(value) => setView(value as "releases" | "changes")}>
+          <TabsList><TabsTrigger value="releases">Named releases</TabsTrigger><TabsTrigger value="changes">All changes</TabsTrigger></TabsList>
+        </Tabs>
         <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
           <div className="relative"><Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search releases, files, areas, or commit ID" /></div>
           <Select value={type} onValueChange={setType}><SelectTrigger><SelectValue placeholder="All change types" /></SelectTrigger><SelectContent><SelectItem value="all">All change types</SelectItem>{Object.entries(releaseTypeLabels).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select>
@@ -15193,7 +15248,23 @@ function ReleaseHistorySettings({ active }: { active: boolean }) {
 
         {error && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Release history unavailable</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
         {loading && <div className="grid gap-2">{Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} className="h-20 w-full" />)}</div>}
-        {!loading && !error && <div className="overflow-hidden rounded-lg border">
+        {!loading && !error && view === "releases" && <div className="grid gap-3">
+          {(history?.releaseGroups || []).map((group) => <Collapsible key={group.id} className="overflow-hidden rounded-lg border bg-card">
+            <div className="flex flex-col gap-3 p-4 lg:flex-row lg:items-start lg:justify-between">
+              <div className="min-w-0 space-y-2">
+                <div className="flex flex-wrap items-center gap-2"><Badge variant={group.current ? "default" : "secondary"}>{group.current ? "Current" : "Release"}</Badge><Badge variant="outline" className={releaseBadgeClass(group.primaryType)}>{releaseTypeLabels[group.primaryType] || "Maintenance"}</Badge><span className="font-mono text-xs font-semibold text-foreground">v{group.version}</span></div>
+                <div><p className="font-semibold text-foreground">{group.name}</p><p className="mt-1 text-sm text-muted-foreground">{numberLabel(group.changeCount)} changes across {(group.areas || []).join(", ") || "the application"}.</p></div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground"><span>Revision #{group.shortRevision || "unknown"}</span><span>{numberLabel(group.fileCount)} files changed</span><span>{dateLabel(group.publishedAt)}</span></div>
+              </div>
+              <CollapsibleTrigger asChild><Button variant="outline" size="sm">View release notes</Button></CollapsibleTrigger>
+            </div>
+            <CollapsibleContent className="border-t bg-muted/20">
+              <div className="divide-y">{group.changes.map((release) => <div key={release.id} className="grid gap-2 p-4 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-start"><Badge variant="outline" className={releaseBadgeClass(release.type)}>{releaseTypeLabels[release.type] || release.type}</Badge><div className="min-w-0"><p className="text-sm font-medium text-foreground">{release.title}</p><p className="mt-1 text-xs text-muted-foreground">{release.author || "Unknown author"} / {(release.areas || []).join(" / ") || "Repository"}</p></div>{release.commitUrl && <Button variant="ghost" size="icon" asChild title="View commit"><a href={release.commitUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /></a></Button>}</div>)}</div>
+            </CollapsibleContent>
+          </Collapsible>)}
+          {!(history?.releaseGroups || []).length && <Empty className="rounded-lg border py-12"><EmptyHeader><EmptyMedia variant="icon"><History /></EmptyMedia><EmptyTitle>No matching releases</EmptyTitle><EmptyDescription>Adjust the search or change-type filter.</EmptyDescription></EmptyHeader></Empty>}
+        </div>}
+        {!loading && !error && view === "changes" && <div className="overflow-hidden rounded-lg border">
           {releases.map((release, index) => {
             const isNew = Boolean(!viewingFilteredHistory && lastSeen && (lastSeenIndex === -1 || index < lastSeenIndex))
             return <Collapsible key={release.id} className="border-b last:border-b-0">
@@ -15215,8 +15286,8 @@ function ReleaseHistorySettings({ active }: { active: boolean }) {
           {!releases.length && <Empty className="py-12"><EmptyHeader><EmptyMedia variant="icon"><History /></EmptyMedia><EmptyTitle>No matching releases</EmptyTitle><EmptyDescription>Adjust the search or change-type filter.</EmptyDescription></EmptyHeader></Empty>}
         </div>}
 
-        {hasMore && <Button variant="outline" onClick={() => void load(false)} disabled={loadingMore}>{loadingMore && <Loader2 className="size-4 animate-spin" />} Load more changes</Button>}
-        {history && <p className="text-xs text-muted-foreground">Showing {numberLabel(releases.length)} of {numberLabel(history.filteredTotal)} matching changes. Source: {history.source === "git" ? "live repository history" : "deployment manifest"}.</p>}
+        {view === "changes" && hasMore && <Button variant="outline" onClick={() => void load(false)} disabled={loadingMore}>{loadingMore && <Loader2 className="size-4 animate-spin" />} Load more changes</Button>}
+        {history && <p className="text-xs text-muted-foreground">{view === "releases" ? `Showing ${numberLabel(history.releaseGroups?.length || 0)} of ${numberLabel(history.releaseGroupTotal || history.releaseGroups?.length || 0)} named releases` : `Showing ${numberLabel(releases.length)} of ${numberLabel(history.filteredTotal)} matching changes`}. Source: {history.source === "git" ? "live repository history" : "deployment manifest"}. {numberLabel(newCount)} new since last viewed.</p>}
       </CardContent>
     </Card>
   </div>

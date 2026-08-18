@@ -8,7 +8,7 @@ const { spawn } = require("child_process");
 const readline = require("readline");
 const zlib = require("zlib");
 const nodemailer = require("nodemailer");
-const { loadReleaseHistory } = require("./lib/release-history");
+const { groupReleases, loadReleaseHistory, readDeploymentStatus } = require("./lib/release-history");
 const ftp = require("basic-ftp");
 const { XMLParser } = require("fast-xml-parser");
 const postgres = require("./db");
@@ -34137,6 +34137,7 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/system/releases") {
     const history = loadReleaseHistory();
+    const deployment = readDeploymentStatus();
     const query = sourceTextValue(url.searchParams.get("q") || "").toLowerCase();
     const type = sourceTextValue(url.searchParams.get("type") || "").toLowerCase();
     const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || 30) || 30));
@@ -34147,15 +34148,26 @@ async function handleApi(req, res) {
       return [release.title, release.notes, release.author, release.shortId, ...(release.tags || []), ...(release.files || []), ...(release.areas || [])]
         .some((value) => String(value || "").toLowerCase().includes(query));
     });
+    const filteredGroups = groupReleases(filtered).map((group) => ({
+      ...group,
+      current: group.id === history.currentGroup?.id
+    }));
     return sendJson(res, 200, {
       generatedAt: history.generatedAt,
       source: history.source,
       repositoryUrl: history.repositoryUrl,
       current: history.current,
+      currentGroup: history.currentGroup,
+      deployment: deployment ? {
+        ...deployment,
+        revisionMatchesHistory: Boolean(deployment.revision && history.current?.id && deployment.revision === history.current.id)
+      } : null,
       total: Number(history.total || history.releases?.length || 0),
       filteredTotal: filtered.length,
       limit,
       offset,
+      releaseGroupTotal: filteredGroups.length,
+      releaseGroups: filteredGroups.slice(0, 50),
       releases: filtered.slice(offset, offset + limit)
     });
   }
