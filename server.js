@@ -10849,10 +10849,10 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   for (const group of groups.values()) {
     const estimatedCost = group.routes.reduce((sum, route) => sum + Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0) * Number(route.qty || 0), 0);
     const budgetLimit = Math.max(0, Number(group.vendor?.purchaseOrderRules?.budgetLimit || 0));
-    const openCommitment = (db.purchaseOrders || []).filter((existing) => String(existing.vendorId || "") === String(group.vendor?.id || "") && !["received", "closed", "canceled", "rejected"].includes(String(existing.status || "").toLowerCase())).reduce((sum, existing) => sum + Number(existing.estimatedCost || 0), 0);
+    const openCommitment = (db.purchaseOrders || []).filter((existing) => String(existing.vendorId || "") === String(group.vendor?.id || "") && !["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(existing.status || "").toLowerCase())).reduce((sum, existing) => sum + purchaseOrderOpenCommitment(existing), 0);
     const budgetExceeded = budgetLimit > 0 && openCommitment + estimatedCost > budgetLimit;
     const approvalRequired = budgetExceeded || (group.vendor?.purchaseOrderRules?.requireBuyerApproval !== false && estimatedCost >= Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)));
-    const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: approvalRequired ? "awaiting_approval" : "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), unitCost: Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0), estimatedUnitCost: Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), estimatedCost, approval: { required: approvalRequired, threshold: Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)), budgetLimit, budgetExceeded, status: approvalRequired ? "awaiting_approval" : "not_required" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
+    const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: approvalRequired ? "awaiting_approval" : "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), unitCost: Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0), estimatedUnitCost: Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), estimatedCost, openEstimatedCost: estimatedCost, approval: { required: approvalRequired, threshold: Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)), budgetLimit, budgetExceeded, status: approvalRequired ? "awaiting_approval" : "not_required" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
     db.purchaseOrders = db.purchaseOrders || []; db.purchaseOrders.unshift(po); created.push(po);
     for (const route of group.routes) {
       const linkedRoute = (route.order.fulfillmentRoutes || []).find((candidate) => candidate.id === route.id);
@@ -10875,6 +10875,347 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
     for (const order of group.orders) { order.purchaseGroupId = purchaseGroupId; order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), po.id])]; order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), po.poNumber])]; recalculateOrderOperationalStatus(order); addOrderWorkflowEvent(order, { step: "purchase_order_created", title: "Purchase order created", message: `${po.poNumber} created for ${po.supplier}.`, user: options.user || "System" }); }
   }
   return { purchaseGroupId, purchaseOrders: created, orders };
+}
+
+function purchaseOrderOpenQuantity(line = {}) {
+  const ordered = Math.max(0, Number(line.qty || 0));
+  const received = Math.max(0, Number(line.receivedQty || 0));
+  const reSourced = Math.max(0, Number(line.reSourcedQty || 0));
+  return Math.max(0, ordered - received - reSourced);
+}
+
+function purchaseOrderOpenCommitment(po = {}) {
+  const lines = Array.isArray(po.items) ? po.items : [];
+  if (!lines.length) return Math.max(0, Number(po.estimatedCost || 0));
+  return lines.reduce((sum, line) => {
+    const unitCost = Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0));
+    return sum + purchaseOrderOpenQuantity(line) * unitCost;
+  }, 0);
+}
+
+function findPurchaseOrderReceiptLine(po = {}, input = {}) {
+  const lines = Array.isArray(po.items) ? po.items : [];
+  const routeId = String(input.routeId || "").trim();
+  if (routeId) {
+    const matchedByRoute = lines.find((line) => String(line.routeId || "") === routeId);
+    if (matchedByRoute) return matchedByRoute;
+  }
+  const lineIndex = Number(input.lineIndex);
+  if (Number.isInteger(lineIndex) && lineIndex >= 0 && lineIndex < lines.length) {
+    const indexed = lines[lineIndex];
+    if (!input.sku || String(indexed.sku || "").toLowerCase() === String(input.sku || "").toLowerCase()) return indexed;
+  }
+  const sku = String(input.sku || "").trim().toLowerCase();
+  return sku ? lines.find((line) => String(line.sku || "").trim().toLowerCase() === sku) || null : null;
+}
+
+function validatePurchaseOrderReceiptLines(po = {}, receivedLines = []) {
+  const requestedByLine = new Map();
+  for (const input of receivedLines) {
+    const qty = Number(input.qtyReceived || 0);
+    if (!Number.isFinite(qty) || qty <= 0) continue;
+    const poLine = findPurchaseOrderReceiptLine(po, input);
+    if (!poLine) return `SKU ${String(input.sku || "unknown")} is not an open line on this purchase order.`;
+    const previous = Number(requestedByLine.get(poLine) || 0);
+    requestedByLine.set(poLine, previous + qty);
+  }
+  for (const [poLine, requested] of requestedByLine.entries()) {
+    const openQty = purchaseOrderOpenQuantity(poLine);
+    if (requested > openQty) {
+      return `Cannot receive ${requested} units of ${String(poLine.sku || "this line")}; only ${openQty} remain open after receipts and re-sourcing.`;
+    }
+  }
+  return "";
+}
+
+function purchaseOrderSupplierOffers(db, product = {}, currentPo = {}) {
+  const currentVendorId = String(currentPo.vendorId || "");
+  const currentSupplier = String(currentPo.supplier || "").trim().toLowerCase();
+  const rows = [
+    {
+      vendorId: product.vendorId,
+      supplier: product.supplier || product.vendor,
+      vendorSku: product.vendorSku,
+      unitCost: product.sellUnitCost ?? product.unitCost ?? product.cost,
+      stockQty: product.stockQty ?? product.qty
+    },
+    ...(Array.isArray(product.vendorOffers) ? product.vendorOffers : [])
+  ];
+  const offers = new Map();
+  for (const row of rows) {
+    const rawName = String(row.supplier || row.vendor || "").trim();
+    const vendor = findVendorById(db, row.vendorId) || findVendorByName(db, rawName);
+    if (!vendor) continue;
+    const vendorStatus = String(vendor.status || "active").toLowerCase();
+    if (vendor.active === false || ["inactive", "disabled", "deleted"].includes(vendorStatus)) continue;
+    if ((currentVendorId && String(vendor.id) === currentVendorId) || (!currentVendorId && rawName.toLowerCase() === currentSupplier)) continue;
+    const unitCost = Number(row.sellUnitCost ?? row.unitCost ?? row.cost ?? 0);
+    if (!Number.isFinite(unitCost) || unitCost <= 0) continue;
+    const key = String(vendor.id || vendor.name).toLowerCase();
+    const offer = {
+      vendorId: vendor.id,
+      supplier: vendor.name,
+      vendorSku: String(row.vendorSku || row.sku || ""),
+      unitCost,
+      stockQty: Math.max(0, Number(row.stockQty ?? row.qty ?? 0))
+    };
+    const existing = offers.get(key);
+    if (!existing || offer.unitCost < existing.unitCost) offers.set(key, offer);
+  }
+  return [...offers.values()].sort((left, right) => left.unitCost - right.unitCost || left.supplier.localeCompare(right.supplier));
+}
+
+async function purchaseOrderReSourceOptions(db, po, productLoader) {
+  const lines = [];
+  for (let index = 0; index < (po.items || []).length; index += 1) {
+    const line = po.items[index] || {};
+    const openQty = purchaseOrderOpenQuantity(line);
+    if (openQty <= 0) continue;
+    const product = await productLoader(String(line.sku || ""));
+    const currentUnitCost = Number(line.unitCost ?? line.estimatedUnitCost ?? 0);
+    lines.push({
+      lineKey: String(line.routeId || `${index}:${line.sku || ""}:${line.orderId || ""}`),
+      lineIndex: index,
+      routeId: String(line.routeId || ""),
+      orderId: String(line.orderId || ""),
+      orderNumber: String(line.orderNumber || ""),
+      sku: String(line.sku || ""),
+      title: String(line.title || line.sku || "Untitled item"),
+      orderedQty: Math.max(0, Number(line.qty || 0)),
+      receivedQty: Math.max(0, Number(line.receivedQty || 0)),
+      openQty,
+      currentUnitCost,
+      alternatives: purchaseOrderSupplierOffers(db, product || {}, po)
+    });
+  }
+  const groups = new Map();
+  for (const line of lines) {
+    for (const offer of line.alternatives) {
+      const group = groups.get(offer.vendorId) || {
+        vendorId: offer.vendorId,
+        supplier: offer.supplier,
+        coverageCount: 0,
+        totalLineCount: lines.length,
+        currentCost: 0,
+        estimatedCost: 0,
+        savings: 0,
+        lines: []
+      };
+      group.coverageCount += 1;
+      group.currentCost += line.currentUnitCost * line.openQty;
+      group.estimatedCost += offer.unitCost * line.openQty;
+      group.lines.push({ lineKey: line.lineKey, sku: line.sku, openQty: line.openQty, unitCost: offer.unitCost, stockQty: offer.stockQty, vendorSku: offer.vendorSku });
+      groups.set(offer.vendorId, group);
+    }
+  }
+  const suppliers = [...groups.values()].map((group) => ({
+    ...group,
+    completeCoverage: group.coverageCount === group.totalLineCount,
+    savings: group.currentCost - group.estimatedCost
+  })).sort((left, right) => Number(right.completeCoverage) - Number(left.completeCoverage) || right.savings - left.savings || left.estimatedCost - right.estimatedCost);
+  const status = String(po.status || "draft").toLowerCase();
+  const committed = ["submitted", "placed", "acknowledged", "vendor_confirmed", "partially_received", "received", "closed"].includes(status)
+    || Boolean(po.submittedAt)
+    || (Array.isArray(po.submissions) && po.submissions.length > 0);
+  return {
+    purchaseOrderId: po.id,
+    poNumber: po.poNumber,
+    currentVendorId: po.vendorId || "",
+    currentSupplier: po.supplier || "Unassigned supplier",
+    status,
+    committed,
+    requiresSupplierCancellation: committed,
+    lines,
+    suppliers,
+    bestSupplierVendorId: suppliers[0]?.vendorId || ""
+  };
+}
+
+async function reSourcePurchaseOrder(db, po, input = {}, productLoader) {
+  const now = new Date().toISOString();
+  const status = String(po.status || "draft").toLowerCase();
+  if (["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(status)) {
+    throw new Error(`PO ${po.poNumber || po.id} cannot be re-sourced from status ${status}.`);
+  }
+  const requestId = String(input.requestId || "").trim();
+  if (requestId) {
+    const previous = (po.reSourceOperations || []).find((row) => row.requestId === requestId);
+    if (previous?.replacementPurchaseOrderId) {
+      const replacement = (db.purchaseOrders || []).find((row) => String(row.id) === String(previous.replacementPurchaseOrderId));
+      if (replacement) return { purchaseOrder: po, replacementPurchaseOrder: replacement, orders: [], idempotent: true };
+    }
+  }
+  const preview = await purchaseOrderReSourceOptions(db, po, productLoader);
+  if (!preview.lines.length) throw new Error("This PO has no open, unreceived quantity to re-source.");
+  if (preview.requiresSupplierCancellation && input.supplierCancellationConfirmed !== true) {
+    throw new Error("Confirm that the existing supplier order was canceled or adjusted before creating the replacement PO.");
+  }
+  const targetVendor = findVendorById(db, input.vendorId) || findVendorByName(db, input.supplier);
+  if (!targetVendor) throw new Error("Choose an active replacement supplier.");
+  const targetSummary = preview.suppliers.find((row) => String(row.vendorId) === String(targetVendor.id));
+  if (!targetSummary) throw new Error(`${targetVendor.name} does not have an eligible offer for the open PO lines.`);
+  const requestedLineKeys = new Set(Array.isArray(input.lineKeys) ? input.lineKeys.map(String) : targetSummary.lines.map((row) => String(row.lineKey)));
+  const selected = preview.lines.filter((line) => requestedLineKeys.has(line.lineKey)).map((line) => ({
+    ...line,
+    offer: line.alternatives.find((offer) => String(offer.vendorId) === String(targetVendor.id))
+  })).filter((line) => line.offer);
+  if (!selected.length) throw new Error("Select at least one open PO line supplied by the replacement vendor.");
+  const orderIds = [...new Set(selected.map((line) => line.orderId).filter(Boolean))];
+  const orders = orderIds.map((id) => (db.orders || []).find((order) => String(order.id) === String(id))).filter(Boolean);
+  const estimatedCost = selected.reduce((sum, line) => sum + Number(line.offer.unitCost || 0) * line.openQty, 0);
+  const budgetLimit = Math.max(0, Number(targetVendor.purchaseOrderRules?.budgetLimit || 0));
+  const openCommitment = (db.purchaseOrders || []).filter((existing) => String(existing.id) !== String(po.id)
+    && String(existing.vendorId || "") === String(targetVendor.id || "")
+    && !["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(existing.status || "").toLowerCase()))
+    .reduce((sum, existing) => sum + purchaseOrderOpenCommitment(existing), 0);
+  const budgetExceeded = budgetLimit > 0 && openCommitment + estimatedCost > budgetLimit;
+  const approvalRequired = budgetExceeded || (targetVendor.purchaseOrderRules?.requireBuyerApproval !== false
+    && estimatedCost >= Math.max(0, Number(targetVendor.purchaseOrderRules?.approvalThreshold || 0)));
+  const replacement = {
+    id: crypto.randomUUID(),
+    poNumber: nextPoNumber(db),
+    status: approvalRequired ? "awaiting_approval" : "draft",
+    type: po.type || "customer_demand",
+    purchaseGroupId: po.purchaseGroupId || `PG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+    vendorId: targetVendor.id,
+    supplier: targetVendor.name,
+    warehouseId: po.warehouseId || "",
+    warehouseName: po.warehouseName || "",
+    orderIds,
+    orderNumbers: [...new Set(selected.map((line) => line.orderNumber).filter(Boolean))],
+    items: [],
+    totalUnits: selected.reduce((sum, line) => sum + line.openQty, 0),
+    estimatedCost,
+    openEstimatedCost: estimatedCost,
+    approval: {
+      required: approvalRequired,
+      threshold: Math.max(0, Number(targetVendor.purchaseOrderRules?.approvalThreshold || 0)),
+      budgetLimit,
+      budgetExceeded,
+      status: approvalRequired ? "awaiting_approval" : "not_required"
+    },
+    replacesPurchaseOrderId: po.id,
+    replacesPurchaseOrderNumber: po.poNumber,
+    reSourceReason: String(input.reason || "supplier_change"),
+    buyerNote: String(input.note || "").trim(),
+    createdAt: now,
+    updatedAt: now,
+    timeline: [],
+    receipts: []
+  };
+  for (const selectedLine of selected) {
+    const originalLine = po.items[selectedLine.lineIndex];
+    const order = orders.find((row) => String(row.id) === selectedLine.orderId);
+    const oldRoute = order?.fulfillmentRoutes?.find((route) => String(route.id) === String(selectedLine.routeId));
+    const lineIndex = Number.isFinite(Number(oldRoute?.lineIndex)) ? Number(oldRoute.lineIndex) : Math.max(0, (order?.items || []).findIndex((line) => String(line.sku || "").toLowerCase() === selectedLine.sku.toLowerCase()));
+    const newRoute = {
+      id: crypto.randomUUID(),
+      type: "purchase",
+      status: "buyer_review",
+      lineIndex,
+      sku: selectedLine.sku,
+      title: selectedLine.title,
+      qty: selectedLine.openQty,
+      vendorId: targetVendor.id,
+      vendorName: targetVendor.name,
+      warehouseId: replacement.warehouseId,
+      warehouseName: replacement.warehouseName,
+      purchaseOrderId: replacement.id,
+      purchaseOrderNumber: replacement.poNumber,
+      purchaseGroupId: replacement.purchaseGroupId,
+      replacesRouteId: selectedLine.routeId,
+      createdAt: now,
+      updatedAt: now
+    };
+    if (oldRoute) {
+      oldRoute.status = "canceled";
+      oldRoute.reSourcedQty = Number(oldRoute.reSourcedQty || 0) + selectedLine.openQty;
+      oldRoute.replacementRouteId = newRoute.id;
+      oldRoute.replacementPurchaseOrderId = replacement.id;
+      oldRoute.replacementPurchaseOrderNumber = replacement.poNumber;
+      oldRoute.updatedAt = now;
+    }
+    if (order) {
+      order.fulfillmentRoutes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [];
+      order.fulfillmentRoutes.push(newRoute);
+    }
+    const previousRequirement = (db.purchaseRequirements || []).find((row) => String(row.routeId || "") === String(selectedLine.routeId));
+    if (previousRequirement) {
+      previousRequirement.status = "resourced";
+      previousRequirement.replacementPurchaseOrderId = replacement.id;
+      previousRequirement.replacementPurchaseOrderNumber = replacement.poNumber;
+      previousRequirement.updatedAt = now;
+    }
+    db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
+    db.purchaseRequirements.push({
+      ...(previousRequirement || {}),
+      id: crypto.randomUUID(),
+      routeId: newRoute.id,
+      orderId: selectedLine.orderId,
+      orderNumber: selectedLine.orderNumber,
+      lineIndex,
+      sku: selectedLine.sku,
+      title: selectedLine.title,
+      qty: selectedLine.openQty,
+      vendorId: targetVendor.id,
+      vendorName: targetVendor.name,
+      warehouseId: replacement.warehouseId,
+      warehouseName: replacement.warehouseName,
+      status: "converted",
+      source: "po_resourcing",
+      purchaseOrderId: replacement.id,
+      purchaseOrderNumber: replacement.poNumber,
+      replacesRequirementId: previousRequirement?.id || "",
+      createdAt: now,
+      updatedAt: now,
+      convertedAt: now
+    });
+    originalLine.reSourcedQty = Number(originalLine.reSourcedQty || 0) + selectedLine.openQty;
+    originalLine.remainingQty = purchaseOrderOpenQuantity(originalLine);
+    originalLine.replacementPurchaseOrderId = replacement.id;
+    originalLine.replacementPurchaseOrderNumber = replacement.poNumber;
+    replacement.items.push({
+      sku: selectedLine.sku,
+      title: selectedLine.title,
+      qty: selectedLine.openQty,
+      remainingQty: selectedLine.openQty,
+      unitCost: Number(selectedLine.offer.unitCost || 0),
+      estimatedUnitCost: Number(selectedLine.offer.unitCost || 0),
+      vendorSku: selectedLine.offer.vendorSku || "",
+      orderId: selectedLine.orderId,
+      orderNumber: selectedLine.orderNumber,
+      routeId: newRoute.id,
+      replacesRouteId: selectedLine.routeId,
+      sourcePurchaseOrderId: po.id,
+      sourcePurchaseOrderNumber: po.poNumber
+    });
+  }
+  const allOpenMoved = preview.lines.every((line) => selected.some((row) => row.lineKey === line.lineKey && row.openQty === line.openQty));
+  if (allOpenMoved) {
+    po.status = "superseded";
+    po.archivedAt = now;
+    po.supersededMode = preview.committed ? "supplier_change" : "replaced_before_submission";
+  } else {
+    po.partiallyReSourced = true;
+  }
+  po.replacedByPurchaseOrderId = replacement.id;
+  po.replacedByPurchaseOrderNumber = replacement.poNumber;
+  po.openEstimatedCost = purchaseOrderOpenCommitment(po);
+  po.reSourceOperations = Array.isArray(po.reSourceOperations) ? po.reSourceOperations : [];
+  po.reSourceOperations.unshift({ requestId, replacementPurchaseOrderId: replacement.id, replacementPurchaseOrderNumber: replacement.poNumber, vendorId: targetVendor.id, supplier: targetVendor.name, reason: replacement.reSourceReason, lineCount: selected.length, unitCount: replacement.totalUnits, createdAt: now, createdBy: input.user || "Luis" });
+  po.updatedAt = now;
+  addPoTimeline(po, { type: "resourced", title: allOpenMoved ? "PO superseded" : "PO lines re-sourced", message: `${replacement.totalUnits} open unit${replacement.totalUnits === 1 ? "" : "s"} moved to ${replacement.poNumber} for ${replacement.supplier}.`, user: input.user || "Luis" });
+  addPoTimeline(replacement, { type: "created", title: "Replacement PO created", message: `Created from open quantities on ${po.poNumber} after a supplier change.`, user: input.user || "Luis" });
+  db.purchaseOrders = Array.isArray(db.purchaseOrders) ? db.purchaseOrders : [];
+  db.purchaseOrders.unshift(replacement);
+  for (const order of orders) {
+    order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), replacement.id])];
+    order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), replacement.poNumber])];
+    recalculateOrderOperationalStatus(order);
+    addOrderWorkflowEvent(order, { step: "purchase_order_resourced", title: "Supplier PO replaced", message: `${po.poNumber} open quantities moved to ${replacement.poNumber} for ${replacement.supplier}.`, user: input.user || "Luis" });
+    order.updatedAt = now;
+  }
+  return { purchaseOrder: po, replacementPurchaseOrder: replacement, orders, preview };
 }
 
 function processDuePurchaseRequirementPool(db, options = {}) {
@@ -11666,7 +12007,7 @@ function supplierReminderPreview(po, vendor, settings) {
 
 function poIsOverdue(po) {
   const expectedAt = String(po?.expectedAt || "").slice(0, 10);
-  return Boolean(expectedAt && expectedAt < new Date().toISOString().slice(0, 10) && !["received", "closed", "canceled", "rejected"].includes(String(po?.status || "").toLowerCase()));
+  return Boolean(expectedAt && expectedAt < new Date().toISOString().slice(0, 10) && !["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po?.status || "").toLowerCase()));
 }
 
 function addPoReminder(po, reminder) {
@@ -31244,6 +31585,52 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { linkedOrders: result.linkedOrders, linkedRoutes: result.linkedRoutes, message: `Reconciled ${result.linkedRoutes} purchase route${result.linkedRoutes === 1 ? "" : "s"} across ${result.linkedOrders} order${result.linkedOrders === 1 ? "" : "s"}.` });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "re-source-options" && postgres.isPostgresEnabled()) {
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+    const preview = await purchaseOrderReSourceOptions(db, po, (sku) => postgres.readProductByKey(sku));
+    return sendJson(res, 200, { preview });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "re-source" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    try {
+      const db = await readDbFast({ skipInventory: true });
+      db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+      db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+      const poIndex = db.purchaseOrders.findIndex((row) => String(row.id) === String(po.id));
+      if (poIndex >= 0) db.purchaseOrders[poIndex] = po;
+      else db.purchaseOrders.unshift(po);
+      const orderIds = [...new Set([
+        ...(po.orderIds || []),
+        po.orderId,
+        ...(po.items || []).map((line) => line.orderId)
+      ].filter(Boolean))];
+      db.orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+      const result = await reSourcePurchaseOrder(db, po, body, (sku) => postgres.readProductByKey(sku));
+      await postgres.savePurchaseOrder(result.purchaseOrder);
+      await postgres.savePurchaseOrder(result.replacementPurchaseOrder);
+      for (const order of result.orders || []) {
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+      }
+      await postgres.writeStateDocuments({
+        purchaseRequirements: db.purchaseRequirements || [],
+        sequence: db.sequence || {}
+      });
+      return sendJson(res, 201, {
+        ...result,
+        message: `${result.replacementPurchaseOrder.poNumber} created for ${result.replacementPurchaseOrder.supplier}.`
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
@@ -31508,9 +31895,14 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
+    if (["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())) {
+      return sendJson(res, 409, { error: `PO ${po.poNumber || po.id} cannot receive inventory from status ${String(po.status || "unknown").replace(/_/g, " ")}.` });
+    }
     const db = await readDbFast({ skipInventory: true });
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     const receivedLines = Array.isArray(body.items) ? body.items : [];
+    const receiptValidationError = validatePurchaseOrderReceiptLines(po, receivedLines);
+    if (receiptValidationError) return sendJson(res, 400, { error: receiptValidationError });
     const receivedAt = String(body.receivedAt || new Date().toISOString().slice(0, 10));
     const note = String(body.note || "").trim();
     const mode = String(body.mode || "final").toLowerCase() === "draft" ? "draft" : "final";
@@ -31540,7 +31932,7 @@ async function handleApi(req, res) {
       if (!sku || !Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
       const [product, poLine] = await Promise.all([
         postgres.readProductByKey(sku),
-        Promise.resolve((po.items || []).find((item) => String(item.sku || "").toLowerCase() === sku.toLowerCase()))
+        Promise.resolve(findPurchaseOrderReceiptLine(po, line))
       ]);
       const varianceStatus = String(line.varianceStatus || "none").toLowerCase();
       const varianceNote = String(line.varianceNote || "").trim();
@@ -31572,6 +31964,8 @@ async function handleApi(req, res) {
       }
       receipt.items.push({
         sku,
+        routeId: String(poLine?.routeId || line.routeId || ""),
+        orderId: String(poLine?.orderId || ""),
         title: product?.title || poLine?.title || sku,
         qtyReceived,
         orderedQty: Number(poLine?.qty || 0),
@@ -31605,7 +31999,7 @@ async function handleApi(req, res) {
       product.updatedAt = new Date().toISOString();
       if (poLine) {
         poLine.receivedQty = Number(poLine.receivedQty || 0) + qtyReceived;
-        poLine.remainingQty = Math.max(0, Number(poLine.qty || 0) - Number(poLine.receivedQty || 0));
+        poLine.remainingQty = purchaseOrderOpenQuantity(poLine);
         poLine.lastReceivedAt = receivedAt;
         poLine.lastLocationBin = locationBin;
         poLine.lastVarianceStatus = varianceStatus;
@@ -31655,12 +32049,15 @@ async function handleApi(req, res) {
     po.receipts = Array.isArray(po.receipts) ? po.receipts : [];
     po.receipts.unshift(receipt);
     po.receivedUnits = Number(po.receivedUnits || 0) + totalReceived;
-    po.status = (po.items || []).every((item) => Number(item.receivedQty || 0) >= Number(item.qty || 0)) ? "received" : "partially_received";
+    const noOpenQuantity = (po.items || []).every((item) => purchaseOrderOpenQuantity(item) <= 0);
+    const allOrderedUnitsReceived = (po.items || []).every((item) => Number(item.receivedQty || 0) >= Number(item.qty || 0));
+    po.status = noOpenQuantity ? (allOrderedUnitsReceived ? "received" : "closed") : "partially_received";
+    po.openEstimatedCost = purchaseOrderOpenCommitment(po);
     po.receivedAt = receivedAt;
     po.updatedAt = new Date().toISOString();
     addPoTimeline(po, {
       type: "received",
-      title: po.status === "received" ? "PO received" : "PO partially received",
+      title: po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
       message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
       user: body.user || "Luis"
     });
@@ -40192,6 +40589,30 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "re-source-options") {
+    const po = (db.purchaseOrders || []).find((row) => String(row.id) === String(parts[2]));
+    if (!po) return notFound(res);
+    const preview = await purchaseOrderReSourceOptions(db, po, async (sku) => findInventoryBySkuOrAlias(db, sku));
+    return sendJson(res, 200, { preview });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "re-source") {
+    const body = await parseBody(req);
+    const po = (db.purchaseOrders || []).find((row) => String(row.id) === String(parts[2]));
+    if (!po) return notFound(res);
+    try {
+      const result = await reSourcePurchaseOrder(db, po, body, async (sku) => findInventoryBySkuOrAlias(db, sku));
+      await writeDb(db);
+      return sendJson(res, 201, {
+        ...result,
+        state: publicState(db),
+        message: `${result.replacementPurchaseOrder.poNumber} created for ${result.replacementPurchaseOrder.supplier}.`
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[3] === "submit") {
     const body = await parseBody(req);
     const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
@@ -40285,8 +40706,13 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
     if (!po) return notFound(res);
+    if (["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())) {
+      return sendJson(res, 409, { error: `PO ${po.poNumber || po.id} cannot receive inventory from status ${String(po.status || "unknown").replace(/_/g, " ")}.` });
+    }
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     const receivedLines = Array.isArray(body.items) ? body.items : [];
+    const receiptValidationError = validatePurchaseOrderReceiptLines(po, receivedLines);
+    if (receiptValidationError) return sendJson(res, 400, { error: receiptValidationError });
     const receivedAt = String(body.receivedAt || new Date().toISOString().slice(0, 10));
     const note = String(body.note || "").trim();
     const mode = String(body.mode || "final").toLowerCase() === "draft" ? "draft" : "final";
@@ -40316,7 +40742,7 @@ async function handleApi(req, res) {
       const qtyReceived = Number(line.qtyReceived || 0);
       if (!sku || !Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
       const product = db.inventory.find((item) => String(item.sku || "").toLowerCase() === sku.toLowerCase());
-      const poLine = (po.items || []).find((item) => String(item.sku || "").toLowerCase() === sku.toLowerCase());
+      const poLine = findPurchaseOrderReceiptLine(po, line);
       const varianceStatus = String(line.varianceStatus || "none").toLowerCase();
       const varianceNote = String(line.varianceNote || "").trim();
       const locationBin = String(line.locationBin || defaultLocationBin || "").trim();
@@ -40348,6 +40774,8 @@ async function handleApi(req, res) {
       }
       receipt.items.push({
         sku,
+        routeId: String(poLine?.routeId || line.routeId || ""),
+        orderId: String(poLine?.orderId || ""),
         title: product?.title || poLine?.title || sku,
         qtyReceived,
         orderedQty: Number(poLine?.qty || 0),
@@ -40379,7 +40807,7 @@ async function handleApi(req, res) {
       product.updatedAt = new Date().toISOString();
       if (poLine) {
         poLine.receivedQty = Number(poLine.receivedQty || 0) + qtyReceived;
-        poLine.remainingQty = Math.max(0, Number(poLine.qty || 0) - Number(poLine.receivedQty || 0));
+        poLine.remainingQty = purchaseOrderOpenQuantity(poLine);
         poLine.lastReceivedAt = receivedAt;
         poLine.lastLocationBin = locationBin;
         poLine.lastVarianceStatus = varianceStatus;
@@ -40427,12 +40855,15 @@ async function handleApi(req, res) {
     po.receipts = Array.isArray(po.receipts) ? po.receipts : [];
     po.receipts.unshift(receipt);
     po.receivedUnits = Number(po.receivedUnits || 0) + totalReceived;
-    po.status = (po.items || []).every((item) => Number(item.receivedQty || 0) >= Number(item.qty || 0)) ? "received" : "partially_received";
+    const noOpenQuantity = (po.items || []).every((item) => purchaseOrderOpenQuantity(item) <= 0);
+    const allOrderedUnitsReceived = (po.items || []).every((item) => Number(item.receivedQty || 0) >= Number(item.qty || 0));
+    po.status = noOpenQuantity ? (allOrderedUnitsReceived ? "received" : "closed") : "partially_received";
+    po.openEstimatedCost = purchaseOrderOpenCommitment(po);
     po.receivedAt = receivedAt;
     po.updatedAt = new Date().toISOString();
     addPoTimeline(po, {
       type: "received",
-      title: po.status === "received" ? "PO received" : "PO partially received",
+      title: po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
       message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
       user: body.user || "Luis"
     });

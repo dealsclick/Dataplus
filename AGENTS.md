@@ -343,6 +343,10 @@ Eligible supplier demand is pooled by canonical supplier and physical receiving 
 
 PO receiving posts stock to the PO's physical destination warehouse, appends inventory provenance, and reroutes linked customer orders. Received lines may then reserve the new physical stock and move into fulfillment. Supplier POs must never use a virtual supplier-feed warehouse as their receiving destination.
 
+PO re-sourcing moves only open, unreceived quantities to a linked replacement PO. Draft or unsubmitted originals may be superseded immediately. Submitted, acknowledged, or partially received POs require the buyer to confirm that the supplier-side order was canceled or adjusted before DataPlus creates the replacement.
+
+Received quantities always remain on the original PO. Original and replacement POs, fulfillment routes, purchase requirements, and customer orders must retain bidirectional audit links. Superseded, canceled, rejected, closed, and deleted POs are excluded from the default active queue but remain available in PO History; do not physically delete them merely to reduce queue clutter.
+
 ## Jobs and workers
 
 Jobs are the audit trail for imports, exports, syncs, scans, index rebuilds, backups, and marketplace actions.
