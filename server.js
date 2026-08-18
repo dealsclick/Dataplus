@@ -25305,6 +25305,40 @@ async function findCatalogProductsBySkus(skus = [], db = {}) {
   return found;
 }
 
+async function purchaseOrderWithCatalogImages(purchaseOrder = {}, db = {}) {
+  const lineField = Array.isArray(purchaseOrder.items)
+    ? "items"
+    : Array.isArray(purchaseOrder.lines)
+      ? "lines"
+      : "";
+  if (!lineField) return purchaseOrder;
+
+  const lines = purchaseOrder[lineField];
+  const skus = [...new Set(lines.map((line) => String(line?.sku || "").trim()).filter(Boolean))];
+  if (!skus.length) return purchaseOrder;
+
+  const [managedProducts, sourceProducts] = await Promise.all([
+    postgres.isPostgresEnabled() ? postgres.readProductsByKeys(skus) : Promise.resolve([]),
+    findCatalogProductsBySkus(skus, db)
+  ]);
+  const imagesBySku = new Map();
+  for (const product of [...(managedProducts || []), ...(sourceProducts || [])]) {
+    const key = String(product?.sku || "").trim().toLowerCase();
+    const image = compactCatalogImageUrl(product || {});
+    if (key && image && !imagesBySku.has(key)) imagesBySku.set(key, image);
+  }
+
+  return {
+    ...purchaseOrder,
+    [lineField]: lines.map((line) => ({
+      ...line,
+      defaultImage: String(line?.defaultImage || line?.imageUrl || line?.image || "").trim()
+        || imagesBySku.get(String(line?.sku || "").trim().toLowerCase())
+        || ""
+    }))
+  };
+}
+
 async function findSourceCatalogAlternatesBySkus(skus = [], db = {}) {
   const wanted = [...new Set(skus.map((sku) => String(sku || "").trim().toLowerCase()).filter(Boolean))];
   const result = Object.fromEntries(wanted.map((sku) => [sku, []]));
@@ -31852,8 +31886,9 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
+    const purchaseOrder = await purchaseOrderWithCatalogImages(po);
     const linkedOrders = await Promise.all([...(po.orderIds || []), po.orderId].filter(Boolean).map((id) => postgres.readOrderByKey(id)));
-    return sendJson(res, 200, { purchaseOrder: po, linkedOrders: linkedOrders.filter(Boolean) });
+    return sendJson(res, 200, { purchaseOrder, linkedOrders: linkedOrders.filter(Boolean) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "reminder" && parts[4] === "preview" && postgres.isPostgresEnabled()) {

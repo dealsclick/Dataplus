@@ -12533,7 +12533,41 @@ function PurchaseOrderDetailPage() {
     {po.replacesPurchaseOrderId ? <Alert><RotateCcw className="size-4" /><AlertTitle>Replacement purchase order</AlertTitle><AlertDescription>This PO replaces open quantities from <a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.replacesPurchaseOrderId))}`}>{String(po.replacesPurchaseOrderNumber || po.replacesPurchaseOrderId)}</a>. Received quantities remain on the original PO.</AlertDescription></Alert> : null}
     {po.replacedByPurchaseOrderId ? <Alert><Archive className="size-4" /><AlertTitle>This PO was superseded</AlertTitle><AlertDescription>Its open quantities were moved to <a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.replacedByPurchaseOrderId))}`}>{String(po.replacedByPurchaseOrderNumber || po.replacedByPurchaseOrderId)}</a>. This record is retained for receipts and audit history.</AlertDescription></Alert> : null}
     <Tabs defaultValue="lines"><TabsList><TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger><TabsTrigger value="orders">Linked orders ({(data.linkedOrders || []).length})</TabsTrigger><TabsTrigger value="receipts">Receipts ({receipts.length})</TabsTrigger><TabsTrigger value="documents">Documents ({documents.length})</TabsTrigger><TabsTrigger value="history">History ({history.length})</TabsTrigger></TabsList>
-      <TabsContent value="lines" className="mt-4"><Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>Ordered</TableHead><TableHead>Received</TableHead><TableHead>Remaining</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => <TableRow key={`${String(line.sku)}-${index}`}><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(line.sku || ""))}`}>{String(line.sku || "-")}</a></TableCell><TableCell>{String(line.title || "-")}</TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{numberLabel(Number(line.receivedQty || 0))}</TableCell><TableCell>{numberLabel(Number(line.remainingQty ?? Math.max(0, Number(line.qty || 0) - Number(line.receivedQty || 0))))}</TableCell></TableRow>)}</TableBody></Table></CardContent></Card></TabsContent>
+      <TabsContent value="lines" className="mt-4">
+        <Card>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>SKU</TableHead>
+                  <TableHead>Item</TableHead>
+                  <TableHead>Ordered</TableHead>
+                  <TableHead>Received</TableHead>
+                  <TableHead>Remaining</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {lines.map((line, index) => {
+                  const sku = String(line.sku || "")
+                  const title = String(line.title || sku || "Item")
+                  return <TableRow key={`${sku}-${index}`}>
+                    <TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(sku)}`}>{sku || "-"}</a></TableCell>
+                    <TableCell>
+                      <div className="flex min-w-56 items-center gap-3">
+                        <CatalogImage src={String(line.defaultImage || line.imageUrl || line.image || "")} alt={title} className="size-11 shrink-0" imageClassName="p-1" />
+                        <span className="line-clamp-2" title={title}>{title}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell>{numberLabel(Number(line.qty || 0))}</TableCell>
+                    <TableCell>{numberLabel(Number(line.receivedQty || 0))}</TableCell>
+                    <TableCell>{numberLabel(Number(line.remainingQty ?? Math.max(0, Number(line.qty || 0) - Number(line.receivedQty || 0))))}</TableCell>
+                  </TableRow>
+                })}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      </TabsContent>
       <TabsContent value="orders" className="mt-4 grid gap-2">{(data.linkedOrders || []).map((order) => <Card key={String(order.id)}><CardContent className="flex items-center justify-between p-4 text-sm"><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(order.id))}`}>{String(order.orderNumber || order.id)}</a><span>{String(order.buyer || "Customer")}</span><Badge variant="outline">{String(order.operationalStatus || order.status || "-").replace(/_/g, " ")}</Badge></CardContent></Card>)}</TabsContent>
       <TabsContent value="receipts" className="mt-4 grid gap-2">{receipts.map((receipt, index) => <Card key={String(receipt.id || index)}><CardContent className="flex items-center justify-between p-4 text-sm"><div><p className="font-medium">{String(receipt.receiptNumber || `Receipt ${index + 1}`)}</p><p className="text-muted-foreground">{String(receipt.receivedAt || "-")} · {String(receipt.warehouseName || po.warehouseName || "-")}</p></div><Badge variant="outline">{String(receipt.status || "final")}</Badge></CardContent></Card>)}{!receipts.length && <Card><CardContent className="p-4 text-sm text-muted-foreground">No inventory has been received against this PO.</CardContent></Card>}</TabsContent>
       <TabsContent value="documents" className="mt-4 grid gap-2"><div className="flex justify-end"><Button size="sm" onClick={openDocument}>Link document</Button></div>{documents.map((document, index) => <Card key={String(document.id || index)}><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm"><div><p className="font-medium">{String(document.name || "Document")}</p><p className="text-muted-foreground">{String(document.type || "supplier document")}{document.note ? ` - ${String(document.note)}` : ""}</p></div><Button size="sm" variant="outline" asChild><a href={String(document.url || "#")} target="_blank" rel="noreferrer">Open</a></Button></CardContent></Card>)}{!documents.length && <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm text-muted-foreground"><span>No supplier documents are linked.</span><Button size="sm" onClick={openDocument}>Link document</Button></CardContent></Card>}</TabsContent>
