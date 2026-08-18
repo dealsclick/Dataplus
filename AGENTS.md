@@ -341,6 +341,8 @@ Auto-PO creation is controlled by supplier profile rules and must respect approv
 
 Eligible supplier demand is pooled by canonical supplier and physical receiving warehouse until the configured cutoff, which defaults to 3:00 PM in the configured timezone. Demand received after cutoff rolls into the next eligible business-day pool. The scheduler creates draft or approval-required POs only for suppliers with auto-creation enabled; buyers may explicitly run due pools or force-create selected pooled demand from Purchasing.
 
+Purchasing presents pooled demand as one row per canonical supplier. The dedicated `/purchasing/supplier-pools/:supplierKey` workspace lists every linked customer order and SKU, while preserving separate PO groups for incompatible receiving destinations or cutoff windows.
+
 PO receiving posts stock to the PO's physical destination warehouse, appends inventory provenance, and reroutes linked customer orders. Received lines may then reserve the new physical stock and move into fulfillment. Supplier POs must never use a virtual supplier-feed warehouse as their receiving destination.
 
 PO re-sourcing moves only open, unreceived quantities to a linked replacement PO. Draft or unsubmitted originals may be superseded immediately. Submitted, acknowledged, or partially received POs require the buyer to confirm that the supplier-side order was canceled or adjusted before DataPlus creates the replacement.
