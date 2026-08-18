@@ -12109,11 +12109,18 @@ void LegacyPickListPanel
 void LegacyFulfillmentPage
 
 function PurchasingPage() {
-  const [data, setData] = useState<{ requirements?: Array<Record<string, unknown>>; purchaseOrders?: Array<Record<string, unknown>> }>({})
+  const [data, setData] = useState<{
+    requirements?: Array<Record<string, unknown>>
+    purchaseOrders?: Array<Record<string, unknown>>
+    poolSummary?: Record<string, unknown>
+    workflowSettings?: Record<string, unknown>
+  }>({})
   const [loading, setLoading] = useState(true)
   const [creatingOrderId, setCreatingOrderId] = useState("")
   const [actingPoId, setActingPoId] = useState("")
-  const [tab, setTab] = useState("requirements")
+  const [poolingBusy, setPoolingBusy] = useState(false)
+  const [forcePoolOpen, setForcePoolOpen] = useState(false)
+  const [tab, setTab] = useState("pool")
   const [query, setQuery] = useState("")
   const load = async () => { setLoading(true); try { setData(await api("/api/purchasing/work")) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchasing work.") } finally { setLoading(false) } }
   useEffect(() => { void load() }, [])
@@ -12126,8 +12133,19 @@ function PurchasingPage() {
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create purchase order.") } finally { setCreatingOrderId("") }
   }
   const actOnPo = async (poId: string, action: "approve" | "hold" | "reject") => { setActingPoId(poId); try { await api(`/api/purchase-orders/${encodeURIComponent(poId)}/action`, { method: "POST", body: JSON.stringify({ action, user: "Luis" }) }); toast.success(`PO ${action}d.`); await load() } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update PO.") } finally { setActingPoId("") } }
+  const runPurchasePool = async (force = false) => {
+    setPoolingBusy(true)
+    try {
+      const result = await api<{ message?: string; purchaseOrders?: Array<Record<string, unknown>> }>("/api/purchasing/pool/run", { method: "POST", body: JSON.stringify({ force, user: "Luis" }) })
+      toast.success(result.message || `${numberLabel(result.purchaseOrders?.length || 0)} supplier POs created.`)
+      setForcePoolOpen(false)
+      await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to process pooled supplier demand.") } finally { setPoolingBusy(false) }
+  }
   const requirements = (data.requirements || []).filter((row) => JSON.stringify(row).toLowerCase().includes(query.toLowerCase()))
   const pos = (data.purchaseOrders || []).filter((row) => JSON.stringify(row).toLowerCase().includes(query.toLowerCase()))
+  const pooledRequirements = requirements.filter((row) => String(row.status || "").toLowerCase() === "pooled")
+  const poolSummary = data.poolSummary || {}
   const openRequirements = requirements.filter((row) => !["received", "closed", "canceled"].includes(String(row.status))).length
   const approvalQueue = pos.filter((po) => ["awaiting_approval", "draft"].includes(String(po.status || "").toLowerCase()) && ((po.approval as Record<string, unknown> | undefined)?.required !== false))
   const today = new Date().toISOString().slice(0, 10)
@@ -12140,14 +12158,20 @@ function PurchasingPage() {
   return <div className="grid gap-5">
     <PageHeader eyebrow="Buyer operations" title="Purchasing" description="Review customer demand, create supplier-specific POs, submit them, and receive inventory into the destination warehouse." action={<ContextActions disabled={loading} actions={[
       { id: "refresh", label: "Refresh purchasing", description: "Reload purchase requirements, POs, approvals, and supplier scorecards.", icon: loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />, onSelect: () => void load() },
+      { id: "pool", label: "View pooled supplier demand", description: "See order lines waiting for the supplier cutoff.", icon: <Clock3 className="size-4" />, onSelect: () => setTab("pool") },
+      { id: "run-due-pool", label: "Run due supplier cutoffs", description: "Create draft POs only for supplier pools whose cutoff has passed.", icon: <Play className="size-4" />, onSelect: () => void runPurchasePool(false) },
       { id: "requirements", label: "View purchase requirements", description: "Review customer demand before creating supplier POs.", icon: <ShoppingBag className="size-4" />, onSelect: () => setTab("requirements") },
       { id: "approvals", label: "View approval queue", description: "Review draft POs that need buyer approval.", icon: <ShieldCheck className="size-4" />, onSelect: () => setTab("approvals") },
       { id: "risk", label: "View exceptions and risk", description: "See missing suppliers, exceptions, and overdue receipts.", icon: <AlertCircle className="size-4" />, group: "Utilities", onSelect: () => setTab("risks") },
     ]} />} />
-    <div className="grid gap-3 sm:grid-cols-4"><Detail label="Open requirements" value={numberLabel(openRequirements)} /><Detail label="Awaiting approval" value={numberLabel(approvalQueue.length)} /><Detail label="Buyer review" value={numberLabel(requirements.filter((row) => ["new", "buyer_review", "awaiting_approval"].includes(String(row.status))).length)} /><Detail label="Open POs" value={numberLabel(pos.filter((row) => !["received", "closed", "canceled"].includes(String(row.status))).length)} /></div>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Detail label="Pooled demand" value={numberLabel(Number(poolSummary.requirements ?? pooledRequirements.length))} /><Detail label="Due at cutoff" value={numberLabel(Number(poolSummary.dueRequirements || 0))} /><Detail label="Awaiting approval" value={numberLabel(approvalQueue.length)} /><Detail label="Open requirements" value={numberLabel(openRequirements)} /><Detail label="Open POs" value={numberLabel(pos.filter((row) => !["received", "closed", "canceled"].includes(String(row.status))).length)} /></div>
     <Tabs value={tab} onValueChange={setTab}>
-      <TabsList><TabsTrigger value="requirements">Purchase requirements ({numberLabel(requirements.length)})</TabsTrigger><TabsTrigger value="approvals">Awaiting approval ({numberLabel(approvalQueue.length)})</TabsTrigger><TabsTrigger value="pos">Purchase orders ({numberLabel(pos.length)})</TabsTrigger><TabsTrigger value="performance">Supplier performance ({numberLabel(supplierPerformance.length)})</TabsTrigger><TabsTrigger value="risks">Exceptions & risk ({numberLabel(risks.length)})</TabsTrigger></TabsList>
+      <TabsList><TabsTrigger value="pool">Pooled demand ({numberLabel(pooledRequirements.length)})</TabsTrigger><TabsTrigger value="requirements">All requirements ({numberLabel(requirements.length)})</TabsTrigger><TabsTrigger value="approvals">Awaiting approval ({numberLabel(approvalQueue.length)})</TabsTrigger><TabsTrigger value="pos">Purchase orders ({numberLabel(pos.length)})</TabsTrigger><TabsTrigger value="performance">Supplier performance ({numberLabel(supplierPerformance.length)})</TabsTrigger><TabsTrigger value="risks">Exceptions & risk ({numberLabel(risks.length)})</TabsTrigger></TabsList>
       <div className="relative mt-4 max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PO, order, supplier, customer, or SKU" /></div>
+      <TabsContent value="pool" className="mt-4 grid gap-4">
+        <Alert><Clock3 className="size-4" /><AlertTitle>Supplier demand is pooled before PO creation</AlertTitle><AlertDescription>DataPlus groups unfulfilled supplier lines by supplier and receiving warehouse until the cutoff. Physical warehouse stock bypasses this queue and goes directly to fulfillment. Next cutoff: {poolSummary.nextCutoff ? dateLabel(String(poolSummary.nextCutoff)) : "not scheduled"}.</AlertDescription></Alert>
+        <Card><CardHeader className="gap-3 border-b lg:flex-row lg:items-center lg:justify-between"><div><CardTitle className="text-base">Demand waiting for supplier POs</CardTitle><CardDescription>{numberLabel(Number(poolSummary.units || 0))} units are grouped without creating duplicate POs.</CardDescription></div><div className="flex flex-wrap gap-2"><Button variant="outline" disabled={poolingBusy || Number(poolSummary.dueRequirements || 0) === 0} onClick={() => void runPurchasePool(false)}>{poolingBusy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Run due cutoffs</Button><Button disabled={poolingBusy || pooledRequirements.length === 0} onClick={() => setForcePoolOpen(true)}>Create pooled POs now</Button></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Supplier</TableHead><TableHead>Customer order</TableHead><TableHead>SKU / quantity</TableHead><TableHead>Source</TableHead><TableHead>Receiving destination</TableHead><TableHead>Cutoff</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{pooledRequirements.map((row) => <TableRow key={String(row.id)}><TableCell className="font-medium">{String(row.vendorName || "Unassigned")}</TableCell><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId || ""))}`}>{String(row.orderNumber || row.orderId || "-")}</a></TableCell><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(row.sku || ""))}`}>{String(row.sku || "-")}</a><p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell>{String(row.sourceWarehouseName || row.sourceName || "Supplier feed")}</TableCell><TableCell>{String(row.warehouseName || row.destinationWarehouseName || "Order destination")}</TableCell><TableCell className="whitespace-nowrap">{String(row.cutoffTime || "15:00")}<p className="text-xs text-muted-foreground">{String(row.poolDate || row.cutoffDate || "Next business day")}</p></TableCell><TableCell><Badge variant="secondary">Pooled</Badge></TableCell></TableRow>)}{!pooledRequirements.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No supplier demand is waiting in the cutoff pool.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
+      </TabsContent>
       <TabsContent value="requirements" className="mt-4"><Card><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Customer order</TableHead><TableHead>SKU / quantity</TableHead><TableHead>Fulfillment path</TableHead><TableHead>Supplier</TableHead><TableHead>PO</TableHead><TableHead>Ship by</TableHead><TableHead>Status</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
         {requirements.map((row) => { const poId = String(row.purchaseOrderId || ""); const orderId = String(row.orderId || ""); const sku = String(row.sku || ""); return <TableRow key={String(row.id)}><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(orderId)}`}>{String(row.orderNumber)}</a><p className="text-xs text-muted-foreground">{String(row.customer || "Customer")}</p></TableCell><TableCell>{sku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(sku)}`} target="_blank" rel="noreferrer" title={`Open ${sku} in a new tab`}>{sku}</a> : "-"}<p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell><Badge variant="outline">{String(row.type || "purchase").replace(/_/g, " ")}</Badge></TableCell><TableCell>{String(row.vendorName || "Unassigned")}</TableCell><TableCell>{poId ? <a className="font-medium hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(row.purchaseOrderNumber || poId)}</a> : <span className="text-muted-foreground">Not created</span>}</TableCell><TableCell>{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant={String(row.status).includes("exception") ? "destructive" : "secondary"}>{String(row.status || "new").replace(/_/g, " ")}</Badge></TableCell><TableCell className="text-right">{!poId && orderId ? <Button size="sm" disabled={creatingOrderId === orderId} onClick={() => void createForOrder(orderId)}>{creatingOrderId === orderId ? <Loader2 className="size-4 animate-spin" /> : "Create PO"}</Button> : <Button size="sm" variant="ghost" asChild><a href={`/purchase-orders/${encodeURIComponent(poId)}`}>Open</a></Button>}</TableCell></TableRow> })}
         {!requirements.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase requirements match this view.</TableCell></TableRow>}
@@ -12160,6 +12184,7 @@ function PurchasingPage() {
       <TabsContent value="performance" className="mt-4 grid gap-4"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Open commitment" value={moneyLabel(performanceTotals.commitment)} /><Detail label="Supplier acknowledgement" value={`${performanceTotals.total ? ((performanceTotals.acknowledged / performanceTotals.total) * 100).toFixed(0) : 0}%`} /><Detail label="PO receipt rate" value={`${performanceTotals.total ? ((performanceTotals.received / performanceTotals.total) * 100).toFixed(0) : 0}%`} /><Detail label="On-time receipt" value={`${performanceTotals.received ? ((performanceTotals.onTime / performanceTotals.received) * 100).toFixed(0) : 0}%`} /></div><Card><CardHeader><CardTitle className="text-base">Supplier scorecards</CardTitle><CardDescription>Based on linked purchase orders, supplier acknowledgements, expected arrivals, and recorded receipts.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Supplier</TableHead><TableHead>Open POs</TableHead><TableHead>Open commitment</TableHead><TableHead>Acknowledged</TableHead><TableHead>Fill rate</TableHead><TableHead>Overdue</TableHead><TableHead /></TableRow></TableHeader><TableBody>{supplierPerformance.sort((left, right) => right.commitment - left.commitment).map((supplier) => <TableRow key={supplier.vendorId || supplier.supplier}><TableCell className="font-medium">{supplier.supplier}</TableCell><TableCell>{numberLabel(supplier.open)}</TableCell><TableCell>{moneyLabel(supplier.commitment)}</TableCell><TableCell>{supplier.total ? `${((supplier.acknowledged / supplier.total) * 100).toFixed(0)}%` : "-"}</TableCell><TableCell>{supplier.units ? `${((supplier.receivedUnits / supplier.units) * 100).toFixed(0)}%` : "-"}</TableCell><TableCell>{supplier.overdue ? <Badge variant="destructive">{supplier.overdue}</Badge> : <Badge variant="secondary">0</Badge>}</TableCell><TableCell>{supplier.vendorId ? <Button size="sm" variant="outline" asChild><a href={`/vendors/${encodeURIComponent(supplier.vendorId)}`}>Open vendor</a></Button> : <span className="text-xs text-muted-foreground">No profile</span>}</TableCell></TableRow>)}{!supplierPerformance.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No purchase-order history is available yet.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="risks" className="mt-4"><Card><CardHeader><CardTitle className="text-base">Buyer attention queue</CardTitle><CardDescription>Only supply work needing intervention: missing suppliers, exceptions, and overdue expected receipts.</CardDescription></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Type</TableHead><TableHead>Reference</TableHead><TableHead>Issue</TableHead><TableHead /></TableRow></TableHeader><TableBody>{risks.map((risk) => <TableRow key={`${risk.kind}-${risk.id}`}><TableCell><Badge variant="destructive">{risk.kind}</Badge></TableCell><TableCell className="font-medium">{risk.reference}</TableCell><TableCell>{risk.detail}</TableCell><TableCell><Button size="sm" variant="outline" asChild><a href={risk.href}>Open</a></Button></TableCell></TableRow>)}{!risks.length && <TableRow><TableCell colSpan={4} className="h-28 text-center text-muted-foreground">No purchasing exceptions or overdue POs.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent>
     </Tabs>
+    <AlertDialog open={forcePoolOpen} onOpenChange={setForcePoolOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Create all pooled supplier POs now?</AlertDialogTitle><AlertDialogDescription>This bypasses the normal cutoff and converts {numberLabel(pooledRequirements.length)} pooled requirement{pooledRequirements.length === 1 ? "" : "s"} into supplier-specific draft POs, grouped by supplier and receiving warehouse. Buyer approval rules still apply.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={poolingBusy}>Keep pooling</AlertDialogCancel><AlertDialogAction disabled={poolingBusy} onClick={(event) => { event.preventDefault(); void runPurchasePool(true) }}>{poolingBusy ? <Loader2 className="size-4 animate-spin" /> : <ShoppingBag className="size-4" />} Create draft POs</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>
 }
 
@@ -14774,6 +14799,10 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
               <CardHeader><CardTitle className="text-base">Purchase order automation</CardTitle><CardDescription>Create supplier-specific draft POs only after an order is paid and routed to this vendor.</CardDescription></CardHeader>
               <CardContent className="grid gap-4">
                 <ToggleField label="Auto-create draft POs" checked={Boolean(draft["purchaseOrderRules.autoCreateDrafts"] ?? purchaseOrderRules.autoCreateDrafts)} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.autoCreateDrafts", next)} />
+                <ToggleField label="Pool demand until supplier cutoff" description="Combine eligible order lines for this supplier into one draft PO per receiving warehouse." checked={Boolean(draft["purchaseOrderRules.poolUntilCutoff"] ?? (purchaseOrderRules.poolUntilCutoff ?? true))} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.poolUntilCutoff", next)} />
+                <Field label="Daily supplier cutoff"><Input disabled={!editing || (draft["purchaseOrderRules.poolUntilCutoff"] ?? purchaseOrderRules.poolUntilCutoff ?? true) === false} type="time" value={String(draft["purchaseOrderRules.cutoffTime"] ?? purchaseOrderRules.cutoffTime ?? "15:00")} onChange={(event) => update("purchaseOrderRules.cutoffTime", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Orders received after this time roll into the next eligible pool.</p></Field>
+                <Field label="Cutoff timezone"><Select disabled={!editing || (draft["purchaseOrderRules.poolUntilCutoff"] ?? purchaseOrderRules.poolUntilCutoff ?? true) === false} value={String(draft["purchaseOrderRules.cutoffTimezone"] ?? purchaseOrderRules.cutoffTimezone ?? "America/New_York")} onValueChange={(next) => update("purchaseOrderRules.cutoffTimezone", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="America/New_York">Eastern</SelectItem><SelectItem value="America/Chicago">Central</SelectItem><SelectItem value="America/Denver">Mountain</SelectItem><SelectItem value="America/Los_Angeles">Pacific</SelectItem><SelectItem value="UTC">UTC</SelectItem></SelectContent></Select></Field>
+                <ToggleField label="Allow true supplier drop shipping" description="When enabled, eligible lines may bypass receiving and ship directly from this supplier. Leave off when supplier stock must first be purchased into a physical warehouse." checked={Boolean(draft["purchaseOrderRules.dropShipEnabled"] ?? purchaseOrderRules.dropShipEnabled)} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.dropShipEnabled", next)} />
                 <ToggleField label="Require buyer approval" checked={Boolean(draft["purchaseOrderRules.requireBuyerApproval"] ?? (purchaseOrderRules.requireBuyerApproval ?? true))} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.requireBuyerApproval", next)} />
                 <Field label="Approval threshold"><Input disabled={!editing} type="number" min="0" value={String(draft["purchaseOrderRules.approvalThreshold"] ?? purchaseOrderRules.approvalThreshold ?? 0)} onChange={(event) => update("purchaseOrderRules.approvalThreshold", Number(event.target.value || 0))} /><p className="mt-1 text-xs text-muted-foreground">0 means every supplier PO requires buyer approval.</p></Field>
                 <Field label="Open PO budget"><Input disabled={!editing} type="number" min="0" value={String(draft["purchaseOrderRules.budgetLimit"] ?? purchaseOrderRules.budgetLimit ?? 0)} onChange={(event) => update("purchaseOrderRules.budgetLimit", Number(event.target.value || 0))} /><p className="mt-1 text-xs text-muted-foreground">0 disables the supplier commitment limit.</p></Field>
@@ -15320,6 +15349,9 @@ function SettingsPage({
   const [aiUsage, setAiUsage] = useState<Record<string, unknown> | null>(null)
   const [loadingAiUsage, setLoadingAiUsage] = useState(false)
   const [runtime, setRuntime] = useState<Record<string, number> | null>(null)
+  const [orderWorkflowSettings, setOrderWorkflowSettings] = useState<Record<string, unknown>>({})
+  const [orderWorkflowDraft, setOrderWorkflowDraft] = useState<Record<string, unknown>>({})
+  const [orderWorkflowLoading, setOrderWorkflowLoading] = useState(true)
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const settingsTabs = new Set(["operations", "worker", "backups", "catalog", "data-sources", "barcode", "ai", "email", "users", "releases"])
   const [activeTab, setActiveTab] = useState(settingsTabs.has(requestedTab || "") ? String(requestedTab) : "operations")
@@ -15339,6 +15371,7 @@ function SettingsPage({
   const aiToolScopeDefinitions = (Array.isArray(settings.aiToolScopeDefinitions) ? settings.aiToolScopeDefinitions : []) as Array<Record<string, unknown>>
   const aiToolScopes = () => (value("aiToolScopes") && typeof value("aiToolScopes") === "object" ? value("aiToolScopes") as Record<string, unknown> : {})
   const usageNumber = (field: string, period = "thirtyDays") => Number((aiUsage?.[period] as Record<string, unknown> | undefined)?.[field] || 0).toLocaleString()
+  const workflowValue = (section: string, field: string, fallback: unknown) => orderWorkflowDraft[`${section}.${field}`] ?? ((orderWorkflowSettings[section] as Record<string, unknown> | undefined)?.[field]) ?? fallback
 
   const loadAiUsage = async () => {
     setLoadingAiUsage(true)
@@ -15354,9 +15387,20 @@ function SettingsPage({
   useEffect(() => {
     void api<Record<string, number>>("/api/system/runtime").then(setRuntime).catch(() => setRuntime(null))
   }, [])
+  useEffect(() => {
+    setOrderWorkflowLoading(true)
+    void api<{ settings?: Record<string, unknown> }>("/api/order-workflows")
+      .then((result) => setOrderWorkflowSettings(result.settings || {}))
+      .catch((error) => toast.error(error instanceof Error ? error.message : "Unable to load order-routing settings."))
+      .finally(() => setOrderWorkflowLoading(false))
+  }, [])
 
   function update(field: string, next: unknown) {
     setDraft((current) => ({ ...current, [field]: next }))
+  }
+
+  function updateWorkflow(section: string, field: string, next: unknown) {
+    setOrderWorkflowDraft((current) => ({ ...current, [`${section}.${field}`]: next }))
   }
 
   function requestCatalogMaintenance(request: NonNullable<typeof catalogMaintenanceConfirm>) {
@@ -15403,6 +15447,20 @@ function SettingsPage({
 
   async function save() {
     await onSaveSettings(draft)
+    if (Object.keys(orderWorkflowDraft).length) {
+      const allocationPolicy = { ...((orderWorkflowSettings.allocationPolicy as Record<string, unknown> | undefined) || {}) }
+      const automation = { ...((orderWorkflowSettings.automation as Record<string, unknown> | undefined) || {}) }
+      const purchasePooling = { ...((orderWorkflowSettings.purchasePooling as Record<string, unknown> | undefined) || {}) }
+      for (const [key, next] of Object.entries(orderWorkflowDraft)) {
+        const [section, field] = key.split(".")
+        if (section === "allocationPolicy") allocationPolicy[field] = next
+        if (section === "automation") automation[field] = next
+        if (section === "purchasePooling") purchasePooling[field] = next
+      }
+      const result = await api<{ settings?: Record<string, unknown> }>("/api/order-workflows", { method: "PUT", body: JSON.stringify({ allocationPolicy, automation, purchasePooling }) })
+      setOrderWorkflowSettings(result.settings || { allocationPolicy, automation, purchasePooling })
+      setOrderWorkflowDraft({})
+    }
     setDraft({})
     setEditing(false)
   }
@@ -15470,7 +15528,7 @@ function SettingsPage({
           <TabsTrigger value="releases">Releases</TabsTrigger>
         </TabsList>
         <TabsContent value="releases"><ReleaseHistorySettings active={activeTab === "releases"} /></TabsContent>
-        <TabsContent value="operations">
+        <TabsContent value="operations" className="grid gap-4">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Operations</CardTitle>
@@ -15503,6 +15561,29 @@ function SettingsPage({
               <Field label="Warehouse audit administrator roles">
                 <Input disabled={!editing} value={Array.isArray(value("warehouseAuditAdminRoles")) ? (value("warehouseAuditAdminRoles") as string[]).join(", ") : "Owner, Admin"} onChange={(event) => update("warehouseAuditAdminRoles", event.target.value.split(",").map((role) => role.trim()).filter(Boolean))} placeholder="Owner, Admin" />
               </Field>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="gap-3 border-b lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <CardTitle className="text-base">Order routing and supplier PO pooling</CardTitle>
+                <CardDescription>Control how paid order lines use physical stock, enter fulfillment, or wait for a consolidated supplier PO.</CardDescription>
+              </div>
+              <Button variant="outline" size="sm" asChild><a href="/purchasing">Open purchasing</a></Button>
+            </CardHeader>
+            <CardContent className="grid gap-4 pt-6 md:grid-cols-2">
+              {orderWorkflowLoading ? <div className="flex items-center gap-2 text-sm text-muted-foreground md:col-span-2"><Loader2 className="size-4 animate-spin" /> Loading order-routing settings...</div> : <>
+                <ToggleField label="Route paid orders automatically" description="Evaluate physical availability and supplier demand after an order is paid or imported." checked={Boolean(workflowValue("automation", "routePaidOrders", true))} disabled={!editing} onCheckedChange={(next) => updateWorkflow("automation", "routePaidOrders", next)} />
+                <ToggleField label="Reroute after PO receiving" description="Re-evaluate linked order lines when purchased inventory reaches a physical warehouse." checked={Boolean(workflowValue("automation", "rerouteAfterReceiving", true))} disabled={!editing} onCheckedChange={(next) => updateWorkflow("automation", "rerouteAfterReceiving", next)} />
+                <ToggleField label="Pool supplier demand" description="Hold supplier-backed lines until their cutoff so one supplier PO can cover multiple customer orders." checked={Boolean(workflowValue("purchasePooling", "enabled", true))} disabled={!editing} onCheckedChange={(next) => updateWorkflow("purchasePooling", "enabled", next)} />
+                <ToggleField label="Create draft POs at cutoff" description="Run the lightweight cutoff scheduler and create tracked draft purchase orders for due pools." checked={Boolean(workflowValue("purchasePooling", "autoCreateDraftsAtCutoff", true))} disabled={!editing || !Boolean(workflowValue("purchasePooling", "enabled", true))} onCheckedChange={(next) => updateWorkflow("purchasePooling", "autoCreateDraftsAtCutoff", next)} />
+                <Field label="Default supplier cutoff"><Input disabled={!editing || !Boolean(workflowValue("purchasePooling", "enabled", true))} type="time" value={String(workflowValue("purchasePooling", "defaultCutoffTime", "15:00"))} onChange={(event) => updateWorkflow("purchasePooling", "defaultCutoffTime", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Supplier profiles can override this time.</p></Field>
+                <Field label="Default cutoff timezone"><Select disabled={!editing || !Boolean(workflowValue("purchasePooling", "enabled", true))} value={String(workflowValue("purchasePooling", "timezone", "America/New_York"))} onValueChange={(next) => updateWorkflow("purchasePooling", "timezone", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="America/New_York">Eastern</SelectItem><SelectItem value="America/Chicago">Central</SelectItem><SelectItem value="America/Denver">Mountain</SelectItem><SelectItem value="America/Los_Angeles">Pacific</SelectItem><SelectItem value="UTC">UTC</SelectItem></SelectContent></Select></Field>
+                <ToggleField label="Skip weekends" description="Roll pools created after cutoff to the next weekday." checked={Boolean(workflowValue("purchasePooling", "skipWeekends", true))} disabled={!editing || !Boolean(workflowValue("purchasePooling", "enabled", true))} onCheckedChange={(next) => updateWorkflow("purchasePooling", "skipWeekends", next)} />
+                <Alert className="md:col-span-2"><ShieldCheck className="size-4" /><AlertTitle>Line-level routing and shortage retention are always enforced</AlertTitle><AlertDescription>Mixed orders stay linked while each line follows its own physical-stock or supplier-purchase route. Unmet quantities remain visible until they are received, fulfilled, canceled, or explicitly resolved.</AlertDescription></Alert>
+                <Alert className="md:col-span-2"><ShieldCheck className="size-4" /><AlertTitle>Supplier and destination separation is enforced</AlertTitle><AlertDescription>Each purchase order contains one supplier and one physical receiving warehouse. This prevents mixed receipts from allocating inventory to the wrong customer order or location.</AlertDescription></Alert>
+                <Alert className="md:col-span-2"><Warehouse className="size-4" /><AlertTitle>Physical inventory is the fulfillment gate</AlertTitle><AlertDescription>Supplier feeds and DataWarehouse quantities are supply signals. They enter purchasing unless stock was received or audited into a physical warehouse. Mixed orders remain linked while each line follows its own route.</AlertDescription></Alert>
+              </>}
             </CardContent>
           </Card>
         </TabsContent>

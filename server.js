@@ -3373,6 +3373,7 @@ function normalizeDb(db) {
   db.sequence.vendor = Number(db.sequence.vendor || 3000);
   db.sequence.draft = Number(db.sequence.draft || 1000);
   db.inventoryLedger = Array.isArray(db.inventoryLedger) ? db.inventoryLedger : [];
+  db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
   db.marketplaceTemplates = normalizeMarketplaceTemplates(db.marketplaceTemplates);
   db.exportMappings = normalizeExportMappings(db.exportMappings);
   db.categorySettings = normalizeCategorySettings(db.categorySettings);
@@ -10816,17 +10817,27 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   const orders = (orderIds || []).map((id) => (db.orders || []).find((order) => order.id === id)).filter(Boolean);
   if (!orders.length) throw new Error("No matching orders found for purchase order.");
   ensurePurchaseRequirementsForOrders(db, orders, options);
+  const requestedRouteIds = new Set(Array.isArray(options.routeIds) ? options.routeIds.map(String) : []);
   const groups = new Map();
   for (const order of orders) {
     const routes = (order.fulfillmentRoutes || []).filter((route) => {
       if (route.type !== "purchase" || route.purchaseOrderId || ["canceled", "received", "closed"].includes(String(route.status || "").toLowerCase())) return false;
+      if (requestedRouteIds.size && !requestedRouteIds.has(String(route.id))) return false;
       if (!Array.isArray(options.vendorIds) || !options.vendorIds.length) return true;
       const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName);
       return options.vendorIds.includes(vendor?.id || route.vendorId);
     });
     for (const route of routes) {
       const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName) || findVendorByName(db, options.supplier);
-      const warehouse = (db.warehouses || []).find((row) => row.id === route.warehouseId || row.id === options.warehouseId || row.id === vendor?.purchaseOrderRules?.defaultWarehouseId) || (db.warehouses || [])[0] || null;
+      const preferredWarehouseId = route.warehouseId
+        || options.warehouseId
+        || vendor?.purchaseOrderRules?.defaultWarehouseId
+        || "";
+      const warehouse = (db.warehouses || []).find((row) => String(row.id) === String(preferredWarehouseId) && isPhysicalFulfillmentWarehouse(row))
+        || purchaseDestinationWarehouse(db, order, vendor);
+      if (!warehouse) {
+        throw new Error(`No active physical receiving warehouse is configured for ${vendor?.name || route.vendorName || "this supplier"}.`);
+      }
       const key = `${vendor?.id || route.vendorName || "unassigned"}:${warehouse?.id || ""}`;
       const group = groups.get(key) || { vendor, warehouse, routes: [], orders: [] };
       group.routes.push({ ...route, order }); if (!group.orders.includes(order)) group.orders.push(order); groups.set(key, group);
@@ -10843,10 +10854,56 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
     const approvalRequired = budgetExceeded || (group.vendor?.purchaseOrderRules?.requireBuyerApproval !== false && estimatedCost >= Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)));
     const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: approvalRequired ? "awaiting_approval" : "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), unitCost: Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0), estimatedUnitCost: Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), estimatedCost, approval: { required: approvalRequired, threshold: Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)), budgetLimit, budgetExceeded, status: approvalRequired ? "awaiting_approval" : "not_required" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
     db.purchaseOrders = db.purchaseOrders || []; db.purchaseOrders.unshift(po); created.push(po);
-    for (const route of group.routes) { const linkedRoute = (route.order.fulfillmentRoutes || []).find((candidate) => candidate.id === route.id); if (linkedRoute) { linkedRoute.purchaseOrderId = po.id; linkedRoute.purchaseOrderNumber = po.poNumber; linkedRoute.purchaseGroupId = purchaseGroupId; linkedRoute.status = "buyer_review"; linkedRoute.updatedAt = po.updatedAt; } }
+    for (const route of group.routes) {
+      const linkedRoute = (route.order.fulfillmentRoutes || []).find((candidate) => candidate.id === route.id);
+      if (linkedRoute) {
+        linkedRoute.purchaseOrderId = po.id;
+        linkedRoute.purchaseOrderNumber = po.poNumber;
+        linkedRoute.purchaseGroupId = purchaseGroupId;
+        linkedRoute.status = "buyer_review";
+        linkedRoute.updatedAt = po.updatedAt;
+      }
+      const requirement = (db.purchaseRequirements || []).find((candidate) => candidate.routeId === route.id);
+      if (requirement) {
+        requirement.status = "converted";
+        requirement.purchaseOrderId = po.id;
+        requirement.purchaseOrderNumber = po.poNumber;
+        requirement.convertedAt = po.createdAt;
+        requirement.updatedAt = po.updatedAt;
+      }
+    }
     for (const order of group.orders) { order.purchaseGroupId = purchaseGroupId; order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), po.id])]; order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), po.poNumber])]; recalculateOrderOperationalStatus(order); addOrderWorkflowEvent(order, { step: "purchase_order_created", title: "Purchase order created", message: `${po.poNumber} created for ${po.supplier}.`, user: options.user || "System" }); }
   }
   return { purchaseGroupId, purchaseOrders: created, orders };
+}
+
+function processDuePurchaseRequirementPool(db, options = {}) {
+  db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
+  const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  const vendorId = String(options.vendorId || "").trim();
+  const requestedIds = new Set(Array.isArray(options.requirementIds) ? options.requirementIds.map(String) : []);
+  const eligible = db.purchaseRequirements.filter((requirement) => {
+    if (String(requirement.status || "pooled") !== "pooled") return false;
+    if (requestedIds.size && !requestedIds.has(String(requirement.id))) return false;
+    if (vendorId && String(requirement.vendorId || "") !== vendorId) return false;
+    if (options.force !== true && !purchaseRequirementIsDue(requirement, now)) return false;
+    const vendor = findVendorById(db, requirement.vendorId) || findVendorByName(db, requirement.vendorName);
+    return options.force === true || vendor?.purchaseOrderRules?.autoCreateDrafts === true;
+  });
+  if (!eligible.length) return { purchaseOrders: [], requirements: [], orders: [], message: "No pooled purchase requirements are due." };
+  const orderIds = [...new Set(eligible.map((requirement) => requirement.orderId).filter(Boolean))];
+  const routeIds = eligible.map((requirement) => requirement.routeId).filter(Boolean);
+  const vendorIds = [...new Set(eligible.map((requirement) => requirement.vendorId).filter(Boolean))];
+  const result = createSupplierPurchaseOrdersFromOrders(db, orderIds, {
+    routeIds,
+    vendorIds,
+    user: options.user || (options.force === true ? "Buyer" : "PO cutoff scheduler")
+  });
+  return {
+    ...result,
+    requirements: eligible,
+    message: `${result.purchaseOrders.length} supplier purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created from ${eligible.length} pooled requirement${eligible.length === 1 ? "" : "s"}.`
+  };
 }
 
 function reconcilePurchaseOrderLinks(db, orderIds = []) {
@@ -11472,6 +11529,10 @@ function normalizeVendor(db, vendor) {
     },
     purchaseOrderRules: {
       autoCreateDrafts: Boolean(vendor.purchaseOrderRules?.autoCreateDrafts),
+      poolUntilCutoff: vendor.purchaseOrderRules?.poolUntilCutoff !== false,
+      cutoffTime: vendor.purchaseOrderRules?.cutoffTime || "",
+      cutoffTimezone: vendor.purchaseOrderRules?.cutoffTimezone || "",
+      dropShipEnabled: Boolean(vendor.purchaseOrderRules?.dropShipEnabled),
       requireBuyerApproval: vendor.purchaseOrderRules?.requireBuyerApproval !== false,
       approvalThreshold: Math.max(0, Number(vendor.purchaseOrderRules?.approvalThreshold || 0)),
       budgetLimit: Math.max(0, Number(vendor.purchaseOrderRules?.budgetLimit || 0)),
@@ -19348,8 +19409,21 @@ function releaseOrderReservation(db, order, body = {}) {
 
 function defaultOrderWorkflowSettings() {
   return {
-    version: 1,
+    version: 2,
     allocationPolicy: { allowSplitShipments: true, createBackorders: true, warehousePriority: [] },
+    automation: {
+      routePaidOrders: true,
+      rerouteAfterReceiving: true
+    },
+    purchasePooling: {
+      enabled: true,
+      autoCreateDraftsAtCutoff: true,
+      defaultCutoffTime: "15:00",
+      timezone: "America/New_York",
+      consolidateBySupplier: true,
+      consolidateByWarehouse: true,
+      skipWeekends: true
+    },
     orderTypes: [
       { id: "online", name: "Online order", statuses: ["new", "processing", "on_hold", "partial_fulfilled", "fulfilled", "canceled"], defaultStatus: "new" },
       { id: "draft", name: "Draft order", statuses: ["draft", "approved", "canceled"], defaultStatus: "draft" },
@@ -19360,7 +19434,14 @@ function defaultOrderWorkflowSettings() {
 
 async function readOrderWorkflowSettings() {
   const stored = postgres.isPostgresEnabled() ? await postgres.readStateField("orderWorkflowSettings") : (await readDbFast()).orderWorkflowSettings;
-  return { ...defaultOrderWorkflowSettings(), ...(stored || {}), allocationPolicy: { ...defaultOrderWorkflowSettings().allocationPolicy, ...((stored || {}).allocationPolicy || {}) } };
+  const defaults = defaultOrderWorkflowSettings();
+  return {
+    ...defaults,
+    ...(stored || {}),
+    allocationPolicy: { ...defaults.allocationPolicy, ...((stored || {}).allocationPolicy || {}) },
+    automation: { ...defaults.automation, ...((stored || {}).automation || {}) },
+    purchasePooling: { ...defaults.purchasePooling, ...((stored || {}).purchasePooling || {}) }
+  };
 }
 
 function addOrderWorkflowEvent(order, event = {}) {
@@ -19385,14 +19466,22 @@ function openLineQuantity(line = {}, routes = []) {
     const status = String(route.status || "").toLowerCase();
     // Received purchasing work is historical supply evidence, not fulfillment work. Its
     // quantity becomes eligible for a new warehouse allocation on the next routing pass.
-    return sum + (["canceled", "received", "closed"].includes(status) ? 0 : Number(route.qty || 0));
+    if (["canceled", "received", "closed"].includes(status)) return sum;
+    if (route.type === "purchase" && status === "partially_received") {
+      return sum + Math.max(0, Number(route.qty || 0) - Number(route.receivedQty || 0));
+    }
+    return sum + Number(route.qty || 0);
   }, 0);
   return Math.max(0, Number(line.qty || 0) - committed);
 }
 
 function createWorkflowRoute(order, input = {}) {
   order.fulfillmentRoutes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [];
-  const existing = order.fulfillmentRoutes.find((route) => route.lineIndex === input.lineIndex && route.type === input.type && route.warehouseId === input.warehouseId && route.vendorId === input.vendorId && String(route.status || "").toLowerCase() !== "canceled");
+  const existing = order.fulfillmentRoutes.find((route) => route.lineIndex === input.lineIndex
+    && route.type === input.type
+    && route.warehouseId === input.warehouseId
+    && route.vendorId === input.vendorId
+    && !["canceled", "received", "closed"].includes(String(route.status || "").toLowerCase()));
   if (existing) {
     existing.qty = Number(existing.qty || 0) + Number(input.qty || 0);
     existing.updatedAt = new Date().toISOString();
@@ -19421,17 +19510,124 @@ function recalculateOrderOperationalStatus(order = {}) {
   const shipped = routes.reduce((sum, route) => sum + (["shipped", "delivered"].includes(String(route.status || "").toLowerCase()) ? Number(route.qty || 0) : 0), 0);
   const total = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
   const active = routes.filter((route) => !["shipped", "delivered", "canceled", "closed"].includes(String(route.status || "").toLowerCase()));
+  const activeWarehouse = active.filter((route) => route.type === "warehouse");
+  const activePurchase = active.filter((route) => route.type === "purchase");
+  const activeDropShip = active.filter((route) => route.type === "drop_ship");
   let next = "pending_payment";
   if (canceled) next = "canceled";
   else if (blocking) next = "on_hold";
   else if (!isOrderPaymentCleared(order)) next = "pending_payment";
   else if (shipped >= total && total > 0 && !active.length) next = "completed";
   else if (shipped > 0) next = "partially_fulfilled";
-  else if (active.length) next = "in_fulfillment";
+  else if (activeWarehouse.length && (activePurchase.length || activeDropShip.length)) next = "split_fulfillment";
+  else if (activePurchase.length) next = "waiting_for_po";
+  else if (activeDropShip.length) next = "waiting_supplier";
+  else if (activeWarehouse.some((route) => ["picking", "picked", "packing", "packed"].includes(String(route.status || "").toLowerCase()))) next = "in_fulfillment";
+  else if (activeWarehouse.length) next = "ready_to_ship";
   else next = "processing";
   order.operationalStatus = next;
   order.workflowStatus = next;
   order.workflowUpdatedAt = new Date().toISOString();
+  return next;
+}
+
+function isPhysicalFulfillmentWarehouse(warehouse = {}) {
+  return Boolean(warehouse) && warehouse.active !== false && warehouse.enabled !== false && isPhysicalWarehouse(warehouse);
+}
+
+function localDateTimeParts(date = new Date(), timeZone = "America/New_York") {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(date).reduce((result, part) => {
+    if (part.type !== "literal") result[part.type] = part.value;
+    return result;
+  }, {});
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    time: `${parts.hour}:${parts.minute}`
+  };
+}
+
+function addPoolDays(dateValue, days = 1) {
+  const date = new Date(`${dateValue}T12:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function nextPurchasePoolDate(now, cutoffTime, timeZone, skipWeekends = true) {
+  const local = localDateTimeParts(now, timeZone);
+  let poolDate = local.time >= cutoffTime ? addPoolDays(local.date, 1) : local.date;
+  if (skipWeekends) {
+    while ([0, 6].includes(new Date(`${poolDate}T12:00:00.000Z`).getUTCDay())) poolDate = addPoolDays(poolDate, 1);
+  }
+  return poolDate;
+}
+
+function purchaseRequirementIsDue(requirement = {}, now = new Date()) {
+  const timeZone = requirement.cutoffTimezone || "America/New_York";
+  const local = localDateTimeParts(now, timeZone);
+  if (local.date > requirement.poolDate) return true;
+  return local.date === requirement.poolDate && local.time >= String(requirement.cutoffTime || "15:00");
+}
+
+function purchaseDestinationWarehouse(db, order, vendor) {
+  const warehouses = (db.warehouses || []).filter(isPhysicalFulfillmentWarehouse);
+  const preferredId = vendor?.purchaseOrderRules?.defaultWarehouseId || order.fulfillmentWarehouseId || order.warehouseId || "";
+  return warehouses.find((warehouse) => String(warehouse.id) === String(preferredId))
+    || warehouses.find((warehouse) => warehouse.default === true || warehouse.isDefault === true)
+    || warehouses[0]
+    || null;
+}
+
+function ensurePooledPurchaseRequirement(db, order, route, line, settings, vendor, sourceWarehouse = null) {
+  db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
+  const purchasePooling = settings.purchasePooling || defaultOrderWorkflowSettings().purchasePooling;
+  const vendorRules = vendor?.purchaseOrderRules || {};
+  const cutoffTime = String(vendorRules.cutoffTime || purchasePooling.defaultCutoffTime || "15:00");
+  const cutoffTimezone = String(vendorRules.cutoffTimezone || purchasePooling.timezone || "America/New_York");
+  const destination = purchaseDestinationWarehouse(db, order, vendor);
+  const now = new Date();
+  const existing = db.purchaseRequirements.find((requirement) => requirement.routeId === route.id);
+  const next = existing || {
+    id: crypto.randomUUID(),
+    createdAt: now.toISOString(),
+    status: "pooled",
+    routeId: route.id,
+    orderId: order.id,
+    orderNumber: order.orderNumber || order.id,
+    lineIndex: route.lineIndex,
+    sku: route.sku || line?.sku || "",
+    title: route.title || line?.title || route.sku || "Untitled item"
+  };
+  Object.assign(next, {
+    qty: Number(route.qty || 0),
+    vendorId: vendor?.id || route.vendorId || "",
+    vendorName: vendor?.name || route.vendorName || "Unassigned supplier",
+    sourceWarehouseId: sourceWarehouse?.id || route.sourceWarehouseId || "",
+    sourceWarehouseName: sourceWarehouse?.name || route.sourceWarehouseName || "",
+    destinationWarehouseId: destination?.id || "",
+    destinationWarehouseName: destination?.name || "",
+    cutoffTime,
+    cutoffTimezone,
+    poolDate: existing?.poolDate || nextPurchasePoolDate(now, cutoffTime, cutoffTimezone, purchasePooling.skipWeekends !== false),
+    updatedAt: now.toISOString()
+  });
+  if (!existing) db.purchaseRequirements.unshift(next);
+  route.purchaseRequirementId = next.id;
+  route.status = route.purchaseOrderId ? route.status : "pooled";
+  route.warehouseId = destination?.id || route.warehouseId || "";
+  route.warehouseName = destination?.name || route.warehouseName || "";
+  route.sourceWarehouseId = next.sourceWarehouseId;
+  route.sourceWarehouseName = next.sourceWarehouseName;
+  route.cutoffTime = cutoffTime;
+  route.cutoffTimezone = cutoffTimezone;
+  route.poolDate = next.poolDate;
   return next;
 }
 
@@ -19480,7 +19676,9 @@ function fulfillmentWarehousePlan(db = {}, order = {}, line = {}, product = {}) 
     if (warehouse.status && String(warehouse.status).toLowerCase() !== "active") return false;
     if (warehouse.isSellable === false) return false;
     if (restrict && !mappingByWarehouse.has(String(warehouse.id || "").toLowerCase())) return false;
-    return true;
+    const supplierSource = String(warehouse.inventorySourceType || "").toLowerCase() === "supplier_feed"
+      || warehouse.fulfillmentNetwork === "supplier";
+    return isPhysicalFulfillmentWarehouse(warehouse) || supplierSource;
   }).sort((left, right) => {
     const leftPriority = priority.get(String(left.id || "").toLowerCase()) ?? 9999;
     const rightPriority = priority.get(String(right.id || "").toLowerCase()) ?? 9999;
@@ -19495,7 +19693,9 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     recalculateOrderOperationalStatus(order);
     return { routes: [], skipped: true, reason: "Payment has not cleared." };
   }
-  const created = []; const touchedProducts = [];
+  const workflowSettings = body.workflowSettings || await readOrderWorkflowSettings();
+  db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
+  const created = []; const touchedProducts = []; const pooledRequirements = [];
   order.routingExplanation = Array.isArray(order.routingExplanation) ? order.routingExplanation : [];
   for (let lineIndex = 0; lineIndex < orderLineItems(order).length; lineIndex += 1) {
     const line = orderLineItems(order)[lineIndex];
@@ -19511,7 +19711,13 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     };
     order.routingExplanation = order.routingExplanation.filter((entry) => entry.lineIndex !== lineIndex);
     order.routingExplanation.push(explanation);
-    const warehouses = plan.warehouses;
+    // Available physical stock always wins. Supplier feeds represent purchasable supply and
+    // are considered only after every eligible physical fulfillment location.
+    const warehouses = [...plan.warehouses].sort((left, right) => {
+      const leftPhysical = isPhysicalFulfillmentWarehouse(left) ? 0 : 1;
+      const rightPhysical = isPhysicalFulfillmentWarehouse(right) ? 0 : 1;
+      return leftPhysical - rightPhysical;
+    });
     for (const warehouse of warehouses) {
       if (!product || remaining <= 0) break;
       const sourceType = String(warehouse.inventorySourceType || "").toLowerCase();
@@ -19529,8 +19735,12 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       const qty = Math.min(remaining, available);
       if (!qty) { explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "skipped", reason: "No available quantity." }); continue; }
       if (supplierSource) {
-        created.push(createWorkflowRoute(order, { type: "drop_ship", status: "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku, qty, warehouseId: warehouse.id, warehouseName: warehouse.name, vendorId: warehouse.dropshipVendorId || product.vendorId || "", vendorName: product.vendor || product.supplier || warehouse.vendorName || "" }));
-        explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "drop_ship", qty, reason: "Supplier-feed inventory is available and matched to this product." });
+        const vendor = findVendorById(db, warehouse.dropshipVendorId || warehouse.vendorId || product.vendorId)
+          || findVendorByName(db, product.vendor || product.supplier || warehouse.vendorName);
+        const route = createWorkflowRoute(order, { type: "purchase", status: "pooled", lineIndex, sku: line.sku, title: line.title || line.sku, qty, vendorId: vendor?.id || warehouse.dropshipVendorId || product.vendorId || "", vendorName: vendor?.name || product.vendor || product.supplier || warehouse.vendorName || "", sourceWarehouseId: warehouse.id, sourceWarehouseName: warehouse.name });
+        created.push(route);
+        pooledRequirements.push(ensurePooledPurchaseRequirement(db, order, route, line, workflowSettings, vendor, warehouse));
+        explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "pooled", routeType: "purchase", qty, reason: "Supplier-feed quantity is purchasable supply, so demand was added to the supplier PO pool." });
         remaining -= qty;
         continue;
       }
@@ -19546,12 +19756,16 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     }
     if (remaining > 0) {
       const vendorName = String(line.vendor || product?.vendor || "").trim();
-      if (product?.dropShipEligible === true || product?.fulfillmentMethod === "drop_ship") {
-        created.push(createWorkflowRoute(order, { type: "drop_ship", status: "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku, qty: remaining, vendorId: product?.vendorId || "", vendorName }));
+      const vendor = findVendorById(db, product?.vendorId) || findVendorByName(db, vendorName);
+      const dropShipAllowed = vendor?.purchaseOrderRules?.dropShipEnabled === true && (product?.dropShipEligible === true || product?.fulfillmentMethod === "drop_ship");
+      if (dropShipAllowed) {
+        created.push(createWorkflowRoute(order, { type: "drop_ship", status: "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku, qty: remaining, vendorId: vendor?.id || product?.vendorId || "", vendorName: vendor?.name || vendorName }));
         explanation.decisions.push({ status: "routed", routeType: "drop_ship", qty: remaining, reason: "Product permits vendor drop shipment." });
       } else if (vendorName || product?.vendorId) {
-        created.push(createWorkflowRoute(order, { type: "purchase", status: "new", lineIndex, sku: line.sku, title: line.title || line.sku, qty: remaining, vendorId: product?.vendorId || "", vendorName }));
-        explanation.decisions.push({ status: "routed", routeType: "purchase", qty: remaining, reason: "Available warehouse stock was insufficient; purchasing is required." });
+        const route = createWorkflowRoute(order, { type: "purchase", status: "pooled", lineIndex, sku: line.sku, title: line.title || line.sku, qty: remaining, vendorId: vendor?.id || product?.vendorId || "", vendorName: vendor?.name || vendorName });
+        created.push(route);
+        pooledRequirements.push(ensurePooledPurchaseRequirement(db, order, route, line, workflowSettings, vendor));
+        explanation.decisions.push({ status: "pooled", routeType: "purchase", qty: remaining, reason: "Physical warehouse stock was insufficient; demand was added to the supplier PO pool." });
       } else {
         createOrderException(order, { type: "no_fulfillment_source", lineIndex, sku: line.sku, description: `${line.sku || "This line"} has no allocatable inventory or assigned vendor.` });
         explanation.decisions.push({ status: "blocked", qty: remaining, reason: "No sellable warehouse inventory or assigned supplier." });
@@ -19560,17 +19774,34 @@ async function routeOrderForFulfillment(db, order, body = {}) {
   }
   recalculateOrderOperationalStatus(order);
   if (created.length) addOrderWorkflowEvent(order, { step: "route_fulfillment", title: "Fulfillment routed", message: `${created.length} line-level fulfillment route${created.length === 1 ? "" : "s"} created.`, user: body.user || "System" });
-  const autoVendorIds = [...new Set(created.filter((route) => route.type === "purchase").map((route) => {
+  order.routingLastAttemptAt = new Date().toISOString();
+  order.routingLastResult = created.length ? "routed" : (order.workflowExceptions || []).some((exception) => exception.status !== "resolved") ? "needs_review" : "no_open_demand";
+  const immediateVendorIds = [...new Set(created.filter((route) => route.type === "purchase").map((route) => {
     const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName);
-    return vendor?.purchaseOrderRules?.autoCreateDrafts === true ? vendor.id : "";
+    const poolUntilCutoff = workflowSettings.purchasePooling?.enabled !== false && vendor?.purchaseOrderRules?.poolUntilCutoff !== false;
+    return vendor?.purchaseOrderRules?.autoCreateDrafts === true && !poolUntilCutoff ? vendor.id : "";
   }).filter(Boolean))];
   let autoPurchaseOrders = [];
-  if (autoVendorIds.length) {
+  if (immediateVendorIds.length) {
     db.orders = [...(db.orders || []).filter((row) => row.id !== order.id), order];
-    const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { vendorIds: autoVendorIds, user: "Auto PO" });
+    const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { vendorIds: immediateVendorIds, user: "Auto PO" });
     autoPurchaseOrders = result.purchaseOrders;
   }
-  return { routes: created, touchedProducts, autoPurchaseOrders, skipped: false };
+  return { routes: created, touchedProducts, pooledRequirements, autoPurchaseOrders, skipped: false };
+}
+
+function orderNeedsAutomaticRouting(order = {}, now = Date.now()) {
+  const terminalStates = new Set(["canceled", "cancelled", "void", "deleted", "fulfilled", "shipped", "returned"]);
+  const states = [order.status, order.fulfillmentStatus, order.operationalStatus].map((value) => String(value || "").trim().toLowerCase());
+  if (states.some((state) => terminalStates.has(state))) return false;
+  if (!isOrderPaymentCleared(order)) return false;
+  if (order.routingLastResult === "needs_review" && (order.workflowExceptions || []).some((exception) => String(exception.status || "open").toLowerCase() !== "resolved")) return false;
+  const lastAttempt = new Date(order.routingLastAttemptAt || 0).getTime();
+  if (lastAttempt && Number.isFinite(lastAttempt) && now - lastAttempt < 5 * 60 * 1000) return false;
+  return orderLineItems(order).some((line, lineIndex) => {
+    const routes = (order.fulfillmentRoutes || []).filter((route) => Number(route.lineIndex) === lineIndex);
+    return openLineQuantity(line, routes) > 0;
+  });
 }
 
 function orderShipmentSummary(order = {}) {
@@ -30293,9 +30524,69 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/purchasing/work" && postgres.isPostgresEnabled()) {
-    const [orders, purchaseOrders] = await Promise.all([postgres.listOrders({ limit: 5000 }), postgres.listPurchaseOrders({ limit: 5000 })]);
-    const requirements = orders.flatMap((order) => (order.fulfillmentRoutes || []).filter((route) => route.type === "purchase" || route.type === "drop_ship").map((route) => ({ ...route, orderId: order.id, orderNumber: order.orderNumber, customer: order.buyer || "", shipBy: order.shipBy || "", operationalStatus: order.operationalStatus || "" })));
-    return sendJson(res, 200, { requirements, purchaseOrders: purchaseOrders || [], generatedAt: new Date().toISOString() });
+    const [orders, purchaseOrders, storedRequirements, workflowSettings] = await Promise.all([
+      postgres.listOrders({ limit: 5000 }),
+      postgres.listPurchaseOrders({ limit: 5000 }),
+      postgres.readStateField("purchaseRequirements").catch(() => []),
+      readOrderWorkflowSettings()
+    ]);
+    const orderById = new Map((orders || []).map((order) => [String(order.id), order]));
+    const requirements = (Array.isArray(storedRequirements) ? storedRequirements : []).map((requirement) => {
+      const order = orderById.get(String(requirement.orderId || ""));
+      const route = (order?.fulfillmentRoutes || []).find((entry) => String(entry.id) === String(requirement.routeId)) || {};
+      return {
+        ...route,
+        ...requirement,
+        orderId: order?.id || requirement.orderId,
+        orderNumber: order?.orderNumber || requirement.orderNumber,
+        customer: order?.buyer || order?.customerName || "",
+        shipBy: order?.shipBy || "",
+        operationalStatus: order?.operationalStatus || ""
+      };
+    });
+    const now = new Date();
+    const pooled = requirements.filter((requirement) => String(requirement.status || "pooled") === "pooled");
+    const due = pooled.filter((requirement) => purchaseRequirementIsDue(requirement, now));
+    const nextCutoff = pooled
+      .map((requirement) => `${requirement.poolDate || ""}T${requirement.cutoffTime || "15:00"}`)
+      .filter((value) => !value.startsWith("T"))
+      .sort()[0] || "";
+    return sendJson(res, 200, {
+      requirements,
+      purchaseOrders: purchaseOrders || [],
+      workflowSettings,
+      poolSummary: {
+        requirements: pooled.length,
+        units: pooled.reduce((sum, requirement) => sum + Number(requirement.qty || 0), 0),
+        dueRequirements: due.length,
+        dueUnits: due.reduce((sum, requirement) => sum + Number(requirement.qty || 0), 0),
+        nextCutoff
+      },
+      generatedAt: new Date().toISOString()
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/purchasing/pool/run" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+    const result = processDuePurchaseRequirementPool(db, {
+      requirementIds: Array.isArray(body.requirementIds) ? body.requirementIds : [],
+      vendorId: body.vendorId,
+      force: body.force === true,
+      user: body.user || (body.force === true ? "Buyer" : "PO cutoff scheduler")
+    });
+    for (const po of result.purchaseOrders || []) await postgres.savePurchaseOrder(po);
+    for (const order of result.orders || []) {
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+    }
+    await postgres.writeStateDocuments({
+      purchaseRequirements: db.purchaseRequirements || [],
+      sequence: db.sequence || {}
+    });
+    return sendJson(res, 200, result);
   }
 
   if (req.method === "GET" && url.pathname === "/api/orders") {
@@ -30370,7 +30661,22 @@ async function handleApi(req, res) {
 
   if (req.method === "PUT" && url.pathname === "/api/order-workflows") {
     const body = await parseBody(req);
-    const settings = { ...defaultOrderWorkflowSettings(), ...(body || {}), updatedAt: new Date().toISOString() };
+    const defaults = defaultOrderWorkflowSettings();
+    const settings = {
+      ...defaults,
+      ...(body || {}),
+      allocationPolicy: {
+        ...defaults.allocationPolicy,
+        ...(body?.allocationPolicy || {}),
+        // Mixed line routing and visible shortage demand are operational invariants.
+        // They cannot be disabled because doing so can hide unfulfilled quantities.
+        allowSplitShipments: true,
+        createBackorders: true
+      },
+      automation: { ...defaults.automation, ...(body?.automation || {}) },
+      purchasePooling: { ...defaults.purchasePooling, ...(body?.purchasePooling || {}) },
+      updatedAt: new Date().toISOString()
+    };
     if (postgres.isPostgresEnabled()) await postgres.writeStateField("orderWorkflowSettings", settings);
     else { const db = await readDbFast(); db.orderWorkflowSettings = settings; await writeDb(db); }
     return sendJson(res, 200, { settings });
@@ -30587,14 +30893,21 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "route" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
-    const db = await readDbFast({ skipInventory: true }); db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
-    const result = await routeOrderForFulfillment(db, order, body);
+    const db = await readDbFast({ skipInventory: true });
+    const [inventoryLedger, purchaseRequirements, workflowSettings] = await Promise.all([
+      postgres.readStateField("inventoryLedger"),
+      postgres.readStateField("purchaseRequirements").catch(() => []),
+      readOrderWorkflowSettings()
+    ]);
+    db.inventoryLedger = inventoryLedger || [];
+    db.purchaseRequirements = purchaseRequirements || [];
+    const result = await routeOrderForFulfillment(db, order, { ...body, workflowSettings });
     const products = [...new Map((result.touchedProducts || []).map((product) => [product.id, product])).values()];
     if (products.length) { await postgres.upsertProductsFromState(products); await postgres.upsertInventoryLevelsFromProducts(products); await postgres.writeStateField("inventoryLedger", db.inventoryLedger); }
     for (const po of result.autoPurchaseOrders || []) await postgres.savePurchaseOrder(po);
-    if ((result.autoPurchaseOrders || []).length) await postgres.writeStateDocuments({ sequence: db.sequence || {} });
+    await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
     order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order); clearOrderApiCache(order.id);
-    return sendJson(res, 200, { order, routes: result.routes, message: result.skipped ? result.reason : `Routed ${result.routes.length} fulfillment assignment${result.routes.length === 1 ? "" : "s"}.` });
+    return sendJson(res, 200, { order, routes: result.routes, pooledRequirements: result.pooledRequirements || [], message: result.skipped ? result.reason : `Routed ${result.routes.length} fulfillment assignment${result.routes.length === 1 ? "" : "s"}.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "workflow-routes" && parts[4] && parts[5] === "status" && postgres.isPostgresEnabled()) {
@@ -30615,12 +30928,19 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "reroute" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req); const rows = await postgres.listOrders({ limit: Math.min(5000, Math.max(1, Number(body.limit || 5000))) });
-    const db = await readDbFast({ skipInventory: true }); db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
+    const db = await readDbFast({ skipInventory: true });
+    const [inventoryLedger, purchaseRequirements, workflowSettings] = await Promise.all([
+      postgres.readStateField("inventoryLedger"),
+      postgres.readStateField("purchaseRequirements").catch(() => []),
+      readOrderWorkflowSettings()
+    ]);
+    db.inventoryLedger = inventoryLedger || [];
+    db.purchaseRequirements = purchaseRequirements || [];
     const report = { scanned: 0, routed: 0, pendingPayment: 0, exceptions: 0, completed: 0, skipped: 0, orders: [] }; const touchedProducts = new Map(); const autoPurchaseOrders = new Map();
     for (const order of rows) {
       if (["canceled", "cancelled", "void", "deleted", "fulfilled"].includes(String(order.status || "").toLowerCase())) { recalculateOrderOperationalStatus(order); report.skipped += 1; continue; }
       report.scanned += 1;
-      const result = await routeOrderForFulfillment(db, order, { user: body.user || "System", force: body.force === true });
+      const result = await routeOrderForFulfillment(db, order, { user: body.user || "System", force: body.force === true, workflowSettings });
       for (const product of result.touchedProducts || []) touchedProducts.set(product.id, product);
       for (const po of result.autoPurchaseOrders || []) autoPurchaseOrders.set(po.id, po);
       recalculateOrderOperationalStatus(order);
@@ -30630,7 +30950,7 @@ async function handleApi(req, res) {
       report.orders.push({ id: order.id, orderNumber: order.orderNumber, status: order.operationalStatus, routes: result.routes.length, skipped: result.skipped || false });
       if (body.dryRun !== true) { order.updatedAt = new Date().toISOString(); await postgres.saveOrder(order); clearOrderApiCache(order.id); }
     }
-    if (body.dryRun !== true) { if (touchedProducts.size) { await postgres.upsertProductsFromState([...touchedProducts.values()]); await postgres.upsertInventoryLevelsFromProducts([...touchedProducts.values()]); } for (const po of autoPurchaseOrders.values()) await postgres.savePurchaseOrder(po); if (autoPurchaseOrders.size) await postgres.writeStateDocuments({ sequence: db.sequence || {} }); await postgres.writeStateField("inventoryLedger", db.inventoryLedger); }
+    if (body.dryRun !== true) { if (touchedProducts.size) { await postgres.upsertProductsFromState([...touchedProducts.values()]); await postgres.upsertInventoryLevelsFromProducts([...touchedProducts.values()]); } for (const po of autoPurchaseOrders.values()) await postgres.savePurchaseOrder(po); await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {}, inventoryLedger: db.inventoryLedger || [] }); }
     return sendJson(res, 200, { report, message: `Workflow reroute evaluated ${report.scanned} active orders.` });
   }
 
@@ -30645,10 +30965,11 @@ async function handleApi(req, res) {
     const body = await parseBody(req); const order = await postgres.readOrderByKey(parts[2]); if (!order) return notFound(res);
     await hydrateOrderLocalCosts(order);
     const db = await readDbFast({ skipInventory: true }); db.orders = (db.orders || []).map((row) => row.id === order.id ? order : row);
+    db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { warehouseId: body.warehouseId, supplier: body.supplier, user: body.user || "Luis" });
     for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
     for (const linkedOrder of result.orders) await postgres.saveOrder(linkedOrder);
-    await postgres.writeStateDocuments({ sequence: db.sequence || {} }); clearOrderApiCache(order.id);
+    await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} }); clearOrderApiCache(order.id);
     return sendJson(res, 201, { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` });
   }
 
@@ -30934,6 +31255,7 @@ async function handleApi(req, res) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
+    const workflowSettings = await readOrderWorkflowSettings();
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     if (!vendor) return sendJson(res, 400, { error: "This PO has no matching supplier profile." });
     const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
@@ -30945,6 +31267,7 @@ async function handleApi(req, res) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
+    const workflowSettings = await readOrderWorkflowSettings();
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     if (!vendor) return sendJson(res, 400, { error: "This PO has no matching supplier profile." });
     const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
@@ -31112,6 +31435,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
+    db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
     try {
       if (body.groupBySupplier === true) {
         const selectedOrders = (await Promise.all((body.orderIds || []).map((id) => postgres.readOrderByKey(id)))).filter(Boolean);
@@ -31120,7 +31444,7 @@ async function handleApi(req, res) {
         const result = createSupplierPurchaseOrdersFromOrders(db, body.orderIds || [], { warehouseId: body.warehouseId, supplier: body.supplier, user: body.user || "Luis" });
         for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
         for (const order of result.orders) await postgres.saveOrder(order);
-        await postgres.writeStateDocuments({ sequence: db.sequence || {} });
+        await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
         return sendJson(res, 201, { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` });
       }
       const po = createPurchaseOrderFromOrders(db, body.orderIds || [], {
@@ -31133,7 +31457,7 @@ async function handleApi(req, res) {
       const touchedOrders = (db.orders || []).filter((order) => (po.orderIds || []).includes(order.id));
       await postgres.savePurchaseOrder(po);
       for (const order of touchedOrders) await postgres.saveOrder(order);
-      await postgres.writeStateDocuments({ sequence: db.sequence || {} });
+      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {} });
       const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
       return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
     } catch (error) {
@@ -31350,25 +31674,35 @@ async function handleApi(req, res) {
       for (const route of linkedOrder.fulfillmentRoutes || []) {
         if (route.type !== "purchase" || route.purchaseOrderId !== po.id) continue;
         const receivedForSku = receipt.items.filter((item) => String(item.sku || "").toLowerCase() === String(route.sku || "").toLowerCase()).reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0);
-        if (receivedForSku > 0) { route.status = receivedForSku >= Number(route.qty || 0) ? "received" : "partially_received"; route.receivedQty = Math.min(Number(route.qty || 0), Number(route.receivedQty || 0) + receivedForSku); route.updatedAt = new Date().toISOString(); }
+        if (receivedForSku > 0) {
+          route.receivedQty = Math.min(Number(route.qty || 0), Number(route.receivedQty || 0) + receivedForSku);
+          route.status = route.receivedQty >= Number(route.qty || 0) ? "received" : "partially_received";
+          route.updatedAt = new Date().toISOString();
+        }
       }
       reroutedOrders.push(linkedOrder);
     }
     if (touchedProducts.length) {
+      const touchedById = new Map(touchedProducts.map((product) => [String(product.id || product.sku), product]));
+      db.products = (db.products || []).map((product) => touchedById.get(String(product.id || product.sku)) || product);
       await postgres.upsertProductsFromState(touchedProducts);
       await postgres.upsertInventoryLevelsFromProducts(touchedProducts);
       await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
     }
     const releasedProducts = [];
+    const shouldRerouteAfterReceiving = workflowSettings.automation?.rerouteAfterReceiving !== false;
     for (const linkedOrder of reroutedOrders) {
-      const reroute = await routeOrderForFulfillment(db, linkedOrder, { user: body.user || "System" });
-      releasedProducts.push(...(reroute.touchedProducts || []));
+      if (shouldRerouteAfterReceiving) {
+        const reroute = await routeOrderForFulfillment(db, linkedOrder, { user: body.user || "System", workflowSettings });
+        releasedProducts.push(...(reroute.touchedProducts || []));
+      }
       recalculateOrderOperationalStatus(linkedOrder);
       linkedOrder.updatedAt = new Date().toISOString();
       await postgres.saveOrder(linkedOrder);
       clearOrderApiCache(linkedOrder.id);
     }
-    if (releasedProducts.length) { const unique = [...new Map(releasedProducts.map((product) => [product.id, product])).values()]; await postgres.upsertProductsFromState(unique); await postgres.upsertInventoryLevelsFromProducts(unique); await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] }); }
+    if (releasedProducts.length) { const unique = [...new Map(releasedProducts.map((product) => [product.id, product])).values()]; await postgres.upsertProductsFromState(unique); await postgres.upsertInventoryLevelsFromProducts(unique); }
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [], purchaseRequirements: db.purchaseRequirements || [] });
     await postgres.savePurchaseOrder(po);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(stateDb, { lite: true }) });
@@ -32761,8 +33095,8 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
-    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "requireBuyerApproval", "overdueReminderEnabled"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
     const numericPurchaseOrderRuleFields = new Set(["approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
@@ -41464,6 +41798,147 @@ async function reconcileSupplierDirectoryOnStartup() {
   }
 }
 
+let orderRoutingProcessing = false;
+let purchasePoolProcessing = false;
+
+async function processScheduledOrderRouting() {
+  if (!postgres.isPostgresEnabled() || orderRoutingProcessing || purchasePoolProcessing) return;
+  orderRoutingProcessing = true;
+  let job = null;
+  try {
+    const workflowSettings = await readOrderWorkflowSettings();
+    if (workflowSettings.automation?.routePaidOrders === false) return;
+    const orders = await postgres.listOrders({ limit: 1000 }) || [];
+    const candidates = orders.filter((order) => orderNeedsAutomaticRouting(order)).slice(0, 50);
+    if (!candidates.length) return;
+    const db = await readDbFast({ skipInventory: true });
+    db.orders = orders;
+    db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+    db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
+    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+    job = createImportJob(db, {
+      section: "Orders",
+      category: "Fulfillment",
+      operation: "Paid order routing",
+      direction: "sync",
+      status: "running",
+      totalRows: candidates.length,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "routing_orders",
+      message: `Routing ${candidates.length} paid order${candidates.length === 1 ? "" : "s"} by physical inventory and supplier demand.`
+    });
+    const touchedProducts = new Map();
+    const purchaseOrders = new Map();
+    const errors = [];
+    let routedOrders = 0;
+    let processedRows = 0;
+    for (const order of candidates) {
+      try {
+        const result = await routeOrderForFulfillment(db, order, { user: "Order routing scheduler", workflowSettings });
+        if ((result.routes || []).length) routedOrders += 1;
+        for (const product of result.touchedProducts || []) touchedProducts.set(String(product.id || product.sku), product);
+        for (const po of result.autoPurchaseOrders || []) purchaseOrders.set(String(po.id || po.poNumber), po);
+      } catch (error) {
+        order.routingLastAttemptAt = new Date().toISOString();
+        order.routingLastResult = "failed";
+        errors.push({ orderId: order.id, orderNumber: order.orderNumber, message: error.message });
+      }
+      order.updatedAt = new Date().toISOString();
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      processedRows += 1;
+      Object.assign(job, {
+        processedRows,
+        progressPercent: Math.round((processedRows / candidates.length) * 100),
+        currentItem: order.orderNumber || order.id,
+        message: `Routed ${processedRows} of ${candidates.length} paid orders.`,
+        updatedAt: new Date().toISOString()
+      });
+      upsertImportJobStore(job);
+    }
+    const changedProducts = [...touchedProducts.values()];
+    if (changedProducts.length) {
+      await postgres.upsertProductsFromState(changedProducts);
+      await postgres.upsertInventoryLevelsFromProducts(changedProducts);
+    }
+    for (const po of purchaseOrders.values()) await postgres.savePurchaseOrder(po);
+    await postgres.writeStateDocuments({
+      inventoryLedger: db.inventoryLedger || [],
+      purchaseRequirements: db.purchaseRequirements || [],
+      sequence: db.sequence || {}
+    });
+    finishImportJob(job, {
+      status: errors.length ? "warning" : "success",
+      phase: "complete",
+      progressPercent: 100,
+      processedRows,
+      changedCount: routedOrders,
+      errorCount: errors.length,
+      errors,
+      message: `${routedOrders} paid order${routedOrders === 1 ? "" : "s"} routed; ${errors.length} need review.`,
+      details: "Physical inventory was reserved for fulfillment. Supplier-backed demand was retained in the purchase pool."
+    });
+  } catch (error) {
+    if (job) finishImportJob(job, { status: "failed", phase: "failed", message: `Paid order routing failed: ${error.message}` });
+    console.error(`Paid order routing failed: ${error.message}`);
+  } finally {
+    orderRoutingProcessing = false;
+  }
+}
+
+async function processScheduledPurchasePooling() {
+  if (!postgres.isPostgresEnabled() || purchasePoolProcessing || orderRoutingProcessing) return;
+  purchasePoolProcessing = true;
+  let job = null;
+  try {
+    const workflowSettings = await readOrderWorkflowSettings();
+    if (workflowSettings.purchasePooling?.enabled === false || workflowSettings.purchasePooling?.autoCreateDraftsAtCutoff === false) return;
+    const db = await readDbFast({ skipInventory: true });
+    db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
+    if (!db.purchaseRequirements.some((requirement) => String(requirement.status || "pooled") === "pooled" && purchaseRequirementIsDue(requirement))) return;
+    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
+    const result = processDuePurchaseRequirementPool(db, { user: "PO cutoff scheduler" });
+    if (!result.purchaseOrders?.length) return;
+    job = createImportJob(db, {
+      section: "Purchasing",
+      category: "Purchase orders",
+      operation: "Supplier PO cutoff",
+      direction: "sync",
+      status: "running",
+      totalRows: result.requirements.length,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "creating_purchase_orders",
+      message: `Creating ${result.purchaseOrders.length} pooled supplier purchase order${result.purchaseOrders.length === 1 ? "" : "s"}.`
+    });
+    for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
+    for (const order of result.orders || []) {
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+    }
+    await postgres.writeStateDocuments({
+      purchaseRequirements: db.purchaseRequirements || [],
+      sequence: db.sequence || {}
+    });
+    finishImportJob(job, {
+      status: "success",
+      phase: "complete",
+      progressPercent: 100,
+      processedRows: result.requirements.length,
+      changedCount: result.purchaseOrders.length,
+      message: result.message,
+      details: `${result.requirements.length} pooled order line requirement${result.requirements.length === 1 ? "" : "s"} converted at the configured supplier cutoff.`
+    });
+    console.log(result.message);
+  } catch (error) {
+    if (job) finishImportJob(job, { status: "failed", phase: "failed", message: `Supplier PO cutoff failed: ${error.message}` });
+    console.error(`Supplier PO cutoff failed: ${error.message}`);
+  } finally {
+    purchasePoolProcessing = false;
+  }
+}
+
 function startServer() {
   ensureDb();
   pruneChannelApiLogsSoon(true);
@@ -41501,6 +41976,14 @@ function startServer() {
   categoryRefreshRecovery.unref?.();
   const categoryRefreshRecoveryInterval = setInterval(() => void recoverScheduledCategoryMappingJobs(), 60_000);
   categoryRefreshRecoveryInterval.unref?.();
+  const orderRoutingStart = setTimeout(() => void processScheduledOrderRouting(), 8_000);
+  orderRoutingStart.unref?.();
+  const orderRoutingInterval = setInterval(() => void processScheduledOrderRouting(), 60_000);
+  orderRoutingInterval.unref?.();
+  const purchasePoolStart = setTimeout(() => void processScheduledPurchasePooling(), 25_000);
+  purchasePoolStart.unref?.();
+  const purchasePoolInterval = setInterval(() => void processScheduledPurchasePooling(), 60_000);
+  purchasePoolInterval.unref?.();
   return server;
 }
 

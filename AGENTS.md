@@ -286,6 +286,16 @@ Order detail must include customer, billing, shipping, payments, line items, SKU
 
 Use the order Actions command menu for refresh, cancel, archive/delete where allowed, fulfillment, refunds, returns, shipping quotes/labels, notifications, and PO creation. Cancellations must distinguish local-only from local plus channel notification.
 
+Order routing is line-level and source-aware:
+
+- Only available inventory in an active physical fulfillment warehouse may be reserved and released to fulfillment.
+- Supplier-feed and DataWarehouse availability are sourcing signals. They create pooled purchase requirements and must never make an order ready to ship by themselves.
+- Mixed orders retain one customer order while using separate fulfillment routes for physical-stock lines and supplier-purchase lines. The operational state is `split_fulfillment` until all routes are ready or completed.
+- A route backed by physical stock enters fulfillment for pick, pack, and ship. A supplier route remains `waiting_for_po` until purchased inventory is received into a physical destination.
+- True supplier drop shipping is a separate vendor-level permission and must not be inferred merely because a supplier reports stock.
+- When automatic routing is enabled, newly imported or paid orders are evaluated by the background order-routing scheduler and recorded as visible Jobs work. Blocking sourcing exceptions pause automatic retries until an operator resolves the exception or manually reruns routing.
+- Partial PO receipts immediately release only the received quantity for physical allocation. The unreceived balance remains attached to the supplier purchase route and linked customer order.
+
 ### Fulfillment and warehouse
 
 Fulfillment is the operational workspace for pick lists, batches, scanning, packing, shipping labels, and shipment status. A pick list has its own ID and line-level picked status. Labels can be created only after required package data is complete and the relevant items are picked/selected.
@@ -328,6 +338,10 @@ PO creation is available from:
 - Purchasing workspace.
 
 Auto-PO creation is controlled by supplier profile rules and must respect approval thresholds, budgets, supplier status, and duplicate prevention.
+
+Eligible supplier demand is pooled by canonical supplier and physical receiving warehouse until the configured cutoff, which defaults to 3:00 PM in the configured timezone. Demand received after cutoff rolls into the next eligible business-day pool. The scheduler creates draft or approval-required POs only for suppliers with auto-creation enabled; buyers may explicitly run due pools or force-create selected pooled demand from Purchasing.
+
+PO receiving posts stock to the PO's physical destination warehouse, appends inventory provenance, and reroutes linked customer orders. Received lines may then reserve the new physical stock and move into fulfillment. Supplier POs must never use a virtual supplier-feed warehouse as their receiving destination.
 
 ## Jobs and workers
 
