@@ -10819,6 +10819,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   ensurePurchaseRequirementsForOrders(db, orders, options);
   const requestedRouteIds = new Set(Array.isArray(options.routeIds) ? options.routeIds.map(String) : []);
   const groups = new Map();
+  let unassignedRouteCount = 0;
   for (const order of orders) {
     const routes = (order.fulfillmentRoutes || []).filter((route) => {
       if (route.type !== "purchase" || route.purchaseOrderId || ["canceled", "received", "closed"].includes(String(route.status || "").toLowerCase())) return false;
@@ -10829,6 +10830,10 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
     });
     for (const route of routes) {
       const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName) || findVendorByName(db, options.supplier);
+      if (!vendor) {
+        unassignedRouteCount += 1;
+        continue;
+      }
       const preferredWarehouseId = route.warehouseId
         || options.warehouseId
         || vendor?.purchaseOrderRules?.defaultWarehouseId
@@ -10843,16 +10848,17 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
       group.routes.push({ ...route, order }); if (!group.orders.includes(order)) group.orders.push(order); groups.set(key, group);
     }
   }
+  if (!groups.size && unassignedRouteCount) throw new Error("Assign a supplier to the unresolved purchase requirements before creating a PO.");
   if (!groups.size) throw new Error("No unassigned purchase requirements are available for PO creation.");
   const purchaseGroupId = options.purchaseGroupId || `PG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
   const created = [];
   for (const group of groups.values()) {
-    const estimatedCost = group.routes.reduce((sum, route) => sum + Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0) * Number(route.qty || 0), 0);
+    const estimatedCost = group.routes.reduce((sum, route) => sum + Number(route.unitCost || route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0) * Number(route.qty || 0), 0);
     const budgetLimit = Math.max(0, Number(group.vendor?.purchaseOrderRules?.budgetLimit || 0));
     const openCommitment = (db.purchaseOrders || []).filter((existing) => String(existing.vendorId || "") === String(group.vendor?.id || "") && !["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(existing.status || "").toLowerCase())).reduce((sum, existing) => sum + purchaseOrderOpenCommitment(existing), 0);
     const budgetExceeded = budgetLimit > 0 && openCommitment + estimatedCost > budgetLimit;
     const approvalRequired = budgetExceeded || (group.vendor?.purchaseOrderRules?.requireBuyerApproval !== false && estimatedCost >= Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)));
-    const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: approvalRequired ? "awaiting_approval" : "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => ({ sku: route.sku, title: route.title, qty: Number(route.qty || 0), unitCost: Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0), estimatedUnitCost: Number(route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0), orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id })), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), estimatedCost, openEstimatedCost: estimatedCost, approval: { required: approvalRequired, threshold: Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)), budgetLimit, budgetExceeded, status: approvalRequired ? "awaiting_approval" : "not_required" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
+    const po = { id: crypto.randomUUID(), poNumber: nextPoNumber(db), status: approvalRequired ? "awaiting_approval" : "draft", type: "customer_demand", purchaseGroupId, vendorId: group.vendor?.id || "", supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier", warehouseId: group.warehouse?.id || "", warehouseName: group.warehouse?.name || "", orderIds: group.orders.map((order) => order.id), orderNumbers: group.orders.map((order) => order.orderNumber), items: group.routes.map((route) => { const unitCost = Number(route.unitCost || route.order?.items?.[route.lineIndex]?.unitCost || route.order?.items?.[route.lineIndex]?.cost || 0); return { sku: route.sku, title: route.title, qty: Number(route.qty || 0), unitCost, estimatedUnitCost: unitCost, vendorSku: route.vendorSku || "", orderId: route.order.id, orderNumber: route.order.orderNumber, routeId: route.id }; }), totalUnits: group.routes.reduce((sum, route) => sum + Number(route.qty || 0), 0), estimatedCost, openEstimatedCost: estimatedCost, approval: { required: approvalRequired, threshold: Math.max(0, Number(group.vendor?.purchaseOrderRules?.approvalThreshold || 0)), budgetLimit, budgetExceeded, status: approvalRequired ? "awaiting_approval" : "not_required" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), timeline: [], receipts: [] };
     db.purchaseOrders = db.purchaseOrders || []; db.purchaseOrders.unshift(po); created.push(po);
     for (const route of group.routes) {
       const linkedRoute = (route.order.fulfillmentRoutes || []).find((candidate) => candidate.id === route.id);
@@ -19972,6 +19978,95 @@ function ensurePooledPurchaseRequirement(db, order, route, line, settings, vendo
   return next;
 }
 
+function vendorCanReceivePurchaseDemand(vendor = {}) {
+  const status = String(vendor.status || "active").trim().toLowerCase();
+  return vendor.active !== false && !["inactive", "disabled", "deleted"].includes(status);
+}
+
+function routingSupplierOffers(db, product = {}, line = {}) {
+  const rows = [
+    {
+      vendorId: line.vendorId,
+      supplier: line.vendor || line.supplier,
+      vendorSku: line.vendorSku,
+      unitCost: line.unitCost ?? line.cost,
+      stockQty: line.supplierQty ?? line.vendorQty,
+      sourceKey: line.sourceKey,
+      matchMethod: "order_line"
+    },
+    {
+      vendorId: product.vendorId,
+      supplier: product.supplier || product.vendor,
+      vendorSku: product.vendorSku,
+      unitCost: product.sellUnitCost ?? product.unitCost ?? product.cost,
+      stockQty: product.stockQty ?? product.qty,
+      sourceKey: product.sourceKey,
+      uom: product.uom,
+      uomQty: product.uomQty,
+      discontinued: product.discontinued,
+      matchMethod: "primary_supplier"
+    },
+    ...(Array.isArray(product.vendorOffers) ? product.vendorOffers.map((offer) => ({ ...offer, matchMethod: offer.matchMethod || offer.matchType || "supplier_coverage" })) : [])
+  ];
+  const offers = new Map();
+  for (const row of rows) {
+    const rawName = String(row.supplier || row.vendor || "").trim();
+    const vendor = findVendorById(db, row.vendorId) || findVendorByName(db, rawName);
+    if (!vendor || !vendorCanReceivePurchaseDemand(vendor)) continue;
+    const discontinued = row.discontinued === true || ["true", "yes", "1", "discontinued"].includes(String(row.discontinued || "").toLowerCase());
+    if (discontinued) continue;
+    const rawAvailability = row.availableQty ?? row.stockQty ?? row.qty;
+    const availabilityKnown = rawAvailability !== undefined && rawAvailability !== null && rawAvailability !== "";
+    const unitCost = Number(row.sellUnitCost ?? row.unitCost ?? row.cost ?? 0);
+    const offer = {
+      vendorId: vendor.id,
+      vendorName: vendor.name,
+      vendorSku: String(row.vendorSku || row.sku || ""),
+      unitCost: Number.isFinite(unitCost) && unitCost > 0 ? unitCost : 0,
+      availableQty: availabilityKnown ? Math.max(0, Number(rawAvailability) || 0) : 0,
+      availabilityKnown,
+      uom: String(row.uom || row.unitOfMeasure || ""),
+      uomQty: Math.max(1, Number(row.uomQty ?? row.packQty ?? row.packageQty ?? 1) || 1),
+      sourceKey: String(row.sourceKey || row.source || ""),
+      matchMethod: String(row.matchMethod || "supplier_coverage")
+    };
+    const key = String(vendor.id || vendor.name).toLowerCase();
+    const existing = offers.get(key);
+    const offerScore = (offer.availabilityKnown && offer.availableQty > 0 ? 1000000 : 0) + offer.availableQty - offer.unitCost / 100000;
+    const existingScore = existing ? (existing.availabilityKnown && existing.availableQty > 0 ? 1000000 : 0) + existing.availableQty - existing.unitCost / 100000 : -Infinity;
+    if (!existing || offerScore > existingScore) offers.set(key, offer);
+  }
+  return [...offers.values()].sort((left, right) => {
+    const leftStock = left.availabilityKnown && left.availableQty > 0 ? 0 : 1;
+    const rightStock = right.availabilityKnown && right.availableQty > 0 ? 0 : 1;
+    return leftStock - rightStock || left.unitCost - right.unitCost || left.vendorName.localeCompare(right.vendorName);
+  });
+}
+
+function supplierSourceWarehouseForOffer(db, offer = {}, plan = {}) {
+  const candidates = [...(plan.warehouses || []), ...(db.warehouses || [])].filter((warehouse) => {
+    const sourceType = String(warehouse.inventorySourceType || "").toLowerCase();
+    return sourceType === "supplier_feed" || warehouse.fulfillmentNetwork === "supplier" || warehouse.virtual === true;
+  });
+  const vendorId = String(offer.vendorId || "").toLowerCase();
+  const vendorName = String(offer.vendorName || "").toLowerCase();
+  return candidates.find((warehouse) => vendorId && [warehouse.dropshipVendorId, warehouse.vendorId].some((value) => String(value || "").toLowerCase() === vendorId))
+    || candidates.find((warehouse) => vendorName && String(warehouse.vendorName || warehouse.supplier || "").toLowerCase() === vendorName)
+    || candidates.find((warehouse) => String(warehouse.name || "").toLowerCase() === "datawarehouse")
+    || null;
+}
+
+function resolveOrderRoutingExceptions(order, lineIndex, types = []) {
+  const accepted = new Set(types);
+  const now = new Date().toISOString();
+  for (const entry of order.workflowExceptions || []) {
+    if (Number(entry.lineIndex) !== Number(lineIndex) || entry.status === "resolved" || !accepted.has(String(entry.type || ""))) continue;
+    entry.status = "resolved";
+    entry.resolvedAt = now;
+    entry.resolution = "A fulfillment or purchasing route is now available.";
+  }
+}
+
 function orderChannelPolicy(db = {}, order = {}) {
   const candidates = [order.channelId, order.channel, order.source, order.channelSource, order.marketplace]
     .map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
@@ -20054,37 +20149,13 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     order.routingExplanation.push(explanation);
     // Available physical stock always wins. Supplier feeds represent purchasable supply and
     // are considered only after every eligible physical fulfillment location.
-    const warehouses = [...plan.warehouses].sort((left, right) => {
-      const leftPhysical = isPhysicalFulfillmentWarehouse(left) ? 0 : 1;
-      const rightPhysical = isPhysicalFulfillmentWarehouse(right) ? 0 : 1;
-      return leftPhysical - rightPhysical;
-    });
+    const warehouses = plan.warehouses.filter(isPhysicalFulfillmentWarehouse);
     for (const warehouse of warehouses) {
       if (!product || remaining <= 0) break;
-      const sourceType = String(warehouse.inventorySourceType || "").toLowerCase();
-      const supplierSource = sourceType === "supplier_feed" || warehouse.fulfillmentNetwork === "supplier";
-      if (supplierSource) {
-        const warehouseVendor = String(warehouse.dropshipVendorId || warehouse.vendorId || "").toLowerCase();
-        const productVendor = String(product.vendorId || product.vendor || product.supplier || "").toLowerCase();
-        if (warehouseVendor && productVendor && warehouseVendor !== productVendor) {
-          explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "skipped", reason: "Supplier warehouse does not match the product supplier." });
-          continue;
-        }
-      }
       const stock = ensureInventoryWarehouseStock(product, warehouse);
       const available = Math.max(0, Number(stock.qty || 0) - Number(stock.reserved || 0));
       const qty = Math.min(remaining, available);
       if (!qty) { explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "skipped", reason: "No available quantity." }); continue; }
-      if (supplierSource) {
-        const vendor = findVendorById(db, warehouse.dropshipVendorId || warehouse.vendorId || product.vendorId)
-          || findVendorByName(db, product.vendor || product.supplier || warehouse.vendorName);
-        const route = createWorkflowRoute(order, { type: "purchase", status: "pooled", lineIndex, sku: line.sku, title: line.title || line.sku, qty, vendorId: vendor?.id || warehouse.dropshipVendorId || product.vendorId || "", vendorName: vendor?.name || product.vendor || product.supplier || warehouse.vendorName || "", sourceWarehouseId: warehouse.id, sourceWarehouseName: warehouse.name });
-        created.push(route);
-        pooledRequirements.push(ensurePooledPurchaseRequirement(db, order, route, line, workflowSettings, vendor, warehouse));
-        explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "pooled", routeType: "purchase", qty, reason: "Supplier-feed quantity is purchasable supply, so demand was added to the supplier PO pool." });
-        remaining -= qty;
-        continue;
-      }
       stock.reserved = Number(stock.reserved || 0) + qty;
       stock.updatedAt = new Date().toISOString();
       syncInventoryTotalsFromWarehouses(product);
@@ -20096,28 +20167,84 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       remaining -= qty;
     }
     if (remaining > 0) {
-      const vendorName = String(line.vendor || product?.vendor || "").trim();
-      const vendor = findVendorById(db, product?.vendorId) || findVendorByName(db, vendorName);
-      const dropShipAllowed = vendor?.purchaseOrderRules?.dropShipEnabled === true && (product?.dropShipEligible === true || product?.fulfillmentMethod === "drop_ship");
+      const supplierOffers = routingSupplierOffers(db, product || {}, line);
+      const supplierOffer = supplierOffers.find((offer) => offer.availabilityKnown && offer.availableQty >= remaining)
+        || supplierOffers.find((offer) => offer.availabilityKnown && offer.availableQty > 0)
+        || supplierOffers.find((offer) => !offer.availabilityKnown)
+        || supplierOffers[0]
+        || null;
+      const vendor = supplierOffer ? findVendorById(db, supplierOffer.vendorId) : null;
+      const sourceWarehouse = supplierOffer ? supplierSourceWarehouseForOffer(db, supplierOffer, plan) : null;
+      const supplierHasEnough = Boolean(supplierOffer && (!supplierOffer.availabilityKnown || supplierOffer.availableQty >= remaining));
+      const reviewReason = !supplierOffer
+        ? "Assign an active supplier before creating the purchase order."
+        : supplierHasEnough
+          ? ""
+          : supplierOffer.availableQty > 0
+            ? `Supplier reports ${supplierOffer.availableQty} available for ${remaining} required.`
+            : "Supplier currently reports no available quantity; buyer confirmation is required.";
+      const dropShipAllowed = vendor?.purchaseOrderRules?.dropShipEnabled === true
+        && (product?.dropShipEligible === true || product?.fulfillmentMethod === "drop_ship");
       if (dropShipAllowed) {
-        created.push(createWorkflowRoute(order, { type: "drop_ship", status: "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku, qty: remaining, vendorId: vendor?.id || product?.vendorId || "", vendorName: vendor?.name || vendorName }));
+        created.push(createWorkflowRoute(order, {
+          type: "drop_ship", status: "buyer_review", lineIndex, sku: line.sku, title: line.title || line.sku,
+          qty: remaining, vendorId: vendor.id, vendorName: vendor.name, vendorSku: supplierOffer?.vendorSku || "",
+          unitCost: supplierOffer?.unitCost || 0, availableQty: supplierOffer?.availableQty || 0,
+          availabilityKnown: supplierOffer?.availabilityKnown === true, sourceWarehouseId: sourceWarehouse?.id || "",
+          sourceWarehouseName: sourceWarehouse?.name || "", supplierMatchMethod: supplierOffer?.matchMethod || ""
+        }));
         explanation.decisions.push({ status: "routed", routeType: "drop_ship", qty: remaining, reason: "Product permits vendor drop shipment." });
-      } else if (vendorName || product?.vendorId) {
-        const route = createWorkflowRoute(order, { type: "purchase", status: "pooled", lineIndex, sku: line.sku, title: line.title || line.sku, qty: remaining, vendorId: vendor?.id || product?.vendorId || "", vendorName: vendor?.name || vendorName });
-        created.push(route);
-        pooledRequirements.push(ensurePooledPurchaseRequirement(db, order, route, line, workflowSettings, vendor));
-        explanation.decisions.push({ status: "pooled", routeType: "purchase", qty: remaining, reason: "Physical warehouse stock was insufficient; demand was added to the supplier PO pool." });
+        resolveOrderRoutingExceptions(order, lineIndex, ["no_fulfillment_source", "missing_catalog_product", "supplier_unavailable", "supplier_assignment_required"]);
       } else {
-        createOrderException(order, { type: "no_fulfillment_source", lineIndex, sku: line.sku, description: `${line.sku || "This line"} has no allocatable inventory or assigned vendor.` });
-        explanation.decisions.push({ status: "blocked", qty: remaining, reason: "No sellable warehouse inventory or assigned supplier." });
+        const requirementStatus = supplierOffer && supplierHasEnough ? "pooled" : "buyer_review";
+        const route = createWorkflowRoute(order, {
+          type: "purchase", status: requirementStatus, lineIndex, sku: line.sku, title: line.title || line.sku,
+          qty: remaining, vendorId: vendor?.id || "", vendorName: vendor?.name || "Unassigned supplier",
+          vendorSku: supplierOffer?.vendorSku || "", unitCost: supplierOffer?.unitCost || 0,
+          availableQty: supplierOffer?.availableQty || 0, availabilityKnown: supplierOffer?.availabilityKnown === true,
+          uom: supplierOffer?.uom || "", uomQty: supplierOffer?.uomQty || 1, sourceKey: supplierOffer?.sourceKey || "",
+          sourceWarehouseId: sourceWarehouse?.id || "", sourceWarehouseName: sourceWarehouse?.name || "",
+          supplierMatchMethod: supplierOffer?.matchMethod || "", reviewReason
+        });
+        created.push(route);
+        pooledRequirements.push(ensurePooledPurchaseRequirement(db, order, route, line, workflowSettings, vendor, sourceWarehouse, {
+          status: requirementStatus,
+          vendorSku: supplierOffer?.vendorSku,
+          unitCost: supplierOffer?.unitCost,
+          availableQty: supplierOffer?.availableQty,
+          availabilityKnown: supplierOffer?.availabilityKnown === true,
+          uom: supplierOffer?.uom,
+          uomQty: supplierOffer?.uomQty,
+          sourceKey: supplierOffer?.sourceKey,
+          matchMethod: supplierOffer?.matchMethod,
+          reviewReason
+        }));
+        resolveOrderRoutingExceptions(order, lineIndex, ["no_fulfillment_source", "missing_catalog_product", "supplier_unavailable"]);
+        if (!supplierOffer) {
+          createOrderException(order, {
+            type: "supplier_assignment_required", severity: "warning", owner: "Purchasing", lineIndex,
+            sku: line.sku, description: `${line.sku || "This line"} needs a supplier assignment before a PO can be created.`
+          });
+        } else {
+          resolveOrderRoutingExceptions(order, lineIndex, ["supplier_assignment_required"]);
+        }
+        explanation.decisions.push({
+          status: requirementStatus, routeType: "purchase", qty: remaining,
+          vendorId: vendor?.id || "", vendorName: vendor?.name || "Unassigned supplier",
+          sourceWarehouseId: sourceWarehouse?.id || "", sourceWarehouseName: sourceWarehouse?.name || "",
+          reason: requirementStatus === "pooled"
+            ? "Physical warehouse stock was insufficient; the remaining demand was added to the supplier PO pool."
+            : reviewReason
+        });
       }
     }
   }
   recalculateOrderOperationalStatus(order);
   if (created.length) addOrderWorkflowEvent(order, { step: "route_fulfillment", title: "Fulfillment routed", message: `${created.length} line-level fulfillment route${created.length === 1 ? "" : "s"} created.`, user: body.user || "System" });
   order.routingLastAttemptAt = new Date().toISOString();
-  order.routingLastResult = created.length ? "routed" : (order.workflowExceptions || []).some((exception) => exception.status !== "resolved") ? "needs_review" : "no_open_demand";
-  const immediateVendorIds = [...new Set(created.filter((route) => route.type === "purchase").map((route) => {
+  const hasBlockingException = (order.workflowExceptions || []).some((exception) => exception.status !== "resolved" && exception.severity === "blocking");
+  order.routingLastResult = hasBlockingException ? "needs_review" : created.length ? "routed" : "no_open_demand";
+  const immediateVendorIds = [...new Set(created.filter((route) => route.type === "purchase" && route.status === "pooled" && route.vendorId).map((route) => {
     const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName);
     const poolUntilCutoff = workflowSettings.purchasePooling?.enabled !== false && vendor?.purchaseOrderRules?.poolUntilCutoff !== false;
     return vendor?.purchaseOrderRules?.autoCreateDrafts === true && !poolUntilCutoff ? vendor.id : "";
@@ -20136,7 +20263,7 @@ function orderNeedsAutomaticRouting(order = {}, now = Date.now()) {
   const states = [order.status, order.fulfillmentStatus, order.operationalStatus].map((value) => String(value || "").trim().toLowerCase());
   if (states.some((state) => terminalStates.has(state))) return false;
   if (!isOrderPaymentCleared(order)) return false;
-  if (order.routingLastResult === "needs_review" && (order.workflowExceptions || []).some((exception) => String(exception.status || "open").toLowerCase() !== "resolved")) return false;
+  if (order.routingLastResult === "needs_review" && (order.workflowExceptions || []).some((exception) => String(exception.status || "open").toLowerCase() !== "resolved" && exception.severity === "blocking")) return false;
   const lastAttempt = new Date(order.routingLastAttemptAt || 0).getTime();
   if (lastAttempt && Number.isFinite(lastAttempt) && now - lastAttempt < 5 * 60 * 1000) return false;
   return orderLineItems(order).some((line, lineIndex) => {
@@ -30887,6 +31014,7 @@ async function handleApi(req, res) {
     });
     const now = new Date();
     const pooled = requirements.filter((requirement) => String(requirement.status || "pooled") === "pooled");
+    const buyerReview = requirements.filter((requirement) => String(requirement.status || "").toLowerCase() === "buyer_review");
     const due = pooled.filter((requirement) => purchaseRequirementIsDue(requirement, now));
     const nextCutoff = pooled
       .map((requirement) => `${requirement.poolDate || ""}T${requirement.cutoffTime || "15:00"}`)
@@ -30901,6 +31029,8 @@ async function handleApi(req, res) {
         units: pooled.reduce((sum, requirement) => sum + Number(requirement.qty || 0), 0),
         dueRequirements: due.length,
         dueUnits: due.reduce((sum, requirement) => sum + Number(requirement.qty || 0), 0),
+        buyerReviewRequirements: buyerReview.length,
+        buyerReviewUnits: buyerReview.reduce((sum, requirement) => sum + Number(requirement.qty || 0), 0),
         nextCutoff
       },
       generatedAt: new Date().toISOString()
