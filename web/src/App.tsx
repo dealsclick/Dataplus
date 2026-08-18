@@ -1833,7 +1833,7 @@ function App() {
                 {view === "operations" && <OperationsPage />}
                 {view === "warehouse" && <WarehouseWorkspace />}
                 {view === "fulfillment" && <FulfillmentPage />}
-                {view === "purchasing" && <PurchasingPage />}
+                {view === "purchasing" && <PurchasingRouter />}
                 {view === "po-detail" && <PurchaseOrderDetailPage />}
                 {view === "order-detail" && <OrderDetailWorkspace />}
                 {view === "draft-detail" && <DraftQuoteFieldDetailPage />}
@@ -12200,6 +12200,79 @@ function LegacyFulfillmentPage() {
 void LegacyPickListPanel
 void LegacyFulfillmentPage
 
+type PooledSupplierGroup = {
+  key: string
+  vendorId: string
+  supplier: string
+  requirements: Array<Record<string, unknown>>
+  orderIds: Set<string>
+  skus: Set<string>
+  destinations: Set<string>
+  poGroups: Set<string>
+  units: number
+  nextCutoff?: Record<string, unknown>
+  due: boolean
+}
+
+function pooledSupplierKey(row: Record<string, unknown>) {
+  const vendorId = String(row.vendorId || "").trim()
+  if (vendorId) return `vendor:${vendorId}`
+  const supplier = String(row.vendorName || "Unassigned").trim().toLowerCase()
+  return `name:${supplier || "unassigned"}`
+}
+
+function pooledRequirementDestination(row: Record<string, unknown>) {
+  return String(row.warehouseName || row.destinationWarehouseName || "Order destination")
+}
+
+function pooledRequirementCutoff(row: Record<string, unknown>) {
+  const date = String(row.poolDate || row.cutoffDate || "").split("T")[0]
+  const time = String(row.cutoffTime || "15:00")
+  if (!date) return Number.POSITIVE_INFINITY
+  const parsed = new Date(`${date}T${time.length === 5 ? `${time}:00` : time}`).getTime()
+  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY
+}
+
+function groupPooledRequirements(rows: Array<Record<string, unknown>>) {
+  const groups = new Map<string, PooledSupplierGroup>()
+  rows.forEach((row) => {
+    const key = pooledSupplierKey(row)
+    const vendorId = String(row.vendorId || "").trim()
+    const supplier = String(row.vendorName || "Unassigned")
+    const destination = pooledRequirementDestination(row)
+    const cutoffMs = pooledRequirementCutoff(row)
+    const poolDate = String(row.poolDate || row.cutoffDate || "Next business day")
+    const cutoffTime = String(row.cutoffTime || "15:00")
+    const group = groups.get(key) || {
+      key,
+      vendorId,
+      supplier,
+      requirements: [],
+      orderIds: new Set<string>(),
+      skus: new Set<string>(),
+      destinations: new Set<string>(),
+      poGroups: new Set<string>(),
+      units: 0,
+      due: false,
+    }
+    group.requirements.push(row)
+    if (row.orderId) group.orderIds.add(String(row.orderId))
+    if (row.sku) group.skus.add(String(row.sku))
+    group.destinations.add(destination)
+    group.poGroups.add(`${destination}|${poolDate}|${cutoffTime}`)
+    group.units += Number(row.qty || 0)
+    if (!group.nextCutoff || cutoffMs < pooledRequirementCutoff(group.nextCutoff)) group.nextCutoff = row
+    if (cutoffMs <= Date.now()) group.due = true
+    groups.set(key, group)
+  })
+  return [...groups.values()].sort((left, right) => left.supplier.localeCompare(right.supplier))
+}
+
+function PurchasingRouter() {
+  const match = window.location.pathname.match(/^\/purchasing\/supplier-pools\/([^/]+)\/?$/)
+  return match ? <PurchasingSupplierPoolPage supplierKey={decodeURIComponent(match[1])} /> : <PurchasingPage />
+}
+
 function PurchasingPage() {
   const [data, setData] = useState<{
     requirements?: Array<Record<string, unknown>>
@@ -12240,6 +12313,7 @@ function PurchasingPage() {
   const pos = allPos.filter((row) => !archivedPoStatuses.has(String(row.status || "").toLowerCase()))
   const archivedPos = allPos.filter((row) => archivedPoStatuses.has(String(row.status || "").toLowerCase()))
   const pooledRequirements = requirements.filter((row) => String(row.status || "").toLowerCase() === "pooled")
+  const pooledSupplierGroups = groupPooledRequirements(pooledRequirements)
   const buyerReviewRequirements = requirements.filter((row) => String(row.status || "").toLowerCase() === "buyer_review")
   const poolSummary = data.poolSummary || {}
   const openRequirements = requirements.filter((row) => !["received", "closed", "canceled", "resourced"].includes(String(row.status).toLowerCase())).length
@@ -12268,7 +12342,7 @@ function PurchasingPage() {
       <div className="relative mt-4 max-w-xl"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PO, order, supplier, customer, or SKU" /></div>
       <TabsContent value="pool" className="mt-4 grid gap-4">
         <Alert><Clock3 className="size-4" /><AlertTitle>Supplier demand is pooled before PO creation</AlertTitle><AlertDescription>DataPlus groups unfulfilled supplier lines by supplier and receiving warehouse until the cutoff. Physical warehouse stock bypasses this queue and goes directly to fulfillment. Next cutoff: {poolSummary.nextCutoff ? dateLabel(String(poolSummary.nextCutoff)) : "not scheduled"}.</AlertDescription></Alert>
-        <Card><CardHeader className="gap-3 border-b lg:flex-row lg:items-center lg:justify-between"><div><CardTitle className="text-base">Demand waiting for supplier POs</CardTitle><CardDescription>{numberLabel(Number(poolSummary.units || 0))} units are grouped without creating duplicate POs.</CardDescription></div><div className="flex flex-wrap gap-2"><Button variant="outline" disabled={poolingBusy || Number(poolSummary.dueRequirements || 0) === 0} onClick={() => void runPurchasePool(false)}>{poolingBusy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Run due cutoffs</Button><Button disabled={poolingBusy || pooledRequirements.length === 0} onClick={() => setForcePoolOpen(true)}>Create pooled POs now</Button></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Supplier</TableHead><TableHead>Customer order</TableHead><TableHead>SKU / quantity</TableHead><TableHead>Source</TableHead><TableHead>Receiving destination</TableHead><TableHead>Cutoff</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{pooledRequirements.map((row) => <TableRow key={String(row.id)}><TableCell className="font-medium">{String(row.vendorName || "Unassigned")}</TableCell><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId || ""))}`}>{String(row.orderNumber || row.orderId || "-")}</a></TableCell><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(row.sku || ""))}`}>{String(row.sku || "-")}</a><p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell>{String(row.sourceWarehouseName || row.sourceName || "Supplier feed")}</TableCell><TableCell>{String(row.warehouseName || row.destinationWarehouseName || "Order destination")}</TableCell><TableCell className="whitespace-nowrap">{String(row.cutoffTime || "15:00")}<p className="text-xs text-muted-foreground">{String(row.poolDate || row.cutoffDate || "Next business day")}</p></TableCell><TableCell><Badge variant="secondary">Pooled</Badge></TableCell></TableRow>)}{!pooledRequirements.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No supplier demand is waiting in the cutoff pool.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
+        <Card><CardHeader className="gap-3 border-b lg:flex-row lg:items-center lg:justify-between"><div><CardTitle className="text-base">Demand waiting for supplier POs</CardTitle><CardDescription>{numberLabel(Number(poolSummary.units || 0))} units across {numberLabel(pooledSupplierGroups.length)} supplier pool{pooledSupplierGroups.length === 1 ? "" : "s"}. Open a supplier to review every linked customer order.</CardDescription></div><div className="flex flex-wrap gap-2"><Button variant="outline" disabled={poolingBusy || Number(poolSummary.dueRequirements || 0) === 0} onClick={() => void runPurchasePool(false)}>{poolingBusy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Run due cutoffs</Button><Button disabled={poolingBusy || pooledRequirements.length === 0} onClick={() => setForcePoolOpen(true)}>Create pooled POs now</Button></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Supplier</TableHead><TableHead>Orders</TableHead><TableHead>SKUs</TableHead><TableHead>Units</TableHead><TableHead>Receiving destination</TableHead><TableHead>Next cutoff</TableHead><TableHead>Status</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{pooledSupplierGroups.map((group) => { const cutoff = group.nextCutoff || {}; const destinationNames = [...group.destinations]; return <TableRow key={group.key}><TableCell><a className="font-medium hover:underline" href={`/purchasing/supplier-pools/${encodeURIComponent(group.key)}`}>{group.supplier}</a><p className="text-xs text-muted-foreground">{numberLabel(group.poGroups.size)} PO group{group.poGroups.size === 1 ? "" : "s"}</p></TableCell><TableCell>{numberLabel(group.orderIds.size)}</TableCell><TableCell>{numberLabel(group.skus.size)}</TableCell><TableCell>{numberLabel(group.units)}</TableCell><TableCell className="max-w-64"><p className="truncate" title={destinationNames.join(", ")}>{destinationNames.length === 1 ? destinationNames[0] : `${numberLabel(destinationNames.length)} destinations`}</p>{destinationNames.length > 1 && <p className="truncate text-xs text-muted-foreground">{destinationNames.join(", ")}</p>}</TableCell><TableCell className="whitespace-nowrap">{String(cutoff.cutoffTime || "15:00")}<p className="text-xs text-muted-foreground">{String(cutoff.poolDate || cutoff.cutoffDate || "Next business day")}</p></TableCell><TableCell><Badge variant={group.due ? "destructive" : "secondary"}>{group.due ? "Cutoff due" : "Pooling"}</Badge></TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/purchasing/supplier-pools/${encodeURIComponent(group.key)}`}>View orders</a></Button></TableCell></TableRow>})}{!pooledSupplierGroups.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No supplier demand is waiting in the cutoff pool.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
       </TabsContent>
       <TabsContent value="buyer_review" className="mt-4 grid gap-4">
         <Alert><AlertCircle className="size-4" /><AlertTitle>Purchasing decision required</AlertTitle><AlertDescription>These paid order lines have no allocatable physical stock, but DataPlus could not safely place them into the automatic supplier pool. Assign a supplier or review its reported availability, then create the PO.</AlertDescription></Alert>
@@ -12291,6 +12365,78 @@ function PurchasingPage() {
       <TabsContent value="risks" className="mt-4"><Card><CardHeader><CardTitle className="text-base">Buyer attention queue</CardTitle><CardDescription>Only supply work needing intervention: missing suppliers, exceptions, and overdue expected receipts.</CardDescription></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Type</TableHead><TableHead>Reference</TableHead><TableHead>Issue</TableHead><TableHead /></TableRow></TableHeader><TableBody>{risks.map((risk) => <TableRow key={`${risk.kind}-${risk.id}`}><TableCell><Badge variant="destructive">{risk.kind}</Badge></TableCell><TableCell className="font-medium">{risk.reference}</TableCell><TableCell>{risk.detail}</TableCell><TableCell><Button size="sm" variant="outline" asChild><a href={risk.href}>Open</a></Button></TableCell></TableRow>)}{!risks.length && <TableRow><TableCell colSpan={4} className="h-28 text-center text-muted-foreground">No purchasing exceptions or overdue POs.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent>
     </Tabs>
     <AlertDialog open={forcePoolOpen} onOpenChange={setForcePoolOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Create all pooled supplier POs now?</AlertDialogTitle><AlertDialogDescription>This bypasses the normal cutoff and converts {numberLabel(pooledRequirements.length)} pooled requirement{pooledRequirements.length === 1 ? "" : "s"} into supplier-specific draft POs, grouped by supplier and receiving warehouse. Buyer approval rules still apply.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={poolingBusy}>Keep pooling</AlertDialogCancel><AlertDialogAction disabled={poolingBusy} onClick={(event) => { event.preventDefault(); void runPurchasePool(true) }}>{poolingBusy ? <Loader2 className="size-4 animate-spin" /> : <ShoppingBag className="size-4" />} Create draft POs</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+  </div>
+}
+
+function PurchasingSupplierPoolPage({ supplierKey }: { supplierKey: string }) {
+  const [data, setData] = useState<{ requirements?: Array<Record<string, unknown>> }>({})
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const load = async () => {
+    setLoading(true)
+    try { setData(await api("/api/purchasing/work")) }
+    catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load supplier demand.") }
+    finally { setLoading(false) }
+  }
+  useEffect(() => { void load() }, [supplierKey])
+
+  const requirements = (data.requirements || []).filter((row) => String(row.status || "").toLowerCase() === "pooled" && pooledSupplierKey(row) === supplierKey)
+  const supplierGroup = groupPooledRequirements(requirements)[0]
+  const supplier = supplierGroup?.supplier || (supplierKey.startsWith("name:") ? supplierKey.slice(5) : "Supplier")
+  const vendorId = supplierGroup?.vendorId || ""
+  const orderCount = new Set(requirements.map((row) => String(row.orderId || "")).filter(Boolean)).size
+  const skuCount = new Set(requirements.map((row) => String(row.sku || "")).filter(Boolean)).size
+  const unitCount = requirements.reduce((sum, row) => sum + Number(row.qty || 0), 0)
+  const dueCount = requirements.filter((row) => pooledRequirementCutoff(row) <= Date.now()).length
+  const destinationGroups = [...requirements.reduce((groups, row) => {
+    const destination = pooledRequirementDestination(row)
+    const poolDate = String(row.poolDate || row.cutoffDate || "Next business day")
+    const cutoffTime = String(row.cutoffTime || "15:00")
+    const key = `${destination}|${poolDate}|${cutoffTime}`
+    const group = groups.get(key) || { key, destination, poolDate, cutoffTime, requirements: [] as Array<Record<string, unknown>> }
+    group.requirements.push(row)
+    groups.set(key, group)
+    return groups
+  }, new Map<string, { key: string; destination: string; poolDate: string; cutoffTime: string; requirements: Array<Record<string, unknown>> }>()).values()]
+
+  const createSupplierPos = async (force: boolean) => {
+    setBusy(true)
+    try {
+      const result = await api<{ message?: string; purchaseOrders?: Array<Record<string, unknown>> }>("/api/purchasing/pool/run", {
+        method: "POST",
+        body: JSON.stringify({ requirementIds: requirements.map((row) => String(row.id)), vendorId: vendorId || undefined, force, user: "Luis" }),
+      })
+      toast.success(result.message || `${numberLabel(result.purchaseOrders?.length || 0)} supplier POs created.`)
+      setConfirmOpen(false)
+      await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to process this supplier pool.") }
+    finally { setBusy(false) }
+  }
+
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Purchasing / supplier pool" title={`${supplier} pooled demand`} description="Customer-order lines are combined by supplier for buyer review, while receiving destinations remain separate PO groups." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/purchasing">Back to purchasing</a></Button><ContextActions disabled={loading || busy} label="Pool actions" actions={[
+      { id: "refresh", label: "Refresh supplier pool", description: "Reload linked customer orders and pooled quantities.", icon: loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />, onSelect: () => void load() },
+      { id: "run-due", label: "Run due cutoff groups", description: "Create POs only for this supplier's groups whose cutoff has passed.", icon: <Play className="size-4" />, disabled: dueCount === 0, onSelect: () => void createSupplierPos(false) },
+      { id: "create-now", label: "Create this supplier's POs now", description: "Bypass cutoff and create draft POs for this supplier only.", icon: <ShoppingBag className="size-4" />, disabled: requirements.length === 0, onSelect: () => setConfirmOpen(true) },
+      ...(vendorId ? [{ id: "vendor", label: "Open supplier profile", description: "Review purchasing rules, cutoff, contacts, and source settings.", icon: <Store className="size-4" />, group: "Utilities" as const, onSelect: () => { window.location.href = `/vendors/${encodeURIComponent(vendorId)}` } }] : []),
+    ]} /></div>} />
+
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Detail label="Customer orders" value={numberLabel(orderCount)} /><Detail label="Unique SKUs" value={numberLabel(skuCount)} /><Detail label="Units" value={numberLabel(unitCount)} /><Detail label="PO groups" value={numberLabel(destinationGroups.length)} /><Detail label="Due now" value={numberLabel(dueCount)} /></div>
+
+    <Alert><Clock3 className="size-4" /><AlertTitle>One supplier, compatible PO groups</AlertTitle><AlertDescription>All demand below belongs to {supplier}. DataPlus keeps each receiving destination and cutoff group separate when draft POs are created, so customer orders are combined without mixing incompatible receipts.</AlertDescription></Alert>
+
+    {destinationGroups.map((group) => {
+      const groupOrders = new Set(group.requirements.map((row) => String(row.orderId || "")).filter(Boolean)).size
+      const groupUnits = group.requirements.reduce((sum, row) => sum + Number(row.qty || 0), 0)
+      const groupDue = group.requirements.some((row) => pooledRequirementCutoff(row) <= Date.now())
+      return <Card key={group.key}><CardHeader className="gap-3 border-b sm:flex-row sm:items-center sm:justify-between"><div><div className="flex flex-wrap items-center gap-2"><CardTitle className="text-base">{group.destination}</CardTitle><Badge variant={groupDue ? "destructive" : "secondary"}>{groupDue ? "Cutoff due" : "Pooling"}</Badge></div><CardDescription>{numberLabel(groupOrders)} customer order{groupOrders === 1 ? "" : "s"} · {numberLabel(groupUnits)} units</CardDescription></div><div className="text-sm"><p className="font-medium">Cutoff {group.cutoffTime}</p><p className="text-xs text-muted-foreground">{group.poolDate}</p></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Customer order</TableHead><TableHead>Customer</TableHead><TableHead>SKU / item</TableHead><TableHead>Quantity</TableHead><TableHead>Source</TableHead><TableHead>Ship by</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{group.requirements.map((row) => <TableRow key={String(row.id)}><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId || ""))}`}>{String(row.orderNumber || row.orderId || "-")}</a></TableCell><TableCell>{String(row.customer || "Customer")}</TableCell><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(row.sku || ""))}`}>{String(row.sku || "-")}</a>{row.title ? <p className="max-w-72 truncate text-xs text-muted-foreground" title={String(row.title)}>{String(row.title)}</p> : null}</TableCell><TableCell>{numberLabel(Number(row.qty || 0))}</TableCell><TableCell>{String(row.sourceWarehouseName || row.sourceName || "Supplier feed")}</TableCell><TableCell>{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant="secondary">Pooled</Badge></TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card>
+    })}
+
+    {!loading && !requirements.length && <Empty className="rounded-lg border"><EmptyHeader><EmptyMedia variant="icon"><CheckCircle2 /></EmptyMedia><EmptyTitle>No pooled demand remains for this supplier</EmptyTitle><EmptyDescription>The requirements may have moved into purchase orders, been rerouted, or been resolved.</EmptyDescription></EmptyHeader><Button variant="outline" asChild><a href="/purchasing">Return to purchasing</a></Button></Empty>}
+    {loading && <Card><CardContent className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading supplier orders...</CardContent></Card>}
+
+    <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Create {supplier} purchase orders now?</AlertDialogTitle><AlertDialogDescription>This bypasses the cutoff for {numberLabel(requirements.length)} pooled line{requirements.length === 1 ? "" : "s"} across {numberLabel(orderCount)} customer order{orderCount === 1 ? "" : "s"}. DataPlus will create separate draft POs for compatible receiving destinations. Buyer approval rules still apply.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={busy}>Keep pooling</AlertDialogCancel><AlertDialogAction disabled={busy} onClick={(event) => { event.preventDefault(); void createSupplierPos(true) }}>{busy ? <Loader2 className="size-4 animate-spin" /> : <ShoppingBag className="size-4" />} Create supplier POs</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>
 }
 
