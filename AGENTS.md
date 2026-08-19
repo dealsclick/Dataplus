@@ -329,9 +329,11 @@ Audit scanner rules:
 
 ## Purchase orders
 
-The Purchasing workspace presents the buyer lifecycle as **Needs sourcing -> Draft POs -> Ready to submit -> Sent -> Receiving -> History**. **Needs sourcing** means no usable supplier/PO assignment exists yet. **Draft POs** are numbered documents that already exist and are collecting additional demand. Raw line-level purchase requirements are audit records that support troubleshooting; they must not be presented as the primary buyer queue after they have been attached to a PO.
+The Purchasing workspace presents the buyer lifecycle as **Unassigned Orders -> Draft POs -> Ready to Send -> Sent -> Receiving -> History**. **Unassigned Orders** means a paid customer-order line has no safe supplier assignment yet. **Draft POs** are numbered documents that already exist and collect eligible customer demand until cutoff. Their next-step state must guide the buyer with one of **Collecting orders**, **Needs approval**, **Ready to send**, or **Buyer review**. Raw line-level purchase requirements are audit records that support troubleshooting; they must not be presented as the primary buyer queue after they have been attached to a PO.
 
 Purchase requirements are grouped by supplier. One customer order may link to multiple supplier POs. Show linked POs inside the order with PO number, supplier, status, date placed, expected date, items, quantities, and total.
+
+PO line views must show the catalog SKU, manufacturer part number, vendor part number, and vendor SKU when available. Show the selected supplier as the primary value; when other eligible suppliers carry the same item, add a compact alternate count whose hover preview compares supplier inventory, vendor SKU, and unit cost. This comparison is informational. A buyer must use the explicit **Re-source open quantities** workflow to move unreceived demand to another supplier.
 
 PO creation is available from:
 
