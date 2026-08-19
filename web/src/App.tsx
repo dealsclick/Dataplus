@@ -416,6 +416,7 @@ type Vendor = {
   pricingRules?: Record<string, unknown>
   variationRules?: Record<string, unknown>
   inventoryRules?: Record<string, unknown>
+  purchaseOrderRules?: Record<string, unknown>
   sourcePriority?: Record<string, unknown>
   catalogSettings?: {
     enabled?: boolean
@@ -5371,6 +5372,9 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const [draft, setDraft] = useState<Record<string, string | boolean>>({})
   const imageUrls = (product.images || []).map((image) => typeof image === "string" ? image : image.url || image.src || "").filter(Boolean)
   const cost = Number(product.sellUnitCost ?? product.cost ?? 0), price = Number(product.websitePrice ?? product.price ?? 0), available = Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0))
+  const ebaySellableQty = Math.max(available, Number(product.effectiveReplenishableQty || product.replenishableQty || 0))
+  const ebayLifecycleBlocked = product.active === false || Boolean(product.toBeDiscontinued) || /\binactive\b|discontinued/i.test(String(product.status || ""))
+  const ebayLaunchBlocked = ebayLifecycleBlocked && ebaySellableQty <= 0
   const margin = price > 0 ? ((price - cost) / price) * 100 : 0
   const pricing = product.pricingCalculation || {}
   const pricingSourceLabel = pricing.priceSource === "vendor-website-price" ? "Supplier website price" : pricing.priceSource === "minimum-allowed-price" ? "Minimum allowed price floor" : "Cost plus markup"
@@ -5380,7 +5384,8 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const save = async () => { setSaving(true); try { const numeric = new Set(["websitePrice", "cost", "fobPrice", "listPrice", "qty", "reserved", "reorderPoint", "minQuantity", "quantityIncrements", "itemLength", "itemWidth", "itemHeight", "itemWeight", "packageLength", "packageWidth", "packageHeight", "packageWeight", "dimensionalWeight"]); const payload = Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, key === "images" ? String(value || "").split(/\r?\n/).map((url) => url.trim()).filter(Boolean) : key === "bulletPoints" ? String(value || "").split(/\r?\n/).map((point) => point.trim()).filter(Boolean) : numeric.has(key) ? Number(value || 0) : value])); const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.id || product.sku || sku)}`, { method: "PATCH", body: JSON.stringify(payload) }); onUpdated(result.item); setEditorOpen(false); toast.success("Product details saved.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save product details.") } finally { setSaving(false) } }
   const pushShopify = async (path: string, apply: boolean, label: string) => { if (apply && product.toBeDiscontinued) return toast.error("Discontinued SKUs cannot be sent to Shopify."); try { const result = await api<{ job?: ImportJob; message?: string }>(path, { method: "POST", body: JSON.stringify({ skus: [product.sku], dryRun: !apply, apply }) }); toast.success(result.message || `${label} queued.`); if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 500) } catch (error) { toast.error(error instanceof Error ? error.message : `Unable to queue ${label.toLowerCase()}.`) } }
   const pushEbay = async (dryRun: boolean) => {
-    if (product.toBeDiscontinued) return toast.error("Discontinued SKUs cannot be sent to eBay.")
+    if (ebayLaunchBlocked) return toast.error("Inactive or discontinued SKUs cannot be sent to eBay unless sellable inventory is available.")
+    if (ebayLifecycleBlocked) toast.warning(`This SKU is inactive or discontinued, but sellable inventory is ${numberLabel(ebaySellableQty)}. The job will record a warning.`)
     try {
       const result = await api<{ job?: ImportJob; message?: string }>("/api/ebay/listings/launch", {
         method: "POST",
@@ -5423,7 +5428,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const readinessScore = Math.round((readinessChecks.filter(([, ready]) => ready).length / readinessChecks.length) * 100)
   return <div className="relative grid gap-5">
     <ProductReadinessPanel score={readinessScore} checks={readinessChecks} discontinued={Boolean(product.toBeDiscontinued)} />
-    <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" onClick={onBack}>Back to Products</Button><div className="flex flex-wrap gap-2"><Badge variant={product.active === false ? "outline" : "default"}>{product.active === false ? "Inactive" : "Active"}</Badge>{product.categoryVerified ? <Badge variant="outline">Category verified</Badge> : <Badge variant="outline">Category needs review</Badge>}{product.toBeDiscontinued ? <Badge variant="destructive">Discontinued</Badge> : null}<Button size="sm" onClick={openEditor}><Pencil className="size-4" /> Edit product</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Shopify</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/product-create", false, "Shopify launch review")}><ShoppingBag className="size-4" /> Review Shopify launch</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || Boolean(product.shopifyId)} onClick={() => void pushShopify("/api/shopify/product-create", true, "Shopify product launch")}><ShoppingBag className="size-4" /> {product.shopifyId ? "Already in Shopify" : "Launch on Shopify"}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/variant-price-push", false, "Shopify price review")}><ShoppingBag className="size-4" /> Review Shopify price</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || !product.shopifyId} onClick={() => void pushShopify("/api/shopify/variant-price-push", true, "Shopify price push")}><ShoppingBag className="size-4" /> Push Shopify price</DropdownMenuItem>{ebayEnabled && <><DropdownMenuSeparator /><DropdownMenuLabel>eBay</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushEbay(true)}><ShoppingBag className="size-4" /> Review eBay launch</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued} onClick={() => void pushEbay(false)}><ShoppingBag className="size-4" /> Launch on eBay</DropdownMenuItem></>}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }}><History className="size-4" /> View channel jobs</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
+    <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" onClick={onBack}>Back to Products</Button><div className="flex flex-wrap gap-2"><Badge variant={product.active === false ? "outline" : "default"}>{product.active === false ? "Inactive" : "Active"}</Badge>{product.categoryVerified ? <Badge variant="outline">Category verified</Badge> : <Badge variant="outline">Category needs review</Badge>}{product.toBeDiscontinued ? <Badge variant="destructive">Discontinued</Badge> : null}<Button size="sm" onClick={openEditor}><Pencil className="size-4" /> Edit product</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Shopify</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/product-create", false, "Shopify launch review")}><ShoppingBag className="size-4" /> Review Shopify launch</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || Boolean(product.shopifyId)} onClick={() => void pushShopify("/api/shopify/product-create", true, "Shopify product launch")}><ShoppingBag className="size-4" /> {product.shopifyId ? "Already in Shopify" : "Launch on Shopify"}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/variant-price-push", false, "Shopify price review")}><ShoppingBag className="size-4" /> Review Shopify price</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || !product.shopifyId} onClick={() => void pushShopify("/api/shopify/variant-price-push", true, "Shopify price push")}><ShoppingBag className="size-4" /> Push Shopify price</DropdownMenuItem>{ebayEnabled && <><DropdownMenuSeparator /><DropdownMenuLabel>eBay</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushEbay(true)}><ShoppingBag className="size-4" /> Review eBay launch</DropdownMenuItem><DropdownMenuItem disabled={ebayLaunchBlocked} onClick={() => void pushEbay(false)}><ShoppingBag className="size-4" /> Launch on eBay</DropdownMenuItem></>}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }}><History className="size-4" /> View channel jobs</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
     <Card><CardContent className="grid gap-5 p-5 lg:grid-cols-[180px_minmax(0,1fr)]"><div className="grid aspect-square place-items-center overflow-hidden rounded-md border bg-muted/40">{product.defaultImage || imageUrls[0] ? <img src={product.defaultImage || imageUrls[0]} alt={product.title || sku} className="size-full object-contain p-3" /> : <Boxes className="size-10 text-muted-foreground" />}</div><div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">Approved catalog product</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">{product.marketplaceTitle || product.title || "Untitled product"}</h1><div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground"><strong className="font-mono text-foreground">{product.sku || sku}</strong><span>{product.brand || "No brand"}</span><span>{product.supplier || product.vendor || "No supplier"}</span><span>{product.uomDisplay || "Each"}</span></div><p className="mt-4 text-sm text-muted-foreground">{product.mainCategory || product.category || "Uncategorized"}</p>{product.tags?.length ? <div className="mt-3 flex flex-wrap gap-1">{product.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div> : null}</div></CardContent></Card>
     <Tabs value={productTab} onValueChange={setProductTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="content">Content</TabsTrigger><TabsTrigger value="identifiers">Identifiers</TabsTrigger><TabsTrigger value="pricing">Pricing</TabsTrigger><TabsTrigger value="inventory">Inventory</TabsTrigger><TabsTrigger value="shipping">Shipping & compliance</TabsTrigger>{enabledChannels.map((channel) => <TabsTrigger key={channel.id || channel.name} value={channelTabId(channel)}>{channel.name}</TabsTrigger>)}<TabsTrigger value="offers">Variants & related SKUs</TabsTrigger><TabsTrigger value="suppliers">Suppliers</TabsTrigger><TabsTrigger value="source">Source & history</TabsTrigger></TabsList></div>
       <TabsContent value="overview" className="mt-4 grid gap-4"><div className="grid gap-4 xl:grid-cols-2">{section("Identity & category", "Core catalog, supplier, and classification fields.", values([["SKU", product.sku || sku], ["Vendor SKU", product.vendorSku || ""], ["Brand", product.brand || ""], ["Manufacturer", product.manufacturer || ""], ["Mfr part number", product.mfrPartNumber || ""], ["Supplier", product.supplier || product.vendor || ""], ["Main category", product.mainCategory || product.category || ""], ["UPC / barcode", product.barcode || ""], ["UNSPSC", String(product.unspsc || "")], ["Selling UOM", product.uomDisplay || product.uom || "Each"]]))}{section("Pricing", "The current primary sell-unit price and its source.", values([["Sell-unit cost", moneyLabel(pricing.primarySellUnitCost ?? product.sellUnitCost)], ["Website price", moneyLabel(price)], ["Gross profit", moneyLabel(price - cost)], ["Margin", `${margin.toFixed(1)}%`], ["Pricing source", pricingSourceLabel], ["Last price update", product.lastPricesUpdateAt ? dateLabel(product.lastPricesUpdateAt) : "Not recorded"], ["Updated by", product.lastPricesUpdateBy || "Not recorded"], ["List / MSRP", moneyLabel(product.listPrice || product.msrp)]]))}</div>{section("Product content", "Customer-facing merchandising summary.", <div className="grid gap-4"><div><p className="mb-1 text-xs font-bold uppercase tracking-wide text-muted-foreground">Short description</p><p className="whitespace-pre-wrap text-sm leading-6">{product.shortDescription || "No short description has been prepared."}</p></div><Separator /><div><p className="mb-1 text-xs font-bold uppercase tracking-wide text-muted-foreground">Long description</p><p className="line-clamp-4 whitespace-pre-wrap text-sm leading-6">{product.longDescription || "No long description has been prepared."}</p></div></div>)}<div className="grid gap-4 xl:grid-cols-2">{section("Inventory & status", "Sellable stock, replenishment, and product state.", values([["On hand", numberLabel(product.qty ?? product.stockQty)], ["Reserved", numberLabel(product.reserved)], ["Available", numberLabel(available)], ["Reorder point", numberLabel(product.reorderPoint)], ["Replenishable", product.replenishable ? "Enabled" : "Off"], ["Replenishable qty", numberLabel(product.effectiveReplenishableQty)], ["Product status", product.toBeDiscontinued ? "Discontinued" : product.status || (product.active === false ? "Inactive" : "Active")], ["Stock updated", product.stockUpdatedAt ? dateLabel(product.stockUpdatedAt) : "Not recorded"]]))}{section("Dimensions & shipping", "Physical product and shipment measurements.", values([["Item dimensions", product.itemLength && product.itemWidth && product.itemHeight ? `${product.itemLength} x ${product.itemWidth} x ${product.itemHeight} in` : "Not recorded"], ["Item weight", product.itemWeight ? `${product.itemWeight} lb` : "Not recorded"], ["Package dimensions", product.packageLength && product.packageWidth && product.packageHeight ? `${product.packageLength} x ${product.packageWidth} x ${product.packageHeight} in` : "Not recorded"], ["Package weight", product.packageWeight ? `${product.packageWeight} lb` : "Not recorded"], ["Shipping class", product.shippingClass || "Not classified"], ["Shipping method", product.shippingMethod || "Not classified"], ["Dimensional weight", product.dimensionalWeight ? `${product.dimensionalWeight} lb` : "Not calculated"], ["Last record update", product.updatedAt ? dateLabel(product.updatedAt) : "Not recorded"]]))}</div></TabsContent>
@@ -10479,6 +10484,11 @@ function WarehouseAuditPanel({
   const [countEditBusy, setCountEditBusy] = useState(false);
   const [scannerSettings, setScannerSettings] = useState<SystemSettings>({});
   const [quickPreviewItem, setQuickPreviewItem] = useState<CatalogItem | null>(null);
+  const [foundStockFileName, setFoundStockFileName] = useState("");
+  const [foundStockCsv, setFoundStockCsv] = useState("");
+  const [includeAlreadyListedFoundStock, setIncludeAlreadyListedFoundStock] = useState(false);
+  const [foundStockImporting, setFoundStockImporting] = useState(false);
+  const [ebayReadinessBusy, setEbayReadinessBusy] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const photoVideoRef = useRef<HTMLVideoElement | null>(null);
   const manualSkuRef = useRef<HTMLInputElement | null>(null);
@@ -10774,6 +10784,55 @@ function WarehouseAuditPanel({
       );
     } finally {
       setBusy(false);
+    }
+  };
+  const chooseFoundStockFile = async (file?: File | null) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      setFoundStockFileName(file.name);
+      setFoundStockCsv(text);
+      toast.success(`${file.name} ready to import.`);
+    } catch {
+      toast.error("Unable to read that CSV file.");
+    }
+  };
+  const importFoundStockCsv = async () => {
+    if (!resumedAudit || !foundStockCsv.trim()) return toast.error("Choose a found-stock CSV first.");
+    setFoundStockImporting(true);
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; summary?: Record<string, unknown>; message?: string }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/found-stock-import`,
+        { method: "POST", body: JSON.stringify({ csv: foundStockCsv, fileName: foundStockFileName, includeAlreadyListed: includeAlreadyListedFoundStock, user: auditOwner || "Luis" }) },
+      );
+      applyAuditUpdate(result.audit || resumedAudit);
+      setFoundStockCsv("");
+      setFoundStockFileName("");
+      const summary = result.summary || {};
+      const importedCount = Number(summary.imported || 0);
+      toast.success(result.message || `Imported ${numberLabel(importedCount)} found-stock row${importedCount === 1 ? "" : "s"}.`);
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to import found-stock CSV.");
+    } finally {
+      setFoundStockImporting(false);
+    }
+  };
+  const queueFoundStockEbayReadiness = async () => {
+    if (!resumedAudit) return;
+    setEbayReadinessBusy(true);
+    try {
+      const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/ebay-readiness`,
+        { method: "POST", body: JSON.stringify({ includeAlreadyListed: includeAlreadyListedFoundStock }) },
+      );
+      toast.success(result.message || "eBay found-stock readiness queued.");
+      if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", `/jobs/${encodeURIComponent(String(result.job?.id))}`); window.dispatchEvent(new PopStateEvent("popstate")) }, 500);
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue eBay readiness.");
+    } finally {
+      setEbayReadinessBusy(false);
     }
   };
   const submit = async (value = barcode, quantity = 1) => {
@@ -11242,6 +11301,9 @@ function WarehouseAuditPanel({
   const auditStatus = String(current?.status || "");
   const varianceLines = lines.filter((line) => Number(line.countedQty || 0) !== Number(line.expectedQty || 0));
   const unresolvedUnknowns = unknowns.filter((item) => !item.createdProductSku);
+  const foundStockLines = lines.filter((line) => String(line.source || "").includes("found-stock") || Boolean(line.foundStock));
+  const latestFoundStockImport = Array.isArray(current?.foundStockImports) ? current?.foundStockImports[0] as Record<string, unknown> : null;
+  const latestFoundStockSummary = latestFoundStockImport?.summary && typeof latestFoundStockImport.summary === "object" ? latestFoundStockImport.summary as Record<string, unknown> : null;
   if (createOnly)
     return (
       <Card>
@@ -11368,6 +11430,27 @@ function WarehouseAuditPanel({
                 {auditStatus === "pending_review" && <Button size="sm" disabled={busy} onClick={() => void complete()}>Approve & apply counts</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}>Return to count</Button>}
                 <Button size="sm" variant="ghost" className="col-span-2 sm:col-span-1" asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export</a></Button>
+              </div>
+            </div>
+            <div className="grid gap-3 rounded-md border bg-muted/20 p-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+              <div className="grid gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-medium">Found stock import</p>
+                  <Badge variant="outline">{numberLabel(foundStockLines.length)} found-stock SKU{foundStockLines.length === 1 ? "" : "s"}</Badge>
+                  {latestFoundStockSummary ? <Badge variant="secondary">{numberLabel(Number(latestFoundStockSummary.imported || 0))} last import</Badge> : null}
+                </div>
+                <p className="text-xs text-muted-foreground">Upload physical stock from this warehouse, create reusable local SKUs, then queue eBay readiness for imported rows.</p>
+                {latestFoundStockSummary ? <p className="text-xs text-muted-foreground">Latest: {numberLabel(Number(latestFoundStockSummary.matchedCatalog || 0))} catalog matches, {numberLabel(Number(latestFoundStockSummary.created || 0))} created, {numberLabel(Number(latestFoundStockSummary.reused || 0))} reused, {numberLabel(Number(latestFoundStockSummary.alreadyListed || 0))} already listed.</p> : null}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted">
+                  <FileUp className="size-4" />
+                  {foundStockFileName || "Choose CSV"}
+                  <input type="file" accept=".csv,text/csv" className="sr-only" disabled={auditStatus !== "in_progress" || foundStockImporting} onChange={(event) => void chooseFoundStockFile(event.target.files?.[0])} />
+                </label>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground"><Checkbox checked={includeAlreadyListedFoundStock} onCheckedChange={(checked) => setIncludeAlreadyListedFoundStock(checked === true)} /> Include already listed in eBay prep</label>
+                <Button size="sm" disabled={auditStatus !== "in_progress" || foundStockImporting || !foundStockCsv.trim()} onClick={() => void importFoundStockCsv()}>{foundStockImporting ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Import</Button>
+                <Button size="sm" variant="outline" disabled={ebayReadinessBusy || !foundStockLines.length} onClick={() => void queueFoundStockEbayReadiness()}>{ebayReadinessBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} Get ready for eBay</Button>
               </div>
             </div>
             {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Review required before inventory changes</p><p className="text-muted-foreground">This audit contains {numberLabel(varianceLines.length)} SKU variance lines and {numberLabel(unresolvedUnknowns.length)} unresolved UPCs. Approving it posts the counted quantities to {String(current.warehouseName)}.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
@@ -12279,6 +12362,7 @@ type WaitingPoSupplierGroup = {
   units: number
   estimatedCost: number
   nextCutoffMs: number
+  nextCutoffPo?: Record<string, unknown>
   readyForReview: boolean
 }
 
@@ -12404,6 +12488,56 @@ function waitingPoCutoff(po: Record<string, unknown>) {
   return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY
 }
 
+const PURCHASE_WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+type VendorDeliveryScheduleRow = {
+  id: string
+  cutoffDay: number
+  cutoffTime: string
+  deliveryDay: number
+  enabled: boolean
+  label?: string
+}
+
+function normalizeVendorDeliverySchedule(value: unknown): VendorDeliveryScheduleRow[] {
+  if (!Array.isArray(value)) return []
+  return value.map((entry, index) => {
+    const row = (entry || {}) as Record<string, unknown>
+    return {
+      id: String(row.id || `delivery-window-${index + 1}`),
+      cutoffDay: Math.max(0, Math.min(6, Number(row.cutoffDay ?? 2))),
+      cutoffTime: /^\d{2}:\d{2}$/.test(String(row.cutoffTime || "")) ? String(row.cutoffTime) : "16:00",
+      deliveryDay: Math.max(0, Math.min(6, Number(row.deliveryDay ?? 3))),
+      enabled: row.enabled !== false,
+      label: String(row.label || ""),
+    }
+  })
+}
+
+function purchaseScheduleTimeLabel(value: unknown) {
+  const [hours, minutes] = String(value || "15:00").split(":").map(Number)
+  const date = new Date(2000, 0, 1, Number.isFinite(hours) ? hours : 15, Number.isFinite(minutes) ? minutes : 0)
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+}
+
+function purchaseScheduleDateLabel(value: unknown) {
+  const raw = String(value || "").split("T")[0]
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw || "Not scheduled"
+  return new Date(`${raw}T12:00:00`).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })
+}
+
+function PurchaseScheduleSummary({ record, compact = false }: { record: Record<string, unknown>; compact?: boolean }) {
+  const cutoffMs = waitingPoCutoff(record)
+  const passed = Boolean(record.readyForReview) || (Number.isFinite(cutoffMs) && cutoffMs <= Date.now())
+  const cutoffDate = record.poolDate || record.cutoffDate
+  const expectedDelivery = record.expectedDeliveryDate || record.expectedAt
+  return <div className={`grid ${compact ? "min-w-44 gap-0.5" : "gap-1"}`}>
+    <Badge variant={passed ? "destructive" : "info"} className="w-fit">{passed ? "Cutoff passed" : "Collecting"}</Badge>
+    <span className="text-sm font-medium">{purchaseScheduleDateLabel(cutoffDate)} at {purchaseScheduleTimeLabel(record.cutoffTime)}</span>
+    <span className="text-xs text-muted-foreground">Delivery {purchaseScheduleDateLabel(expectedDelivery)} · {String(record.cutoffTimezone || "America/New_York").replace("America/", "")}</span>
+  </div>
+}
+
 function groupWaitingPurchaseOrders(rows: Array<Record<string, unknown>>) {
   const groups = new Map<string, WaitingPoSupplierGroup>()
   rows.filter(purchaseOrderIsWaiting).forEach((po) => {
@@ -12431,7 +12565,10 @@ function groupWaitingPurchaseOrders(rows: Array<Record<string, unknown>>) {
     })
     if (po.warehouseName) group.destinations.add(String(po.warehouseName))
     group.estimatedCost += Number(po.openEstimatedCost ?? po.estimatedCost ?? 0)
-    group.nextCutoffMs = Math.min(group.nextCutoffMs, cutoffMs)
+    if (cutoffMs < group.nextCutoffMs) {
+      group.nextCutoffMs = cutoffMs
+      group.nextCutoffPo = po
+    }
     group.readyForReview = group.readyForReview || Boolean(po.readyForReview) || cutoffMs <= Date.now()
     groups.set(key, group)
   })
@@ -12538,7 +12675,7 @@ function PurchasingPage() {
       <TabsContent value="waiting" className="mt-4 grid gap-4">
         <Alert><Clock3 className="size-4" /><AlertTitle>Draft POs open as soon as purchasing is required</AlertTitle><AlertDescription>DataPlus creates one numbered draft per supplier and physical receiving warehouse, then keeps adding eligible orders and SKUs until the buyer submits it. The cutoff marks the draft ready for review; it does not delay PO creation.</AlertDescription></Alert>
         {pooledRequirements.length > 0 && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>{numberLabel(pooledRequirements.length)} legacy requirement{pooledRequirements.length === 1 ? "" : "s"} need repair</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>These older lines predate numbered draft POs.</span><Button size="sm" variant="outline" disabled={poolingBusy} onClick={() => setForcePoolOpen(true)}>{poolingBusy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Repair legacy lines</Button></AlertDescription></Alert>}
-        <Card><CardHeader className="border-b"><CardTitle className="text-base">Draft POs</CardTitle><CardDescription>{numberLabel(collectingPurchaseOrders.length)} numbered draft PO{collectingPurchaseOrders.length === 1 ? "" : "s"} are collecting {numberLabel(waitingUnits)} units across {numberLabel(waitingOrderIds.size)} customer order{waitingOrderIds.size === 1 ? "" : "s"}. The Next step column tells the buyer exactly what each draft needs.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Supplier</TableHead><TableHead>Draft POs</TableHead><TableHead>Orders</TableHead><TableHead>SKUs</TableHead><TableHead>Units</TableHead><TableHead>Open cost</TableHead><TableHead>Receiving destination</TableHead><TableHead>Next step</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{waitingSupplierGroups.map((group) => { const destinations = [...group.destinations]; const nextStep = group.purchaseOrders.map(purchaseOrderNextStep).sort((left, right) => right.priority - left.priority)[0]; return <TableRow key={group.key}><TableCell><a className="font-medium hover:underline" href={`/purchasing/waiting-for-po/${encodeURIComponent(group.key)}`}>{group.supplier}</a></TableCell><TableCell>{numberLabel(group.purchaseOrders.length)}</TableCell><TableCell>{numberLabel(group.orderIds.size)}</TableCell><TableCell>{numberLabel(group.skus.size)}</TableCell><TableCell>{numberLabel(group.units)}</TableCell><TableCell>{moneyLabel(group.estimatedCost)}</TableCell><TableCell className="max-w-56"><p className="truncate" title={destinations.join(", ")}>{destinations.length === 1 ? destinations[0] : `${numberLabel(destinations.length)} destinations`}</p></TableCell><TableCell><div className="grid max-w-56 gap-1"><Badge variant={nextStep?.variant || "secondary"} className="w-fit">{nextStep?.label || "Collecting orders"}</Badge><span className="text-xs text-muted-foreground">{nextStep?.description || "New eligible orders keep joining this supplier draft."}</span></div></TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/purchasing/waiting-for-po/${encodeURIComponent(group.key)}`}>Open draft</a></Button></TableCell></TableRow>})}{!waitingSupplierGroups.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No draft POs are collecting orders. Check Ready to Send for drafts that need buyer action.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
+        <Card><CardHeader className="border-b"><CardTitle className="text-base">Draft POs</CardTitle><CardDescription>{numberLabel(collectingPurchaseOrders.length)} numbered draft PO{collectingPurchaseOrders.length === 1 ? "" : "s"} are collecting {numberLabel(waitingUnits)} units across {numberLabel(waitingOrderIds.size)} customer order{waitingOrderIds.size === 1 ? "" : "s"}. The schedule shows the actual supplier cutoff and expected delivery.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Supplier</TableHead><TableHead>Draft POs</TableHead><TableHead>Orders</TableHead><TableHead>SKUs</TableHead><TableHead>Units</TableHead><TableHead>Open cost</TableHead><TableHead>Receiving destination</TableHead><TableHead>Schedule</TableHead><TableHead>Next step</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{waitingSupplierGroups.map((group) => { const destinations = [...group.destinations]; const nextStep = group.purchaseOrders.map(purchaseOrderNextStep).sort((left, right) => right.priority - left.priority)[0]; return <TableRow key={group.key}><TableCell><a className="font-medium hover:underline" href={`/purchasing/waiting-for-po/${encodeURIComponent(group.key)}`}>{group.supplier}</a></TableCell><TableCell>{numberLabel(group.purchaseOrders.length)}</TableCell><TableCell>{numberLabel(group.orderIds.size)}</TableCell><TableCell>{numberLabel(group.skus.size)}</TableCell><TableCell>{numberLabel(group.units)}</TableCell><TableCell>{moneyLabel(group.estimatedCost)}</TableCell><TableCell className="max-w-56"><p className="truncate" title={destinations.join(", ")}>{destinations.length === 1 ? destinations[0] : `${numberLabel(destinations.length)} destinations`}</p></TableCell><TableCell>{group.nextCutoffPo ? <PurchaseScheduleSummary record={group.nextCutoffPo} compact /> : "Not scheduled"}</TableCell><TableCell><div className="grid max-w-56 gap-1"><Badge variant={nextStep?.variant || "secondary"} className="w-fit">{nextStep?.label || "Collecting orders"}</Badge><span className="text-xs text-muted-foreground">{nextStep?.description || "New eligible orders keep joining this supplier draft."}</span></div></TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/purchasing/waiting-for-po/${encodeURIComponent(group.key)}`}>Open draft</a></Button></TableCell></TableRow>})}{!waitingSupplierGroups.length && <TableRow><TableCell colSpan={10} className="h-28 text-center text-muted-foreground">No draft POs are collecting orders. Check Ready to Send for drafts that need buyer action.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
       </TabsContent>
       <TabsContent value="pool" className="mt-4 grid gap-4">
         <Alert><Clock3 className="size-4" /><AlertTitle>Supplier demand is pooled before PO creation</AlertTitle><AlertDescription>DataPlus groups unfulfilled supplier lines by supplier and receiving warehouse until the cutoff. Physical warehouse stock bypasses this queue and goes directly to fulfillment. Next cutoff: {poolSummary.nextCutoff ? dateLabel(String(poolSummary.nextCutoff)) : "not scheduled"}.</AlertDescription></Alert>
@@ -12552,7 +12689,7 @@ function PurchasingPage() {
         {requirements.map((row) => { const poId = String(row.purchaseOrderId || ""); const orderId = String(row.orderId || ""); const sku = String(row.sku || ""); const status = String(row.status || "new").toLowerCase(); const hasSupplier = Boolean(String(row.vendorId || "").trim()); return <TableRow key={String(row.id)}><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(orderId)}`}>{String(row.orderNumber)}</a><p className="text-xs text-muted-foreground">{String(row.customer || "Customer")}</p></TableCell><TableCell>{sku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(sku)}`} target="_blank" rel="noreferrer" title={`Open ${sku} in a new tab`}>{sku}</a> : "-"}<p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell><Badge variant="outline">{String(row.type || "purchase").replace(/_/g, " ")}</Badge></TableCell><TableCell>{String(row.vendorName || "Unassigned")} {row.reviewReason ? <p className="mt-1 max-w-64 text-xs text-amber-700 dark:text-amber-300">{String(row.reviewReason)}</p> : null}</TableCell><TableCell>{poId ? <a className="font-medium hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(row.purchaseOrderNumber || poId)}</a> : <span className="text-muted-foreground">Not created</span>}</TableCell><TableCell>{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant={status.includes("exception") ? "destructive" : status === "buyer_review" ? "outline" : status === "converted" ? "default" : "secondary"} className={status === "buyer_review" ? "border-amber-400 bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200" : status === "converted" ? "bg-emerald-600 text-white hover:bg-emerald-600" : ""}>{purchaseRequirementStatusLabel(status)}</Badge></TableCell><TableCell className="text-right">{poId ? <Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(poId)}`}>Open PO</a></Button> : status === "buyer_review" && !hasSupplier ? <Button size="sm" variant="outline" asChild><a href={`/products/${encodeURIComponent(sku)}`}>Assign supplier</a></Button> : <Button size="sm" disabled={creatingOrderId === orderId} onClick={() => void createForOrder(orderId)}>{creatingOrderId === orderId ? <Loader2 className="size-4 animate-spin" /> : "Create PO"}</Button>}</TableCell></TableRow> })}
         {!requirements.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase requirements match this view.</TableCell></TableRow>}
       </TableBody></Table></div></CardContent></Card></TabsContent>
-      <TabsContent value="approvals" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Ready to Send</CardTitle><CardDescription>These drafts now need buyer action. Approve any required commitment, review the final order, then send it to the supplier.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Estimated cost</TableHead><TableHead>Next step</TableHead><TableHead>Cutoff</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{approvalQueue.map((po) => { const approval = (po.approval || {}) as Record<string, unknown>; const poId = String(po.id || ""); const approvalStatus = String(approval.status || "pending").toLowerCase(); const needsApproval = approval.required !== false && approvalStatus !== "approved"; const nextStep = purchaseOrderNextStep(po); return <TableRow key={poId}><TableCell><a className="font-medium hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(po.poNumber || poId)}</a></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || purchaseOrderItems(po).reduce((sum, line) => sum + Number(line.qty || 0), 0)))}</TableCell><TableCell>{moneyLabel(Number(po.openEstimatedCost ?? po.estimatedCost ?? 0))}</TableCell><TableCell><div className="grid max-w-52 gap-1"><Badge variant={nextStep.variant} className="w-fit">{nextStep.label}</Badge><span className="text-xs text-muted-foreground">{nextStep.description}</span></div></TableCell><TableCell className="whitespace-nowrap">{String(po.cutoffTime || "15:00")}<p className="text-xs text-muted-foreground">{String(po.poolDate || po.cutoffDate || "-")}</p></TableCell><TableCell className="text-right">{needsApproval ? <div className="flex justify-end gap-1"><Button size="sm" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "hold")}>Hold</Button><Button size="sm" variant="ghost" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "reject")}>Reject</Button></div> : <Button size="sm" asChild><a href={`/purchase-orders/${encodeURIComponent(poId)}`}>Open to send</a></Button>}</TableCell></TableRow> })}{!approvalQueue.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No draft POs need buyer action.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
+      <TabsContent value="approvals" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Ready to Send</CardTitle><CardDescription>These drafts now need buyer action. Approve any required commitment, review the final order, then send it to the supplier.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Estimated cost</TableHead><TableHead>Next step</TableHead><TableHead>Schedule</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{approvalQueue.map((po) => { const approval = (po.approval || {}) as Record<string, unknown>; const poId = String(po.id || ""); const approvalStatus = String(approval.status || "pending").toLowerCase(); const needsApproval = approval.required !== false && approvalStatus !== "approved"; const nextStep = purchaseOrderNextStep(po); return <TableRow key={poId}><TableCell><a className="font-medium hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(po.poNumber || poId)}</a></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || purchaseOrderItems(po).reduce((sum, line) => sum + Number(line.qty || 0), 0)))}</TableCell><TableCell>{moneyLabel(Number(po.openEstimatedCost ?? po.estimatedCost ?? 0))}</TableCell><TableCell><div className="grid max-w-52 gap-1"><Badge variant={nextStep.variant} className="w-fit">{nextStep.label}</Badge><span className="text-xs text-muted-foreground">{nextStep.description}</span></div></TableCell><TableCell><PurchaseScheduleSummary record={po} compact /></TableCell><TableCell className="text-right">{needsApproval ? <div className="flex justify-end gap-1"><Button size="sm" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "hold")}>Hold</Button><Button size="sm" variant="ghost" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "reject")}>Reject</Button></div> : <Button size="sm" asChild><a href={`/purchase-orders/${encodeURIComponent(poId)}`}>Open to send</a></Button>}</TableCell></TableRow> })}{!approvalQueue.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No draft POs need buyer action.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="sent" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Sent to suppliers</CardTitle><CardDescription>Submitted purchase orders stay here until receiving begins or they are closed.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Destination</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Status</TableHead><TableHead>Sent / updated</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
         {sentPos.map((po) => <TableRow key={String(po.id)}><TableCell className="font-medium"><a className="hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || po.id)}</a></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{String(po.warehouseName || "-")}</TableCell><TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || 0))}</TableCell><TableCell><Badge variant="default">{String(po.status || "submitted").replace(/_/g, " ")}</Badge></TableCell><TableCell>{dateLabel(String(po.submittedAt || po.placedAt || po.sentAt || po.updatedAt || po.createdAt || ""))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>Open PO</a></Button></TableCell></TableRow>)}
         {!sentPos.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase orders have been sent to suppliers.</TableCell></TableRow>}
@@ -12608,7 +12745,7 @@ function PurchasingSupplierPoolPage({ supplierKey }: { supplierKey: string }) {
       const poOrders = new Set(items.map((line) => String(line.orderId || "")).filter(Boolean))
       const nextStep = purchaseOrderNextStep(po)
       return <Card key={String(po.id)}>
-        <CardHeader className="gap-3 border-b lg:flex-row lg:items-center lg:justify-between"><div><div className="flex flex-wrap items-center gap-2"><CardTitle className="text-base"><a className="hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || "Draft PO")}</a></CardTitle><Badge variant={nextStep.variant}>{nextStep.label}</Badge></div><CardDescription>{String(po.warehouseName || "Receiving warehouse not assigned")} · {numberLabel(poOrders.size)} order{poOrders.size === 1 ? "" : "s"} · updated {dateLabel(String(po.updatedAt || po.createdAt || ""))}</CardDescription><p className="mt-1 text-xs text-muted-foreground">{nextStep.description}</p></div><div className="flex flex-wrap items-center gap-3"><div className="text-right text-sm"><p className="font-medium">Review cutoff {String(po.cutoffTime || "15:00")}</p><p className="text-xs text-muted-foreground">{String(po.poolDate || "Next business day")}</p></div><Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>Open draft PO</a></Button></div></CardHeader>
+        <CardHeader className="gap-3 border-b lg:flex-row lg:items-center lg:justify-between"><div><div className="flex flex-wrap items-center gap-2"><CardTitle className="text-base"><a className="hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || "Draft PO")}</a></CardTitle><Badge variant={nextStep.variant}>{nextStep.label}</Badge></div><CardDescription>{String(po.warehouseName || "Receiving warehouse not assigned")} · {numberLabel(poOrders.size)} order{poOrders.size === 1 ? "" : "s"} · updated {dateLabel(String(po.updatedAt || po.createdAt || ""))}</CardDescription><p className="mt-1 text-xs text-muted-foreground">{nextStep.description}</p></div><div className="flex flex-wrap items-center gap-3"><PurchaseScheduleSummary record={po} /><Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>Open draft PO</a></Button></div></CardHeader>
         <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-14">Item</TableHead><TableHead>SKU / product</TableHead><TableHead>Supplier</TableHead><TableHead>Mfr part #</TableHead><TableHead>Vendor part #</TableHead><TableHead>Vendor SKU</TableHead><TableHead>Customer order</TableHead><TableHead>Quantity</TableHead><TableHead>Unit cost</TableHead><TableHead>Line total</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{items.map((line, index) => { const sku = String(line.sku || ""); const orderId = String(line.orderId || ""); const quantity = Number(line.qty || 0); const unitCost = Number(line.unitCost ?? line.estimatedUnitCost ?? 0); return <TableRow key={String(line.routeId || `${sku}-${orderId}-${index}`)}><TableCell><CatalogImage src={String(line.defaultImage || "")} alt={String(line.title || sku || "Product")} className="size-10 shrink-0" imageClassName="size-full" /></TableCell><TableCell><a className="font-medium hover:underline" href={`/products/${encodeURIComponent(sku)}`}>{sku || "Missing SKU"}</a><p className="max-w-80 truncate text-xs text-muted-foreground" title={String(line.title || "")}>{String(line.title || "Untitled product")}</p></TableCell><TableCell><PurchaseLineSupplier line={line} fallbackSupplier={String(po.supplier || "")} /></TableCell><TableCell className="font-mono text-xs">{String(line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || "-")}</TableCell><TableCell className="font-mono text-xs">{String(line.vendorPartNumber || line.vendorPart || line.partNumber || "-")}</TableCell><TableCell className="font-mono text-xs">{String(line.vendorSku || "-")}</TableCell><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(orderId)}`}>{String(line.orderNumber || orderId || "-")}</a></TableCell><TableCell>{numberLabel(quantity)}</TableCell><TableCell>{moneyLabel(unitCost)}</TableCell><TableCell>{moneyLabel(quantity * unitCost)}</TableCell><TableCell><Badge variant="secondary">Added to draft</Badge></TableCell></TableRow>})}{!items.length && <TableRow><TableCell colSpan={11} className="h-24 text-center text-muted-foreground">This draft has no linked lines.</TableCell></TableRow>}</TableBody></Table></div></CardContent>
       </Card>
     })}
@@ -12782,7 +12919,7 @@ function PurchaseOrderDetailPage() {
   const reSourceReplacementCost = reSourceSelectedLines.reduce((sum, line) => { const offer = line.alternatives.find((candidate) => candidate.vendorId === reSourceDraft.vendorId); return sum + Number(offer?.unitCost || 0) * line.openQty }, 0)
   return <div className="grid gap-5">
     <PageHeader eyebrow="Purchasing / Purchase order" title={String(po.poNumber || id)} description={`${String(po.supplier || "Unassigned supplier")} to ${String(po.warehouseName || "unassigned destination")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/purchasing">Back</a></Button><Button size="sm" variant="outline" onClick={() => void load()}><RefreshCw className="size-4" /> Refresh</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" disabled={saving}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={openEditor}>Edit PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("approve")}>Approve PO</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("reject")}>Reject PO</DropdownMenuItem><DropdownMenuItem onClick={() => void submit()}>Submit to supplier</DropdownMenuItem><DropdownMenuItem onClick={openAcknowledgement}>Record supplier acknowledgement</DropdownMenuItem><DropdownMenuItem onClick={() => void openReminder()}>Preview overdue reminder</DropdownMenuItem><DropdownMenuItem onClick={openDocument}>Link supplier document</DropdownMenuItem><DropdownMenuItem disabled={reSourceLoading || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => void openReSource()}>{reSourceLoading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Re-source open quantities</DropdownMenuItem><DropdownMenuItem onClick={openReceiving}>Receive inventory</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=csv`, "_blank", "noreferrer")}>Export CSV</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/api/purchase-orders/${encodeURIComponent(id)}/export?format=html`, "_blank", "noreferrer")}>Print PO</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void updateStatus("hold")}>Place on hold</DropdownMenuItem><DropdownMenuItem onClick={() => void updateStatus("close")}>Close PO</DropdownMenuItem><DropdownMenuItem className="text-destructive" onClick={() => void updateStatus("cancel")}>Cancel PO</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>} />
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} /><Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /></div>
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} /><Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /><Detail label="Cutoff" value={`${purchaseScheduleDateLabel(po.poolDate || po.cutoffDate)} ${purchaseScheduleTimeLabel(po.cutoffTime)}`} /><Detail label="Expected delivery" value={purchaseScheduleDateLabel(po.expectedDeliveryDate || po.expectedAt)} /></div>
     <Alert variant={nextStep.variant === "destructive" ? "destructive" : "default"} className={nextStep.variant === "default" ? "border-blue-500/30 bg-blue-500/5" : nextStep.variant === "secondary" ? "border-muted-foreground/20 bg-muted/40" : ""}>
       <Clock3 className="size-4" />
       <AlertTitle>Next step: {nextStep.label}</AlertTitle>
@@ -15251,11 +15388,33 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const inventoryRules = vendor.inventoryRules || {}
   const pricingRules = vendor.pricingRules || {}
   const variationRules = vendor.variationRules || {}
-  const purchaseOrderRules = (vendor as Vendor & { purchaseOrderRules?: Record<string, unknown> }).purchaseOrderRules || {}
+  const purchaseOrderRules = vendor.purchaseOrderRules || {}
   const sourcePriority = vendor.sourcePriority || {}
   const catalogSettings = vendor.catalogSettings || {}
   const catalogSourceCodesValue = draft["catalogSettings.sourceCodes"] ?? catalogSettings.sourceCodes ?? []
   const catalogSourceCodes = Array.isArray(catalogSourceCodesValue) ? catalogSourceCodesValue.join(" | ") : String(catalogSourceCodesValue || "")
+  const deliverySchedule = normalizeVendorDeliverySchedule(draft["purchaseOrderRules.deliverySchedule"] ?? purchaseOrderRules.deliverySchedule)
+  const weeklyScheduleEnabled = Boolean(draft["purchaseOrderRules.weeklyScheduleEnabled"] ?? purchaseOrderRules.weeklyScheduleEnabled ?? deliverySchedule.length > 0)
+
+  function updateDeliveryScheduleRow(id: string, field: keyof VendorDeliveryScheduleRow, next: unknown) {
+    update("purchaseOrderRules.deliverySchedule", deliverySchedule.map((row) => row.id === id ? { ...row, [field]: next } : row))
+  }
+
+  function addDeliveryScheduleRow() {
+    update("purchaseOrderRules.deliverySchedule", [...deliverySchedule, {
+      id: `delivery-window-${Date.now()}`,
+      cutoffDay: 2,
+      cutoffTime: "16:00",
+      deliveryDay: 3,
+      enabled: true,
+      label: "",
+    }])
+  }
+
+  function setWeeklyScheduleEnabled(next: boolean) {
+    update("purchaseOrderRules.weeklyScheduleEnabled", next)
+    if (next && !deliverySchedule.length) addDeliveryScheduleRow()
+  }
 
   return (
     <div className="grid gap-4">
@@ -15415,7 +15574,18 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
               <CardContent className="grid gap-4">
                 <ToggleField label="Auto-create draft POs" checked={Boolean(draft["purchaseOrderRules.autoCreateDrafts"] ?? purchaseOrderRules.autoCreateDrafts)} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.autoCreateDrafts", next)} />
                 <ToggleField label="Pool demand until supplier cutoff" description="Combine eligible order lines for this supplier into one draft PO per receiving warehouse." checked={Boolean(draft["purchaseOrderRules.poolUntilCutoff"] ?? (purchaseOrderRules.poolUntilCutoff ?? true))} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.poolUntilCutoff", next)} />
-                <Field label="Daily supplier cutoff"><Input disabled={!editing || (draft["purchaseOrderRules.poolUntilCutoff"] ?? purchaseOrderRules.poolUntilCutoff ?? true) === false} type="time" value={String(draft["purchaseOrderRules.cutoffTime"] ?? purchaseOrderRules.cutoffTime ?? "15:00")} onChange={(event) => update("purchaseOrderRules.cutoffTime", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Orders received after this time roll into the next eligible pool.</p></Field>
+                <ToggleField label="Use weekly delivery calendar" description="Set the real order cutoff and expected delivery weekday for suppliers that ship on selected days." checked={weeklyScheduleEnabled} disabled={!editing || (draft["purchaseOrderRules.poolUntilCutoff"] ?? purchaseOrderRules.poolUntilCutoff ?? true) === false} onCheckedChange={setWeeklyScheduleEnabled} />
+                {weeklyScheduleEnabled && <div className="grid gap-3 rounded-lg border bg-muted/20 p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-medium">Cutoff and delivery windows</p><p className="text-xs text-muted-foreground">Orders collect into the current draft until cutoff. The expected delivery date is saved on the PO.</p></div><Button type="button" size="sm" variant="outline" disabled={!editing} onClick={addDeliveryScheduleRow}><CalendarDays className="size-4" /> Add window</Button></div>
+                  {deliverySchedule.map((row) => <div key={row.id} className="grid gap-3 rounded-md border bg-background p-3 md:grid-cols-[1fr_9rem_1fr_auto] md:items-end">
+                    <Field label="Order cutoff day"><Select disabled={!editing || !row.enabled} value={String(row.cutoffDay)} onValueChange={(next) => updateDeliveryScheduleRow(row.id, "cutoffDay", Number(next))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PURCHASE_WEEKDAYS.map((day, index) => <SelectItem key={day} value={String(index)}>{day}</SelectItem>)}</SelectContent></Select></Field>
+                    <Field label="Cutoff time"><Input disabled={!editing || !row.enabled} type="time" value={row.cutoffTime} onChange={(event) => updateDeliveryScheduleRow(row.id, "cutoffTime", event.target.value)} /></Field>
+                    <Field label="Expected delivery day"><Select disabled={!editing || !row.enabled} value={String(row.deliveryDay)} onValueChange={(next) => updateDeliveryScheduleRow(row.id, "deliveryDay", Number(next))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PURCHASE_WEEKDAYS.map((day, index) => <SelectItem key={day} value={String(index)}>{day}</SelectItem>)}</SelectContent></Select></Field>
+                    <div className="flex items-center justify-end gap-2 pb-0.5"><Switch aria-label={`${PURCHASE_WEEKDAYS[row.cutoffDay]} delivery window`} disabled={!editing} checked={row.enabled} onCheckedChange={(next) => updateDeliveryScheduleRow(row.id, "enabled", next)} /><Button type="button" size="icon" variant="ghost" disabled={!editing} title="Remove delivery window" onClick={() => update("purchaseOrderRules.deliverySchedule", deliverySchedule.filter((entry) => entry.id !== row.id))}><Trash2 className="size-4" /></Button></div>
+                  </div>)}
+                  {!deliverySchedule.length && <p className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">Add the supplier's first cutoff and delivery window.</p>}
+                </div>}
+                <Field label={weeklyScheduleEnabled ? "Fallback daily cutoff" : "Daily supplier cutoff"}><Input disabled={!editing || weeklyScheduleEnabled || (draft["purchaseOrderRules.poolUntilCutoff"] ?? purchaseOrderRules.poolUntilCutoff ?? true) === false} type="time" value={String(draft["purchaseOrderRules.cutoffTime"] ?? purchaseOrderRules.cutoffTime ?? "15:00")} onChange={(event) => update("purchaseOrderRules.cutoffTime", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">{weeklyScheduleEnabled ? "Used only if the weekly delivery calendar is disabled or unavailable." : "Orders received after this time roll into the next eligible business-day pool."}</p></Field>
                 <Field label="Cutoff timezone"><Select disabled={!editing || (draft["purchaseOrderRules.poolUntilCutoff"] ?? purchaseOrderRules.poolUntilCutoff ?? true) === false} value={String(draft["purchaseOrderRules.cutoffTimezone"] ?? purchaseOrderRules.cutoffTimezone ?? "America/New_York")} onValueChange={(next) => update("purchaseOrderRules.cutoffTimezone", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="America/New_York">Eastern</SelectItem><SelectItem value="America/Chicago">Central</SelectItem><SelectItem value="America/Denver">Mountain</SelectItem><SelectItem value="America/Los_Angeles">Pacific</SelectItem><SelectItem value="UTC">UTC</SelectItem></SelectContent></Select></Field>
                 <ToggleField label="Allow true supplier drop shipping" description="When enabled, eligible lines may bypass receiving and ship directly from this supplier. Leave off when supplier stock must first be purchased into a physical warehouse." checked={Boolean(draft["purchaseOrderRules.dropShipEnabled"] ?? purchaseOrderRules.dropShipEnabled)} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.dropShipEnabled", next)} />
                 <ToggleField label="Require buyer approval" checked={Boolean(draft["purchaseOrderRules.requireBuyerApproval"] ?? (purchaseOrderRules.requireBuyerApproval ?? true))} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.requireBuyerApproval", next)} />

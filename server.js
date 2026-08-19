@@ -416,9 +416,9 @@ const PRODUCT_DUMP_FIELD_ALIASES = {
   unspsc: ["unspsc"],
   uom: ["uom"],
   uomQty: ["uom_qty", "uomQty"],
-  minQuantity: ["min_quantity", "minQuantity", "minimum_quantity"],
-  reorderPoint: ["min_quantity", "minimum_quantity"],
-  quantityIncrements: ["quantity_increments", "quantityIncrements"],
+  minQuantity: ["min_quantity", "minQuantity", "minimum_quantity", "minimumQuantity", "minimum qty", "minimum quantity", "min qty", "min quantity", "MIN min quantity"],
+  reorderPoint: ["min_quantity", "minimum_quantity", "minimumQuantity", "minimum qty", "minimum quantity", "min qty", "min quantity", "MIN min quantity"],
+  quantityIncrements: ["quantity_increments", "quantityIncrements", "quantity increments", "quantity increment", "qty_increments", "qtyIncrement", "qty increment", "order_increment", "order increment", "sell_increment", "sell increment"],
   cost: ["price", "cost", "fob_price", "wholesale_price"],
   sourceCost: ["price", "cost", "fob_price", "wholesale_price"],
   price: ["vendor_website_price", "vendorWebsitePrice", "price", "cost"],
@@ -1159,8 +1159,20 @@ function normalizedUomCode(value = "") {
 }
 
 function productUomQty(item = {}) {
-  const qty = Number(sourceNumberValue(item.uomQty ?? item.uom_qty ?? item.minQuantity ?? item.min_quantity ?? item.quantityIncrements ?? item.quantity_increments ?? 1));
-  return Number.isFinite(qty) && qty > 1 ? qty : 1;
+  const quantities = [
+    item.uomQty,
+    item.uom_qty,
+    item.minQuantity,
+    item.min_quantity,
+    item.quantityIncrements,
+    item.quantity_increments
+  ].map((value) => Number(sourceNumberValue(value))).filter((value) => Number.isFinite(value) && value > 1);
+  return quantities.length ? Math.max(...quantities) : 1;
+}
+
+function productHasMinimumSellMultiple(item = {}) {
+  return [item.minQuantity, item.min_quantity, item.quantityIncrements, item.quantity_increments]
+    .some((value) => Number(sourceNumberValue(value)) > 1);
 }
 
 function productSupplierTokens(item = {}) {
@@ -1265,7 +1277,7 @@ function productRequiresUomOnlyVariants(item = {}, db = null) {
 
 function productRequiresEachAndUomVariants(item = {}, db = null) {
   const rules = productVariationRules(item, db);
-  return rules.shopifyVariantMode === "each-and-uom" && rules.allowShopifyVariations !== false && productUomQty(item) > 1;
+  return rules.shopifyVariantMode === "each-and-uom" && rules.allowShopifyVariations !== false && productUomQty(item) > 1 && !productHasMinimumSellMultiple(item);
 }
 
 function productUomInfo(item = {}) {
@@ -1476,6 +1488,7 @@ function systemProductVariants(item = {}, db = null) {
     variants = [generated, ...manual].filter((variant) => {
       const key = String(variant.sku || "").trim().toLowerCase();
       if (!key || seen.has(key)) return false;
+      if (productHasMinimumSellMultiple(item) && Number(variant.uomQty || variant.packQty || 1) <= 1) return false;
       seen.add(key);
       return true;
     });
@@ -5756,6 +5769,219 @@ function productIsCloseout(item = {}) {
 
 function productBlockedFromShopifyWebsite(item = {}, db = null) {
   return productIsCloseout(item) && productSellableQty(item, db) <= 0;
+}
+
+function productInactiveOrDiscontinuedReason(item = {}) {
+  if (item.active === false) return "Inactive";
+  if (/\binactive\b/i.test(String(item.status || ""))) return "Inactive";
+  if (productIsCloseout(item) || /discontinued/i.test(String(item.status || ""))) return "Discontinued";
+  return "";
+}
+
+function productEbayLaunchBlockReason(item = {}, db = null) {
+  const reason = productInactiveOrDiscontinuedReason(item);
+  if (!reason) return "";
+  const sellableQty = productSellableQty(item, db);
+  return sellableQty > 0 ? "" : `${reason} with no sellable inventory`;
+}
+
+function productEbayLaunchInventoryWarning(item = {}, db = null) {
+  const reason = productInactiveOrDiscontinuedReason(item);
+  if (!reason) return "";
+  const sellableQty = productSellableQty(item, db);
+  if (!(sellableQty > 0)) return "";
+  return `${reason} status bypassed because sellable inventory is ${sellableQty.toLocaleString()}.`;
+}
+
+function foundStockCell(row = {}, names = []) {
+  const entries = Object.entries(row || {});
+  for (const name of names) {
+    const expected = String(name || "").trim().toLowerCase();
+    const match = entries.find(([key]) => String(key || "").trim().toLowerCase() === expected);
+    if (match) return String(match[1] ?? "").trim();
+  }
+  return "";
+}
+
+function cleanFoundStockSku(value = "") {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^0-9A-Za-z._-]/g, "")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
+function foundStockImportRow(row = {}) {
+  const itemNumber = cleanFoundStockSku(foundStockCell(row, ["Item Number", "SKU", "Internal SKU", "Item", "ItemNumber"]));
+  const mpn = foundStockCell(row, ["MPN", "Manufacturer Part Number", "Mfr Part Number", "Part Number"]);
+  const description = foundStockCell(row, ["Manufacturer / Description", "Description", "Title", "Product", "Manufacturer"]);
+  const quantity = Math.max(0, Math.floor(Number(foundStockCell(row, ["Quantity", "Qty", "Count", "On Hand"]) || 0) || 0));
+  return {
+    sourceRow: csvRecordRow(row),
+    itemNumber,
+    mpn,
+    description,
+    quantity,
+    locationBin: foundStockCell(row, ["LOCATION", "Location", "Bin", "Bin Location"]),
+    inventoryStatus: foundStockCell(row, ["Inventory Status", "Status"]),
+    ebayListingStatus: foundStockCell(row, ["eBay Listing Status", "Ebay Listing Status", "eBay Status"]),
+    notes: foundStockCell(row, ["Notes", "Note"])
+  };
+}
+
+function foundStockSkuForMatchedProduct(parent = {}, source = {}, audit = {}) {
+  const parentSku = cleanFoundStockSku(parent.sku || parent.id || "SKU") || "SKU";
+  const sourceKey = cleanFoundStockSku(source.itemNumber || source.mpn || `AUDIT-${String(audit.auditNumber || audit.id || "").replace(/\D/g, "")}`);
+  return `${parentSku}-OT-${sourceKey || String(audit.auditNumber || "FOUND").replace(/[^0-9A-Za-z]/g, "")}`.slice(0, 64);
+}
+
+function foundStockProductPayload({ sku, source, audit, warehouse, parent = null, now = new Date().toISOString(), createdBy = "Warehouse user" } = {}) {
+  const parentTitle = parent ? String(parent.marketplaceTitle || parent.title || "").trim() : "";
+  const title = parentTitle || source.description || source.mpn || source.itemNumber || sku;
+  const warehouseStock = normalizeWarehouseStockRow({
+    warehouseId: warehouse?.id || audit.warehouseId || "",
+    warehouseName: warehouse?.name || audit.warehouseName || "Warehouse",
+    locationBin: source.locationBin || "",
+    qty: source.quantity,
+    reserved: 0
+  }, warehouse);
+  return {
+    ...(parent ? {
+      parentSku: parent.sku || "",
+      parentProductId: parent.id || parent.sku || "",
+      sourceParentSku: parent.sku || "",
+      category: parent.category || "",
+      mainCategory: parent.mainCategory || parent.category || "",
+      sourceCategory: parent.sourceCategory || parent.vendorCategory || "",
+      brand: parent.brand || "",
+      manufacturer: parent.manufacturer || source.description || "",
+      shortDescription: parent.shortDescription || "",
+      longDescription: parent.longDescription || "",
+      images: Array.isArray(parent.images) ? parent.images : [],
+      defaultImage: parent.defaultImage || ""
+    } : {}),
+    id: crypto.randomUUID(),
+    sku,
+    title,
+    marketplaceTitle: title,
+    barcode: "",
+    qty: source.quantity,
+    stockQty: source.quantity,
+    reserved: 0,
+    reorderPoint: 0,
+    active: true,
+    status: "Draft",
+    condition: "New",
+    source: "warehouse-audit-found-stock",
+    mfrPartNumber: source.mpn || parent?.mfrPartNumber || "",
+    vendorSku: source.itemNumber || "",
+    externalId: source.itemNumber || "",
+    supplier: parent?.supplier || "",
+    cost: parent?.cost || 0,
+    price: parent?.price || parent?.websitePrice || 0,
+    websitePrice: parent?.websitePrice || parent?.price || 0,
+    locationBin: source.locationBin || "",
+    warehouseStock: [warehouseStock],
+    aliases: source.itemNumber && source.itemNumber.toLowerCase() !== sku.toLowerCase() ? [{
+      aliasSku: source.itemNumber,
+      parentSku: sku,
+      source: "Warehouse audit found stock",
+      type: parent ? "one-time-parent-match" : "one-time-found-stock",
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+      notes: `Imported from ${audit.auditNumber || "warehouse audit"}.`
+    }] : [],
+    foundStock: {
+      source: "warehouse-audit-csv",
+      auditId: audit.id || "",
+      auditNumber: audit.auditNumber || "",
+      itemNumber: source.itemNumber || "",
+      mpn: source.mpn || "",
+      originalDescription: source.description || "",
+      originalEbayListingStatus: source.ebayListingStatus || "",
+      originalInventoryStatus: source.inventoryStatus || "",
+      notes: source.notes || ""
+    },
+    ebayListing: {
+      ...(parent?.ebayListing && typeof parent.ebayListing === "object" ? parent.ebayListing : {}),
+      merchantSku: sku,
+      quantity: source.quantity,
+      status: "draft",
+      offerId: "",
+      listingId: ""
+    },
+    createdAt: now,
+    updatedAt: now,
+    createdBy,
+    createdMethod: parent ? "Warehouse audit one-time SKU from catalog match" : "Warehouse audit found-stock import",
+    createdSource: "Warehouse audit",
+    createdSourceDetail: audit.auditNumber || "",
+    createdAuditId: audit.id || "",
+    createdAuditNumber: audit.auditNumber || ""
+  };
+}
+
+async function findFoundStockCatalogParent(source = {}) {
+  const itemNumber = String(source.itemNumber || "").trim();
+  const mpn = String(source.mpn || "").trim();
+  if (itemNumber) {
+    const exact = await postgres.readProductByKey(itemNumber).catch(() => null);
+    if (exact?.foundStock || String(exact?.source || "").includes("found-stock")) return { product: null, existingFoundStock: exact, matchMethod: "existing_found_stock" };
+    if (exact) return { product: exact, matchMethod: "item_number" };
+  }
+  if (mpn) {
+    const exactMpn = await postgres.readProductByKey(mpn).catch(() => null);
+    if (exactMpn?.foundStock || String(exactMpn?.source || "").includes("found-stock")) return { product: null, existingFoundStock: exactMpn, matchMethod: "existing_found_stock" };
+    if (exactMpn) return { product: exactMpn, matchMethod: "mpn_key" };
+    const result = await postgres.listProducts({ q: mpn, page: 1, limit: 10 }).catch(() => null);
+    const rows = result?.inventory || result?.items || [];
+    const normalizedMpn = mpn.toLowerCase();
+    const strong = rows.find((product) => [
+      product.mfrPartNumber,
+      product.mpn,
+      product.vendorSku,
+      product.externalId
+    ].some((value) => String(value || "").trim().toLowerCase() === normalizedMpn));
+    if (strong) return { product: strong, matchMethod: "mpn_exact" };
+  }
+  return { product: null, existingFoundStock: null, matchMethod: "" };
+}
+
+function upsertAuditLineFromFoundStock(audit = {}, product = {}, source = {}, attrs = {}) {
+  const now = attrs.now || new Date().toISOString();
+  const locationKey = String(source.locationBin || "").trim().toLowerCase();
+  audit.lines = Array.isArray(audit.lines) ? audit.lines : [];
+  const existing = audit.lines.find((line) =>
+    String(line.productId || line.sku || "").toLowerCase() === String(product.id || product.sku || "").toLowerCase()
+    && String(line.locationBin || "").trim().toLowerCase() === locationKey
+  );
+  if (existing) {
+    existing.countedQty = Number(existing.countedQty || 0) + Number(source.quantity || 0);
+    existing.lastScannedAt = now;
+    existing.reviewStatus = "unreviewed";
+    existing.foundStock = { ...(existing.foundStock || {}), ...attrs.foundStock };
+    return existing;
+  }
+  const line = {
+    id: crypto.randomUUID(),
+    productId: product.id || product.sku,
+    sku: product.sku,
+    title: product.marketplaceTitle || product.title || product.sku,
+    image: auditProductImageUrl(product, {}),
+    barcode: source.itemNumber || source.mpn || product.sku,
+    locationBin: source.locationBin || "",
+    expectedQty: attrs.expectedQty ?? 0,
+    countedQty: Number(source.quantity || 0),
+    firstScannedAt: now,
+    lastScannedAt: now,
+    reviewStatus: "unreviewed",
+    source: "warehouse-audit-found-stock-csv",
+    foundStock: attrs.foundStock || {}
+  };
+  audit.lines.push(line);
+  return line;
 }
 
 function shopifyShippingEligibility(item = {}, settings = {}) {
@@ -10858,6 +11084,14 @@ function recalculateWaitingPurchaseOrder(db, po, vendor) {
     budgetExceeded,
     status: approvalRequired ? "pending" : "not_required"
   };
+  if (
+    vendor?.purchaseOrderRules?.weeklyScheduleEnabled !== false
+    && vendorDeliverySchedule(vendor).length
+    && po.scheduleMode !== "weekly"
+    && !purchaseRequirementIsDue(po)
+  ) {
+    Object.assign(po, nextPurchaseScheduleWindow(new Date(), vendor, defaultOrderWorkflowSettings().purchasePooling));
+  }
   po.readyForReview = purchaseRequirementIsDue(po);
   po.workflowStage = po.readyForReview ? "ready_for_buyer_review" : "waiting_for_po";
   po.updatedAt = new Date().toISOString();
@@ -10911,8 +11145,18 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
     const isNew = !po;
     if (!po) {
       const firstRoute = group.routes[0] || {};
-      const cutoffTime = String(firstRoute.cutoffTime || group.vendor?.purchaseOrderRules?.cutoffTime || "15:00");
-      const cutoffTimezone = String(firstRoute.cutoffTimezone || group.vendor?.purchaseOrderRules?.cutoffTimezone || "America/New_York");
+      const scheduleWindow = firstRoute.poolDate
+        ? {
+            cutoffTime: firstRoute.cutoffTime,
+            cutoffTimezone: firstRoute.cutoffTimezone,
+            poolDate: firstRoute.poolDate,
+            expectedDeliveryDate: firstRoute.expectedDeliveryDate,
+            scheduleMode: firstRoute.scheduleMode || "daily",
+            scheduleRuleId: firstRoute.scheduleRuleId || "",
+            cutoffDay: firstRoute.cutoffDay,
+            deliveryDay: firstRoute.deliveryDay
+          }
+        : nextPurchaseScheduleWindow(new Date(now), group.vendor, defaultOrderWorkflowSettings().purchasePooling);
       po = {
         id: crypto.randomUUID(),
         poNumber: nextPoNumber(db),
@@ -10924,9 +11168,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         supplier: group.vendor?.name || group.routes[0]?.vendorName || "Unassigned supplier",
         warehouseId: group.warehouse?.id || "",
         warehouseName: group.warehouse?.name || "",
-        cutoffTime,
-        cutoffTimezone,
-        poolDate: String(firstRoute.poolDate || nextPurchasePoolDate(new Date(now), cutoffTime, cutoffTimezone, true)),
+        ...scheduleWindow,
         readyForReview: false,
         orderIds: [],
         orderNumbers: [],
@@ -11915,6 +12157,10 @@ function normalizeVendor(db, vendor) {
   const existingPricingRules = vendor.pricingRules && typeof vendor.pricingRules === "object" ? vendor.pricingRules : {};
   const existingVariationRules = vendor.variationRules && typeof vendor.variationRules === "object" ? vendor.variationRules : {};
   const existingInventoryRules = vendor.inventoryRules && typeof vendor.inventoryRules === "object" ? vendor.inventoryRules : {};
+  const configuredDeliverySchedule = normalizePurchaseDeliveryScheduleRows(vendor.purchaseOrderRules?.deliverySchedule);
+  const deliverySchedule = configuredDeliverySchedule.length
+    ? configuredDeliverySchedule
+    : inferredVendorDeliverySchedule({ name: vendorName, code: vendorCode });
   const pricingRuleDefaults = isEssendant
     ? {
         costBasis: "sell-unit",
@@ -12015,6 +12261,8 @@ function normalizeVendor(db, vendor) {
       poolUntilCutoff: vendor.purchaseOrderRules?.poolUntilCutoff !== false,
       cutoffTime: vendor.purchaseOrderRules?.cutoffTime || "",
       cutoffTimezone: vendor.purchaseOrderRules?.cutoffTimezone || "",
+      weeklyScheduleEnabled: vendor.purchaseOrderRules?.weeklyScheduleEnabled !== false && deliverySchedule.length > 0,
+      deliverySchedule,
       dropShipEnabled: Boolean(vendor.purchaseOrderRules?.dropShipEnabled),
       requireBuyerApproval: vendor.purchaseOrderRules?.requireBuyerApproval !== false,
       approvalThreshold: Math.max(0, Number(vendor.purchaseOrderRules?.approvalThreshold || 0)),
@@ -17894,6 +18142,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     const results = [];
     const errors = [];
     const reviewIssues = [];
+    const warningIssues = [];
     const touched = [];
     let launched = 0;
     let ready = 0;
@@ -17917,11 +18166,12 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         processed_at: new Date().toISOString()
       };
       try {
-        if (lifecycleAction !== "end" && (item.active === false || /discontinued/i.test(String(item.status || "")))) {
+        const launchBlockReason = lifecycleAction !== "end" ? productEbayLaunchBlockReason(item, workDb) : "";
+        const launchInventoryWarning = lifecycleAction !== "end" ? productEbayLaunchInventoryWarning(item, workDb) : "";
+        if (launchBlockReason) {
           skipped += 1;
-          const reason = "Inactive or discontinued";
-          results.push({ ...resultContext, status: "skipped", reason });
-          reviewIssues.push(standardImportError({ sku, supplier, field: "status", issue: reason, details: `${label} skipped this SKU.` }));
+          results.push({ ...resultContext, status: "skipped", reason: launchBlockReason });
+          reviewIssues.push(standardImportError({ sku, supplier, field: "status", issue: launchBlockReason, details: `${label} skipped this SKU.` }));
         } else {
           const readiness = await ebayListingReadiness(workDb, item, payload);
           const config = readiness.config || {};
@@ -17952,6 +18202,10 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
             return_policy: config.returnPolicyId || "",
             fulfillment_policy: config.fulfillmentPolicyId || ""
           };
+          if (launchInventoryWarning) {
+            resultBase.warning = launchInventoryWarning;
+            warningIssues.push(standardImportError({ sku, supplier, field: "status", issue: "Inactive/discontinued inventory bypass", details: launchInventoryWarning }));
+          }
           if (lifecycleAction === "end") {
             const listing = await withdrawEbayListing(workDb, item, payload);
             touched.push(item);
@@ -17999,12 +18253,14 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     }
     if (touched.length && postgres.isPostgresEnabled()) await postgres.upsertProductsFromState(touched);
     attachImportJobOriginalFile(job, rowsToCsv(results), dryRun ? `${artifactStem}-review.csv` : `${artifactStem}-results.csv`);
-    attachImportJobErrorsFile(job, [...reviewIssues, ...errors]);
+    attachImportJobErrorsFile(job, [...reviewIssues, ...warningIssues, ...errors]);
     const status = errors.length
       ? (launched || ready ? "done_with_warnings" : "failed")
       : reviewIssues.length
         ? "done_with_warnings"
-        : "success";
+        : warningIssues.length
+          ? "done_with_warnings"
+          : "success";
     const changed = dryRun ? ready : launched;
     const message = dryRun
       ? `${label} complete: ${ready.toLocaleString()} ready, ${skipped.toLocaleString()} need data, ${errors.length.toLocaleString()} failed.`
@@ -18016,7 +18272,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
       processedRows: total,
       changed,
       missingCount: skipped + errors.length,
-      errors: [...reviewIssues, ...errors].map((row) => `${row.sku || "eBay"}: ${row.issue}`).slice(0, 100),
+      errors: [...reviewIssues, ...warningIssues, ...errors].map((row) => `${row.sku || "eBay"}: ${row.issue}${row.details ? ` - ${row.details}` : ""}`).slice(0, 100),
       progressPercent: 100,
       estimatedSecondsRemaining: 0,
       message,
@@ -18024,10 +18280,10 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     });
     await postgres.upsertOperationJob(job);
     await postgres.upsertOperationArtifact(job, "original").catch(() => {});
-    if (reviewIssues.length || errors.length) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
+    if (reviewIssues.length || warningIssues.length || errors.length) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
-    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: `${label} completed`, statusCode: reviewIssues.length || errors.length ? 207 : 200, ok: !reviewIssues.length && !errors.length, jobId: job.id, message });
+    appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: `${label} completed`, statusCode: reviewIssues.length || warningIssues.length || errors.length ? 207 : 200, ok: !reviewIssues.length && !warningIssues.length && !errors.length, jobId: job.id, message });
     publicStateJsonCache = null;
     return job;
   } catch (error) {
@@ -20043,6 +20299,95 @@ function addPoolDays(dateValue, days = 1) {
   return date.toISOString().slice(0, 10);
 }
 
+const PURCHASE_DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+function purchaseDayNumber(value, fallback = null) {
+  if (value !== null && value !== undefined && String(value).trim() !== "" && Number.isInteger(Number(value)) && Number(value) >= 0 && Number(value) <= 6) return Number(value);
+  const normalized = String(value || "").trim().toLowerCase();
+  const index = PURCHASE_DAY_NAMES.findIndex((day) => day.toLowerCase() === normalized || day.slice(0, 3).toLowerCase() === normalized.slice(0, 3));
+  return index >= 0 ? index : fallback;
+}
+
+function normalizePurchaseDeliveryScheduleRows(raw = []) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((entry, index) => {
+    const row = entry && typeof entry === "object" ? entry : {};
+    const cutoffDay = purchaseDayNumber(row.cutoffDay);
+    const deliveryDay = purchaseDayNumber(row.deliveryDay);
+    if (cutoffDay === null || deliveryDay === null) return null;
+    const cutoffTime = /^\d{2}:\d{2}$/.test(String(row.cutoffTime || "")) ? String(row.cutoffTime) : "15:00";
+    return {
+      id: String(row.id || `delivery-window-${index + 1}`),
+      cutoffDay,
+      cutoffTime,
+      deliveryDay,
+      enabled: row.enabled !== false,
+      label: String(row.label || "")
+    };
+  }).filter(Boolean);
+}
+
+function inferredVendorDeliverySchedule(vendor = {}) {
+  const identity = `${String(vendor.name || "")} ${String(vendor.code || "")}`.trim().toLowerCase();
+  if (!identity.includes("true value") && !/(^|\s)trv($|\s)/.test(identity)) return [];
+  return [
+    { id: "tuesday-wednesday", cutoffDay: 2, cutoffTime: "16:00", deliveryDay: 3, enabled: true, label: "Tuesday cutoff / Wednesday delivery" },
+    { id: "friday-monday", cutoffDay: 5, cutoffTime: "16:00", deliveryDay: 1, enabled: true, label: "Friday cutoff / Monday delivery" }
+  ];
+}
+
+function vendorDeliverySchedule(vendor = {}) {
+  const configured = normalizePurchaseDeliveryScheduleRows(vendor.purchaseOrderRules?.deliverySchedule);
+  return configured.length ? configured : inferredVendorDeliverySchedule(vendor);
+}
+
+function nextPurchaseScheduleWindow(now, vendor = {}, purchasePooling = {}) {
+  const vendorRules = vendor.purchaseOrderRules || {};
+  const cutoffTimezone = String(vendorRules.cutoffTimezone || purchasePooling.timezone || "America/New_York");
+  const local = localDateTimeParts(now, cutoffTimezone);
+  const weeklyRows = vendorRules.weeklyScheduleEnabled === false
+    ? []
+    : vendorDeliverySchedule(vendor).filter((row) => row.enabled !== false);
+  let selected = null;
+  for (let offset = 0; offset <= 14 && !selected; offset += 1) {
+    const candidateDate = addPoolDays(local.date, offset);
+    const candidateDay = new Date(`${candidateDate}T12:00:00.000Z`).getUTCDay();
+    const candidates = weeklyRows
+      .filter((row) => row.cutoffDay === candidateDay && (offset > 0 || local.time < row.cutoffTime))
+      .sort((left, right) => left.cutoffTime.localeCompare(right.cutoffTime));
+    if (candidates.length) selected = { row: candidates[0], date: candidateDate };
+  }
+  if (selected) {
+    const daysToDelivery = (selected.row.deliveryDay - selected.row.cutoffDay + 7) % 7 || 7;
+    return {
+      cutoffTime: selected.row.cutoffTime,
+      cutoffTimezone,
+      poolDate: selected.date,
+      expectedDeliveryDate: addPoolDays(selected.date, daysToDelivery),
+      scheduleMode: "weekly",
+      scheduleRuleId: selected.row.id,
+      cutoffDay: selected.row.cutoffDay,
+      deliveryDay: selected.row.deliveryDay
+    };
+  }
+  const cutoffTime = String(vendorRules.cutoffTime || purchasePooling.defaultCutoffTime || "15:00");
+  const poolDate = nextPurchasePoolDate(now, cutoffTime, cutoffTimezone, purchasePooling.skipWeekends !== false);
+  let expectedDeliveryDate = addPoolDays(poolDate, 1);
+  if (purchasePooling.skipWeekends !== false) {
+    while ([0, 6].includes(new Date(`${expectedDeliveryDate}T12:00:00.000Z`).getUTCDay())) expectedDeliveryDate = addPoolDays(expectedDeliveryDate, 1);
+  }
+  return {
+    cutoffTime,
+    cutoffTimezone,
+    poolDate,
+    expectedDeliveryDate,
+    scheduleMode: "daily",
+    scheduleRuleId: "",
+    cutoffDay: new Date(`${poolDate}T12:00:00.000Z`).getUTCDay(),
+    deliveryDay: new Date(`${expectedDeliveryDate}T12:00:00.000Z`).getUTCDay()
+  };
+}
+
 function nextPurchasePoolDate(now, cutoffTime, timeZone, skipWeekends = true) {
   const local = localDateTimeParts(now, timeZone);
   let poolDate = local.time >= cutoffTime ? addPoolDays(local.date, 1) : local.date;
@@ -20071,12 +20416,25 @@ function purchaseDestinationWarehouse(db, order, vendor) {
 function ensurePooledPurchaseRequirement(db, order, route, line, settings, vendor, sourceWarehouse = null, options = {}) {
   db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
   const purchasePooling = settings.purchasePooling || defaultOrderWorkflowSettings().purchasePooling;
-  const vendorRules = vendor?.purchaseOrderRules || {};
-  const cutoffTime = String(vendorRules.cutoffTime || purchasePooling.defaultCutoffTime || "15:00");
-  const cutoffTimezone = String(vendorRules.cutoffTimezone || purchasePooling.timezone || "America/New_York");
   const destination = purchaseDestinationWarehouse(db, order, vendor);
   const now = new Date();
   const existing = db.purchaseRequirements.find((requirement) => requirement.routeId === route.id);
+  const weeklyScheduleActive = vendor?.purchaseOrderRules?.weeklyScheduleEnabled !== false && vendorDeliverySchedule(vendor).some((row) => row.enabled !== false);
+  const existingScheduleMatchesVendor = existing && (weeklyScheduleActive
+    ? existing.scheduleMode === "weekly"
+    : existing.scheduleMode === "daily");
+  const scheduleWindow = existing && (purchaseRequirementIsDue(existing, now) || existingScheduleMatchesVendor)
+    ? {
+        cutoffTime: existing.cutoffTime,
+        cutoffTimezone: existing.cutoffTimezone,
+        poolDate: existing.poolDate,
+        expectedDeliveryDate: existing.expectedDeliveryDate,
+        scheduleMode: existing.scheduleMode || "daily",
+        scheduleRuleId: existing.scheduleRuleId || "",
+        cutoffDay: existing.cutoffDay,
+        deliveryDay: existing.deliveryDay
+      }
+    : nextPurchaseScheduleWindow(now, vendor, purchasePooling);
   const requestedStatus = String(options.status || (vendor ? "pooled" : "buyer_review")).toLowerCase();
   const next = existing || {
     id: crypto.randomUUID(),
@@ -20097,9 +20455,14 @@ function ensurePooledPurchaseRequirement(db, order, route, line, settings, vendo
     sourceWarehouseName: sourceWarehouse?.name || route.sourceWarehouseName || "",
     destinationWarehouseId: destination?.id || "",
     destinationWarehouseName: destination?.name || "",
-    cutoffTime,
-    cutoffTimezone,
-    poolDate: existing?.poolDate || nextPurchasePoolDate(now, cutoffTime, cutoffTimezone, purchasePooling.skipWeekends !== false),
+    cutoffTime: scheduleWindow.cutoffTime,
+    cutoffTimezone: scheduleWindow.cutoffTimezone,
+    poolDate: scheduleWindow.poolDate,
+    expectedDeliveryDate: scheduleWindow.expectedDeliveryDate,
+    scheduleMode: scheduleWindow.scheduleMode,
+    scheduleRuleId: scheduleWindow.scheduleRuleId,
+    cutoffDay: scheduleWindow.cutoffDay,
+    deliveryDay: scheduleWindow.deliveryDay,
     vendorSku: String(options.vendorSku || route.vendorSku || next.vendorSku || ""),
     manufacturer: String(options.manufacturer || route.manufacturer || line?.manufacturer || next.manufacturer || ""),
     mfrPartNumber: String(options.mfrPartNumber || options.manufacturerPartNumber || route.mfrPartNumber || route.manufacturerPartNumber || line?.mfrPartNumber || line?.manufacturerPartNumber || line?.mpn || next.mfrPartNumber || ""),
@@ -20129,9 +20492,14 @@ function ensurePooledPurchaseRequirement(db, order, route, line, settings, vendo
   route.warehouseName = destination?.name || route.warehouseName || "";
   route.sourceWarehouseId = next.sourceWarehouseId;
   route.sourceWarehouseName = next.sourceWarehouseName;
-  route.cutoffTime = cutoffTime;
-  route.cutoffTimezone = cutoffTimezone;
+  route.cutoffTime = next.cutoffTime;
+  route.cutoffTimezone = next.cutoffTimezone;
   route.poolDate = next.poolDate;
+  route.expectedDeliveryDate = next.expectedDeliveryDate;
+  route.scheduleMode = next.scheduleMode;
+  route.scheduleRuleId = next.scheduleRuleId;
+  route.cutoffDay = next.cutoffDay;
+  route.deliveryDay = next.deliveryDay;
   return next;
 }
 
@@ -21865,6 +22233,23 @@ function sourceDataValue(item = {}, keys = []) {
       if (Array.isArray(value) && value.length) return value.join(", ");
       if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
     }
+  }
+  return "";
+}
+
+function canonicalProductDumpFieldKey(key = "") {
+  return String(key || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function productDumpRecordFieldValue(record = {}, aliases = []) {
+  const keys = Array.isArray(aliases) ? aliases : [aliases];
+  for (const key of keys) {
+    const value = record?.[key];
+    if (value !== undefined && value !== null && String(value).trim()) return value;
+  }
+  const wanted = new Set(keys.map(canonicalProductDumpFieldKey).filter(Boolean));
+  for (const [key, value] of Object.entries(record || {})) {
+    if (wanted.has(canonicalProductDumpFieldKey(key)) && value !== undefined && value !== null && String(value).trim()) return value;
   }
   return "";
 }
@@ -25027,7 +25412,7 @@ function normalizeCatalogProductForInventory(record) {
   const defaultImage = sourceTextValue(record.defaultImage || record.default_image || record.image || record.image_url);
   const images = [...new Set([defaultImage, ...sourceListValue(record.images || record.image_urls)].filter(Boolean))];
   const stockQty = sourceNumberValue(record.stockQty ?? record.stock_qty ?? record.qty ?? record.quantity);
-  const minQuantity = sourceTextValue(record.minQuantity || record.min_quantity);
+  const minQuantity = sourceTextValue(productDumpRecordFieldValue(record, PRODUCT_DUMP_FIELD_ALIASES.minQuantity));
   const checkedImage = record.checkedImage || record.checked_image || {};
   const sourceBrand = sourceTextValue(record.sourceBrand || record.brand);
   const sourceCategory = formatCategoryName(record.sourceCategory || record.vendorCategory || record.category || record.product_type);
@@ -25071,7 +25456,7 @@ function normalizeCatalogProductForInventory(record) {
     uom: sourceTextValue(record.uom),
     uomQty: sourceTextValue(record.uomQty || record.uom_qty),
     minQuantity,
-    quantityIncrements: sourceTextValue(record.quantityIncrements || record.quantity_increments),
+    quantityIncrements: sourceTextValue(productDumpRecordFieldValue(record, PRODUCT_DUMP_FIELD_ALIASES.quantityIncrements)),
     hazardous: sourceBooleanValue(record.hazardous, false),
     sdsUrl: sourceTextValue(record.sdsUrl || record.sds_url),
     itemHeight: sourceNumberValue(record.itemHeight || record.item_height),
@@ -30648,6 +31033,169 @@ async function handleApi(req, res) {
     return sendJson(res, 201, { audit, message: `${audit.auditNumber} started.` });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "found-stock-import" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const csv = String(body.csv || "");
+    if (!csv.trim()) return sendJson(res, 400, { error: "Upload a CSV file before importing found stock." });
+    const records = parseCsv(csv);
+    if (!records.length) return sendJson(res, 400, { error: "The uploaded CSV did not contain any rows." });
+    if (records.length > 5000) return sendJson(res, 400, { error: "Import up to 5,000 found-stock rows at a time." });
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress") return sendJson(res, 400, { error: "Found-stock files can be imported only while the audit is in progress." });
+    const db = await readDbFast({ skipInventory: true });
+    const warehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "") || String(row.name || "").toLowerCase() === String(audit.warehouseName || "").toLowerCase()) || null;
+    if (!warehouse || !isPhysicalWarehouse(warehouse)) return sendJson(res, 400, { error: "Found-stock imports require a physical warehouse audit." });
+    const now = new Date().toISOString();
+    const createdBy = String(body.user || "Luis").trim() || "Luis";
+    const changedProducts = new Map();
+    const summary = { rows: records.length, imported: 0, matchedCatalog: 0, created: 0, reused: 0, alreadyListed: 0, skippedInvalid: 0, lineCount: 0 };
+    const errors = [];
+    const importedSkus = [];
+    const touchedParentSkus = [];
+    for (const record of records) {
+      const source = foundStockImportRow(record);
+      if (!source.itemNumber && !source.mpn) {
+        summary.skippedInvalid += 1;
+        errors.push({ row: source.sourceRow, issue: "Missing item number and MPN" });
+        continue;
+      }
+      if (!(source.quantity > 0)) {
+        summary.skippedInvalid += 1;
+        errors.push({ row: source.sourceRow, record_key: source.itemNumber || source.mpn, issue: "Quantity must be greater than zero" });
+        continue;
+      }
+      const listed = /already\s+listed/i.test(source.ebayListingStatus);
+      if (listed) summary.alreadyListed += 1;
+      const parentMatch = await findFoundStockCatalogParent(source);
+      const parent = parentMatch.product;
+      const rawSku = parent ? foundStockSkuForMatchedProduct(parent, source, audit) : cleanFoundStockSku(source.itemNumber || source.mpn);
+      if (!rawSku) {
+        summary.skippedInvalid += 1;
+        errors.push({ row: source.sourceRow, record_key: source.itemNumber || source.mpn, issue: "Unable to derive SKU" });
+        continue;
+      }
+      let sku = rawSku;
+      let product = parentMatch.existingFoundStock || await postgres.readProductByKey(sku).catch(() => null);
+      if (!product && parent && String(parent.sku || "").toLowerCase() === sku.toLowerCase()) sku = `${sku}-OT-${String(audit.auditNumber || audit.id || "").replace(/[^0-9A-Za-z]/g, "")}`.slice(0, 64);
+      if (!product && sku !== rawSku) product = await postgres.readProductByKey(sku).catch(() => null);
+      if (product) {
+        product.qty = source.quantity;
+        product.stockQty = source.quantity;
+        product.reserved = Number(product.reserved || 0);
+        product.locationBin = source.locationBin || product.locationBin || "";
+        product.mfrPartNumber = product.mfrPartNumber || source.mpn || "";
+        product.vendorSku = product.vendorSku || source.itemNumber || "";
+        product.foundStock = { ...(product.foundStock || {}), auditId: audit.id, auditNumber: audit.auditNumber, itemNumber: source.itemNumber, mpn: source.mpn, originalEbayListingStatus: source.ebayListingStatus, notes: source.notes };
+        product.warehouseStock = Array.isArray(product.warehouseStock) ? product.warehouseStock : [];
+        const stockRow = auditWarehouseStockRow(product, audit, source.locationBin) || ensureInventoryWarehouseStock(product, warehouse);
+        stockRow.locationBin = source.locationBin || stockRow.locationBin || "";
+        stockRow.qty = source.quantity;
+        stockRow.reserved = Number(stockRow.reserved || 0);
+        syncInventoryTotalsFromWarehouses(product);
+        product.updatedAt = now;
+        summary.reused += 1;
+      } else {
+        product = foundStockProductPayload({ sku, source, audit, warehouse, parent, now, createdBy });
+        summary.created += 1;
+      }
+      if (parent) {
+        summary.matchedCatalog += 1;
+        parent.shadowSkus = Array.isArray(parent.shadowSkus) ? parent.shadowSkus : [];
+        if (!parent.shadowSkus.some((shadow) => String(shadow.shadowSku || "").toLowerCase() === String(product.sku || "").toLowerCase())) {
+          parent.shadowSkus.push(normalizeShadowSku(applyChannelDefaultsToShadow(db, {
+            shadowSku: product.sku,
+            marketplace: "eBay",
+            price: product.websitePrice || product.price || parent.websitePrice || parent.price || 0,
+            status: "Draft",
+            notes: `One-time warehouse found stock from ${audit.auditNumber || "audit"}.`,
+            marketplaceAttributes: {
+              source: "warehouse-audit-found-stock",
+              auditId: audit.id || "",
+              auditNumber: audit.auditNumber || "",
+              foundStockSku: product.sku,
+              itemNumber: source.itemNumber || "",
+              mpn: source.mpn || ""
+            }
+          }, "eBay"), parent));
+          parent.updatedAt = now;
+          changedProducts.set(parent.id || parent.sku, parent);
+          touchedParentSkus.push(parent.sku);
+        }
+      }
+      const foundStock = {
+        row: source.sourceRow,
+        itemNumber: source.itemNumber,
+        mpn: source.mpn,
+        description: source.description,
+        ebayListingStatus: source.ebayListingStatus,
+        matchMethod: parentMatch.matchMethod || "created_local",
+        parentSku: parent?.sku || "",
+        oneTimeSku: product.sku
+      };
+      upsertAuditLineFromFoundStock(audit, product, source, { now, foundStock });
+      changedProducts.set(product.id || product.sku, product);
+      importedSkus.push(product.sku);
+      summary.imported += 1;
+    }
+    summary.lineCount = Array.isArray(audit.lines) ? audit.lines.length : 0;
+    audit.foundStockImports = [{
+      id: crypto.randomUUID(),
+      fileName: String(body.fileName || "found-stock.csv").trim(),
+      importedAt: now,
+      importedBy: createdBy,
+      summary,
+      errors: errors.slice(0, 50),
+      importedSkus: [...new Set(importedSkus)].slice(0, 5000),
+      parentSkus: [...new Set(touchedParentSkus)].slice(0, 5000)
+    }, ...(Array.isArray(audit.foundStockImports) ? audit.foundStockImports : [])].slice(0, 20);
+    audit.updatedAt = now;
+    if (changedProducts.size) {
+      const products = [...changedProducts.values()];
+      await postgres.upsertProductsFromState(products);
+      await postgres.upsertInventoryLevelsFromProducts(products);
+    }
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    return sendJson(res, 200, { audit, summary, errors: errors.slice(0, 50), message: `Imported ${summary.imported.toLocaleString()} found-stock row${summary.imported === 1 ? "" : "s"} into ${audit.auditNumber}.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "ebay-readiness" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    const lines = Array.isArray(audit.lines) ? audit.lines : [];
+    const skus = [...new Set(lines
+      .filter((line) => String(line.source || "").includes("found-stock") || line.foundStock)
+      .filter((line) => body.includeAlreadyListed === true || !/already\s+listed/i.test(String(line.foundStock?.ebayListingStatus || "")))
+      .map((line) => String(line.sku || "").trim())
+      .filter(Boolean))];
+    if (!skus.length) return sendJson(res, 400, { error: "No found-stock audit SKUs are available for eBay readiness review." });
+    const result = await queueEbayListingLaunchJob(db, {
+      skus,
+      lifecycleAction: "review",
+      dryRun: true,
+      apply: false,
+      publish: false,
+      limit: skus.length,
+      marketplaceId: body.marketplaceId,
+      merchantLocationKey: body.merchantLocationKey,
+      paymentPolicyId: body.paymentPolicyId,
+      returnPolicyId: body.returnPolicyId,
+      fulfillmentPolicyId: body.fulfillmentPolicyId
+    }, { operation: `eBay found-stock readiness ${audit.auditNumber || ""}`.trim() });
+    audit.lastEbayFoundStockReviewJobId = result.job?.id || "";
+    audit.lastEbayFoundStockReviewAt = new Date().toISOString();
+    audit.updatedAt = audit.lastEbayFoundStockReviewAt;
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    const jobs = await mergedImportJobsAsync(db);
+    return sendJson(res, result.duplicate ? 200 : 202, { job: clientImportJob(result.job), duplicate: result.duplicate, importJobs: clientImportJobs(jobs), message: result.duplicate ? "An eBay found-stock readiness job is already running." : `eBay readiness review queued for ${skus.length.toLocaleString()} found-stock SKU${skus.length === 1 ? "" : "s"}.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lookup" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
@@ -33949,8 +34497,8 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
-    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
     const numericPurchaseOrderRuleFields = new Set(["approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
@@ -34028,8 +34576,14 @@ async function handleApi(req, res) {
         const key = field.split(".")[1];
         if (!purchaseOrderRuleFields.has(key)) continue;
         vendor.purchaseOrderRules = vendor.purchaseOrderRules || {};
-        const value = booleanPurchaseOrderRuleFields.has(key) ? Boolean(rawValue) : numericPurchaseOrderRuleFields.has(key) ? Math.max(0, Number(rawValue || 0)) : String(rawValue ?? "");
-        if (vendor.purchaseOrderRules[key] !== value) {
+        const value = key === "deliverySchedule"
+          ? normalizePurchaseDeliveryScheduleRows(rawValue)
+          : booleanPurchaseOrderRuleFields.has(key)
+            ? Boolean(rawValue)
+            : numericPurchaseOrderRuleFields.has(key)
+              ? Math.max(0, Number(rawValue || 0))
+              : String(rawValue ?? "");
+        if (JSON.stringify(vendor.purchaseOrderRules[key]) !== JSON.stringify(value)) {
           changes.push(`${field} changed`);
           vendor.purchaseOrderRules[key] = value;
         }
@@ -41513,6 +42067,9 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
+    const numericPurchaseOrderRuleFields = new Set(["approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
@@ -41582,6 +42139,23 @@ async function handleApi(req, res) {
         if (vendor.inventoryRules[key] !== value) {
           changes.push(`${field} changed`);
           vendor.inventoryRules[key] = value;
+        }
+        continue;
+      }
+      if (field.startsWith("purchaseOrderRules.")) {
+        const key = field.split(".")[1];
+        if (!purchaseOrderRuleFields.has(key)) continue;
+        vendor.purchaseOrderRules = vendor.purchaseOrderRules || {};
+        const value = key === "deliverySchedule"
+          ? normalizePurchaseDeliveryScheduleRows(rawValue)
+          : booleanPurchaseOrderRuleFields.has(key)
+            ? Boolean(rawValue)
+            : numericPurchaseOrderRuleFields.has(key)
+              ? Math.max(0, Number(rawValue || 0))
+              : String(rawValue ?? "");
+        if (JSON.stringify(vendor.purchaseOrderRules[key]) !== JSON.stringify(value)) {
+          changes.push(`${field} changed`);
+          vendor.purchaseOrderRules[key] = value;
         }
         continue;
       }
