@@ -6815,6 +6815,18 @@ function EbayListingWorkspace({
                   </Alert>
                 )}
                 <div className="flex flex-wrap gap-2">
+                  {listing.listingUrl ? (
+                    <Button asChild variant="outline">
+                      <a
+                        href={listing.listingUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        <ExternalLink className="size-4" />
+                        View in channel
+                      </a>
+                    </Button>
+                  ) : null}
                   <Button
                     variant="outline"
                     onClick={() => void saveDraft()}
