@@ -4838,6 +4838,26 @@ const productEditableNumberFields = new Set([
   "packageLength", "packageWidth", "packageHeight", "packageWeight", "replenishableQty",
 ])
 
+function catalogImageUrlValue(image: unknown) {
+  const value = typeof image === "object" && image !== null
+    ? String((image as { url?: unknown; src?: unknown; href?: unknown }).url || (image as { src?: unknown }).src || (image as { href?: unknown }).href || "").trim()
+    : String(image || "").trim()
+  if (!value || value.startsWith("__dataplus_catalog_image__")) return ""
+  try {
+    const parsed = new URL(value)
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed.toString() : ""
+  } catch {
+    return ""
+  }
+}
+
+function catalogImageUrlList(images: unknown) {
+  const rows = Array.isArray(images)
+    ? images
+    : String(images || "").split(/\r?\n/)
+  return [...new Set(rows.map(catalogImageUrlValue).filter(Boolean))]
+}
+
 function ProductDetailSheet({
   sourceItem,
   open,
@@ -5328,8 +5348,8 @@ function StandaloneProductPage() {
 }
 
 function StandaloneProductWorkspace({ product, sku, onBack }: { product: ProductItem; sku: string; onBack: () => void }) {
-  const imageUrls = (product.images || []).map((image) => typeof image === "string" ? image : image.url || image.src || "").filter(Boolean)
-  const primaryImage = product.defaultImage || imageUrls[0] || ""
+  const imageUrls = catalogImageUrlList(product.images || [])
+  const primaryImage = catalogImageUrlValue(product.defaultImage) || imageUrls[0] || ""
   const cost = Number(product.sellUnitCost ?? product.cost ?? 0)
   const price = Number(product.websitePrice ?? product.price ?? 0)
   const grossProfit = price - cost
@@ -5370,7 +5390,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const [productTab, setProductTab] = useState("overview")
   const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState<Record<string, string | boolean>>({})
-  const imageUrls = (product.images || []).map((image) => typeof image === "string" ? image : image.url || image.src || "").filter(Boolean)
+  const imageUrls = catalogImageUrlList(product.images || [])
   const cost = Number(product.sellUnitCost ?? product.cost ?? 0), price = Number(product.websitePrice ?? product.price ?? 0), available = Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0))
   const ebaySellableQty = Math.max(available, Number(product.effectiveReplenishableQty || product.replenishableQty || 0))
   const ebayLifecycleBlocked = product.active === false || Boolean(product.toBeDiscontinued) || /\binactive\b|discontinued/i.test(String(product.status || ""))
@@ -5380,8 +5400,33 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const pricingSourceLabel = pricing.priceSource === "vendor-website-price" ? "Supplier website price" : pricing.priceSource === "minimum-allowed-price" ? "Minimum allowed price floor" : "Cost plus markup"
   const section = (title: string, description: string, children: React.ReactNode) => <Card><CardHeader className="border-b pb-3"><CardTitle className="text-sm">{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader><CardContent className="pt-4">{children}</CardContent></Card>
   const values = (rows: Array<[string, string]>) => <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{rows.map(([label, value]) => <Detail key={label} label={label} value={value || "-"} />)}</div>
-  const openEditor = () => { setDraft({ marketplaceTitle: product.marketplaceTitle || product.title || "", brand: product.brand || "", manufacturer: product.manufacturer || "", mfrPartNumber: product.mfrPartNumber || "", supplier: product.supplier || product.vendor || "", supplierCode: product.supplierCode || "", vendorSku: product.vendorSku || "", mainCategory: product.mainCategory || product.category || "", sourceCategory: product.sourceCategory || "", vendorCategory: product.vendorCategory || "", condition: product.condition || "New", status: product.status || "Active", barcode: product.barcode || "", externalId: product.externalId || "", unspsc: product.unspsc || "", uom: product.uom || "", uomQty: String(product.uomQty || 1), tags: (product.tags || []).join(", "), shortDescription: product.shortDescription || "", longDescription: product.longDescription || "", bulletPoints: (product.bulletPoints || []).join("\n"), seoKeywords: product.seoKeywords || "", wildcardSearch: product.wildcardSearch || "", defaultImage: product.defaultImage || imageUrls[0] || "", images: imageUrls.join("\n"), websitePrice: String(price), cost: String(product.cost ?? 0), fobPrice: String(product.fobPrice ?? 0), listPrice: String(product.listPrice ?? product.msrp ?? 0), qty: String(product.qty ?? product.stockQty ?? 0), reserved: String(product.reserved ?? 0), reorderPoint: String(product.reorderPoint || 0), minQuantity: String(product.minQuantity || ""), quantityIncrements: String(product.quantityIncrements || ""), leadTime: String(product.leadTime || product.leadtime || ""), itemLength: String(product.itemLength || 0), itemWidth: String(product.itemWidth || 0), itemHeight: String(product.itemHeight || 0), itemWeight: String(product.itemWeight || 0), packageLength: String(product.packageLength || 0), packageWidth: String(product.packageWidth || 0), packageHeight: String(product.packageHeight || 0), packageWeight: String(product.packageWeight || 0), dimensionalWeight: String(product.dimensionalWeight || 0), countryOfOrigin: product.countryOfOrigin || "", sdsUrl: product.sdsUrl || "", stockStatus: product.stockStatus || "", stockUpdatedAt: product.stockUpdatedAt || "", lastPricesUpdateAt: product.lastPricesUpdateAt || "", lastPricesUpdateBy: product.lastPricesUpdateBy || "", hazardous: Boolean(product.hazardous), active: product.active !== false, categoryVerified: Boolean(product.categoryVerified) }); setEditorOpen(true) }
-  const save = async () => { setSaving(true); try { const numeric = new Set(["websitePrice", "cost", "fobPrice", "listPrice", "qty", "reserved", "reorderPoint", "minQuantity", "quantityIncrements", "itemLength", "itemWidth", "itemHeight", "itemWeight", "packageLength", "packageWidth", "packageHeight", "packageWeight", "dimensionalWeight"]); const payload = Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, key === "images" ? String(value || "").split(/\r?\n/).map((url) => url.trim()).filter(Boolean) : key === "bulletPoints" ? String(value || "").split(/\r?\n/).map((point) => point.trim()).filter(Boolean) : numeric.has(key) ? Number(value || 0) : value])); const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.id || product.sku || sku)}`, { method: "PATCH", body: JSON.stringify(payload) }); onUpdated(result.item); setEditorOpen(false); toast.success("Product details saved.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save product details.") } finally { setSaving(false) } }
+  const openEditor = () => { setDraft({ marketplaceTitle: product.marketplaceTitle || product.title || "", brand: product.brand || "", manufacturer: product.manufacturer || "", mfrPartNumber: product.mfrPartNumber || "", supplier: product.supplier || product.vendor || "", supplierCode: product.supplierCode || "", vendorSku: product.vendorSku || "", mainCategory: product.mainCategory || product.category || "", sourceCategory: product.sourceCategory || "", vendorCategory: product.vendorCategory || "", condition: product.condition || "New", status: product.status || "Active", barcode: product.barcode || "", externalId: product.externalId || "", unspsc: product.unspsc || "", uom: product.uom || "", uomQty: String(product.uomQty || 1), tags: (product.tags || []).join(", "), shortDescription: product.shortDescription || "", longDescription: product.longDescription || "", bulletPoints: (product.bulletPoints || []).join("\n"), seoKeywords: product.seoKeywords || "", wildcardSearch: product.wildcardSearch || "", defaultImage: catalogImageUrlValue(product.defaultImage) || imageUrls[0] || "", images: imageUrls.join("\n"), websitePrice: String(price), cost: String(product.cost ?? 0), fobPrice: String(product.fobPrice ?? 0), listPrice: String(product.listPrice ?? product.msrp ?? 0), qty: String(product.qty ?? product.stockQty ?? 0), reserved: String(product.reserved ?? 0), reorderPoint: String(product.reorderPoint || 0), minQuantity: String(product.minQuantity || ""), quantityIncrements: String(product.quantityIncrements || ""), leadTime: String(product.leadTime || product.leadtime || ""), itemLength: String(product.itemLength || 0), itemWidth: String(product.itemWidth || 0), itemHeight: String(product.itemHeight || 0), itemWeight: String(product.itemWeight || 0), packageLength: String(product.packageLength || 0), packageWidth: String(product.packageWidth || 0), packageHeight: String(product.packageHeight || 0), packageWeight: String(product.packageWeight || 0), dimensionalWeight: String(product.dimensionalWeight || 0), countryOfOrigin: product.countryOfOrigin || "", sdsUrl: product.sdsUrl || "", stockStatus: product.stockStatus || "", stockUpdatedAt: product.stockUpdatedAt || "", lastPricesUpdateAt: product.lastPricesUpdateAt || "", lastPricesUpdateBy: product.lastPricesUpdateBy || "", hazardous: Boolean(product.hazardous), active: product.active !== false, categoryVerified: Boolean(product.categoryVerified) }); setEditorOpen(true) }
+  const save = async () => {
+    setSaving(true)
+    try {
+      const numeric = new Set(["websitePrice", "cost", "fobPrice", "listPrice", "qty", "reserved", "reorderPoint", "minQuantity", "quantityIncrements", "itemLength", "itemWidth", "itemHeight", "itemWeight", "packageLength", "packageWidth", "packageHeight", "packageWeight", "dimensionalWeight"])
+      const payload = Object.fromEntries(Object.entries(draft).map(([key, value]) => [
+        key,
+        key === "images"
+          ? catalogImageUrlList(value)
+          : key === "defaultImage"
+            ? catalogImageUrlValue(value)
+            : key === "bulletPoints"
+              ? String(value || "").split(/\r?\n/).map((point) => point.trim()).filter(Boolean)
+              : numeric.has(key)
+                ? Number(value || 0)
+                : value,
+      ]))
+      const result = await api<{ item: ProductItem }>(`/api/inventory/${encodeURIComponent(product.id || product.sku || sku)}`, { method: "PATCH", body: JSON.stringify(payload) })
+      onUpdated(result.item)
+      setEditorOpen(false)
+      toast.success("Product details saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save product details.")
+    } finally {
+      setSaving(false)
+    }
+  }
   const pushShopify = async (path: string, apply: boolean, label: string) => { if (apply && product.toBeDiscontinued) return toast.error("Discontinued SKUs cannot be sent to Shopify."); try { const result = await api<{ job?: ImportJob; message?: string }>(path, { method: "POST", body: JSON.stringify({ skus: [product.sku], dryRun: !apply, apply }) }); toast.success(result.message || `${label} queued.`); if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 500) } catch (error) { toast.error(error instanceof Error ? error.message : `Unable to queue ${label.toLowerCase()}.`) } }
   const pushEbay = async (dryRun: boolean) => {
     if (ebayLaunchBlocked) return toast.error("Inactive or discontinued SKUs cannot be sent to eBay unless sellable inventory is available.")

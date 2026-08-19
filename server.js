@@ -23966,12 +23966,36 @@ function ebayMinimalInventoryItemPayload(item, config) {
   };
 }
 
+function ebayImageUrlValue(image) {
+  const value = typeof image === "object" && image !== null
+    ? String(image.url || image.src || image.href || "").trim()
+    : String(image || "").trim();
+  if (!value || value.startsWith("__dataplus_catalog_image__")) return "";
+  try {
+    const parsed = new URL(value);
+    if (!["http:", "https:"].includes(parsed.protocol)) return "";
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
 function ebayProductImageUrls(item = {}) {
-  return [
+  const images = [
     item.defaultImage,
     item.default_image,
-    ...(Array.isArray(item.images) ? item.images : parseList(item.images))
-  ].filter(Boolean).map(String).filter((url, index, list) => list.indexOf(url) === index);
+    item.imageUrl,
+    item.primaryImage,
+    item.checkedImageUrl,
+    item.originalImage,
+    item.checkedImage?.url,
+    item.productManagerFields?.default_image,
+    item.productManagerFields?.checked_image?.url,
+    ...(Array.isArray(item.images) ? item.images : parseList(item.images)),
+    ...(Array.isArray(item.imageUrls) ? item.imageUrls : parseList(item.imageUrls)),
+    ...(Array.isArray(item.productManagerFields?.images) ? item.productManagerFields.images : [])
+  ].map(ebayImageUrlValue).filter(Boolean);
+  return [...new Set(images)];
 }
 
 function ebayOfferPayload(item, config) {
