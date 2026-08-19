@@ -1239,6 +1239,12 @@ function productPricingRules(item = {}, db = null) {
   };
 }
 
+function productExplicitPricingCostBasis(item = {}, db = null) {
+  const vendor = vendorProfileForProduct(db, item);
+  const rules = vendor?.pricingRules && typeof vendor.pricingRules === "object" ? vendor.pricingRules : {};
+  return String(rules.costBasis || "").trim();
+}
+
 function productIsEssendant(item = {}) {
   return productSupplierTokens(item).some((value) => {
     const text = value.toLowerCase();
@@ -1263,11 +1269,7 @@ function productVariationRules(item = {}, db = null) {
 }
 
 function productUsesSellUnitPricing(item = {}, db = null) {
-  if (productPricingRules(item, db).costBasis === "sell-unit") return true;
-  return productSupplierTokens(item).some((value) => {
-    const text = value.toLowerCase();
-    return text === "uss" || text.includes("essendant");
-  });
+  return productEffectiveCostBasis(item, db) === "sell-unit";
 }
 
 function productRequiresUomOnlyVariants(item = {}, db = null) {
@@ -1278,6 +1280,57 @@ function productRequiresUomOnlyVariants(item = {}, db = null) {
 function productRequiresEachAndUomVariants(item = {}, db = null) {
   const rules = productVariationRules(item, db);
   return rules.shopifyVariantMode === "each-and-uom" && rules.allowShopifyVariations !== false && productUomQty(item) > 1 && !productHasMinimumSellMultiple(item);
+}
+
+function productSourceCostValue(item = {}) {
+  const values = [
+    item.cost,
+    item.sourceCost,
+    item.source_cost,
+    item.vendorCost,
+    item.vendor_cost,
+    item.wholesalePrice,
+    item.wholesale_price,
+    item.fobPrice,
+    item.fob_price,
+    item.price,
+    item.websitePrice
+  ].map((value) => Number(sourceNumberValue(value))).filter((value) => Number.isFinite(value) && value > 0);
+  return values[0] || 0;
+}
+
+function productSourceSellPriceValue(item = {}) {
+  const values = [
+    item.vendorWebsitePrice,
+    item.vendor_website_price,
+    item.websitePrice,
+    item.shopifyPrice,
+    item.price,
+    item.productManagerFields?.vendor_website_price,
+    item.productManagerFields?.website_price
+  ].map((value) => Number(sourceNumberValue(value))).filter((value) => Number.isFinite(value) && value > 0);
+  return values[0] || 0;
+}
+
+function productCostAppearsToBeSellUnit(item = {}, db = null) {
+  const explicitCostBasis = productExplicitPricingCostBasis(item, db);
+  if (explicitCostBasis === "sell-unit") return true;
+  if (explicitCostBasis === "each-unit") return false;
+  if (productIsEssendant(item)) return true;
+  if (productRequiresEachAndUomVariants(item, db)) return false;
+  const qty = productUomQty(item);
+  const sourceCost = productSourceCostValue(item);
+  const sourceSellPrice = productSourceSellPriceValue(item);
+  if (!(qty > 1) || !(sourceCost > 0) || !(sourceSellPrice > 0)) return false;
+  const suspiciousMultiplier = Math.max(2, Number(productPricingRules(item, db).suspiciousPriceMultiplier || 5));
+  const expectedEachPrice = pricedFromCost(sourceCost, SHOPIFY_PRICE_MARKUP_PERCENT);
+  const expectedPackPrice = pricedFromCost(sourceCost * qty, SHOPIFY_PRICE_MARKUP_PERCENT);
+  if (!(expectedPackPrice > sourceSellPrice * suspiciousMultiplier)) return false;
+  return sourceCost <= sourceSellPrice * 1.5 && expectedEachPrice <= sourceSellPrice * 1.75;
+}
+
+function productEffectiveCostBasis(item = {}, db = null) {
+  return productCostAppearsToBeSellUnit(item, db) ? "sell-unit" : productPricingRules(item, db).costBasis;
 }
 
 function productUomInfo(item = {}) {
@@ -1294,20 +1347,7 @@ function productUomInfo(item = {}) {
 }
 
 function productEachUnitCost(item = {}, db = null) {
-  const cost = Number(sourceNumberValue(
-    item.cost
-    ?? item.sourceCost
-    ?? item.source_cost
-    ?? item.vendorCost
-    ?? item.vendor_cost
-    ?? item.wholesalePrice
-    ?? item.wholesale_price
-    ?? item.price
-    ?? item.websitePrice
-    ?? item.fobPrice
-    ?? item.fob_price
-    ?? 0
-  ));
+  const cost = productSourceCostValue(item);
   if (productUsesSellUnitPricing(item, db)) {
     const qty = productUomQty(item);
     return qty > 1 && cost > 0 ? Math.round((cost / qty) * 10000) / 10000 : cost;
@@ -1317,20 +1357,7 @@ function productEachUnitCost(item = {}, db = null) {
 
 function productSellUnitCost(item = {}, db = null) {
   if (productUsesSellUnitPricing(item, db)) {
-    const cost = Number(sourceNumberValue(
-      item.cost
-      ?? item.sourceCost
-      ?? item.source_cost
-      ?? item.vendorCost
-      ?? item.vendor_cost
-      ?? item.wholesalePrice
-      ?? item.wholesale_price
-      ?? item.price
-      ?? item.websitePrice
-      ?? item.fobPrice
-      ?? item.fob_price
-      ?? 0
-    ));
+    const cost = productSourceCostValue(item);
     return cost > 0 ? cost : 0;
   }
   const unitCost = productEachUnitCost(item, db);
@@ -19118,6 +19145,7 @@ function publicInventoryItem(item = {}, context = {}) {
   const listPrice = isClearanceItem(item) ? Number(sourceNumberValue(item.listPrice ?? item.msrp ?? 0)) : 0;
   const primaryVariant = systemProductVariants(pricedItem, rulesDb)[0] || {};
   const pricingRules = productPricingRules(pricedItem, rulesDb);
+  const effectiveCostBasis = productEffectiveCostBasis(pricedItem, rulesDb);
   const primarySellUnitCost = shopifyVariantPriceBasis(pricedItem, primaryVariant, rulesDb) || sellUnitCost || cost;
   const vendorWebsitePrice = shopifyUsableVendorWebsitePrice(pricedItem, rulesDb);
   const minimumAllowedPrice = Number(sourceNumberValue(item.minimumAllowedPrice ?? item.minimum_allowed_price ?? item.productManagerFields?.minimum_allowed_price ?? 0));
@@ -19221,7 +19249,7 @@ function publicInventoryItem(item = {}, context = {}) {
     sourceCost: cost,
     sellUnitCost,
     pricingCalculation: {
-      costBasis: pricingRules.costBasis,
+      costBasis: effectiveCostBasis,
       sellUnit: primaryVariant.uomDisplay || uomInfo.display,
       sourceCost: cost,
       sellUnitCost,
