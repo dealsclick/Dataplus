@@ -6335,7 +6335,7 @@ function EbayListingWorkspace({
         overrides.ebayPackageType ??
           listing.packageType ??
           settings.ebayDefaultPackageType ??
-          "MAILING_BOX",
+          "",
       ),
       ebayShippingIrregular:
         overrides.ebayShippingIrregular === true ||
@@ -6687,7 +6687,6 @@ function EbayListingWorkspace({
     packageLength > 0 && packageWidth > 0 && packageHeight > 0;
   const packageReady = hasPackageWeight && hasPackageDimensions;
   const packageTypeOptions = [
-    { value: "MAILING_BOX", label: "Mailing box" },
     { value: "PACKAGE_THICK_ENVELOPE", label: "Package / thick envelope" },
     { value: "PARCEL_OR_PADDED_ENVELOPE", label: "Parcel or padded envelope" },
     { value: "PADDED_BAGS", label: "Padded bag" },
@@ -7094,7 +7093,7 @@ function EbayListingWorkspace({
                     "eBay package type",
                     "ebayPackageType",
                     packageTypeOptions,
-                    "Defaults to Mailing box when no SKU override is saved.",
+                    "Leave blank unless eBay requires a specific package classification.",
                   )}
                   {toggle(
                     "Irregular package",

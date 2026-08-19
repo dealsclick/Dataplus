@@ -22486,7 +22486,7 @@ function ebayListingConfig(db, item, body = {}) {
     listingTemplateId: selectedListingTemplateId,
     itemSpecificTemplateId,
     dispatchTimeDays: Math.max(0, Math.min(30, Math.floor(Number(body.dispatchTimeDays ?? productSettings.ebayDispatchTimeDays ?? effectiveSettings.ebayDefaultDispatchTimeDays ?? 0) || 0))),
-    packageType: String(body.packageType ?? productSettings.ebayPackageType ?? saved.packageType ?? explicit("packageType", "ebayDefaultPackageType", "MAILING_BOX")).trim(),
+    packageType: String(body.packageType ?? productSettings.ebayPackageType ?? saved.packageType ?? explicit("packageType", "ebayDefaultPackageType", "")).trim(),
     shippingIrregular: ebayBoolean(body.shippingIrregular ?? productSettings.ebayShippingIrregular ?? saved.shippingIrregular ?? explicitBoolean("shippingIrregular", "ebayShippingIrregular", false), false),
     productCompliancePolicyIds,
     listingDescription: ebayListingDescription(item, { ...body, db, ebayDescriptionSource: explicit("ebayDescriptionSource", "ebayDescriptionSource", "longDescription") }),
@@ -24007,7 +24007,8 @@ const EBAY_PACKAGE_TYPES = new Set([
 
 function ebayPackageType(value) {
   const normalized = String(value || "").trim().toUpperCase();
-  return EBAY_PACKAGE_TYPES.has(normalized) ? normalized : "MAILING_BOX";
+  if (!normalized || normalized === "MAILINGBOXES" || normalized === "MAILING_BOX") return "";
+  return EBAY_PACKAGE_TYPES.has(normalized) ? normalized : "";
 }
 
 function ebayPackageWeightAndSize(item = {}, config = {}) {
@@ -24016,12 +24017,13 @@ function ebayPackageWeightAndSize(item = {}, config = {}) {
   const width = ebayRoundedMeasurement(ebayMeasurementValue(item, "packageWidth", "itemWidth"));
   const height = ebayRoundedMeasurement(ebayMeasurementValue(item, "packageHeight", "itemHeight"));
   if (!(weight > 0) && ![length, width, height].every((value) => value > 0)) return undefined;
+  const packageType = ebayPackageType(config.packageType || item.ebayPackageType || item.packageType);
   return {
     ...(weight > 0 ? { weight: { value: weight, unit: "POUND" } } : {}),
     ...([length, width, height].every((value) => value > 0) ? {
       dimensions: { length, width, height, unit: "INCH" }
     } : {}),
-    packageType: ebayPackageType(config.packageType || item.ebayPackageType || item.packageType),
+    ...(packageType ? { packageType } : {}),
     shippingIrregular: Boolean(config.shippingIrregular || item.shippingIrregular)
   };
 }
