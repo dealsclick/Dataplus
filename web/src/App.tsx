@@ -803,6 +803,8 @@ type ProductItem = CatalogItem & {
     mpn?: string
     subtitle?: string
     dispatchTimeDays?: number
+    packageType?: string
+    shippingIrregular?: boolean
     productCompliancePolicyIds?: string[]
     categoryAttributes?: Array<{ id?: string; name?: string; required?: boolean; mode?: string; [key: string]: unknown }>
     history?: Array<{ id?: string; at?: string; action?: string; message?: string; actor?: string; offerId?: string; listingId?: string }>
@@ -6149,6 +6151,8 @@ function EbayListingWorkspace({
     "ebayListingTemplateId",
     "ebayItemSpecificTemplateId",
     "ebayDispatchTimeDays",
+    "ebayPackageType",
+    "ebayShippingIrregular",
   ]);
   const change = (key: string, value: string | boolean) =>
     setDraft((current) => ({
@@ -6327,6 +6331,15 @@ function EbayListingWorkspace({
           settings.ebayDefaultDispatchTimeDays ??
           2,
       ),
+      ebayPackageType: String(
+        overrides.ebayPackageType ??
+          listing.packageType ??
+          settings.ebayDefaultPackageType ??
+          "MAILING_BOX",
+      ),
+      ebayShippingIrregular:
+        overrides.ebayShippingIrregular === true ||
+        listing.shippingIrregular === true,
       ebayBestOfferEnabled:
         overrides.ebayBestOfferEnabled === true ||
         listing.bestOfferEnabled === true,
@@ -6422,6 +6435,8 @@ function EbayListingWorkspace({
       mpn: text("ebayMpn"),
       subtitle: text("ebaySubtitle"),
       dispatchTimeDays: text("ebayDispatchTimeDays"),
+      packageType: text("ebayPackageType"),
+      shippingIrregular: checked("ebayShippingIrregular"),
       bestOfferEnabled: checked("ebayBestOfferEnabled"),
       bestOfferAutoAcceptPrice: text("ebayBestOfferAutoAcceptPrice"),
       bestOfferAutoDeclinePrice: text("ebayBestOfferAutoDeclinePrice"),
@@ -6642,6 +6657,47 @@ function EbayListingWorkspace({
   const history = Array.isArray(product.ebayListing?.history)
     ? product.ebayListing?.history
     : [];
+  const measurementValue = (...values: Array<string | number | undefined>) => {
+    for (const value of values) {
+      const numeric = Number(value ?? 0);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        return Math.round(numeric * 100) / 100;
+      }
+    }
+    return 0;
+  };
+  const packageWeight = measurementValue(
+    product.packageWeight,
+    product.itemWeight,
+  );
+  const packageLength = measurementValue(
+    product.packageLength,
+    product.itemLength,
+  );
+  const packageWidth = measurementValue(
+    product.packageWidth,
+    product.itemWidth,
+  );
+  const packageHeight = measurementValue(
+    product.packageHeight,
+    product.itemHeight,
+  );
+  const hasPackageWeight = packageWeight > 0;
+  const hasPackageDimensions =
+    packageLength > 0 && packageWidth > 0 && packageHeight > 0;
+  const packageReady = hasPackageWeight && hasPackageDimensions;
+  const packageTypeOptions = [
+    { value: "MAILING_BOX", label: "Mailing box" },
+    { value: "PACKAGE_THICK_ENVELOPE", label: "Package / thick envelope" },
+    { value: "PARCEL_OR_PADDED_ENVELOPE", label: "Parcel or padded envelope" },
+    { value: "PADDED_BAGS", label: "Padded bag" },
+    { value: "LARGE_ENVELOPE", label: "Large envelope" },
+    { value: "USPS_FLAT_RATE_ENVELOPE", label: "USPS flat-rate envelope" },
+    { value: "USPS_LARGE_PACK", label: "USPS large pack" },
+    { value: "EXTRA_LARGE_PACK", label: "Extra large pack" },
+    { value: "VERY_LARGE_PACK", label: "Very large pack" },
+    { value: "BULKY_GOODS", label: "Bulky goods" },
+  ];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -6697,6 +6753,7 @@ function EbayListingWorkspace({
               <TabsTrigger value="readiness">Readiness</TabsTrigger>
               <TabsTrigger value="commerce">Price & inventory</TabsTrigger>
               <TabsTrigger value="listing">Listing</TabsTrigger>
+              <TabsTrigger value="shipping">Shipping package</TabsTrigger>
               <TabsTrigger value="policies">Policies</TabsTrigger>
               <TabsTrigger value="details">Identifiers & specifics</TabsTrigger>
               <TabsTrigger value="history">
@@ -6979,6 +7036,77 @@ function EbayListingWorkspace({
                       )
                     : null}
                 </div>
+              </TabsContent>
+              <TabsContent value="shipping" className="m-0 grid gap-5">
+                <Alert variant={packageReady ? "default" : "destructive"}>
+                  <Truck className="size-4" />
+                  <AlertTitle>
+                    {packageReady
+                      ? "Package details are ready for eBay"
+                      : "Package details need attention"}
+                  </AlertTitle>
+                  <AlertDescription>
+                    DataPlus sends these catalog package measurements with the
+                    eBay inventory item. Weight is required by eBay for shipping
+                    policies that calculate rates from the package.
+                  </AlertDescription>
+                </Alert>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <Card>
+                    <CardHeader className="p-4">
+                      <CardDescription>Package weight</CardDescription>
+                      <CardTitle className="mt-1 text-base">
+                        {hasPackageWeight ? `${packageWeight} lb` : "Not recorded"}
+                      </CardTitle>
+                    </CardHeader>
+                  </Card>
+                  <Card>
+                    <CardHeader className="p-4">
+                      <CardDescription>Package dimensions</CardDescription>
+                      <CardTitle className="mt-1 text-base">
+                        {hasPackageDimensions
+                          ? `${packageLength} x ${packageWidth} x ${packageHeight} in`
+                          : "Not recorded"}
+                      </CardTitle>
+                    </CardHeader>
+                  </Card>
+                  <Card>
+                    <CardHeader className="p-4">
+                      <CardDescription>Dimensional weight</CardDescription>
+                      <CardTitle className="mt-1 text-base">
+                        {Number(product.dimensionalWeight || 0) > 0
+                          ? `${Number(product.dimensionalWeight).toFixed(2)} lb`
+                          : "Not recorded"}
+                      </CardTitle>
+                    </CardHeader>
+                  </Card>
+                  <Card>
+                    <CardHeader className="p-4">
+                      <CardDescription>Shipping class</CardDescription>
+                      <CardTitle className="mt-1 text-base capitalize">
+                        {product.shippingClass || product.shippingMethod || "Not recorded"}
+                      </CardTitle>
+                    </CardHeader>
+                  </Card>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  {select(
+                    "eBay package type",
+                    "ebayPackageType",
+                    packageTypeOptions,
+                    "Defaults to Mailing box when no SKU override is saved.",
+                  )}
+                  {toggle(
+                    "Irregular package",
+                    "Marks this SKU as irregular for eBay calculated shipping.",
+                    "ebayShippingIrregular",
+                  )}
+                </div>
+                <FieldDescription>
+                  Edit the measured package weight and dimensions in the product
+                  Shipping section. This tab controls the eBay-specific package
+                  classification sent with those measurements.
+                </FieldDescription>
               </TabsContent>
               <TabsContent value="policies" className="m-0 grid gap-5">
                 <Alert>

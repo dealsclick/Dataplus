@@ -22486,6 +22486,8 @@ function ebayListingConfig(db, item, body = {}) {
     listingTemplateId: selectedListingTemplateId,
     itemSpecificTemplateId,
     dispatchTimeDays: Math.max(0, Math.min(30, Math.floor(Number(body.dispatchTimeDays ?? productSettings.ebayDispatchTimeDays ?? effectiveSettings.ebayDefaultDispatchTimeDays ?? 0) || 0))),
+    packageType: String(body.packageType ?? productSettings.ebayPackageType ?? saved.packageType ?? explicit("packageType", "ebayDefaultPackageType", "MAILING_BOX")).trim(),
+    shippingIrregular: ebayBoolean(body.shippingIrregular ?? productSettings.ebayShippingIrregular ?? saved.shippingIrregular ?? explicitBoolean("shippingIrregular", "ebayShippingIrregular", false), false),
     productCompliancePolicyIds,
     listingDescription: ebayListingDescription(item, { ...body, db, ebayDescriptionSource: explicit("ebayDescriptionSource", "ebayDescriptionSource", "longDescription") }),
     aspects,
