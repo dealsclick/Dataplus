@@ -23925,6 +23925,7 @@ function ebayInventoryItemPayload(item, config) {
   const images = ebayProductImageUrls(item).slice(0, config.maxImages || 12);
   const identifierType = String(config.identifierType || "").toLowerCase();
   const identifierValue = String(config.identifierValue || "").trim();
+  const packageWeightAndSize = ebayPackageWeightAndSize(item, config);
   const product = {
     title: String(item.marketplaceTitle || item.title || item.sku).slice(0, 80),
     description: config.listingDescription || item.shortDescription || item.title || item.sku,
@@ -23947,11 +23948,13 @@ function ebayInventoryItemPayload(item, config) {
       }
     },
     condition: config.condition,
+    packageWeightAndSize,
     product
   };
 }
 
 function ebayMinimalInventoryItemPayload(item, config) {
+  const packageWeightAndSize = ebayPackageWeightAndSize(item, config);
   return {
     availability: {
       shipToLocationAvailability: {
@@ -23959,10 +23962,65 @@ function ebayMinimalInventoryItemPayload(item, config) {
       }
     },
     condition: config.condition,
+    packageWeightAndSize,
     product: {
       title: String(item.marketplaceTitle || item.title || item.sku).slice(0, 80),
       description: config.listingDescription || item.shortDescription || item.title || item.sku
     }
+  };
+}
+
+function ebayMeasurementValue(item = {}, primaryKey = "", fallbackKey = "") {
+  const snakeKey = primaryKey.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+  const fallbackSnakeKey = fallbackKey.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+  return sourceNumberValue(
+    item[primaryKey]
+    ?? item[snakeKey]
+    ?? item.raw?.[primaryKey]
+    ?? item.raw?.[snakeKey]
+    ?? item.original?.[snakeKey]
+    ?? item[fallbackKey]
+    ?? item[fallbackSnakeKey]
+    ?? item.raw?.[fallbackKey]
+    ?? item.raw?.[fallbackSnakeKey]
+    ?? item.original?.[fallbackSnakeKey]
+    ?? 0
+  );
+}
+
+function ebayRoundedMeasurement(value) {
+  const number = Number(value || 0);
+  return number > 0 ? Math.round(number * 100) / 100 : 0;
+}
+
+const EBAY_PACKAGE_TYPES = new Set([
+  "LETTER", "BULKY_GOODS", "CARAVAN", "CARS", "EUROPALLET", "EXPANDABLE_TOUGH_BAGS",
+  "EXTRA_LARGE_PACK", "FURNITURE", "INDUSTRY_VEHICLES", "LARGE_CANADA_POSTBOX",
+  "LARGE_CANADA_POST_BUBBLE_MAILER", "LARGE_ENVELOPE", "MAILING_BOX",
+  "MEDIUM_CANADA_POST_BOX", "MEDIUM_CANADA_POST_BUBBLE_MAILER", "MOTORBIKES",
+  "ONE_WAY_PALLET", "PACKAGE_THICK_ENVELOPE", "PADDED_BAGS", "PARCEL_OR_PADDED_ENVELOPE",
+  "ROLL", "SMALL_CANADA_POST_BOX", "SMALL_CANADA_POST_BUBBLE_MAILER", "TOUGH_BAGS",
+  "UPS_LETTER", "USPS_FLAT_RATE_ENVELOPE", "USPS_LARGE_PACK", "VERY_LARGE_PACK", "WINE_PAK"
+]);
+
+function ebayPackageType(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  return EBAY_PACKAGE_TYPES.has(normalized) ? normalized : "MAILING_BOX";
+}
+
+function ebayPackageWeightAndSize(item = {}, config = {}) {
+  const weight = ebayRoundedMeasurement(ebayMeasurementValue(item, "packageWeight", "itemWeight"));
+  const length = ebayRoundedMeasurement(ebayMeasurementValue(item, "packageLength", "itemLength"));
+  const width = ebayRoundedMeasurement(ebayMeasurementValue(item, "packageWidth", "itemWidth"));
+  const height = ebayRoundedMeasurement(ebayMeasurementValue(item, "packageHeight", "itemHeight"));
+  if (!(weight > 0) && ![length, width, height].every((value) => value > 0)) return undefined;
+  return {
+    ...(weight > 0 ? { weight: { value: weight, unit: "POUND" } } : {}),
+    ...([length, width, height].every((value) => value > 0) ? {
+      dimensions: { length, width, height, unit: "INCH" }
+    } : {}),
+    packageType: ebayPackageType(config.packageType || item.ebayPackageType || item.packageType),
+    shippingIrregular: Boolean(config.shippingIrregular || item.shippingIrregular)
   };
 }
 
