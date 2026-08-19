@@ -329,6 +329,8 @@ Audit scanner rules:
 
 ## Purchase orders
 
+The Purchasing workspace presents the buyer lifecycle as **Needs sourcing -> Waiting for PO -> Ready to submit -> Sent -> Receiving -> History**. Raw line-level purchase requirements are audit records that support troubleshooting; they must not be presented as the primary buyer queue after they have been attached to a PO.
+
 Purchase requirements are grouped by supplier. One customer order may link to multiple supplier POs. Show linked POs inside the order with PO number, supplier, status, date placed, expected date, items, quantities, and total.
 
 PO creation is available from:
