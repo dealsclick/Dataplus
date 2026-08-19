@@ -329,7 +329,7 @@ Audit scanner rules:
 
 ## Purchase orders
 
-The Purchasing workspace presents the buyer lifecycle as **Needs sourcing -> Waiting for PO -> Ready to submit -> Sent -> Receiving -> History**. Raw line-level purchase requirements are audit records that support troubleshooting; they must not be presented as the primary buyer queue after they have been attached to a PO.
+The Purchasing workspace presents the buyer lifecycle as **Needs sourcing -> Draft POs -> Ready to submit -> Sent -> Receiving -> History**. **Needs sourcing** means no usable supplier/PO assignment exists yet. **Draft POs** are numbered documents that already exist and are collecting additional demand. Raw line-level purchase requirements are audit records that support troubleshooting; they must not be presented as the primary buyer queue after they have been attached to a PO.
 
 Purchase requirements are grouped by supplier. One customer order may link to multiple supplier POs. Show linked POs inside the order with PO number, supplier, status, date placed, expected date, items, quantities, and total.
 
@@ -341,9 +341,9 @@ PO creation is available from:
 
 Auto-PO creation is controlled by supplier profile rules and must respect approval thresholds, budgets, supplier status, and duplicate prevention.
 
-Every eligible supplier purchase route immediately opens or appends to one numbered **Waiting for PO** draft per canonical supplier and physical receiving warehouse. Appends are idempotent: a customer-order route may appear only once in the draft. The same draft keeps collecting new orders and SKU quantities until it is submitted, placed, approved, rejected, canceled, or otherwise frozen; later demand then opens the next numbered draft.
+Every eligible supplier purchase route immediately opens or appends to one numbered **Draft PO** per canonical supplier and physical receiving warehouse. Appends are idempotent: a customer-order route may appear only once in the draft. The same draft keeps collecting new orders and SKU quantities until it is submitted, placed, approved, rejected, canceled, or otherwise frozen; later demand then opens the next numbered draft.
 
-The supplier cutoff, which defaults to 3:00 PM in the configured timezone, marks an open Waiting for PO draft as ready for buyer review or automatic submission when the supplier rules explicitly allow it. Cutoff does not delay draft creation. Buyers control submission unless the supplier profile has an explicit auto-submit rule. Purchasing groups Waiting for PO drafts by canonical supplier, and `/purchasing/waiting-for-po/:supplierKey` shows each numbered draft with its linked customer orders, SKUs, quantities, images, destination, cost, and review state.
+The supplier cutoff, which defaults to 3:00 PM in the configured timezone, marks an open Draft PO as ready for buyer review or automatic submission when the supplier rules explicitly allow it. Cutoff does not delay draft creation. Buyers control submission unless the supplier profile has an explicit auto-submit rule. Purchasing groups Draft POs by canonical supplier, and `/purchasing/waiting-for-po/:supplierKey` shows each numbered draft with its linked customer orders, SKUs, quantities, images, destination, cost, and review state.
 
 PO receiving posts stock to the PO's physical destination warehouse, appends inventory provenance, and reroutes linked customer orders. Received lines may then reserve the new physical stock and move into fulfillment. Supplier POs must never use a virtual supplier-feed warehouse as their receiving destination.
 
