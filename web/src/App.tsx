@@ -16629,6 +16629,7 @@ function SettingsPage({
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="flex flex-wrap">
           <TabsTrigger value="operations">Operations</TabsTrigger>
+          <TabsTrigger value="purchasing">Purchasing</TabsTrigger>
           <TabsTrigger value="worker">Worker</TabsTrigger>
           <TabsTrigger value="backups">Backups</TabsTrigger>
           <TabsTrigger value="catalog">Catalog</TabsTrigger>
@@ -16675,11 +16676,13 @@ function SettingsPage({
               </Field>
             </CardContent>
           </Card>
+        </TabsContent>
+        <TabsContent value="purchasing" className="grid gap-4">
           <Card>
             <CardHeader className="gap-3 border-b lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <CardTitle className="text-base">Order routing and purchasing rollout</CardTitle>
-                <CardDescription>Choose when routing becomes operational and prevent older test orders from entering fulfillment or purchasing.</CardDescription>
+                <CardTitle className="text-base">Purchasing workflow</CardTitle>
+                <CardDescription>Control which paid orders enter purchasing, how supplier demand is grouped, and when draft purchase orders are prepared.</CardDescription>
               </div>
               <Button variant="outline" size="sm" asChild><a href="/purchasing">Open purchasing</a></Button>
             </CardHeader>
