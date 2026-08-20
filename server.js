@@ -20243,7 +20243,8 @@ function defaultOrderWorkflowSettings() {
     version: 2,
     allocationPolicy: { allowSplitShipments: true, createBackorders: true, warehousePriority: [] },
     automation: {
-      routePaidOrders: true,
+      routePaidOrders: false,
+      routingStartDate: "",
       rerouteAfterReceiving: true
     },
     purchasePooling: {
@@ -20272,6 +20273,129 @@ async function readOrderWorkflowSettings() {
     allocationPolicy: { ...defaults.allocationPolicy, ...((stored || {}).allocationPolicy || {}) },
     automation: { ...defaults.automation, ...((stored || {}).automation || {}) },
     purchasePooling: { ...defaults.purchasePooling, ...((stored || {}).purchasePooling || {}) }
+  };
+}
+
+function orderRoutingTimestamp(order = {}) {
+  const value = order.createdAt || order.orderDate || order.orderedAt || order.importedAt || order.processedAt || "";
+  const timestamp = Date.parse(String(value || ""));
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function orderRoutingPolicyDecision(order = {}, settings = defaultOrderWorkflowSettings()) {
+  if (settings.automation?.routePaidOrders === false) {
+    return { allowed: false, code: "routing_disabled", reason: "Order routing is disabled in System Settings." };
+  }
+  const startDate = String(settings.automation?.routingStartDate || "").trim().slice(0, 10);
+  if (startDate) {
+    const cutoff = Date.parse(`${startDate}T00:00:00`);
+    const orderTimestamp = orderRoutingTimestamp(order);
+    if (Number.isFinite(cutoff) && (!orderTimestamp || orderTimestamp < cutoff)) {
+      return { allowed: false, code: "before_routing_start", reason: `Order has no eligible creation date or was created before the routing start date (${startDate}).` };
+    }
+  }
+  return { allowed: true, code: "allowed", reason: "" };
+}
+
+const ORDER_ROUTING_RESET_CONFIRMATION = "RESET ROUTING AND PURCHASE ORDERS";
+
+async function resetOrderRoutingAndPurchasing(options = {}) {
+  if (!postgres.isPostgresEnabled()) throw new Error("Routing reset requires PostgreSQL.");
+  const user = options.user || "System administrator";
+  const now = new Date().toISOString();
+  const routingStartDate = String(options.routingStartDate || now.slice(0, 10)).slice(0, 10);
+  const settings = await readOrderWorkflowSettings();
+  settings.automation = { ...settings.automation, routePaidOrders: false, routingStartDate };
+  settings.updatedAt = now;
+  await postgres.writeStateField("orderWorkflowSettings", settings);
+
+  const [orders, warehouses, inventoryLedger] = await Promise.all([
+    postgres.listOrders({ limit: 10000 }),
+    postgres.readStateField("warehouses").catch(() => []),
+    postgres.readStateField("inventoryLedger").catch(() => [])
+  ]);
+  const db = { warehouses: Array.isArray(warehouses) ? warehouses : [], inventoryLedger: Array.isArray(inventoryLedger) ? inventoryLedger : [] };
+  const touchedProducts = new Map();
+  let ordersReset = 0;
+  let reservationsReleased = 0;
+  let routesRemoved = 0;
+
+  for (const order of orders || []) {
+    const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [];
+    const warehouseRoutes = routes.filter((route) => route?.type === "warehouse" && !["fulfilled", "shipped", "delivered", "canceled", "cancelled", "closed"].includes(String(route.status || "").toLowerCase()));
+    for (const route of warehouseRoutes) {
+      const productKey = String(route.productId || route.sku || "").trim();
+      if (!productKey) continue;
+      const product = touchedProducts.get(productKey) || await postgres.readProductByKey(productKey);
+      if (!product) continue;
+      const stock = (product.warehouseStock || []).find((row) => String(row.warehouseId || "") === String(route.warehouseId || ""));
+      if (!stock) continue;
+      const reservedBefore = Number(stock.reserved || 0);
+      const releaseQty = Math.min(reservedBefore, Math.max(0, Number(route.qty || route.quantity || route.qtyAllocated || 0)));
+      if (!releaseQty) continue;
+      stock.reserved = Math.max(0, reservedBefore - releaseQty);
+      stock.updatedAt = now;
+      syncInventoryTotalsFromWarehouses(product);
+      product.updatedAt = now;
+      touchedProducts.set(String(product.id || product.sku), product);
+      touchedProducts.set(productKey, product);
+      reservationsReleased += releaseQty;
+      const warehouse = db.warehouses.find((row) => String(row.id || "") === String(route.warehouseId || ""));
+      addInventoryLedger(db, product, {
+        type: "routing_reset_release", source: "system_routing_reset",
+        referenceId: order.id, referenceNumber: order.orderNumber,
+        warehouseId: route.warehouseId || "", warehouseName: route.warehouseName || warehouse?.name || "",
+        quantityChange: 0, reservedBefore, reservedAfter: stock.reserved, reservedChange: -releaseQty,
+        reason: "Released by order-routing and purchase-order reset.", user
+      });
+    }
+
+    const hadRoutingState = routes.length || order.routingLastAttemptAt || order.purchaseOrderId || (order.purchaseOrderIds || []).length;
+    if (!hadRoutingState) continue;
+    routesRemoved += routes.length;
+    order.fulfillmentRoutes = [];
+    order.routingExplanation = [];
+    order.routingLastAttemptAt = "";
+    order.routingLastResult = "not_routed";
+    order.purchaseOrderIds = [];
+    order.purchaseOrderNumbers = [];
+    order.purchaseOrderId = "";
+    order.purchaseOrderNumber = "";
+    order.hasPurchaseOrder = false;
+    for (const line of orderLineItems(order)) {
+      delete line.purchaseOrderId;
+      delete line.purchaseOrderNumber;
+      delete line.purchaseRequirementId;
+    }
+    order.workflowExceptions = (order.workflowExceptions || []).filter((exception) => !["Purchasing", "Fulfillment"].includes(String(exception.owner || "")));
+    if (!isTerminalCustomerDemand(order)) {
+      order.operationalStatus = isOrderPaymentCleared(order) ? "processing" : "pending_payment";
+      order.workflowStatus = order.operationalStatus;
+    }
+    addOrderWorkflowEvent(order, {
+      step: "routing_reset", title: "Routing reset",
+      message: "Test fulfillment routes and purchase-order links were cleared. The customer order was preserved.", user
+    });
+    order.updatedAt = now;
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    ordersReset += 1;
+  }
+
+  const changedProducts = [...new Map([...touchedProducts.values()].map((product) => [String(product.id || product.sku), product])).values()];
+  if (changedProducts.length) {
+    await postgres.upsertProductsFromState(changedProducts);
+    await postgres.upsertInventoryLevelsFromProducts(changedProducts);
+  }
+  await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger, purchaseRequirements: [], fulfillmentPickLists: [], fulfillmentBatches: [] });
+  const purchaseOrderSummary = await postgres.clearPurchaseOrders();
+  return {
+    settings,
+    summary: {
+      ordersReset, routesRemoved, reservationsReleased, productsUpdated: changedProducts.length,
+      purchaseOrdersDeleted: Number(purchaseOrderSummary.purchaseOrdersDeleted || 0),
+      purchaseOrderLinesDeleted: Number(purchaseOrderSummary.purchaseOrderLinesDeleted || 0), routingStartDate
+    }
   };
 }
 
@@ -21203,11 +21327,13 @@ function fulfillmentWarehousePlan(db = {}, order = {}, line = {}, product = {}) 
 
 async function routeOrderForFulfillment(db, order, body = {}) {
   if (isTerminalCustomerDemand(order)) return { routes: [], skipped: true, reason: "Order is canceled or refunded." };
+  const workflowSettings = body.workflowSettings || await readOrderWorkflowSettings();
+  const policy = orderRoutingPolicyDecision(order, workflowSettings);
+  if (!policy.allowed) return { routes: [], skipped: true, skipCode: policy.code, reason: policy.reason };
   if (!isOrderPaymentCleared(order) && body.force !== true) {
     recalculateOrderOperationalStatus(order);
     return { routes: [], skipped: true, reason: "Payment has not cleared." };
   }
-  const workflowSettings = body.workflowSettings || await readOrderWorkflowSettings();
   db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
   const created = []; const touchedProducts = []; const pooledRequirements = [];
   order.routingExplanation = Array.isArray(order.routingExplanation) ? order.routingExplanation : [];
@@ -32568,6 +32694,23 @@ async function handleApi(req, res) {
     if (postgres.isPostgresEnabled()) await postgres.writeStateField("orderWorkflowSettings", settings);
     else { const db = await readDbFast(); db.orderWorkflowSettings = settings; await writeDb(db); }
     return sendJson(res, 200, { settings });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/order-workflows/reset-routing") {
+    const body = await parseBody(req);
+    if (body.confirmation !== ORDER_ROUTING_RESET_CONFIRMATION) return sendJson(res, 400, { error: `Confirmation must equal ${ORDER_ROUTING_RESET_CONFIRMATION}.` });
+    if (orderRoutingProcessing || purchasePoolProcessing) return sendJson(res, 409, { error: "Routing or purchasing work is currently running. Stop it or wait for it to finish, then retry the reset." });
+    orderRoutingProcessing = true;
+    purchasePoolProcessing = true;
+    try {
+      const result = await resetOrderRoutingAndPurchasing(body);
+      return sendJson(res, 200, { ...result, message: `Routing reset complete. ${result.summary.ordersReset} order(s) were reset and ${result.summary.purchaseOrdersDeleted} purchase order(s) were deleted. Routing remains disabled.` });
+    } catch (error) {
+      return sendJson(res, 500, { error: `Unable to reset routing and purchase orders: ${error.message}` });
+    } finally {
+      orderRoutingProcessing = false;
+      purchasePoolProcessing = false;
+    }
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "accounting-export.csv" && postgres.isPostgresEnabled()) {
@@ -43954,7 +44097,7 @@ async function processScheduledOrderRouting() {
     const workflowSettings = await readOrderWorkflowSettings();
     if (workflowSettings.automation?.routePaidOrders === false) return;
     const orders = await postgres.listOrders({ limit: 1000 }) || [];
-    const candidates = orders.filter((order) => orderNeedsAutomaticRouting(order)).slice(0, 50);
+    const candidates = orders.filter((order) => orderRoutingPolicyDecision(order, workflowSettings).allowed && orderNeedsAutomaticRouting(order)).slice(0, 50);
     if (!candidates.length) return;
     const db = await readDbFast({ skipInventory: true });
     db.orders = orders;
@@ -44039,6 +44182,7 @@ async function processScheduledPurchasePooling() {
   let job = null;
   try {
     const workflowSettings = await readOrderWorkflowSettings();
+    if (workflowSettings.automation?.routePaidOrders === false) return;
     if (workflowSettings.purchasePooling?.enabled === false) return;
     const db = await readDbFast({ skipInventory: true });
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];

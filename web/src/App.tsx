@@ -34,6 +34,7 @@ import {
   PackageSearch,
   PanelRightOpen,
   Play,
+  Power,
   RefreshCw,
   RotateCcw,
   Search,
@@ -16442,6 +16443,8 @@ function SettingsPage({
   const [orderWorkflowSettings, setOrderWorkflowSettings] = useState<Record<string, unknown>>({})
   const [orderWorkflowDraft, setOrderWorkflowDraft] = useState<Record<string, unknown>>({})
   const [orderWorkflowLoading, setOrderWorkflowLoading] = useState(true)
+  const [routingResetOpen, setRoutingResetOpen] = useState(false)
+  const [routingResetLoading, setRoutingResetLoading] = useState(false)
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const settingsTabs = new Set(["operations", "worker", "backups", "catalog", "data-sources", "barcode", "ai", "email", "users", "releases"])
   const [activeTab, setActiveTab] = useState(settingsTabs.has(requestedTab || "") ? String(requestedTab) : "operations")
@@ -16555,6 +16558,25 @@ function SettingsPage({
     setEditing(false)
   }
 
+  async function resetRoutingAndPurchasing() {
+    setRoutingResetLoading(true)
+    try {
+      const routingStartDate = String(workflowValue("automation", "routingStartDate", "") || new Date().toISOString().slice(0, 10))
+      const result = await api<{ settings?: Record<string, unknown>; message?: string }>("/api/order-workflows/reset-routing", {
+        method: "POST",
+        body: JSON.stringify({ confirmation: "RESET ROUTING AND PURCHASE ORDERS", routingStartDate, user: "Luis" }),
+      })
+      setOrderWorkflowSettings(result.settings || {})
+      setOrderWorkflowDraft({})
+      setRoutingResetOpen(false)
+      toast.success(result.message || "Routing and purchase-order test data were reset.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to reset routing and purchase orders.")
+    } finally {
+      setRoutingResetLoading(false)
+    }
+  }
+
   async function sendSmtpTest() {
     const recipient = window.prompt("Send the SMTP test email to:", String(value("smtpFromEmail") || ""))
     if (!recipient) return
@@ -16656,26 +16678,38 @@ function SettingsPage({
           <Card>
             <CardHeader className="gap-3 border-b lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <CardTitle className="text-base">Order routing and supplier PO pooling</CardTitle>
-                <CardDescription>Control how paid order lines use physical stock, enter fulfillment, or wait for a consolidated supplier PO.</CardDescription>
+                <CardTitle className="text-base">Order routing and purchasing rollout</CardTitle>
+                <CardDescription>Choose when routing becomes operational and prevent older test orders from entering fulfillment or purchasing.</CardDescription>
               </div>
               <Button variant="outline" size="sm" asChild><a href="/purchasing">Open purchasing</a></Button>
             </CardHeader>
             <CardContent className="grid gap-4 pt-6 md:grid-cols-2">
               {orderWorkflowLoading ? <div className="flex items-center gap-2 text-sm text-muted-foreground md:col-span-2"><Loader2 className="size-4 animate-spin" /> Loading order-routing settings...</div> : <>
-                <ToggleField label="Route paid orders automatically" description="Evaluate physical availability and supplier demand after an order is paid or imported." checked={Boolean(workflowValue("automation", "routePaidOrders", true))} disabled={!editing} onCheckedChange={(next) => updateWorkflow("automation", "routePaidOrders", next)} />
-                <ToggleField label="Reroute after PO receiving" description="Re-evaluate linked order lines when purchased inventory reaches a physical warehouse." checked={Boolean(workflowValue("automation", "rerouteAfterReceiving", true))} disabled={!editing} onCheckedChange={(next) => updateWorkflow("automation", "rerouteAfterReceiving", next)} />
-                <ToggleField label="Pool supplier demand" description="Hold supplier-backed lines until their cutoff so one supplier PO can cover multiple customer orders." checked={Boolean(workflowValue("purchasePooling", "enabled", true))} disabled={!editing} onCheckedChange={(next) => updateWorkflow("purchasePooling", "enabled", next)} />
-                <ToggleField label="Create draft POs at cutoff" description="Run the lightweight cutoff scheduler and create tracked draft purchase orders for due pools." checked={Boolean(workflowValue("purchasePooling", "autoCreateDraftsAtCutoff", true))} disabled={!editing || !Boolean(workflowValue("purchasePooling", "enabled", true))} onCheckedChange={(next) => updateWorkflow("purchasePooling", "autoCreateDraftsAtCutoff", next)} />
-                <Field label="Default supplier cutoff"><Input disabled={!editing || !Boolean(workflowValue("purchasePooling", "enabled", true))} type="time" value={String(workflowValue("purchasePooling", "defaultCutoffTime", "15:00"))} onChange={(event) => updateWorkflow("purchasePooling", "defaultCutoffTime", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Supplier profiles can override this time.</p></Field>
-                <Field label="Default cutoff timezone"><Select disabled={!editing || !Boolean(workflowValue("purchasePooling", "enabled", true))} value={String(workflowValue("purchasePooling", "timezone", "America/New_York"))} onValueChange={(next) => updateWorkflow("purchasePooling", "timezone", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="America/New_York">Eastern</SelectItem><SelectItem value="America/Chicago">Central</SelectItem><SelectItem value="America/Denver">Mountain</SelectItem><SelectItem value="America/Los_Angeles">Pacific</SelectItem><SelectItem value="UTC">UTC</SelectItem></SelectContent></Select></Field>
-                <ToggleField label="Skip weekends" description="Roll pools created after cutoff to the next weekday." checked={Boolean(workflowValue("purchasePooling", "skipWeekends", true))} disabled={!editing || !Boolean(workflowValue("purchasePooling", "enabled", true))} onCheckedChange={(next) => updateWorkflow("purchasePooling", "skipWeekends", next)} />
+                <ToggleField label="Enable order routing" description="Master switch for automatic and manual routing, physical allocation, supplier demand, and PO cutoff processing." checked={Boolean(workflowValue("automation", "routePaidOrders", false))} disabled={!editing} onCheckedChange={(next) => updateWorkflow("automation", "routePaidOrders", next)} />
+                <Field label="Route orders created on or after"><Input disabled={!editing} type="date" value={String(workflowValue("automation", "routingStartDate", ""))} onChange={(event) => updateWorkflow("automation", "routingStartDate", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Orders before this date remain visible but cannot be routed manually or by the scheduler.</p></Field>
+                <ToggleField label="Reroute after PO receiving" description="Re-evaluate linked order lines when purchased inventory reaches a physical warehouse." checked={Boolean(workflowValue("automation", "rerouteAfterReceiving", true))} disabled={!editing || !Boolean(workflowValue("automation", "routePaidOrders", false))} onCheckedChange={(next) => updateWorkflow("automation", "rerouteAfterReceiving", next)} />
+                <ToggleField label="Pool supplier demand" description="Hold supplier-backed lines until their cutoff so one supplier PO can cover multiple customer orders." checked={Boolean(workflowValue("purchasePooling", "enabled", true))} disabled={!editing || !Boolean(workflowValue("automation", "routePaidOrders", false))} onCheckedChange={(next) => updateWorkflow("purchasePooling", "enabled", next)} />
+                <ToggleField label="Create draft POs at cutoff" description="Run the lightweight cutoff scheduler and create tracked draft purchase orders for due pools." checked={Boolean(workflowValue("purchasePooling", "autoCreateDraftsAtCutoff", true))} disabled={!editing || !Boolean(workflowValue("automation", "routePaidOrders", false)) || !Boolean(workflowValue("purchasePooling", "enabled", true))} onCheckedChange={(next) => updateWorkflow("purchasePooling", "autoCreateDraftsAtCutoff", next)} />
+                <Field label="Default supplier cutoff"><Input disabled={!editing || !Boolean(workflowValue("automation", "routePaidOrders", false)) || !Boolean(workflowValue("purchasePooling", "enabled", true))} type="time" value={String(workflowValue("purchasePooling", "defaultCutoffTime", "15:00"))} onChange={(event) => updateWorkflow("purchasePooling", "defaultCutoffTime", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Supplier profiles can override this time.</p></Field>
+                <Field label="Default cutoff timezone"><Select disabled={!editing || !Boolean(workflowValue("automation", "routePaidOrders", false)) || !Boolean(workflowValue("purchasePooling", "enabled", true))} value={String(workflowValue("purchasePooling", "timezone", "America/New_York"))} onValueChange={(next) => updateWorkflow("purchasePooling", "timezone", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="America/New_York">Eastern</SelectItem><SelectItem value="America/Chicago">Central</SelectItem><SelectItem value="America/Denver">Mountain</SelectItem><SelectItem value="America/Los_Angeles">Pacific</SelectItem><SelectItem value="UTC">UTC</SelectItem></SelectContent></Select></Field>
+                <ToggleField label="Skip weekends" description="Roll pools created after cutoff to the next weekday." checked={Boolean(workflowValue("purchasePooling", "skipWeekends", true))} disabled={!editing || !Boolean(workflowValue("automation", "routePaidOrders", false)) || !Boolean(workflowValue("purchasePooling", "enabled", true))} onCheckedChange={(next) => updateWorkflow("purchasePooling", "skipWeekends", next)} />
+                <Alert className="md:col-span-2" variant={Boolean(workflowValue("automation", "routePaidOrders", false)) ? "default" : "destructive"}><Power className="size-4" /><AlertTitle>{Boolean(workflowValue("automation", "routePaidOrders", false)) ? "Routing is enabled" : "Routing is paused"}</AlertTitle><AlertDescription>{Boolean(workflowValue("automation", "routePaidOrders", false)) ? `Only eligible orders created on or after ${String(workflowValue("automation", "routingStartDate", "the configured start date"))} can enter the workflow.` : "No automatic routing, manual rerouting, supplier pooling, or PO cutoff work will run."}</AlertDescription></Alert>
                 <Alert className="md:col-span-2"><ShieldCheck className="size-4" /><AlertTitle>Line-level routing and shortage retention are always enforced</AlertTitle><AlertDescription>Mixed orders stay linked while each line follows its own physical-stock or supplier-purchase route. Unmet quantities remain visible until they are received, fulfilled, canceled, or explicitly resolved.</AlertDescription></Alert>
                 <Alert className="md:col-span-2"><ShieldCheck className="size-4" /><AlertTitle>Supplier and destination separation is enforced</AlertTitle><AlertDescription>Each purchase order contains one supplier and one physical receiving warehouse. This prevents mixed receipts from allocating inventory to the wrong customer order or location.</AlertDescription></Alert>
                 <Alert className="md:col-span-2"><Warehouse className="size-4" /><AlertTitle>Physical inventory is the fulfillment gate</AlertTitle><AlertDescription>Supplier feeds and DataWarehouse quantities are supply signals. They enter purchasing unless stock was received or audited into a physical warehouse. Mixed orders remain linked while each line follows its own route.</AlertDescription></Alert>
+                <div className="flex flex-col gap-3 rounded-md border border-destructive/30 bg-destructive/5 p-4 md:col-span-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div><p className="text-sm font-medium">Reset test routing and purchasing data</p><p className="text-xs text-muted-foreground">Preserves customer orders and products, releases active physical reservations, deletes routes, purchase requirements, draft POs, and pick-list test data, then leaves routing paused.</p></div>
+                  <Button type="button" variant="destructive" onClick={() => setRoutingResetOpen(true)}>Reset test data</Button>
+                </div>
               </>}
             </CardContent>
           </Card>
+          <AlertDialog open={routingResetOpen} onOpenChange={(open) => !routingResetLoading && setRoutingResetOpen(open)}>
+            <AlertDialogContent>
+              <AlertDialogHeader><AlertDialogTitle>Reset routing and purchase orders?</AlertDialogTitle><AlertDialogDescription>This deletes current fulfillment routes, purchase requirements, purchase orders, and pick-list test data. Physical reservations created by routing will be released. Customer orders, products, inventory on hand, and history events remain.</AlertDialogDescription></AlertDialogHeader>
+              <AlertDialogFooter><AlertDialogCancel disabled={routingResetLoading}>Cancel</AlertDialogCancel><AlertDialogAction disabled={routingResetLoading} onClick={(event) => { event.preventDefault(); void resetRoutingAndPurchasing() }}>{routingResetLoading ? <><Loader2 className="mr-2 size-4 animate-spin" /> Resetting...</> : "Reset and pause routing"}</AlertDialogAction></AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </TabsContent>
         <TabsContent value="data-sources"><VendorFeedScheduleManager vendors={[]} dataSource /></TabsContent>
         <TabsContent value="barcode" className="grid gap-4">
