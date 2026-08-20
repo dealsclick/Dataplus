@@ -10620,10 +10620,17 @@ function WarehouseAuditPanel({
   const [active, setActive] = useState<Record<string, unknown> | null>(null);
   const [barcode, setBarcode] = useState("");
   const [warehouse, setWarehouse] = useState("Staten Island");
+  const [auditReason, setAuditReason] = useState("cycle_count");
   const [auditOwner, setAuditOwner] = useState("Luis");
   const [auditReviewer, setAuditReviewer] = useState("");
   const [activeBin, setActiveBin] = useState("");
-  const [auditWarehouses, setAuditWarehouses] = useState<Array<{ id?: string; name?: string; code?: string; bins?: Array<{ id?: string; code?: string; name?: string; nickname?: string; active?: boolean; isDefault?: boolean }> }>>([]);
+  const [auditWarehouses, setAuditWarehouses] = useState<Array<{ id?: string; name?: string; code?: string; warehouseType?: string; inventorySourceType?: string; isPhysical?: boolean; bins?: Array<{ id?: string; code?: string; name?: string; nickname?: string; active?: boolean; isDefault?: boolean }> }>>([]);
+  const [auditVendors, setAuditVendors] = useState<Vendor[]>([]);
+  const [dispositionOpen, setDispositionOpen] = useState(false);
+  const [dispositionType, setDispositionType] = useState<"stock_here" | "transfer" | "return_to_supplier">("stock_here");
+  const [destinationWarehouseId, setDestinationWarehouseId] = useState("");
+  const [returnSupplierId, setReturnSupplierId] = useState("");
+  const [dispositionNote, setDispositionNote] = useState("");
   const [cameraMode, setCameraMode] = useState<"product" | "bin">("product");
   const [offlineScanCount, setOfflineScanCount] = useState(0);
   const [syncingOfflineScans, setSyncingOfflineScans] = useState(false);
@@ -10739,6 +10746,7 @@ function WarehouseAuditPanel({
     ]);
     setAudits(result.audits || []);
     setAuditWarehouses((state.warehouses || []) as typeof auditWarehouses);
+    setAuditVendors(state.vendors || []);
     setScannerSettings(state.systemSettings || {});
   };
   const resumedAudit =
@@ -10949,6 +10957,7 @@ function WarehouseAuditPanel({
         body: JSON.stringify({
           warehouseId: selectedCreateWarehouse?.id || "",
           warehouseName: selectedCreateWarehouse?.name || warehouse,
+          reason: auditReason,
           user: auditOwner,
           reviewer: auditReviewer,
         }),
@@ -11392,9 +11401,10 @@ function WarehouseAuditPanel({
         message?: string;
       }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/complete`,
-        { method: "POST", body: JSON.stringify({ user: "Luis" }) },
+        { method: "POST", body: JSON.stringify({ user: "Luis", dispositionType, destinationWarehouseId, supplierId: returnSupplierId, dispositionNote }) },
       );
       setActive(result.audit || null);
+      setDispositionOpen(false);
       toast.success(result.message || "Warehouse audit completed.");
       await load();
     } catch (error) {
@@ -11490,6 +11500,15 @@ function WarehouseAuditPanel({
   const foundStockLines = lines.filter((line) => String(line.source || "").includes("found-stock") || Boolean(line.foundStock));
   const latestFoundStockImport = Array.isArray(current?.foundStockImports) ? current?.foundStockImports[0] as Record<string, unknown> : null;
   const latestFoundStockSummary = latestFoundStockImport?.summary && typeof latestFoundStockImport.summary === "object" ? latestFoundStockImport.summary as Record<string, unknown> : null;
+  const auditDisposition = current?.disposition && typeof current.disposition === "object" ? current.disposition as Record<string, unknown> : null;
+  const transferDestinations = auditWarehouses.filter((item) =>
+    String(item.id || "") !== String(current?.warehouseId || "") &&
+    warehouseTypeOption(item.warehouseType).isPhysical &&
+    String(item.inventorySourceType || "").toLowerCase() !== "supplier_feed",
+  );
+  const availableReturnSuppliers = [...auditVendors]
+    .filter((vendor) => String(vendor.name || "").trim())
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
   if (createOnly)
     return (
       <Card>
@@ -11533,6 +11552,16 @@ function WarehouseAuditPanel({
               placeholder="Team member name"
             />
           </Field>
+          <Field label="Audit reason">
+            <Select value={auditReason} onValueChange={setAuditReason}>
+              <SelectTrigger className="min-w-56"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="cycle_count">Cycle count</SelectItem>
+                <SelectItem value="new_inventory_onboarding">New inventory onboarding</SelectItem>
+                <SelectItem value="extra_stock">Extra stock</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
           <Field label="Assigned reviewer">
             <Input
               value={auditReviewer}
@@ -11567,6 +11596,16 @@ function WarehouseAuditPanel({
                 onChange={(event) => setWarehouse(event.target.value)}
               />
             </Field>
+            <Field label="Audit reason">
+              <Select value={auditReason} onValueChange={setAuditReason}>
+                <SelectTrigger className="min-w-56"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="cycle_count">Cycle count</SelectItem>
+                  <SelectItem value="new_inventory_onboarding">New inventory onboarding</SelectItem>
+                  <SelectItem value="extra_stock">Extra stock</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
             <Button
               disabled={busy || !warehouse.trim()}
               onClick={() => void create()}
@@ -11587,6 +11626,9 @@ function WarehouseAuditPanel({
                 {String(current.reviewer || "").trim() && <p className="mt-1 text-xs text-muted-foreground">Reviewer: {String(current.reviewer)}</p>}
                 <div className="mt-2 flex flex-wrap gap-2">
                   <Badge variant={auditStatus === "completed" ? "secondary" : auditStatus === "pending_review" ? "outline" : "default"}>{auditStatus === "pending_review" ? "Pending review" : auditStatus === "completed" ? "Applied" : "Counting"}</Badge>
+                  <Badge variant="outline">{String(current.reasonLabel || (current.reason === "new_inventory_onboarding" ? "New inventory onboarding" : current.reason === "extra_stock" ? "Extra stock" : "Cycle count"))}</Badge>
+                  {auditDisposition && <Badge variant="secondary">{String(auditDisposition.label || "Inventory outcome applied")}</Badge>}
+                  {Boolean(auditDisposition?.supplierReturnNumber) && <Badge variant="outline">{String(auditDisposition?.supplierReturnNumber)} draft</Badge>}
                   {offlineScanCount > 0 && <Badge variant="outline">{syncingOfflineScans ? "Syncing offline scans" : `${offlineScanCount} scan${offlineScanCount === 1 ? "" : "s"} queued offline`}</Badge>}
                   {auditStatus === "pending_review" && <span className="text-xs text-muted-foreground">{numberLabel(varianceLines.length)} variance lines · {numberLabel(unresolvedUnknowns.length)} unresolved UPCs</span>}
                 </div>
@@ -11613,7 +11655,7 @@ function WarehouseAuditPanel({
                 </Button>
                 {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}>Scan bin</Button>}
                 {auditStatus === "in_progress" && <Button size="sm" disabled={busy || !lines.length} onClick={() => void submitForReview()}>Submit for review</Button>}
-                {auditStatus === "pending_review" && <Button size="sm" disabled={busy} onClick={() => void complete()}>Approve & apply counts</Button>}
+                {auditStatus === "pending_review" && <Button size="sm" disabled={busy} onClick={() => setDispositionOpen(true)}>Choose inventory outcome</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}>Return to count</Button>}
                 <Button size="sm" variant="ghost" className="col-span-2 sm:col-span-1" asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export</a></Button>
               </div>
@@ -11639,7 +11681,30 @@ function WarehouseAuditPanel({
                 <Button size="sm" variant="outline" disabled={ebayReadinessBusy || !foundStockLines.length} onClick={() => void queueFoundStockEbayReadiness()}>{ebayReadinessBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} Get ready for eBay</Button>
               </div>
             </div>
-            {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Review required before inventory changes</p><p className="text-muted-foreground">This audit contains {numberLabel(varianceLines.length)} SKU variance lines and {numberLabel(unresolvedUnknowns.length)} unresolved UPCs. Approving it posts the counted quantities to {String(current.warehouseName)}.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
+            {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm dark:border-amber-500/30 dark:bg-amber-500/10"><p className="font-medium">Review required before inventory changes</p><p className="text-muted-foreground">This audit contains {numberLabel(varianceLines.length)} SKU variance lines and {numberLabel(unresolvedUnknowns.length)} unresolved UPCs. Choose whether approved inventory will be stocked here, transferred, or held for return to a supplier.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
+            {auditDisposition && <div className="grid gap-1 rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">Inventory outcome: {String(auditDisposition.label || "Applied")}</p>{Boolean(auditDisposition.destinationWarehouseName) && <p className="text-muted-foreground">Destination: {String(auditDisposition.destinationWarehouseName)}</p>}{Boolean(auditDisposition.supplierName) && <p className="text-muted-foreground">Supplier: {String(auditDisposition.supplierName)}{auditDisposition.supplierReturnNumber ? ` / ${String(auditDisposition.supplierReturnNumber)}` : ""}</p>}{Boolean(auditDisposition.note) && <p className="text-muted-foreground">Note: {String(auditDisposition.note)}</p>}</div>}
+            <Dialog open={dispositionOpen} onOpenChange={setDispositionOpen}>
+              <DialogContent className="max-w-3xl">
+                <DialogHeader>
+                  <DialogTitle>Choose inventory outcome</DialogTitle>
+                  <DialogDescription>The approved count is ready. Select what DataPlus should do with these units after the audit is completed.</DialogDescription>
+                </DialogHeader>
+                <div className="grid gap-3 md:grid-cols-3">
+                  {[
+                    { value: "stock_here", title: "Stock here", description: `Make the approved units available in ${String(current.warehouseName)}.` },
+                    { value: "transfer", title: "Transfer", description: "Count the units here, then move them to another physical warehouse." },
+                    { value: "return_to_supplier", title: "Return to supplier", description: "Hold the units from sale and create a supplier-return draft." },
+                  ].map((option) => <button key={option.value} type="button" onClick={() => setDispositionType(option.value as typeof dispositionType)} className={`rounded-md border p-4 text-left transition-colors ${dispositionType === option.value ? "border-primary bg-primary/10 ring-1 ring-primary" : "bg-background hover:bg-muted/60"}`}><span className="font-medium">{option.title}</span><span className="mt-1 block text-xs text-muted-foreground">{option.description}</span></button>)}
+                </div>
+                {dispositionType === "transfer" && <Field label="Destination warehouse"><Select value={destinationWarehouseId} onValueChange={setDestinationWarehouseId}><SelectTrigger><SelectValue placeholder="Choose a physical warehouse" /></SelectTrigger><SelectContent>{transferDestinations.map((item) => <SelectItem key={String(item.id || item.name)} value={String(item.id || "")}>{String(item.name || "Warehouse")}{item.code ? ` (${String(item.code)})` : ""}</SelectItem>)}</SelectContent></Select></Field>}
+                {dispositionType === "return_to_supplier" && <Field label="Return supplier"><Select value={returnSupplierId} onValueChange={setReturnSupplierId}><SelectTrigger><SelectValue placeholder="Choose supplier" /></SelectTrigger><SelectContent>{availableReturnSuppliers.map((vendor) => <SelectItem key={vendor.id} value={vendor.id}>{vendor.name}{String(vendor.status || "active").toLowerCase() !== "active" ? " (inactive)" : ""}</SelectItem>)}</SelectContent></Select></Field>}
+                <Field label="Outcome note"><Textarea value={dispositionNote} onChange={(event) => setDispositionNote(event.target.value)} placeholder="Optional handling instructions, return reason, or transfer note" /></Field>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setDispositionOpen(false)}>Cancel</Button>
+                  <Button disabled={busy || (dispositionType === "transfer" && !destinationWarehouseId) || (dispositionType === "return_to_supplier" && !returnSupplierId)} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create return draft" : "Apply & stock"}</Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
             {auditStatus === "in_progress" && Boolean(current.returnNote) && <div className="rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Returned for recount</p><p className="mt-1 text-muted-foreground">Reviewer note: {String(current.returnNote)}</p></div>}
             <Dialog open={cameraOpen} onOpenChange={(open) => { if (!open) closeCameraScanner(); }}>
               <DialogContent className="!inset-0 !flex !h-[100dvh] !max-w-none !translate-x-0 !translate-y-0 flex-col overflow-hidden rounded-none bg-black p-0 text-white sm:!inset-auto sm:!h-[90vh] sm:!max-w-3xl sm:!-translate-x-1/2 sm:!-translate-y-1/2 sm:rounded-xl" showCloseButton={false}>

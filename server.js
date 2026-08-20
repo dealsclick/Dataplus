@@ -32044,7 +32044,13 @@ async function handleApi(req, res) {
     }
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const highest = Math.max(122, ...audits.map((audit) => Number(String(audit.auditNumber || "").replace(/\D/g, "")) || 0));
-    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
+    const reasonOptions = {
+      cycle_count: "Cycle count",
+      new_inventory_onboarding: "New inventory onboarding",
+      extra_stock: "Extra stock"
+    };
+    const reason = Object.prototype.hasOwnProperty.call(reasonOptions, String(body.reason || "")) ? String(body.reason) : "cycle_count";
+    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: new Date().toISOString(), createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
     audits.unshift(audit);
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
     return sendJson(res, 201, { audit, message: `${audit.auditNumber} started.` });
@@ -32492,7 +32498,21 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
     const auditWarehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "") || String(row.name || "").toLowerCase() === String(audit.warehouseName || "").toLowerCase()) || null;
+    if (!auditWarehouse || !isPhysicalWarehouse(auditWarehouse)) return sendJson(res, 400, { error: "This audit no longer has a valid physical warehouse." });
+    const dispositionType = String(body.dispositionType || "").trim().toLowerCase();
+    if (!["stock_here", "transfer", "return_to_supplier"].includes(dispositionType)) return sendJson(res, 400, { error: "Choose whether to stock, transfer, or return the counted inventory." });
+    const destinationWarehouse = dispositionType === "transfer"
+      ? (db.warehouses || []).find((row) => String(row.id || "") === String(body.destinationWarehouseId || "")) || null
+      : null;
+    if (dispositionType === "transfer" && (!destinationWarehouse || !isPhysicalWarehouse(destinationWarehouse) || destinationWarehouse.id === auditWarehouse.id)) {
+      return sendJson(res, 400, { error: "Choose a different physical destination warehouse for this transfer." });
+    }
+    const returnSupplier = dispositionType === "return_to_supplier"
+      ? (db.vendors || []).find((row) => String(row.id || "") === String(body.supplierId || "") || String(row.name || "").trim().toLowerCase() === String(body.supplierName || "").trim().toLowerCase()) || null
+      : null;
+    if (dispositionType === "return_to_supplier" && !returnSupplier) return sendJson(res, 400, { error: "Choose the supplier receiving this return." });
     const products = [];
+    const dispositionLines = [];
     for (const line of audit.lines || []) {
       if (String(line.reviewStatus || "").toLowerCase() === "excluded") continue;
       const product = await postgres.readProductByKey(line.productId || line.sku);
@@ -32500,10 +32520,14 @@ async function handleApi(req, res) {
       const stockRow = auditWarehouseStockRow(product, audit, line.locationBin) || (auditWarehouse ? ensureInventoryWarehouseStock(product, auditWarehouse) : null);
       const qtyBefore = stockRow ? Number(stockRow.qty || 0) : Number(product.qty || 0);
       const reservedBefore = stockRow ? Number(stockRow.reserved || 0) : Number(product.reserved || 0);
+      const countedQty = Math.max(0, Number(line.countedQty || 0));
+      if (dispositionType !== "stock_here" && reservedBefore > 0) {
+        return sendJson(res, 409, { error: `${line.sku || "A counted SKU"} has ${reservedBefore} reserved unit${reservedBefore === 1 ? "" : "s"}. Release or reassign those allocations before transferring or returning this audit.` });
+      }
       if (stockRow) {
-        stockRow.qty = Number(line.countedQty || 0);
+        stockRow.qty = countedQty;
         syncInventoryTotalsFromWarehouses(product);
-      } else product.qty = Number(line.countedQty || 0);
+      } else product.qty = countedQty;
       product.lastInventoryAuditAt = new Date().toISOString();
       product.lastInventoryAuditId = audit.id;
       addInventoryLedger(db, product, {
@@ -32514,20 +32538,48 @@ async function handleApi(req, res) {
         warehouseId: auditWarehouse?.id || audit.warehouseId || "",
         warehouseName: auditWarehouse?.name || audit.warehouseName || "",
         locationBin: line.locationBin || stockRow?.locationBin || "",
-        quantityChange: Number(line.countedQty || 0) - qtyBefore,
+        quantityChange: countedQty - qtyBefore,
         qtyBefore,
-        qtyAfter: Number(line.countedQty || 0),
+        qtyAfter: countedQty,
         reservedBefore,
         reservedAfter: stockRow ? Number(stockRow.reserved || 0) : Number(product.reserved || 0),
         reason: `Approved warehouse audit ${audit.auditNumber}`,
         user: String(body.user || "Approver").trim() || "Approver"
       });
+      if (dispositionType === "transfer" && stockRow && destinationWarehouse) {
+        const targetRow = ensureInventoryWarehouseStock(product, destinationWarehouse);
+        const targetBefore = Number(targetRow.qty || 0);
+        stockRow.qty = 0;
+        targetRow.qty = targetBefore + countedQty;
+        targetRow.updatedAt = new Date().toISOString();
+        stockRow.updatedAt = targetRow.updatedAt;
+        syncInventoryTotalsFromWarehouses(product);
+        const referenceNumber = `${audit.auditNumber}: ${auditWarehouse.name} -> ${destinationWarehouse.name}`;
+        addInventoryLedger(db, product, { type: "transfer_out", source: "warehouse_audit", referenceId: audit.id, referenceNumber, warehouseId: auditWarehouse.id, warehouseName: auditWarehouse.name, locationBin: line.locationBin || stockRow.locationBin || "", quantityChange: -countedQty, qtyBefore: countedQty, qtyAfter: 0, reservedBefore: 0, reservedAfter: 0, reason: String(body.dispositionNote || `Transferred after ${audit.auditNumber}`).trim(), user: String(body.user || "Approver").trim() || "Approver" });
+        addInventoryLedger(db, product, { type: "transfer_in", source: "warehouse_audit", referenceId: audit.id, referenceNumber, warehouseId: destinationWarehouse.id, warehouseName: destinationWarehouse.name, locationBin: targetRow.locationBin || "", quantityChange: countedQty, qtyBefore: targetBefore, qtyAfter: targetRow.qty, reservedBefore: Number(targetRow.reserved || 0), reservedAfter: Number(targetRow.reserved || 0), reason: String(body.dispositionNote || `Transferred from ${auditWarehouse.name} after ${audit.auditNumber}`).trim(), user: String(body.user || "Approver").trim() || "Approver" });
+      } else if (dispositionType === "return_to_supplier" && stockRow) {
+        stockRow.returnHoldQty = countedQty;
+        stockRow.reserved = countedQty;
+        syncInventoryTotalsFromWarehouses(product);
+        addInventoryLedger(db, product, { type: "supplier_return_hold", source: "warehouse_audit", referenceId: audit.id, referenceNumber: audit.auditNumber, warehouseId: auditWarehouse.id, warehouseName: auditWarehouse.name, locationBin: line.locationBin || stockRow.locationBin || "", quantityChange: 0, reservedChange: countedQty, qtyBefore: countedQty, qtyAfter: countedQty, reservedBefore: 0, reservedAfter: countedQty, reason: String(body.dispositionNote || `Held for return to ${returnSupplier.name}`).trim(), user: String(body.user || "Approver").trim() || "Approver" });
+      }
+      dispositionLines.push({ sku: product.sku || line.sku, productId: product.id || line.productId || "", title: product.title || line.title || "", quantity: countedQty, locationBin: line.locationBin || stockRow?.locationBin || "" });
       products.push(product);
     }
     if (products.length) { await postgres.upsertProductsFromState(products); await postgres.upsertInventoryLevelsFromProducts(products); }
+    let supplierReturn = null;
+    if (dispositionType === "return_to_supplier") {
+      const supplierReturns = await postgres.readStateField("warehouseSupplierReturns").catch(() => []) || [];
+      const highestReturn = Math.max(0, ...supplierReturns.map((row) => Number(String(row.returnNumber || "").replace(/\D/g, "")) || 0));
+      supplierReturn = { id: crypto.randomUUID(), returnNumber: `VRET-${highestReturn + 1001}`, status: "draft", source: "warehouse_audit", auditId: audit.id, auditNumber: audit.auditNumber, supplierId: returnSupplier.id || "", supplierName: returnSupplier.name || "Supplier", warehouseId: auditWarehouse.id, warehouseName: auditWarehouse.name, lines: dispositionLines, totalUnits: dispositionLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0), note: String(body.dispositionNote || "").trim(), createdBy: String(body.user || "Approver").trim() || "Approver", createdAt: new Date().toISOString() };
+      supplierReturns.unshift(supplierReturn);
+      await postgres.writeStateDocuments({ warehouseSupplierReturns: supplierReturns.slice(0, 1000) });
+    }
     audit.status = "completed"; audit.completedAt = new Date().toISOString(); audit.approvedAt = audit.completedAt; audit.approvedBy = String(body.user || "Approver").trim() || "Approver"; audit.appliedLines = products.length;
+    audit.disposition = { type: dispositionType, label: dispositionType === "transfer" ? "Transferred" : dispositionType === "return_to_supplier" ? "Return to supplier" : "Stocked here", destinationWarehouseId: destinationWarehouse?.id || "", destinationWarehouseName: destinationWarehouse?.name || "", supplierId: returnSupplier?.id || "", supplierName: returnSupplier?.name || "", supplierReturnId: supplierReturn?.id || "", supplierReturnNumber: supplierReturn?.returnNumber || "", note: String(body.dispositionNote || "").trim(), appliedAt: audit.completedAt, appliedBy: audit.approvedBy };
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500), inventoryLedger: db.inventoryLedger || [] });
-    return sendJson(res, 200, { audit, message: `${audit.auditNumber} completed. ${products.length} catalog counts were updated.` });
+    const outcome = dispositionType === "transfer" ? `transferred to ${destinationWarehouse.name}` : dispositionType === "return_to_supplier" ? `placed on hold in ${supplierReturn.returnNumber}` : `stocked in ${auditWarehouse.name}`;
+    return sendJson(res, 200, { audit, supplierReturn, message: `${audit.auditNumber} completed. ${products.length} catalog counts were ${outcome}.` });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "export" && postgres.isPostgresEnabled()) {
