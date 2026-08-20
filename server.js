@@ -1325,6 +1325,7 @@ function productCostAppearsToBeSellUnit(item = {}, db = null) {
   const suspiciousMultiplier = Math.max(2, Number(productPricingRules(item, db).suspiciousPriceMultiplier || 5));
   const expectedEachPrice = pricedFromCost(sourceCost, SHOPIFY_PRICE_MARKUP_PERCENT);
   const expectedPackPrice = pricedFromCost(sourceCost * qty, SHOPIFY_PRICE_MARKUP_PERCENT);
+  if (expectedEachPrice > 0 && sourceSellPrice > expectedEachPrice * suspiciousMultiplier) return true;
   if (!(expectedPackPrice > sourceSellPrice * suspiciousMultiplier)) return false;
   return sourceCost <= sourceSellPrice * 1.5 && expectedEachPrice <= sourceSellPrice * 1.75;
 }
