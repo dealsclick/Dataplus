@@ -4673,6 +4673,34 @@ async function listOrders(options = {}) {
   return orders.rows.map((row) => orderRowToState(row, byOrder.get(row.order_id) || []));
 }
 
+async function readOrdersByIds(orderIds = []) {
+  const client = getPool();
+  const ids = [...new Set((Array.isArray(orderIds) ? orderIds : [])
+    .map((value) => nullableString(value))
+    .filter(Boolean))];
+  if (!client || !ids.length) return [];
+  await initRelationalSchema();
+  const [orders, lines] = await Promise.all([
+    client.query(`
+      select *
+      from order_records
+      where order_id = any($1::text[])
+    `, [ids]),
+    client.query(`
+      select *
+      from order_line_items
+      where order_id = any($1::text[])
+      order by order_id, line_index
+    `, [ids])
+  ]);
+  const byOrder = new Map();
+  for (const line of lines.rows) {
+    if (!byOrder.has(line.order_id)) byOrder.set(line.order_id, []);
+    byOrder.get(line.order_id).push(line);
+  }
+  return orders.rows.map((row) => orderRowToState(row, byOrder.get(row.order_id) || []));
+}
+
 async function readOrderByKey(key) {
   const client = getPool();
   const value = nullableString(key);
@@ -8129,6 +8157,7 @@ module.exports = {
   pruneChannelApiLogs,
   readOperationalSummary,
   listOrders,
+  readOrdersByIds,
   listPurchaseOrders,
   searchUniversal,
   readOrderByKey,

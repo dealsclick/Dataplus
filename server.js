@@ -32385,64 +32385,21 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/purchasing/work" && postgres.isPostgresEnabled()) {
-    const [orders, purchaseOrders, storedRequirements, workflowSettings] = await Promise.all([
-      postgres.listOrders({ limit: 5000 }),
+    const [purchaseOrders, storedRequirements, workflowSettings, vendors] = await Promise.all([
       postgres.listPurchaseOrders({ limit: 5000 }),
       postgres.readStateField("purchaseRequirements").catch(() => []),
-      readOrderWorkflowSettings()
+      readOrderWorkflowSettings(),
+      postgres.readStateField("vendors").catch(() => [])
     ]);
-    const db = await readDbFast({ skipInventory: true });
-    db.orders = orders || [];
-    db.purchaseOrders = purchaseOrders || [];
-    db.purchaseRequirements = Array.isArray(storedRequirements) ? storedRequirements : [];
-    const terminalPurchaseOrders = new Map();
-    const terminalOrders = new Map();
-    let terminalRequirementsChanged = false;
-    for (const order of db.orders.filter(isTerminalCustomerDemand)) {
-      const result = reconcileTerminalOrderPurchasing(db, order, { user: "Purchasing reconciliation" });
-      if (!result.changed && !result.requirementsChanged) continue;
-      for (const po of result.purchaseOrders || []) terminalPurchaseOrders.set(String(po.id), po);
-      terminalOrders.set(String(order.id), order);
-      terminalRequirementsChanged = terminalRequirementsChanged || result.requirementsChanged;
-    }
-    const recoveredRequirements = recoverPurchaseRequirementsFromRoutes(db, db.orders, workflowSettings, { user: "Purchasing recovery" });
-    const repairedPurchaseOrders = new Map();
-    const repairedOrders = new Map();
-    const recoveredRouteIds = new Set(recoveredRequirements.map((requirement) => String(requirement.routeId || "")));
-    for (const order of db.orders.filter((candidate) => (candidate.fulfillmentRoutes || []).some((route) => recoveredRouteIds.has(String(route.id || ""))))) {
-      repairedOrders.set(String(order.id), order);
-    }
-    const waitingOrderIds = db.orders.filter((order) => (order.fulfillmentRoutes || []).some((route) => route.type === "purchase"
-      && !route.purchaseOrderId
-      && route.vendorId
-      && !isTerminalCustomerDemand(order)
-      && !["canceled", "supplier_commitment_canceled", "received", "closed"].includes(String(route.status || "").toLowerCase())))
-      .map((order) => order.id);
-    for (const orderId of waitingOrderIds) {
-      try {
-        const result = createSupplierPurchaseOrdersFromOrders(db, [orderId], { user: "Purchasing recovery" });
-        for (const po of result.purchaseOrders || []) repairedPurchaseOrders.set(String(po.id), po);
-        for (const order of result.orders || []) repairedOrders.set(String(order.id), order);
-      } catch (error) {
-        console.warn(`Waiting for PO repair skipped ${orderId}: ${error.message}`);
-      }
-    }
-    if (recoveredRequirements.length || repairedPurchaseOrders.size || terminalPurchaseOrders.size || terminalRequirementsChanged) {
-      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements, sequence: db.sequence || {} });
-      for (const po of terminalPurchaseOrders.values()) await postgres.savePurchaseOrder(po);
-      for (const po of repairedPurchaseOrders.values()) await postgres.savePurchaseOrder(po);
-      for (const order of terminalOrders.values()) {
-        await postgres.saveOrder(order);
-        clearOrderApiCache(order.id);
-      }
-      for (const order of repairedOrders.values()) {
-        order.updatedAt = new Date().toISOString();
-        await postgres.saveOrder(order);
-        clearOrderApiCache(order.id);
-      }
-    }
-    const cutoffChanges = refreshPurchaseOrderCutoffStates(db);
-    for (const po of cutoffChanges) await postgres.savePurchaseOrder(po);
+    const purchaseRequirements = Array.isArray(storedRequirements) ? storedRequirements : [];
+    const requirementOrderIds = purchaseRequirements.map((requirement) => requirement?.orderId).filter(Boolean);
+    const orders = await postgres.readOrdersByIds(requirementOrderIds);
+    const db = {
+      orders: orders || [],
+      purchaseOrders: purchaseOrders || [],
+      purchaseRequirements,
+      vendors: Array.isArray(vendors) ? vendors : []
+    };
     const orderById = new Map((db.orders || []).map((order) => [String(order.id), order]));
     const requirements = db.purchaseRequirements.map((requirement) => {
       const order = orderById.get(String(requirement.orderId || ""));
