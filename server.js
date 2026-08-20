@@ -26077,7 +26077,8 @@ function confirmedSupplierMatch(row = {}) {
 async function auditSupplierOptionsForLine(line = {}, vendors = []) {
   const product = await postgres.readProductByKey(line.productId || line.sku);
   if (!product) return { product: null, options: [], pendingReviewCount: 0 };
-  const cacheIdentity = encodeURIComponent(String(product.id || product.sku || line.productId || line.sku || "").trim().toLowerCase());
+  const cacheVersion = String(product.supplierCoverageUpdatedAt || "unindexed").trim();
+  const cacheIdentity = encodeURIComponent(`${String(product.id || product.sku || line.productId || line.sku || "").trim().toLowerCase()}:${cacheVersion}`);
   const cacheKey = cacheIdentity ? `dataplus:audit-supplier-options:${cacheIdentity}` : "";
   if (cacheKey) {
     const cached = await redisCache.getJson(cacheKey);
@@ -26090,14 +26091,9 @@ async function auditSupplierOptionsForLine(line = {}, vendors = []) {
       };
     }
   }
-  const coverage = await postgres.findVendorCatalogSupplierMatches({
+  const coverage = await postgres.readProductSupplierLinks({
     productId: product.id,
-    sku: product.sku,
-    title: product.marketplaceTitle || product.title,
-    barcode: product.barcode,
-    mfrPartNumber: product.mfrPartNumber,
-    brand: product.brand,
-    queryTimeoutMs: 8000
+    sku: product.sku
   });
   const matches = [...(coverage.matches || [])];
   const primarySupplier = String(product.supplier || product.vendor || "").trim();

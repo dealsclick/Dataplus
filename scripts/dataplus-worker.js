@@ -24,6 +24,7 @@ loadLocalEnv();
 
 const postgres = require("../db");
 const { createDataQualityEngine } = require("../lib/data-quality");
+const redisCache = require("../lib/redis-cache");
 const dataplus = require("../server");
 
 const WORKER_ID = process.env.DATAPLUS_WORKER_ID || `dataplus-worker-${crypto.randomUUID().slice(0, 8)}`;
@@ -1682,6 +1683,12 @@ async function runProductDumpImportJob(job) {
               postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist supplier coverage progress:", error.message || error));
             }
           });
+          await Promise.all([
+            redisCache.deleteByPrefix("dataplus:audit-supplier-options:"),
+            redisCache.deleteByPrefix("dataplus:supplier-coverage:"),
+            redisCache.deleteByPrefix("dataplus:products:"),
+            redisCache.deleteByPrefix("dataplus:product-detail:")
+          ]);
         } catch (error) {
           supplierCoverageError = error.message || "Supplier coverage status rebuild failed.";
         }
@@ -1712,7 +1719,7 @@ async function runProductDumpImportJob(job) {
     status: supplierCoverageError ? "warning" : "success",
     phase: supplierCoverageError ? "completed_with_warning" : "complete",
     message: supplierCoverageError ? "Product dump import finished, but supplier coverage needs review." : "Product dump import and supplier coverage rebuild finished.",
-    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", supplierCoverageResult ? `Stored supplier coverage for ${Number(supplierCoverageResult.productsUpdated || 0).toLocaleString()} approved products and ${Number(supplierCoverageResult.vendorItemsUpdated || 0).toLocaleString()} source records from ${Number(supplierCoverageResult.keys || 0).toLocaleString()} matched identities.` : "", !shouldRefreshSupplierCoverage ? "Supplier coverage was unchanged and skipped for this reconciliation-only refresh." : "", supplierCoverageError ? `Supplier coverage rebuild failed: ${supplierCoverageError}` : "", ...followOn].filter(Boolean).join(" "),
+    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", supplierCoverageResult ? `Stored ${Number(supplierCoverageResult.supplierLinks || 0).toLocaleString()} product-to-supplier links and refreshed coverage for ${Number(supplierCoverageResult.productsUpdated || 0).toLocaleString()} approved products and ${Number(supplierCoverageResult.vendorItemsUpdated || 0).toLocaleString()} source records from ${Number(supplierCoverageResult.keys || 0).toLocaleString()} matched identities.` : "", !shouldRefreshSupplierCoverage ? "Supplier coverage was unchanged and skipped for this reconciliation-only refresh." : "", supplierCoverageError ? `Supplier coverage rebuild failed: ${supplierCoverageError}` : "", ...followOn].filter(Boolean).join(" "),
     totalRows: finalProcessedRows || current.totalRows || 0,
     processedRows: finalProcessedRows || current.processedRows || 0,
     changed: finalChanged || current.changed || 0,
