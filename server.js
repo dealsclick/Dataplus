@@ -11127,7 +11127,7 @@ function recalculateWaitingPurchaseOrder(db, po, vendor) {
 }
 
 function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
-  const orders = (orderIds || []).map((id) => (db.orders || []).find((order) => order.id === id)).filter(Boolean);
+  const orders = (orderIds || []).map((id) => (db.orders || []).find((order) => order.id === id)).filter((order) => order && !isTerminalCustomerDemand(order));
   if (!orders.length) throw new Error("No matching orders found for purchase order.");
   ensurePurchaseRequirementsForOrders(db, orders, options);
   const requestedRouteIds = new Set(Array.isArray(options.routeIds) ? options.routeIds.map(String) : []);
@@ -11135,7 +11135,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   let unassignedRouteCount = 0;
   for (const order of orders) {
     const routes = (order.fulfillmentRoutes || []).filter((route) => {
-      if (route.type !== "purchase" || route.purchaseOrderId || ["canceled", "received", "closed"].includes(String(route.status || "").toLowerCase())) return false;
+      if (route.type !== "purchase" || route.purchaseOrderId || ["canceled", "supplier_commitment_canceled", "received", "closed"].includes(String(route.status || "").toLowerCase())) return false;
       if (requestedRouteIds.size && !requestedRouteIds.has(String(route.id))) return false;
       if (!Array.isArray(options.vendorIds) || !options.vendorIds.length) return true;
       const vendor = findVendorById(db, route.vendorId) || findVendorByName(db, route.vendorName);
@@ -11338,6 +11338,64 @@ function validatePurchaseOrderReceiptLines(po = {}, receivedLines = []) {
     }
   }
   return "";
+}
+
+function purchaseOrderCanceledDemandReceiptExceptions(po = {}, receivedLines = []) {
+  const exceptions = (Array.isArray(po.receivingExceptions) ? po.receivingExceptions : [])
+    .filter((entry) => entry?.type === "canceled_customer_demand" && ["open", "awaiting_receipt"].includes(String(entry.status || "open").toLowerCase()));
+  if (!exceptions.length) return [];
+  const matches = [];
+  for (const input of receivedLines || []) {
+    const qtyReceived = Number(input.qtyReceived || 0);
+    if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
+    const poLine = findPurchaseOrderReceiptLine(po, input);
+    if (!poLine) continue;
+    for (const exception of exceptions) {
+      const routeMatches = exception.routeId && String(exception.routeId) === String(poLine.routeId || input.routeId || "");
+      const orderSkuMatches = String(exception.orderId || "") === String(poLine.orderId || "")
+        && String(exception.sku || "").trim().toLowerCase() === String(poLine.sku || input.sku || "").trim().toLowerCase();
+      if (!routeMatches && !orderSkuMatches) continue;
+      if (!matches.some((entry) => String(entry.id || entry.key) === String(exception.id || exception.key))) matches.push(exception);
+    }
+  }
+  return matches;
+}
+
+function acknowledgeCanceledDemandReceipt(po = {}, receipt = {}, exceptions = [], user = "System") {
+  if (!exceptions.length) return 0;
+  const now = new Date().toISOString();
+  po.returns = Array.isArray(po.returns) ? po.returns : [];
+  let heldUnits = 0;
+  for (const exception of exceptions) {
+    const receivedQty = (receipt.items || []).reduce((sum, item) => {
+      const routeMatches = exception.routeId && String(exception.routeId) === String(item.routeId || "");
+      const orderSkuMatches = String(exception.orderId || "") === String(item.orderId || "")
+        && String(exception.sku || "").trim().toLowerCase() === String(item.sku || "").trim().toLowerCase();
+      return routeMatches || orderSkuMatches ? sum + Number(item.qtyReceived || 0) : sum;
+    }, 0);
+    if (receivedQty <= 0) continue;
+    exception.status = "received_for_return";
+    exception.receivedAt = now;
+    exception.receiptNumber = receipt.receiptNumber;
+    exception.receivedQty = Number(exception.receivedQty || 0) + receivedQty;
+    exception.acknowledgedBy = user;
+    const vendorReturn = po.returns.find((entry) => String(entry.sourceKey || "") === String(exception.key || ""));
+    if (vendorReturn) {
+      vendorReturn.status = "ready_to_return";
+      vendorReturn.receivedAt = now;
+      vendorReturn.receiptNumber = receipt.receiptNumber;
+      vendorReturn.receivedQty = Number(vendorReturn.receivedQty || 0) + receivedQty;
+      vendorReturn.updatedAt = now;
+    }
+    heldUnits += receivedQty;
+  }
+  if (heldUnits > 0) addPoTimeline(po, {
+    type: "vendor_return_hold",
+    title: "Canceled demand received into return hold",
+    message: `${heldUnits} unit${heldUnits === 1 ? "" : "s"} from canceled or refunded customer demand were isolated for vendor return.`,
+    user
+  });
+  return heldUnits;
 }
 
 function purchaseOrderSupplierOffers(db, product = {}, currentPo = {}) {
@@ -20274,10 +20332,207 @@ function createOrderException(order, input = {}) {
   return entry;
 }
 
+function orderTerminalDemandReason(order = {}) {
+  const status = String(order.status || "").trim().toLowerCase();
+  const financialStatus = String(order.financialStatus || "").trim().toLowerCase();
+  if (order.cancelledAt || ["canceled", "cancelled", "void", "deleted"].includes(status)) return "canceled";
+  if (status === "refunded" || financialStatus === "refunded") return "refunded";
+  return "";
+}
+
+function isTerminalCustomerDemand(order = {}) {
+  return Boolean(orderTerminalDemandReason(order));
+}
+
+function purchaseOrderHasSupplierCommitment(po = {}) {
+  const status = String(po.status || "draft").trim().toLowerCase();
+  return Boolean(po.submittedAt || po.placedAt || po.sentAt)
+    || (Array.isArray(po.submissions) && po.submissions.length > 0)
+    || (Array.isArray(po.submissionHistory) && po.submissionHistory.length > 0)
+    || ["submitted", "placed", "sent", "acknowledged", "partially_received", "received", "closed"].includes(status);
+}
+
+function reconcileTerminalOrderPurchasing(db, order, options = {}) {
+  const reason = orderTerminalDemandReason(order);
+  if (!reason) return { changed: false, purchaseOrders: [], requirementsChanged: false };
+  const now = new Date().toISOString();
+  const user = options.user || "System";
+  db.purchaseOrders = Array.isArray(db.purchaseOrders) ? db.purchaseOrders : [];
+  db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
+  order.fulfillmentRoutes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [];
+  const changedPurchaseOrders = new Map();
+  let requirementsChanged = false;
+  let changed = false;
+
+  for (const route of order.fulfillmentRoutes) {
+    if (route.type !== "purchase") continue;
+    const po = db.purchaseOrders.find((candidate) => String(candidate.id || "") === String(route.purchaseOrderId || "")
+      || (route.purchaseOrderNumber && String(candidate.poNumber || "") === String(route.purchaseOrderNumber)));
+    const committed = po ? purchaseOrderHasSupplierCommitment(po) : false;
+    const nextRouteStatus = committed ? "supplier_commitment_canceled" : "canceled";
+    if (String(route.status || "") !== nextRouteStatus || !route.customerDemandCanceledAt) {
+      route.status = nextRouteStatus;
+      route.customerDemandCanceled = true;
+      route.customerDemandCanceledAt = now;
+      route.customerDemandCancelReason = reason;
+      route.updatedAt = now;
+      changed = true;
+    }
+    for (const requirement of db.purchaseRequirements) {
+      if (String(requirement.routeId || "") !== String(route.id || "") && String(requirement.orderId || "") !== String(order.id || "")) continue;
+      const nextStatus = committed ? "canceled_after_submission" : "canceled";
+      if (String(requirement.status || "") !== nextStatus || !requirement.customerDemandCanceledAt) {
+        requirement.status = nextStatus;
+        requirement.customerDemandCanceled = true;
+        requirement.customerDemandCanceledAt = now;
+        requirement.customerDemandCancelReason = reason;
+        requirement.updatedAt = now;
+        requirementsChanged = true;
+      }
+    }
+    if (!po) continue;
+    po.items = Array.isArray(po.items) ? po.items : [];
+    const matchingLines = po.items.filter((line) => String(line.routeId || "") === String(route.id || "")
+      || String(line.orderId || "") === String(order.id || ""));
+    if (!matchingLines.length) continue;
+    if (!committed) {
+      po.removedDemand = Array.isArray(po.removedDemand) ? po.removedDemand : [];
+      for (const line of matchingLines) {
+        if (!po.removedDemand.some((entry) => String(entry.routeId || "") === String(line.routeId || ""))) {
+          po.removedDemand.push({ ...line, removedAt: now, removedBy: user, reason: `${reason}_customer_order` });
+        }
+      }
+      po.items = po.items.filter((line) => !matchingLines.includes(line));
+      const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+      if (po.items.length) recalculateWaitingPurchaseOrder(db, po, vendor);
+      else {
+        po.orderIds = [];
+        po.orderNumbers = [];
+        po.totalUnits = 0;
+        po.estimatedCost = 0;
+        po.openEstimatedCost = 0;
+        po.status = "canceled";
+        po.workflowStage = "history";
+        po.canceledAt = now;
+        po.cancelReason = `All customer demand was ${reason}.`;
+      }
+      addPoTimeline(po, {
+        type: "customer_order_canceled",
+        title: "Canceled demand removed",
+        message: `${order.orderNumber || order.id} was ${reason}; its uncommitted line${matchingLines.length === 1 ? " was" : "s were"} removed from this draft PO.`,
+        user
+      });
+    } else {
+      po.receivingExceptions = Array.isArray(po.receivingExceptions) ? po.receivingExceptions : [];
+      po.returns = Array.isArray(po.returns) ? po.returns : [];
+      for (const line of matchingLines) {
+        line.customerDemandCanceled = true;
+        line.customerDemandCanceledAt = now;
+        line.customerDemandCancelReason = reason;
+        const exceptionKey = `${order.id}:${line.routeId || line.sku}`;
+        if (!po.receivingExceptions.some((entry) => entry.key === exceptionKey)) {
+          po.receivingExceptions.push({
+            id: crypto.randomUUID(), key: exceptionKey, type: "canceled_customer_demand", status: "open",
+            orderId: order.id, orderNumber: order.orderNumber, routeId: line.routeId || route.id, sku: line.sku,
+            qty: purchaseOrderOpenQuantity(line), reason, createdAt: now
+          });
+        }
+        if (!po.returns.some((entry) => entry.sourceKey === exceptionKey)) {
+          po.returns.push({
+            id: crypto.randomUUID(), returnNumber: `RTV-${String(po.returns.length + 1).padStart(4, "0")}`,
+            sourceKey: exceptionKey, source: "customer_order_cancellation", status: "awaiting_receipt",
+            warehouseId: po.warehouseId || "", warehouseName: po.warehouseName || "",
+            reason: `${order.orderNumber || order.id} was ${reason} after supplier submission.`,
+            orderId: order.id, orderNumber: order.orderNumber,
+            items: [{ ...line, qty: purchaseOrderOpenQuantity(line) }], createdBy: user, createdAt: now
+          });
+        }
+      }
+      addPoTimeline(po, {
+        type: "receiving_exception",
+        title: "Canceled order requires receiving review",
+        message: `${order.orderNumber || order.id} was ${reason} after this PO was committed. Receiving must isolate the affected stock for cancellation or vendor return.`,
+        user
+      });
+    }
+    po.updatedAt = now;
+    changedPurchaseOrders.set(String(po.id), po);
+    changed = true;
+  }
+
+  if (String(order.status || "").toLowerCase() !== (reason === "refunded" ? "refunded" : "canceled")
+    || String(order.operationalStatus || "").toLowerCase() !== "canceled"
+    || String(order.workflowStatus || "").toLowerCase() !== "canceled") changed = true;
+  order.status = reason === "refunded" ? "refunded" : "canceled";
+  order.operationalStatus = "canceled";
+  order.workflowStatus = "canceled";
+  order.routingLastResult = "terminal";
+  order.workflowUpdatedAt = now;
+  order.updatedAt = now;
+  const eventExists = (order.workflowHistory || []).some((event) => event.step === "terminal_demand_reconciled" && event.reason === reason);
+  if (!eventExists) addOrderWorkflowEvent(order, {
+    step: "terminal_demand_reconciled", status: "done", title: "Canceled demand reconciled",
+    message: committedSummary(changedPurchaseOrders) ? "Supplier-committed items were flagged for receiving and vendor-return review." : "Uncommitted purchasing demand was removed from draft purchase orders.",
+    reason, user
+  });
+  return { changed, purchaseOrders: [...changedPurchaseOrders.values()], requirementsChanged };
+}
+
+function committedSummary(purchaseOrders = new Map()) {
+  return [...purchaseOrders.values()].some((po) => purchaseOrderHasSupplierCommitment(po));
+}
+
+const MARKETPLACE_ORDER_OPERATION_KEYS = [
+  "shipments", "fulfillmentLines", "inventoryAllocations", "backorderLines", "fulfillmentRoutes",
+  "workflowHistory", "workflowExceptions", "timeline", "documents", "notifications", "routingExplanation",
+  "returnWarehouseId", "returnWarehouseName", "fulfillmentStage", "notes", "orderNotes",
+  "shippingLabelPurchases", "selectedShippingQuote", "selectedDeliveryOption", "localFlags",
+  "purchaseOrderId", "purchaseOrderNumber", "purchaseOrderIds", "purchaseOrderNumbers", "purchaseGroupId",
+  "routingLastAttemptAt", "routingLastResult", "operationalStatus", "workflowStatus"
+];
+
+function preserveMarketplaceOrderOperations(incoming = {}, existing = null) {
+  if (!existing) return { ...incoming };
+  const preserved = Object.fromEntries(MARKETPLACE_ORDER_OPERATION_KEYS
+    .filter((key) => existing[key] !== undefined)
+    .map((key) => [key, existing[key]]));
+  return { ...incoming, ...preserved };
+}
+
+async function reconcilePersistedTerminalOrders(orders = [], options = {}) {
+  const terminalOrders = (orders || []).filter(isTerminalCustomerDemand);
+  if (!terminalOrders.length || !postgres.isPostgresEnabled()) return { reconciled: 0, purchaseOrders: 0 };
+  const [purchaseOrders, storedRequirements] = await Promise.all([
+    postgres.listPurchaseOrders({ limit: 5000 }),
+    postgres.readStateField("purchaseRequirements").catch(() => [])
+  ]);
+  const db = await readDbFast({ skipInventory: true });
+  db.purchaseOrders = purchaseOrders || [];
+  db.purchaseRequirements = Array.isArray(storedRequirements) ? storedRequirements : [];
+  const changedPurchaseOrders = new Map();
+  let requirementsChanged = false;
+  let reconciled = 0;
+  for (const input of terminalOrders) {
+    const persisted = await postgres.readOrderByKey(input.id);
+    const order = preserveMarketplaceOrderOperations(input, persisted);
+    const result = reconcileTerminalOrderPurchasing(db, order, options);
+    if (!result.changed && !result.requirementsChanged) continue;
+    for (const po of result.purchaseOrders || []) changedPurchaseOrders.set(String(po.id), po);
+    requirementsChanged = requirementsChanged || result.requirementsChanged;
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    reconciled += 1;
+  }
+  for (const po of changedPurchaseOrders.values()) await postgres.savePurchaseOrder(po);
+  if (requirementsChanged) await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements });
+  if (reconciled) clearOrderApiCache();
+  return { reconciled, purchaseOrders: changedPurchaseOrders.size };
+}
+
 function recalculateOrderOperationalStatus(order = {}) {
   const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [];
   const lines = orderLineItems(order);
-  const canceled = ["canceled", "cancelled", "void", "deleted"].includes(String(order.status || "").toLowerCase());
+  const canceled = isTerminalCustomerDemand(order);
   const blocking = (order.workflowExceptions || []).some((entry) => entry.status !== "resolved" && entry.severity === "blocking");
   const shipped = routes.reduce((sum, route) => sum + (["shipped", "delivered"].includes(String(route.status || "").toLowerCase()) ? Number(route.qty || 0) : 0), 0);
   const total = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
@@ -20729,8 +20984,9 @@ function ensurePooledPurchaseRequirement(db, order, route, line, settings, vendo
 function recoverPurchaseRequirementsFromRoutes(db, orders = [], settings = defaultOrderWorkflowSettings(), options = {}) {
   db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
   const created = [];
-  const terminalStatuses = new Set(["canceled", "cancelled", "closed", "deleted", "received", "shipped", "delivered"]);
+  const terminalStatuses = new Set(["canceled", "cancelled", "supplier_commitment_canceled", "closed", "deleted", "received", "shipped", "delivered"]);
   for (const order of orders || []) {
+    if (isTerminalCustomerDemand(order)) continue;
     const lines = orderLineItems(order);
     let repairedOrder = false;
     for (const route of order.fulfillmentRoutes || []) {
@@ -20945,7 +21201,7 @@ function fulfillmentWarehousePlan(db = {}, order = {}, line = {}, product = {}) 
 }
 
 async function routeOrderForFulfillment(db, order, body = {}) {
-  if (["canceled", "cancelled", "void", "deleted"].includes(String(order.status || "").toLowerCase())) return { routes: [], skipped: true, reason: "Order is canceled." };
+  if (isTerminalCustomerDemand(order)) return { routes: [], skipped: true, reason: "Order is canceled or refunded." };
   if (!isOrderPaymentCleared(order) && body.force !== true) {
     recalculateOrderOperationalStatus(order);
     return { routes: [], skipped: true, reason: "Payment has not cleared." };
@@ -21091,6 +21347,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
 }
 
 function orderNeedsAutomaticRouting(order = {}, now = Date.now()) {
+  if (isTerminalCustomerDemand(order)) return false;
   const terminalStates = new Set(["canceled", "cancelled", "void", "deleted", "fulfilled", "shipped", "returned"]);
   const states = [order.status, order.fulfillmentStatus, order.operationalStatus].map((value) => String(value || "").trim().toLowerCase());
   if (states.some((state) => terminalStates.has(state))) return false;
@@ -22094,6 +22351,8 @@ function trackingUrlForCarrier(carrier = "", trackingNumber = "") {
 function mapEbayStatus(order) {
   const cancelState = String(order.cancelStatus?.cancelState || order.cancelStatus || "").toLowerCase();
   if (cancelState.includes("cancel")) return "canceled";
+  const payment = String(order.orderPaymentStatus || "").toLowerCase();
+  if (payment.includes("refund") || ebayRefundTotal(order) > 0) return "refunded";
   const fulfillment = String(order.orderFulfillmentStatus || "").toLowerCase();
   if (fulfillment.includes("fulfilled")) return "shipped";
   if (fulfillment.includes("progress")) return "ready";
@@ -24582,7 +24841,6 @@ async function importEbayOrders(db, options = {}) {
   const hasRequestedLookback = Number.isFinite(requestedLookbackDays) && requestedLookbackDays > 0;
   const lookbackDays = Math.max(1, Math.min(365, hasRequestedLookback ? Math.floor(requestedLookbackDays) : 30));
   const maxOrders = Math.max(1, Math.min(5000, Number(options.limit || 5000) || 5000));
-  const includeCanceled = options.includeCanceled === true || String(options.includeCanceled || "").toLowerCase() === "true";
   const lastSync = db.connectorState.ebayLastOrderSync ? new Date(db.connectorState.ebayLastOrderSync) : null;
   const hasMoneyGaps = (db.orders || []).some((order) => (
     String(order.source || "").toLowerCase() === "ebay"
@@ -24628,18 +24886,6 @@ async function importEbayOrders(db, options = {}) {
     const orders = Array.isArray(data.orders) ? data.orders : [];
     for (const order of orders) {
       try {
-        const cancellationState = `${order.orderCancelStatus || ""} ${order.orderFulfillmentStatus || ""} ${order.orderPaymentStatus || ""}`;
-        if (!includeCanceled && /cancel/i.test(cancellationState)) {
-          skipped += 1;
-          rows.push({
-            order_id: order.orderId || "",
-            created_date: order.creationDate || "",
-            status: order.orderFulfillmentStatus || order.orderPaymentStatus || "",
-            action: "skipped",
-            reason: "Canceled order excluded by import setting"
-          });
-          continue;
-        }
         let fulfillments = [];
         try {
           if (order.orderId && (order.fulfillmentHrefs?.length || String(order.orderFulfillmentStatus || "").toLowerCase() !== "not_started")) {
@@ -24648,7 +24894,14 @@ async function importEbayOrders(db, options = {}) {
         } catch (fulfillmentError) {
           errors.push(`fulfillment ${order.orderId || "unknown"}: ${fulfillmentError.message}`);
         }
-        const action = upsertOrder(db, mapEbayOrder(order, db, fulfillments));
+        const mappedOrder = mapEbayOrder(order, db, fulfillments);
+        const existingOrder = (db.orders || []).find((row) => (
+          String(row.marketplaceOrderId || row.marketplaceOrderNumber || row.orderNumber || row.id || "")
+            === String(mappedOrder.marketplaceOrderId || mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber || mappedOrder.id || "")
+        ));
+        const mergedOrder = preserveMarketplaceOrderOperations(mappedOrder, existingOrder);
+        const action = upsertOrder(db, mergedOrder);
+        reconcileTerminalOrderPurchasing(db, mergedOrder, { user: "eBay order import" });
         if (action === "created") created += 1;
         if (action === "updated") updated += 1;
         if (action === "skipped") skipped += 1;
@@ -28076,7 +28329,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
   const billing = node.billingAddress || {};
   const financial = String(node.displayFinancialStatus || "").toLowerCase();
   const fulfillment = String(node.displayFulfillmentStatus || "").toLowerCase();
-  const status = node.cancelledAt ? "canceled" : fulfillment === "fulfilled" ? "fulfilled" : fulfillment === "partial" ? "partial_fulfilled" : financial === "paid" ? "processing" : "new";
+  const status = node.cancelledAt ? "canceled" : financial === "refunded" ? "refunded" : fulfillment === "fulfilled" ? "fulfilled" : fulfillment === "partial" ? "partial_fulfilled" : financial === "paid" ? "processing" : "new";
   return {
     id: String(node.id || "").replace("gid://shopify/Order/", "shopify-order-"),
     shopifyOrderId: node.id || "",
@@ -28089,6 +28342,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
     status,
     financialStatus: node.displayFinancialStatus || "",
     fulfillmentStatus: node.displayFulfillmentStatus || "",
+    cancelledAt: node.cancelledAt || "",
     buyer: customer.displayName || [shipping.firstName, shipping.lastName].filter(Boolean).join(" ") || node.email || "",
     buyerEmail: customer.email || node.email || "",
     phone: shipping.phone || customer.phone || "",
@@ -28121,8 +28375,14 @@ async function importShopifyOrders(limit = 250, filters = {}) {
     if (!connection.pageInfo?.hasNextPage || !connection.pageInfo?.endCursor) break; after = connection.pageInfo.endCursor;
   }
   const sources = String(filters.sources || "Native Shopify sources");
-  const filtered = imported.filter((order) => (filters.includeCanceled || order.status !== "canceled") && shopifySourceIsAllowed(order, sources));
+  const filtered = imported.filter((order) => shopifySourceIsAllowed(order, sources));
+  for (let index = 0; index < filtered.length; index += 1) {
+    if (!isTerminalCustomerDemand(filtered[index])) continue;
+    const existing = await postgres.readOrderByKey(filtered[index].id);
+    filtered[index] = preserveMarketplaceOrderOperations(filtered[index], existing);
+  }
   await postgres.upsertOrdersFromState(filtered, { replace: false });
+  await reconcilePersistedTerminalOrders(filtered, { user: "Shopify order import" });
   clearOrderApiCache();
   return filtered;
 }
@@ -28138,11 +28398,12 @@ async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}, webho
   if (!incoming.id) throw new Error("Shopify could not load the order referenced by this webhook.");
   if (!shopifySourceIsAllowed(incoming, settings.shopifyOrderImportSources)) return { skipped: true, reason: `Sales channel ${incoming.channelSource || "Unknown"} is not enabled for Shopify order imports.` };
   const existing = await postgres.readOrderByKey(incoming.id);
-  const preservedKeys = ["shipments", "fulfillmentLines", "inventoryAllocations", "backorderLines", "workflowHistory", "timeline", "documents", "notifications", "returnWarehouseId", "returnWarehouseName", "fulfillmentStage", "notes", "orderNotes", "shippingLabelPurchases", "selectedShippingQuote", "selectedDeliveryOption", "localFlags"];
-  const preserved = Object.fromEntries(preservedKeys.filter((key) => existing?.[key] !== undefined).map((key) => [key, existing[key]]));
-  const merged = { ...incoming, ...preserved, updatedAt: new Date().toISOString(), importedAt: new Date().toISOString() };
+  const merged = preserveMarketplaceOrderOperations(incoming, existing);
+  merged.updatedAt = new Date().toISOString();
+  merged.importedAt = new Date().toISOString();
   addOrderTimeline(merged, { type: "channel_sync", title: "Shopify webhook applied", message: `${String(webhook.topic || "orders/update")} refreshed the local order record.`, user: "Shopify" });
   await postgres.saveOrder(merged);
+  await reconcilePersistedTerminalOrders([merged], { user: `Shopify ${String(webhook.topic || "orders/update")}` });
   clearOrderApiCache(merged.id);
   return { order: merged, created: !existing };
 }
@@ -32134,6 +32395,16 @@ async function handleApi(req, res) {
     db.orders = orders || [];
     db.purchaseOrders = purchaseOrders || [];
     db.purchaseRequirements = Array.isArray(storedRequirements) ? storedRequirements : [];
+    const terminalPurchaseOrders = new Map();
+    const terminalOrders = new Map();
+    let terminalRequirementsChanged = false;
+    for (const order of db.orders.filter(isTerminalCustomerDemand)) {
+      const result = reconcileTerminalOrderPurchasing(db, order, { user: "Purchasing reconciliation" });
+      if (!result.changed && !result.requirementsChanged) continue;
+      for (const po of result.purchaseOrders || []) terminalPurchaseOrders.set(String(po.id), po);
+      terminalOrders.set(String(order.id), order);
+      terminalRequirementsChanged = terminalRequirementsChanged || result.requirementsChanged;
+    }
     const recoveredRequirements = recoverPurchaseRequirementsFromRoutes(db, db.orders, workflowSettings, { user: "Purchasing recovery" });
     const repairedPurchaseOrders = new Map();
     const repairedOrders = new Map();
@@ -32144,7 +32415,8 @@ async function handleApi(req, res) {
     const waitingOrderIds = db.orders.filter((order) => (order.fulfillmentRoutes || []).some((route) => route.type === "purchase"
       && !route.purchaseOrderId
       && route.vendorId
-      && !["canceled", "received", "closed"].includes(String(route.status || "").toLowerCase())))
+      && !isTerminalCustomerDemand(order)
+      && !["canceled", "supplier_commitment_canceled", "received", "closed"].includes(String(route.status || "").toLowerCase())))
       .map((order) => order.id);
     for (const orderId of waitingOrderIds) {
       try {
@@ -32155,9 +32427,14 @@ async function handleApi(req, res) {
         console.warn(`Waiting for PO repair skipped ${orderId}: ${error.message}`);
       }
     }
-    if (recoveredRequirements.length || repairedPurchaseOrders.size) {
+    if (recoveredRequirements.length || repairedPurchaseOrders.size || terminalPurchaseOrders.size || terminalRequirementsChanged) {
       await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements, sequence: db.sequence || {} });
+      for (const po of terminalPurchaseOrders.values()) await postgres.savePurchaseOrder(po);
       for (const po of repairedPurchaseOrders.values()) await postgres.savePurchaseOrder(po);
+      for (const order of terminalOrders.values()) {
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+      }
       for (const order of repairedOrders.values()) {
         order.updatedAt = new Date().toISOString();
         await postgres.saveOrder(order);
@@ -33254,6 +33531,15 @@ async function handleApi(req, res) {
     const receivedAt = String(body.receivedAt || new Date().toISOString().slice(0, 10));
     const note = String(body.note || "").trim();
     const mode = String(body.mode || "final").toLowerCase() === "draft" ? "draft" : "final";
+    const canceledDemandExceptions = purchaseOrderCanceledDemandReceiptExceptions(po, receivedLines);
+    if (mode === "final" && canceledDemandExceptions.length && body.acknowledgeCanceledDemand !== true) {
+      return sendJson(res, 409, {
+        error: "This receipt includes items for canceled or refunded customer orders. Confirm they will be isolated for vendor return before receiving them.",
+        code: "CANCELED_DEMAND_REQUIRES_ACKNOWLEDGEMENT",
+        requiresAcknowledgement: true,
+        receivingExceptions: canceledDemandExceptions
+      });
+    }
     const defaultLocationBin = String(body.defaultLocationBin || "").trim();
     const warehouse = (db.warehouses || []).find((row) => isPhysicalWarehouse(row) && (row.id === body.warehouseId || row.id === po.warehouseId)) || null;
     if (mode === "final" && !warehouse) return sendJson(res, 400, { error: "Choose a physical receiving warehouse. DataWarehouse cannot receive physical PO stock." });
@@ -33409,6 +33695,7 @@ async function handleApi(req, res) {
       message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
       user: body.user || "Luis"
     });
+    acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, body.user || "Luis");
     // A receipt satisfies linked purchase demand first. Re-route only those customer orders
     // after stock has been posted, which turns received supply into reserved warehouse work.
     const linkedOrderIds = [...new Set([...(po.orderIds || []), po.orderId].filter(Boolean))];
@@ -33437,6 +33724,13 @@ async function handleApi(req, res) {
     const releasedProducts = [];
     const shouldRerouteAfterReceiving = workflowSettings.automation?.rerouteAfterReceiving !== false;
     for (const linkedOrder of reroutedOrders) {
+      if (isTerminalCustomerDemand(linkedOrder)) {
+        recalculateOrderOperationalStatus(linkedOrder);
+        linkedOrder.updatedAt = new Date().toISOString();
+        await postgres.saveOrder(linkedOrder);
+        clearOrderApiCache(linkedOrder.id);
+        continue;
+      }
       if (shouldRerouteAfterReceiving) {
         const reroute = await routeOrderForFulfillment(db, linkedOrder, { user: body.user || "System", workflowSettings });
         releasedProducts.push(...(reroute.touchedProducts || []));
@@ -42118,6 +42412,15 @@ async function handleApi(req, res) {
     const receivedAt = String(body.receivedAt || new Date().toISOString().slice(0, 10));
     const note = String(body.note || "").trim();
     const mode = String(body.mode || "final").toLowerCase() === "draft" ? "draft" : "final";
+    const canceledDemandExceptions = purchaseOrderCanceledDemandReceiptExceptions(po, receivedLines);
+    if (mode === "final" && canceledDemandExceptions.length && body.acknowledgeCanceledDemand !== true) {
+      return sendJson(res, 409, {
+        error: "This receipt includes items for canceled or refunded customer orders. Confirm they will be isolated for vendor return before receiving them.",
+        code: "CANCELED_DEMAND_REQUIRES_ACKNOWLEDGEMENT",
+        requiresAcknowledgement: true,
+        receivingExceptions: canceledDemandExceptions
+      });
+    }
     const defaultLocationBin = String(body.defaultLocationBin || "").trim();
     const warehouse = (db.warehouses || []).find((row) => (row.id === body.warehouseId || row.id === po.warehouseId) && isPhysicalWarehouse(row)) || null;
     if (mode === "final" && !warehouse) {
@@ -42269,6 +42572,7 @@ async function handleApi(req, res) {
       message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
       user: body.user || "Luis"
     });
+    acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, body.user || "Luis");
 
     await writeDb(db);
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(db) });
