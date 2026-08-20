@@ -2392,24 +2392,47 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
   try {
     if (typeof isCanceled === "function" && isCanceled()) throw new Error("Supplier coverage refresh canceled.");
     await client.query("drop table if exists vendor_supplier_coverage_next");
+    await client.query("drop table if exists vendor_supplier_identity_next");
+    await client.query(`
+      create temporary table vendor_supplier_identity_next as
+      select distinct
+        identity.match_key,
+        item.vendor_id,
+        identity.match_type
+      from vendor_catalog_items item
+      cross join lateral (values
+        (
+          case
+            when coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''), '') <> ''
+              then 'barcode:' || lower(coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), '')))
+            else null
+          end,
+          'upc'
+        ),
+        (
+          case
+            when coalesce(trim(item.mfr_part_number), '') <> '' and coalesce(trim(item.brand), '') <> ''
+              then 'mfr:' || lower(trim(item.brand)) || '|' || lower(trim(item.mfr_part_number))
+            else null
+          end,
+          'manufacturer-part-and-brand'
+        ),
+        (
+          case
+            when coalesce(trim(coalesce(nullif(item.internal_sku, ''), nullif(item.vendor_sku, ''), item.source_sku)), '') <> ''
+              then 'sku:' || lower(trim(coalesce(nullif(item.internal_sku, ''), nullif(item.vendor_sku, ''), item.source_sku)))
+            else null
+          end,
+          'exact-sku'
+        )
+      ) identity(match_key, match_type)
+      where coalesce(identity.match_key, '') <> ''
+    `);
     await client.query(`
       create temporary table vendor_supplier_coverage_next as
-      with coverage_candidates as materialized (
-        select
-          case
-            when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> ''
-              then 'barcode:' || lower(coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), '')))
-            when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> ''
-              then 'mfr:' || lower(trim(brand)) || '|' || lower(trim(mfr_part_number))
-            else 'sku:' || lower(trim(coalesce(nullif(internal_sku, ''), nullif(vendor_sku, ''), source_sku)))
-          end as match_key,
-          vendor_id
-        from vendor_catalog_items
-      )
-      select candidate.match_key, count(distinct candidate.vendor_id)::integer as supplier_count
-      from coverage_candidates candidate
-      where coalesce(candidate.match_key, '') <> ''
-      group by candidate.match_key
+      select identity.match_key, count(distinct identity.vendor_id)::integer as supplier_count
+      from vendor_supplier_identity_next identity
+      group by identity.match_key
     `);
     if (typeof isCanceled === "function" && isCanceled()) throw new Error("Supplier coverage refresh canceled.");
     await client.query("begin");
@@ -2485,38 +2508,53 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
     `);
     const productsResult = await client.query(`
       with product_identities as materialized (
-        select
-          product_id,
-          case
-            when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> ''
-              then 'barcode:' || lower(coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), '')))
-            when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> ''
-              then 'mfr:' || lower(trim(brand)) || '|' || lower(trim(mfr_part_number))
-            else 'sku:' || lower(trim(sku))
-          end as match_key,
-          case
-            when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> '' then 'upc'
-            when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> '' then 'manufacturer-part-and-brand'
-            else 'exact-sku'
-          end as match_type
-        from products
-      ), approved_reviews as materialized (
-        select product_id, count(distinct vendor_id)::integer as approved_supplier_count
+        select product.product_id, identity.match_key, identity.match_type
+        from products product
+        cross join lateral (values
+          (
+            case
+              when coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), ''), '') <> ''
+                then 'barcode:' || lower(coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), '')))
+              else null
+            end,
+            'upc'
+          ),
+          (
+            case
+              when coalesce(trim(product.mfr_part_number), '') <> '' and coalesce(trim(product.brand), '') <> ''
+                then 'mfr:' || lower(trim(product.brand)) || '|' || lower(trim(product.mfr_part_number))
+              else null
+            end,
+            'manufacturer-part-and-brand'
+          ),
+          (case when coalesce(trim(product.sku), '') <> '' then 'sku:' || lower(trim(product.sku)) else null end, 'exact-sku')
+        ) identity(match_key, match_type)
+        where coalesce(identity.match_key, '') <> ''
+      ), exact_matches as materialized (
+        select product_identity.product_id, supplier.vendor_id, product_identity.match_type
+        from product_identities product_identity
+        join vendor_supplier_identity_next supplier on supplier.match_key = product_identity.match_key
+      ), all_matches as materialized (
+        select product_id, vendor_id, match_type from exact_matches
+        union all
+        select product_id, vendor_id, 'approved-mfr-part-number' as match_type
         from supplier_match_reviews
         where status = 'approved'
-        group by product_id
       ), product_coverage as materialized (
         select
-          product_identity.product_id,
+          product.product_id,
           case
-            when coalesce(review.approved_supplier_count, 0) > 0
-              then product_identity.match_type || '+approved-mfr-part-number'
-            else product_identity.match_type
+            when bool_or(matches.match_type = 'upc') and bool_or(matches.match_type = 'manufacturer-part-and-brand') then 'upc+manufacturer-part-and-brand'
+            when bool_or(matches.match_type = 'upc') then 'upc'
+            when bool_or(matches.match_type = 'manufacturer-part-and-brand') then 'manufacturer-part-and-brand'
+            when bool_or(matches.match_type = 'exact-sku') then 'exact-sku'
+            when bool_or(matches.match_type = 'approved-mfr-part-number') then 'approved-mfr-part-number'
+            else 'none'
           end as match_type,
-          (coalesce(coverage.supplier_count, 0) + coalesce(review.approved_supplier_count, 0))::integer as supplier_count
-        from product_identities product_identity
-        left join vendor_supplier_coverage coverage on coverage.match_key = product_identity.match_key
-        left join approved_reviews review on review.product_id = product_identity.product_id
+          count(distinct matches.vendor_id)::integer as supplier_count
+        from products product
+        left join all_matches matches on matches.product_id = product.product_id
+        group by product.product_id
       )
       update products product
       set
@@ -2534,31 +2572,26 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
         )
     `);
     const vendorItemsResult = await client.query(`
-      with vendor_item_identities as materialized (
+      with vendor_item_coverage as materialized (
         select
-          vendor_id,
-          source_sku,
+          item.vendor_id,
+          item.source_sku,
           case
-            when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> ''
-              then 'barcode:' || lower(coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), '')))
-            when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> ''
-              then 'mfr:' || lower(trim(brand)) || '|' || lower(trim(mfr_part_number))
-            else 'sku:' || lower(trim(coalesce(nullif(internal_sku, ''), nullif(vendor_sku, ''), source_sku)))
-          end as match_key,
-          case
-            when coalesce(nullif(trim(barcode), ''), nullif(trim(raw ->> 'upc'), ''), nullif(trim(raw ->> 'gtin'), ''), nullif(trim(raw ->> 'upcCode'), ''), '') <> '' then 'upc'
-            when coalesce(trim(mfr_part_number), '') <> '' and coalesce(trim(brand), '') <> '' then 'manufacturer-part-and-brand'
+            when bool_or(candidate.match_type = 'upc') then 'upc'
+            when bool_or(candidate.match_type = 'manufacturer-part-and-brand') then 'manufacturer-part-and-brand'
             else 'exact-sku'
-          end as match_type
-        from vendor_catalog_items
-      ), vendor_item_coverage as materialized (
-        select
-          vendor_item.vendor_id,
-          vendor_item.source_sku,
-          vendor_item.match_type,
-          coalesce(coverage.supplier_count, 1)::integer as supplier_count
-        from vendor_item_identities vendor_item
-        left join vendor_supplier_coverage coverage on coverage.match_key = vendor_item.match_key
+          end as match_type,
+          greatest(count(distinct matched.vendor_id), 1)::integer as supplier_count
+        from vendor_catalog_items item
+        join vendor_supplier_identity_next candidate
+          on candidate.vendor_id = item.vendor_id
+         and candidate.match_key in (
+           case when coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''), '') <> '' then 'barcode:' || lower(coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''))) end,
+           case when coalesce(trim(item.mfr_part_number), '') <> '' and coalesce(trim(item.brand), '') <> '' then 'mfr:' || lower(trim(item.brand)) || '|' || lower(trim(item.mfr_part_number)) end,
+           case when coalesce(trim(coalesce(nullif(item.internal_sku, ''), nullif(item.vendor_sku, ''), item.source_sku)), '') <> '' then 'sku:' || lower(trim(coalesce(nullif(item.internal_sku, ''), nullif(item.vendor_sku, ''), item.source_sku))) end
+         )
+        left join vendor_supplier_identity_next matched on matched.match_key = candidate.match_key
+        group by item.vendor_id, item.source_sku
       )
       update vendor_catalog_items item
       set
@@ -2930,53 +2963,62 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
   const barcode = nullableString(identity.barcode || identity.upc || identity.gtin || "");
   const mfrPartNumber = nullableString(identity.mfrPartNumber || identity.manufacturerPartNumber || "");
   const brand = nullableString(identity.brand || "");
-  const baseSelect = `
-    select vci.*, v.name as supplier_name, v.code as supplier_code
-    from vendor_catalog_items vci
-    left join vendors v on v.vendor_id = vci.vendor_id
-  `;
-  const orderAndLimit = ` order by vci.updated_at desc nulls last, vci.last_seen_at desc nulls last limit 150`;
-  let rows = [];
-  let matchType = "none";
-
-  if (barcode) {
-    const barcodeQueries = [
-      `${baseSelect} where lower(vci.barcode) = lower($1) ${orderAndLimit}`,
-      `${baseSelect} where vci.raw ->> 'upc' = $1 ${orderAndLimit}`,
-      `${baseSelect} where vci.raw ->> 'gtin' = $1 ${orderAndLimit}`,
-      `${baseSelect} where vci.raw ->> 'upcCode' = $1 ${orderAndLimit}`
-    ];
-    for (const query of barcodeQueries) {
-      const result = await client.query(query, [barcode]);
-      if (result.rows.length) {
-        rows = result.rows;
-        break;
-      }
-    }
-    if (rows.length) matchType = "upc";
-  }
-
-  if (!rows.length && mfrPartNumber && brand) {
-    const result = await client.query(`${baseSelect}
-      where lower(vci.mfr_part_number) = lower($1)
-        and lower(vci.brand) = lower($2)
-      ${orderAndLimit}`, [mfrPartNumber, brand]);
-    rows = result.rows;
-    if (rows.length) matchType = "manufacturer-part-and-brand";
-  }
-
-  if (!rows.length && sku) {
-    const result = await client.query(`${baseSelect}
-      where lower(vci.source_sku) = lower($1)
-        or lower(vci.internal_sku) = lower($1)
-        or lower(vci.vendor_sku) = lower($1)
-      ${orderAndLimit}`, [sku]);
-    rows = result.rows;
-    if (rows.length) matchType = "exact-sku";
-  }
+  const result = await client.query(`
+    select matched.*
+    from (
+      select
+        vci.*,
+        v.name as supplier_name,
+        v.code as supplier_code,
+        case
+          when $1 <> '' and (
+            lower(coalesce(vci.barcode, '')) = lower($1)
+            or vci.raw ->> 'upc' = $1
+            or vci.raw ->> 'gtin' = $1
+            or vci.raw ->> 'upcCode' = $1
+          ) then 'upc'
+          when $2 <> '' and $3 <> ''
+            and lower(coalesce(vci.mfr_part_number, '')) = lower($2)
+            and lower(coalesce(vci.brand, '')) = lower($3) then 'manufacturer-part-and-brand'
+          else 'exact-sku'
+        end as coverage_match_type
+      from vendor_catalog_items vci
+      left join vendors v on v.vendor_id = vci.vendor_id
+      where ($1 <> '' and (
+          lower(coalesce(vci.barcode, '')) = lower($1)
+          or vci.raw ->> 'upc' = $1
+          or vci.raw ->> 'gtin' = $1
+          or vci.raw ->> 'upcCode' = $1
+        ))
+        or ($2 <> '' and $3 <> ''
+          and lower(coalesce(vci.mfr_part_number, '')) = lower($2)
+          and lower(coalesce(vci.brand, '')) = lower($3))
+        or ($4 <> '' and (
+          lower(coalesce(vci.source_sku, '')) = lower($4)
+          or lower(coalesce(vci.internal_sku, '')) = lower($4)
+          or lower(coalesce(vci.vendor_sku, '')) = lower($4)
+        ))
+    ) matched
+    order by
+      case matched.coverage_match_type when 'upc' then 0 when 'manufacturer-part-and-brand' then 1 else 2 end,
+      matched.updated_at desc nulls last,
+      matched.last_seen_at desc nulls last
+    limit 250
+  `, [barcode || "", mfrPartNumber || "", brand || "", sku || ""]);
+  const rows = result.rows;
+  const matchedTypes = new Set(rows.map((row) => row.coverage_match_type).filter(Boolean));
+  const matchType = matchedTypes.has("upc") && matchedTypes.has("manufacturer-part-and-brand")
+    ? "upc+manufacturer-part-and-brand"
+    : matchedTypes.has("upc")
+      ? "upc"
+      : matchedTypes.has("manufacturer-part-and-brand")
+        ? "manufacturer-part-and-brand"
+        : matchedTypes.has("exact-sku")
+          ? "exact-sku"
+          : "none";
 
   const seen = new Set();
-  const matches = rows.map((row) => vendorCatalogSupplierMatchRow(row, matchType)).filter((row) => {
+  const matches = rows.map((row) => vendorCatalogSupplierMatchRow(row, row.coverage_match_type || matchType)).filter((row) => {
     const key = `${String(row.supplierCode || row.supplier || "").toLowerCase()}|${String(row.sku || row.vendorSku || "").toLowerCase()}`;
     if (seen.has(key)) return false;
     seen.add(key);

@@ -31980,7 +31980,20 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []);
-    const hydratedAudits = (Array.isArray(audits) ? audits : []).map((audit) => {
+    const auditRows = Array.isArray(audits) ? audits : [];
+    const auditProductKeys = [...new Set(auditRows.flatMap((audit) => (Array.isArray(audit.lines) ? audit.lines : [])
+      .flatMap((line) => [String(line?.productId || "").trim(), String(line?.sku || "").trim()])
+      .filter(Boolean)))];
+    const auditProducts = auditProductKeys.length
+      ? await postgres.readProductsByKeys(auditProductKeys, { includeMarketplaceIds: false }).catch(() => [])
+      : [];
+    const auditProductsByKey = new Map();
+    for (const product of auditProducts) {
+      for (const key of [product?.id, product?.sku]) {
+        if (key) auditProductsByKey.set(String(key).trim().toLowerCase(), product);
+      }
+    }
+    const hydratedAudits = auditRows.map((audit) => {
       const sourceMatches = new Map();
       for (const unknown of Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []) {
         const source = unknown?.sourceMatch || {};
@@ -31991,10 +32004,19 @@ async function handleApi(req, res) {
       return {
         ...audit,
         lines: (Array.isArray(audit.lines) ? audit.lines : []).map((line) => {
-          if (String(line?.image || "").trim()) return line;
+          const product = auditProductsByKey.get(String(line?.productId || "").trim().toLowerCase())
+            || auditProductsByKey.get(String(line?.sku || "").trim().toLowerCase())
+            || null;
           const source = sourceMatches.get(String(line?.sku || line?.productId || "").trim().toLowerCase()) || {};
-          const image = auditProductImageUrl({}, source);
-          return image ? { ...line, image } : line;
+          const image = String(line?.image || "").trim() || auditProductImageUrl(product || {}, source);
+          const supplierCount = Math.max(0, Number(product?.supplierCount ?? line?.supplierCount ?? 0) || 0);
+          return {
+            ...line,
+            ...(image ? { image } : {}),
+            supplierCount,
+            hasMultipleSuppliers: Boolean(product?.hasMultipleSuppliers || supplierCount >= 2),
+            supplierCoverageMatchType: String(product?.supplierCoverageMatchType || line?.supplierCoverageMatchType || "")
+          };
         })
       };
     });
@@ -32262,7 +32284,31 @@ async function handleApi(req, res) {
     const now = new Date().toISOString();
     if (product) {
       const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku) && String(entry.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase());
-      if (line) { line.countedQty = Number(line.countedQty || 0) + quantity; line.image = line.image || auditImage; line.lastScannedAt = now; line.reviewStatus = "unreviewed"; } else (audit.lines || (audit.lines = [])).push({ id: crypto.randomUUID(), productId: product.id || product.sku, sku: product.sku, title: product.marketplaceTitle || product.title || product.sku, image: auditImage, barcode, locationBin: resolvedLocationBin, expectedQty: auditExpectedQuantity(product, audit, resolvedLocationBin), countedQty: quantity, firstScannedAt: now, lastScannedAt: now, reviewStatus: "unreviewed" });
+      if (line) {
+        line.countedQty = Number(line.countedQty || 0) + quantity;
+        line.image = line.image || auditImage;
+        line.supplierCount = Math.max(0, Number(product.supplierCount || 0));
+        line.hasMultipleSuppliers = Boolean(product.hasMultipleSuppliers || line.supplierCount >= 2);
+        line.supplierCoverageMatchType = String(product.supplierCoverageMatchType || "");
+        line.lastScannedAt = now;
+        line.reviewStatus = "unreviewed";
+      } else (audit.lines || (audit.lines = [])).push({
+        id: crypto.randomUUID(),
+        productId: product.id || product.sku,
+        sku: product.sku,
+        title: product.marketplaceTitle || product.title || product.sku,
+        image: auditImage,
+        barcode,
+        locationBin: resolvedLocationBin,
+        expectedQty: auditExpectedQuantity(product, audit, resolvedLocationBin),
+        countedQty: quantity,
+        supplierCount: Math.max(0, Number(product.supplierCount || 0)),
+        hasMultipleSuppliers: Boolean(product.hasMultipleSuppliers || Number(product.supplierCount || 0) >= 2),
+        supplierCoverageMatchType: String(product.supplierCoverageMatchType || ""),
+        firstScannedAt: now,
+        lastScannedAt: now,
+        reviewStatus: "unreviewed"
+      });
       audit.updatedAt = now;
       await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
       return sendJson(res, 200, { audit, product, matched: true, message: `${product.sku} counted: ${quantity}.` });

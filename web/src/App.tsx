@@ -45,6 +45,7 @@ import {
   Store,
   Sun,
   Truck,
+  Users,
   Warehouse,
   X,
   Pencil,
@@ -12105,6 +12106,7 @@ function WarehouseAuditPanel({
                   <TableRow>
                     <TableHead className="w-14">Scan</TableHead>
                     <TableHead>UPC / SKU</TableHead>
+                    <TableHead>Suppliers</TableHead>
                     <TableHead>Bin</TableHead>
                     <TableHead>Counted</TableHead>
                     <TableHead>Created SKU</TableHead>
@@ -12124,6 +12126,22 @@ function WarehouseAuditPanel({
                             {String(line.sku)}
                           </button>
                         ) : "-"}
+                      </TableCell>
+                      <TableCell>
+                        {Number(line.supplierCount || 0) >= 2 ? (
+                          <Badge
+                            variant="outline"
+                            className="border-blue-300 bg-blue-50 text-blue-800 dark:border-blue-700 dark:bg-blue-950/60 dark:text-blue-200"
+                            title={`Matched across ${numberLabel(Number(line.supplierCount || 0))} suppliers${String(line.supplierCoverageMatchType || "").includes("manufacturer-part") ? " using manufacturer part number + brand" : String(line.supplierCoverageMatchType || "").includes("upc") ? " using UPC" : ""}. Open the SKU to compare supplier offers.`}
+                          >
+                            <Users className="mr-1 size-3" />
+                            {numberLabel(Number(line.supplierCount || 0))} suppliers
+                          </Badge>
+                        ) : Number(line.supplierCount || 0) === 1 ? (
+                          <span className="text-xs text-muted-foreground">1 supplier</span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">Not indexed</span>
+                        )}
                       </TableCell>
                       <TableCell>{String(line.locationBin || "-")}</TableCell>
                       <TableCell>
@@ -12145,6 +12163,7 @@ function WarehouseAuditPanel({
                         <span className="grid size-8 place-items-center rounded-full border border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300" title="Not found in the catalog"><X className="size-4" /></span>
                       </TableCell>
                       <TableCell className="font-mono font-medium">{String(item.barcode || "-")}</TableCell>
+                      <TableCell><span className="text-xs text-muted-foreground">-</span></TableCell>
                       <TableCell>{String(item.locationBin || "-")}</TableCell>
                       <TableCell>{numberLabel(Number(item.count || 0))}</TableCell>
                       <TableCell>{item.createdProductSku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(item.createdProductSku))}`} target="_blank" rel="noreferrer">{String(item.createdProductSku)}</a> : "-"}</TableCell>
@@ -12155,7 +12174,7 @@ function WarehouseAuditPanel({
                   {!lines.length && !unknowns.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={7}
+                        colSpan={8}
                         className="h-20 text-center text-muted-foreground"
                       >
                         Scan the first UPC to begin counting.
