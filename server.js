@@ -6583,6 +6583,8 @@ function productImageUrls(item = {}) {
 }
 
 function auditProductImageUrl(product = {}, sourceItem = {}) {
+  product = product && typeof product === "object" ? product : {};
+  sourceItem = sourceItem && typeof sourceItem === "object" ? sourceItem : {};
   const images = [
     product.defaultImage,
     product.default_image,
@@ -32226,7 +32228,7 @@ async function handleApi(req, res) {
       product: product ? {
         sku: product.sku,
         title: product.marketplaceTitle || product.title || product.sku,
-        image: auditProductImageUrl(product, lookup.sourceItem)
+        image: auditProductImageUrl(product, lookup.sourceItem || {})
       } : null,
       message: product ? `${product.sku} found in the catalog.` : `No catalog item was found for ${barcode}.`
     });
