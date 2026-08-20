@@ -10622,6 +10622,13 @@ type AuditSupplierOption = {
   matchType?: string
 }
 
+type AuditSupplierCacheEntry = {
+  options: AuditSupplierOption[]
+  expiresAt: number
+}
+
+const auditSupplierOptionsCache = new Map<string, AuditSupplierCacheEntry>()
+
 function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { auditId: string; auditStatus: string; line: Record<string, unknown>; onAuditUpdate: (audit: Record<string, unknown>) => void }) {
   const supplierCount = Number(line.supplierCount || 0)
   const possibleSupplierCount = Number(line.possibleSupplierCount || 0)
@@ -10631,8 +10638,10 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState("")
+  const [supplierMenuOpen, setSupplierMenuOpen] = useState(false)
   const selectedKey = String(line.selectedSupplierKey || "")
   const selectedName = String(line.selectedSupplierName || line.supplierName || "")
+  const supplierCacheKey = `${auditId}:${lineKey}`
 
   useEffect(() => {
     if (!selectedKey || !selectedName) return
@@ -10649,15 +10658,24 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
     }, ...current])
   }, [line.selectedManufacturerSku, line.selectedSupplierCode, line.selectedSupplierCost, line.selectedSupplierId, line.selectedSupplierMatchType, line.selectedSupplierQty, line.selectedVendorSku, selectedKey, selectedName])
 
-  const loadOptions = async () => {
-    if (loaded || loading) return
+  const loadOptions = async (force = false) => {
+    if ((!force && loaded) || loading) return
+    const cached = auditSupplierOptionsCache.get(supplierCacheKey)
+    if (!force && cached && cached.expiresAt > Date.now()) {
+      setOptions(cached.options)
+      setLoaded(true)
+      setLoadError("")
+      return
+    }
     setLoading(true)
     setLoadError("")
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), 10000)
     try {
       const result = await api<{ options?: AuditSupplierOption[] }>(`/api/warehouse-audits/${encodeURIComponent(auditId)}/lines/${encodeURIComponent(lineKey)}/suppliers`, { signal: controller.signal })
-      setOptions(Array.isArray(result.options) ? result.options : [])
+      const nextOptions = Array.isArray(result.options) ? result.options : []
+      setOptions(nextOptions)
+      auditSupplierOptionsCache.set(supplierCacheKey, { options: nextOptions, expiresAt: Date.now() + 15 * 60 * 1000 })
       setLoaded(true)
     } catch (error) {
       const message = error instanceof DOMException && error.name === "AbortError" ? "Supplier lookup timed out. Please retry." : error instanceof Error ? error.message : "Supplier options could not be loaded."
@@ -10677,6 +10695,7 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
         body: JSON.stringify({ supplierKey, user: "Luis" }),
       })
       if (result.audit) onAuditUpdate(result.audit)
+      setSupplierMenuOpen(false)
       toast.success(result.message || "Supplier assigned.")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Supplier could not be assigned.")
@@ -10689,8 +10708,8 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
     return <p className="min-w-32 text-sm font-medium">{selectedName || "Single supplier"}</p>
   }
   if (supplierCount >= 2) {
-    if (!loaded) return <div className="min-w-44 space-y-1"><Button size="sm" variant="outline" disabled={loading} onClick={() => void loadOptions()}>{loading ? <><Loader2 className="size-3.5 animate-spin" /> Loading suppliers</> : loadError ? "Retry suppliers" : "Choose supplier"}</Button>{loadError && <p className="max-w-48 text-[11px] text-destructive">{loadError}</p>}</div>
-    return <Select value={selectedKey || undefined} disabled={saving || !["in_progress", "pending_review"].includes(auditStatus)} onValueChange={(value) => void assignSupplier(value)}><SelectTrigger className={selectedKey ? "h-9 min-w-44" : "h-9 min-w-44 border-amber-400 bg-amber-50 text-amber-950 dark:bg-amber-950/40 dark:text-amber-100"}><SelectValue placeholder="Choose supplier" /></SelectTrigger><SelectContent>{options.length ? options.map((option) => <SelectItem key={option.key} value={option.key}>{option.supplierName}</SelectItem>) : <div className="px-2 py-3 text-xs text-muted-foreground">No confirmed suppliers found.</div>}</SelectContent></Select>
+    const editable = ["in_progress", "pending_review"].includes(auditStatus)
+    return <Popover open={supplierMenuOpen} onOpenChange={(open) => { setSupplierMenuOpen(open); if (open) void loadOptions() }}><PopoverTrigger asChild><Button size="sm" variant={selectedKey ? "outline" : "secondary"} disabled={saving || !editable} className={cn("min-w-44 justify-between", !selectedKey && "border border-amber-400 bg-amber-50 text-amber-950 hover:bg-amber-100 dark:bg-amber-950/50 dark:text-amber-100")}><span className="truncate">{saving ? "Saving supplier..." : selectedName || "Choose supplier"}</span>{saving ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />}</Button></PopoverTrigger><PopoverContent align="start" className="w-72 p-0"><Command><CommandInput placeholder="Search suppliers..." disabled={loading || Boolean(loadError)} /><CommandList>{loading && <div className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading supplier offers...</div>}{loadError && <div className="space-y-3 p-3"><p className="text-sm text-destructive">{loadError}</p><Button size="sm" variant="outline" onClick={() => { setLoaded(false); void loadOptions(true) }}><RefreshCw className="size-3.5" /> Retry</Button></div>}{loaded && !loading && !loadError && <><CommandEmpty>No confirmed suppliers found.</CommandEmpty><CommandGroup heading="Available suppliers">{options.map((option) => <CommandItem key={option.key} value={`${option.supplierName} ${option.supplierCode || ""}`} onSelect={() => void assignSupplier(option.key)}><CheckCircle2 className={cn("size-4", option.key === selectedKey ? "text-emerald-600" : "text-transparent")} /><span className="truncate">{option.supplierName}</span></CommandItem>)}</CommandGroup></>}</CommandList></Command></PopoverContent></Popover>
   }
   if (possibleSupplierCount >= 2) return <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/60 dark:text-amber-200"><Users className="mr-1 size-3" />{numberLabel(possibleSupplierCount)} possible</Badge>
   return <span className="text-xs text-muted-foreground">Not indexed</span>

@@ -26077,6 +26077,19 @@ function confirmedSupplierMatch(row = {}) {
 async function auditSupplierOptionsForLine(line = {}, vendors = []) {
   const product = await postgres.readProductByKey(line.productId || line.sku);
   if (!product) return { product: null, options: [], pendingReviewCount: 0 };
+  const cacheIdentity = encodeURIComponent(String(product.id || product.sku || line.productId || line.sku || "").trim().toLowerCase());
+  const cacheKey = cacheIdentity ? `dataplus:audit-supplier-options:${cacheIdentity}` : "";
+  if (cacheKey) {
+    const cached = await redisCache.getJson(cacheKey);
+    if (cached && Array.isArray(cached.options)) {
+      return {
+        product,
+        options: cached.options,
+        pendingReviewCount: Number(cached.pendingReviewCount || 0),
+        cached: true
+      };
+    }
+  }
   const coverage = await postgres.findVendorCatalogSupplierMatches({
     productId: product.id,
     sku: product.sku,
@@ -26127,7 +26140,19 @@ async function auditSupplierOptionsForLine(line = {}, vendors = []) {
     const current = bySupplier.get(key);
     if (!current || (option.cost > 0 && (Number(current.cost || 0) <= 0 || option.cost < Number(current.cost || 0)))) bySupplier.set(key, option);
   }
-  return { product, options: [...bySupplier.values()].sort((a, b) => a.supplierName.localeCompare(b.supplierName)), pendingReviewCount: Number(coverage.pendingReviewCount || 0) };
+  const result = {
+    product,
+    options: [...bySupplier.values()].sort((a, b) => a.supplierName.localeCompare(b.supplierName)),
+    pendingReviewCount: Number(coverage.pendingReviewCount || 0),
+    cached: false
+  };
+  if (cacheKey) {
+    await redisCache.setJson(cacheKey, {
+      options: result.options,
+      pendingReviewCount: result.pendingReviewCount
+    }, result.options.length ? 3600 : 300);
+  }
+  return result;
 }
 
 function applySourceCatalogOverride(product = {}, overrides = {}, vendorMappings = {}) {
@@ -31040,6 +31065,7 @@ async function handleApi(req, res) {
     });
     if (!review || review.productId !== product.id) return notFound(res);
     await redisCache.deleteByPrefix("dataplus:supplier-coverage:");
+    await redisCache.deleteByPrefix("dataplus:audit-supplier-options:");
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
     return sendJson(res, 200, { review });
