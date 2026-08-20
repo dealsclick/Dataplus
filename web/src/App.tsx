@@ -12137,6 +12137,15 @@ function WarehouseAuditPanel({
                             <Users className="mr-1 size-3" />
                             {numberLabel(Number(line.supplierCount || 0))} suppliers
                           </Badge>
+                        ) : Number(line.possibleSupplierCount || 0) >= 2 ? (
+                          <Badge
+                            variant="outline"
+                            className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/60 dark:text-amber-200"
+                            title={`Exact manufacturer part number found at ${numberLabel(Number(line.possibleSupplierCount || 0))} suppliers, but brand confirmation or approval is still required before merging supplier coverage.`}
+                          >
+                            <Users className="mr-1 size-3" />
+                            {numberLabel(Number(line.possibleSupplierCount || 0))} possible
+                          </Badge>
                         ) : Number(line.supplierCount || 0) === 1 ? (
                           <span className="text-xs text-muted-foreground">1 supplier</span>
                         ) : (

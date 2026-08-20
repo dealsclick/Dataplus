@@ -2943,6 +2943,18 @@ async function readVendorCatalogSupplierCoverageBySkus(skus = []) {
       select distinct on (input_sku, vendor_id, source_sku) *
       from matched_seed_items
       order by input_sku, vendor_id, source_sku, updated_at desc
+    ), matched_products as materialized (
+      select input.input_sku, product.*
+      from input_skus input
+      join products product on lower(product.product_id) = input.input_sku
+      union all
+      select input.input_sku, product.*
+      from input_skus input
+      join products product on lower(product.sku) = input.input_sku
+    ), seed_products as materialized (
+      select distinct on (input_sku, product_id) *
+      from matched_products
+      order by input_sku, product_id, updated_at desc
     ), seed_identities as materialized (
       select distinct seed.input_sku, identity.match_key, identity.match_type
       from seed_items seed
@@ -2973,6 +2985,31 @@ async function readVendorCatalogSupplierCoverageBySkus(skus = []) {
         )
       ) identity(match_key, match_type)
       where coalesce(identity.match_key, '') <> ''
+    ), mpn_seeds as materialized (
+      select distinct
+        seed.input_sku,
+        lower(trim(seed.mfr_part_number)) as mfr_part_number,
+        lower(trim(coalesce(seed.brand, ''))) as brand
+      from seed_items seed
+      where length(trim(coalesce(seed.mfr_part_number, ''))) >= 5
+      union
+      select distinct
+        product.input_sku,
+        lower(trim(product.mfr_part_number)) as mfr_part_number,
+        lower(trim(coalesce(product.brand, ''))) as brand
+      from seed_products product
+      where length(trim(coalesce(product.mfr_part_number, ''))) >= 5
+    ), mpn_coverage as (
+      select
+        seed.input_sku,
+        count(distinct candidate.vendor_id) filter (
+          where seed.brand <> '' and lower(trim(coalesce(candidate.brand, ''))) = seed.brand
+        )::integer as confirmed_supplier_count,
+        count(distinct candidate.vendor_id)::integer as possible_supplier_count
+      from mpn_seeds seed
+      join vendor_catalog_items candidate
+        on lower(candidate.mfr_part_number) = seed.mfr_part_number
+      group by seed.input_sku
     ), ranked_coverage as (
       select
         seed.input_sku,
@@ -2989,17 +3026,34 @@ async function readVendorCatalogSupplierCoverageBySkus(skus = []) {
     )
     select
       input.input_sku,
-      coalesce(coverage.supplier_count, 0)::integer as supplier_count,
-      coalesce(coverage.match_type, 'none') as match_type
+      greatest(
+        coalesce(coverage.supplier_count, 0),
+        coalesce(mpn.confirmed_supplier_count, 0),
+        case when exists (select 1 from seed_items seed where seed.input_sku = input.input_sku) then 1 else 0 end
+      )::integer as supplier_count,
+      greatest(
+        coalesce(coverage.supplier_count, 0),
+        coalesce(mpn.confirmed_supplier_count, 0),
+        coalesce(mpn.possible_supplier_count, 0),
+        case when exists (select 1 from seed_items seed where seed.input_sku = input.input_sku) then 1 else 0 end
+      )::integer as possible_supplier_count,
+      case
+        when coalesce(mpn.confirmed_supplier_count, 0) > coalesce(coverage.supplier_count, 0)
+          then 'manufacturer-part-and-brand'
+        else coalesce(coverage.match_type, 'none')
+      end as match_type
     from input_skus input
     left join ranked_coverage coverage
       on coverage.input_sku = input.input_sku
      and coverage.coverage_rank = 1
+    left join mpn_coverage mpn on mpn.input_sku = input.input_sku
   `, [values]);
   return result.rows.map((row) => ({
     sku: row.input_sku || "",
     supplierCount: Number(row.supplier_count || 0),
     hasMultipleSuppliers: Number(row.supplier_count || 0) >= 2,
+    possibleSupplierCount: Number(row.possible_supplier_count || row.supplier_count || 0),
+    hasPossibleMultipleSuppliers: Number(row.possible_supplier_count || row.supplier_count || 0) >= 2,
     supplierCoverageMatchType: row.match_type || "none"
   }));
 }

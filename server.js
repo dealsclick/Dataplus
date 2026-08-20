@@ -32043,11 +32043,18 @@ async function handleApi(req, res) {
             Number(supplierCoverage?.supplierCount || 0),
             Number(line?.supplierCount || 0)
           );
+          const possibleSupplierCount = Math.max(
+            supplierCount,
+            Number(supplierCoverage?.possibleSupplierCount || 0),
+            Number(line?.possibleSupplierCount || 0)
+          );
           return {
             ...line,
             ...(image ? { image } : {}),
             supplierCount,
             hasMultipleSuppliers: Boolean(product?.hasMultipleSuppliers || sourceProduct?.hasMultipleSuppliers || supplierCoverage?.hasMultipleSuppliers || supplierCount >= 2),
+            possibleSupplierCount,
+            hasPossibleMultipleSuppliers: Boolean(supplierCoverage?.hasPossibleMultipleSuppliers || possibleSupplierCount >= 2),
             supplierCoverageMatchType: String(supplierCoverage?.supplierCoverageMatchType || product?.supplierCoverageMatchType || sourceProduct?.supplierCoverageMatchType || line?.supplierCoverageMatchType || "")
           };
         })
@@ -32329,6 +32336,8 @@ async function handleApi(req, res) {
         line.image = line.image || auditImage;
         line.supplierCount = Math.max(0, Number(product.supplierCount || 0), Number(lookup.sourceItem?.supplierCount || 0), Number(scanSupplierCoverage?.supplierCount || 0));
         line.hasMultipleSuppliers = Boolean(product.hasMultipleSuppliers || lookup.sourceItem?.hasMultipleSuppliers || scanSupplierCoverage?.hasMultipleSuppliers || line.supplierCount >= 2);
+        line.possibleSupplierCount = Math.max(line.supplierCount, Number(scanSupplierCoverage?.possibleSupplierCount || 0));
+        line.hasPossibleMultipleSuppliers = Boolean(scanSupplierCoverage?.hasPossibleMultipleSuppliers || line.possibleSupplierCount >= 2);
         line.supplierCoverageMatchType = String(scanSupplierCoverage?.supplierCoverageMatchType || coverageProduct?.supplierCoverageMatchType || "");
         line.lastScannedAt = now;
         line.reviewStatus = "unreviewed";
@@ -32344,6 +32353,8 @@ async function handleApi(req, res) {
         countedQty: quantity,
         supplierCount: Math.max(0, Number(product.supplierCount || 0), Number(lookup.sourceItem?.supplierCount || 0), Number(scanSupplierCoverage?.supplierCount || 0)),
         hasMultipleSuppliers: Boolean(product.hasMultipleSuppliers || lookup.sourceItem?.hasMultipleSuppliers || scanSupplierCoverage?.hasMultipleSuppliers || Number(product.supplierCount || 0) >= 2 || Number(lookup.sourceItem?.supplierCount || 0) >= 2),
+        possibleSupplierCount: Math.max(0, Number(product.supplierCount || 0), Number(lookup.sourceItem?.supplierCount || 0), Number(scanSupplierCoverage?.possibleSupplierCount || scanSupplierCoverage?.supplierCount || 0)),
+        hasPossibleMultipleSuppliers: Boolean(scanSupplierCoverage?.hasPossibleMultipleSuppliers || Number(scanSupplierCoverage?.possibleSupplierCount || 0) >= 2),
         supplierCoverageMatchType: String(scanSupplierCoverage?.supplierCoverageMatchType || coverageProduct?.supplierCoverageMatchType || ""),
         firstScannedAt: now,
         lastScannedAt: now,
