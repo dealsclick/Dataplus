@@ -31987,10 +31987,24 @@ async function handleApi(req, res) {
     const auditProducts = auditProductKeys.length
       ? await postgres.readProductsByKeys(auditProductKeys, { includeMarketplaceIds: false }).catch(() => [])
       : [];
+    const auditSourceProducts = auditProductKeys.length
+      ? await postgres.readVendorCatalogItemsBySkus(auditProductKeys).catch(() => [])
+      : [];
     const auditProductsByKey = new Map();
     for (const product of auditProducts) {
       for (const key of [product?.id, product?.sku]) {
         if (key) auditProductsByKey.set(String(key).trim().toLowerCase(), product);
+      }
+    }
+    const auditSourceProductsByKey = new Map();
+    for (const product of auditSourceProducts) {
+      for (const key of [product?.id, product?.sku, product?.sourceSku, product?.internalSku, product?.vendorSku]) {
+        if (!key) continue;
+        const normalizedKey = String(key).trim().toLowerCase();
+        const current = auditSourceProductsByKey.get(normalizedKey);
+        if (!current || Number(product?.supplierCount || 0) > Number(current?.supplierCount || 0)) {
+          auditSourceProductsByKey.set(normalizedKey, product);
+        }
       }
     }
     const hydratedAudits = auditRows.map((audit) => {
@@ -32007,15 +32021,23 @@ async function handleApi(req, res) {
           const product = auditProductsByKey.get(String(line?.productId || "").trim().toLowerCase())
             || auditProductsByKey.get(String(line?.sku || "").trim().toLowerCase())
             || null;
+          const sourceProduct = auditSourceProductsByKey.get(String(line?.productId || "").trim().toLowerCase())
+            || auditSourceProductsByKey.get(String(line?.sku || "").trim().toLowerCase())
+            || null;
           const source = sourceMatches.get(String(line?.sku || line?.productId || "").trim().toLowerCase()) || {};
-          const image = String(line?.image || "").trim() || auditProductImageUrl(product || {}, source);
-          const supplierCount = Math.max(0, Number(product?.supplierCount ?? line?.supplierCount ?? 0) || 0);
+          const image = String(line?.image || "").trim() || auditProductImageUrl(product || sourceProduct || {}, source);
+          const supplierCount = Math.max(
+            0,
+            Number(product?.supplierCount || 0),
+            Number(sourceProduct?.supplierCount || 0),
+            Number(line?.supplierCount || 0)
+          );
           return {
             ...line,
             ...(image ? { image } : {}),
             supplierCount,
-            hasMultipleSuppliers: Boolean(product?.hasMultipleSuppliers || supplierCount >= 2),
-            supplierCoverageMatchType: String(product?.supplierCoverageMatchType || line?.supplierCoverageMatchType || "")
+            hasMultipleSuppliers: Boolean(product?.hasMultipleSuppliers || sourceProduct?.hasMultipleSuppliers || supplierCount >= 2),
+            supplierCoverageMatchType: String(product?.supplierCoverageMatchType || sourceProduct?.supplierCoverageMatchType || line?.supplierCoverageMatchType || "")
           };
         })
       };
@@ -32280,6 +32302,9 @@ async function handleApi(req, res) {
     const resolvedLocationBin = binCheck.value || locationBin;
     const lookup = await resolveScannedCatalogBarcode(barcode);
     const product = lookup.product;
+    const coverageProduct = [product, lookup.sourceItem]
+      .filter(Boolean)
+      .sort((left, right) => Number(right?.supplierCount || 0) - Number(left?.supplierCount || 0))[0] || product;
     const auditImage = auditProductImageUrl(product || {}, lookup.sourceItem || {});
     const now = new Date().toISOString();
     if (product) {
@@ -32287,9 +32312,9 @@ async function handleApi(req, res) {
       if (line) {
         line.countedQty = Number(line.countedQty || 0) + quantity;
         line.image = line.image || auditImage;
-        line.supplierCount = Math.max(0, Number(product.supplierCount || 0));
-        line.hasMultipleSuppliers = Boolean(product.hasMultipleSuppliers || line.supplierCount >= 2);
-        line.supplierCoverageMatchType = String(product.supplierCoverageMatchType || "");
+        line.supplierCount = Math.max(0, Number(product.supplierCount || 0), Number(lookup.sourceItem?.supplierCount || 0));
+        line.hasMultipleSuppliers = Boolean(product.hasMultipleSuppliers || lookup.sourceItem?.hasMultipleSuppliers || line.supplierCount >= 2);
+        line.supplierCoverageMatchType = String(coverageProduct?.supplierCoverageMatchType || "");
         line.lastScannedAt = now;
         line.reviewStatus = "unreviewed";
       } else (audit.lines || (audit.lines = [])).push({
@@ -32302,9 +32327,9 @@ async function handleApi(req, res) {
         locationBin: resolvedLocationBin,
         expectedQty: auditExpectedQuantity(product, audit, resolvedLocationBin),
         countedQty: quantity,
-        supplierCount: Math.max(0, Number(product.supplierCount || 0)),
-        hasMultipleSuppliers: Boolean(product.hasMultipleSuppliers || Number(product.supplierCount || 0) >= 2),
-        supplierCoverageMatchType: String(product.supplierCoverageMatchType || ""),
+        supplierCount: Math.max(0, Number(product.supplierCount || 0), Number(lookup.sourceItem?.supplierCount || 0)),
+        hasMultipleSuppliers: Boolean(product.hasMultipleSuppliers || lookup.sourceItem?.hasMultipleSuppliers || Number(product.supplierCount || 0) >= 2 || Number(lookup.sourceItem?.supplierCount || 0) >= 2),
+        supplierCoverageMatchType: String(coverageProduct?.supplierCoverageMatchType || ""),
         firstScannedAt: now,
         lastScannedAt: now,
         reviewStatus: "unreviewed"
