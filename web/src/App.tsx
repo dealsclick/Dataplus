@@ -16445,8 +16445,9 @@ function SettingsPage({
   const [orderWorkflowLoading, setOrderWorkflowLoading] = useState(true)
   const [routingResetOpen, setRoutingResetOpen] = useState(false)
   const [routingResetLoading, setRoutingResetLoading] = useState(false)
+  const [settingsWarehouses, setSettingsWarehouses] = useState<Array<Record<string, unknown>>>([])
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
-  const settingsTabs = new Set(["operations", "worker", "backups", "catalog", "data-sources", "barcode", "ai", "email", "users", "releases"])
+  const settingsTabs = new Set(["operations", "organization", "orders", "purchasing", "inventory", "notifications", "security", "jobs", "worker", "backups", "catalog", "data-sources", "barcode", "ai", "email", "users", "releases"])
   const [activeTab, setActiveTab] = useState(settingsTabs.has(requestedTab || "") ? String(requestedTab) : "operations")
   const value = (field: string) => draft[field] ?? settings[field]
   const boolValue = (field: string) => Boolean(value(field))
@@ -16487,6 +16488,11 @@ function SettingsPage({
       .catch((error) => toast.error(error instanceof Error ? error.message : "Unable to load order-routing settings."))
       .finally(() => setOrderWorkflowLoading(false))
   }, [])
+  useEffect(() => {
+    void api<LiteState>("/api/state?lite=1")
+      .then((state) => setSettingsWarehouses((state.warehouses || []) as Array<Record<string, unknown>>))
+      .catch(() => setSettingsWarehouses([]))
+  }, [])
 
   function update(field: string, next: unknown) {
     setDraft((current) => ({ ...current, [field]: next }))
@@ -16494,6 +16500,41 @@ function SettingsPage({
 
   function updateWorkflow(section: string, field: string, next: unknown) {
     setOrderWorkflowDraft((current) => ({ ...current, [`${section}.${field}`]: next }))
+  }
+
+  function configuredUsers() {
+    const users = value("systemUsers")
+    return (Array.isArray(users) ? users : []) as Array<Record<string, unknown>>
+  }
+
+  function updateSystemUser(userId: string, field: string, next: unknown) {
+    update("systemUsers", configuredUsers().map((user) => String(user.id) === userId ? { ...user, [field]: next } : user))
+  }
+
+  function addSystemUser() {
+    update("systemUsers", [...configuredUsers(), { id: crypto.randomUUID(), name: "", email: "", role: "Operator", status: "active" }])
+  }
+
+  function removeSystemUser(userId: string) {
+    const users = configuredUsers()
+    if (users.length <= 1) return toast.error("At least one system user is required.")
+    update("systemUsers", users.filter((user) => String(user.id) !== userId))
+    if (String(value("activeSystemUserId") || "") === userId) update("activeSystemUserId", String(users.find((user) => String(user.id) !== userId)?.id || ""))
+  }
+
+  function configuredRoles() {
+    const roles = value("permissionRoles")
+    return (Array.isArray(roles) ? roles : []) as Array<Record<string, unknown>>
+  }
+
+  function updateRolePermissions(roleId: string, permission: string, enabled: boolean) {
+    update("permissionRoles", configuredRoles().map((role) => {
+      if (String(role.id) !== roleId) return role
+      const permissions = new Set(Array.isArray(role.permissions) ? role.permissions.map(String) : [])
+      if (enabled) permissions.add(permission)
+      else permissions.delete(permission)
+      return { ...role, permissions: Array.from(permissions) }
+    }))
   }
 
   function requestCatalogMaintenance(request: NonNullable<typeof catalogMaintenanceConfirm>) {
@@ -16629,7 +16670,13 @@ function SettingsPage({
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="flex flex-wrap">
           <TabsTrigger value="operations">Operations</TabsTrigger>
+          <TabsTrigger value="organization">Organization</TabsTrigger>
+          <TabsTrigger value="orders">Orders</TabsTrigger>
           <TabsTrigger value="purchasing">Purchasing</TabsTrigger>
+          <TabsTrigger value="inventory">Inventory & fulfillment</TabsTrigger>
+          <TabsTrigger value="notifications">Notifications</TabsTrigger>
+          <TabsTrigger value="security">Security</TabsTrigger>
+          <TabsTrigger value="jobs">Jobs</TabsTrigger>
           <TabsTrigger value="worker">Worker</TabsTrigger>
           <TabsTrigger value="backups">Backups</TabsTrigger>
           <TabsTrigger value="catalog">Catalog</TabsTrigger>
@@ -16641,6 +16688,135 @@ function SettingsPage({
           <TabsTrigger value="releases">Releases</TabsTrigger>
         </TabsList>
         <TabsContent value="releases"><ReleaseHistorySettings active={activeTab === "releases"} /></TabsContent>
+        <TabsContent value="organization" className="grid gap-4">
+          <Card>
+            <CardHeader><CardTitle className="text-base">Company profile</CardTitle><CardDescription>Shared identity and regional defaults used by documents, notifications, purchasing, and warehouse operations.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <Field label="Display name"><Input disabled={!editing} value={String(value("organizationName") || "")} onChange={(event) => update("organizationName", event.target.value)} /></Field>
+              <Field label="Legal name"><Input disabled={!editing} value={String(value("organizationLegalName") || "")} onChange={(event) => update("organizationLegalName", event.target.value)} /></Field>
+              <Field label="Operations email"><Input disabled={!editing} type="email" value={String(value("organizationEmail") || "")} onChange={(event) => update("organizationEmail", event.target.value)} /></Field>
+              <Field label="Phone"><Input disabled={!editing} value={String(value("organizationPhone") || "")} onChange={(event) => update("organizationPhone", event.target.value)} /></Field>
+              <Field label="Address line 1"><Input disabled={!editing} value={String(value("organizationAddressLine1") || "")} onChange={(event) => update("organizationAddressLine1", event.target.value)} /></Field>
+              <Field label="Address line 2"><Input disabled={!editing} value={String(value("organizationAddressLine2") || "")} onChange={(event) => update("organizationAddressLine2", event.target.value)} /></Field>
+              <Field label="City"><Input disabled={!editing} value={String(value("organizationCity") || "")} onChange={(event) => update("organizationCity", event.target.value)} /></Field>
+              <Field label="State / region"><Input disabled={!editing} value={String(value("organizationState") || "")} onChange={(event) => update("organizationState", event.target.value)} /></Field>
+              <Field label="Postal code"><Input disabled={!editing} value={String(value("organizationPostalCode") || "")} onChange={(event) => update("organizationPostalCode", event.target.value)} /></Field>
+              <Field label="Country code"><Input disabled={!editing} maxLength={2} value={String(value("organizationCountry") || "US")} onChange={(event) => update("organizationCountry", event.target.value.toUpperCase())} /></Field>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle className="text-base">Regional defaults</CardTitle><CardDescription>These values keep dates, money, weights, and dimensions consistent across workspaces.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <Field label="Timezone"><Select disabled={!editing} value={String(value("organizationTimezone") || "America/New_York")} onValueChange={(next) => update("organizationTimezone", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="America/New_York">Eastern</SelectItem><SelectItem value="America/Chicago">Central</SelectItem><SelectItem value="America/Denver">Mountain</SelectItem><SelectItem value="America/Los_Angeles">Pacific</SelectItem><SelectItem value="UTC">UTC</SelectItem></SelectContent></Select></Field>
+              <Field label="Currency"><Input disabled={!editing} maxLength={3} value={String(value("organizationCurrency") || "USD")} onChange={(event) => update("organizationCurrency", event.target.value.toUpperCase())} /></Field>
+              <Field label="Locale"><Input disabled={!editing} value={String(value("organizationLocale") || "en-US")} onChange={(event) => update("organizationLocale", event.target.value)} /></Field>
+              <Field label="Measurement system"><Select disabled={!editing} value={String(value("organizationMeasurementSystem") || "imperial")} onValueChange={(next) => update("organizationMeasurementSystem", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="imperial">Imperial</SelectItem><SelectItem value="metric">Metric</SelectItem></SelectContent></Select></Field>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="orders" className="grid gap-4">
+          <Card>
+            <CardHeader><CardTitle className="text-base">Order safeguards</CardTitle><CardDescription>Defaults that protect unpaid, risky, canceled, and refunded orders before they reach purchasing or fulfillment.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2">
+              <ToggleField label="Hold unpaid orders" checked={boolValue("ordersAutoHoldUnpaid")} disabled={!editing} onCheckedChange={(next) => update("ordersAutoHoldUnpaid", next)} />
+              <ToggleField label="Hold high-risk orders" checked={boolValue("ordersAutoHoldHighRisk")} disabled={!editing} onCheckedChange={(next) => update("ordersAutoHoldHighRisk", next)} />
+              <ToggleField label="Release canceled reservations" checked={boolValue("ordersReleaseCanceledReservations")} disabled={!editing} onCheckedChange={(next) => update("ordersReleaseCanceledReservations", next)} />
+              <ToggleField label="Remove canceled lines from draft POs" checked={boolValue("ordersRemoveCanceledLinesFromDraftPos")} disabled={!editing} onCheckedChange={(next) => update("ordersRemoveCanceledLinesFromDraftPos", next)} />
+              <ToggleField label="Remove refunded lines from draft POs" checked={boolValue("ordersRemoveRefundedLinesFromDraftPos")} disabled={!editing} onCheckedChange={(next) => update("ordersRemoveRefundedLinesFromDraftPos", next)} />
+              <ToggleField label="Notify routing exceptions" checked={boolValue("ordersNotifyRoutingExceptions")} disabled={!editing} onCheckedChange={(next) => update("ordersNotifyRoutingExceptions", next)} />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle className="text-base">Import and recovery defaults</CardTitle><CardDescription>Channel settings can override import lookback. Routing lifecycle remains controlled from Purchasing.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <Field label="Default import lookback (days)"><Input disabled={!editing} type="number" min="1" max="3650" value={String(value("ordersDefaultImportLookbackDays") || 60)} onChange={(event) => update("ordersDefaultImportLookbackDays", Number(event.target.value || 60))} /></Field>
+              <Field label="Archive after (days)"><Input disabled={!editing} type="number" min="30" max="3650" value={String(value("ordersArchiveAfterDays") || 365)} onChange={(event) => update("ordersArchiveAfterDays", Number(event.target.value || 365))} /></Field>
+              <Field label="Routing retry (minutes)"><Input disabled={!editing} type="number" min="1" max="1440" value={String(value("ordersRoutingRetryMinutes") || 15)} onChange={(event) => update("ordersRoutingRetryMinutes", Number(event.target.value || 15))} /></Field>
+              <Field label="Maximum routing attempts"><Input disabled={!editing} type="number" min="1" max="20" value={String(value("ordersRoutingMaxAttempts") || 3)} onChange={(event) => update("ordersRoutingMaxAttempts", Number(event.target.value || 3))} /></Field>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="inventory" className="grid gap-4">
+          <Card>
+            <CardHeader><CardTitle className="text-base">Inventory allocation</CardTitle><CardDescription>Physical warehouse defaults only. Supplier-feed and marketplace quantities remain separate sourcing snapshots.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <Field label="Default fulfillment warehouse"><Select disabled={!editing} value={String(value("inventoryDefaultFulfillmentWarehouseId") || "none")} onValueChange={(next) => update("inventoryDefaultFulfillmentWarehouseId", next === "none" ? "" : next)}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent><SelectItem value="none">No default</SelectItem>{settingsWarehouses.filter((warehouse) => warehouse.isPhysical === true).map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select></Field>
+              <Field label="Default receiving warehouse"><Select disabled={!editing} value={String(value("inventoryDefaultReceivingWarehouseId") || "none")} onValueChange={(next) => update("inventoryDefaultReceivingWarehouseId", next === "none" ? "" : next)}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent><SelectItem value="none">No default</SelectItem>{settingsWarehouses.filter((warehouse) => warehouse.isPhysical === true).map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select></Field>
+              <Field label="Allocation strategy"><Select disabled={!editing} value={String(value("inventoryAllocationStrategy") || "priority")} onValueChange={(next) => update("inventoryAllocationStrategy", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="priority">Warehouse priority</SelectItem><SelectItem value="fifo">FIFO</SelectItem><SelectItem value="fefo">FEFO</SelectItem></SelectContent></Select></Field>
+              <Field label="Reservation expiry (hours)"><Input disabled={!editing} type="number" min="1" max="720" value={String(value("inventoryReservationExpiryHours") || 48)} onChange={(event) => update("inventoryReservationExpiryHours", Number(event.target.value || 48))} /></Field>
+              <Field label="Default safety stock"><Input disabled={!editing} type="number" min="0" value={String(value("inventoryDefaultSafetyStock") || 0)} onChange={(event) => update("inventoryDefaultSafetyStock", Number(event.target.value || 0))} /></Field>
+              <ToggleField label="Allow negative physical stock" checked={boolValue("inventoryAllowNegativePhysicalStock")} disabled={!editing} onCheckedChange={(next) => update("inventoryAllowNegativePhysicalStock", next)} />
+              <ToggleField label="Auto-release canceled reservations" checked={boolValue("inventoryAutoReleaseCanceledReservations")} disabled={!editing} onCheckedChange={(next) => update("inventoryAutoReleaseCanceledReservations", next)} />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle className="text-base">Fulfillment gates</CardTitle><CardDescription>Required operational checks before items can be labeled and shipped.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <ToggleField label="Allow partial shipments" checked={boolValue("fulfillmentAllowPartialShipments")} disabled={!editing} onCheckedChange={(next) => update("fulfillmentAllowPartialShipments", next)} />
+              <ToggleField label="Require picked items before labels" checked={boolValue("fulfillmentRequirePickedBeforeLabel")} disabled={!editing} onCheckedChange={(next) => update("fulfillmentRequirePickedBeforeLabel", next)} />
+              <ToggleField label="Require package data before labels" checked={boolValue("fulfillmentRequirePackageDataBeforeLabel")} disabled={!editing} onCheckedChange={(next) => update("fulfillmentRequirePackageDataBeforeLabel", next)} />
+              <ToggleField label="Auto-create pick lists" checked={boolValue("fulfillmentAutoCreatePickLists")} disabled={!editing} onCheckedChange={(next) => update("fulfillmentAutoCreatePickLists", next)} />
+              <Field label="Default weight unit"><Select disabled={!editing} value={String(value("fulfillmentDefaultWeightUnit") || "lb")} onValueChange={(next) => update("fulfillmentDefaultWeightUnit", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="lb">Pounds</SelectItem><SelectItem value="oz">Ounces</SelectItem><SelectItem value="kg">Kilograms</SelectItem><SelectItem value="g">Grams</SelectItem></SelectContent></Select></Field>
+              <Field label="Default dimension unit"><Select disabled={!editing} value={String(value("fulfillmentDefaultDimensionUnit") || "in")} onValueChange={(next) => update("fulfillmentDefaultDimensionUnit", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="in">Inches</SelectItem><SelectItem value="cm">Centimeters</SelectItem></SelectContent></Select></Field>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="notifications" className="grid gap-4">
+          <Card>
+            <CardHeader><CardTitle className="text-base">Notification policy</CardTitle><CardDescription>One master switch with separate delivery methods and operational alert types.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <ToggleField label="Enable notifications" checked={boolValue("notificationsEnabled")} disabled={!editing} onCheckedChange={(next) => update("notificationsEnabled", next)} />
+              <ToggleField label="In-app notifications" checked={boolValue("notificationInAppEnabled")} disabled={!editing || !boolValue("notificationsEnabled")} onCheckedChange={(next) => update("notificationInAppEnabled", next)} />
+              <ToggleField label="Email notifications" checked={boolValue("notificationEmailEnabled")} disabled={!editing || !boolValue("notificationsEnabled")} onCheckedChange={(next) => update("notificationEmailEnabled", next)} />
+              <ToggleField label="Job failures" checked={boolValue("notifyJobFailures")} disabled={!editing || !boolValue("notificationsEnabled")} onCheckedChange={(next) => update("notifyJobFailures", next)} />
+              <ToggleField label="Feed failures" checked={boolValue("notifyFeedFailures")} disabled={!editing || !boolValue("notificationsEnabled")} onCheckedChange={(next) => update("notifyFeedFailures", next)} />
+              <ToggleField label="Channel authentication failures" checked={boolValue("notifyChannelAuthFailures")} disabled={!editing || !boolValue("notificationsEnabled")} onCheckedChange={(next) => update("notifyChannelAuthFailures", next)} />
+              <ToggleField label="Low stock" checked={boolValue("notifyLowStock")} disabled={!editing || !boolValue("notificationsEnabled")} onCheckedChange={(next) => update("notifyLowStock", next)} />
+              <ToggleField label="Stale supplier feeds" checked={boolValue("notifyStaleFeeds")} disabled={!editing || !boolValue("notificationsEnabled")} onCheckedChange={(next) => update("notifyStaleFeeds", next)} />
+              <ToggleField label="Overdue purchase orders" checked={boolValue("notifyOverduePurchaseOrders")} disabled={!editing || !boolValue("notificationsEnabled")} onCheckedChange={(next) => update("notifyOverduePurchaseOrders", next)} />
+              <ToggleField label="Receiving exceptions" checked={boolValue("notifyReceivingExceptions")} disabled={!editing || !boolValue("notificationsEnabled")} onCheckedChange={(next) => update("notifyReceivingExceptions", next)} />
+              <Field label="Recipients"><Input disabled={!editing} value={Array.isArray(value("notificationRecipients")) ? (value("notificationRecipients") as string[]).join(", ") : ""} onChange={(event) => update("notificationRecipients", event.target.value.split(",").map((email) => email.trim()).filter(Boolean))} placeholder="ops@example.com, buyer@example.com" /></Field>
+              <Field label="Low-stock threshold"><Input disabled={!editing || !boolValue("notifyLowStock")} type="number" min="0" value={String(value("notificationLowStockThreshold") || 5)} onChange={(event) => update("notificationLowStockThreshold", Number(event.target.value || 0))} /></Field>
+              <Field label="Feed stale after (hours)"><Input disabled={!editing || !boolValue("notifyStaleFeeds")} type="number" min="1" value={String(value("notificationStaleFeedHours") || 24)} onChange={(event) => update("notificationStaleFeedHours", Number(event.target.value || 24))} /></Field>
+              <Field label="Escalate after (minutes)"><Input disabled={!editing} type="number" min="1" value={String(value("notificationEscalationMinutes") || 60)} onChange={(event) => update("notificationEscalationMinutes", Number(event.target.value || 60))} /></Field>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="security" className="grid gap-4">
+          <Card>
+            <CardHeader><CardTitle className="text-base">Security and audit policy</CardTitle><CardDescription>Controls destructive confirmations, audit history, and protected warehouse-audit actions.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <ToggleField label="Admin confirmation for deletes" checked={boolValue("requireAdminConfirmationForDeletes")} disabled={!editing} onCheckedChange={(next) => update("requireAdminConfirmationForDeletes", next)} />
+              <ToggleField label="System audit logging" checked={boolValue("securityAuditLoggingEnabled")} disabled={!editing} onCheckedChange={(next) => update("securityAuditLoggingEnabled", next)} />
+              <ToggleField label="Log credential changes" checked={boolValue("securityCredentialChangeLoggingEnabled")} disabled={!editing} onCheckedChange={(next) => update("securityCredentialChangeLoggingEnabled", next)} />
+              <Field label="Audit retention (days)"><Input disabled={!editing} type="number" min="30" max="3650" value={String(value("securityAuditRetentionDays") || 365)} onChange={(event) => update("securityAuditRetentionDays", Number(event.target.value || 365))} /></Field>
+              <Field label={Boolean(settings.warehouseAuditAdminPinConfigured) ? "Warehouse audit PIN (set to replace)" : "Warehouse audit PIN"}><Input disabled={!editing} type="password" inputMode="numeric" value={String(draft.warehouseAuditAdminPin || "")} onChange={(event) => update("warehouseAuditAdminPin", event.target.value)} placeholder={Boolean(settings.warehouseAuditAdminPinConfigured) ? "PIN configured" : "Set a 4-12 digit PIN"} /></Field>
+              <Field label="Warehouse audit administrator roles"><Input disabled={!editing} value={Array.isArray(value("warehouseAuditAdminRoles")) ? (value("warehouseAuditAdminRoles") as string[]).join(", ") : "Owner, Admin"} onChange={(event) => update("warehouseAuditAdminRoles", event.target.value.split(",").map((role) => role.trim()).filter(Boolean))} /></Field>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="jobs" className="grid gap-4">
+          <Card>
+            <CardHeader><CardTitle className="text-base">Job execution defaults</CardTitle><CardDescription>Bounded concurrency, retry, timeout, and stale-job recovery defaults for background workers.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+              <Field label="Maximum parallel jobs"><Input disabled={!editing} type="number" min="1" max="20" value={String(value("jobsMaxParallel") || 2)} onChange={(event) => update("jobsMaxParallel", Number(event.target.value || 2))} /></Field>
+              <Field label="Maximum attempts"><Input disabled={!editing} type="number" min="1" max="20" value={String(value("jobsMaxAttempts") || 3)} onChange={(event) => update("jobsMaxAttempts", Number(event.target.value || 3))} /></Field>
+              <Field label="Retry backoff (seconds)"><Input disabled={!editing} type="number" min="5" value={String(value("jobsRetryBackoffSeconds") || 60)} onChange={(event) => update("jobsRetryBackoffSeconds", Number(event.target.value || 60))} /></Field>
+              <Field label="Default timeout (minutes)"><Input disabled={!editing} type="number" min="5" value={String(value("jobsDefaultTimeoutMinutes") || 120)} onChange={(event) => update("jobsDefaultTimeoutMinutes", Number(event.target.value || 120))} /></Field>
+              <Field label="Stale after (minutes)"><Input disabled={!editing} type="number" min="1" value={String(value("jobsStaleAfterMinutes") || 15)} onChange={(event) => update("jobsStaleAfterMinutes", Number(event.target.value || 15))} /></Field>
+              <ToggleField label="Clean expired artifacts" checked={boolValue("jobsRetentionAutoCleanupEnabled")} disabled={!editing} onCheckedChange={(next) => update("jobsRetentionAutoCleanupEnabled", next)} />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle className="text-base">Maintenance window</CardTitle><CardDescription>Optionally reserve a quiet period for backups, index work, and large imports.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <ToggleField label="Enable maintenance window" checked={boolValue("jobsMaintenanceWindowEnabled")} disabled={!editing} onCheckedChange={(next) => update("jobsMaintenanceWindowEnabled", next)} />
+              <Field label="Starts"><Input disabled={!editing || !boolValue("jobsMaintenanceWindowEnabled")} type="time" value={String(value("jobsMaintenanceWindowStart") || "02:00")} onChange={(event) => update("jobsMaintenanceWindowStart", event.target.value)} /></Field>
+              <Field label="Ends"><Input disabled={!editing || !boolValue("jobsMaintenanceWindowEnabled")} type="time" value={String(value("jobsMaintenanceWindowEnd") || "05:00")} onChange={(event) => update("jobsMaintenanceWindowEnd", event.target.value)} /></Field>
+              <ToggleField label="Pause marketplace writes" checked={boolValue("jobsPauseMarketplaceWritesDuringMaintenance")} disabled={!editing || !boolValue("jobsMaintenanceWindowEnabled")} onCheckedChange={(next) => update("jobsPauseMarketplaceWritesDuringMaintenance", next)} />
+            </CardContent>
+          </Card>
+        </TabsContent>
         <TabsContent value="operations" className="grid gap-4">
           <Card>
             <CardHeader>
@@ -16658,7 +16834,6 @@ function SettingsPage({
                 </Select>
               </Field>
               <ToggleField label="Auto quality scan after imports" checked={boolValue("autoDataQualityScanAfterImports")} disabled={!editing} onCheckedChange={(next) => update("autoDataQualityScanAfterImports", next)} />
-              <ToggleField label="Clean expired job artifacts" checked={boolValue("jobsRetentionAutoCleanupEnabled")} disabled={!editing} onCheckedChange={(next) => update("jobsRetentionAutoCleanupEnabled", next)} />
               <Field label="Channel activity retention">
                 <Input disabled value={`${String(value("channelLogRetentionDays") || 365)} days`} />
                 <p className="mt-1 text-xs text-muted-foreground">Searchable channel activity metadata is retained for one year.</p>
@@ -16666,13 +16841,6 @@ function SettingsPage({
               <Field label="Download and artifact retention">
                 <Input disabled value={`${String(value("jobArtifactRetentionDays") || 7)} days`} />
                 <p className="mt-1 text-xs text-muted-foreground">Large CSVs, exports, and job downloads expire after seven days.</p>
-              </Field>
-              <ToggleField label="Admin confirmation for deletes" checked={boolValue("requireAdminConfirmationForDeletes")} disabled={!editing} onCheckedChange={(next) => update("requireAdminConfirmationForDeletes", next)} />
-              <Field label={Boolean(settings.warehouseAuditAdminPinConfigured) ? "Warehouse audit administrator PIN (set to replace)" : "Warehouse audit administrator PIN"}>
-                <Input disabled={!editing} type="password" inputMode="numeric" value={String(draft.warehouseAuditAdminPin || "")} onChange={(event) => update("warehouseAuditAdminPin", event.target.value)} placeholder={Boolean(settings.warehouseAuditAdminPinConfigured) ? "PIN configured" : "Set a 4-12 digit PIN"} />
-              </Field>
-              <Field label="Warehouse audit administrator roles">
-                <Input disabled={!editing} value={Array.isArray(value("warehouseAuditAdminRoles")) ? (value("warehouseAuditAdminRoles") as string[]).join(", ") : "Owner, Admin"} onChange={(event) => update("warehouseAuditAdminRoles", event.target.value.split(",").map((role) => role.trim()).filter(Boolean))} placeholder="Owner, Admin" />
               </Field>
             </CardContent>
           </Card>
@@ -16881,12 +17049,18 @@ function SettingsPage({
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Backups and retention</CardTitle>
-              <CardDescription>Retention should stay long enough for job review and file downloads.</CardDescription>
+              <CardDescription>Define how system backups are created, checked, stored, and retained. Manual runs remain available regardless of the schedule.</CardDescription>
             </CardHeader>
-            <CardContent className="grid gap-4 md:grid-cols-3">
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <ToggleField label="Enable scheduled backups" checked={boolValue("backupScheduleEnabled")} disabled={!editing} onCheckedChange={(next) => update("backupScheduleEnabled", next)} />
+              <Field label="Daily backup time"><Input disabled={!editing || !boolValue("backupScheduleEnabled")} type="time" value={String(value("backupScheduleTime") || "01:00")} onChange={(event) => update("backupScheduleTime", event.target.value)} /></Field>
+              <Field label="Backup destination"><Select disabled={!editing} value={String(value("backupDestination") || "local")} onValueChange={(next) => update("backupDestination", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="local">Local server</SelectItem><SelectItem value="digitalocean-spaces">DigitalOcean Spaces</SelectItem><SelectItem value="s3">Amazon S3 compatible</SelectItem></SelectContent></Select></Field>
+              <Field label="Backup retention days"><Input disabled={!editing} type="number" min="1" max="3650" value={String(value("backupRetentionDays") || 30)} onChange={(event) => update("backupRetentionDays", Number(event.target.value || 30))} /></Field>
               <ToggleField label="Include source catalog" checked={boolValue("backupIncludeSourceCatalog")} disabled={!editing} onCheckedChange={(next) => update("backupIncludeSourceCatalog", next)} />
-              <Field label="Backup retention days"><Input disabled={!editing} type="number" value={String(value("backupRetentionDays") || 30)} onChange={(event) => update("backupRetentionDays", Number(event.target.value || 0))} /></Field>
-              <Button variant="outline" onClick={() => api("/api/system/backup", { method: "POST", body: JSON.stringify({}) }).then(() => toast.success("Backup queued.")).catch((error) => toast.error(error.message))}>Run backup</Button>
+              <ToggleField label="Encrypt backup files" checked={boolValue("backupEncryptionEnabled")} disabled={!editing} onCheckedChange={(next) => update("backupEncryptionEnabled", next)} />
+              <ToggleField label="Verify after creation" checked={boolValue("backupVerifyAfterCreate")} disabled={!editing} onCheckedChange={(next) => update("backupVerifyAfterCreate", next)} />
+              <div className="flex items-end"><Button className="w-full" variant="outline" onClick={() => api("/api/system/backup", { method: "POST", body: JSON.stringify({}) }).then((result) => toast.success(`Backup queued${result && typeof result === "object" && "jobNumber" in result ? ` as Job ${String((result as Record<string, unknown>).jobNumber)}` : ""}.`)).catch((error) => toast.error(error.message))}><Database className="size-4" /> Run backup now</Button></div>
+              <Alert className="md:col-span-2 xl:col-span-4"><ShieldCheck className="size-4" /><AlertTitle>Backups run as jobs</AlertTitle><AlertDescription>Each run is visible in Jobs with progress, verification status, and its downloadable artifact while the file is retained.</AlertDescription></Alert>
             </CardContent>
           </Card>
         </TabsContent>
@@ -17003,15 +17177,46 @@ function SettingsPage({
           </AlertDialog>
         </TabsContent>
         <TabsContent value="users">
+          <div className="grid gap-4">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Users and permissions</CardTitle>
-              <CardDescription>Advanced user management is still available in the legacy screen while this tab is migrated.</CardDescription>
+              <CardDescription>Manage the operators recorded on manual actions and assign a reusable role to each person.</CardDescription>
             </CardHeader>
-            <CardContent>
-              <Button asChild variant="outline"><a href="/legacy/settings" target="_blank" rel="noreferrer">Open legacy user settings</a></Button>
+            <CardContent className="grid gap-4">
+              <div className="grid gap-4 rounded-md border bg-muted/20 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+                <Field label="Current operator"><Select disabled={!editing} value={String(value("activeSystemUserId") || configuredUsers()[0]?.id || "")} onValueChange={(next) => update("activeSystemUserId", next)}><SelectTrigger><SelectValue placeholder="Select operator" /></SelectTrigger><SelectContent>{configuredUsers().filter((user) => String(user.status || "active") === "active").map((user) => <SelectItem key={String(user.id)} value={String(user.id)}>{String(user.name || user.email || "Unnamed user")}</SelectItem>)}</SelectContent></Select><p className="mt-1 text-xs text-muted-foreground">Manual changes and approvals are attributed to this operator until full sign-in enforcement is enabled.</p></Field>
+                <Button type="button" variant="outline" disabled={!editing} onClick={addSystemUser}>Add user</Button>
+              </div>
+              <div className="overflow-x-auto rounded-md border">
+                <Table>
+                  <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Email</TableHead><TableHead>Role</TableHead><TableHead>Status</TableHead><TableHead className="w-20 text-right">Action</TableHead></TableRow></TableHeader>
+                  <TableBody>{configuredUsers().map((user) => <TableRow key={String(user.id)}>
+                    <TableCell><Input className="min-w-36" disabled={!editing} value={String(user.name || "")} onChange={(event) => updateSystemUser(String(user.id), "name", event.target.value)} placeholder="Full name" /></TableCell>
+                    <TableCell><Input className="min-w-52" disabled={!editing} type="email" value={String(user.email || "")} onChange={(event) => updateSystemUser(String(user.id), "email", event.target.value)} placeholder="user@example.com" /></TableCell>
+                    <TableCell><Select disabled={!editing} value={String(user.role || "Operator")} onValueChange={(next) => updateSystemUser(String(user.id), "role", next)}><SelectTrigger className="min-w-32"><SelectValue /></SelectTrigger><SelectContent>{configuredRoles().map((role) => <SelectItem key={String(role.id)} value={String(role.name)}>{String(role.name)}</SelectItem>)}</SelectContent></Select></TableCell>
+                    <TableCell><Select disabled={!editing || String(user.id) === "owner"} value={String(user.status || "active")} onValueChange={(next) => updateSystemUser(String(user.id), "status", next)}><SelectTrigger className="min-w-28"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></TableCell>
+                    <TableCell className="text-right"><Button type="button" size="sm" variant="ghost" disabled={!editing || String(user.id) === "owner"} onClick={() => removeSystemUser(String(user.id))}>Remove</Button></TableCell>
+                  </TableRow>)}</TableBody>
+                </Table>
+              </div>
             </CardContent>
           </Card>
+          <Card>
+            <CardHeader><CardTitle className="text-base">Role permissions</CardTitle><CardDescription>Permissions are grouped by workspace. Owner always retains full access.</CardDescription></CardHeader>
+            <CardContent className="grid gap-3">
+              {configuredRoles().map((role) => {
+                const permissions = new Set(Array.isArray(role.permissions) ? role.permissions.map(String) : [])
+                const ownerRole = permissions.has("all") || String(role.id) === "owner"
+                return <div key={String(role.id)} className="grid gap-3 rounded-md border p-4 lg:grid-cols-[10rem_1fr] lg:items-start">
+                  <div><p className="font-medium">{String(role.name || role.id)}</p><p className="text-xs text-muted-foreground">{ownerRole ? "Full system access" : `${permissions.size} workspace permissions`}</p></div>
+                  <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">{["catalog", "orders", "fulfillment", "purchasing", "warehouse", "channels", "jobs", "system"].map((permission) => <label key={permission} className="flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm"><Checkbox disabled={!editing || ownerRole} checked={ownerRole || permissions.has(permission)} onCheckedChange={(checked) => updateRolePermissions(String(role.id), permission, checked === true)} /><span className="capitalize">{permission}</span></label>)}</div>
+                </div>
+              })}
+              <Alert><ShieldCheck className="size-4" /><AlertTitle>Permission policy is ready for authentication enforcement</AlertTitle><AlertDescription>These roles already control DataPlus operator attribution and provide the permission model for the sign-in layer. Credentials and API secrets remain protected server-side.</AlertDescription></Alert>
+            </CardContent>
+          </Card>
+          </div>
         </TabsContent>
       </Tabs>
     </div>

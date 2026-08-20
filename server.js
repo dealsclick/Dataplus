@@ -918,8 +918,76 @@ const DEFAULT_SYSTEM_SETTINGS = {
   catalogCacheTtlSeconds: 300,
   catalogSearchDebounceMs: 350,
   skuChangeTrackedFields: ["cost", "price", "list_price", "qty", "stock_status", "to_be_discontinued", "brand", "mfr_part_number", "vendor_sku", "category", "default_image"],
+  organizationName: "DataPlus",
+  organizationLegalName: "",
+  organizationEmail: "",
+  organizationPhone: "",
+  organizationAddressLine1: "",
+  organizationAddressLine2: "",
+  organizationCity: "",
+  organizationState: "",
+  organizationPostalCode: "",
+  organizationCountry: "US",
+  organizationTimezone: "America/New_York",
+  organizationCurrency: "USD",
+  organizationLocale: "en-US",
+  organizationMeasurementSystem: "imperial",
+  ordersAutoHoldUnpaid: true,
+  ordersAutoHoldHighRisk: true,
+  ordersReleaseCanceledReservations: true,
+  ordersRemoveCanceledLinesFromDraftPos: true,
+  ordersRemoveRefundedLinesFromDraftPos: true,
+  ordersDefaultImportLookbackDays: 60,
+  ordersArchiveAfterDays: 365,
+  ordersRoutingRetryMinutes: 15,
+  ordersRoutingMaxAttempts: 3,
+  ordersNotifyRoutingExceptions: true,
+  inventoryDefaultFulfillmentWarehouseId: "",
+  inventoryDefaultReceivingWarehouseId: "",
+  inventoryAllocationStrategy: "priority",
+  inventoryReservationExpiryHours: 48,
+  inventoryDefaultSafetyStock: 0,
+  inventoryAllowNegativePhysicalStock: false,
+  inventoryAutoReleaseCanceledReservations: true,
+  fulfillmentAllowPartialShipments: true,
+  fulfillmentRequirePickedBeforeLabel: true,
+  fulfillmentRequirePackageDataBeforeLabel: true,
+  fulfillmentAutoCreatePickLists: false,
+  fulfillmentDefaultWeightUnit: "lb",
+  fulfillmentDefaultDimensionUnit: "in",
+  notificationsEnabled: true,
+  notificationRecipients: [],
+  notificationInAppEnabled: true,
+  notificationEmailEnabled: true,
+  notifyJobFailures: true,
+  notifyFeedFailures: true,
+  notifyChannelAuthFailures: true,
+  notifyLowStock: false,
+  notifyStaleFeeds: true,
+  notifyOverduePurchaseOrders: true,
+  notifyReceivingExceptions: true,
+  notificationLowStockThreshold: 5,
+  notificationStaleFeedHours: 24,
+  notificationEscalationMinutes: 60,
+  securityAuditLoggingEnabled: true,
+  securityAuditRetentionDays: 365,
+  securityCredentialChangeLoggingEnabled: true,
+  jobsMaxParallel: 2,
+  jobsMaxAttempts: 3,
+  jobsRetryBackoffSeconds: 60,
+  jobsDefaultTimeoutMinutes: 120,
+  jobsStaleAfterMinutes: 15,
+  jobsMaintenanceWindowEnabled: false,
+  jobsMaintenanceWindowStart: "02:00",
+  jobsMaintenanceWindowEnd: "05:00",
+  jobsPauseMarketplaceWritesDuringMaintenance: false,
   backupIncludeSourceCatalog: false,
   backupRetentionDays: 30,
+  backupScheduleEnabled: false,
+  backupScheduleTime: "01:00",
+  backupDestination: "local",
+  backupEncryptionEnabled: false,
+  backupVerifyAfterCreate: true,
   jobsRetentionDays: IMPORT_JOB_FILE_RETENTION_DAYS,
   channelLogRetentionDays: CHANNEL_API_LOG_RETENTION_DAYS,
   jobArtifactRetentionDays: IMPORT_JOB_FILE_RETENTION_DAYS,
@@ -4822,6 +4890,53 @@ function normalizeSystemSettings(settings = {}) {
   ]) normalized[field] = normalized[field] !== false && String(normalized[field]).toLowerCase() !== "false";
   normalized.catalogCacheTtlSeconds = Math.max(15, Math.min(3600, Number(normalized.catalogCacheTtlSeconds || 300) || 300));
   normalized.catalogSearchDebounceMs = Math.max(100, Math.min(1500, Number(normalized.catalogSearchDebounceMs || 350) || 350));
+  for (const field of [
+    "organizationName", "organizationLegalName", "organizationEmail", "organizationPhone",
+    "organizationAddressLine1", "organizationAddressLine2", "organizationCity", "organizationState",
+    "organizationPostalCode", "organizationCountry", "organizationTimezone", "organizationCurrency", "organizationLocale",
+    "inventoryDefaultFulfillmentWarehouseId", "inventoryDefaultReceivingWarehouseId"
+  ]) normalized[field] = sourceTextValue(normalized[field] || DEFAULT_SYSTEM_SETTINGS[field] || "");
+  normalized.organizationMeasurementSystem = ["imperial", "metric"].includes(String(normalized.organizationMeasurementSystem || "").toLowerCase())
+    ? String(normalized.organizationMeasurementSystem).toLowerCase() : "imperial";
+  normalized.inventoryAllocationStrategy = ["priority", "fifo", "fefo"].includes(String(normalized.inventoryAllocationStrategy || "").toLowerCase())
+    ? String(normalized.inventoryAllocationStrategy).toLowerCase() : "priority";
+  normalized.fulfillmentDefaultWeightUnit = ["lb", "kg", "oz", "g"].includes(String(normalized.fulfillmentDefaultWeightUnit || "").toLowerCase())
+    ? String(normalized.fulfillmentDefaultWeightUnit).toLowerCase() : "lb";
+  normalized.fulfillmentDefaultDimensionUnit = ["in", "cm"].includes(String(normalized.fulfillmentDefaultDimensionUnit || "").toLowerCase())
+    ? String(normalized.fulfillmentDefaultDimensionUnit).toLowerCase() : "in";
+  normalized.backupDestination = ["local", "s3", "digitalocean-spaces"].includes(String(normalized.backupDestination || "").toLowerCase())
+    ? String(normalized.backupDestination).toLowerCase() : "local";
+  for (const field of [
+    "ordersAutoHoldUnpaid", "ordersAutoHoldHighRisk", "ordersReleaseCanceledReservations",
+    "ordersRemoveCanceledLinesFromDraftPos", "ordersRemoveRefundedLinesFromDraftPos", "ordersNotifyRoutingExceptions",
+    "inventoryAllowNegativePhysicalStock", "inventoryAutoReleaseCanceledReservations", "fulfillmentAllowPartialShipments",
+    "fulfillmentRequirePickedBeforeLabel", "fulfillmentRequirePackageDataBeforeLabel", "fulfillmentAutoCreatePickLists",
+    "notificationsEnabled", "notificationInAppEnabled", "notificationEmailEnabled", "notifyJobFailures", "notifyFeedFailures",
+    "notifyChannelAuthFailures", "notifyLowStock", "notifyStaleFeeds", "notifyOverduePurchaseOrders",
+    "notifyReceivingExceptions", "securityAuditLoggingEnabled", "securityCredentialChangeLoggingEnabled",
+    "jobsMaintenanceWindowEnabled", "jobsPauseMarketplaceWritesDuringMaintenance", "backupScheduleEnabled",
+    "backupEncryptionEnabled", "backupVerifyAfterCreate"
+  ]) normalized[field] = normalized[field] === true || String(normalized[field]).toLowerCase() === "true";
+  normalized.ordersDefaultImportLookbackDays = Math.max(1, Math.min(3650, Number(normalized.ordersDefaultImportLookbackDays || 60) || 60));
+  normalized.ordersArchiveAfterDays = Math.max(30, Math.min(3650, Number(normalized.ordersArchiveAfterDays || 365) || 365));
+  normalized.ordersRoutingRetryMinutes = Math.max(1, Math.min(1440, Number(normalized.ordersRoutingRetryMinutes || 15) || 15));
+  normalized.ordersRoutingMaxAttempts = Math.max(1, Math.min(20, Number(normalized.ordersRoutingMaxAttempts || 3) || 3));
+  normalized.inventoryReservationExpiryHours = Math.max(1, Math.min(720, Number(normalized.inventoryReservationExpiryHours || 48) || 48));
+  normalized.inventoryDefaultSafetyStock = Math.max(0, Math.min(1000000, Number(normalized.inventoryDefaultSafetyStock || 0) || 0));
+  normalized.notificationLowStockThreshold = Math.max(0, Math.min(1000000, Number(normalized.notificationLowStockThreshold || 5) || 5));
+  normalized.notificationStaleFeedHours = Math.max(1, Math.min(720, Number(normalized.notificationStaleFeedHours || 24) || 24));
+  normalized.notificationEscalationMinutes = Math.max(1, Math.min(10080, Number(normalized.notificationEscalationMinutes || 60) || 60));
+  normalized.securityAuditRetentionDays = Math.max(30, Math.min(3650, Number(normalized.securityAuditRetentionDays || 365) || 365));
+  normalized.jobsMaxParallel = Math.max(1, Math.min(20, Number(normalized.jobsMaxParallel || 2) || 2));
+  normalized.jobsMaxAttempts = Math.max(1, Math.min(20, Number(normalized.jobsMaxAttempts || 3) || 3));
+  normalized.jobsRetryBackoffSeconds = Math.max(5, Math.min(3600, Number(normalized.jobsRetryBackoffSeconds || 60) || 60));
+  normalized.jobsDefaultTimeoutMinutes = Math.max(5, Math.min(1440, Number(normalized.jobsDefaultTimeoutMinutes || 120) || 120));
+  normalized.jobsStaleAfterMinutes = Math.max(1, Math.min(1440, Number(normalized.jobsStaleAfterMinutes || 15) || 15));
+  normalized.notificationRecipients = [...new Set((Array.isArray(normalized.notificationRecipients) ? normalized.notificationRecipients : parseList(normalized.notificationRecipients))
+    .map((email) => sourceTextValue(email).toLowerCase()).filter(Boolean))];
+  for (const [field, fallback] of [["jobsMaintenanceWindowStart", "02:00"], ["jobsMaintenanceWindowEnd", "05:00"], ["backupScheduleTime", "01:00"]]) {
+    normalized[field] = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(normalized[field] || "")) ? String(normalized[field]) : fallback;
+  }
   normalized.shopifyDailyInventoryUpdateEnabled = normalized.shopifyDailyInventoryUpdateEnabled === true || String(normalized.shopifyDailyInventoryUpdateEnabled).toLowerCase() === "true";
   normalized.shopifyDailyInventoryUpdateMode = String(normalized.shopifyDailyInventoryUpdateMode || "dry-run").toLowerCase() === "apply" ? "apply" : "dry-run";
   normalized.shopifyDailyInventoryRequireSuccessfulDump = normalized.shopifyDailyInventoryRequireSuccessfulDump !== false;
