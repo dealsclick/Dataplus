@@ -4673,6 +4673,56 @@ async function listOrders(options = {}) {
   return orders.rows.map((row) => orderRowToState(row, byOrder.get(row.order_id) || []));
 }
 
+async function readOrderLinesBySkus(skus = []) {
+  const client = getPool();
+  const normalized = [...new Set((Array.isArray(skus) ? skus : [])
+    .map((value) => nullableString(value)?.toLowerCase())
+    .filter(Boolean))];
+  if (!client || !normalized.length) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    select
+      order_records.*,
+      order_line_items.line_id,
+      order_line_items.line_index,
+      order_line_items.sku as line_sku,
+      order_line_items.mapped_sku as line_mapped_sku,
+      order_line_items.original_sku as line_original_sku,
+      order_line_items.qty as line_qty,
+      order_line_items.raw as line_raw
+    from order_line_items
+    join order_records using (order_id)
+    where lower(coalesce(order_records.status, '')) <> 'deleted'
+      and (
+        lower(coalesce(order_line_items.sku, '')) = any($1::text[])
+        or lower(coalesce(order_line_items.mapped_sku, '')) = any($1::text[])
+        or lower(coalesce(order_line_items.original_sku, '')) = any($1::text[])
+        or regexp_replace(lower(coalesce(order_line_items.sku, '')), '[-_](?:[0-9]+(?:pc|pk|pack|ct|cs|case|bx|ea)|ea|each)$', '') = any($1::text[])
+        or regexp_replace(lower(coalesce(order_line_items.mapped_sku, '')), '[-_](?:[0-9]+(?:pc|pk|pack|ct|cs|case|bx|ea)|ea|each)$', '') = any($1::text[])
+        or regexp_replace(lower(coalesce(order_line_items.original_sku, '')), '[-_](?:[0-9]+(?:pc|pk|pack|ct|cs|case|bx|ea)|ea|each)$', '') = any($1::text[])
+      )
+    order by coalesce(order_records.created_at, order_records.updated_at) desc, order_records.order_number desc
+  `, [normalized]);
+  return result.rows.map((row) => ({
+    orderId: row.order_id,
+    orderNumber: row.order_number,
+    internalOrderNumber: row.internal_order_number,
+    marketplaceOrderId: row.marketplace_order_id,
+    status: row.status,
+    shippedAt: row.shipped_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    orderRaw: row.raw || {},
+    lineId: row.line_id,
+    lineIndex: Number(row.line_index || 0),
+    sku: row.line_sku,
+    mappedSku: row.line_mapped_sku,
+    originalSku: row.line_original_sku,
+    qty: Number(row.line_qty || 0),
+    lineRaw: row.line_raw || {}
+  }));
+}
+
 async function readOrdersByIds(orderIds = []) {
   const client = getPool();
   const ids = [...new Set((Array.isArray(orderIds) ? orderIds : [])
@@ -6288,7 +6338,7 @@ async function readProductsByKeys(keys = [], options = {}) {
     aliasesByProduct.get(alias.product_id).push(aliasRowToState(alias));
   }
   for (const product of products) product.aliases = aliasesByProduct.get(product.id) || [];
-  return products;
+  return options.includeVendorOffers ? hydrateProductsWithVendorOffers(products) : products;
 }
 
 async function readProductsByEbayListingKeys(keys = []) {
@@ -8157,6 +8207,7 @@ module.exports = {
   pruneChannelApiLogs,
   readOperationalSummary,
   listOrders,
+  readOrderLinesBySkus,
   readOrdersByIds,
   listPurchaseOrders,
   searchUniversal,

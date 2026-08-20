@@ -32534,9 +32534,78 @@ async function handleApi(req, res) {
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
+    const auditSkus = [...new Set((audit.lines || []).map((line) => String(line.sku || "").trim()).filter(Boolean))];
+    const lookupDb = await readDbFast({ skipInventory: true });
+    const [managedProducts, sourceProducts, orderMatches] = await Promise.all([
+      postgres.readProductsByKeys(auditSkus, { includeVendorOffers: true }),
+      findCatalogProductsBySkus(auditSkus, lookupDb),
+      postgres.readOrderLinesBySkus(auditSkus)
+    ]);
+    const normalizeSku = (value) => String(value || "").trim().toLowerCase()
+      .replace(/[-_](?:[0-9]+(?:pc|pk|pack|ct|cs|case|bx|ea)|ea|each)$/i, "");
+    const detailsBySku = new Map(auditSkus.map((sku) => [normalizeSku(sku), {
+      vendorSkus: new Set(), manufacturerSkus: new Set(), brands: new Set(), suppliers: new Set()
+    }]));
+    const addDetail = (set, value) => {
+      const text = String(value || "").trim();
+      if (text) set.add(text);
+    };
+    for (const product of [...(managedProducts || []), ...(sourceProducts || [])]) {
+      const details = detailsBySku.get(normalizeSku(product.sku));
+      if (!details) continue;
+      addDetail(details.vendorSkus, product.vendorSku || product.defaultSupplierSku);
+      addDetail(details.manufacturerSkus, product.mfrPartNumber || product.manufacturerPartNumber || product.mpn);
+      addDetail(details.brands, product.brand || product.sourceBrand);
+      addDetail(details.suppliers, postgres.canonicalSupplierName(product.supplier || product.vendor || product.defaultSupplier));
+      for (const offer of product.vendorOffers || product.supplierOffers || []) {
+        addDetail(details.vendorSkus, offer.vendorSku || offer.supplierSku);
+        addDetail(details.manufacturerSkus, offer.mfrPartNumber || offer.manufacturerPartNumber || offer.mpn);
+        addDetail(details.brands, offer.brand || product.brand);
+        addDetail(details.suppliers, postgres.canonicalSupplierName(offer.vendorName || offer.supplier || offer.vendor));
+      }
+    }
+    const orderRefsBySku = new Map(auditSkus.map((sku) => [normalizeSku(sku), { previous: new Set(), current: new Set() }]));
+    const terminalOrderStatuses = new Set(["archived", "canceled", "cancelled", "closed", "complete", "completed", "delivered", "done", "fulfilled", "refunded", "returned", "shipped", "void"]);
+    for (const match of orderMatches || []) {
+      const candidateSkus = [match.sku, match.mappedSku, match.originalSku, match.lineRaw?.parentSku, match.lineRaw?.baseSku, match.lineRaw?.catalogSku]
+        .map(normalizeSku)
+        .filter(Boolean);
+      const skuKey = candidateSkus.find((candidate) => orderRefsBySku.has(candidate));
+      if (!skuKey) continue;
+      const orderRaw = match.orderRaw || {};
+      const lineRaw = match.lineRaw || {};
+      const orderStatus = String(match.status || orderRaw.operationalStatus || orderRaw.workflowStatus || "").trim().toLowerCase();
+      const financialStatus = String(orderRaw.financialStatus || "").trim().toLowerCase();
+      const fulfillmentStatus = String(lineRaw.fulfillmentStatus || orderRaw.fulfillmentStatus || "").trim().toLowerCase();
+      const fulfilledQty = Number(lineRaw.fulfilledQty ?? lineRaw.fulfilledQuantity ?? 0);
+      const remainingQty = Math.max(0, Number(match.qty || 0) - fulfilledQty);
+      const isTerminal = Boolean(match.shippedAt || orderRaw.cancelledAt)
+        || terminalOrderStatuses.has(orderStatus)
+        || terminalOrderStatuses.has(fulfillmentStatus)
+        || financialStatus === "refunded"
+        || remainingQty <= 0;
+      const reference = String(match.internalOrderNumber || match.orderNumber || match.marketplaceOrderId || match.orderId || "").trim();
+      if (!reference) continue;
+      (isTerminal ? orderRefsBySku.get(skuKey).previous : orderRefsBySku.get(skuKey).current).add(reference);
+    }
     const quote = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-    const header = ["Audit", "Warehouse", "Status", "SKU", "Product", "Expected", "Counted", "Variance", "Last scanned"];
-    const rows = (audit.lines || []).map((line) => [audit.auditNumber, audit.warehouseName, audit.status, line.sku, line.title, Number(line.expectedQty || 0), Number(line.countedQty || 0), Number(line.countedQty || 0) - Number(line.expectedQty || 0), line.lastScannedAt || ""]);
+    const header = ["Audit", "Warehouse", "Status", "SKU", "Product", "Vendor SKU", "Manufacturer SKU", "Brand", "Supplier", "Previous orders", "Current orders needing SKU", "Expected", "Counted", "Variance", "Last scanned"];
+    const rows = (audit.lines || []).map((line) => {
+      const skuKey = normalizeSku(line.sku);
+      const details = detailsBySku.get(skuKey) || {};
+      const orders = orderRefsBySku.get(skuKey) || {};
+      return [
+        audit.auditNumber, audit.warehouseName, audit.status, line.sku, line.title,
+        [...(details.vendorSkus || [])].join(", "),
+        [...(details.manufacturerSkus || [])].join(", "),
+        [...(details.brands || [])].join(", "),
+        [...(details.suppliers || [])].join(", "),
+        [...(orders.previous || [])].join(", "),
+        [...(orders.current || [])].join(", "),
+        Number(line.expectedQty || 0), Number(line.countedQty || 0),
+        Number(line.countedQty || 0) - Number(line.expectedQty || 0), line.lastScannedAt || ""
+      ];
+    });
     const csv = [header, ...rows].map((row) => row.map(quote).join(",")).join("\n");
     res.writeHead(200, { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename=${String(audit.auditNumber || "warehouse-audit").replace(/[^a-z0-9_-]/gi, "-")}.csv` });
     return res.end(csv);
