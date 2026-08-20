@@ -10610,6 +10610,82 @@ function ManualReceivingPanel() {
   return <Card><CardHeader><CardTitle className="text-base">Manual receiving</CardTitle><CardDescription>Receive catalog inventory that arrives without a purchase order. Every receipt posts a warehouse-level count and an auditable inventory ledger entry.</CardDescription></CardHeader><CardContent className="grid gap-4"><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_120px_180px_180px]"><Field label="SKU, UPC, or barcode"><Input autoFocus value={lookup} onChange={(event) => setLookup(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void receive() } }} placeholder="Scan or enter identifier" /></Field><Field label="Quantity"><Input type="number" min="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></Field><Field label="Receiving warehouse">{warehouses.length ? <Select value={String(selectedWarehouse?.id || warehouse)} onValueChange={(value) => { const next = warehouses.find((item) => String(item.id) === value); setWarehouse(String(next?.id || value)); setLocationBin("") }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{warehouses.map((item) => <SelectItem key={String(item.id)} value={String(item.id)}>{String(item.name || "Warehouse")}</SelectItem>)}</SelectContent></Select> : <Input value={warehouse} onChange={(event) => setWarehouse(event.target.value)} placeholder="Staten Island" />}</Field><Field label={binRequired ? "Bin location (required)" : "Bin location"}>{activeBins.length ? <Select value={locationBin || "__none"} onValueChange={(value) => setLocationBin(value === "__none" ? "" : value)}><SelectTrigger><SelectValue placeholder="Select bin" /></SelectTrigger><SelectContent>{!binRequired && <SelectItem value="__none">No bin</SelectItem>}{activeBins.map((bin) => <SelectItem key={String(bin.code)} value={String(bin.code)}>{String(bin.code)}{bin.name ? ` - ${String(bin.name)}` : ""}</SelectItem>)}</SelectContent></Select> : <Input value={locationBin} onChange={(event) => setLocationBin(event.target.value)} placeholder={binRequired ? "Configure a bin first" : "Optional bin"} />}</Field></div><div className="flex flex-wrap items-end gap-3"><Field label="Receiving note"><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Delivery, adjustment, or receiving note" /></Field><Button disabled={busy || !lookup.trim() || Number(quantity) <= 0 || (binRequired && !locationBin)} onClick={() => void receive()}>{busy && <Loader2 className="size-4 animate-spin" />} Post receipt</Button></div>{receipts.length > 0 && <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Receipt</TableHead><TableHead>SKU</TableHead><TableHead>Quantity</TableHead><TableHead>Warehouse / bin</TableHead><TableHead>Received</TableHead></TableRow></TableHeader><TableBody>{receipts.slice(0, 5).map((receipt) => { const item = (Array.isArray(receipt.items) ? receipt.items[0] : {}) as Record<string, unknown>; const sku = String(item.sku || ""); return <TableRow key={String(receipt.id)}><TableCell className="font-medium">{String(receipt.receiptNumber || "Receipt")}</TableCell><TableCell>{sku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(sku)}`} target="_blank" rel="noreferrer" title={`Open ${sku} in a new tab`}>{sku}</a> : "-"}</TableCell><TableCell>{numberLabel(Number(item.qtyReceived || 0))}</TableCell><TableCell>{String(receipt.warehouseName || "-")}{receipt.locationBin ? ` / ${String(receipt.locationBin)}` : ""}</TableCell><TableCell>{dateLabel(String(receipt.receivedAt || ""))}</TableCell></TableRow> })}</TableBody></Table></div>}</CardContent></Card>
 }
 
+type AuditSupplierOption = {
+  key: string
+  vendorId?: string
+  supplierName: string
+  supplierCode?: string
+  vendorSku?: string
+  cost?: number
+  qty?: number
+  matchType?: string
+}
+
+function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { auditId: string; auditStatus: string; line: Record<string, unknown>; onAuditUpdate: (audit: Record<string, unknown>) => void }) {
+  const supplierCount = Number(line.supplierCount || 0)
+  const possibleSupplierCount = Number(line.possibleSupplierCount || 0)
+  const lineKey = String(line.id || `${String(line.productId || line.sku || "")}::${String(line.locationBin || "")}`)
+  const [options, setOptions] = useState<AuditSupplierOption[]>([])
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  const selectedKey = String(line.selectedSupplierKey || "")
+  const selectedName = String(line.selectedSupplierName || line.supplierName || "")
+
+  useEffect(() => {
+    if (!selectedKey || !selectedName) return
+    setOptions((current) => current.some((option) => option.key === selectedKey) ? current : [{
+      key: selectedKey,
+      vendorId: String(line.selectedSupplierId || ""),
+      supplierName: selectedName,
+      supplierCode: String(line.selectedSupplierCode || ""),
+      vendorSku: String(line.selectedVendorSku || ""),
+      cost: Number(line.selectedSupplierCost || 0),
+      qty: Number(line.selectedSupplierQty || 0),
+      matchType: String(line.selectedSupplierMatchType || "saved"),
+    }, ...current])
+  }, [line.selectedSupplierCode, line.selectedSupplierCost, line.selectedSupplierId, line.selectedSupplierMatchType, line.selectedSupplierQty, line.selectedVendorSku, selectedKey, selectedName])
+
+  const loadOptions = async () => {
+    if (loaded || loading) return
+    setLoading(true)
+    try {
+      const result = await api<{ options?: AuditSupplierOption[] }>(`/api/warehouse-audits/${encodeURIComponent(auditId)}/lines/${encodeURIComponent(lineKey)}/suppliers`)
+      setOptions(Array.isArray(result.options) ? result.options : [])
+      setLoaded(true)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Supplier options could not be loaded.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const assignSupplier = async (supplierKey: string) => {
+    setSaving(true)
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(auditId)}/lines/${encodeURIComponent(lineKey)}/supplier`, {
+        method: "POST",
+        body: JSON.stringify({ supplierKey, user: "Luis" }),
+      })
+      if (result.audit) onAuditUpdate(result.audit)
+      toast.success(result.message || "Supplier assigned.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Supplier could not be assigned.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (supplierCount === 1) {
+    return <div className="min-w-32"><p className="text-sm font-medium">{selectedName || "Single supplier"}</p>{String(line.selectedVendorSku || "") && <p className="text-[11px] text-muted-foreground">Vendor SKU {String(line.selectedVendorSku)}</p>}{Number(line.selectedSupplierCost || 0) > 0 && <p className="text-[11px] text-muted-foreground">Cost {moneyLabel(Number(line.selectedSupplierCost || 0))}</p>}</div>
+  }
+  if (supplierCount >= 2) {
+    return <div className="min-w-52 space-y-1"><Select value={selectedKey || undefined} disabled={saving || !["in_progress", "pending_review"].includes(auditStatus)} onOpenChange={(open) => { if (open) void loadOptions() }} onValueChange={(value) => void assignSupplier(value)}><SelectTrigger className={selectedKey ? "h-9" : "h-9 border-amber-400 bg-amber-50 text-amber-950 dark:bg-amber-950/40 dark:text-amber-100"}><SelectValue placeholder={loading ? "Loading suppliers..." : "Choose supplier"} /></SelectTrigger><SelectContent>{loading && <div className="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground"><Loader2 className="size-3.5 animate-spin" /> Loading supplier offers</div>}{options.map((option) => <SelectItem key={option.key} value={option.key}><span className="flex flex-col"><span>{option.supplierName}</span><span className="text-[11px] text-muted-foreground">{option.vendorSku ? `Vendor SKU ${option.vendorSku} · ` : ""}{Number(option.cost || 0) > 0 ? `${moneyLabel(Number(option.cost))} · ` : ""}{numberLabel(Number(option.qty || 0))} available</span></span></SelectItem>)}</SelectContent></Select>{selectedName && <p className="text-[11px] text-muted-foreground">Selected: {selectedName}{Number(line.selectedSupplierCost || 0) > 0 ? ` at ${moneyLabel(Number(line.selectedSupplierCost))}` : ""}</p>}</div>
+  }
+  if (possibleSupplierCount >= 2) return <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/60 dark:text-amber-200"><Users className="mr-1 size-3" />{numberLabel(possibleSupplierCount)} possible</Badge>
+  return <span className="text-xs text-muted-foreground">Not indexed</span>
+}
+
 function WarehouseAuditPanel({
   auditId = "",
   createOnly = false,
@@ -10626,11 +10702,9 @@ function WarehouseAuditPanel({
   const [auditReviewer, setAuditReviewer] = useState("");
   const [activeBin, setActiveBin] = useState("");
   const [auditWarehouses, setAuditWarehouses] = useState<Array<{ id?: string; name?: string; code?: string; warehouseType?: string; inventorySourceType?: string; isPhysical?: boolean; bins?: Array<{ id?: string; code?: string; name?: string; nickname?: string; active?: boolean; isDefault?: boolean }> }>>([]);
-  const [auditVendors, setAuditVendors] = useState<Vendor[]>([]);
   const [dispositionOpen, setDispositionOpen] = useState(false);
   const [dispositionType, setDispositionType] = useState<"stock_here" | "transfer" | "return_to_supplier">("stock_here");
   const [destinationWarehouseId, setDestinationWarehouseId] = useState("");
-  const [returnSupplierId, setReturnSupplierId] = useState("");
   const [dispositionNote, setDispositionNote] = useState("");
   const [cameraMode, setCameraMode] = useState<"product" | "bin">("product");
   const [offlineScanCount, setOfflineScanCount] = useState(0);
@@ -10747,7 +10821,6 @@ function WarehouseAuditPanel({
     ]);
     setAudits(result.audits || []);
     setAuditWarehouses((state.warehouses || []) as typeof auditWarehouses);
-    setAuditVendors(state.vendors || []);
     setScannerSettings(state.systemSettings || {});
   };
   const resumedAudit =
@@ -11402,7 +11475,7 @@ function WarehouseAuditPanel({
         message?: string;
       }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/complete`,
-        { method: "POST", body: JSON.stringify({ user: "Luis", dispositionType, destinationWarehouseId, supplierId: returnSupplierId, dispositionNote }) },
+        { method: "POST", body: JSON.stringify({ user: "Luis", dispositionType, destinationWarehouseId, dispositionNote }) },
       );
       setActive(result.audit || null);
       setDispositionOpen(false);
@@ -11507,9 +11580,9 @@ function WarehouseAuditPanel({
     warehouseTypeOption(item.warehouseType).isPhysical &&
     String(item.inventorySourceType || "").toLowerCase() !== "supplier_feed",
   );
-  const availableReturnSuppliers = [...auditVendors]
-    .filter((vendor) => String(vendor.name || "").trim())
-    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  const missingReturnSupplierLines = lines.filter((line) =>
+    Number(line.countedQty || 0) > 0 && Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim(),
+  );
   if (createOnly)
     return (
       <Card>
@@ -11698,11 +11771,11 @@ function WarehouseAuditPanel({
                   ].map((option) => <button key={option.value} type="button" onClick={() => setDispositionType(option.value as typeof dispositionType)} className={`rounded-md border p-4 text-left transition-colors ${dispositionType === option.value ? "border-primary bg-primary/10 ring-1 ring-primary" : "bg-background hover:bg-muted/60"}`}><span className="font-medium">{option.title}</span><span className="mt-1 block text-xs text-muted-foreground">{option.description}</span></button>)}
                 </div>
                 {dispositionType === "transfer" && <Field label="Destination warehouse"><Select value={destinationWarehouseId} onValueChange={setDestinationWarehouseId}><SelectTrigger><SelectValue placeholder="Choose a physical warehouse" /></SelectTrigger><SelectContent>{transferDestinations.map((item) => <SelectItem key={String(item.id || item.name)} value={String(item.id || "")}>{String(item.name || "Warehouse")}{item.code ? ` (${String(item.code)})` : ""}</SelectItem>)}</SelectContent></Select></Field>}
-                {dispositionType === "return_to_supplier" && <Field label="Return supplier"><Select value={returnSupplierId} onValueChange={setReturnSupplierId}><SelectTrigger><SelectValue placeholder="Choose supplier" /></SelectTrigger><SelectContent>{availableReturnSuppliers.map((vendor) => <SelectItem key={vendor.id} value={vendor.id}>{vendor.name}{String(vendor.status || "active").toLowerCase() !== "active" ? " (inactive)" : ""}</SelectItem>)}</SelectContent></Select></Field>}
+                {dispositionType === "return_to_supplier" && <div className={`rounded-md border p-3 text-sm ${missingReturnSupplierLines.length ? "border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100" : "bg-muted/30"}`}><p className="font-medium">Returns follow each SKU's assigned supplier</p><p className="mt-1 text-xs text-muted-foreground">Single-supplier items are assigned automatically. For products carried by multiple suppliers, choose the supplier in the audit table before creating the return.</p>{missingReturnSupplierLines.length > 0 && <p className="mt-2 font-medium">{numberLabel(missingReturnSupplierLines.length)} line{missingReturnSupplierLines.length === 1 ? "" : "s"} still need a supplier.</p>}</div>}
                 <Field label="Outcome note"><Textarea value={dispositionNote} onChange={(event) => setDispositionNote(event.target.value)} placeholder="Optional handling instructions, return reason, or transfer note" /></Field>
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setDispositionOpen(false)}>Cancel</Button>
-                  <Button disabled={busy || (dispositionType === "transfer" && !destinationWarehouseId) || (dispositionType === "return_to_supplier" && !returnSupplierId)} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create return draft" : "Apply & stock"}</Button>
+                  <Button disabled={busy || (dispositionType === "transfer" && !destinationWarehouseId) || (dispositionType === "return_to_supplier" && missingReturnSupplierLines.length > 0)} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create return draft" : "Apply & stock"}</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
@@ -12127,31 +12200,7 @@ function WarehouseAuditPanel({
                           </button>
                         ) : "-"}
                       </TableCell>
-                      <TableCell>
-                        {Number(line.supplierCount || 0) >= 2 ? (
-                          <Badge
-                            variant="outline"
-                            className="border-blue-300 bg-blue-50 text-blue-800 dark:border-blue-700 dark:bg-blue-950/60 dark:text-blue-200"
-                            title={`Matched across ${numberLabel(Number(line.supplierCount || 0))} suppliers${String(line.supplierCoverageMatchType || "").includes("manufacturer-part") ? " using manufacturer part number + brand" : String(line.supplierCoverageMatchType || "").includes("upc") ? " using UPC" : ""}. Open the SKU to compare supplier offers.`}
-                          >
-                            <Users className="mr-1 size-3" />
-                            {numberLabel(Number(line.supplierCount || 0))} suppliers
-                          </Badge>
-                        ) : Number(line.possibleSupplierCount || 0) >= 2 ? (
-                          <Badge
-                            variant="outline"
-                            className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/60 dark:text-amber-200"
-                            title={`Exact manufacturer part number found at ${numberLabel(Number(line.possibleSupplierCount || 0))} suppliers, but brand confirmation or approval is still required before merging supplier coverage.`}
-                          >
-                            <Users className="mr-1 size-3" />
-                            {numberLabel(Number(line.possibleSupplierCount || 0))} possible
-                          </Badge>
-                        ) : Number(line.supplierCount || 0) === 1 ? (
-                          <span className="text-xs text-muted-foreground">1 supplier</span>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">Not indexed</span>
-                        )}
-                      </TableCell>
+                      <TableCell><AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onAuditUpdate={applyAuditUpdate} /></TableCell>
                       <TableCell>{String(line.locationBin || "-")}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1.5">

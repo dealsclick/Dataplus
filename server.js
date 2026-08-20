@@ -26066,6 +26066,68 @@ async function readSourceCatalogRuntimeDb() {
   };
 }
 
+function auditLineKey(line = {}) {
+  return String(line.id || `${line.productId || line.sku || ""}::${line.locationBin || ""}`);
+}
+
+function confirmedSupplierMatch(row = {}) {
+  return ["", "confirmed", "approved"].includes(String(row.matchStatus || "").trim().toLowerCase());
+}
+
+async function auditSupplierOptionsForLine(line = {}, vendors = []) {
+  const product = await postgres.readProductByKey(line.productId || line.sku);
+  if (!product) return { product: null, options: [], pendingReviewCount: 0 };
+  const coverage = await postgres.findVendorCatalogSupplierMatches({
+    productId: product.id,
+    sku: product.sku,
+    title: product.marketplaceTitle || product.title,
+    barcode: product.barcode,
+    mfrPartNumber: product.mfrPartNumber,
+    brand: product.brand
+  });
+  const matches = [...(coverage.matches || [])];
+  const primarySupplier = String(product.supplier || product.vendor || "").trim();
+  const primaryVendorSku = String(product.vendorSku || product.sku || "").trim();
+  if (primarySupplier && !matches.some((row) => confirmedSupplierMatch(row)
+    && String(row.supplier || "").trim().toLowerCase() === primarySupplier.toLowerCase())) {
+    matches.unshift({
+      supplier: primarySupplier,
+      supplierCode: product.supplierCode || "",
+      vendorSku: primaryVendorSku,
+      sourceSku: product.sourceSku || primaryVendorSku,
+      cost: product.cost,
+      qty: product.qty ?? product.stockQty,
+      matchType: "primary",
+      matchStatus: "confirmed",
+      requiresReview: false
+    });
+  }
+  const vendorRows = Array.isArray(vendors) ? vendors : [];
+  const bySupplier = new Map();
+  for (const match of matches.filter(confirmedSupplierMatch)) {
+    const supplierName = String(match.supplier || "").trim();
+    const supplierCode = String(match.supplierCode || "").trim();
+    if (!supplierName && !supplierCode) continue;
+    const vendor = vendorRows.find((row) => (supplierCode && [row.id, row.code, row.vendorCode, row.feedCode].some((value) => String(value || "").trim().toLowerCase() === supplierCode.toLowerCase()))
+      || (supplierName && String(row.name || "").trim().toLowerCase() === supplierName.toLowerCase())) || null;
+    const key = String(vendor?.id || supplierCode || supplierName).trim().toLowerCase();
+    const option = {
+      key,
+      vendorId: String(vendor?.id || match.vendorId || "").trim(),
+      supplierName: String(vendor?.name || supplierName || supplierCode).trim(),
+      supplierCode,
+      sourceSku: String(match.sourceSku || match.sku || "").trim(),
+      vendorSku: String(match.vendorSku || match.sourceSku || match.sku || "").trim(),
+      cost: Number(match.cost || 0),
+      qty: Number(match.qty || 0),
+      matchType: String(match.matchType || coverage.matchType || "").trim()
+    };
+    const current = bySupplier.get(key);
+    if (!current || (option.cost > 0 && (Number(current.cost || 0) <= 0 || option.cost < Number(current.cost || 0)))) bySupplier.set(key, option);
+  }
+  return { product, options: [...bySupplier.values()].sort((a, b) => a.supplierName.localeCompare(b.supplierName)), pendingReviewCount: Number(coverage.pendingReviewCount || 0) };
+}
+
 function applySourceCatalogOverride(product = {}, overrides = {}, vendorMappings = {}) {
   const override = overrides[String(product.sku || "").toLowerCase()];
   const supplier = sourceTextValue(product.supplier || product.vendor);
@@ -32048,10 +32110,30 @@ async function handleApi(req, res) {
             Number(supplierCoverage?.possibleSupplierCount || 0),
             Number(line?.possibleSupplierCount || 0)
           );
+          const singleSupplierName = supplierCount === 1
+            ? String(line?.selectedSupplierName || product?.supplier || product?.vendor || sourceProduct?.supplier || sourceProduct?.vendor || "").trim()
+            : "";
+          const singleSupplierCode = supplierCount === 1
+            ? String(product?.supplierCode || sourceProduct?.supplierCode || "").trim()
+            : "";
+          const singleVendorSku = supplierCount === 1
+            ? String(product?.vendorSku || sourceProduct?.vendorSku || sourceProduct?.sourceSku || "").trim()
+            : "";
+          const singleSupplierCost = supplierCount === 1
+            ? Number(product?.cost || sourceProduct?.cost || 0)
+            : 0;
           return {
             ...line,
             ...(image ? { image } : {}),
             supplierCount,
+            supplierName: String(line?.selectedSupplierName || singleSupplierName || "").trim(),
+            selectedSupplierKey: String(line?.selectedSupplierKey || "").trim(),
+            selectedSupplierId: String(line?.selectedSupplierId || "").trim(),
+            selectedSupplierName: String(line?.selectedSupplierName || "").trim(),
+            selectedSupplierCode: String(line?.selectedSupplierCode || singleSupplierCode || "").trim(),
+            selectedVendorSku: String(line?.selectedVendorSku || singleVendorSku || "").trim(),
+            selectedSupplierCost: Number(line?.selectedSupplierCost || singleSupplierCost || 0),
+            selectedSupplierQty: Number(line?.selectedSupplierQty || 0),
             hasMultipleSuppliers: Boolean(product?.hasMultipleSuppliers || sourceProduct?.hasMultipleSuppliers || supplierCoverage?.hasMultipleSuppliers || supplierCount >= 2),
             possibleSupplierCount,
             hasPossibleMultipleSuppliers: Boolean(supplierCoverage?.hasPossibleMultipleSuppliers || possibleSupplierCount >= 2),
@@ -32524,6 +32606,65 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { line, product: product ? { sku: product.sku, title: product.marketplaceTitle || product.title || "", qty: product.qty, reserved: product.reserved, lastInventoryAuditAt: product.lastInventoryAuditAt || "", lastInventoryAuditId: product.lastInventoryAuditId || "" } : null, movements });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "suppliers" && postgres.isPostgresEnabled()) {
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    const lineKey = decodeURIComponent(parts[4]);
+    const line = (audit.lines || []).find((entry) => auditLineKey(entry) === lineKey);
+    if (!line) return sendJson(res, 404, { error: "Audit line not found." });
+    const db = await readDbFast({ skipInventory: true });
+    const result = await auditSupplierOptionsForLine(line, db.vendors || []);
+    return sendJson(res, 200, {
+      options: result.options,
+      pendingReviewCount: result.pendingReviewCount,
+      selectedSupplierKey: String(line.selectedSupplierKey || ""),
+      selectedSupplierName: String(line.selectedSupplierName || "")
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "supplier" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (!["in_progress", "pending_review"].includes(String(audit.status || ""))) return sendJson(res, 400, { error: "Supplier assignment is locked after an audit is completed." });
+    const lineKey = decodeURIComponent(parts[4]);
+    const line = (audit.lines || []).find((entry) => auditLineKey(entry) === lineKey);
+    if (!line) return sendJson(res, 404, { error: "Audit line not found." });
+    const db = await readDbFast({ skipInventory: true });
+    const result = await auditSupplierOptionsForLine(line, db.vendors || []);
+    const supplierKey = String(body.supplierKey || "").trim().toLowerCase();
+    const selection = result.options.find((option) => String(option.key || "").trim().toLowerCase() === supplierKey);
+    if (!selection) return sendJson(res, 400, { error: "Choose a confirmed supplier for this SKU." });
+    const now = new Date().toISOString();
+    const selectedBy = String(body.user || "Warehouse user").trim() || "Warehouse user";
+    Object.assign(line, {
+      selectedSupplierKey: selection.key,
+      selectedSupplierId: selection.vendorId,
+      selectedSupplierName: selection.supplierName,
+      selectedSupplierCode: selection.supplierCode,
+      selectedVendorSku: selection.vendorSku,
+      selectedSupplierCost: selection.cost,
+      selectedSupplierQty: selection.qty,
+      selectedSupplierMatchType: selection.matchType,
+      supplierSelectedAt: now,
+      supplierSelectedBy: selectedBy
+    });
+    audit.updatedAt = now;
+    audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), {
+      type: "supplier_selected",
+      at: now,
+      user: selectedBy,
+      sku: line.sku || "",
+      supplierName: selection.supplierName,
+      supplierId: selection.vendorId || "",
+      cost: selection.cost
+    }].slice(-250);
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 200, { audit, line, selection, message: `${selection.supplierName} assigned to ${line.sku || "audit line"}.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "count" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
@@ -32604,10 +32745,33 @@ async function handleApi(req, res) {
     if (dispositionType === "transfer" && (!destinationWarehouse || !isPhysicalWarehouse(destinationWarehouse) || destinationWarehouse.id === auditWarehouse.id)) {
       return sendJson(res, 400, { error: "Choose a different physical destination warehouse for this transfer." });
     }
-    const returnSupplier = dispositionType === "return_to_supplier"
-      ? (db.vendors || []).find((row) => String(row.id || "") === String(body.supplierId || "") || String(row.name || "").trim().toLowerCase() === String(body.supplierName || "").trim().toLowerCase()) || null
-      : null;
-    if (dispositionType === "return_to_supplier" && !returnSupplier) return sendJson(res, 400, { error: "Choose the supplier receiving this return." });
+    const returnSelections = new Map();
+    if (dispositionType === "return_to_supplier") {
+      const unresolved = [];
+      for (const line of audit.lines || []) {
+        if (String(line.reviewStatus || "").toLowerCase() === "excluded") continue;
+        if (Math.max(0, Number(line.countedQty || 0)) <= 0) continue;
+        let selection = null;
+        if (line.selectedSupplierName) {
+          selection = {
+            key: String(line.selectedSupplierKey || line.selectedSupplierId || line.selectedSupplierName).trim().toLowerCase(),
+            vendorId: String(line.selectedSupplierId || "").trim(),
+            supplierName: String(line.selectedSupplierName || "").trim(),
+            supplierCode: String(line.selectedSupplierCode || "").trim(),
+            vendorSku: String(line.selectedVendorSku || "").trim(),
+            cost: Number(line.selectedSupplierCost || 0),
+            qty: Number(line.selectedSupplierQty || 0),
+            matchType: String(line.selectedSupplierMatchType || "saved").trim()
+          };
+        } else {
+          const result = await auditSupplierOptionsForLine(line, db.vendors || []);
+          if (result.options.length === 1) selection = result.options[0];
+        }
+        if (!selection?.supplierName) unresolved.push(String(line.sku || "Unknown SKU"));
+        else returnSelections.set(auditLineKey(line), selection);
+      }
+      if (unresolved.length) return sendJson(res, 400, { error: `Choose a supplier for ${unresolved.slice(0, 8).join(", ")}${unresolved.length > 8 ? ` and ${unresolved.length - 8} more` : ""} before creating supplier returns.` });
+    }
     const products = [];
     const dispositionLines = [];
     for (const line of audit.lines || []) {
@@ -32618,6 +32782,7 @@ async function handleApi(req, res) {
       const qtyBefore = stockRow ? Number(stockRow.qty || 0) : Number(product.qty || 0);
       const reservedBefore = stockRow ? Number(stockRow.reserved || 0) : Number(product.reserved || 0);
       const countedQty = Math.max(0, Number(line.countedQty || 0));
+      const lineSupplier = returnSelections.get(auditLineKey(line)) || null;
       if (dispositionType !== "stock_here" && reservedBefore > 0) {
         return sendJson(res, 409, { error: `${line.sku || "A counted SKU"} has ${reservedBefore} reserved unit${reservedBefore === 1 ? "" : "s"}. Release or reassign those allocations before transferring or returning this audit.` });
       }
@@ -32658,25 +32823,37 @@ async function handleApi(req, res) {
         stockRow.returnHoldQty = countedQty;
         stockRow.reserved = countedQty;
         syncInventoryTotalsFromWarehouses(product);
-        addInventoryLedger(db, product, { type: "supplier_return_hold", source: "warehouse_audit", referenceId: audit.id, referenceNumber: audit.auditNumber, warehouseId: auditWarehouse.id, warehouseName: auditWarehouse.name, locationBin: line.locationBin || stockRow.locationBin || "", quantityChange: 0, reservedChange: countedQty, qtyBefore: countedQty, qtyAfter: countedQty, reservedBefore: 0, reservedAfter: countedQty, reason: String(body.dispositionNote || `Held for return to ${returnSupplier.name}`).trim(), user: String(body.user || "Approver").trim() || "Approver" });
+        addInventoryLedger(db, product, { type: "supplier_return_hold", source: "warehouse_audit", referenceId: audit.id, referenceNumber: audit.auditNumber, warehouseId: auditWarehouse.id, warehouseName: auditWarehouse.name, locationBin: line.locationBin || stockRow.locationBin || "", quantityChange: 0, reservedChange: countedQty, qtyBefore: countedQty, qtyAfter: countedQty, reservedBefore: 0, reservedAfter: countedQty, reason: String(body.dispositionNote || `Held for return to ${lineSupplier?.supplierName || "supplier"}`).trim(), user: String(body.user || "Approver").trim() || "Approver" });
       }
-      dispositionLines.push({ sku: product.sku || line.sku, productId: product.id || line.productId || "", title: product.title || line.title || "", quantity: countedQty, locationBin: line.locationBin || stockRow?.locationBin || "" });
+      if (dispositionType !== "return_to_supplier" || countedQty > 0) {
+        dispositionLines.push({ sku: product.sku || line.sku, productId: product.id || line.productId || "", title: product.title || line.title || "", quantity: countedQty, locationBin: line.locationBin || stockRow?.locationBin || "", supplierId: lineSupplier?.vendorId || "", supplierName: lineSupplier?.supplierName || "", supplierCode: lineSupplier?.supplierCode || "", vendorSku: lineSupplier?.vendorSku || "", unitCost: Number(lineSupplier?.cost || 0), supplierMatchType: lineSupplier?.matchType || "" });
+      }
       products.push(product);
     }
     if (products.length) { await postgres.upsertProductsFromState(products); await postgres.upsertInventoryLevelsFromProducts(products); }
-    let supplierReturn = null;
+    const createdSupplierReturns = [];
     if (dispositionType === "return_to_supplier") {
       const supplierReturns = await postgres.readStateField("warehouseSupplierReturns").catch(() => []) || [];
-      const highestReturn = Math.max(0, ...supplierReturns.map((row) => Number(String(row.returnNumber || "").replace(/\D/g, "")) || 0));
-      supplierReturn = { id: crypto.randomUUID(), returnNumber: `VRET-${highestReturn + 1001}`, status: "draft", source: "warehouse_audit", auditId: audit.id, auditNumber: audit.auditNumber, supplierId: returnSupplier.id || "", supplierName: returnSupplier.name || "Supplier", warehouseId: auditWarehouse.id, warehouseName: auditWarehouse.name, lines: dispositionLines, totalUnits: dispositionLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0), note: String(body.dispositionNote || "").trim(), createdBy: String(body.user || "Approver").trim() || "Approver", createdAt: new Date().toISOString() };
-      supplierReturns.unshift(supplierReturn);
+      let nextReturnNumber = Math.max(1000, ...supplierReturns.map((row) => Number(String(row.returnNumber || "").replace(/\D/g, "")) || 0)) + 1;
+      const groupedLines = new Map();
+      for (const line of dispositionLines) {
+        const key = String(line.supplierId || line.supplierCode || line.supplierName).trim().toLowerCase();
+        if (!groupedLines.has(key)) groupedLines.set(key, []);
+        groupedLines.get(key).push(line);
+      }
+      for (const lines of groupedLines.values()) {
+        const first = lines[0];
+        const supplierReturn = { id: crypto.randomUUID(), returnNumber: `VRET-${nextReturnNumber++}`, status: "draft", source: "warehouse_audit", auditId: audit.id, auditNumber: audit.auditNumber, supplierId: first.supplierId || "", supplierName: first.supplierName || "Supplier", supplierCode: first.supplierCode || "", warehouseId: auditWarehouse.id, warehouseName: auditWarehouse.name, lines, totalUnits: lines.reduce((sum, line) => sum + Number(line.quantity || 0), 0), note: String(body.dispositionNote || "").trim(), createdBy: String(body.user || "Approver").trim() || "Approver", createdAt: new Date().toISOString() };
+        createdSupplierReturns.push(supplierReturn);
+        supplierReturns.unshift(supplierReturn);
+      }
       await postgres.writeStateDocuments({ warehouseSupplierReturns: supplierReturns.slice(0, 1000) });
     }
     audit.status = "completed"; audit.completedAt = new Date().toISOString(); audit.approvedAt = audit.completedAt; audit.approvedBy = String(body.user || "Approver").trim() || "Approver"; audit.appliedLines = products.length;
-    audit.disposition = { type: dispositionType, label: dispositionType === "transfer" ? "Transferred" : dispositionType === "return_to_supplier" ? "Return to supplier" : "Stocked here", destinationWarehouseId: destinationWarehouse?.id || "", destinationWarehouseName: destinationWarehouse?.name || "", supplierId: returnSupplier?.id || "", supplierName: returnSupplier?.name || "", supplierReturnId: supplierReturn?.id || "", supplierReturnNumber: supplierReturn?.returnNumber || "", note: String(body.dispositionNote || "").trim(), appliedAt: audit.completedAt, appliedBy: audit.approvedBy };
+    audit.disposition = { type: dispositionType, label: dispositionType === "transfer" ? "Transferred" : dispositionType === "return_to_supplier" ? "Return to suppliers" : "Stocked here", destinationWarehouseId: destinationWarehouse?.id || "", destinationWarehouseName: destinationWarehouse?.name || "", supplierReturns: createdSupplierReturns.map((row) => ({ id: row.id, returnNumber: row.returnNumber, supplierId: row.supplierId, supplierName: row.supplierName, totalUnits: row.totalUnits })), note: String(body.dispositionNote || "").trim(), appliedAt: audit.completedAt, appliedBy: audit.approvedBy };
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500), inventoryLedger: db.inventoryLedger || [] });
-    const outcome = dispositionType === "transfer" ? `transferred to ${destinationWarehouse.name}` : dispositionType === "return_to_supplier" ? `placed on hold in ${supplierReturn.returnNumber}` : `stocked in ${auditWarehouse.name}`;
-    return sendJson(res, 200, { audit, supplierReturn, message: `${audit.auditNumber} completed. ${products.length} catalog counts were ${outcome}.` });
+    const outcome = dispositionType === "transfer" ? `transferred to ${destinationWarehouse.name}` : dispositionType === "return_to_supplier" ? `placed on hold in ${createdSupplierReturns.length} supplier return draft${createdSupplierReturns.length === 1 ? "" : "s"}` : `stocked in ${auditWarehouse.name}`;
+    return sendJson(res, 200, { audit, supplierReturn: createdSupplierReturns[0] || null, supplierReturns: createdSupplierReturns, message: `${audit.auditNumber} completed. ${products.length} catalog counts were ${outcome}.` });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "export" && postgres.isPostgresEnabled()) {
