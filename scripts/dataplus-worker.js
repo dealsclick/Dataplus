@@ -1530,7 +1530,13 @@ async function runProductDumpImportJob(job) {
   if (payload.path) args.push(String(payload.path));
   if (payload.downloadFtp === true) args.push("--ftp");
   args.push("--job-id", String(job.id));
-  if (payload.postgresOnly !== false) args.push("--postgres-only");
+  if (payload.postgresOnly !== false) {
+    args.push("--postgres-only");
+    // PostgreSQL stores the mapped columns separately. Keeping the complete
+    // normalized BSON record in every snapshot only duplicates large payloads
+    // and can exhaust V8 during a multi-million-row full import.
+    args.push("--lean-raw");
+  }
   if (Number(payload.limit || 0) > 0) args.push("--limit", String(Number(payload.limit || 0)));
   args.push("--batch-size", String(dumpBatchSize));
   args.push("--sync-mode", syncMode);
@@ -1544,6 +1550,15 @@ async function runProductDumpImportJob(job) {
     startedAt: job.startedAt || new Date().toISOString()
   });
   const output = [];
+  let outputBytes = 0;
+  const appendProcessOutput = (text = "") => {
+    const value = String(text);
+    output.push(value);
+    outputBytes += Buffer.byteLength(value);
+    while (outputBytes > 256 * 1024 && output.length > 1) {
+      outputBytes -= Buffer.byteLength(output.shift() || "");
+    }
+  };
   const appendWorkerOutput = (stream, text = "") => {
     const timestamp = new Date().toISOString();
     const entries = String(text)
@@ -1577,7 +1592,7 @@ async function runProductDumpImportJob(job) {
     });
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
-      output.push(text);
+      appendProcessOutput(text);
       appendWorkerOutput("stdout", text);
       const lastLine = text.trim().split(/\r?\n/).filter(Boolean).pop();
       if (lastLine) {
@@ -1587,7 +1602,7 @@ async function runProductDumpImportJob(job) {
     });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
-      output.push(text);
+      appendProcessOutput(text);
       appendWorkerOutput("stderr", text);
       const matches = [...text.matchAll(/Processed\s+(\d+)\s+records\s+\((\d+)\s+catalog products,\s+(\d+)\s+skipped\)/gi)];
       const match = matches[matches.length - 1];
