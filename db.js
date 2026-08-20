@@ -3105,7 +3105,9 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
   const barcode = nullableString(identity.barcode || identity.upc || identity.gtin || "");
   const mfrPartNumber = nullableString(identity.mfrPartNumber || identity.manufacturerPartNumber || "");
   const brand = nullableString(identity.brand || "");
-  const result = await client.query(`
+  const queryTimeoutMs = Math.max(0, Math.min(30000, Number(identity.queryTimeoutMs || 0)));
+  const result = await client.query({
+    text: `
     select matched.*
     from (
       select
@@ -3146,7 +3148,10 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
       matched.updated_at desc nulls last,
       matched.last_seen_at desc nulls last
     limit 250
-  `, [barcode || "", mfrPartNumber || "", brand || "", sku || ""]);
+  `,
+    values: [barcode || "", mfrPartNumber || "", brand || "", sku || ""],
+    ...(queryTimeoutMs ? { query_timeout: queryTimeoutMs } : {})
+  });
   const rows = result.rows;
   const matchedTypes = new Set(rows.map((row) => row.coverage_match_type).filter(Boolean));
   const matchType = matchedTypes.has("upc") && matchedTypes.has("manufacturer-part-and-brand")

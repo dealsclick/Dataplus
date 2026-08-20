@@ -10616,6 +10616,7 @@ type AuditSupplierOption = {
   supplierName: string
   supplierCode?: string
   vendorSku?: string
+  manufacturerSku?: string
   cost?: number
   qty?: number
   matchType?: string
@@ -10629,6 +10630,7 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState("")
   const selectedKey = String(line.selectedSupplierKey || "")
   const selectedName = String(line.selectedSupplierName || line.supplierName || "")
 
@@ -10640,22 +10642,29 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
       supplierName: selectedName,
       supplierCode: String(line.selectedSupplierCode || ""),
       vendorSku: String(line.selectedVendorSku || ""),
+      manufacturerSku: String(line.selectedManufacturerSku || ""),
       cost: Number(line.selectedSupplierCost || 0),
       qty: Number(line.selectedSupplierQty || 0),
       matchType: String(line.selectedSupplierMatchType || "saved"),
     }, ...current])
-  }, [line.selectedSupplierCode, line.selectedSupplierCost, line.selectedSupplierId, line.selectedSupplierMatchType, line.selectedSupplierQty, line.selectedVendorSku, selectedKey, selectedName])
+  }, [line.selectedManufacturerSku, line.selectedSupplierCode, line.selectedSupplierCost, line.selectedSupplierId, line.selectedSupplierMatchType, line.selectedSupplierQty, line.selectedVendorSku, selectedKey, selectedName])
 
   const loadOptions = async () => {
     if (loaded || loading) return
     setLoading(true)
+    setLoadError("")
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 10000)
     try {
-      const result = await api<{ options?: AuditSupplierOption[] }>(`/api/warehouse-audits/${encodeURIComponent(auditId)}/lines/${encodeURIComponent(lineKey)}/suppliers`)
+      const result = await api<{ options?: AuditSupplierOption[] }>(`/api/warehouse-audits/${encodeURIComponent(auditId)}/lines/${encodeURIComponent(lineKey)}/suppliers`, { signal: controller.signal })
       setOptions(Array.isArray(result.options) ? result.options : [])
       setLoaded(true)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Supplier options could not be loaded.")
+      const message = error instanceof DOMException && error.name === "AbortError" ? "Supplier lookup timed out. Please retry." : error instanceof Error ? error.message : "Supplier options could not be loaded."
+      setLoadError(message)
+      toast.error(message)
     } finally {
+      window.clearTimeout(timeout)
       setLoading(false)
     }
   }
@@ -10677,10 +10686,11 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
   }
 
   if (supplierCount === 1) {
-    return <div className="min-w-32"><p className="text-sm font-medium">{selectedName || "Single supplier"}</p>{String(line.selectedVendorSku || "") && <p className="text-[11px] text-muted-foreground">Vendor SKU {String(line.selectedVendorSku)}</p>}{Number(line.selectedSupplierCost || 0) > 0 && <p className="text-[11px] text-muted-foreground">Cost {moneyLabel(Number(line.selectedSupplierCost || 0))}</p>}</div>
+    return <p className="min-w-32 text-sm font-medium">{selectedName || "Single supplier"}</p>
   }
   if (supplierCount >= 2) {
-    return <div className="min-w-52 space-y-1"><Select value={selectedKey || undefined} disabled={saving || !["in_progress", "pending_review"].includes(auditStatus)} onOpenChange={(open) => { if (open) void loadOptions() }} onValueChange={(value) => void assignSupplier(value)}><SelectTrigger className={selectedKey ? "h-9" : "h-9 border-amber-400 bg-amber-50 text-amber-950 dark:bg-amber-950/40 dark:text-amber-100"}><SelectValue placeholder={loading ? "Loading suppliers..." : "Choose supplier"} /></SelectTrigger><SelectContent>{loading && <div className="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground"><Loader2 className="size-3.5 animate-spin" /> Loading supplier offers</div>}{options.map((option) => <SelectItem key={option.key} value={option.key}><span className="flex flex-col"><span>{option.supplierName}</span><span className="text-[11px] text-muted-foreground">{option.vendorSku ? `Vendor SKU ${option.vendorSku} · ` : ""}{Number(option.cost || 0) > 0 ? `${moneyLabel(Number(option.cost))} · ` : ""}{numberLabel(Number(option.qty || 0))} available</span></span></SelectItem>)}</SelectContent></Select>{selectedName && <p className="text-[11px] text-muted-foreground">Selected: {selectedName}{Number(line.selectedSupplierCost || 0) > 0 ? ` at ${moneyLabel(Number(line.selectedSupplierCost))}` : ""}</p>}</div>
+    if (!loaded) return <div className="min-w-44 space-y-1"><Button size="sm" variant="outline" disabled={loading} onClick={() => void loadOptions()}>{loading ? <><Loader2 className="size-3.5 animate-spin" /> Loading suppliers</> : loadError ? "Retry suppliers" : "Choose supplier"}</Button>{loadError && <p className="max-w-48 text-[11px] text-destructive">{loadError}</p>}</div>
+    return <Select value={selectedKey || undefined} disabled={saving || !["in_progress", "pending_review"].includes(auditStatus)} onValueChange={(value) => void assignSupplier(value)}><SelectTrigger className={selectedKey ? "h-9 min-w-44" : "h-9 min-w-44 border-amber-400 bg-amber-50 text-amber-950 dark:bg-amber-950/40 dark:text-amber-100"}><SelectValue placeholder="Choose supplier" /></SelectTrigger><SelectContent>{options.length ? options.map((option) => <SelectItem key={option.key} value={option.key}>{option.supplierName}</SelectItem>) : <div className="px-2 py-3 text-xs text-muted-foreground">No confirmed suppliers found.</div>}</SelectContent></Select>
   }
   if (possibleSupplierCount >= 2) return <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/60 dark:text-amber-200"><Users className="mr-1 size-3" />{numberLabel(possibleSupplierCount)} possible</Badge>
   return <span className="text-xs text-muted-foreground">Not indexed</span>
@@ -12179,7 +12189,10 @@ function WarehouseAuditPanel({
                   <TableRow>
                     <TableHead className="w-14">Scan</TableHead>
                     <TableHead>UPC / SKU</TableHead>
-                    <TableHead>Suppliers</TableHead>
+                    <TableHead>Supplier</TableHead>
+                    <TableHead>Vendor SKU</TableHead>
+                    <TableHead>Manufacturer SKU</TableHead>
+                    <TableHead>Cost</TableHead>
                     <TableHead>Bin</TableHead>
                     <TableHead>Counted</TableHead>
                     <TableHead>Created SKU</TableHead>
@@ -12201,6 +12214,9 @@ function WarehouseAuditPanel({
                         ) : "-"}
                       </TableCell>
                       <TableCell><AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onAuditUpdate={applyAuditUpdate} /></TableCell>
+                      <TableCell className="font-mono text-xs">{String(line.selectedVendorSku || "-")}</TableCell>
+                      <TableCell className="font-mono text-xs">{String(line.selectedManufacturerSku || "-")}</TableCell>
+                      <TableCell>{Number(line.selectedSupplierCost || 0) > 0 ? moneyLabel(Number(line.selectedSupplierCost)) : "-"}</TableCell>
                       <TableCell>{String(line.locationBin || "-")}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1.5">
@@ -12222,6 +12238,9 @@ function WarehouseAuditPanel({
                       </TableCell>
                       <TableCell className="font-mono font-medium">{String(item.barcode || "-")}</TableCell>
                       <TableCell><span className="text-xs text-muted-foreground">-</span></TableCell>
+                      <TableCell>-</TableCell>
+                      <TableCell>-</TableCell>
+                      <TableCell>-</TableCell>
                       <TableCell>{String(item.locationBin || "-")}</TableCell>
                       <TableCell>{numberLabel(Number(item.count || 0))}</TableCell>
                       <TableCell>{item.createdProductSku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(item.createdProductSku))}`} target="_blank" rel="noreferrer">{String(item.createdProductSku)}</a> : "-"}</TableCell>
@@ -12232,7 +12251,7 @@ function WarehouseAuditPanel({
                   {!lines.length && !unknowns.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={8}
+                        colSpan={11}
                         className="h-20 text-center text-muted-foreground"
                       >
                         Scan the first UPC to begin counting.

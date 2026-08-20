@@ -26083,7 +26083,8 @@ async function auditSupplierOptionsForLine(line = {}, vendors = []) {
     title: product.marketplaceTitle || product.title,
     barcode: product.barcode,
     mfrPartNumber: product.mfrPartNumber,
-    brand: product.brand
+    brand: product.brand,
+    queryTimeoutMs: 8000
   });
   const matches = [...(coverage.matches || [])];
   const primarySupplier = String(product.supplier || product.vendor || "").trim();
@@ -26118,6 +26119,7 @@ async function auditSupplierOptionsForLine(line = {}, vendors = []) {
       supplierCode,
       sourceSku: String(match.sourceSku || match.sku || "").trim(),
       vendorSku: String(match.vendorSku || match.sourceSku || match.sku || "").trim(),
+      manufacturerSku: String(match.mfrPartNumber || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || "").trim(),
       cost: Number(match.cost || 0),
       qty: Number(match.qty || 0),
       matchType: String(match.matchType || coverage.matchType || "").trim()
@@ -32119,6 +32121,7 @@ async function handleApi(req, res) {
           const singleVendorSku = supplierCount === 1
             ? String(product?.vendorSku || sourceProduct?.vendorSku || sourceProduct?.sourceSku || "").trim()
             : "";
+          const singleManufacturerSku = String(product?.mfrPartNumber || product?.manufacturerPartNumber || product?.mpn || sourceProduct?.mfrPartNumber || sourceProduct?.manufacturerPartNumber || sourceProduct?.mpn || "").trim();
           const singleSupplierCost = supplierCount === 1
             ? Number(product?.cost || sourceProduct?.cost || 0)
             : 0;
@@ -32132,6 +32135,7 @@ async function handleApi(req, res) {
             selectedSupplierName: String(line?.selectedSupplierName || "").trim(),
             selectedSupplierCode: String(line?.selectedSupplierCode || singleSupplierCode || "").trim(),
             selectedVendorSku: String(line?.selectedVendorSku || singleVendorSku || "").trim(),
+            selectedManufacturerSku: String(line?.selectedManufacturerSku || singleManufacturerSku || "").trim(),
             selectedSupplierCost: Number(line?.selectedSupplierCost || singleSupplierCost || 0),
             selectedSupplierQty: Number(line?.selectedSupplierQty || 0),
             hasMultipleSuppliers: Boolean(product?.hasMultipleSuppliers || sourceProduct?.hasMultipleSuppliers || supplierCoverage?.hasMultipleSuppliers || supplierCount >= 2),
@@ -32613,8 +32617,16 @@ async function handleApi(req, res) {
     const lineKey = decodeURIComponent(parts[4]);
     const line = (audit.lines || []).find((entry) => auditLineKey(entry) === lineKey);
     if (!line) return sendJson(res, 404, { error: "Audit line not found." });
-    const db = await readDbFast({ skipInventory: true });
-    const result = await auditSupplierOptionsForLine(line, db.vendors || []);
+    const vendors = await postgres.readStateField("vendors").catch(() => []);
+    let result;
+    try {
+      result = await auditSupplierOptionsForLine(line, Array.isArray(vendors) ? vendors : []);
+    } catch (error) {
+      if (["57014", "QUERY_TIMEOUT"].includes(String(error?.code || "")) || /query.*timeout|canceling statement/i.test(String(error?.message || ""))) {
+        return sendJson(res, 504, { error: "Supplier matching took too long. Retry the lookup; the audit remains available." });
+      }
+      throw error;
+    }
     return sendJson(res, 200, {
       options: result.options,
       pendingReviewCount: result.pendingReviewCount,
@@ -32632,8 +32644,16 @@ async function handleApi(req, res) {
     const lineKey = decodeURIComponent(parts[4]);
     const line = (audit.lines || []).find((entry) => auditLineKey(entry) === lineKey);
     if (!line) return sendJson(res, 404, { error: "Audit line not found." });
-    const db = await readDbFast({ skipInventory: true });
-    const result = await auditSupplierOptionsForLine(line, db.vendors || []);
+    const vendors = await postgres.readStateField("vendors").catch(() => []);
+    let result;
+    try {
+      result = await auditSupplierOptionsForLine(line, Array.isArray(vendors) ? vendors : []);
+    } catch (error) {
+      if (["57014", "QUERY_TIMEOUT"].includes(String(error?.code || "")) || /query.*timeout|canceling statement/i.test(String(error?.message || ""))) {
+        return sendJson(res, 504, { error: "Supplier matching took too long. Retry the assignment; the audit remains available." });
+      }
+      throw error;
+    }
     const supplierKey = String(body.supplierKey || "").trim().toLowerCase();
     const selection = result.options.find((option) => String(option.key || "").trim().toLowerCase() === supplierKey);
     if (!selection) return sendJson(res, 400, { error: "Choose a confirmed supplier for this SKU." });
@@ -32645,6 +32665,7 @@ async function handleApi(req, res) {
       selectedSupplierName: selection.supplierName,
       selectedSupplierCode: selection.supplierCode,
       selectedVendorSku: selection.vendorSku,
+      selectedManufacturerSku: selection.manufacturerSku,
       selectedSupplierCost: selection.cost,
       selectedSupplierQty: selection.qty,
       selectedSupplierMatchType: selection.matchType,
