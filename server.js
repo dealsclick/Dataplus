@@ -11075,9 +11075,9 @@ function purchaseOrderAcceptsWaitingDemand(po = {}) {
     || (Array.isArray(po.submissions) && po.submissions.length > 0)
     || (Array.isArray(po.submissionHistory) && po.submissionHistory.length > 0);
   return String(po.type || "") === "customer_demand"
-    && ["draft", "awaiting_approval"].includes(status)
+    && status === "draft"
     && !hasSubmission
-    && !["approved", "rejected"].includes(String(po.approval?.status || "").toLowerCase());
+    && String(po.approval?.status || "").toLowerCase() !== "rejected";
 }
 
 function purchaseOrderMatchesWaitingGroup(po, vendor, warehouse) {
@@ -11103,24 +11103,25 @@ function recalculateWaitingPurchaseOrder(db, po, vendor) {
   const budgetExceeded = budgetLimit > 0 && openCommitment + po.estimatedCost > budgetLimit;
   const threshold = Math.max(0, Number(vendor?.purchaseOrderRules?.approvalThreshold || 0));
   const approvalRequired = budgetExceeded || (vendor?.purchaseOrderRules?.requireBuyerApproval !== false && po.estimatedCost >= threshold);
+  const previousApprovalStatus = String(po.approval?.status || "").toLowerCase();
   po.approval = {
     ...(po.approval || {}),
     required: approvalRequired,
     threshold,
     budgetLimit,
     budgetExceeded,
-    status: approvalRequired ? "pending" : "not_required"
+    status: previousApprovalStatus === "approved" || previousApprovalStatus === "rejected"
+      ? previousApprovalStatus
+      : approvalRequired ? "pending" : "not_required"
   };
-  if (
-    vendor?.purchaseOrderRules?.weeklyScheduleEnabled !== false
-    && vendorDeliverySchedule(vendor).length
-    && po.scheduleMode !== "weekly"
-    && !purchaseRequirementIsDue(po)
-  ) {
+  if (!purchaseRequirementIsDue(po)) {
     Object.assign(po, nextPurchaseScheduleWindow(new Date(), vendor, defaultOrderWorkflowSettings().purchasePooling));
   }
   po.readyForReview = purchaseRequirementIsDue(po);
-  po.workflowStage = po.readyForReview ? "ready_for_buyer_review" : "waiting_for_po";
+  if (!["hold"].includes(String(po.status || "").toLowerCase()) && po.approval.status !== "rejected") {
+    po.status = po.readyForReview ? "ready_to_send" : "draft";
+  }
+  po.workflowStage = po.readyForReview ? "ready_to_send" : "waiting_for_po";
   po.updatedAt = new Date().toISOString();
   return po;
 }
@@ -11485,7 +11486,7 @@ async function reSourcePurchaseOrder(db, po, input = {}, productLoader) {
   const replacement = {
     id: crypto.randomUUID(),
     poNumber: nextPoNumber(db),
-    status: approvalRequired ? "awaiting_approval" : "draft",
+    status: "draft",
     type: po.type || "customer_demand",
     purchaseGroupId: po.purchaseGroupId || `PG-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
     vendorId: targetVendor.id,
@@ -11503,7 +11504,7 @@ async function reSourcePurchaseOrder(db, po, input = {}, productLoader) {
       threshold: Math.max(0, Number(targetVendor.purchaseOrderRules?.approvalThreshold || 0)),
       budgetLimit,
       budgetExceeded,
-      status: approvalRequired ? "awaiting_approval" : "not_required"
+      status: approvalRequired ? "pending" : "not_required"
     },
     replacesPurchaseOrderId: po.id,
     replacesPurchaseOrderNumber: po.poNumber,
@@ -12290,6 +12291,10 @@ function normalizeVendor(db, vendor) {
       cutoffTimezone: vendor.purchaseOrderRules?.cutoffTimezone || "",
       weeklyScheduleEnabled: vendor.purchaseOrderRules?.weeklyScheduleEnabled !== false && deliverySchedule.length > 0,
       deliverySchedule,
+      scheduleExceptions: normalizePurchaseScheduleExceptions(vendor.purchaseOrderRules?.scheduleExceptions),
+      temporaryCutoffOverride: normalizeTemporaryPurchaseScheduleOverride(vendor.purchaseOrderRules?.temporaryCutoffOverride),
+      cutoffAlertsEnabled: vendor.purchaseOrderRules?.cutoffAlertsEnabled !== false,
+      cutoffAlertLeadMinutes: Math.max(0, Number(vendor.purchaseOrderRules?.cutoffAlertLeadMinutes || 120)),
       dropShipEnabled: Boolean(vendor.purchaseOrderRules?.dropShipEnabled),
       requireBuyerApproval: vendor.purchaseOrderRules?.requireBuyerApproval !== false,
       approvalThreshold: Math.max(0, Number(vendor.purchaseOrderRules?.approvalThreshold || 0)),
@@ -20355,6 +20360,48 @@ function normalizePurchaseDeliveryScheduleRows(raw = []) {
   }).filter(Boolean);
 }
 
+function normalizePurchaseScheduleExceptions(raw = []) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((entry, index) => {
+    const row = entry && typeof entry === "object" ? entry : {};
+    const date = String(row.date || "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    return {
+      id: String(row.id || `schedule-exception-${index + 1}`),
+      date,
+      label: String(row.label || "Supplier closed"),
+      enabled: row.enabled !== false
+    };
+  }).filter(Boolean);
+}
+
+function normalizeTemporaryPurchaseScheduleOverride(raw = {}) {
+  const row = raw && typeof raw === "object" ? raw : {};
+  const cutoffDate = String(row.cutoffDate || "").slice(0, 10);
+  const deliveryDate = String(row.deliveryDate || "").slice(0, 10);
+  return {
+    enabled: row.enabled === true,
+    cutoffDate: /^\d{4}-\d{2}-\d{2}$/.test(cutoffDate) ? cutoffDate : "",
+    cutoffTime: /^\d{2}:\d{2}$/.test(String(row.cutoffTime || "")) ? String(row.cutoffTime) : "15:00",
+    deliveryDate: /^\d{4}-\d{2}-\d{2}$/.test(deliveryDate) ? deliveryDate : "",
+    label: String(row.label || "Temporary supplier schedule")
+  };
+}
+
+function vendorScheduleBlackoutDates(vendor = {}) {
+  return new Set(normalizePurchaseScheduleExceptions(vendor.purchaseOrderRules?.scheduleExceptions)
+    .filter((row) => row.enabled !== false)
+    .map((row) => row.date));
+}
+
+function nextEligiblePurchaseDate(dateValue, blackoutDates, skipWeekends = true) {
+  let date = dateValue;
+  while (blackoutDates.has(date) || (skipWeekends && [0, 6].includes(new Date(`${date}T12:00:00.000Z`).getUTCDay()))) {
+    date = addPoolDays(date, 1);
+  }
+  return date;
+}
+
 function inferredVendorDeliverySchedule(vendor = {}) {
   const identity = `${String(vendor.name || "")} ${String(vendor.code || "")}`.trim().toLowerCase();
   if (!identity.includes("true value") && !/(^|\s)trv($|\s)/.test(identity)) return [];
@@ -20373,12 +20420,37 @@ function nextPurchaseScheduleWindow(now, vendor = {}, purchasePooling = {}) {
   const vendorRules = vendor.purchaseOrderRules || {};
   const cutoffTimezone = String(vendorRules.cutoffTimezone || purchasePooling.timezone || "America/New_York");
   const local = localDateTimeParts(now, cutoffTimezone);
+  const blackoutDates = vendorScheduleBlackoutDates(vendor);
+  const skipWeekends = purchasePooling.skipWeekends !== false;
+  const temporaryOverride = normalizeTemporaryPurchaseScheduleOverride(vendorRules.temporaryCutoffOverride);
+  if (
+    temporaryOverride.enabled
+    && temporaryOverride.cutoffDate
+    && (temporaryOverride.cutoffDate > local.date
+      || (temporaryOverride.cutoffDate === local.date && temporaryOverride.cutoffTime > local.time))
+  ) {
+    const expectedDeliveryDate = temporaryOverride.deliveryDate
+      ? nextEligiblePurchaseDate(temporaryOverride.deliveryDate, blackoutDates, skipWeekends)
+      : nextEligiblePurchaseDate(addPoolDays(temporaryOverride.cutoffDate, 1), blackoutDates, skipWeekends);
+    return {
+      cutoffTime: temporaryOverride.cutoffTime,
+      cutoffTimezone,
+      poolDate: temporaryOverride.cutoffDate,
+      expectedDeliveryDate,
+      scheduleMode: "override",
+      scheduleRuleId: "temporary-override",
+      scheduleLabel: temporaryOverride.label,
+      cutoffDay: new Date(`${temporaryOverride.cutoffDate}T12:00:00.000Z`).getUTCDay(),
+      deliveryDay: new Date(`${expectedDeliveryDate}T12:00:00.000Z`).getUTCDay()
+    };
+  }
   const weeklyRows = vendorRules.weeklyScheduleEnabled === false
     ? []
     : vendorDeliverySchedule(vendor).filter((row) => row.enabled !== false);
   let selected = null;
   for (let offset = 0; offset <= 14 && !selected; offset += 1) {
     const candidateDate = addPoolDays(local.date, offset);
+    if (blackoutDates.has(candidateDate)) continue;
     const candidateDay = new Date(`${candidateDate}T12:00:00.000Z`).getUTCDay();
     const candidates = weeklyRows
       .filter((row) => row.cutoffDay === candidateDay && (offset > 0 || local.time < row.cutoffTime))
@@ -20387,23 +20459,23 @@ function nextPurchaseScheduleWindow(now, vendor = {}, purchasePooling = {}) {
   }
   if (selected) {
     const daysToDelivery = (selected.row.deliveryDay - selected.row.cutoffDay + 7) % 7 || 7;
+    const expectedDeliveryDate = nextEligiblePurchaseDate(addPoolDays(selected.date, daysToDelivery), blackoutDates, skipWeekends);
     return {
       cutoffTime: selected.row.cutoffTime,
       cutoffTimezone,
       poolDate: selected.date,
-      expectedDeliveryDate: addPoolDays(selected.date, daysToDelivery),
+      expectedDeliveryDate,
       scheduleMode: "weekly",
       scheduleRuleId: selected.row.id,
+      scheduleLabel: selected.row.label || "",
       cutoffDay: selected.row.cutoffDay,
       deliveryDay: selected.row.deliveryDay
     };
   }
   const cutoffTime = String(vendorRules.cutoffTime || purchasePooling.defaultCutoffTime || "15:00");
-  const poolDate = nextPurchasePoolDate(now, cutoffTime, cutoffTimezone, purchasePooling.skipWeekends !== false);
-  let expectedDeliveryDate = addPoolDays(poolDate, 1);
-  if (purchasePooling.skipWeekends !== false) {
-    while ([0, 6].includes(new Date(`${expectedDeliveryDate}T12:00:00.000Z`).getUTCDay())) expectedDeliveryDate = addPoolDays(expectedDeliveryDate, 1);
-  }
+  let poolDate = nextPurchasePoolDate(now, cutoffTime, cutoffTimezone, skipWeekends);
+  poolDate = nextEligiblePurchaseDate(poolDate, blackoutDates, skipWeekends);
+  const expectedDeliveryDate = nextEligiblePurchaseDate(addPoolDays(poolDate, 1), blackoutDates, skipWeekends);
   return {
     cutoffTime,
     cutoffTimezone,
@@ -20411,6 +20483,7 @@ function nextPurchaseScheduleWindow(now, vendor = {}, purchasePooling = {}) {
     expectedDeliveryDate,
     scheduleMode: "daily",
     scheduleRuleId: "",
+    scheduleLabel: "Daily supplier cutoff",
     cutoffDay: new Date(`${poolDate}T12:00:00.000Z`).getUTCDay(),
     deliveryDay: new Date(`${expectedDeliveryDate}T12:00:00.000Z`).getUTCDay()
   };
@@ -20428,8 +20501,126 @@ function nextPurchasePoolDate(now, cutoffTime, timeZone, skipWeekends = true) {
 function purchaseRequirementIsDue(requirement = {}, now = new Date()) {
   const timeZone = requirement.cutoffTimezone || "America/New_York";
   const local = localDateTimeParts(now, timeZone);
+  if (!requirement.poolDate) return false;
   if (local.date > requirement.poolDate) return true;
   return local.date === requirement.poolDate && local.time >= String(requirement.cutoffTime || "15:00");
+}
+
+function purchaseOrderHasSubmissionRecord(po = {}) {
+  return Boolean(po.submittedAt || po.placedAt || po.sentAt)
+    || (Array.isArray(po.submissions) && po.submissions.length > 0)
+    || (Array.isArray(po.submissionHistory) && po.submissionHistory.length > 0);
+}
+
+function refreshPurchaseOrderCutoffStates(db, now = new Date()) {
+  const changed = [];
+  for (const po of db.purchaseOrders || []) {
+    if (String(po.type || "") !== "customer_demand" || purchaseOrderHasSubmissionRecord(po)) continue;
+    const previousStatus = String(po.status || "draft").toLowerCase();
+    if (["hold", "canceled", "rejected", "received", "closed", "superseded", "deleted"].includes(previousStatus)) continue;
+    const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    po.approval = po.approval && typeof po.approval === "object" ? po.approval : {};
+    if (previousStatus === "approved") po.approval.status = "approved";
+    if (previousStatus === "awaiting_approval" && !["approved", "rejected"].includes(String(po.approval.status || "").toLowerCase())) {
+      po.approval.status = "pending";
+    }
+    recalculateWaitingPurchaseOrder(db, po, vendor);
+    const nextStatus = String(po.status || "draft").toLowerCase();
+    if (previousStatus !== nextStatus) {
+      addPoTimeline(po, {
+        type: "cutoff",
+        title: nextStatus === "ready_to_send" ? "Supplier cutoff reached" : "Supplier schedule refreshed",
+        message: nextStatus === "ready_to_send"
+          ? "This draft moved to Ready to Send. Complete approval when required, then submit it to the supplier."
+          : "This draft remains open for additional eligible customer demand until the supplier cutoff.",
+        user: "PO cutoff scheduler"
+      });
+      changed.push(po);
+    }
+  }
+  return changed;
+}
+
+function purchaseCutoffMinutesUntil(record = {}, now = new Date()) {
+  if (!record.poolDate || !record.cutoffTime) return null;
+  const timeZone = String(record.cutoffTimezone || "America/New_York");
+  const local = localDateTimeParts(now, timeZone);
+  const currentDate = new Date(`${local.date}T${local.time}:00.000Z`);
+  const cutoffDate = new Date(`${record.poolDate}T${record.cutoffTime}:00.000Z`);
+  return Math.round((cutoffDate.getTime() - currentDate.getTime()) / 60000);
+}
+
+function buildPurchaseBuyerAlerts(db, now = new Date()) {
+  const alerts = [];
+  for (const po of db.purchaseOrders || []) {
+    if (String(po.type || "") !== "customer_demand" || purchaseOrderHasSubmissionRecord(po)) continue;
+    const status = String(po.status || "draft").toLowerCase();
+    if (!["draft", "ready_to_send"].includes(status)) continue;
+    const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    if (vendor?.purchaseOrderRules?.cutoffAlertsEnabled === false) continue;
+    const approval = po.approval && typeof po.approval === "object" ? po.approval : {};
+    const approvalStatus = String(approval.status || "not_required").toLowerCase();
+    const minutesUntil = purchaseCutoffMinutesUntil(po, now);
+    const poLabel = String(po.poNumber || po.id || "Draft PO");
+    if (status === "ready_to_send" && approval.required === true && approvalStatus !== "approved") {
+      alerts.push({
+        id: `approval:${po.id}`,
+        purchaseOrderId: po.id,
+        title: `${poLabel} needs approval`,
+        message: `${po.supplier || "Supplier"} cutoff has passed. Approve or hold this PO before sending.`,
+        severity: "warning",
+        status: "Needs approval",
+        cutoffAt: po.poolDate && po.cutoffTime ? `${po.poolDate}T${po.cutoffTime}` : ""
+      });
+      continue;
+    }
+    if (status === "ready_to_send") {
+      alerts.push({
+        id: `send:${po.id}`,
+        purchaseOrderId: po.id,
+        title: `${poLabel} is ready to send`,
+        message: `${po.supplier || "Supplier"} draft reached cutoff and is ready for submission.`,
+        severity: "success",
+        status: "Ready to send",
+        cutoffAt: po.poolDate && po.cutoffTime ? `${po.poolDate}T${po.cutoffTime}` : ""
+      });
+      continue;
+    }
+    const leadMinutes = Math.max(0, Number(vendor?.purchaseOrderRules?.cutoffAlertLeadMinutes || 120));
+    if (minutesUntil !== null && minutesUntil >= 0 && minutesUntil <= leadMinutes) {
+      alerts.push({
+        id: `cutoff:${po.id}`,
+        purchaseOrderId: po.id,
+        title: `${poLabel} cutoff is approaching`,
+        message: `${po.supplier || "Supplier"} closes in ${minutesUntil} minute${minutesUntil === 1 ? "" : "s"}.`,
+        severity: minutesUntil <= 30 ? "critical" : "warning",
+        status: minutesUntil <= 30 ? "Due soon" : "Upcoming",
+        minutesUntilCutoff: minutesUntil,
+        cutoffAt: `${po.poolDate}T${po.cutoffTime}`
+      });
+    }
+  }
+  return alerts.sort((left, right) => {
+    const priority = { critical: 0, warning: 1, success: 2 };
+    return (priority[left.severity] ?? 3) - (priority[right.severity] ?? 3)
+      || String(left.cutoffAt || "").localeCompare(String(right.cutoffAt || ""));
+  });
+}
+
+function previewPurchaseScheduleWindows(now, vendor = {}, purchasePooling = {}, count = 4) {
+  const windows = [];
+  const seen = new Set();
+  let cursor = now instanceof Date ? new Date(now) : new Date(now || Date.now());
+  for (let attempt = 0; attempt < 40 && windows.length < Math.max(1, count); attempt += 1) {
+    const window = nextPurchaseScheduleWindow(cursor, vendor, purchasePooling);
+    const key = `${window.poolDate}:${window.cutoffTime}:${window.expectedDeliveryDate}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      windows.push(window);
+    }
+    cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return windows;
 }
 
 function purchaseDestinationWarehouse(db, order, vendor) {
@@ -20447,10 +20638,12 @@ function ensurePooledPurchaseRequirement(db, order, route, line, settings, vendo
   const destination = purchaseDestinationWarehouse(db, order, vendor);
   const now = new Date();
   const existing = db.purchaseRequirements.find((requirement) => requirement.routeId === route.id);
-  const weeklyScheduleActive = vendor?.purchaseOrderRules?.weeklyScheduleEnabled !== false && vendorDeliverySchedule(vendor).some((row) => row.enabled !== false);
-  const existingScheduleMatchesVendor = existing && (weeklyScheduleActive
-    ? existing.scheduleMode === "weekly"
-    : existing.scheduleMode === "daily");
+  const targetScheduleWindow = nextPurchaseScheduleWindow(now, vendor, purchasePooling);
+  const existingScheduleMatchesVendor = existing
+    && String(existing.scheduleMode || "") === String(targetScheduleWindow.scheduleMode || "")
+    && String(existing.scheduleRuleId || "") === String(targetScheduleWindow.scheduleRuleId || "")
+    && String(existing.poolDate || "") === String(targetScheduleWindow.poolDate || "")
+    && String(existing.cutoffTime || "") === String(targetScheduleWindow.cutoffTime || "");
   const scheduleWindow = existing && (purchaseRequirementIsDue(existing, now) || existingScheduleMatchesVendor)
     ? {
         cutoffTime: existing.cutoffTime,
@@ -20459,10 +20652,11 @@ function ensurePooledPurchaseRequirement(db, order, route, line, settings, vendo
         expectedDeliveryDate: existing.expectedDeliveryDate,
         scheduleMode: existing.scheduleMode || "daily",
         scheduleRuleId: existing.scheduleRuleId || "",
+        scheduleLabel: existing.scheduleLabel || "",
         cutoffDay: existing.cutoffDay,
         deliveryDay: existing.deliveryDay
       }
-    : nextPurchaseScheduleWindow(now, vendor, purchasePooling);
+    : targetScheduleWindow;
   const requestedStatus = String(options.status || (vendor ? "pooled" : "buyer_review")).toLowerCase();
   const next = existing || {
     id: crypto.randomUUID(),
@@ -20489,6 +20683,7 @@ function ensurePooledPurchaseRequirement(db, order, route, line, settings, vendo
     expectedDeliveryDate: scheduleWindow.expectedDeliveryDate,
     scheduleMode: scheduleWindow.scheduleMode,
     scheduleRuleId: scheduleWindow.scheduleRuleId,
+    scheduleLabel: scheduleWindow.scheduleLabel || "",
     cutoffDay: scheduleWindow.cutoffDay,
     deliveryDay: scheduleWindow.deliveryDay,
     vendorSku: String(options.vendorSku || route.vendorSku || next.vendorSku || ""),
@@ -31969,6 +32164,8 @@ async function handleApi(req, res) {
         clearOrderApiCache(order.id);
       }
     }
+    const cutoffChanges = refreshPurchaseOrderCutoffStates(db);
+    for (const po of cutoffChanges) await postgres.savePurchaseOrder(po);
     const orderById = new Map((db.orders || []).map((order) => [String(order.id), order]));
     const requirements = db.purchaseRequirements.map((requirement) => {
       const order = orderById.get(String(requirement.orderId || ""));
@@ -31994,6 +32191,7 @@ async function handleApi(req, res) {
     return sendJson(res, 200, {
       requirements,
       purchaseOrders: db.purchaseOrders || [],
+      buyerAlerts: buildPurchaseBuyerAlerts(db),
       workflowSettings,
       poolSummary: {
         requirements: pooled.length,
@@ -32025,7 +32223,9 @@ async function handleApi(req, res) {
       force: body.force === true,
       user: body.user || (body.force === true ? "Buyer" : "PO cutoff scheduler")
     });
-    for (const po of result.purchaseOrders || []) await postgres.savePurchaseOrder(po);
+    const cutoffChanges = refreshPurchaseOrderCutoffStates(db);
+    const changedPurchaseOrders = new Map([...(result.purchaseOrders || []), ...cutoffChanges].map((po) => [String(po.id), po]));
+    for (const po of changedPurchaseOrders.values()) await postgres.savePurchaseOrder(po);
     for (const order of result.orders || []) {
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
@@ -32034,7 +32234,12 @@ async function handleApi(req, res) {
       purchaseRequirements: db.purchaseRequirements || [],
       sequence: db.sequence || {}
     });
-    return sendJson(res, 200, result);
+    return sendJson(res, 200, {
+      ...result,
+      purchaseOrders: [...changedPurchaseOrders.values()],
+      transitionedPurchaseOrders: cutoffChanges.length,
+      buyerAlerts: buildPurchaseBuyerAlerts(db)
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/orders") {
@@ -32834,7 +33039,7 @@ async function handleApi(req, res) {
     await postgres.savePurchaseOrder(po);
     const linkedOrders = await Promise.all((po.orderIds || []).map((orderId) => postgres.readOrderByKey(orderId)));
     for (const linkedOrder of linkedOrders.filter(Boolean)) {
-      for (const route of linkedOrder.fulfillmentRoutes || []) if (String(route.purchaseOrderId || "") === String(po.id)) route.status = action === "approve" ? "awaiting_approval" : action === "reject" ? "exception" : action === "hold" ? "buyer_review" : route.status;
+      for (const route of linkedOrder.fulfillmentRoutes || []) if (String(route.purchaseOrderId || "") === String(po.id)) route.status = action === "approve" ? "waiting_for_po" : action === "reject" ? "exception" : action === "hold" ? "buyer_review" : route.status;
       recalculateOrderOperationalStatus(linkedOrder); linkedOrder.updatedAt = new Date().toISOString(); await postgres.saveOrder(linkedOrder); clearOrderApiCache(linkedOrder.id);
     }
     return sendJson(res, 201, { purchaseOrder: po, document, message: "PO document linked." });
@@ -32905,18 +33110,32 @@ async function handleApi(req, res) {
     if (!po) return notFound(res);
     const action = String(body.action || "").toLowerCase();
     const nextStatus = {
-      approve: "approved",
-      reject: "rejected",
       hold: "hold",
       cancel: "canceled",
       received: "received",
       close: "closed",
-      reopen: "draft",
       acknowledge: "vendor_confirmed"
     }[action];
-    if (!nextStatus) return sendJson(res, 400, { error: "Unsupported PO action." });
+    if (!nextStatus && !["approve", "reject", "reopen"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
-    po.status = nextStatus;
+    const now = new Date().toISOString();
+    if (action === "approve") {
+      po.status = "ready_to_send";
+      po.workflowStage = "ready_to_send";
+      po.readyForReview = true;
+      po.approval = { ...(po.approval || {}), required: true, status: "approved", approvedAt: now, approvedBy: body.user || "Luis", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+    } else if (action === "reject") {
+      po.status = "hold";
+      po.workflowStage = "buyer_review";
+      po.approval = { ...(po.approval || {}), required: true, status: "rejected", rejectedAt: now, rejectedBy: body.user || "Luis", rejectionNote: String(body.note || "").trim(), approvedAt: "", approvedBy: "" };
+    } else if (action === "reopen") {
+      po.status = "draft";
+      po.workflowStage = "waiting_for_po";
+      po.readyForReview = false;
+      po.approval = { ...(po.approval || {}), status: po.approval?.required === false ? "not_required" : "pending", approvedAt: "", approvedBy: "", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+    } else {
+      po.status = nextStatus;
+    }
     if (action === "acknowledge") {
       po.vendorAcknowledgement = {
         acknowledgedAt: new Date().toISOString(),
@@ -32926,11 +33145,12 @@ async function handleApi(req, res) {
       };
       if (po.vendorAcknowledgement.expectedAt) po.expectedAt = po.vendorAcknowledgement.expectedAt;
     }
-    po.updatedAt = new Date().toISOString();
+    po.updatedAt = now;
+    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : nextStatus;
     addPoTimeline(po, {
       type: "status",
-      title: `PO ${nextStatus}`,
-      message: action === "acknowledge" ? `Supplier acknowledged the PO${po.expectedAt ? `; expected ${po.expectedAt}` : ""}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${nextStatus}.` : `Status changed from ${previousStatus} to ${nextStatus}.`,
+      title: `PO ${actionLabel}`,
+      message: action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : action === "acknowledge" ? `Supplier acknowledged the PO${po.expectedAt ? `; expected ${po.expectedAt}` : ""}.` : body.note ? `${body.note} Status changed from ${previousStatus} to ${po.status}.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po);
@@ -32980,6 +33200,15 @@ async function handleApi(req, res) {
     if (!po) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    if (po.type === "customer_demand") {
+      if (["approved", "awaiting_approval"].includes(String(po.status || "").toLowerCase())) refreshPurchaseOrderCutoffStates({ ...db, purchaseOrders: [po] });
+      if (String(po.status || "").toLowerCase() !== "ready_to_send") {
+        return sendJson(res, 409, { error: `${po.poNumber || "This PO"} is still collecting orders and cannot be sent before its supplier cutoff.` });
+      }
+      if (po.approval?.required !== false && String(po.approval?.status || "pending").toLowerCase() !== "approved") {
+        return sendJson(res, 409, { error: `${po.poNumber || "This PO"} needs buyer approval before it can be sent.` });
+      }
+    }
     const settings = vendor?.submissionSettings || {};
     const method = String(body.method || settings.preferredMethod || "email").toLowerCase();
     const allowedMethods = new Set(["preferred", "api", "ftp", "email", "manual"]);
@@ -34591,6 +34820,33 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { vendor, state: publicState(stateDb, { lite: true }) });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "purchase-schedule" && parts[4] === "preview" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const vendor = findVendorById(db, parts[2]);
+    if (!vendor) return notFound(res);
+    const submittedRules = body.purchaseOrderRules && typeof body.purchaseOrderRules === "object" ? body.purchaseOrderRules : {};
+    const previewVendor = {
+      ...vendor,
+      purchaseOrderRules: {
+        ...(vendor.purchaseOrderRules || {}),
+        ...submittedRules,
+        deliverySchedule: normalizePurchaseDeliveryScheduleRows(submittedRules.deliverySchedule ?? vendor.purchaseOrderRules?.deliverySchedule),
+        scheduleExceptions: normalizePurchaseScheduleExceptions(submittedRules.scheduleExceptions ?? vendor.purchaseOrderRules?.scheduleExceptions),
+        temporaryCutoffOverride: normalizeTemporaryPurchaseScheduleOverride(submittedRules.temporaryCutoffOverride ?? vendor.purchaseOrderRules?.temporaryCutoffOverride)
+      }
+    };
+    const workflowSettings = await readOrderWorkflowSettings();
+    return sendJson(res, 200, {
+      windows: previewPurchaseScheduleWindows(
+        body.startAt ? new Date(body.startAt) : new Date(),
+        previewVendor,
+        workflowSettings.purchasePooling || {},
+        Math.max(1, Math.min(12, Number(body.count || 6)))
+      )
+    });
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
@@ -34611,9 +34867,9 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
-    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
-    const numericPurchaseOrderRuleFields = new Set(["approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
+    const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
@@ -34692,6 +34948,10 @@ async function handleApi(req, res) {
         vendor.purchaseOrderRules = vendor.purchaseOrderRules || {};
         const value = key === "deliverySchedule"
           ? normalizePurchaseDeliveryScheduleRows(rawValue)
+          : key === "scheduleExceptions"
+            ? normalizePurchaseScheduleExceptions(rawValue)
+            : key === "temporaryCutoffOverride"
+              ? normalizeTemporaryPurchaseScheduleOverride(rawValue)
           : booleanPurchaseOrderRuleFields.has(key)
             ? Boolean(rawValue)
             : numericPurchaseOrderRuleFields.has(key)
@@ -41743,6 +42003,11 @@ async function handleApi(req, res) {
     const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
     if (!po) return notFound(res);
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+    if (po.type === "customer_demand") {
+      if (["approved", "awaiting_approval"].includes(String(po.status || "").toLowerCase())) refreshPurchaseOrderCutoffStates(db);
+      if (String(po.status || "").toLowerCase() !== "ready_to_send") return sendJson(res, 409, { error: `${po.poNumber || "This PO"} is still collecting orders and cannot be sent before its supplier cutoff.` });
+      if (po.approval?.required !== false && String(po.approval?.status || "pending").toLowerCase() !== "approved") return sendJson(res, 409, { error: `${po.poNumber || "This PO"} needs buyer approval before it can be sent.` });
+    }
     const settings = vendor?.submissionSettings || {};
     const method = String(body.method || settings.preferredMethod || "email").toLowerCase();
     const allowedMethods = new Set(["preferred", "api", "ftp", "email", "manual"]);
@@ -41806,21 +42071,33 @@ async function handleApi(req, res) {
     const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
     if (!po) return notFound(res);
     const action = String(body.action || "").toLowerCase();
-    const nextStatus = {
-      approve: "approved",
-      hold: "hold",
-      cancel: "canceled",
-      received: "received",
-      close: "closed",
-      reopen: "draft"
-    }[action];
-    if (!nextStatus) return sendJson(res, 400, { error: "Unsupported PO action." });
+    const nextStatus = { hold: "hold", cancel: "canceled", received: "received", close: "closed", acknowledge: "vendor_confirmed" }[action];
+    if (!nextStatus && !["approve", "reject", "reopen"].includes(action)) return sendJson(res, 400, { error: "Unsupported PO action." });
     const previousStatus = po.status || "draft";
-    po.status = nextStatus;
+    const now = new Date().toISOString();
+    if (action === "approve") {
+      po.status = "ready_to_send";
+      po.workflowStage = "ready_to_send";
+      po.readyForReview = true;
+      po.approval = { ...(po.approval || {}), required: true, status: "approved", approvedAt: now, approvedBy: body.user || "Luis", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+    } else if (action === "reject") {
+      po.status = "hold";
+      po.workflowStage = "buyer_review";
+      po.approval = { ...(po.approval || {}), required: true, status: "rejected", rejectedAt: now, rejectedBy: body.user || "Luis", rejectionNote: String(body.note || "").trim(), approvedAt: "", approvedBy: "" };
+    } else if (action === "reopen") {
+      po.status = "draft";
+      po.workflowStage = "waiting_for_po";
+      po.readyForReview = false;
+      po.approval = { ...(po.approval || {}), status: po.approval?.required === false ? "not_required" : "pending", approvedAt: "", approvedBy: "", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+    } else {
+      po.status = nextStatus;
+    }
+    po.updatedAt = now;
+    const actionLabel = action === "approve" ? "approval granted" : action === "reject" ? "approval rejected" : action === "reopen" ? "reopened" : nextStatus;
     addPoTimeline(po, {
       type: "status",
-      title: `PO ${nextStatus}`,
-      message: `Status changed from ${previousStatus} to ${nextStatus}.`,
+      title: `PO ${actionLabel}`,
+      message: action === "approve" ? "Buyer approval completed. This PO remains in Ready to Send until submitted." : action === "reject" ? `${String(body.note || "Buyer approval was rejected.").trim()} The PO was placed on hold.` : `Status changed from ${previousStatus} to ${po.status}.`,
       user: body.user || "Luis"
     });
     await writeDb(db);
@@ -42162,6 +42439,32 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { brand, state: publicState(db) });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "purchase-schedule" && parts[4] === "preview") {
+    const body = await parseBody(req);
+    const vendor = findVendorById(db, parts[2]);
+    if (!vendor) return notFound(res);
+    const submittedRules = body.purchaseOrderRules && typeof body.purchaseOrderRules === "object" ? body.purchaseOrderRules : {};
+    const previewVendor = {
+      ...vendor,
+      purchaseOrderRules: {
+        ...(vendor.purchaseOrderRules || {}),
+        ...submittedRules,
+        deliverySchedule: normalizePurchaseDeliveryScheduleRows(submittedRules.deliverySchedule ?? vendor.purchaseOrderRules?.deliverySchedule),
+        scheduleExceptions: normalizePurchaseScheduleExceptions(submittedRules.scheduleExceptions ?? vendor.purchaseOrderRules?.scheduleExceptions),
+        temporaryCutoffOverride: normalizeTemporaryPurchaseScheduleOverride(submittedRules.temporaryCutoffOverride ?? vendor.purchaseOrderRules?.temporaryCutoffOverride)
+      }
+    };
+    const workflowSettings = await readOrderWorkflowSettings();
+    return sendJson(res, 200, {
+      windows: previewPurchaseScheduleWindows(
+        body.startAt ? new Date(body.startAt) : new Date(),
+        previewVendor,
+        workflowSettings.purchasePooling || {},
+        Math.max(1, Math.min(12, Number(body.count || 6)))
+      )
+    });
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "vendors" && parts[2]) {
     const body = await parseBody(req);
     const vendor = findVendorById(db, parts[2]);
@@ -42181,9 +42484,9 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
-    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
-    const numericPurchaseOrderRuleFields = new Set(["approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "requireBuyerApproval", "overdueReminderEnabled"]);
+    const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
@@ -42262,6 +42565,10 @@ async function handleApi(req, res) {
         vendor.purchaseOrderRules = vendor.purchaseOrderRules || {};
         const value = key === "deliverySchedule"
           ? normalizePurchaseDeliveryScheduleRows(rawValue)
+          : key === "scheduleExceptions"
+            ? normalizePurchaseScheduleExceptions(rawValue)
+            : key === "temporaryCutoffOverride"
+              ? normalizeTemporaryPurchaseScheduleOverride(rawValue)
           : booleanPurchaseOrderRuleFields.has(key)
             ? Boolean(rawValue)
             : numericPurchaseOrderRuleFields.has(key)
@@ -43470,44 +43777,53 @@ async function processScheduledPurchasePooling() {
   let job = null;
   try {
     const workflowSettings = await readOrderWorkflowSettings();
-    if (workflowSettings.purchasePooling?.enabled === false || workflowSettings.purchasePooling?.autoCreateDraftsAtCutoff === false) return;
+    if (workflowSettings.purchasePooling?.enabled === false) return;
     const db = await readDbFast({ skipInventory: true });
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements").catch(() => []) || [];
-    if (!db.purchaseRequirements.some((requirement) => String(requirement.status || "pooled") === "pooled" && purchaseRequirementIsDue(requirement))) return;
     db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 }) || [];
-    const result = processDuePurchaseRequirementPool(db, { user: "PO cutoff scheduler" });
-    if (!result.purchaseOrders?.length) return;
+    const hasDueRequirements = db.purchaseRequirements.some((requirement) => String(requirement.status || "pooled") === "pooled" && purchaseRequirementIsDue(requirement));
+    const result = workflowSettings.purchasePooling?.autoCreateDraftsAtCutoff !== false && hasDueRequirements
+      ? processDuePurchaseRequirementPool(db, { user: "PO cutoff scheduler" })
+      : { requirements: [], purchaseOrders: [], orders: [], message: "No unattached supplier demand was due." };
+    const transitionedPurchaseOrders = refreshPurchaseOrderCutoffStates(db);
+    const changedPurchaseOrders = [...new Map([
+      ...(result.purchaseOrders || []),
+      ...transitionedPurchaseOrders
+    ].map((po) => [String(po.id), po])).values()];
+    if (!changedPurchaseOrders.length) return;
     job = createImportJob(db, {
       section: "Purchasing",
       category: "Purchase orders",
       operation: "Supplier PO cutoff",
       direction: "sync",
       status: "running",
-      totalRows: result.requirements.length,
+      totalRows: Math.max(result.requirements.length, changedPurchaseOrders.length),
       processedRows: 0,
       progressPercent: 0,
-      phase: "creating_purchase_orders",
-      message: `Creating ${result.purchaseOrders.length} pooled supplier purchase order${result.purchaseOrders.length === 1 ? "" : "s"}.`
+      phase: "updating_purchase_orders",
+      message: `Updating ${changedPurchaseOrders.length} supplier purchase order${changedPurchaseOrders.length === 1 ? "" : "s"} at cutoff.`
     });
-    for (const po of result.purchaseOrders) await postgres.savePurchaseOrder(po);
+    for (const po of changedPurchaseOrders) await postgres.savePurchaseOrder(po);
     for (const order of result.orders || []) {
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
     }
-    await postgres.writeStateDocuments({
-      purchaseRequirements: db.purchaseRequirements || [],
-      sequence: db.sequence || {}
-    });
+    if (result.requirements.length) {
+      await postgres.writeStateDocuments({
+        purchaseRequirements: db.purchaseRequirements || [],
+        sequence: db.sequence || {}
+      });
+    }
     finishImportJob(job, {
       status: "success",
       phase: "complete",
       progressPercent: 100,
-      processedRows: result.requirements.length,
-      changedCount: result.purchaseOrders.length,
-      message: result.message,
-      details: `${result.requirements.length} pooled order line requirement${result.requirements.length === 1 ? "" : "s"} converted at the configured supplier cutoff.`
+      processedRows: Math.max(result.requirements.length, changedPurchaseOrders.length),
+      changedCount: changedPurchaseOrders.length,
+      message: `${transitionedPurchaseOrders.length} draft PO${transitionedPurchaseOrders.length === 1 ? "" : "s"} moved into Ready to Send; ${result.purchaseOrders.length} legacy requirement group${result.purchaseOrders.length === 1 ? "" : "s"} attached.`,
+      details: "Cutoff transitions preserve buyer approval as a status within Ready to Send. No PO is submitted without satisfying its approval guard."
     });
-    console.log(result.message);
+    console.log(`Supplier cutoff processed ${changedPurchaseOrders.length} purchase order(s).`);
   } catch (error) {
     if (job) finishImportJob(job, { status: "failed", phase: "failed", message: `Supplier PO cutoff failed: ${error.message}` });
     console.error(`Supplier PO cutoff failed: ${error.message}`);

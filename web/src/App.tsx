@@ -9,6 +9,7 @@ import {
   AlertCircle,
   AlertTriangle,
   Archive,
+  Bell,
   Boxes,
   CheckCircle2,
   CalendarDays,
@@ -12564,20 +12565,26 @@ function purchaseOrderIsWaiting(po: Record<string, unknown>) {
   const status = String(po.status || "draft").toLowerCase()
   const approval = (po.approval || {}) as Record<string, unknown>
   return String(po.type || "") === "customer_demand"
-    && ["draft", "awaiting_approval", "approved", "hold"].includes(status)
+    && status === "draft"
     && !purchaseOrderHasSubmission(po)
+    && !Boolean(po.readyForReview)
+    && waitingPoCutoff(po) > Date.now()
     && String(approval.status || "").toLowerCase() !== "rejected"
 }
 
 function purchaseOrderIsReadyToSubmit(po: Record<string, unknown>) {
-  if (!purchaseOrderIsWaiting(po)) return false
   const status = String(po.status || "draft").toLowerCase()
   const approvalStatus = String(((po.approval || {}) as Record<string, unknown>).status || "").toLowerCase()
-  return Boolean(po.readyForReview)
-    || waitingPoCutoff(po) <= Date.now()
+  return String(po.type || "") === "customer_demand"
+    && !purchaseOrderHasSubmission(po)
+    && !["hold", "rejected", "canceled", "superseded", "deleted", "received", "closed"].includes(status)
+    && approvalStatus !== "rejected"
+    && (status === "ready_to_send"
     || status === "awaiting_approval"
     || status === "approved"
-    || approvalStatus === "approved"
+    || Boolean(po.readyForReview)
+    || waitingPoCutoff(po) <= Date.now()
+    || approvalStatus === "approved")
 }
 
 function purchaseRequirementStatusLabel(status: unknown) {
@@ -12604,8 +12611,8 @@ function purchaseOrderNextStep(po: Record<string, unknown>): PurchaseOrderNextSt
     || po.approvalRequired === true
     || po.requiresApproval === true
     || status === "awaiting_approval"
-  const approved = status === "approved" || approvalStatus === "approved"
-  const cutoffReached = Boolean(po.readyForReview) || waitingPoCutoff(po) <= Date.now()
+  const approved = approvalStatus === "approved"
+  const cutoffReached = status === "ready_to_send" || Boolean(po.readyForReview) || waitingPoCutoff(po) <= Date.now()
 
   if (status === "hold" || approvalStatus === "rejected") {
     return { label: "Buyer review", description: "Resolve the hold or rejection before this PO can move forward.", variant: "destructive", priority: 4 }
@@ -12683,6 +12690,21 @@ type VendorDeliveryScheduleRow = {
   label?: string
 }
 
+type VendorScheduleException = {
+  id: string
+  date: string
+  label: string
+  enabled: boolean
+}
+
+type VendorTemporaryScheduleOverride = {
+  enabled: boolean
+  cutoffDate: string
+  cutoffTime: string
+  deliveryDate: string
+  label: string
+}
+
 function normalizeVendorDeliverySchedule(value: unknown): VendorDeliveryScheduleRow[] {
   if (!Array.isArray(value)) return []
   return value.map((entry, index) => {
@@ -12696,6 +12718,30 @@ function normalizeVendorDeliverySchedule(value: unknown): VendorDeliverySchedule
       label: String(row.label || ""),
     }
   })
+}
+
+function normalizeVendorScheduleExceptions(value: unknown): VendorScheduleException[] {
+  if (!Array.isArray(value)) return []
+  return value.map((entry, index) => {
+    const row = (entry || {}) as Record<string, unknown>
+    return {
+      id: String(row.id || `schedule-exception-${index + 1}`),
+      date: String(row.date || "").slice(0, 10),
+      label: String(row.label || "Supplier closed"),
+      enabled: row.enabled !== false,
+    }
+  }).filter((row) => /^\d{4}-\d{2}-\d{2}$/.test(row.date))
+}
+
+function normalizeVendorTemporaryScheduleOverride(value: unknown): VendorTemporaryScheduleOverride {
+  const row = (value && typeof value === "object" ? value : {}) as Record<string, unknown>
+  return {
+    enabled: row.enabled === true,
+    cutoffDate: String(row.cutoffDate || "").slice(0, 10),
+    cutoffTime: /^\d{2}:\d{2}$/.test(String(row.cutoffTime || "")) ? String(row.cutoffTime) : "15:00",
+    deliveryDate: String(row.deliveryDate || "").slice(0, 10),
+    label: String(row.label || "Temporary supplier schedule"),
+  }
 }
 
 function purchaseScheduleTimeLabel(value: unknown) {
@@ -12716,9 +12762,9 @@ function PurchaseScheduleSummary({ record, compact = false }: { record: Record<s
   const cutoffDate = record.poolDate || record.cutoffDate
   const expectedDelivery = record.expectedDeliveryDate || record.expectedAt
   return <div className={`grid ${compact ? "min-w-44 gap-0.5" : "gap-1"}`}>
-    <Badge variant={passed ? "destructive" : "info"} className="w-fit">{passed ? "Cutoff passed" : "Collecting"}</Badge>
+    <Badge variant={passed ? "default" : "info"} className="w-fit">{passed ? "Ready to send" : "Collecting"}</Badge>
     <span className="text-sm font-medium">{purchaseScheduleDateLabel(cutoffDate)} at {purchaseScheduleTimeLabel(record.cutoffTime)}</span>
-    <span className="text-xs text-muted-foreground">Delivery {purchaseScheduleDateLabel(expectedDelivery)} · {String(record.cutoffTimezone || "America/New_York").replace("America/", "")}</span>
+    <span className="text-xs text-muted-foreground">Delivery {purchaseScheduleDateLabel(expectedDelivery)} · {String(record.scheduleLabel || record.cutoffTimezone || "America/New_York").replace("America/", "")}</span>
   </div>
 }
 
@@ -12768,6 +12814,7 @@ function PurchasingPage() {
   const [data, setData] = useState<{
     requirements?: Array<Record<string, unknown>>
     purchaseOrders?: Array<Record<string, unknown>>
+    buyerAlerts?: Array<Record<string, unknown>>
     poolSummary?: Record<string, unknown>
     workflowSettings?: Record<string, unknown>
   }>({})
@@ -12803,9 +12850,8 @@ function PurchasingPage() {
   const allPos = (data.purchaseOrders || []).filter((row) => JSON.stringify(row).toLowerCase().includes(query.toLowerCase()))
   const pos = allPos.filter((row) => !archivedPoStatuses.has(String(row.status || "").toLowerCase()))
   const archivedPos = allPos.filter((row) => archivedPoStatuses.has(String(row.status || "").toLowerCase()))
-  const waitingPurchaseOrders = allPos.filter(purchaseOrderIsWaiting)
-  const readyToSubmitPos = waitingPurchaseOrders.filter(purchaseOrderIsReadyToSubmit)
-  const collectingPurchaseOrders = waitingPurchaseOrders.filter((po) => !purchaseOrderIsReadyToSubmit(po))
+  const collectingPurchaseOrders = allPos.filter(purchaseOrderIsWaiting)
+  const readyToSubmitPos = allPos.filter(purchaseOrderIsReadyToSubmit)
   const waitingSupplierGroups = groupWaitingPurchaseOrders(collectingPurchaseOrders)
   const waitingOrderIds = new Set(collectingPurchaseOrders.flatMap((po) => purchaseOrderItems(po).map((line) => String(line.orderId || "")).filter(Boolean)))
   const waitingUnits = collectingPurchaseOrders.reduce((sum, po) => sum + purchaseOrderItems(po).reduce((lineSum, line) => lineSum + Number(line.qty || 0), 0), 0)
@@ -12822,6 +12868,7 @@ function PurchasingPage() {
   const buyerReviewRequirements = requirements.filter((row) => String(row.status || "").toLowerCase() === "buyer_review")
   const poolSummary = data.poolSummary || {}
   const approvalQueue = readyToSubmitPos
+  const buyerAlerts = data.buyerAlerts || []
   const today = new Date().toISOString().slice(0, 10)
   const supplierPerformance: any[] = Object.values(pos.reduce((groups, po) => { const key = String(po.vendorId || po.supplier || "unassigned"); const group = (groups as any)[key] || { vendorId: String(po.vendorId || ""), supplier: String(po.supplier || "Unassigned"), total: 0, open: 0, received: 0, acknowledged: 0, overdue: 0, commitment: 0, units: 0, receivedUnits: 0 }; group.total += 1; group.units += Number(po.totalUnits || 0); group.receivedUnits += (Array.isArray(po.items) ? po.items as Array<Record<string, unknown>> : []).reduce((sum, line) => sum + Number(line.receivedQty || 0), 0); group.commitment += Number(po.openEstimatedCost ?? po.estimatedCost ?? 0); const status = String(po.status || "").toLowerCase(); if (!["received", "closed", "canceled", "rejected"].includes(status)) group.open += 1; if (["received", "closed"].includes(status)) group.received += 1; if (po.vendorAcknowledgement || ["vendor_confirmed", "partially_received", "received", "closed"].includes(status)) group.acknowledged += 1; if (!["received", "closed", "canceled", "rejected"].includes(status) && String(po.expectedAt || "") && String(po.expectedAt) < today) group.overdue += 1; (groups as any)[key] = group; return groups }, {} as Record<string, { vendorId: string; supplier: string; total: number; open: number; received: number; acknowledged: number; overdue: number; commitment: number; units: number; receivedUnits: number }>))
   const performanceTotals = { suppliers: supplierPerformance.length, onTime: supplierPerformance.reduce((sum, row) => sum + Math.max(0, row.received - row.overdue), 0), received: supplierPerformance.reduce((sum, row) => sum + row.received, 0), acknowledged: supplierPerformance.reduce((sum, row) => sum + row.acknowledged, 0), total: supplierPerformance.reduce((sum, row) => sum + row.total, 0), commitment: supplierPerformance.reduce((sum, row) => sum + row.commitment, 0) }
@@ -12843,6 +12890,7 @@ function PurchasingPage() {
       { id: "history", label: "View PO history", description: "Review replaced, canceled, rejected, and deleted purchase orders.", icon: <History className="size-4" />, group: "Utilities", onSelect: () => setTab("archive") },
     ]} />} />
     <Alert><ShoppingBag className="size-4" /><AlertTitle>Buyer workflow</AlertTitle><AlertDescription>Resolve sourcing first, let each supplier draft collect eligible orders, submit it at cutoff, then track the PO through receiving. Line-level requirements remain available under Requirement audit for troubleshooting.</AlertDescription></Alert>
+    {buyerAlerts.length > 0 && <Card className="border-amber-300 bg-amber-50/70 dark:border-amber-800 dark:bg-amber-950/20"><CardHeader className="pb-3"><CardTitle className="flex items-center gap-2 text-base"><Bell className="size-4" /> Buyer cutoff alerts</CardTitle><CardDescription>Supplier drafts approaching cutoff or waiting for buyer action.</CardDescription></CardHeader><CardContent className="grid gap-2">{buyerAlerts.slice(0, 8).map((alert) => <a key={String(alert.id || alert.purchaseOrderId)} href={`/purchase-orders/${encodeURIComponent(String(alert.purchaseOrderId || ""))}`} className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background/80 px-3 py-2.5 hover:border-primary/50"><div><p className="text-sm font-medium">{String(alert.title || "Purchasing alert")}</p><p className="text-xs text-muted-foreground">{String(alert.message || "Open this PO for details.")}</p></div><Badge variant={String(alert.severity || "warning") === "critical" ? "destructive" : String(alert.severity || "") === "success" ? "success" : "warning"}>{String(alert.status || "Review")}</Badge></a>)}</CardContent></Card>}
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
       {[
         { id: "buyer_review", label: "Unassigned Orders", value: buyerReviewRequirements.length, description: "Supplier assignment required", icon: <AlertCircle className="size-4" /> },
@@ -12873,7 +12921,7 @@ function PurchasingPage() {
         {requirements.map((row) => { const poId = String(row.purchaseOrderId || ""); const orderId = String(row.orderId || ""); const sku = String(row.sku || ""); const status = String(row.status || "new").toLowerCase(); const hasSupplier = Boolean(String(row.vendorId || "").trim()); return <TableRow key={String(row.id)}><TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(orderId)}`}>{String(row.orderNumber)}</a><p className="text-xs text-muted-foreground">{String(row.customer || "Customer")}</p></TableCell><TableCell>{sku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(sku)}`} target="_blank" rel="noreferrer" title={`Open ${sku} in a new tab`}>{sku}</a> : "-"}<p className="text-xs text-muted-foreground">{numberLabel(Number(row.qty || 0))} units</p></TableCell><TableCell><Badge variant="outline">{String(row.type || "purchase").replace(/_/g, " ")}</Badge></TableCell><TableCell>{String(row.vendorName || "Unassigned")} {row.reviewReason ? <p className="mt-1 max-w-64 text-xs text-amber-700 dark:text-amber-300">{String(row.reviewReason)}</p> : null}</TableCell><TableCell>{poId ? <a className="font-medium hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(row.purchaseOrderNumber || poId)}</a> : <span className="text-muted-foreground">Not created</span>}</TableCell><TableCell>{String(row.shipBy || "-")}</TableCell><TableCell><Badge variant={status.includes("exception") ? "destructive" : status === "buyer_review" ? "outline" : status === "converted" ? "default" : "secondary"} className={status === "buyer_review" ? "border-amber-400 bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200" : status === "converted" ? "bg-emerald-600 text-white hover:bg-emerald-600" : ""}>{purchaseRequirementStatusLabel(status)}</Badge></TableCell><TableCell className="text-right">{poId ? <Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(poId)}`}>Open PO</a></Button> : status === "buyer_review" && !hasSupplier ? <Button size="sm" variant="outline" asChild><a href={`/products/${encodeURIComponent(sku)}`}>Assign supplier</a></Button> : <Button size="sm" disabled={creatingOrderId === orderId} onClick={() => void createForOrder(orderId)}>{creatingOrderId === orderId ? <Loader2 className="size-4 animate-spin" /> : "Create PO"}</Button>}</TableCell></TableRow> })}
         {!requirements.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase requirements match this view.</TableCell></TableRow>}
       </TableBody></Table></div></CardContent></Card></TabsContent>
-      <TabsContent value="approvals" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Ready to Send</CardTitle><CardDescription>These drafts now need buyer action. Approve any required commitment, review the final order, then send it to the supplier.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Estimated cost</TableHead><TableHead>Next step</TableHead><TableHead>Schedule</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{approvalQueue.map((po) => { const approval = (po.approval || {}) as Record<string, unknown>; const poId = String(po.id || ""); const approvalStatus = String(approval.status || "pending").toLowerCase(); const needsApproval = approval.required !== false && approvalStatus !== "approved"; const nextStep = purchaseOrderNextStep(po); return <TableRow key={poId}><TableCell><a className="font-medium hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(po.poNumber || poId)}</a></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || purchaseOrderItems(po).reduce((sum, line) => sum + Number(line.qty || 0), 0)))}</TableCell><TableCell>{moneyLabel(Number(po.openEstimatedCost ?? po.estimatedCost ?? 0))}</TableCell><TableCell><div className="grid max-w-52 gap-1"><Badge variant={nextStep.variant} className="w-fit">{nextStep.label}</Badge><span className="text-xs text-muted-foreground">{nextStep.description}</span></div></TableCell><TableCell><PurchaseScheduleSummary record={po} compact /></TableCell><TableCell className="text-right">{needsApproval ? <div className="flex justify-end gap-1"><Button size="sm" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "hold")}>Hold</Button><Button size="sm" variant="ghost" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "reject")}>Reject</Button></div> : <Button size="sm" asChild><a href={`/purchase-orders/${encodeURIComponent(poId)}`}>Open to send</a></Button>}</TableCell></TableRow> })}{!approvalQueue.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No draft POs need buyer action.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
+      <TabsContent value="approvals" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Ready to Send</CardTitle><CardDescription>These drafts reached their supplier cutoff. “Needs approval” is a status within this queue, not a separate purchasing stage.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Estimated cost</TableHead><TableHead>Status</TableHead><TableHead>Schedule</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{approvalQueue.map((po) => { const approval = (po.approval || {}) as Record<string, unknown>; const poId = String(po.id || ""); const approvalStatus = String(approval.status || "pending").toLowerCase(); const needsApproval = approval.required === true && approvalStatus !== "approved"; const nextStep = purchaseOrderNextStep(po); return <TableRow key={poId}><TableCell><a className="font-medium hover:underline" href={`/purchase-orders/${encodeURIComponent(poId)}`}>{String(po.poNumber || poId)}</a></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || purchaseOrderItems(po).reduce((sum, line) => sum + Number(line.qty || 0), 0)))}</TableCell><TableCell>{moneyLabel(Number(po.openEstimatedCost ?? po.estimatedCost ?? 0))}</TableCell><TableCell><div className="grid max-w-52 gap-1"><Badge variant={nextStep.variant} className="w-fit">{nextStep.label}</Badge><span className="text-xs text-muted-foreground">{nextStep.description}</span></div></TableCell><TableCell><PurchaseScheduleSummary record={po} compact /></TableCell><TableCell className="text-right">{needsApproval ? <div className="flex justify-end gap-1"><Button size="sm" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "hold")}>Hold</Button><Button size="sm" variant="ghost" disabled={actingPoId === poId} onClick={() => void actOnPo(poId, "reject")}>Reject</Button></div> : <Button size="sm" asChild><a href={`/purchase-orders/${encodeURIComponent(poId)}`}>Open to send</a></Button>}</TableCell></TableRow> })}{!approvalQueue.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase orders are ready to send.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="sent" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Sent to suppliers</CardTitle><CardDescription>Submitted purchase orders stay here until receiving begins or they are closed.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Destination</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Status</TableHead><TableHead>Sent / updated</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
         {sentPos.map((po) => <TableRow key={String(po.id)}><TableCell className="font-medium"><a className="hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || po.id)}</a></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{String(po.warehouseName || "-")}</TableCell><TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || 0))}</TableCell><TableCell><Badge variant="default">{String(po.status || "submitted").replace(/_/g, " ")}</Badge></TableCell><TableCell>{dateLabel(String(po.submittedAt || po.placedAt || po.sentAt || po.updatedAt || po.createdAt || ""))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>Open PO</a></Button></TableCell></TableRow>)}
         {!sentPos.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase orders have been sent to suppliers.</TableCell></TableRow>}
@@ -12904,7 +12952,7 @@ function PurchasingSupplierPoolPage({ supplierKey }: { supplierKey: string }) {
   }
   useEffect(() => { void load() }, [supplierKey])
 
-  const purchaseOrders = (data.purchaseOrders || []).filter((po) => purchaseOrderIsWaiting(po) && waitingPoSupplierKey(po) === supplierKey)
+  const purchaseOrders = (data.purchaseOrders || []).filter((po) => (purchaseOrderIsWaiting(po) || purchaseOrderIsReadyToSubmit(po)) && waitingPoSupplierKey(po) === supplierKey)
   const allItems = purchaseOrders.flatMap(purchaseOrderItems)
   const supplier = String(purchaseOrders[0]?.supplier || (supplierKey.startsWith("name:") ? supplierKey.slice(5) : "Supplier"))
   const vendorId = String(purchaseOrders[0]?.vendorId || "")
@@ -15546,12 +15594,15 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
+  const [schedulePreview, setSchedulePreview] = useState<Array<Record<string, unknown>>>([])
+  const [schedulePreviewLoading, setSchedulePreviewLoading] = useState(false)
   const value = (field: string, fallback = "") => String(draft[field] ?? (vendor as unknown as Record<string, unknown>)[field] ?? fallback)
   const addressValue = (field: string, fallback = "") => String(draft[`address.${field}`] ?? vendor.address?.[field as keyof NonNullable<Vendor["address"]>] ?? fallback)
 
   useEffect(() => {
     setEditing(false)
     setDraft({})
+    setSchedulePreview([])
   }, [vendor.id])
   useEffect(() => { void api<{ warehouses?: Array<Record<string, unknown>> }>("/api/state?lite=1").then((state) => setWarehouses(state.warehouses || [])).catch(() => undefined) }, [])
 
@@ -15578,6 +15629,8 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const catalogSourceCodesValue = draft["catalogSettings.sourceCodes"] ?? catalogSettings.sourceCodes ?? []
   const catalogSourceCodes = Array.isArray(catalogSourceCodesValue) ? catalogSourceCodesValue.join(" | ") : String(catalogSourceCodesValue || "")
   const deliverySchedule = normalizeVendorDeliverySchedule(draft["purchaseOrderRules.deliverySchedule"] ?? purchaseOrderRules.deliverySchedule)
+  const scheduleExceptions = normalizeVendorScheduleExceptions(draft["purchaseOrderRules.scheduleExceptions"] ?? purchaseOrderRules.scheduleExceptions)
+  const temporaryScheduleOverride = normalizeVendorTemporaryScheduleOverride(draft["purchaseOrderRules.temporaryCutoffOverride"] ?? purchaseOrderRules.temporaryCutoffOverride)
   const weeklyScheduleEnabled = Boolean(draft["purchaseOrderRules.weeklyScheduleEnabled"] ?? purchaseOrderRules.weeklyScheduleEnabled ?? deliverySchedule.length > 0)
 
   function updateDeliveryScheduleRow(id: string, field: keyof VendorDeliveryScheduleRow, next: unknown) {
@@ -15598,6 +15651,42 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   function setWeeklyScheduleEnabled(next: boolean) {
     update("purchaseOrderRules.weeklyScheduleEnabled", next)
     if (next && !deliverySchedule.length) addDeliveryScheduleRow()
+  }
+
+  function updateScheduleException(id: string, field: keyof VendorScheduleException, next: unknown) {
+    update("purchaseOrderRules.scheduleExceptions", scheduleExceptions.map((row) => row.id === id ? { ...row, [field]: next } : row))
+  }
+
+  function addScheduleException() {
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+    update("purchaseOrderRules.scheduleExceptions", [...scheduleExceptions, {
+      id: `schedule-exception-${Date.now()}`,
+      date: tomorrow,
+      label: "Supplier closed",
+      enabled: true,
+    }])
+  }
+
+  function updateTemporaryScheduleOverride(field: keyof VendorTemporaryScheduleOverride, next: unknown) {
+    update("purchaseOrderRules.temporaryCutoffOverride", { ...temporaryScheduleOverride, [field]: next })
+  }
+
+  async function previewPurchaseSchedule() {
+    setSchedulePreviewLoading(true)
+    try {
+      const pendingRules = Object.fromEntries(Object.entries(draft)
+        .filter(([key]) => key.startsWith("purchaseOrderRules."))
+        .map(([key, next]) => [key.slice("purchaseOrderRules.".length), next]))
+      const result = await api<{ windows?: Array<Record<string, unknown>> }>(`/api/vendors/${encodeURIComponent(vendor.id)}/purchase-schedule/preview`, {
+        method: "POST",
+        body: JSON.stringify({ purchaseOrderRules: { ...purchaseOrderRules, ...pendingRules }, count: 6 }),
+      })
+      setSchedulePreview(result.windows || [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not preview this supplier schedule.")
+    } finally {
+      setSchedulePreviewLoading(false)
+    }
   }
 
   return (
@@ -15771,6 +15860,30 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
                 </div>}
                 <Field label={weeklyScheduleEnabled ? "Fallback daily cutoff" : "Daily supplier cutoff"}><Input disabled={!editing || weeklyScheduleEnabled || (draft["purchaseOrderRules.poolUntilCutoff"] ?? purchaseOrderRules.poolUntilCutoff ?? true) === false} type="time" value={String(draft["purchaseOrderRules.cutoffTime"] ?? purchaseOrderRules.cutoffTime ?? "15:00")} onChange={(event) => update("purchaseOrderRules.cutoffTime", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">{weeklyScheduleEnabled ? "Used only if the weekly delivery calendar is disabled or unavailable." : "Orders received after this time roll into the next eligible business-day pool."}</p></Field>
                 <Field label="Cutoff timezone"><Select disabled={!editing || (draft["purchaseOrderRules.poolUntilCutoff"] ?? purchaseOrderRules.poolUntilCutoff ?? true) === false} value={String(draft["purchaseOrderRules.cutoffTimezone"] ?? purchaseOrderRules.cutoffTimezone ?? "America/New_York")} onValueChange={(next) => update("purchaseOrderRules.cutoffTimezone", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="America/New_York">Eastern</SelectItem><SelectItem value="America/Chicago">Central</SelectItem><SelectItem value="America/Denver">Mountain</SelectItem><SelectItem value="America/Los_Angeles">Pacific</SelectItem><SelectItem value="UTC">UTC</SelectItem></SelectContent></Select></Field>
+                <div className="grid gap-3 rounded-lg border bg-muted/20 p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-medium">Supplier closures and holidays</p><p className="text-xs text-muted-foreground">Cutoffs and delivery dates automatically move past enabled blackout dates.</p></div><Button type="button" size="sm" variant="outline" disabled={!editing} onClick={addScheduleException}><CalendarDays className="size-4" /> Add closure</Button></div>
+                  {scheduleExceptions.map((row) => <div key={row.id} className="grid gap-3 rounded-md border bg-background p-3 md:grid-cols-[11rem_1fr_auto] md:items-end">
+                    <Field label="Closed date"><Input disabled={!editing || !row.enabled} type="date" value={row.date} onChange={(event) => updateScheduleException(row.id, "date", event.target.value)} /></Field>
+                    <Field label="Reason"><Input disabled={!editing || !row.enabled} value={row.label} onChange={(event) => updateScheduleException(row.id, "label", event.target.value)} placeholder="Holiday or supplier closure" /></Field>
+                    <div className="flex items-center justify-end gap-2 pb-0.5"><Switch aria-label={`${row.label} closure`} disabled={!editing} checked={row.enabled} onCheckedChange={(next) => updateScheduleException(row.id, "enabled", next)} /><Button type="button" size="icon" variant="ghost" disabled={!editing} title="Remove closure" onClick={() => update("purchaseOrderRules.scheduleExceptions", scheduleExceptions.filter((entry) => entry.id !== row.id))}><Trash2 className="size-4" /></Button></div>
+                  </div>)}
+                  {!scheduleExceptions.length && <p className="rounded-md border border-dashed p-3 text-center text-xs text-muted-foreground">No supplier closures are configured.</p>}
+                </div>
+                <div className="grid gap-3 rounded-lg border bg-muted/20 p-3">
+                  <ToggleField label="Use temporary schedule override" description="Temporarily replace the regular calendar for a special cutoff or delivery date. The override is ignored after its cutoff passes." checked={temporaryScheduleOverride.enabled} disabled={!editing} onCheckedChange={(next) => updateTemporaryScheduleOverride("enabled", next)} />
+                  {temporaryScheduleOverride.enabled && <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <Field label="Override cutoff date"><Input disabled={!editing} type="date" value={temporaryScheduleOverride.cutoffDate} onChange={(event) => updateTemporaryScheduleOverride("cutoffDate", event.target.value)} /></Field>
+                    <Field label="Override cutoff time"><Input disabled={!editing} type="time" value={temporaryScheduleOverride.cutoffTime} onChange={(event) => updateTemporaryScheduleOverride("cutoffTime", event.target.value)} /></Field>
+                    <Field label="Expected delivery date"><Input disabled={!editing} type="date" value={temporaryScheduleOverride.deliveryDate} onChange={(event) => updateTemporaryScheduleOverride("deliveryDate", event.target.value)} /></Field>
+                    <Field label="Reason"><Input disabled={!editing} value={temporaryScheduleOverride.label} onChange={(event) => updateTemporaryScheduleOverride("label", event.target.value)} placeholder="Holiday week schedule" /></Field>
+                  </div>}
+                </div>
+                <ToggleField label="Buyer cutoff alerts" description="Show approaching cutoffs and Ready to Send actions in Purchasing." checked={Boolean(draft["purchaseOrderRules.cutoffAlertsEnabled"] ?? (purchaseOrderRules.cutoffAlertsEnabled ?? true))} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.cutoffAlertsEnabled", next)} />
+                <Field label="Alert before cutoff (minutes)"><Input disabled={!editing || Boolean(draft["purchaseOrderRules.cutoffAlertsEnabled"] ?? (purchaseOrderRules.cutoffAlertsEnabled ?? true)) === false} type="number" min="0" step="15" value={String(draft["purchaseOrderRules.cutoffAlertLeadMinutes"] ?? purchaseOrderRules.cutoffAlertLeadMinutes ?? 120)} onChange={(event) => update("purchaseOrderRules.cutoffAlertLeadMinutes", Number(event.target.value || 0))} /></Field>
+                <div className="grid gap-3 rounded-lg border bg-background p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-medium">Schedule preview</p><p className="text-xs text-muted-foreground">Check the next cutoff and expected delivery windows using the current unsaved settings.</p></div><Button type="button" size="sm" variant="outline" disabled={schedulePreviewLoading} onClick={() => void previewPurchaseSchedule()}>{schedulePreviewLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Preview dates</Button></div>
+                  {schedulePreview.length > 0 && <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{schedulePreview.map((window, index) => <div key={`${String(window.poolDate)}-${String(window.cutoffTime)}-${index}`} className="rounded-md border bg-muted/20 p-3"><p className="text-xs font-semibold uppercase text-muted-foreground">{String(window.scheduleLabel || window.scheduleMode || "Supplier window")}</p><p className="mt-1 text-sm font-medium">Cutoff {purchaseScheduleDateLabel(window.poolDate)} at {purchaseScheduleTimeLabel(window.cutoffTime)}</p><p className="text-xs text-muted-foreground">Expected {purchaseScheduleDateLabel(window.expectedDeliveryDate)}</p></div>)}</div>}
+                </div>
                 <ToggleField label="Allow true supplier drop shipping" description="When enabled, eligible lines may bypass receiving and ship directly from this supplier. Leave off when supplier stock must first be purchased into a physical warehouse." checked={Boolean(draft["purchaseOrderRules.dropShipEnabled"] ?? purchaseOrderRules.dropShipEnabled)} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.dropShipEnabled", next)} />
                 <ToggleField label="Require buyer approval" checked={Boolean(draft["purchaseOrderRules.requireBuyerApproval"] ?? (purchaseOrderRules.requireBuyerApproval ?? true))} disabled={!editing} onCheckedChange={(next) => update("purchaseOrderRules.requireBuyerApproval", next)} />
                 <Field label="Approval threshold"><Input disabled={!editing} type="number" min="0" value={String(draft["purchaseOrderRules.approvalThreshold"] ?? purchaseOrderRules.approvalThreshold ?? 0)} onChange={(event) => update("purchaseOrderRules.approvalThreshold", Number(event.target.value || 0))} /><p className="mt-1 text-xs text-muted-foreground">0 means every supplier PO requires buyer approval.</p></Field>
