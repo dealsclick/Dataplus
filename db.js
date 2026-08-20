@@ -2927,15 +2927,22 @@ async function readVendorCatalogSupplierCoverageBySkus(skus = []) {
   const result = await client.query(`
     with input_skus as (
       select distinct unnest($1::text[]) as input_sku
-    ), seed_items as materialized (
-      select distinct input.input_sku, item.*
+    ), matched_seed_items as materialized (
+      select input.input_sku, item.*
       from input_skus input
-      join vendor_catalog_items item
-        on input.input_sku in (
-          lower(item.source_sku),
-          lower(coalesce(item.internal_sku, '')),
-          lower(coalesce(item.vendor_sku, ''))
-        )
+      join vendor_catalog_items item on lower(item.source_sku) = input.input_sku
+      union all
+      select input.input_sku, item.*
+      from input_skus input
+      join vendor_catalog_items item on lower(item.internal_sku) = input.input_sku
+      union all
+      select input.input_sku, item.*
+      from input_skus input
+      join vendor_catalog_items item on lower(item.vendor_sku) = input.input_sku
+    ), seed_items as materialized (
+      select distinct on (input_sku, vendor_id, source_sku) *
+      from matched_seed_items
+      order by input_sku, vendor_id, source_sku, updated_at desc
     ), seed_identities as materialized (
       select distinct seed.input_sku, identity.match_key, identity.match_type
       from seed_items seed
@@ -2966,44 +2973,28 @@ async function readVendorCatalogSupplierCoverageBySkus(skus = []) {
         )
       ) identity(match_key, match_type)
       where coalesce(identity.match_key, '') <> ''
-    ), matched as materialized (
-      select seed.input_sku, candidate.vendor_id, seed.match_type
+    ), ranked_coverage as (
+      select
+        seed.input_sku,
+        greatest(coalesce(coverage.supplier_count, 0), 1)::integer as supplier_count,
+        seed.match_type,
+        row_number() over (
+          partition by seed.input_sku
+          order by
+            greatest(coalesce(coverage.supplier_count, 0), 1) desc,
+            case seed.match_type when 'upc' then 1 when 'manufacturer-part-and-brand' then 2 else 3 end
+        ) as coverage_rank
       from seed_identities seed
-      join vendor_catalog_items candidate on seed.match_type = 'upc' and (
-        lower(candidate.barcode) = substring(seed.match_key from 9)
-        or lower(candidate.raw ->> 'upc') = substring(seed.match_key from 9)
-        or lower(candidate.raw ->> 'gtin') = substring(seed.match_key from 9)
-        or lower(candidate.raw ->> 'upcCode') = substring(seed.match_key from 9)
-      )
-      union all
-      select seed.input_sku, candidate.vendor_id, seed.match_type
-      from seed_identities seed
-      join vendor_catalog_items candidate
-        on seed.match_type = 'manufacturer-part-and-brand'
-       and lower(candidate.brand) = split_part(substring(seed.match_key from 5), '|', 1)
-       and lower(candidate.mfr_part_number) = substring(substring(seed.match_key from 5) from position('|' in substring(seed.match_key from 5)) + 1)
-      union all
-      select seed.input_sku, candidate.vendor_id, seed.match_type
-      from seed_identities seed
-      join vendor_catalog_items candidate on seed.match_type = 'exact-sku' and (
-        lower(candidate.source_sku) = substring(seed.match_key from 5)
-        or lower(candidate.internal_sku) = substring(seed.match_key from 5)
-        or lower(candidate.vendor_sku) = substring(seed.match_key from 5)
-      )
+      left join vendor_supplier_coverage coverage on coverage.match_key = seed.match_key
     )
     select
       input.input_sku,
-      count(distinct matched.vendor_id)::integer as supplier_count,
-      case
-        when bool_or(matched.match_type = 'upc') and bool_or(matched.match_type = 'manufacturer-part-and-brand') then 'upc+manufacturer-part-and-brand'
-        when bool_or(matched.match_type = 'upc') then 'upc'
-        when bool_or(matched.match_type = 'manufacturer-part-and-brand') then 'manufacturer-part-and-brand'
-        when bool_or(matched.match_type = 'exact-sku') then 'exact-sku'
-        else 'none'
-      end as match_type
+      coalesce(coverage.supplier_count, 0)::integer as supplier_count,
+      coalesce(coverage.match_type, 'none') as match_type
     from input_skus input
-    left join matched on matched.input_sku = input.input_sku
-    group by input.input_sku
+    left join ranked_coverage coverage
+      on coverage.input_sku = input.input_sku
+     and coverage.coverage_rank = 1
   `, [values]);
   return result.rows.map((row) => ({
     sku: row.input_sku || "",
