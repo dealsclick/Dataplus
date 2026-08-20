@@ -1079,15 +1079,19 @@ async function importCatalogStore(dumpPath, options) {
   const errorRows = [];
   const trackLocalChanges = !options.dryRun && !options.postgresOnly;
   const previousSnapshot = trackLocalChanges ? await readChangeSnapshot() : new Map();
-  const job = await createDumpImportJob({
-    jobId: options.jobId,
-    dryRun: options.dryRun,
-    section: "Source Catalog",
-    operation: options.downloadFtp ? "FTP product dump import" : "Product dump import",
-    fileName: path.basename(dumpPath),
-    filePath: dumpPath,
-    message: `Importing source catalog from ${path.basename(dumpPath)}.`
-  });
+  // The external worker owns PostgreSQL job progress. Avoid loading the full
+  // application state merely to update the same job from this streaming child.
+  const job = options.postgresOnly
+    ? { id: options.jobId || "" }
+    : await createDumpImportJob({
+      jobId: options.jobId,
+      dryRun: options.dryRun,
+      section: "Source Catalog",
+      operation: options.downloadFtp ? "FTP product dump import" : "Product dump import",
+      fileName: path.basename(dumpPath),
+      filePath: dumpPath,
+      message: `Importing source catalog from ${path.basename(dumpPath)}.`
+    });
   if (!options.dryRun) {
     await createVendorFeedRun({
       id: importId,
@@ -1204,15 +1208,17 @@ async function importCatalogStore(dumpPath, options) {
         error: error.message
       });
     }
-    await finishDumpImportJob(job, {
-      status: "failed",
-      message: `Product dump import failed after ${stats.read} record${stats.read === 1 ? "" : "s"}.`,
-      totalRows: stats.read,
-      changed: stats.importable,
-      missingCount: stats.skipped,
-      errors: importErrorMessages([standardImportError({ row: stats.read, issue: error.message })]),
-      errorRows: [standardImportError({ row: stats.read, issue: error.message })]
-    });
+    if (!options.postgresOnly) {
+      await finishDumpImportJob(job, {
+        status: "failed",
+        message: `Product dump import failed after ${stats.read} record${stats.read === 1 ? "" : "s"}.`,
+        totalRows: stats.read,
+        changed: stats.importable,
+        missingCount: stats.skipped,
+        errors: importErrorMessages([standardImportError({ row: stats.read, issue: error.message })]),
+        errorRows: [standardImportError({ row: stats.read, issue: error.message })]
+      });
+    }
     throw error;
   } finally {
     if (writer) {
@@ -1265,17 +1271,19 @@ async function importCatalogStore(dumpPath, options) {
     }, null, 2));
   }
 
-  await finishDumpImportJob(job, {
-    status: stats.skipped ? "warning" : "success",
-    message: `${options.dryRun ? "Dry run checked" : options.postgresOnly ? "Normalized" : "Imported"} ${stats.importable} source catalog products from ${path.basename(dumpPath)}.`,
-    totalRows: stats.read,
-    changed: stats.importable,
-    created: stats.importable,
-    missingCount: stats.skipped,
-    errors: importErrorMessages(errorRows),
-    errorRows,
-    details: `${seen ? seen.size : stats.importable} unique SKUs ${options.postgresOnly ? "normalized into PostgreSQL" : `written to ${path.relative(ROOT, effectiveCatalogPath)}`}. ${previousSnapshot.size ? `${stats.changes.toLocaleString()} tracked field changes detected.` : options.postgresOnly ? "Local change tracking skipped for Postgres-only import." : "Change tracking baseline snapshot created."} ${Number(stats.sqlChanges || 0).toLocaleString()} SQL change events recorded. ${stats.closeouts.toLocaleString()} closeout SKUs found.`
-  });
+  if (!options.postgresOnly) {
+    await finishDumpImportJob(job, {
+      status: stats.skipped ? "warning" : "success",
+      message: `${options.dryRun ? "Dry run checked" : "Imported"} ${stats.importable} source catalog products from ${path.basename(dumpPath)}.`,
+      totalRows: stats.read,
+      changed: stats.importable,
+      created: stats.importable,
+      missingCount: stats.skipped,
+      errors: importErrorMessages(errorRows),
+      errorRows,
+      details: `${seen ? seen.size : stats.importable} unique SKUs written to ${path.relative(ROOT, effectiveCatalogPath)}. ${previousSnapshot.size ? `${stats.changes.toLocaleString()} tracked field changes detected.` : "Change tracking baseline snapshot created."} ${Number(stats.sqlChanges || 0).toLocaleString()} SQL change events recorded. ${stats.closeouts.toLocaleString()} closeout SKUs found.`
+    });
+  }
   if (!options.dryRun) {
     await finishVendorFeedRun(importId, {
       status: stats.skipped ? "warning" : "success",
