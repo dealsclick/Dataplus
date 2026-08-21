@@ -2637,7 +2637,7 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
           seed.source_sku as seed_source_sku
         from product_mpn_identity_next product
         join vendor_mpn_identity_next seed on seed.mfr_part_number = product.mfr_part_number
-      ), linked_items as materialized (
+      ), first_hop_items as materialized (
         select distinct
           seed.product_id,
           seed.product_sku,
@@ -2653,12 +2653,40 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
           on seed_identity.vendor_id = seed.seed_vendor_id
          and seed_identity.source_sku = seed.seed_source_sku
          and seed_identity.match_key like 'sku:%'
+        join vendor_supplier_coverage_next seed_coverage
+          on seed_coverage.match_key = seed_identity.match_key
+         and seed_coverage.supplier_count <= 25
         join vendor_supplier_identity_next identity
           on identity.match_key = seed_identity.match_key
         join vendor_catalog_items related
           on related.vendor_id = identity.vendor_id
          and related.source_sku = identity.source_sku
-        where lower(trim(coalesce(related.mfr_part_number, ''))) <> seed.mfr_part_number
+      ), linked_items as materialized (
+        select * from first_hop_items
+        union
+        select distinct
+          first.product_id,
+          first.product_sku,
+          first.mfr_part_number,
+          related.vendor_id,
+          related.source_sku,
+          related_identity.match_key,
+          related.brand,
+          related.title,
+          lower(trim(coalesce(related.mfr_part_number, ''))) as supplier_mfr_part_number
+        from first_hop_items first
+        join vendor_supplier_identity_next first_identity
+          on first_identity.vendor_id = first.vendor_id
+         and first_identity.source_sku = first.source_sku
+         and first_identity.match_key like 'sku:%'
+        join vendor_supplier_coverage_next first_coverage
+          on first_coverage.match_key = first_identity.match_key
+         and first_coverage.supplier_count <= 25
+        join vendor_supplier_identity_next related_identity
+          on related_identity.match_key = first_identity.match_key
+        join vendor_catalog_items related
+          on related.vendor_id = related_identity.vendor_id
+         and related.source_sku = related_identity.source_sku
       )
       insert into supplier_match_reviews (
         match_id,
@@ -2696,7 +2724,8 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
         now(),
         now()
       from linked_items linked
-      where not exists (
+      where lower(trim(coalesce(linked.supplier_mfr_part_number, ''))) <> linked.mfr_part_number
+        and not exists (
         select 1
         from product_supplier_links_next confirmed
         where confirmed.product_id = linked.product_id
@@ -2762,9 +2791,9 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
             when bool_or(candidate.match_type = 'exact-sku') then 'exact-sku'
             else 'source-sku'
           end as match_type,
-          greatest(count(distinct matched.vendor_id), 1)::integer as supplier_count
+          greatest(max(coverage.supplier_count), 1)::integer as supplier_count
         from vendor_supplier_identity_next candidate
-        left join vendor_supplier_identity_next matched on matched.match_key = candidate.match_key
+        join vendor_supplier_coverage_next coverage on coverage.match_key = candidate.match_key
         group by candidate.vendor_id, candidate.source_sku
       )
       update vendor_catalog_items item
