@@ -824,6 +824,14 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayOrderImportScheduleType: "times",
   ebayOrderImportScheduleTimes: "05:00,17:00",
   ebayOrderImportScheduleEveryHours: 12,
+  temuOrderImportEnabled: false,
+  temuOrderImportLookbackDays: 30,
+  temuOrderImportLimit: 250,
+  temuOrderImportIncludeCanceled: false,
+  temuOrderImportScheduleEnabled: false,
+  temuOrderImportScheduleType: "times",
+  temuOrderImportScheduleTimes: "05:00,17:00",
+  temuOrderImportScheduleEveryHours: 12,
   ebayPriceInventorySyncScheduleEnabled: false,
   ebayPriceInventorySyncScheduleType: "times",
   ebayPriceInventorySyncScheduleTimes: "04:00,16:00",
@@ -4111,10 +4119,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -4134,6 +4142,9 @@ function normalizeChannel(channel = {}) {
   settings.ebayOrderImportScheduleType = String(settings.ebayOrderImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.ebayOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.ebayOrderImportScheduleEveryHours || 12) || 12));
   settings.ebayOrderImportScheduleTimes = normalizeChannelScheduleTimes(settings.ebayOrderImportScheduleTimes || DEFAULT_CHANNEL_SETTINGS.ebayOrderImportScheduleTimes);
+  settings.temuOrderImportScheduleType = String(settings.temuOrderImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
+  settings.temuOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.temuOrderImportScheduleEveryHours || 12) || 12));
+  settings.temuOrderImportScheduleTimes = normalizeChannelScheduleTimes(settings.temuOrderImportScheduleTimes || DEFAULT_CHANNEL_SETTINGS.temuOrderImportScheduleTimes);
   settings.ebayPriceInventorySyncLimit = Math.max(1, Math.min(25000, Number(settings.ebayPriceInventorySyncLimit || 1000) || 1000));
   settings.ebayPriceInventorySyncScheduleType = String(settings.ebayPriceInventorySyncScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.ebayPriceInventorySyncScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.ebayPriceInventorySyncScheduleEveryHours || 12) || 12));
@@ -18305,6 +18316,75 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
   }
 }
 
+async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
+  const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const limit = Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250) || 250));
+  const lookbackDays = Math.max(1, Math.min(365, Number(payload.lookbackDays || 30) || 30));
+  const startedAt = job.startedAt || new Date().toISOString();
+  job = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "importing_temu_orders",
+    totalRows: limit,
+    processedRows: 0,
+    startedAt,
+    message: payload.scheduled
+      ? "Reconciling Temu orders changed since the last successful sync..."
+      : `Importing Temu orders from the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
+  });
+  appendChannelApiLog({ channel: "Temu", transport: "Job", method: "RUN", path: "temu-orders", operation: "Temu order import started", statusCode: 102, ok: true, jobId: job.id, message: job.message });
+  try {
+    const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+    const result = await importTemuOrders(workDb, {
+      ...payload,
+      jobId: job.id,
+      lookbackDays,
+      limit,
+      forceLookback: payload.forceLookback !== false,
+      progress: async (patch = {}) => {
+        await persistWorkerImportJob(job, {
+          status: "running",
+          phase: patch.phase || "importing_temu_orders",
+          totalRows: Math.max(Number(patch.totalRows || 0), Number(job.totalRows || 0), limit),
+          processedRows: Number(patch.processedRows || 0),
+          progressPercent: progressPercent(Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
+          estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
+          lastProgressAt: new Date().toISOString()
+        });
+      }
+    });
+    await writeDb(normalizeDb({ ...workDb, inventory: [] }));
+    attachImportJobOriginalFile(job, rowsToCsv(result.rows || []), "temu-orders-import-results.csv");
+    const errorRows = (result.errors || []).map((message) => standardImportError({ source: "Temu", issue: message }));
+    attachImportJobErrorsFile(job, errorRows);
+    const status = result.errors?.length ? "done_with_warnings" : "success";
+    const message = `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} Temu order${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`;
+    finishImportJob(job, {
+      status,
+      phase: "complete",
+      totalRows: Math.max(Number(result.fetched || 0), Number(job.totalRows || 0)),
+      processedRows: Number(result.fetched || 0),
+      changed: Number(result.created || 0) + Number(result.updated || 0),
+      missingCount: Number(result.skipped || 0) + errorRows.length,
+      errors: result.errors || [],
+      progressPercent: 100,
+      estimatedSecondsRemaining: 0,
+      message,
+      finishedAt: new Date().toISOString()
+    });
+    await postgres.upsertOperationJob(job);
+    await postgres.upsertOperationArtifact(job, "original").catch(() => {});
+    if (errorRows.length) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
+    appendChannelApiLog({ channel: "Temu", transport: "Job", method: "RUN", path: "temu-orders", operation: "Temu order import completed", statusCode: errorRows.length ? 207 : 200, ok: !errorRows.length, jobId: job.id, message });
+    publicStateJsonCache = null;
+    return job;
+  } catch (error) {
+    const message = error.message || "Temu order import failed.";
+    await persistWorkerImportJob(job, { status: "failed", phase: "failed", missingCount: 1, errors: [message], estimatedSecondsRemaining: 0, message, finishedAt: new Date().toISOString() });
+    appendChannelApiLog({ channel: "Temu", transport: "Job", method: "RUN", path: "temu-orders", operation: "Temu order import failed", statusCode: 502, ok: false, jobId: job.id, message });
+    throw error;
+  }
+}
+
 async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
   const lifecycleAction = normalizeEbayListingLifecycleAction(payload.lifecycleAction || "launch");
@@ -20055,17 +20135,38 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
   const raw = { ...listOrder, ...detail };
   const parentOrderSn = valueAt(raw, ["parentOrderSn", "parent_order_sn", "parentOrderSN", "orderSn", "order_sn"]);
   const childItems = firstArrayFrom(raw.orderList || raw.orderDetailList || raw.skuList || raw.goodsList || raw.items || raw);
-  const items = childItems.length ? childItems.map((item) => ({
-    sku: String(valueAt(item, ["sku", "skuId", "skuSn", "goodsSkuSn", "extCode"], "TEMU-SKU")),
-    title: String(valueAt(item, ["goodsName", "productName", "title", "name"], "Temu item")),
-    qty: Number(valueAt(item, ["quantity", "qty", "goodsNumber"], 1)) || 1,
-    price: nestedMoney(valueAt(item, ["salePrice", "retailPrice", "orderAmount", "price"], 0))
-  })) : [
+  const items = childItems.length ? childItems.map((item) => {
+    const externalSku = String(valueAt(item, ["extCode", "externalSku", "sellerSku", "outSkuSn", "outSku", "merchantSku"], "")).trim();
+    const channelSku = String(valueAt(item, ["sku", "skuSn", "goodsSkuSn", "productSku", "goodsSku"], "")).trim();
+    const channelVariantId = String(valueAt(item, ["skuId", "goodsSkuId", "goodsSkuSn", "productSkuId"], "")).trim();
+    const channelProductId = String(valueAt(item, ["goodsId", "productId", "goods_id"], "")).trim();
+    const sku = externalSku || channelSku || channelVariantId || "TEMU-SKU";
+    return {
+      sku,
+      originalSku: channelSku || channelVariantId || sku,
+      channelSku: channelSku || externalSku || sku,
+      channelVariantSku: channelSku || "",
+      channelVariantId,
+      channelProductId,
+      temuGoodsId: channelProductId,
+      temuSkuId: channelVariantId,
+      temuExternalSku: externalSku,
+      title: String(valueAt(item, ["goodsName", "productName", "title", "name"], "Temu item")),
+      qty: Number(valueAt(item, ["quantity", "qty", "goodsNumber"], 1)) || 1,
+      price: nestedMoney(valueAt(item, ["salePrice", "retailPrice", "orderAmount", "price"], 0)),
+      external: { source: "Temu", raw: item }
+    };
+  }) : [
     {
-      sku: String(valueAt(raw, ["sku", "skuId", "skuSn"], "TEMU-SKU")),
+      sku: String(valueAt(raw, ["extCode", "externalSku", "sellerSku", "sku", "skuSn", "skuId"], "TEMU-SKU")),
+      originalSku: String(valueAt(raw, ["sku", "skuSn", "skuId"], "")),
+      channelSku: String(valueAt(raw, ["sku", "skuSn", "goodsSkuSn"], "")),
+      channelVariantId: String(valueAt(raw, ["skuId", "goodsSkuId"], "")),
+      channelProductId: String(valueAt(raw, ["goodsId", "productId"], "")),
       title: String(valueAt(raw, ["goodsName", "productName", "title"], "Temu order")),
       qty: Number(valueAt(raw, ["quantity", "qty"], 1)) || 1,
-      price: nestedMoney(valueAt(raw, ["orderAmount", "payAmount", "totalAmount"], 0))
+      price: nestedMoney(valueAt(raw, ["orderAmount", "payAmount", "totalAmount"], 0)),
+      external: { source: "Temu", raw }
     }
   ];
 
@@ -22072,11 +22173,14 @@ function extractTemuOrderSn(order) {
   return valueAt(order, ["parentOrderSn", "parent_order_sn", "parentOrderSN", "orderSn", "order_sn"], "");
 }
 
-async function importTemuOrders(db) {
+async function importTemuOrders(db, options = {}) {
   const now = Math.floor(Date.now() / 1000);
   db.connectorState = db.connectorState || {};
   const lastSync = Number(db.connectorState.temuLastOrderSync || 0);
-  const updateAtStart = lastSync ? Math.max(0, lastSync - 3600) : now - 90 * 24 * 3600;
+  const lookbackDays = Math.max(1, Math.min(365, Number(options.lookbackDays || 30) || 30));
+  const limit = Math.max(1, Math.min(5000, Number(options.limit || 250) || 250));
+  const updateAtStart = options.forceLookback === false && lastSync ? Math.max(0, lastSync - 3600) : now - lookbackDays * 24 * 3600;
+  const includeCanceled = options.includeCanceled === true || String(options.includeCanceled).toLowerCase() === "true";
   const config = getTemuConfig(db);
   const pageSize = Math.min(100, Math.max(1, config.pageSize || 50));
   let pageNumber = 1;
@@ -22085,8 +22189,10 @@ async function importTemuOrders(db) {
   let skipped = 0;
   let fetched = 0;
   const errors = [];
+  const rows = [];
 
-  while (pageNumber <= 10) {
+  const maxPages = Math.ceil(limit / pageSize);
+  while (pageNumber <= Math.max(1, maxPages) && fetched < limit) {
     const listResponse = await temuRequest("bg.order.list.v2.get", {
       pageNumber,
       pageSize,
@@ -22097,6 +22203,7 @@ async function importTemuOrders(db) {
     if (!list.length) break;
 
     for (const listOrder of list) {
+      if (fetched >= limit) break;
       const parentOrderSn = extractTemuOrderSn(listOrder);
       let detail = {};
       let shipping = {};
@@ -22111,11 +22218,22 @@ async function importTemuOrders(db) {
         errors.push(`shipping ${parentOrderSn || "unknown"}: ${error.message}`);
       }
 
-      const action = upsertOrder(db, mapTemuOrder(listOrder, detail, shipping));
+      const mappedOrder = mapTemuOrder(listOrder, detail, shipping);
+      if (!includeCanceled && String(mappedOrder.status || "").toLowerCase() === "canceled") {
+        skipped += 1;
+        fetched += 1;
+        rows.push({ orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber, status: mappedOrder.status, action: "skipped", itemCount: mappedOrder.items?.length || 0 });
+        continue;
+      }
+      const action = upsertOrder(db, mappedOrder);
       if (action === "created") created += 1;
       if (action === "updated") updated += 1;
       if (action === "skipped") skipped += 1;
       fetched += 1;
+      rows.push({ orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber, status: mappedOrder.status, action, itemCount: mappedOrder.items?.length || 0, buyer: mappedOrder.buyer || "" });
+      if (typeof options.progress === "function") {
+        await options.progress({ phase: "importing_temu_orders", processedRows: fetched, totalRows: limit });
+      }
     }
 
     if (list.length < pageSize) break;
@@ -22123,7 +22241,85 @@ async function importTemuOrders(db) {
   }
 
   db.connectorState.temuLastOrderSync = now;
-  return { fetched, created, updated, skipped, errors };
+  return { fetched, created, updated, skipped, errors, rows };
+}
+
+async function queueTemuOrderImportJob(db, body = {}, options = {}) {
+  const channel = requireEnabledChannel(db, "Temu");
+  const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+  if (!settings.temuOrderImportEnabled) {
+    const error = new Error("Enable Temu order imports in Channel Settings before importing orders.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const lookbackDays = Math.max(1, Math.min(365, Number(body.lookbackDays || settings.temuOrderImportLookbackDays || 30) || 30));
+  const limit = Math.max(1, Math.min(5000, Number(body.limit || settings.temuOrderImportLimit || 250) || 250));
+  const workerPayload = {
+    lookbackDays,
+    limit,
+    includeCanceled: body.includeCanceled === undefined || body.includeCanceled === null || body.includeCanceled === ""
+      ? settings.temuOrderImportIncludeCanceled === true
+      : body.includeCanceled === true || String(body.includeCanceled).toLowerCase() === "true",
+    forceLookback: options.forceLookback === true || options.scheduled !== true,
+    scheduled: options.scheduled === true,
+    scheduleKey: options.scheduleKey || ""
+  };
+  const operation = options.operation || "Temu order import";
+  const activeImport = await findActiveImportJobByWorkerTask(db, "temu-order-import");
+  if (activeImport) return { duplicate: true, job: activeImport, workerPayload };
+  const duplicate = await findActiveDuplicateImportJob(db, {
+    section: "Operations",
+    operation,
+    direction: "import",
+    fileName: "temu-orders-import-results.csv",
+    workerTask: "temu-order-import",
+    workerPayload
+  });
+  if (duplicate) return { duplicate: true, job: duplicate, workerPayload };
+  const job = createImportJob(db, {
+    section: "Operations",
+    category: "Orders",
+    operation,
+    direction: "import",
+    status: "queued",
+    fileName: "temu-orders-import-results.csv",
+    totalRows: limit,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: shouldRunJobsInline() ? "" : "temu-order-import",
+    workerPayload: shouldRunJobsInline() ? {} : workerPayload,
+    message: options.scheduled
+      ? `Scheduled Temu order reconciliation queued. It will use the last sync point, or the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"} on its first run, up to ${limit.toLocaleString()} orders.`
+      : `Temu order import queued for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}, up to ${limit.toLocaleString()} orders.`
+  });
+  upsertImportJobStore(job);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  appendChannelApiLog({
+    channel: "Temu",
+    transport: "Job",
+    method: "QUEUE",
+    path: "temu-orders",
+    operation: options.scheduled ? "Scheduled Temu order import queued" : "Temu order import queued",
+    statusCode: 202,
+    ok: true,
+    jobId: job.id,
+    message: job.message
+  });
+  if (shouldRunJobsInline()) {
+    setTimeout(() => runTemuOrderImportWorkerJob(job, workerPayload).catch((error) => {
+      finishImportJob(job, {
+        status: "failed",
+        phase: "failed",
+        message: error.message || "Temu order import failed.",
+        errors: [error.message || "Temu order import failed."],
+        missingCount: 1,
+        estimatedSecondsRemaining: 0
+      });
+      upsertImportJobStore(job);
+    }), 25);
+  }
+  return { duplicate: false, job, workerPayload };
 }
 
 function getEbayConfig(db = {}) {
@@ -29383,7 +29579,7 @@ function orderSkuBaseFromUomVariant(sku = "") {
 function orderLineSkuLookupKeys(lines = []) {
   const keys = [];
   for (const line of Array.isArray(lines) ? lines : []) {
-    for (const value of [line.sku, line.mappedSku, line.originalSku, line.channelVariantSku, line.channelVariantId]) {
+    for (const value of [line.sku, line.mappedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.channelVariantId]) {
       const sku = String(value || "").trim();
       if (!sku) continue;
       keys.push(sku);
@@ -29420,7 +29616,7 @@ async function enrichOrderDetail(order = {}) {
   let itemRevenue = 0;
   let estimatedCogs = 0;
   const enrichedLines = lines.map((line) => {
-    const lineKeys = [line.sku, line.mappedSku, line.originalSku, line.channelVariantSku, line.channelVariantId].filter(Boolean).map((value) => String(value).toLowerCase());
+    const lineKeys = [line.sku, line.mappedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.channelVariantId].filter(Boolean).map((value) => String(value).toLowerCase());
     const fallbackKeys = lineKeys.map((key) => orderSkuBaseFromUomVariant(key).toLowerCase()).filter((key, index, all) => key && key !== lineKeys[index] && !all.slice(0, index).includes(key));
     const directProduct = lineKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
     const product = directProduct || fallbackKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
@@ -40470,6 +40666,23 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { ...result, state: await postgresLiteState() });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/temu/orders/import" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const result = await queueTemuOrderImportJob(db, body);
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
+        message: result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue Temu order import." });
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/api/ebay/auth-url" && postgres.isPostgresEnabled()) {
     const db = await readDbFast({ skipInventory: true });
     const authUrl = await beginEbayAuthorization(db, {
@@ -41929,6 +42142,22 @@ async function handleApi(req, res) {
     const result = await exchangeTemuCode(db, body.code);
     const normalized = normalizeDb(await readDb({ skipInventory: postgres.isPostgresEnabled() }));
     return sendJson(res, 200, { ...result, state: publicState(normalized) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/temu/orders/import") {
+    const body = await parseBody(req);
+    try {
+      const result = await queueTemuOrderImportJob(db, body);
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        state: publicState(normalizeDb({ ...db, importJobs: [result.job, ...(db.importJobs || [])] })),
+        message: result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue Temu order import." });
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/ebay/auth-url") {
@@ -45245,6 +45474,7 @@ module.exports = {
   queueShopifyVariantPricePushJob,
   queueShopifyOrderImportJob,
   queueShopifySkuMapSyncJob,
+  queueTemuOrderImportJob,
   queueEbayOrderImportJob,
   queueEbayPriceInventorySyncJob,
   queueEbayListingLaunchJob,
@@ -45260,6 +45490,7 @@ module.exports = {
   runEbayCatalogImportWorkerJob,
   runEbayLocationWorkerJob,
   runEbayOrderImportWorkerJob,
+  runTemuOrderImportWorkerJob,
   runEbayPriceInventorySyncWorkerJob,
   runEbayListingLaunchWorkerJob,
   runEbayTaxonomySyncWorkerJob,

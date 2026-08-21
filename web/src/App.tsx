@@ -350,6 +350,14 @@ type ChannelSettings = {
   ebayOrderImportScheduleType?: string
   ebayOrderImportScheduleTimes?: string
   ebayOrderImportScheduleEveryHours?: number
+  temuOrderImportEnabled?: boolean
+  temuOrderImportLookbackDays?: number
+  temuOrderImportLimit?: number
+  temuOrderImportIncludeCanceled?: boolean
+  temuOrderImportScheduleEnabled?: boolean
+  temuOrderImportScheduleType?: string
+  temuOrderImportScheduleTimes?: string
+  temuOrderImportScheduleEveryHours?: number
   ebayPriceInventorySyncScheduleEnabled?: boolean
   ebayPriceInventorySyncScheduleType?: string
   ebayPriceInventorySyncScheduleTimes?: string
@@ -3011,6 +3019,9 @@ function ChannelDetail({
   const [ebayOrderImportOpen, setEbayOrderImportOpen] = useState(false)
   const [ebayOrderImportSaving, setEbayOrderImportSaving] = useState(false)
   const [ebayOrderImportDraft, setEbayOrderImportDraft] = useState({ lookbackDays: "30", limit: "250", includeCanceled: false })
+  const [temuOrderImportOpen, setTemuOrderImportOpen] = useState(false)
+  const [temuOrderImportSaving, setTemuOrderImportSaving] = useState(false)
+  const [temuOrderImportDraft, setTemuOrderImportDraft] = useState({ lookbackDays: "30", limit: "250", includeCanceled: false })
   const [ebayTemplatesOpen, setEbayTemplatesOpen] = useState(false)
   const [ebayTemplatesSaving, setEbayTemplatesSaving] = useState(false)
   const [ebayTemplateDraft, setEbayTemplateDraft] = useState({ listingTemplates: "[]", itemSpecificTemplates: "[]", storeCategories: "[]", buyerRequirements: "{}", shippingMethodMappings: "[]", customPolicies: "[]" })
@@ -3037,6 +3048,7 @@ function ChannelDetail({
   const [ebayTaxonomyStatusLoading, setEbayTaxonomyStatusLoading] = useState(false)
   const isShopify = channel.name?.toLowerCase() === "shopify"
   const isEbay = channel.name?.toLowerCase() === "ebay"
+  const isTemu = channel.name?.toLowerCase() === "temu"
   const settings = { ...(channel.settings || {}), ...draft }
   const channelEnabled = settings.channelEnabled !== false
   const shippingProfiles = Array.isArray(channel.settings?.shopifyShippingProfiles) ? channel.settings.shopifyShippingProfiles : []
@@ -3047,6 +3059,7 @@ function ChannelDetail({
   const scheduleTimes = String(settings.inventoryScheduleTimes || "03:00,13:00").split(/[,;\s]+/).filter(Boolean)
   const orderImportScheduleTimes = String(settings.shopifyOrderImportScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
   const ebayOrderImportScheduleTimes = String(settings.ebayOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
+  const temuOrderImportScheduleTimes = String(settings.temuOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
   const ebayPriceInventorySyncScheduleTimes = String(settings.ebayPriceInventorySyncScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
   const shopifyWarehouseMappings: ShopifyWarehouseMapping[] = Array.isArray(settings.warehouseMappings) && settings.warehouseMappings.length
     ? settings.warehouseMappings as ShopifyWarehouseMapping[]
@@ -3468,6 +3481,36 @@ function ChannelDetail({
     }
   }
 
+  function openTemuOrderImport() {
+    setTemuOrderImportDraft({
+      lookbackDays: String(settings.temuOrderImportLookbackDays || 30),
+      limit: String(settings.temuOrderImportLimit || 250),
+      includeCanceled: settings.temuOrderImportIncludeCanceled === true,
+    })
+    setTemuOrderImportOpen(true)
+  }
+
+  async function queueTemuOrderImport() {
+    setTemuOrderImportSaving(true)
+    try {
+      const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>("/api/temu/orders/import", {
+        method: "POST",
+        body: JSON.stringify({
+          lookbackDays: Math.max(1, Math.min(365, Number(temuOrderImportDraft.lookbackDays || 30) || 30)),
+          limit: Math.max(1, Math.min(5000, Number(temuOrderImportDraft.limit || 250) || 250)),
+          includeCanceled: temuOrderImportDraft.includeCanceled,
+        }),
+      })
+      setTemuOrderImportOpen(false)
+      toast.success(result.message || (result.duplicate ? "An equivalent Temu order import is already running." : "Temu order import queued."))
+      onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue Temu order import.")
+    } finally {
+      setTemuOrderImportSaving(false)
+    }
+  }
+
   function openEbayTemplateControls() {
     const pretty = (value: unknown, fallback: string) => {
       try { return JSON.stringify(value ?? JSON.parse(fallback), null, 2) } catch { return fallback }
@@ -3844,6 +3887,19 @@ function ChannelDetail({
                 <Field label="Import every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings.ebayOrderImportScheduleEveryHours ?? 12)} onChange={(event) => update("ebayOrderImportScheduleEveryHours", Number(event.target.value || 12))} /></Field>
                 <ToggleField label="Schedule eBay order imports" checked={Boolean(settings.ebayOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.ebayOrderImportEnabled)} onCheckedChange={(value) => update("ebayOrderImportScheduleEnabled", value)} />
               </>}
+              {isTemu && <>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu Seller API</p><p className="pt-1 text-xs text-muted-foreground">Store app credentials in runtime settings, authorize the mall account, then import orders as durable Jobs work.</p></div>
+                <ToggleField label="Import orders" checked={Boolean(settings.temuOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuOrderImportEnabled", value)} />
+                <ToggleField label="Include canceled Temu orders" checked={Boolean(settings.temuOrderImportIncludeCanceled)} disabled={!editing} onCheckedChange={(value) => update("temuOrderImportIncludeCanceled", value)} />
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu order import</p><p className="pt-1 text-xs text-muted-foreground">Import a selected history window on demand, then keep recent Temu orders synchronized on a schedule.</p></div>
+                <Field label="Manual import lookback days"><Select disabled={!editing} value={String(settings.temuOrderImportLookbackDays ?? 30)} onValueChange={(value) => update("temuOrderImportLookbackDays", Number(value))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="1">Last 24 hours</SelectItem><SelectItem value="7">Last 7 days</SelectItem><SelectItem value="30">Last 30 days</SelectItem><SelectItem value="90">Last 90 days</SelectItem><SelectItem value="180">Last 180 days</SelectItem><SelectItem value="365">Last 365 days</SelectItem></SelectContent></Select></Field>
+                <Field label="Orders per import"><Input disabled={!editing} type="number" min="1" max="5000" value={String(settings.temuOrderImportLimit ?? 250)} onChange={(event) => update("temuOrderImportLimit", Number(event.target.value || 250))} /></Field>
+                <Field label="Order import schedule"><Select disabled={!editing} value={String(settings.temuOrderImportScheduleType || "times")} onValueChange={(value) => update("temuOrderImportScheduleType", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="times">Specific times</SelectItem><SelectItem value="interval">Every X hours</SelectItem></SelectContent></Select></Field>
+                <Field label="First scheduled import"><Input disabled={!editing} type="time" value={temuOrderImportScheduleTimes[0] || "05:00"} onChange={(event) => update("temuOrderImportScheduleTimes", [event.target.value, temuOrderImportScheduleTimes[1] || "17:00"].join(","))} /></Field>
+                <Field label="Second scheduled import"><Input disabled={!editing} type="time" value={temuOrderImportScheduleTimes[1] || "17:00"} onChange={(event) => update("temuOrderImportScheduleTimes", [temuOrderImportScheduleTimes[0] || "05:00", event.target.value].join(","))} /></Field>
+                <Field label="Import every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings.temuOrderImportScheduleEveryHours ?? 12)} onChange={(event) => update("temuOrderImportScheduleEveryHours", Number(event.target.value || 12))} /></Field>
+                <ToggleField label="Schedule Temu order imports" checked={Boolean(settings.temuOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.temuOrderImportEnabled)} onCheckedChange={(value) => update("temuOrderImportScheduleEnabled", value)} />
+              </>}
               </fieldset>
             </CardContent>
           </Card>
@@ -4127,6 +4183,75 @@ function ChannelDetail({
                     <Button variant="outline" onClick={() => setEbayOrderImportOpen(false)} disabled={ebayOrderImportSaving}>Cancel</Button>
                     <Button onClick={() => void queueEbayOrderImport()} disabled={ebayOrderImportSaving}>
                       {ebayOrderImportSaving && <Loader2 className="size-4 animate-spin" />} Import orders
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </div>
+          ) : isTemu ? (
+            <div className="grid gap-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Temu order import</CardTitle>
+                  <CardDescription>Import Temu orders into DataPlus as a background job. Seller SKUs and Temu product identifiers are preserved for catalog matching review.</CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <Detail label="Connection" value={channel.connected ? "Connected" : "Not connected"} />
+                  <Detail label="Order import" value={settings.temuOrderImportEnabled ? "Enabled" : "Disabled in Setup"} />
+                  <Detail label="Last sync" value={dateLabel(String((channel as Record<string, unknown>).lastSync || ""))} />
+                  <Detail label="Schedule" value={settings.temuOrderImportScheduleEnabled ? "Enabled" : "Manual only"} />
+                </CardContent>
+                <CardFooter className="border-t">
+                  <Button variant="outline" onClick={() => {
+                    if (!settings.temuOrderImportEnabled) {
+                      toast.error("Enable Temu order imports in Setup before starting an import.")
+                      return
+                    }
+                    openTemuOrderImport()
+                  }}>Import Temu orders</Button>
+                </CardFooter>
+              </Card>
+              <Dialog open={temuOrderImportOpen} onOpenChange={setTemuOrderImportOpen}>
+                <DialogContent className="sm:max-w-xl">
+                  <DialogHeader>
+                    <DialogTitle>Import Temu orders</DialogTitle>
+                    <DialogDescription>Choose the order history window for this run. The import is queued as a job and creates a downloadable result file.</DialogDescription>
+                  </DialogHeader>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field label="Look back">
+                      <Select value={temuOrderImportDraft.lookbackDays} onValueChange={(value) => setTemuOrderImportDraft((current) => ({ ...current, lookbackDays: value }))}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="1">Last 24 hours</SelectItem>
+                          <SelectItem value="7">Last 7 days</SelectItem>
+                          <SelectItem value="30">Last 30 days</SelectItem>
+                          <SelectItem value="90">Last 90 days</SelectItem>
+                          <SelectItem value="180">Last 180 days</SelectItem>
+                          <SelectItem value="365">Last 365 days</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    <Field label="Maximum orders">
+                      <Select value={temuOrderImportDraft.limit} onValueChange={(value) => setTemuOrderImportDraft((current) => ({ ...current, limit: value }))}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="250">250 orders</SelectItem>
+                          <SelectItem value="500">500 orders</SelectItem>
+                          <SelectItem value="1000">1,000 orders</SelectItem>
+                          <SelectItem value="2500">2,500 orders</SelectItem>
+                          <SelectItem value="5000">5,000 orders</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    <div className="flex items-start justify-between gap-3 rounded-md border bg-muted/20 p-3 sm:col-span-2">
+                      <div><p className="text-sm font-medium">Include canceled orders</p><p className="text-xs text-muted-foreground">Leave this off for the working order queue. Imported cancellations can still be reviewed when needed.</p></div>
+                      <Switch checked={temuOrderImportDraft.includeCanceled} onCheckedChange={(checked) => setTemuOrderImportDraft((current) => ({ ...current, includeCanceled: checked }))} />
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setTemuOrderImportOpen(false)} disabled={temuOrderImportSaving}>Cancel</Button>
+                    <Button onClick={() => void queueTemuOrderImport()} disabled={temuOrderImportSaving}>
+                      {temuOrderImportSaving && <Loader2 className="size-4 animate-spin" />} Import orders
                     </Button>
                   </DialogFooter>
                 </DialogContent>

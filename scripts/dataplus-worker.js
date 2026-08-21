@@ -57,6 +57,7 @@ const SUPPORTED_TASKS = [
   "shopify-taxonomy-push",
   "shopify-status-sync",
   "shopify-inventory-update",
+  "temu-order-import",
   "ai-category-review",
   "ebay-category-auto-map",
   "ebay-taxonomy-sync",
@@ -74,6 +75,7 @@ let lastScheduleCheckAt = 0;
 let lastSkuMapScheduleCheckAt = 0;
 let lastOrderImportScheduleCheckAt = 0;
 let lastEbayOrderImportScheduleCheckAt = 0;
+let lastTemuOrderImportScheduleCheckAt = 0;
 let lastEbayPriceInventoryScheduleCheckAt = 0;
 let lastSupplierReminderScheduleCheckAt = 0;
 let lastVendorFeedScheduleCheckAt = 0;
@@ -788,6 +790,42 @@ async function checkScheduledEbayOrderImport(force = false) {
     dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "IMPORT", path: "ebay-orders", operation: "Scheduled eBay order import", statusCode: 502, ok: false, message: error.message || "Unable to import eBay orders." });
     await postgres.writeStateDocuments({ channelEbayOrderImportSchedules: scheduleState });
     console.error(`[${WORKER_ID}] scheduled eBay order import failed:`, error.message || error);
+    return false;
+  }
+}
+
+async function checkScheduledTemuOrderImport(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastTemuOrderImportScheduleCheckAt < 60000) return false;
+  lastTemuOrderImportScheduleCheckAt = nowMs;
+  const docs = await postgres.readStateDocuments().catch(() => ({})) || {};
+  const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
+  const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "temu");
+  const settings = channel?.settings || {};
+  if (!channel || settings.channelEnabled === false || !settings.temuOrderImportEnabled || !settings.temuOrderImportScheduleEnabled) return false;
+  const now = new Date(nowMs);
+  const dueSlot = dueScheduleSlot(settings, "temuOrderImportSchedule", now);
+  if (!dueSlot) return false;
+  const today = localDateKey(now);
+  const scheduleId = `${channel.id || "temu"}:${today}:${dueSlot}`;
+  const scheduleState = docs.channelTemuOrderImportSchedules && typeof docs.channelTemuOrderImportSchedules === "object" ? docs.channelTemuOrderImportSchedules : {};
+  const previous = scheduleState[scheduleId] || {};
+  if (previous.lastRunDate === today || previous.lastAttemptedDate === today) return false;
+  try {
+    const result = await dataplus.queueTemuOrderImportJob(stateDb, {
+      lookbackDays: settings.temuOrderImportLookbackDays,
+      limit: settings.temuOrderImportLimit,
+      includeCanceled: Boolean(settings.temuOrderImportIncludeCanceled)
+    }, { scheduled: true, scheduleKey: scheduleId, operation: "Scheduled Temu order import" });
+    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "Temu", time: dueSlot, lastRunDate: today, lastAttemptedDate: today, lastRunAt: new Date(nowMs).toISOString(), lastJobId: result.job?.id || "", lastError: result.duplicate ? "A Temu order import is already active." : "" };
+    console.log(`[${WORKER_ID}] ${result.duplicate ? "skipped duplicate" : "queued"} scheduled Temu order import for ${dueSlot} (${result.job?.id || "duplicate"})`);
+    await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
+    return true;
+  } catch (error) {
+    scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "Temu", time: dueSlot, lastAttemptedDate: today, lastAttemptedAt: new Date(nowMs).toISOString(), lastError: error.message || "Unable to import Temu orders." };
+    dataplus.appendChannelApiLog({ channel: "Temu", transport: "Scheduler", method: "IMPORT", path: "temu-orders", operation: "Scheduled Temu order import", statusCode: 502, ok: false, message: error.message || "Unable to import Temu orders." });
+    await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
+    console.error(`[${WORKER_ID}] scheduled Temu order import failed:`, error.message || error);
     return false;
   }
 }
@@ -1537,6 +1575,10 @@ async function runEbayOrderImportJob(job) {
   return dataplus.runEbayOrderImportWorkerJob(job, job.workerPayload || {});
 }
 
+async function runTemuOrderImportJob(job) {
+  return dataplus.runTemuOrderImportWorkerJob(job, job.workerPayload || {});
+}
+
 async function runEbayPriceInventorySyncJob(job) {
   return dataplus.runEbayPriceInventorySyncWorkerJob(job, job.workerPayload || {});
 }
@@ -1821,7 +1863,7 @@ async function runProductDumpImportJob(job) {
 
 async function runJob(job) {
   const task = String(job.workerTask || "").trim();
-  const channelName = task.startsWith("shopify-") ? "Shopify" : task.startsWith("ebay-") ? "eBay" : "";
+  const channelName = task.startsWith("shopify-") ? "Shopify" : task.startsWith("ebay-") ? "eBay" : task.startsWith("temu-") ? "Temu" : "";
   if (channelName) {
     const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
     const channel = (stateDb.connections || []).find((entry) => String(entry?.name || "").trim().toLowerCase() === channelName.toLowerCase());
@@ -1867,6 +1909,7 @@ async function runJob(job) {
   if (task === "ebay-account-settings-sync") return runEbayAccountSettingsSyncJob(job);
   if (task === "ebay-location-sync") return runEbayLocationSyncJob(job);
   if (task === "ebay-order-import") return runEbayOrderImportJob(job);
+  if (task === "temu-order-import") return runTemuOrderImportJob(job);
   if (task === "ebay-price-inventory-sync") return runEbayPriceInventorySyncJob(job);
   if (task === "ebay-listing-launch") return runEbayListingLaunchJob(job);
   if (task === "vendor-feed-import") return runVendorFeedImportJob(job);
@@ -1889,6 +1932,7 @@ async function tick() {
   await checkScheduledShopifySkuPairAudit();
   await checkScheduledShopifyOrderImport();
   await checkScheduledEbayOrderImport();
+  await checkScheduledTemuOrderImport();
   await checkScheduledEbayPriceInventorySync();
   await checkScheduledSupplierReminders();
   const job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS });
