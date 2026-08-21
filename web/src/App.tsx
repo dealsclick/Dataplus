@@ -10660,7 +10660,7 @@ type AuditSupplierCacheEntry = {
 
 const auditSupplierOptionsCache = new Map<string, AuditSupplierCacheEntry>()
 
-function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { auditId: string; auditStatus: string; line: Record<string, unknown>; onAuditUpdate: (audit: Record<string, unknown>) => void }) {
+function AuditSupplierCell({ auditId, auditStatus, line, onLineUpdate }: { auditId: string; auditStatus: string; line: Record<string, unknown>; onLineUpdate: (lineKey: string, line: Record<string, unknown>) => void }) {
   const supplierCount = Number(line.supplierCount || 0)
   const possibleSupplierCount = Number(line.possibleSupplierCount || 0)
   const lineKey = String(line.id || `${String(line.productId || line.sku || "")}::${String(line.locationBin || "")}`)
@@ -10730,11 +10730,32 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
   const assignSupplier = async (supplierKey: string) => {
     setSaving(true)
     try {
-      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(auditId)}/lines/${encodeURIComponent(lineKey)}/supplier`, {
+      const result = await api<{ line?: Record<string, unknown>; selection?: AuditSupplierOption; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(auditId)}/lines/${encodeURIComponent(lineKey)}/supplier`, {
         method: "POST",
         body: JSON.stringify({ supplierKey, user: "Luis" }),
       })
-      if (result.audit) onAuditUpdate(result.audit)
+      const selected = result.selection
+      const nextLine = result.line || (selected ? {
+        ...line,
+        selectedSupplierKey: selected.key,
+        selectedSupplierId: selected.vendorId || "",
+        selectedSupplierName: selected.supplierName,
+        selectedSupplierCode: selected.supplierCode || "",
+        selectedSupplierSku: selected.vendorSku || selected.sourceSku || "",
+        selectedVendorSku: selected.vendorSku || "",
+        selectedManufacturerSku: selected.manufacturerSku || "",
+        selectedSupplierCost: Number(selected.cost || 0),
+        selectedSupplierQty: Number(selected.qty || 0),
+        selectedSupplierMatchType: selected.matchType || "selected",
+        selectedSupplierIndexed: true,
+      } : null)
+      if (nextLine) onLineUpdate(lineKey, nextLine)
+      if (selected) {
+        const cached = auditSupplierOptionsCache.get(supplierCacheKey)
+        if (cached && !cached.options.some((option) => option.key === selected.key)) {
+          auditSupplierOptionsCache.set(supplierCacheKey, { ...cached, options: [selected, ...cached.options] })
+        }
+      }
       setSupplierMenuOpen(false)
       toast.success(result.message || "Supplier assigned.")
     } catch (error) {
@@ -10919,6 +10940,19 @@ function WarehouseAuditPanel({
       snapshot,
       ...current.filter((row) => String(row.id) !== String(snapshot.id)),
     ]);
+  };
+  const applyAuditLineUpdate = (targetLineKey: string, nextLine: Record<string, unknown>) => {
+    const patchAudit = (audit: Record<string, unknown>): Record<string, unknown> => ({
+      ...audit,
+      lines: (Array.isArray(audit.lines) ? audit.lines : []).map((line) => {
+        const row = line as Record<string, unknown>;
+        const rowKey = String(row.id || `${String(row.productId || row.sku || "")}::${String(row.locationBin || "")}`);
+        return rowKey === targetLineKey ? { ...row, ...nextLine } : row;
+      }),
+    });
+    const snapshot = patchAudit((active || resumedAudit || {}) as Record<string, unknown>);
+    setActive(snapshot);
+    setAudits((current) => current.map((audit) => String(audit.id) === String(snapshot.id) ? patchAudit(audit) : audit));
   };
   useEffect(() => {
     void load();
@@ -12275,7 +12309,7 @@ function WarehouseAuditPanel({
                           <div className="min-w-32"><button className="font-mono font-medium hover:underline" onClick={() => setQuickPreviewItem({ sku: String(line.sku), title: String(line.title || line.sku), defaultImage: String(line.image || "") })} title={`Preview catalog SKU ${String(line.sku)}`}>{String(line.selectedSupplierSku || line.selectedVendorSku || line.sku)}</button>{String(line.selectedSupplierSku || line.selectedVendorSku || "") && String(line.selectedSupplierSku || line.selectedVendorSku) !== String(line.sku) && <p className="mt-0.5 text-xs text-muted-foreground">Catalog: {String(line.sku)}</p>}</div>
                         ) : "-"}
                       </TableCell>
-                      <TableCell><AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onAuditUpdate={applyAuditUpdate} /></TableCell>
+                      <TableCell><AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onLineUpdate={applyAuditLineUpdate} /></TableCell>
                       <TableCell className="font-mono text-xs">{String(line.selectedVendorSku || "-")}</TableCell>
                       <TableCell className="font-mono text-xs">{String(line.selectedManufacturerSku || "-")}</TableCell>
                       <TableCell>{Number(line.selectedSupplierCost || 0) > 0 ? moneyLabel(Number(line.selectedSupplierCost)) : "-"}</TableCell>

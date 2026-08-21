@@ -32691,6 +32691,7 @@ async function handleApi(req, res) {
       selectedSupplierKey: selection.key,
       selectedSupplierId: selection.vendorId,
       selectedSupplierName: selection.supplierName,
+      supplierName: selection.supplierName,
       selectedSupplierCode: selection.supplierCode,
       selectedSupplierSku: selection.vendorSku || selection.sourceSku || "",
       selectedVendorSku: selection.vendorSku,
