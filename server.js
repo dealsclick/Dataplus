@@ -37685,7 +37685,10 @@ async function handleApi(req, res) {
             upsertImportJobStore(workJob);
           }
         });
-        await redisCache.deleteByPrefix("dataplus:audit-supplier-options:");
+        await Promise.all([
+          redisCache.deleteByPrefix("dataplus:audit-supplier-options:"),
+          redisCache.deleteByPrefix("dataplus:supplier-coverage:")
+        ]);
         const nextStatus = await postgres.readSupplierIndexStatus();
         finishImportJob(workJob, {
           status: "success",

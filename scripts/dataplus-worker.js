@@ -1408,11 +1408,16 @@ async function runSupplierCoverageRefreshJob(job) {
         writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh supplier index heartbeat:", error.message || error));
       }
     });
-    await redisCache.deleteByPrefix("dataplus:audit-supplier-options:");
+    await Promise.all([
+      redisCache.deleteByPrefix("dataplus:audit-supplier-options:"),
+      redisCache.deleteByPrefix("dataplus:supplier-coverage:")
+    ]);
     const status = await postgres.readSupplierIndexStatus();
     const labels = {
       upc: "UPC",
-      "manufacturer-part-and-brand": "MPN + brand",
+      "vendor-sku": "Vendor SKU",
+      "source-sku": "Source SKU",
+      "approved-vendor-sku": "Approved vendor SKU",
       "approved-mfr-part-number": "Approved MPN",
       "exact-sku": "Exact SKU",
       primary: "Primary supplier"

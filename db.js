@@ -2407,6 +2407,8 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
     if (typeof isCanceled === "function" && isCanceled()) throw new Error("Supplier coverage refresh canceled.");
     await client.query("drop table if exists vendor_supplier_coverage_next");
     await client.query("drop table if exists vendor_supplier_identity_next");
+    await client.query("drop table if exists vendor_mpn_identity_next");
+    await client.query("drop table if exists product_mpn_identity_next");
     await client.query("drop table if exists product_supplier_links_next");
     await client.query(`
       create temporary table vendor_supplier_identity_next as
@@ -2440,6 +2442,35 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
     `);
     await client.query("create index vendor_supplier_identity_next_match_idx on vendor_supplier_identity_next (match_key)");
     await client.query("create index vendor_supplier_identity_next_item_idx on vendor_supplier_identity_next (vendor_id, source_sku)");
+    await client.query(`
+      create temporary table vendor_mpn_identity_next as
+      select distinct
+        item.vendor_id,
+        item.source_sku,
+        lower(trim(item.mfr_part_number)) as mfr_part_number
+      from vendor_catalog_items item
+      where length(trim(coalesce(item.mfr_part_number, ''))) >= 4
+        and lower(trim(item.mfr_part_number)) not in ('none', 'unknown', 'n/a', 'na', 'null', 'misc')
+    `);
+    await client.query("create index vendor_mpn_identity_next_mpn_idx on vendor_mpn_identity_next (mfr_part_number)");
+    await client.query("create index vendor_mpn_identity_next_item_idx on vendor_mpn_identity_next (vendor_id, source_sku)");
+    await client.query(`
+      create temporary table product_mpn_identity_next as
+      select distinct
+        product.product_id,
+        product.sku as product_sku,
+        lower(trim(product.mfr_part_number)) as mfr_part_number
+      from products product
+      where length(trim(coalesce(product.mfr_part_number, ''))) >= 4
+        and lower(trim(product.mfr_part_number)) not in ('none', 'unknown', 'n/a', 'na', 'null', 'misc')
+    `);
+    await client.query("create index product_mpn_identity_next_mpn_idx on product_mpn_identity_next (mfr_part_number)");
+    if (typeof onProgress === "function") onProgress({
+      phase: "supplier_identities",
+      message: "indexed supplier identifiers",
+      processedRows: 1,
+      totalRows: 5
+    });
     await client.query(`
       create temporary table product_supplier_links_next as
       with product_identities as materialized (
@@ -2480,6 +2511,12 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
         and review.match_type in ('manufacturer-part-number', 'linked-vendor-sku')
     `);
     await client.query("create index product_supplier_links_next_product_idx on product_supplier_links_next (product_id)");
+    if (typeof onProgress === "function") onProgress({
+      phase: "supplier_links",
+      message: "linked exact UPC and SKU identifiers",
+      processedRows: 2,
+      totalRows: 5
+    });
     await client.query(`
       create temporary table vendor_supplier_coverage_next as
       select identity.match_key, count(distinct identity.vendor_id)::integer as supplier_count
@@ -2537,10 +2574,13 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
         now(),
         now(),
         now()
-      from products product
+      from product_mpn_identity_next product_identity
+      join products product on product.product_id = product_identity.product_id
+      join vendor_mpn_identity_next supplier_mpn on supplier_mpn.mfr_part_number = product_identity.mfr_part_number
       join vendor_catalog_items item
-        on lower(item.mfr_part_number) = lower(product.mfr_part_number)
-      where length(trim(coalesce(product.mfr_part_number, ''))) >= 4
+        on item.vendor_id = supplier_mpn.vendor_id
+       and item.source_sku = supplier_mpn.source_sku
+      where true
         and not (
           coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), ''), '') <> ''
           and lower(coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''), '')) =
@@ -2564,14 +2604,12 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
       with mpn_seed_items as materialized (
         select distinct
           product.product_id,
-          product.sku as product_sku,
+          product.product_sku,
           product.mfr_part_number,
           seed.vendor_id as seed_vendor_id,
           seed.source_sku as seed_source_sku
-        from products product
-        join vendor_catalog_items seed
-          on lower(trim(seed.mfr_part_number)) = lower(trim(product.mfr_part_number))
-        where length(trim(coalesce(product.mfr_part_number, ''))) >= 4
+        from product_mpn_identity_next product
+        join vendor_mpn_identity_next seed on seed.mfr_part_number = product.mfr_part_number
       ), linked_items as materialized (
         select distinct
           seed.product_id,
@@ -2593,7 +2631,7 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
         join vendor_catalog_items related
           on related.vendor_id = identity.vendor_id
          and related.source_sku = identity.source_sku
-        where lower(trim(coalesce(related.mfr_part_number, ''))) <> lower(trim(seed.mfr_part_number))
+        where lower(trim(coalesce(related.mfr_part_number, ''))) <> seed.mfr_part_number
       )
       insert into supplier_match_reviews (
         match_id,
@@ -2647,6 +2685,12 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
         updated_at = now(),
         last_seen_at = now()
     `);
+    if (typeof onProgress === "function") onProgress({
+      phase: "supplier_candidates",
+      message: "stored MPN and linked vendor-SKU candidates",
+      processedRows: 3,
+      totalRows: 5
+    });
     const productsResult = await client.query(`
       with product_coverage as materialized (
         select
@@ -2683,8 +2727,8 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
     const vendorItemsResult = await client.query(`
       with vendor_item_coverage as materialized (
         select
-          item.vendor_id,
-          item.source_sku,
+          candidate.vendor_id,
+          candidate.source_sku,
           case
             when bool_or(candidate.match_type = 'upc') then 'upc'
             when bool_or(candidate.match_type = 'vendor-sku') then 'vendor-sku'
@@ -2692,17 +2736,9 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
             else 'source-sku'
           end as match_type,
           greatest(count(distinct matched.vendor_id), 1)::integer as supplier_count
-        from vendor_catalog_items item
-        join vendor_supplier_identity_next candidate
-          on candidate.vendor_id = item.vendor_id
-         and candidate.match_key in (
-           case when coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''), '') <> '' then 'barcode:' || lower(coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''))) end,
-           case when coalesce(trim(item.vendor_sku), '') <> '' then 'sku:' || lower(trim(item.vendor_sku)) end,
-           case when coalesce(trim(item.internal_sku), '') <> '' then 'sku:' || lower(trim(item.internal_sku)) end,
-           case when coalesce(trim(item.source_sku), '') <> '' then 'sku:' || lower(trim(item.source_sku)) end
-         )
+        from vendor_supplier_identity_next candidate
         left join vendor_supplier_identity_next matched on matched.match_key = candidate.match_key
-        group by item.vendor_id, item.source_sku
+        group by candidate.vendor_id, candidate.source_sku
       )
       update vendor_catalog_items item
       set
@@ -2720,6 +2756,12 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
           or item.supplier_coverage_updated_at is null
         )
     `);
+    if (typeof onProgress === "function") onProgress({
+      phase: "supplier_coverage_apply",
+      message: "applied stored supplier coverage",
+      processedRows: 4,
+      totalRows: 5
+    });
     await client.query("commit");
     return {
       enabled: true,
