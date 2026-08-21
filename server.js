@@ -26332,8 +26332,8 @@ function auditLineKey(line = {}) {
   return String(line.id || `${line.productId || line.sku || ""}::${line.locationBin || ""}`);
 }
 
-function confirmedSupplierMatch(row = {}) {
-  return ["", "confirmed", "approved"].includes(String(row.matchStatus || "").trim().toLowerCase());
+function selectableAuditSupplierMatch(row = {}) {
+  return !["rejected"].includes(String(row.matchStatus || "").trim().toLowerCase());
 }
 
 async function auditSupplierOptionsForLine(line = {}) {
@@ -26341,7 +26341,7 @@ async function auditSupplierOptionsForLine(line = {}) {
   if (!product) return { product: null, options: [], pendingReviewCount: 0 };
   const cacheVersion = String(product.supplierCoverageUpdatedAt || "unindexed").trim();
   const cacheIdentity = encodeURIComponent(`${String(product.id || product.sku || line.productId || line.sku || "").trim().toLowerCase()}:${cacheVersion}`);
-  const cacheKey = cacheIdentity ? `dataplus:audit-supplier-options:${cacheIdentity}` : "";
+  const cacheKey = cacheIdentity ? `dataplus:audit-supplier-options:v2:${cacheIdentity}` : "";
   if (cacheKey) {
     const cached = await redisCache.getJson(cacheKey);
     if (cached && Array.isArray(cached.options)) {
@@ -26360,7 +26360,7 @@ async function auditSupplierOptionsForLine(line = {}) {
   const matches = [...(coverage.matches || [])];
   const primarySupplier = String(product.supplier || product.vendor || "").trim();
   const primaryVendorSku = String(product.vendorSku || product.sku || "").trim();
-  if (primarySupplier && !matches.some((row) => confirmedSupplierMatch(row)
+  if (primarySupplier && !matches.some((row) => selectableAuditSupplierMatch(row)
     && String(row.supplier || "").trim().toLowerCase() === primarySupplier.toLowerCase())) {
     matches.unshift({
       supplier: primarySupplier,
@@ -26375,7 +26375,7 @@ async function auditSupplierOptionsForLine(line = {}) {
     });
   }
   const bySupplier = new Map();
-  for (const match of matches.filter(confirmedSupplierMatch)) {
+  for (const match of matches.filter(selectableAuditSupplierMatch)) {
     const supplierName = String(match.supplier || "").trim();
     const supplierCode = String(match.supplierCode || "").trim();
     if (!supplierName && !supplierCode) continue;
@@ -26391,10 +26391,20 @@ async function auditSupplierOptionsForLine(line = {}) {
       barcode: String(match.barcode || match.upc || match.gtin || product.barcode || product.upc || product.gtin || "").trim(),
       cost: Number(match.cost || 0),
       qty: Number(match.qty || 0),
-      matchType: String(match.matchType || coverage.matchType || "").trim()
+      matchType: String(match.matchType || coverage.matchType || "").trim(),
+      matchStatus: String(match.matchStatus || "confirmed").trim().toLowerCase(),
+      requiresReview: Boolean(match.requiresReview || String(match.matchStatus || "").trim().toLowerCase() === "pending"),
+      reviewId: String(match.reviewId || "").trim(),
+      confidence: match.confidence == null ? null : Number(match.confidence)
     };
     const current = bySupplier.get(key);
-    if (!current || (option.cost > 0 && (Number(current.cost || 0) <= 0 || option.cost < Number(current.cost || 0)))) bySupplier.set(key, option);
+    const optionConfirmed = !option.requiresReview;
+    const currentConfirmed = current && !current.requiresReview;
+    if (!current
+      || (optionConfirmed && !currentConfirmed)
+      || (optionConfirmed === currentConfirmed && option.cost > 0 && (Number(current.cost || 0) <= 0 || option.cost < Number(current.cost || 0)))) {
+      bySupplier.set(key, option);
+    }
   }
   const result = {
     product,
@@ -33118,9 +33128,25 @@ async function handleApi(req, res) {
     }
     const supplierKey = String(body.supplierKey || "").trim().toLowerCase();
     const selection = result.options.find((option) => String(option.key || "").trim().toLowerCase() === supplierKey);
-    if (!selection) return sendJson(res, 400, { error: "Choose a confirmed supplier for this SKU." });
+    if (!selection) return sendJson(res, 400, { error: "Choose an available supplier for this SKU." });
     const now = new Date().toISOString();
     const selectedBy = String(body.user || "Warehouse user").trim() || "Warehouse user";
+    if (selection.requiresReview) {
+      if (!selection.reviewId) return sendJson(res, 409, { error: "This supplier match needs review but has no review record. Refresh the supplier choices and try again." });
+      const review = await postgres.reviewSupplierMatch({
+        matchId: selection.reviewId,
+        productId: result.product?.id,
+        status: "approved",
+        reviewedBy: selectedBy
+      });
+      if (!review) return sendJson(res, 409, { error: "The supplier match changed before it could be approved. Refresh the supplier choices and try again." });
+      selection.requiresReview = false;
+      selection.matchStatus = "approved";
+      selection.matchType = selection.matchType === "manufacturer-part-number" ? "approved-mfr-part-number" : selection.matchType;
+      await redisCache.deleteByPrefix("dataplus:audit-supplier-options:");
+      await redisCache.deleteByPrefix("dataplus:supplier-coverage:");
+      await redisCache.deleteByPrefix("dataplus:product-detail:");
+    }
     Object.assign(line, {
       selectedSupplierKey: selection.key,
       selectedSupplierId: selection.vendorId,
