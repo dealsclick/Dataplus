@@ -3352,7 +3352,7 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
 
   const productId = nullableString(identity.productId || identity.id || "");
   const sku = nullableString(identity.sku || identity.internalSku || "");
-  const barcode = canonicalSupplierBarcode(identity.barcode || identity.upc || identity.gtin || "");
+  const barcodeVariants = supplierBarcodeVariants(identity.barcode || identity.upc || identity.gtin || "");
   const mfrPartNumber = nullableString(identity.mfrPartNumber || identity.manufacturerPartNumber || "");
   const queryTimeoutMs = Math.max(0, Math.min(30000, Number(identity.queryTimeoutMs || 0)));
   const result = await client.query({
@@ -3364,11 +3364,11 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
         v.name as supplier_name,
         v.code as supplier_code,
         case
-          when $1 <> '' and (
-            ${canonicalSupplierBarcodeSql("vci.barcode")} = $1
-            or ${canonicalSupplierBarcodeSql("vci.raw ->> 'upc'")} = $1
-            or ${canonicalSupplierBarcodeSql("vci.raw ->> 'gtin'")} = $1
-            or ${canonicalSupplierBarcodeSql("vci.raw ->> 'upcCode'")} = $1
+          when cardinality($1::text[]) > 0 and (
+            lower(coalesce(vci.barcode, '')) = any($1::text[])
+            or lower(coalesce(vci.raw ->> 'upc', '')) = any($1::text[])
+            or lower(coalesce(vci.raw ->> 'gtin', '')) = any($1::text[])
+            or lower(coalesce(vci.raw ->> 'upcCode', '')) = any($1::text[])
           ) then 'upc'
           when $3 <> '' and lower(coalesce(vci.vendor_sku, '')) = lower($3) then 'vendor-sku'
           when $3 <> '' and lower(coalesce(vci.source_sku, '')) = lower($3) then 'source-sku'
@@ -3376,11 +3376,11 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
         end as coverage_match_type
       from vendor_catalog_items vci
       left join vendors v on v.vendor_id = vci.vendor_id
-      where ($1 <> '' and (
-          ${canonicalSupplierBarcodeSql("vci.barcode")} = $1
-          or ${canonicalSupplierBarcodeSql("vci.raw ->> 'upc'")} = $1
-          or ${canonicalSupplierBarcodeSql("vci.raw ->> 'gtin'")} = $1
-          or ${canonicalSupplierBarcodeSql("vci.raw ->> 'upcCode'")} = $1
+      where (cardinality($1::text[]) > 0 and (
+          lower(coalesce(vci.barcode, '')) = any($1::text[])
+          or lower(coalesce(vci.raw ->> 'upc', '')) = any($1::text[])
+          or lower(coalesce(vci.raw ->> 'gtin', '')) = any($1::text[])
+          or lower(coalesce(vci.raw ->> 'upcCode', '')) = any($1::text[])
         ))
         or ($3 <> '' and (
           lower(coalesce(vci.source_sku, '')) = lower($3)
@@ -3394,7 +3394,7 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
       matched.last_seen_at desc nulls last
     limit 250
   `,
-    values: [barcode || "", mfrPartNumber || "", sku || ""],
+    values: [barcodeVariants, mfrPartNumber || "", sku || ""],
     ...(queryTimeoutMs ? { query_timeout: queryTimeoutMs } : {})
   });
   const rows = result.rows;
@@ -3538,6 +3538,18 @@ function canonicalSupplierBarcode(value) {
   return /^\d{8,14}$/.test(normalized) ? normalized.padStart(14, "0") : normalized;
 }
 
+function supplierBarcodeVariants(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return [];
+  if (!/^\d{8,14}$/.test(normalized)) return [normalized];
+  const unpadded = normalized.replace(/^0+/, "") || "0";
+  const variants = new Set([normalized, unpadded]);
+  for (const length of [8, 12, 13, 14]) {
+    if (unpadded.length <= length) variants.add(unpadded.padStart(length, "0"));
+  }
+  return [...variants];
+}
+
 function canonicalSupplierBarcodeSql(expression) {
   const normalized = `lower(trim(coalesce(${expression}, '')))`;
   return `(case when ${normalized} ~ '^[0-9]{8,14}$' then lpad(${normalized}, 14, '0') else ${normalized} end)`;
@@ -3557,25 +3569,26 @@ async function ensureProductSupplierIdentifierMatches(client, { productId = "", 
 
   const productSku = normalizedSupplierIdentifier(product.sku);
   const productBarcode = canonicalSupplierBarcode(product.barcode);
+  const productBarcodeVariants = supplierBarcodeVariants(product.barcode);
   const productMpn = normalizedSupplierIdentifier(product.mfr_part_number);
   const exactResult = await client.query({
     text: `
       with candidates as (
-        select item.vendor_id, item.source_sku, 'upc'::text as match_type, 'barcode:' || $1 as match_key, 0 as priority
+        select item.vendor_id, item.source_sku, 'upc'::text as match_type, 'barcode:' || $2 as match_key, 0 as priority
         from vendor_catalog_items item
-        where $1 <> '' and ${canonicalSupplierBarcodeSql("item.barcode")} = $1
+        where cardinality($1::text[]) > 0 and lower(item.barcode) = any($1::text[])
         union all
-        select item.vendor_id, item.source_sku, 'vendor-sku', 'sku:' || $2, 1
+        select item.vendor_id, item.source_sku, 'vendor-sku', 'sku:' || $3, 1
         from vendor_catalog_items item
-        where $2 <> '' and lower(item.vendor_sku) = $2
+        where $3 <> '' and lower(item.vendor_sku) = $3
         union all
-        select item.vendor_id, item.source_sku, 'exact-sku', 'sku:' || $2, 2
+        select item.vendor_id, item.source_sku, 'exact-sku', 'sku:' || $3, 2
         from vendor_catalog_items item
-        where $2 <> '' and lower(item.internal_sku) = $2
+        where $3 <> '' and lower(item.internal_sku) = $3
         union all
-        select item.vendor_id, item.source_sku, 'source-sku', 'sku:' || $2, 3
+        select item.vendor_id, item.source_sku, 'source-sku', 'sku:' || $3, 3
         from vendor_catalog_items item
-        where $2 <> '' and lower(item.source_sku) = $2
+        where $3 <> '' and lower(item.source_sku) = $3
       )
       select distinct on (vendor_id, source_sku)
         vendor_id, source_sku, match_type, match_key
@@ -3583,7 +3596,7 @@ async function ensureProductSupplierIdentifierMatches(client, { productId = "", 
       order by vendor_id, source_sku, priority
       limit 500
     `,
-    values: [productBarcode, productSku],
+    values: [productBarcodeVariants, productBarcode, productSku],
     query_timeout: 10000
   });
   if (exactResult.rows.length) {
