@@ -2422,6 +2422,8 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
   if (!catalogPool) return { enabled: false, keys: 0 };
   await initRelationalSchema();
   const client = await catalogPool.connect();
+  const vendorBarcodeValueSql = "coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''), '')";
+  const productBarcodeValueSql = "coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), ''), '')";
   if (typeof onProgress === "function") onProgress({
     phase: "supplier_coverage_prepare",
     message: "preparing supplier identifier index",
@@ -2448,8 +2450,8 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
       cross join lateral (values
         (
           case
-            when coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''), '') <> ''
-              then 'barcode:' || lower(coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), '')))
+            when ${vendorBarcodeValueSql} <> ''
+              then 'barcode:' || ${canonicalSupplierBarcodeSql(vendorBarcodeValueSql)}
             else null
           end,
           'upc'
@@ -2506,8 +2508,8 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
         cross join lateral (values
           (
             case
-              when coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), ''), '') <> ''
-                then 'barcode:' || lower(coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), '')))
+              when ${productBarcodeValueSql} <> ''
+                then 'barcode:' || ${canonicalSupplierBarcodeSql(productBarcodeValueSql)}
               else null
             end,
             'upc'
@@ -2609,9 +2611,8 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
        and item.source_sku = supplier_mpn.source_sku
       where true
         and not (
-          coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), ''), '') <> ''
-          and lower(coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''), '')) =
-            lower(coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), ''), ''))
+          ${productBarcodeValueSql} <> ''
+          and ${canonicalSupplierBarcodeSql(vendorBarcodeValueSql)} = ${canonicalSupplierBarcodeSql(productBarcodeValueSql)}
         )
         and lower(trim(product.sku)) not in (
           lower(trim(item.source_sku)),
@@ -3182,6 +3183,7 @@ async function readVendorCatalogSupplierCoverageBySkus(skus = []) {
     .filter(Boolean))];
   if (!values.length) return [];
   await initRelationalSchema();
+  const seedBarcodeValueSql = "coalesce(nullif(trim(seed.barcode), ''), nullif(trim(seed.raw ->> 'upc'), ''), nullif(trim(seed.raw ->> 'gtin'), ''), nullif(trim(seed.raw ->> 'upcCode'), ''), '')";
   const result = await client.query(`
     with input_skus as (
       select distinct unnest($1::text[]) as input_sku
@@ -3219,8 +3221,8 @@ async function readVendorCatalogSupplierCoverageBySkus(skus = []) {
       cross join lateral (values
         (
           case
-            when coalesce(nullif(trim(seed.barcode), ''), nullif(trim(seed.raw ->> 'upc'), ''), nullif(trim(seed.raw ->> 'gtin'), ''), nullif(trim(seed.raw ->> 'upcCode'), ''), '') <> ''
-              then 'barcode:' || lower(coalesce(nullif(trim(seed.barcode), ''), nullif(trim(seed.raw ->> 'upc'), ''), nullif(trim(seed.raw ->> 'gtin'), ''), nullif(trim(seed.raw ->> 'upcCode'), '')))
+            when ${seedBarcodeValueSql} <> ''
+              then 'barcode:' || ${canonicalSupplierBarcodeSql(seedBarcodeValueSql)}
             else null
           end,
           'upc'
@@ -3350,7 +3352,7 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
 
   const productId = nullableString(identity.productId || identity.id || "");
   const sku = nullableString(identity.sku || identity.internalSku || "");
-  const barcode = nullableString(identity.barcode || identity.upc || identity.gtin || "");
+  const barcode = canonicalSupplierBarcode(identity.barcode || identity.upc || identity.gtin || "");
   const mfrPartNumber = nullableString(identity.mfrPartNumber || identity.manufacturerPartNumber || "");
   const queryTimeoutMs = Math.max(0, Math.min(30000, Number(identity.queryTimeoutMs || 0)));
   const result = await client.query({
@@ -3363,10 +3365,10 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
         v.code as supplier_code,
         case
           when $1 <> '' and (
-            lower(coalesce(vci.barcode, '')) = lower($1)
-            or vci.raw ->> 'upc' = $1
-            or vci.raw ->> 'gtin' = $1
-            or vci.raw ->> 'upcCode' = $1
+            ${canonicalSupplierBarcodeSql("vci.barcode")} = $1
+            or ${canonicalSupplierBarcodeSql("vci.raw ->> 'upc'")} = $1
+            or ${canonicalSupplierBarcodeSql("vci.raw ->> 'gtin'")} = $1
+            or ${canonicalSupplierBarcodeSql("vci.raw ->> 'upcCode'")} = $1
           ) then 'upc'
           when $3 <> '' and lower(coalesce(vci.vendor_sku, '')) = lower($3) then 'vendor-sku'
           when $3 <> '' and lower(coalesce(vci.source_sku, '')) = lower($3) then 'source-sku'
@@ -3375,10 +3377,10 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
       from vendor_catalog_items vci
       left join vendors v on v.vendor_id = vci.vendor_id
       where ($1 <> '' and (
-          lower(coalesce(vci.barcode, '')) = lower($1)
-          or vci.raw ->> 'upc' = $1
-          or vci.raw ->> 'gtin' = $1
-          or vci.raw ->> 'upcCode' = $1
+          ${canonicalSupplierBarcodeSql("vci.barcode")} = $1
+          or ${canonicalSupplierBarcodeSql("vci.raw ->> 'upc'")} = $1
+          or ${canonicalSupplierBarcodeSql("vci.raw ->> 'gtin'")} = $1
+          or ${canonicalSupplierBarcodeSql("vci.raw ->> 'upcCode'")} = $1
         ))
         or ($3 <> '' and (
           lower(coalesce(vci.source_sku, '')) = lower($3)
@@ -3530,6 +3532,17 @@ function normalizedSupplierIdentifier(value) {
   return normalized;
 }
 
+function canonicalSupplierBarcode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "";
+  return /^\d{8,14}$/.test(normalized) ? normalized.padStart(14, "0") : normalized;
+}
+
+function canonicalSupplierBarcodeSql(expression) {
+  const normalized = `lower(trim(coalesce(${expression}, '')))`;
+  return `(case when ${normalized} ~ '^[0-9]{8,14}$' then lpad(${normalized}, 14, '0') else ${normalized} end)`;
+}
+
 async function ensureProductSupplierIdentifierMatches(client, { productId = "", sku = "" } = {}) {
   const productResult = await client.query(`
     select product_id, sku, mfr_part_number, barcode, brand, title, marketplace_title
@@ -3543,14 +3556,14 @@ async function ensureProductSupplierIdentifierMatches(client, { productId = "", 
   if (!product) return;
 
   const productSku = normalizedSupplierIdentifier(product.sku);
-  const productBarcode = normalizedSupplierIdentifier(product.barcode);
+  const productBarcode = canonicalSupplierBarcode(product.barcode);
   const productMpn = normalizedSupplierIdentifier(product.mfr_part_number);
   const exactResult = await client.query({
     text: `
       with candidates as (
         select item.vendor_id, item.source_sku, 'upc'::text as match_type, 'barcode:' || $1 as match_key, 0 as priority
         from vendor_catalog_items item
-        where $1 <> '' and lower(item.barcode) = $1
+        where $1 <> '' and ${canonicalSupplierBarcodeSql("item.barcode")} = $1
         union all
         select item.vendor_id, item.source_sku, 'vendor-sku', 'sku:' || $2, 1
         from vendor_catalog_items item
