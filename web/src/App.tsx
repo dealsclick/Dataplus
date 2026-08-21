@@ -9,6 +9,7 @@ import {
   AlertCircle,
   AlertTriangle,
   Archive,
+  ArrowRight,
   Bell,
   Boxes,
   CheckCircle2,
@@ -374,6 +375,40 @@ type ChannelSettings = {
   ebayWebhookEndpoint?: string
   ebayWebhookVerificationToken?: string
   ebayNotificationAlertEmail?: string
+  whatnotApiEnvironment?: string
+  whatnotGraphqlEndpoint?: string
+  whatnotAuthMode?: string
+  whatnotOAuthClientId?: string
+  whatnotOAuthRedirectUri?: string
+  whatnotScopes?: string[]
+  whatnotProductSyncEnabled?: boolean
+  whatnotListingSyncEnabled?: boolean
+  whatnotInventorySyncEnabled?: boolean
+  whatnotOrderImportEnabled?: boolean
+  whatnotTrackingUploadEnabled?: boolean
+  whatnotShipmentLabelEnabled?: boolean
+  whatnotWebhookEnabled?: boolean
+  whatnotWebhookEndpoint?: string
+  whatnotWebhookTopics?: string[]
+  whatnotWebhookSecretConfigured?: boolean
+  whatnotOrderImportLookbackDays?: number
+  whatnotOrderImportLimit?: number
+  whatnotOrderImportScheduleEnabled?: boolean
+  whatnotOrderImportScheduleType?: string
+  whatnotOrderImportScheduleTimes?: string
+  whatnotOrderImportScheduleEveryHours?: number
+  whatnotBulkOperationsEnabled?: boolean
+  whatnotBulkOperationPollSeconds?: number
+  whatnotTaxonomySyncEnabled?: boolean
+  whatnotDefaultListingType?: string
+  whatnotDefaultCondition?: string
+  whatnotAutoPublishListings?: boolean
+  whatnotRequireShippingProfile?: boolean
+  whatnotAutoCreateShippingProfile?: boolean
+  whatnotDefaultShippingProfileId?: string
+  whatnotDefaultLivestreamId?: string
+  whatnotAssignListingsToLivestream?: boolean
+  whatnotAuctionSuddenDeathEnabled?: boolean
   roundingRule?: string
   [key: string]: unknown
 }
@@ -2367,6 +2402,10 @@ function JobsPage({
   const [dataSourceFeeds, setDataSourceFeeds] = useState<VendorFeedSchedule[]>([])
   const shopify = channels.find((channel) => String(channel.name || "").toLowerCase() === "shopify")
   const shopifySettings = shopify?.settings || {}
+  const ebay = channels.find((channel) => String(channel.name || "").toLowerCase() === "ebay")
+  const ebaySettings = ebay?.settings || {}
+  const temu = channels.find((channel) => String(channel.name || "").toLowerCase() === "temu")
+  const temuSettings = temu?.settings || {}
   useEffect(() => {
     if (tab !== "scheduled") return
     let cancelled = false
@@ -2406,6 +2445,8 @@ function JobsPage({
     { name: "Shopify inventory update", owner: "Shopify", enabled: Boolean(shopifySettings.inventoryScheduleEnabled), timing: scheduleDescription(shopifySettings.inventoryScheduleType, shopifySettings.inventoryScheduleTimes, shopifySettings.inventoryScheduleEveryHours, "03:00, 13:00"), behavior: String(shopifySettings.inventoryScheduleMode || "dry-run") === "apply" ? "Pushes inventory to Shopify" : "Runs a Shopify inventory dry run", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify SKU pair audit", owner: "Shopify", enabled: Boolean(shopifySettings.shopifySkuMapScheduleEnabled), timing: `Daily at ${String(shopifySettings.shopifySkuMapScheduleTime || "02:00")}`, behavior: "Checks the Shopify product and variant pair for every mapped SKU", location: "/channels?tab=setup#shopify-schedules", managed: true },
     { name: "Shopify order reconciliation", owner: "Shopify", enabled: Boolean(shopifySettings.shopifyOrderImportEnabled) && Boolean(shopifySettings.shopifyOrderImportScheduleEnabled), timing: scheduleDescription(shopifySettings.shopifyOrderImportScheduleType, shopifySettings.shopifyOrderImportScheduleTimes, shopifySettings.shopifyOrderImportScheduleEveryHours, "04:00, 16:00"), behavior: `Imports allowed sources: ${String(shopifySettings.shopifyOrderImportSources || "Native Shopify sources")}`, location: "/channels?tab=setup#shopify-order-import", managed: true },
+    { name: "eBay order import", owner: "eBay", enabled: Boolean(ebaySettings.ebayOrderImportEnabled) && Boolean(ebaySettings.ebayOrderImportScheduleEnabled), timing: scheduleDescription(ebaySettings.ebayOrderImportScheduleType, ebaySettings.ebayOrderImportScheduleTimes, ebaySettings.ebayOrderImportScheduleEveryHours, "05:00, 17:00"), behavior: `Imports up to ${numberLabel(Number(ebaySettings.ebayOrderImportLimit || 250))} changed orders`, location: "/channels?tab=setup", managed: true },
+    { name: "Temu order import", owner: "Temu", enabled: Boolean(temuSettings.temuOrderImportEnabled) && Boolean(temuSettings.temuOrderImportScheduleEnabled), timing: scheduleDescription(temuSettings.temuOrderImportScheduleType, temuSettings.temuOrderImportScheduleTimes, temuSettings.temuOrderImportScheduleEveryHours, "05:00, 17:00"), behavior: `Imports up to ${numberLabel(Number(temuSettings.temuOrderImportLimit || 250))} changed orders`, location: "/channels?tab=setup", managed: true },
     { name: "Overdue PO reminders", owner: "System", enabled: Boolean(systemSettings.smtpReminderScheduleEnabled), timing: `Daily at ${String(systemSettings.smtpReminderScheduleTime || "08:00")}`, behavior: "Emails enabled supplier reminders for overdue purchase orders", location: "/settings#email-schedule", managed: true },
     { name: "Shopify price sync", owner: "Shopify", enabled: false, timing: "Manual only", behavior: "Pushes approved calculated prices to linked Shopify variants.", location: "/channels?tab=actions", managed: false },
     { name: "Shopify product/status/taxonomy sync", owner: "Shopify", enabled: false, timing: "Manual only", behavior: "Creates products and pushes status or taxonomy changes after review.", location: "/channels?tab=actions", managed: false },
@@ -3049,6 +3090,7 @@ function ChannelDetail({
   const isShopify = channel.name?.toLowerCase() === "shopify"
   const isEbay = channel.name?.toLowerCase() === "ebay"
   const isTemu = channel.name?.toLowerCase() === "temu"
+  const isWhatnot = channel.name?.toLowerCase() === "whatnot"
   const settings = { ...(channel.settings || {}), ...draft }
   const channelEnabled = settings.channelEnabled !== false
   const shippingProfiles = Array.isArray(channel.settings?.shopifyShippingProfiles) ? channel.settings.shopifyShippingProfiles : []
@@ -3061,6 +3103,13 @@ function ChannelDetail({
   const ebayOrderImportScheduleTimes = String(settings.ebayOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
   const temuOrderImportScheduleTimes = String(settings.temuOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
   const ebayPriceInventorySyncScheduleTimes = String(settings.ebayPriceInventorySyncScheduleTimes || "04:00,16:00").split(/[,;\s]+/).filter(Boolean)
+  const whatnotOrderImportScheduleTimes = String(settings.whatnotOrderImportScheduleTimes || "05:00,17:00").split(/[,;\s]+/).filter(Boolean)
+  const whatnotDefaultWebhookEndpoint = `${window.location.origin}/api/webhooks/whatnot`
+  const whatnotWebhookEndpoint = String(settings.whatnotWebhookEndpoint || whatnotDefaultWebhookEndpoint)
+  const whatnotScopes = Array.isArray(settings.whatnotScopes) ? settings.whatnotScopes : []
+  const whatnotWebhookTopics = Array.isArray(settings.whatnotWebhookTopics) ? settings.whatnotWebhookTopics : []
+  const whatnotAvailableScopes = ["read:inventory", "write:inventory", "read:orders", "write:orders", "read:customers", "read:shipments", "write:shipments"]
+  const whatnotAvailableWebhookTopics = ["product/sold", "bulk_operation/finished", "listing/created", "listing/updated", "order/created", "order/updated", "livestream/created", "livestream/stopped", "livestream/product_added", "livestream/product_removed", "shipment/label_created"]
   const shopifyWarehouseMappings: ShopifyWarehouseMapping[] = Array.isArray(settings.warehouseMappings) && settings.warehouseMappings.length
     ? settings.warehouseMappings as ShopifyWarehouseMapping[]
     : Array.isArray(settings.shopifyWarehouseMappings)
@@ -3162,6 +3211,11 @@ function ChannelDetail({
 
   function update(field: string, value: unknown) {
     setDraft((current) => ({ ...current, [field]: value }))
+  }
+
+  function updateStringList(field: string, currentValues: string[], value: string, checked: boolean) {
+    const next = checked ? [...new Set([...currentValues, value])] : currentValues.filter((item) => item !== value)
+    update(field, next)
   }
 
   function updateShopifyWarehouseMapping(id: string, patch: Partial<ShopifyWarehouseMapping>) {
@@ -3900,6 +3954,54 @@ function ChannelDetail({
                 <Field label="Import every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings.temuOrderImportScheduleEveryHours ?? 12)} onChange={(event) => update("temuOrderImportScheduleEveryHours", Number(event.target.value || 12))} /></Field>
                 <ToggleField label="Schedule Temu order imports" checked={Boolean(settings.temuOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.temuOrderImportEnabled)} onCheckedChange={(value) => update("temuOrderImportScheduleEnabled", value)} />
               </>}
+              {isWhatnot && <>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Whatnot Seller API</p><p className="pt-1 text-xs text-muted-foreground">Whatnot is GraphQL-based and currently gated by Seller API access. Store secrets in runtime credentials before enabling live jobs.</p></div>
+                <Field label="Environment"><Select disabled={!editing} value={String(settings.whatnotApiEnvironment || "staging")} onValueChange={(value) => { update("whatnotApiEnvironment", value); update("whatnotGraphqlEndpoint", value === "production" ? "https://api.whatnot.com/seller-api/graphql" : "https://api.stage.whatnot.com/seller-api/graphql") }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="staging">Staging</SelectItem><SelectItem value="production">Production</SelectItem></SelectContent></Select></Field>
+                <Field label="GraphQL endpoint"><Input disabled={!editing} value={String(settings.whatnotGraphqlEndpoint || "https://api.stage.whatnot.com/seller-api/graphql")} onChange={(event) => update("whatnotGraphqlEndpoint", event.target.value)} /></Field>
+                <Field label="Auth mode"><Select disabled={!editing} value={String(settings.whatnotAuthMode || "seller-api-key")} onValueChange={(value) => update("whatnotAuthMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="seller-api-key">Seller API key</SelectItem><SelectItem value="oauth">OAuth partner app</SelectItem></SelectContent></Select></Field>
+                <Field label="OAuth client ID"><Input disabled={!editing || settings.whatnotAuthMode !== "oauth"} value={String(settings.whatnotOAuthClientId || "")} placeholder="Provided by Whatnot" onChange={(event) => update("whatnotOAuthClientId", event.target.value)} /></Field>
+                <Field label="OAuth redirect URI"><Input disabled={!editing || settings.whatnotAuthMode !== "oauth"} value={String(settings.whatnotOAuthRedirectUri || `${window.location.origin}/auth/whatnot/callback`)} onChange={(event) => update("whatnotOAuthRedirectUri", event.target.value)} /></Field>
+                <div className="col-span-full grid gap-2 rounded-md border bg-muted/20 p-3">
+                  <p className="text-sm font-medium">Requested API scopes</p>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{whatnotAvailableScopes.map((scope) => <label key={scope} className="flex items-center gap-2 rounded border bg-background p-2 text-sm"><Checkbox disabled={!editing} checked={whatnotScopes.includes(scope)} onCheckedChange={(checked) => updateStringList("whatnotScopes", whatnotScopes, scope, checked === true)} /><span className="font-mono text-xs">{scope}</span></label>)}</div>
+                </div>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Enabled Whatnot features</p></div>
+                <ToggleField label="Sync products" checked={Boolean(settings.whatnotProductSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("whatnotProductSyncEnabled", value)} />
+                <ToggleField label="Sync listings" checked={Boolean(settings.whatnotListingSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("whatnotListingSyncEnabled", value)} />
+                <ToggleField label="Sync inventory quantity" checked={Boolean(settings.whatnotInventorySyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("whatnotInventorySyncEnabled", value)} />
+                <ToggleField label="Import orders" checked={Boolean(settings.whatnotOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("whatnotOrderImportEnabled", value)} />
+                <ToggleField label="Upload tracking" checked={Boolean(settings.whatnotTrackingUploadEnabled)} disabled={!editing} onCheckedChange={(value) => update("whatnotTrackingUploadEnabled", value)} />
+                <ToggleField label="Generate labels" checked={Boolean(settings.whatnotShipmentLabelEnabled)} disabled={!editing} onCheckedChange={(value) => update("whatnotShipmentLabelEnabled", value)} />
+                <ToggleField label="Use bulk operations" checked={settings.whatnotBulkOperationsEnabled !== false} disabled={!editing} onCheckedChange={(value) => update("whatnotBulkOperationsEnabled", value)} />
+                <ToggleField label="Sync taxonomy" checked={settings.whatnotTaxonomySyncEnabled !== false} disabled={!editing} onCheckedChange={(value) => update("whatnotTaxonomySyncEnabled", value)} />
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Whatnot webhooks</p><p className="pt-1 text-xs text-muted-foreground">Whatnot signs events with X-Whatnot-Webhook-Signature. During Developer Preview, subscriptions must be requested from Whatnot with the endpoint and topic list.</p></div>
+                <Field label="Webhook endpoint"><Input disabled={!editing} value={whatnotWebhookEndpoint} placeholder={whatnotDefaultWebhookEndpoint} onChange={(event) => update("whatnotWebhookEndpoint", event.target.value)} /></Field>
+                <ToggleField label="Enable signed webhook processing" checked={Boolean(settings.whatnotWebhookEnabled)} disabled={!editing} onCheckedChange={(value) => update("whatnotWebhookEnabled", value)} />
+                <ToggleField label="Webhook secret configured" checked={Boolean(settings.whatnotWebhookSecretConfigured)} disabled={!editing} onCheckedChange={(value) => update("whatnotWebhookSecretConfigured", value)} />
+                <div className="col-span-full grid gap-2 rounded-md border bg-muted/20 p-3">
+                  <p className="text-sm font-medium">Subscribed topics</p>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{whatnotAvailableWebhookTopics.map((topic) => <label key={topic} className="flex items-center gap-2 rounded border bg-background p-2 text-sm"><Checkbox disabled={!editing} checked={whatnotWebhookTopics.includes(topic)} onCheckedChange={(checked) => updateStringList("whatnotWebhookTopics", whatnotWebhookTopics, topic, checked === true)} /><span className="font-mono text-xs">{topic}</span></label>)}</div>
+                </div>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Order import</p></div>
+                <Field label="Manual import lookback days"><Input disabled={!editing} type="number" min="1" max="365" value={String(settings.whatnotOrderImportLookbackDays ?? 30)} onChange={(event) => update("whatnotOrderImportLookbackDays", Number(event.target.value || 30))} /></Field>
+                <Field label="Orders per import"><Input disabled={!editing} type="number" min="1" max="5000" value={String(settings.whatnotOrderImportLimit ?? 250)} onChange={(event) => update("whatnotOrderImportLimit", Number(event.target.value || 250))} /></Field>
+                <Field label="Import schedule"><Select disabled={!editing} value={String(settings.whatnotOrderImportScheduleType || "times")} onValueChange={(value) => update("whatnotOrderImportScheduleType", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="times">Specific times</SelectItem><SelectItem value="interval">Every X hours</SelectItem></SelectContent></Select></Field>
+                <Field label="First scheduled import"><Input disabled={!editing} type="time" value={whatnotOrderImportScheduleTimes[0] || "05:00"} onChange={(event) => update("whatnotOrderImportScheduleTimes", [event.target.value, whatnotOrderImportScheduleTimes[1] || "17:00"].join(","))} /></Field>
+                <Field label="Second scheduled import"><Input disabled={!editing} type="time" value={whatnotOrderImportScheduleTimes[1] || "17:00"} onChange={(event) => update("whatnotOrderImportScheduleTimes", [whatnotOrderImportScheduleTimes[0] || "05:00", event.target.value].join(","))} /></Field>
+                <Field label="Import every hours"><Input disabled={!editing} type="number" min="1" max="24" value={String(settings.whatnotOrderImportScheduleEveryHours ?? 12)} onChange={(event) => update("whatnotOrderImportScheduleEveryHours", Number(event.target.value || 12))} /></Field>
+                <ToggleField label="Schedule Whatnot order imports" checked={Boolean(settings.whatnotOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.whatnotOrderImportEnabled)} onCheckedChange={(value) => update("whatnotOrderImportScheduleEnabled", value)} />
+                <Field label="Bulk poll seconds"><Input disabled={!editing || settings.whatnotBulkOperationsEnabled === false} type="number" min="5" max="300" value={String(settings.whatnotBulkOperationPollSeconds ?? 30)} onChange={(event) => update("whatnotBulkOperationPollSeconds", Number(event.target.value || 30))} /></Field>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Product and live selling defaults</p></div>
+                <Field label="Default listing type"><Select disabled={!editing} value={String(settings.whatnotDefaultListingType || "buy_it_now")} onValueChange={(value) => update("whatnotDefaultListingType", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="buy_it_now">Buy it now</SelectItem><SelectItem value="auction">Auction</SelectItem><SelectItem value="giveaway">Giveaway</SelectItem></SelectContent></Select></Field>
+                <Field label="Default condition"><Input disabled={!editing} value={String(settings.whatnotDefaultCondition || "NEW")} onChange={(event) => update("whatnotDefaultCondition", event.target.value)} /></Field>
+                <Field label="Default shipping profile ID"><Input disabled={!editing} value={String(settings.whatnotDefaultShippingProfileId || "")} placeholder="Whatnot ShippingProfile ID" onChange={(event) => update("whatnotDefaultShippingProfileId", event.target.value)} /></Field>
+                <Field label="Default livestream ID"><Input disabled={!editing} value={String(settings.whatnotDefaultLivestreamId || "")} placeholder="Optional Whatnot Livestream ID" onChange={(event) => update("whatnotDefaultLivestreamId", event.target.value)} /></Field>
+                <ToggleField label="Auto-create shipping profiles" checked={settings.whatnotAutoCreateShippingProfile !== false} disabled={!editing} onCheckedChange={(value) => update("whatnotAutoCreateShippingProfile", value)} />
+                <ToggleField label="Require shipping profile before publish" checked={settings.whatnotRequireShippingProfile !== false} disabled={!editing} onCheckedChange={(value) => update("whatnotRequireShippingProfile", value)} />
+                <ToggleField label="Auto-publish listings" checked={Boolean(settings.whatnotAutoPublishListings)} disabled={!editing} onCheckedChange={(value) => update("whatnotAutoPublishListings", value)} />
+                <ToggleField label="Assign listings to livestream" checked={Boolean(settings.whatnotAssignListingsToLivestream)} disabled={!editing} onCheckedChange={(value) => update("whatnotAssignListingsToLivestream", value)} />
+                <ToggleField label="Auction sudden death" checked={Boolean(settings.whatnotAuctionSuddenDeathEnabled)} disabled={!editing} onCheckedChange={(value) => update("whatnotAuctionSuddenDeathEnabled", value)} />
+              </>}
               </fieldset>
             </CardContent>
           </Card>
@@ -4594,18 +4696,24 @@ function channelFilterLabel(value: string) {
     "ebay-not-ready": "eBay setup incomplete",
     "ebay-missing": "Not in eBay catalog",
     "temu-detected": "Detected in Temu catalog",
-    "temu-missing": "Not in Temu catalog"
+    "temu-missing": "Not in Temu catalog",
+    "whatnot-live": "Whatnot live",
+    "whatnot-detected": "Detected in Whatnot inventory",
+    "whatnot-ready": "Ready to send to Whatnot",
+    "whatnot-not-ready": "Whatnot setup incomplete",
+    "whatnot-missing": "Not in Whatnot inventory"
   }
-  return labels[value] || value.replace(/^(shopify|ebay|temu)-/, "$1 ").replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+  return labels[value] || value.replace(/^(shopify|ebay|temu|whatnot)-/, "$1 ").replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
-type MarketplaceChannelKey = "shopify" | "ebay" | "temu"
+type MarketplaceChannelKey = "shopify" | "ebay" | "temu" | "whatnot"
 
 function marketplaceChannelKey(channel: ChannelConnection): MarketplaceChannelKey | "" {
   const key = `${channel.id} ${channel.name}`.toLowerCase()
   if (key.includes("shopify")) return "shopify"
   if (key.includes("ebay")) return "ebay"
   if (key.includes("temu")) return "temu"
+  if (key.includes("whatnot")) return "whatnot"
   return ""
 }
 
@@ -4639,6 +4747,18 @@ function catalogMarketplaceDetected(item: ProductItem, marketplace: MarketplaceC
   }
   if (marketplace === "ebay") {
     return Boolean(item.ebayId || item.ebayListing?.listingId || item.ebayListing?.offerId || matchingChannelStatus || matchingSource)
+  }
+  if (marketplace === "whatnot") {
+    return Boolean(
+      record.whatnotId
+        || record.whatnotProductId
+        || record.whatnotVariantId
+        || record.whatnotListingId
+        || record.whatnotSku
+        || isMarketplaceRecordValue(record.whatnotListing)
+        || matchingChannelStatus
+        || matchingSource,
+    )
   }
   return Boolean(
     item.temuId
@@ -4707,6 +4827,17 @@ function marketplaceListingUrl(item: ProductItem, channel: ChannelConnection) {
     const listingId = String(item.temuProductId || item.temuListingId || item.temuId || "").trim()
     return listingId ? `https://www.temu.com/goods.html?goods_id=${encodeURIComponent(listingId)}` : ""
   }
+  if (key.includes("whatnot")) {
+    const whatnotUrl = firstMarketplaceUrl(
+      record.whatnotListingUrl,
+      record.whatnotProductUrl,
+      record.whatnotUrl,
+      resolveNestedUrl(record.whatnotListing, channelStatuses.whatnot, sources.whatnot),
+    )
+    if (whatnotUrl) return whatnotUrl
+    const listingId = String(record.whatnotListingId || record.whatnotProductId || record.whatnotId || "").trim()
+    return listingId ? `https://www.whatnot.com/listing/${encodeURIComponent(listingId)}` : ""
+  }
   return ""
 }
 
@@ -4715,9 +4846,12 @@ function catalogChannelState(item: ProductItem, channel: ChannelConnection) {
   const isShopify = key.includes("shopify")
   const isEbay = key.includes("ebay")
   const isTemu = key.includes("temu")
+  const isWhatnot = key.includes("whatnot")
   const record = item as ProductItem & Record<string, unknown>
   const temuListing = record.temuListing && typeof record.temuListing === "object" ? record.temuListing as Record<string, unknown> : {}
+  const whatnotListing = record.whatnotListing && typeof record.whatnotListing === "object" ? record.whatnotListing as Record<string, unknown> : {}
   const temuStatus = String(temuListing.status || record.temuStatus || "").toLowerCase()
+  const whatnotStatus = String(whatnotListing.status || record.whatnotStatus || "").toLowerCase()
   const ebayStatus = String(item.ebayListing?.status || "").toLowerCase()
   const state: "live" | "attention" | "disabled" = isShopify
     ? item.shopifyId && item.shopifyPublished ? "live" : item.shopifyId ? "attention" : "disabled"
@@ -4725,9 +4859,11 @@ function catalogChannelState(item: ProductItem, channel: ChannelConnection) {
       ? item.ebayListing?.listingId || ["active", "live"].includes(ebayStatus) ? "live" : item.ebayListing?.offerId ? "attention" : "disabled"
       : isTemu
         ? item.temuListingId || ["active", "live", "published"].includes(temuStatus) ? "live" : item.temuOfferId || item.temuProductId ? "attention" : "disabled"
-        : "disabled"
-  const filter = isShopify ? state === "live" ? "shopify-live" : state === "attention" ? "shopify-unpublished" : "shopify-missing" : isEbay ? state === "live" ? "ebay-live" : state === "attention" ? "ebay-offer" : "ebay-missing" : isTemu ? state === "live" ? "temu-live" : state === "attention" ? "temu-offer" : "temu-missing" : ""
-  return { isShopify, isEbay, isTemu, state, filter }
+        : isWhatnot
+          ? record.whatnotListingId || ["active", "live", "published"].includes(whatnotStatus) ? "live" : record.whatnotProductId || record.whatnotVariantId ? "attention" : "disabled"
+          : "disabled"
+  const filter = isShopify ? state === "live" ? "shopify-live" : state === "attention" ? "shopify-unpublished" : "shopify-missing" : isEbay ? state === "live" ? "ebay-live" : state === "attention" ? "ebay-offer" : "ebay-missing" : isTemu ? state === "live" ? "temu-live" : state === "attention" ? "temu-offer" : "temu-missing" : isWhatnot ? state === "live" ? "whatnot-live" : state === "attention" ? "whatnot-detected" : "whatnot-missing" : ""
+  return { isShopify, isEbay, isTemu, isWhatnot, state, filter }
 }
 
 function CatalogChannelMarks({ item, channels }: { item: ProductItem; channels: ChannelConnection[] }) {
@@ -10922,20 +11058,19 @@ function WarehouseAuditPanel({
   const [warehouse, setWarehouse] = useState("Staten Island");
   const [auditReason, setAuditReason] = useState("cycle_count");
   const [auditOwner, setAuditOwner] = useState("Luis");
-  const [auditReviewer, setAuditReviewer] = useState("");
   const [activeBin, setActiveBin] = useState("");
   const [auditWarehouses, setAuditWarehouses] = useState<Array<{ id?: string; name?: string; code?: string; warehouseType?: string; inventorySourceType?: string; isPhysical?: boolean; bins?: Array<{ id?: string; code?: string; name?: string; nickname?: string; active?: boolean; isDefault?: boolean }> }>>([]);
   const [dispositionOpen, setDispositionOpen] = useState(false);
-  const [dispositionType, setDispositionType] = useState<"stock_here" | "transfer" | "return_to_supplier">("stock_here");
+  const [dispositionType, setDispositionType] = useState<"fulfill_orders" | "stock_here" | "transfer" | "return_to_supplier">("stock_here");
   const [destinationWarehouseId, setDestinationWarehouseId] = useState("");
   const [dispositionNote, setDispositionNote] = useState("");
+  const [actionPreview, setActionPreview] = useState<Record<string, unknown> | null>(null);
+  const [actionPreviewLoading, setActionPreviewLoading] = useState(false);
+  const [actionPreviewError, setActionPreviewError] = useState("");
+  const [returnDespiteDemand, setReturnDespiteDemand] = useState(false);
   const [cameraMode, setCameraMode] = useState<"product" | "bin">("product");
   const [offlineScanCount, setOfflineScanCount] = useState(0);
   const [syncingOfflineScans, setSyncingOfflineScans] = useState(false);
-  const [reviewLine, setReviewLine] = useState<Record<string, unknown> | null>(null);
-  const [reviewContext, setReviewContext] = useState<Record<string, unknown> | null>(null);
-  const [reviewNote, setReviewNote] = useState("");
-  const [reviewBusy, setReviewBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [cameraStreamState, setCameraStreamState] = useState<"opening" | "ready" | "permission" | "error">("opening");
@@ -11269,7 +11404,6 @@ function WarehouseAuditPanel({
           warehouseName: selectedCreateWarehouse?.name || warehouse,
           reason: auditReason,
           user: auditOwner,
-          reviewer: auditReviewer,
         }),
       });
       setActive(result.audit || null);
@@ -11684,22 +11818,24 @@ function WarehouseAuditPanel({
       manualSkuRef.current?.focus();
     }, 0);
   };
-  const submitForReview = async () => {
+  const openInventoryAction = async () => {
     if (!resumedAudit) return;
-    setBusy(true);
+    setDispositionOpen(true);
+    setActionPreview(null);
+    setActionPreviewError("");
+    setReturnDespiteDemand(false);
+    setActionPreviewLoading(true);
     try {
-      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
-        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/submit-review`,
-        { method: "POST", body: JSON.stringify({ user: "Luis" }) },
+      const result = await api<{ preview?: Record<string, unknown> }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/action-preview`,
       );
-      setActive(result.audit || null);
-      setCameraOpen(false);
-      toast.success(result.message || "Warehouse audit submitted for review.");
-      await load();
+      const preview = result.preview || {};
+      setActionPreview(preview);
+      if (Number(preview.totalUsableQty || 0) > 0) setDispositionType("fulfill_orders");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to submit this audit for review.");
+      setActionPreviewError(error instanceof Error ? error.message : "Unable to check open order demand.");
     } finally {
-      setBusy(false);
+      setActionPreviewLoading(false);
     }
   };
   const complete = async () => {
@@ -11711,7 +11847,7 @@ function WarehouseAuditPanel({
         message?: string;
       }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/complete`,
-        { method: "POST", body: JSON.stringify({ user: "Luis", dispositionType, destinationWarehouseId, dispositionNote }) },
+        { method: "POST", body: JSON.stringify({ user: "Luis", dispositionType, destinationWarehouseId, dispositionNote, returnDespiteDemand }) },
       );
       setActive(result.audit || null);
       setDispositionOpen(false);
@@ -11772,31 +11908,6 @@ function WarehouseAuditPanel({
       setCountEditBusy(false);
     }
   };
-  const openLineReview = async (line: Record<string, unknown>) => {
-    if (!resumedAudit) return;
-    setReviewLine(line);
-    setReviewContext(null);
-    setReviewNote(String(line.reviewNote || ""));
-    try {
-      const result = await api<Record<string, unknown>>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lines/${encodeURIComponent(auditLineKey(line))}/context`);
-      setReviewContext(result);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load audit-line history.");
-    }
-  };
-  const reviewAuditLine = async (decision: "approved" | "excluded" | "recount") => {
-    if (!resumedAudit || !reviewLine) return;
-    setReviewBusy(true);
-    try {
-      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lines/${encodeURIComponent(auditLineKey(reviewLine))}/review`, { method: "POST", body: JSON.stringify({ decision, note: reviewNote, user: "Luis" }) });
-      setActive(result.audit || null);
-      setReviewLine(null);
-      toast.success(result.message || "Audit-line review saved.");
-      await load();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to save audit-line review.");
-    } finally { setReviewBusy(false); }
-  };
   const current = resumedAudit;
   const lines = Array.isArray(current?.lines)
     ? (current?.lines as Array<Record<string, unknown>>)
@@ -11805,8 +11916,6 @@ function WarehouseAuditPanel({
     ? (current?.unknownBarcodes as Array<Record<string, unknown>>)
     : [];
   const auditStatus = String(current?.status || "");
-  const varianceLines = lines.filter((line) => Number(line.countedQty || 0) !== Number(line.expectedQty || 0));
-  const unresolvedUnknowns = unknowns.filter((item) => !item.createdProductSku);
   const foundStockLines = lines.filter((line) => String(line.source || "").includes("found-stock") || Boolean(line.foundStock));
   const latestFoundStockImport = Array.isArray(current?.foundStockImports) ? current?.foundStockImports[0] as Record<string, unknown> : null;
   const latestFoundStockSummary = latestFoundStockImport?.summary && typeof latestFoundStockImport.summary === "object" ? latestFoundStockImport.summary as Record<string, unknown> : null;
@@ -11816,9 +11925,24 @@ function WarehouseAuditPanel({
     warehouseTypeOption(item.warehouseType).isPhysical &&
     String(item.inventorySourceType || "").toLowerCase() !== "supplier_feed",
   );
-  const missingReturnSupplierLines = lines.filter((line) =>
-    Number(line.countedQty || 0) > 0 && Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim(),
+  const actionPreviewLines = Array.isArray(actionPreview?.lines)
+    ? actionPreview.lines as Array<Record<string, unknown>>
+    : [];
+  const missingReturnSupplierLines = actionPreviewLines.filter((line) =>
+    Number(line.countedQty || 0) > 0 && Number(line.supplierCount || 0) !== 1 && !String(line.selectedSupplierName || "").trim(),
   );
+  const compatibleOrders = Array.isArray(actionPreview?.orders)
+    ? actionPreview.orders as Array<Record<string, unknown>>
+    : [];
+  const compatibleDemandQty = Number(actionPreview?.totalUsableQty || 0);
+  const compatibleOrderCount = Number(actionPreview?.affectedOrderCount || compatibleOrders.length || 0);
+  const multipleSupplierActionLines = Number(actionPreview?.multipleSupplierLineCount || 0);
+  const dispositionReturns = Array.isArray(auditDisposition?.supplierReturns)
+    ? auditDisposition.supplierReturns as Array<Record<string, unknown>>
+    : [];
+  const dispositionOrders = Array.isArray(auditDisposition?.routedOrders)
+    ? auditDisposition.routedOrders as Array<Record<string, unknown>>
+    : [];
   if (createOnly)
     return (
       <Card>
@@ -11871,13 +11995,6 @@ function WarehouseAuditPanel({
                 <SelectItem value="extra_stock">Extra stock</SelectItem>
               </SelectContent>
             </Select>
-          </Field>
-          <Field label="Assigned reviewer">
-            <Input
-              value={auditReviewer}
-              onChange={(event) => setAuditReviewer(event.target.value)}
-              placeholder="Optional reviewer name"
-            />
           </Field>
           <Button
             disabled={busy || !warehouse.trim() || !auditOwner.trim()}
@@ -11933,14 +12050,13 @@ function WarehouseAuditPanel({
                   catalog SKUs counted · {numberLabel(unknowns.length)} unknown
                   UPCs
                 </p>
-                {String(current.reviewer || "").trim() && <p className="mt-1 text-xs text-muted-foreground">Reviewer: {String(current.reviewer)}</p>}
                 <div className="mt-2 flex flex-wrap gap-2">
-                  <Badge variant={auditStatus === "completed" ? "secondary" : auditStatus === "pending_review" ? "outline" : "default"}>{auditStatus === "pending_review" ? "Pending review" : auditStatus === "completed" ? "Applied" : "Counting"}</Badge>
+                  <Badge variant={auditStatus === "completed" ? "secondary" : auditStatus === "pending_review" ? "outline" : "default"}>{auditStatus === "pending_review" ? "Action required" : auditStatus === "completed" ? "Applied" : "Counting"}</Badge>
                   <Badge variant="outline">{String(current.reasonLabel || (current.reason === "new_inventory_onboarding" ? "New inventory onboarding" : current.reason === "extra_stock" ? "Extra stock" : "Cycle count"))}</Badge>
                   {auditDisposition && <Badge variant="secondary">{String(auditDisposition.label || "Inventory outcome applied")}</Badge>}
                   {Boolean(auditDisposition?.supplierReturnNumber) && <Badge variant="outline">{String(auditDisposition?.supplierReturnNumber)} draft</Badge>}
                   {offlineScanCount > 0 && <Badge variant="outline">{syncingOfflineScans ? "Syncing offline scans" : `${offlineScanCount} scan${offlineScanCount === 1 ? "" : "s"} queued offline`}</Badge>}
-                  {auditStatus === "pending_review" && <span className="text-xs text-muted-foreground">{numberLabel(varianceLines.length)} variance lines · {numberLabel(unresolvedUnknowns.length)} unresolved UPCs</span>}
+                  {auditStatus === "pending_review" && <span className="text-xs text-muted-foreground">Count complete · choose what happens to the inventory</span>}
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-2 sm:flex sm:w-auto">
@@ -11964,9 +12080,8 @@ function WarehouseAuditPanel({
                   Use phone camera
                 </Button>
                 {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}>Scan bin</Button>}
-                {auditStatus === "in_progress" && <Button size="sm" disabled={busy || !lines.length} onClick={() => void submitForReview()}>Submit for review</Button>}
-                {auditStatus === "pending_review" && <Button size="sm" disabled={busy} onClick={() => setDispositionOpen(true)}>Choose inventory outcome</Button>}
-                {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}>Return to count</Button>}
+                {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> Take action</Button>}
+                {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}>Continue counting</Button>}
                 <Button size="sm" variant="ghost" className="col-span-2 sm:col-span-1" asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export</a></Button>
               </div>
             </div>
@@ -11991,31 +12106,35 @@ function WarehouseAuditPanel({
                 <Button size="sm" variant="outline" disabled={ebayReadinessBusy || !foundStockLines.length} onClick={() => void queueFoundStockEbayReadiness()}>{ebayReadinessBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} Get ready for eBay</Button>
               </div>
             </div>
-            {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm dark:border-amber-500/30 dark:bg-amber-500/10"><p className="font-medium">Review required before inventory changes</p><p className="text-muted-foreground">This audit contains {numberLabel(varianceLines.length)} SKU variance lines and {numberLabel(unresolvedUnknowns.length)} unresolved UPCs. Choose whether approved inventory will be stocked here, transferred, or held for return to a supplier.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
-            {auditDisposition && <div className="grid gap-1 rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">Inventory outcome: {String(auditDisposition.label || "Applied")}</p>{Boolean(auditDisposition.destinationWarehouseName) && <p className="text-muted-foreground">Destination: {String(auditDisposition.destinationWarehouseName)}</p>}{Boolean(auditDisposition.supplierName) && <p className="text-muted-foreground">Supplier: {String(auditDisposition.supplierName)}{auditDisposition.supplierReturnNumber ? ` / ${String(auditDisposition.supplierReturnNumber)}` : ""}</p>}{Boolean(auditDisposition.note) && <p className="text-muted-foreground">Note: {String(auditDisposition.note)}</p>}</div>}
+            {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50/60 p-3 text-sm dark:border-blue-500/30 dark:bg-blue-500/10"><p className="font-medium">Count complete. Inventory action required.</p><p className="text-muted-foreground">Choose whether these units should serve open customer orders, remain in this warehouse, transfer elsewhere, or be returned to their suppliers.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
+            {auditDisposition && <div className="grid gap-2 rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">Inventory outcome: {String(auditDisposition.label || "Applied")}</p>{Boolean(auditDisposition.destinationWarehouseName) && <p className="text-muted-foreground">Destination: {String(auditDisposition.destinationWarehouseName)}</p>}{Number(auditDisposition.allocatedQty || 0) > 0 && <p className="text-muted-foreground">Allocated: {numberLabel(Number(auditDisposition.allocatedQty || 0))} units across {numberLabel(dispositionOrders.filter((row) => Number(row.allocatedQty || 0) > 0).length)} open orders.</p>}{Number(auditDisposition.blockedQty || 0) > 0 && <p className="text-amber-700 dark:text-amber-300">{numberLabel(Number(auditDisposition.blockedQty || 0))} units remain tied to submitted supplier POs and require buyer follow-up.</p>}{dispositionOrders.length > 0 && <div className="flex flex-wrap gap-2">{dispositionOrders.filter((row) => Number(row.allocatedQty || 0) > 0).map((row) => <Button key={String(row.id)} size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.id))}`}>#{String(row.orderNumber || row.id)} · {numberLabel(Number(row.allocatedQty || 0))}</a></Button>)}</div>}{dispositionReturns.length > 0 && <div className="grid gap-1"><p className="text-muted-foreground">Supplier return drafts:</p><div className="flex flex-wrap gap-2">{dispositionReturns.map((row) => <Badge key={String(row.id || row.returnNumber)} variant="outline">{String(row.returnNumber || "Return draft")} · {String(row.supplierName || "Supplier")} · {numberLabel(Number(row.totalUnits || 0))}</Badge>)}</div></div>}{Boolean(auditDisposition.note) && <p className="text-muted-foreground">Note: {String(auditDisposition.note)}</p>}</div>}
             <Dialog open={dispositionOpen} onOpenChange={setDispositionOpen}>
               <DialogContent className="max-w-3xl">
                 <DialogHeader>
-                  <DialogTitle>Choose inventory outcome</DialogTitle>
-                  <DialogDescription>The approved count is ready. Select what DataPlus should do with these units after the audit is completed.</DialogDescription>
+                  <DialogTitle>Take action on counted inventory</DialogTitle>
+                  <DialogDescription>The audit is the review record. DataPlus checks supplier-equivalent SKUs against open orders before inventory can be returned.</DialogDescription>
                 </DialogHeader>
-                <div className="grid gap-3 md:grid-cols-3">
+                {actionPreviewLoading && <div className="flex items-center gap-2 rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Checking open orders across supplier-equivalent SKUs...</div>}
+                {actionPreviewError && <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">{actionPreviewError}</div>}
+                {!actionPreviewLoading && !actionPreviewError && actionPreview && <div className={`rounded-md border p-4 ${compatibleDemandQty > 0 ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-700 dark:bg-emerald-950/35 dark:text-emerald-100" : "bg-muted/30"}`}><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{compatibleDemandQty > 0 ? `${numberLabel(compatibleDemandQty)} counted units can serve open orders` : "No compatible open order demand found"}</p><p className="mt-1 text-xs text-muted-foreground">Matched across UPC, manufacturer part number, vendor SKU, and equivalent supplier SKUs.</p></div>{compatibleOrderCount > 0 && <Badge className="bg-emerald-600 text-white">{numberLabel(compatibleOrderCount)} order{compatibleOrderCount === 1 ? "" : "s"}</Badge>}</div>{compatibleOrders.length > 0 && <ScrollArea className="mt-3 max-h-40"><div className="grid gap-2 pr-3">{compatibleOrders.slice(0, 12).map((order) => <a key={String(order.id)} href={`/orders/${encodeURIComponent(String(order.id))}`} className="flex items-center justify-between gap-3 rounded-md border border-emerald-300/70 bg-background/80 px-3 py-2 text-sm hover:bg-background"><span className="min-w-0"><span className="block font-medium">#{String(order.orderNumber || order.id)}</span><span className="block truncate text-xs text-muted-foreground">{String(order.orderSku || order.auditSku || "Matched item")}</span></span><span className="flex shrink-0 items-center gap-2"><Badge variant="outline">{String(order.matchedBy || "") === "supplier_family" ? "Supplier-equivalent" : "Catalog SKU"}</Badge><span className="text-muted-foreground">{numberLabel(Number(order.remainingQty || 0))} needed</span></span></a>)}</div></ScrollArea>}</div>}
+                <div className="grid gap-3 md:grid-cols-2">
                   {[
+                    { value: "fulfill_orders", title: "Use for open orders", description: "Stock the count here, then allocate compatible units and reroute affected orders." },
                     { value: "stock_here", title: "Stock here", description: `Make the approved units available in ${String(current.warehouseName)}.` },
                     { value: "transfer", title: "Transfer", description: "Count the units here, then move them to another physical warehouse." },
                     { value: "return_to_supplier", title: "Return to supplier", description: "Hold the units from sale and create a supplier-return draft." },
                   ].map((option) => <button key={option.value} type="button" onClick={() => setDispositionType(option.value as typeof dispositionType)} className={`rounded-md border p-4 text-left transition-colors ${dispositionType === option.value ? "border-primary bg-primary/10 ring-1 ring-primary" : "bg-background hover:bg-muted/60"}`}><span className="font-medium">{option.title}</span><span className="mt-1 block text-xs text-muted-foreground">{option.description}</span></button>)}
                 </div>
                 {dispositionType === "transfer" && <Field label="Destination warehouse"><Select value={destinationWarehouseId} onValueChange={setDestinationWarehouseId}><SelectTrigger><SelectValue placeholder="Choose a physical warehouse" /></SelectTrigger><SelectContent>{transferDestinations.map((item) => <SelectItem key={String(item.id || item.name)} value={String(item.id || "")}>{String(item.name || "Warehouse")}{item.code ? ` (${String(item.code)})` : ""}</SelectItem>)}</SelectContent></Select></Field>}
-                {dispositionType === "return_to_supplier" && <div className={`rounded-md border p-3 text-sm ${missingReturnSupplierLines.length ? "border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100" : "bg-muted/30"}`}><p className="font-medium">Returns follow each SKU's assigned supplier</p><p className="mt-1 text-xs text-muted-foreground">Single-supplier items are assigned automatically. For products carried by multiple suppliers, choose the supplier in the audit table before creating the return.</p>{missingReturnSupplierLines.length > 0 && <p className="mt-2 font-medium">{numberLabel(missingReturnSupplierLines.length)} line{missingReturnSupplierLines.length === 1 ? "" : "s"} still need a supplier.</p>}</div>}
+                {dispositionType === "return_to_supplier" && <div className={`rounded-md border p-3 text-sm ${missingReturnSupplierLines.length || compatibleDemandQty > 0 ? "border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100" : "bg-muted/30"}`}><p className="font-medium">Returns are created separately for each verified supplier</p><p className="mt-1 text-xs text-muted-foreground">A mixed audit can create multiple supplier-return drafts. Confirm every multi-supplier line first so one item is not returned to multiple vendors.</p>{multipleSupplierActionLines > 0 && <p className="mt-2">{numberLabel(multipleSupplierActionLines)} counted line{multipleSupplierActionLines === 1 ? " has" : "s have"} multiple supplier coverage.</p>}{missingReturnSupplierLines.length > 0 && <p className="mt-2 font-medium">{numberLabel(missingReturnSupplierLines.length)} line{missingReturnSupplierLines.length === 1 ? "" : "s"} still need a supplier.</p>}{compatibleDemandQty > 0 && <label className="mt-3 flex items-start gap-2 rounded-md border border-amber-400/60 bg-background/70 p-3"><Checkbox checked={returnDespiteDemand} onCheckedChange={(checked) => setReturnDespiteDemand(checked === true)} /><span><span className="block font-medium">Return despite open customer demand</span><span className="mt-0.5 block text-xs text-muted-foreground">I reviewed {numberLabel(compatibleOrderCount)} compatible order{compatibleOrderCount === 1 ? "" : "s"} and still want supplier-return drafts created.</span></span></label>}</div>}
                 <Field label="Outcome note"><Textarea value={dispositionNote} onChange={(event) => setDispositionNote(event.target.value)} placeholder="Optional handling instructions, return reason, or transfer note" /></Field>
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setDispositionOpen(false)}>Cancel</Button>
-                  <Button disabled={busy || (dispositionType === "transfer" && !destinationWarehouseId) || (dispositionType === "return_to_supplier" && missingReturnSupplierLines.length > 0)} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create return draft" : "Apply & stock"}</Button>
+                  <Button disabled={busy || actionPreviewLoading || Boolean(actionPreviewError) || (dispositionType === "transfer" && !destinationWarehouseId) || (dispositionType === "return_to_supplier" && (missingReturnSupplierLines.length > 0 || (compatibleDemandQty > 0 && !returnDespiteDemand)))} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{dispositionType === "fulfill_orders" ? "Use for open orders" : dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create supplier return draft(s)" : "Apply & stock"}</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
-            {auditStatus === "in_progress" && Boolean(current.returnNote) && <div className="rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Returned for recount</p><p className="mt-1 text-muted-foreground">Reviewer note: {String(current.returnNote)}</p></div>}
+            {auditStatus === "in_progress" && Boolean(current.returnNote) && <div className="rounded-md border border-amber-200 bg-amber-50/50 p-3 text-sm"><p className="font-medium">Returned for recount</p><p className="mt-1 text-muted-foreground">Recount note: {String(current.returnNote)}</p></div>}
             <Dialog open={cameraOpen} onOpenChange={(open) => { if (!open) closeCameraScanner(); }}>
               <DialogContent className="!inset-0 !flex !h-[100dvh] !max-w-none !translate-x-0 !translate-y-0 flex-col overflow-hidden rounded-none bg-black p-0 text-white sm:!inset-auto sm:!h-[90vh] sm:!max-w-3xl sm:!-translate-x-1/2 sm:!-translate-y-1/2 sm:rounded-xl" showCloseButton={false}>
                 <DialogHeader className="shrink-0 border-b border-white/15 px-4 py-3 text-white">
@@ -12422,7 +12541,7 @@ function WarehouseAuditPanel({
                     <TableHead>Cost</TableHead>
                     <TableHead>Bin</TableHead>
                     <TableHead>Counted</TableHead>
-                    <TableHead className="text-right">Review</TableHead>
+                    <TableHead className="text-right">Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -12451,9 +12570,7 @@ function WarehouseAuditPanel({
                           {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Adjust counted quantity" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
                         </div>
                       </TableCell>
-                      <TableCell className="text-right">
-                        {Number(line.countedQty || 0) !== Number(line.expectedQty || 0) ? <Button size="sm" variant="outline" disabled={auditStatus !== "pending_review"} onClick={() => void openLineReview(line)}>{String(line.reviewStatus || "unreviewed").replace(/_/g, " ")}</Button> : <Badge variant="outline">Matched</Badge>}
-                      </TableCell>
+                      <TableCell className="text-right">{Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() ? <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge> : <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Counted</Badge>}</TableCell>
                     </TableRow>
                     );
                   })}
@@ -12491,7 +12608,7 @@ function WarehouseAuditPanel({
               <DialogContent className="sm:max-w-md">
                 <DialogHeader>
                   <DialogTitle>Adjust counted quantity</DialogTitle>
-                  <DialogDescription>Correct an overscan or missed count before this audit is submitted. DataPlus retains the previous count and your reason in the audit history.</DialogDescription>
+                  <DialogDescription>Correct an overscan or missed count before taking inventory action. DataPlus retains the previous count and your reason in the audit history.</DialogDescription>
                 </DialogHeader>
                 <div className="grid gap-4">
                   <div className="rounded-md border bg-muted/30 p-3 text-sm"><p className="font-medium">{String(countEditLine?.sku || "Audit line")}</p><p className="mt-1 text-muted-foreground">{String(countEditLine?.title || "")}</p><p className="mt-2 text-xs text-muted-foreground">Current count: {numberLabel(Number(countEditLine?.countedQty || 0))}{countEditLine?.locationBin ? ` in ${String(countEditLine.locationBin)}` : ""}</p></div>
@@ -12499,18 +12616,6 @@ function WarehouseAuditPanel({
                   <Field label="Reason"><Textarea value={countEditNote} onChange={(event) => setCountEditNote(event.target.value)} placeholder="Example: carton was scanned twice" /></Field>
                 </div>
                 <DialogFooter><Button variant="outline" onClick={() => setCountEditLine(null)}>Cancel</Button><Button disabled={countEditBusy} onClick={() => void saveCountEdit()}>{countEditBusy && <Loader2 className="size-4 animate-spin" />} Save corrected count</Button></DialogFooter>
-              </DialogContent>
-            </Dialog>
-            <Dialog open={Boolean(reviewLine)} onOpenChange={(open) => !open && setReviewLine(null)}>
-              <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
-                <DialogHeader><DialogTitle>Review variance: {String(reviewLine?.sku || "Audit line")}</DialogTitle><DialogDescription>Approve this count, exclude it from the inventory adjustment, or return the audit to counting for a recount.</DialogDescription></DialogHeader>
-                <div className="grid gap-4 text-sm">
-                  <div className="grid gap-2 rounded-md border bg-muted/20 p-3 sm:grid-cols-4"><Detail label="Expected" value={numberLabel(Number(reviewLine?.expectedQty || 0))} /><Detail label="Counted" value={numberLabel(Number(reviewLine?.countedQty || 0))} /><Detail label="Variance" value={numberLabel(Number(reviewLine?.countedQty || 0) - Number(reviewLine?.expectedQty || 0))} /><Detail label="Bin" value={String(reviewLine?.locationBin || "-")} /></div>
-                  {reviewContext?.product ? <div className="rounded-md border p-3"><p className="font-medium">Current catalog inventory</p><p className="mt-1 text-muted-foreground">{String((reviewContext.product as Record<string, unknown>).sku || "-")} / on hand {numberLabel(Number((reviewContext.product as Record<string, unknown>).qty || 0))} / reserved {numberLabel(Number((reviewContext.product as Record<string, unknown>).reserved || 0))}</p></div> : null}
-                  <div className="rounded-md border"><p className="border-b px-3 py-2 font-medium">Recent inventory activity</p>{Array.isArray(reviewContext?.movements) && (reviewContext?.movements as Array<Record<string, unknown>>).length ? <div className="divide-y">{(reviewContext?.movements as Array<Record<string, unknown>>).map((movement) => <div key={String(movement.id)} className="grid gap-1 px-3 py-2 sm:grid-cols-[1fr_auto]"><div><p>{String(movement.type || "Inventory activity").replace(/_/g, " ")}</p><p className="text-xs text-muted-foreground">{String(movement.reason || movement.referenceNumber || "-")}</p></div><div className="text-right"><p>{Number(movement.quantityChange || 0) > 0 ? "+" : ""}{numberLabel(Number(movement.quantityChange || 0))}</p><p className="text-xs text-muted-foreground">{dateLabel(String(movement.createdAt || ""))}</p></div></div>)}</div> : <p className="p-3 text-muted-foreground">No recent inventory movement is available for this SKU.</p>}</div>
-                  <Field label="Reviewer note"><Textarea value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} placeholder="Reason for approval, exclusion, or recount" /></Field>
-                </div>
-                <DialogFooter className="flex-wrap"><Button variant="outline" onClick={() => setReviewLine(null)}>Close</Button><Button variant="outline" disabled={reviewBusy} onClick={() => void reviewAuditLine("excluded")}>Exclude line</Button><Button variant="outline" disabled={reviewBusy} onClick={() => void reviewAuditLine("recount")}>Return for recount</Button><Button disabled={reviewBusy} onClick={() => void reviewAuditLine("approved")}>{reviewBusy && <Loader2 className="size-4 animate-spin" />} Approve variance</Button></DialogFooter>
               </DialogContent>
             </Dialog>
           </>

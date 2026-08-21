@@ -843,6 +843,40 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayWebhookEndpoint: "",
   ebayWebhookVerificationToken: "",
   ebayNotificationAlertEmail: "",
+  whatnotApiEnvironment: "staging",
+  whatnotGraphqlEndpoint: "https://api.stage.whatnot.com/seller-api/graphql",
+  whatnotAuthMode: "seller-api-key",
+  whatnotOAuthClientId: "",
+  whatnotOAuthRedirectUri: "",
+  whatnotScopes: ["read:inventory", "write:inventory", "read:orders", "write:orders", "read:customers", "read:shipments", "write:shipments"],
+  whatnotProductSyncEnabled: false,
+  whatnotListingSyncEnabled: false,
+  whatnotInventorySyncEnabled: false,
+  whatnotOrderImportEnabled: false,
+  whatnotTrackingUploadEnabled: false,
+  whatnotShipmentLabelEnabled: false,
+  whatnotWebhookEnabled: false,
+  whatnotWebhookEndpoint: "",
+  whatnotWebhookTopics: ["product/sold", "order/created", "order/updated", "listing/created", "listing/updated"],
+  whatnotWebhookSecretConfigured: false,
+  whatnotOrderImportLookbackDays: 30,
+  whatnotOrderImportLimit: 250,
+  whatnotOrderImportScheduleEnabled: false,
+  whatnotOrderImportScheduleType: "times",
+  whatnotOrderImportScheduleTimes: "05:00,17:00",
+  whatnotOrderImportScheduleEveryHours: 12,
+  whatnotBulkOperationsEnabled: true,
+  whatnotBulkOperationPollSeconds: 30,
+  whatnotTaxonomySyncEnabled: true,
+  whatnotDefaultListingType: "buy_it_now",
+  whatnotDefaultCondition: "NEW",
+  whatnotAutoPublishListings: false,
+  whatnotRequireShippingProfile: true,
+  whatnotAutoCreateShippingProfile: true,
+  whatnotDefaultShippingProfileId: "",
+  whatnotDefaultLivestreamId: "",
+  whatnotAssignListingsToLivestream: false,
+  whatnotAuctionSuddenDeathEnabled: false,
   shopifyStoreDomain: "",
   shopifyAdminApiVersion: "2026-04",
   shopifyDefaultStatus: "draft",
@@ -1706,24 +1740,27 @@ const DEFAULT_MARKETPLACE_TEMPLATES = [
   {
     id: "template-whatnot",
     marketplace: "Whatnot",
-    requiredAttributes: ["category", "condition", "showTitle", "auctionStartPrice", "shippingWeight"],
+    requiredAttributes: ["productCategoryId", "condition", "listingType", "price", "shippingWeight", "shippingProfileId"],
     fieldDefinitions: [
-      { key: "category", type: "text", options: [] },
-      { key: "condition", type: "select", options: ["New", "Like New", "Used"] },
-      { key: "showTitle", type: "text", options: [] },
-      { key: "auctionStartPrice", type: "number", options: [] },
-      { key: "shippingWeight", type: "number", options: [] }
+      { key: "productCategoryId", type: "text", options: [] },
+      { key: "condition", type: "select", options: ["NEW", "LIKE_NEW", "USED"] },
+      { key: "listingType", type: "select", options: ["buy_it_now", "auction", "giveaway"] },
+      { key: "price", type: "number", options: [] },
+      { key: "shippingWeight", type: "number", options: [] },
+      { key: "shippingProfileId", type: "text", options: [] },
+      { key: "livestreamId", type: "text", options: [] }
     ],
     optionLists: {
-      condition: ["New", "Like New", "Used"]
+      condition: ["NEW", "LIKE_NEW", "USED"],
+      listingType: ["buy_it_now", "auction", "giveaway"]
     },
     categoryMappings: [],
-    titleMaxLength: 100,
+    titleMaxLength: 999,
     minImages: 1,
-    requireShippingProfile: false,
+    requireShippingProfile: true,
     requireHandlingTime: true,
     requirePrice: true,
-    notes: "Whatnot shadows should capture auction/live selling fields and shipping weight."
+    notes: "Whatnot Seller API uses Product, ProductVariant, and Listing records. Prepare taxonomy category, condition attributes, price, quantity, media, and a valid shipping profile before sync."
   },
   {
     id: "template-tiktok",
@@ -4119,10 +4156,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -4165,6 +4202,24 @@ function normalizeChannel(channel = {}) {
   settings.ebayWebhookEndpoint = String(settings.ebayWebhookEndpoint || "").trim().replace(/\/+$/, "");
   settings.ebayWebhookVerificationToken = String(settings.ebayWebhookVerificationToken || "").trim();
   settings.ebayNotificationAlertEmail = String(settings.ebayNotificationAlertEmail || "").trim().toLowerCase();
+  settings.whatnotApiEnvironment = String(settings.whatnotApiEnvironment || "staging").toLowerCase() === "production" ? "production" : "staging";
+  settings.whatnotGraphqlEndpoint = String(settings.whatnotGraphqlEndpoint || (settings.whatnotApiEnvironment === "production" ? "https://api.whatnot.com/seller-api/graphql" : "https://api.stage.whatnot.com/seller-api/graphql")).trim();
+  settings.whatnotAuthMode = ["seller-api-key", "oauth"].includes(String(settings.whatnotAuthMode || "")) ? String(settings.whatnotAuthMode) : DEFAULT_CHANNEL_SETTINGS.whatnotAuthMode;
+  settings.whatnotOAuthClientId = String(settings.whatnotOAuthClientId || "").trim();
+  settings.whatnotOAuthRedirectUri = String(settings.whatnotOAuthRedirectUri || "").trim();
+  settings.whatnotWebhookEndpoint = String(settings.whatnotWebhookEndpoint || "").trim().replace(/\/+$/, "");
+  settings.whatnotDefaultListingType = ["buy_it_now", "auction", "giveaway"].includes(String(settings.whatnotDefaultListingType || "")) ? String(settings.whatnotDefaultListingType) : DEFAULT_CHANNEL_SETTINGS.whatnotDefaultListingType;
+  settings.whatnotDefaultCondition = String(settings.whatnotDefaultCondition || DEFAULT_CHANNEL_SETTINGS.whatnotDefaultCondition).trim();
+  settings.whatnotDefaultShippingProfileId = String(settings.whatnotDefaultShippingProfileId || "").trim();
+  settings.whatnotDefaultLivestreamId = String(settings.whatnotDefaultLivestreamId || "").trim();
+  settings.whatnotOrderImportLookbackDays = Math.max(1, Math.min(365, Number(settings.whatnotOrderImportLookbackDays || 30) || 30));
+  settings.whatnotOrderImportLimit = Math.max(1, Math.min(5000, Number(settings.whatnotOrderImportLimit || 250) || 250));
+  settings.whatnotOrderImportScheduleType = String(settings.whatnotOrderImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
+  settings.whatnotOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.whatnotOrderImportScheduleEveryHours || 12) || 12));
+  settings.whatnotOrderImportScheduleTimes = normalizeChannelScheduleTimes(settings.whatnotOrderImportScheduleTimes || DEFAULT_CHANNEL_SETTINGS.whatnotOrderImportScheduleTimes);
+  settings.whatnotBulkOperationPollSeconds = Math.max(5, Math.min(300, Number(settings.whatnotBulkOperationPollSeconds || 30) || 30));
+  settings.whatnotScopes = Array.isArray(settings.whatnotScopes) ? [...new Set(settings.whatnotScopes.map((value) => String(value || "").trim()).filter(Boolean))] : DEFAULT_CHANNEL_SETTINGS.whatnotScopes.slice();
+  settings.whatnotWebhookTopics = Array.isArray(settings.whatnotWebhookTopics) ? [...new Set(settings.whatnotWebhookTopics.map((value) => String(value || "").trim()).filter(Boolean))] : DEFAULT_CHANNEL_SETTINGS.whatnotWebhookTopics.slice();
   for (const field of ["ebayStoreCategories", "ebayListingTemplates", "ebayItemSpecificTemplates", "ebayShippingMethodMappings", "ebayCustomPolicies"]) {
     settings[field] = Array.isArray(settings[field]) ? settings[field] : [];
   }
@@ -11205,6 +11260,17 @@ function purchaseOrderAcceptsWaitingDemand(po = {}) {
     || (Array.isArray(po.submissionHistory) && po.submissionHistory.length > 0);
   return String(po.type || "") === "customer_demand"
     && status === "draft"
+    && !hasSubmission
+    && String(po.approval?.status || "").toLowerCase() !== "rejected";
+}
+
+function purchaseOrderCanReleaseWaitingDemand(po = {}) {
+  const status = String(po.status || "draft").toLowerCase();
+  const hasSubmission = Boolean(po.submittedAt || po.placedAt || po.sentAt)
+    || (Array.isArray(po.submissions) && po.submissions.length > 0)
+    || (Array.isArray(po.submissionHistory) && po.submissionHistory.length > 0);
+  return String(po.type || "") === "customer_demand"
+    && ["draft", "ready_to_send"].includes(status)
     && !hasSubmission
     && String(po.approval?.status || "").toLowerCase() !== "rejected";
 }
@@ -26345,6 +26411,141 @@ async function auditSupplierOptionsForLine(line = {}) {
   return result;
 }
 
+function normalizeAuditDemandSku(value) {
+  return String(value || "").trim().toLowerCase()
+    .replace(/[-_](?:[0-9]+(?:pc|pk|pack|ct|cs|case|bx|ea)|ea|each)$/i, "");
+}
+
+function auditOrderLineRemaining(match = {}) {
+  const line = match.lineRaw || {};
+  const requested = Math.max(0, Number(match.qty || line.quantity || line.qty || 0));
+  const explicitRemaining = Number(line.remainingQty ?? line.remainingQuantity ?? line.unfulfilledQuantity);
+  const fulfilled = Math.max(0, Number(line.fulfilledQty ?? line.fulfilledQuantity ?? 0));
+  const order = match.orderRaw || {};
+  const lineIndex = Number(match.lineIndex ?? 0);
+  const warehouseCommitted = (order.fulfillmentRoutes || []).reduce((sum, route) => {
+    if (Number(route.lineIndex) !== lineIndex || String(route.type || "").toLowerCase() !== "warehouse") return sum;
+    const status = String(route.status || "").toLowerCase();
+    if (["canceled", "cancelled", "closed", "expired", "void"].includes(status)) return sum;
+    return sum + Math.max(0, Number(route.qty || 0));
+  }, 0);
+  const openCustomerDemand = Number.isFinite(explicitRemaining) ? explicitRemaining : requested - fulfilled;
+  return Math.max(0, openCustomerDemand - warehouseCommitted);
+}
+
+function auditOrderMatchIsOpen(match = {}) {
+  const order = match.orderRaw || {};
+  const line = match.lineRaw || {};
+  const values = [match.status, order.status, order.operationalStatus, order.workflowStatus, order.fulfillmentStatus, line.fulfillmentStatus]
+    .map((value) => String(value || "").trim().toLowerCase());
+  const terminal = new Set(["archived", "canceled", "cancelled", "closed", "complete", "completed", "delivered", "deleted", "done", "fulfilled", "refunded", "returned", "shipped", "void"]);
+  if (match.shippedAt || order.cancelledAt || order.canceledAt || values.some((value) => terminal.has(value))) return false;
+  const financial = String(order.financialStatus || order.paymentStatus || "").trim().toLowerCase();
+  if (["refunded", "voided", "pending", "unpaid"].includes(financial)) return false;
+  return auditOrderLineRemaining(match) > 0;
+}
+
+async function buildWarehouseAuditActionPreview(audit = {}) {
+  const families = [];
+  for (const line of audit.lines || []) {
+    const countedQty = Math.max(0, Number(line.countedQty || 0));
+    if (!countedQty || String(line.reviewStatus || "").toLowerCase() === "excluded") continue;
+    const supplierResult = await auditSupplierOptionsForLine(line);
+    const candidates = [...new Set([
+      line.sku,
+      line.productId,
+      line.selectedSupplierSku,
+      line.selectedVendorSku,
+      line.selectedManufacturerSku,
+      line.selectedSupplierUpc,
+      line.vendorSku,
+      line.manufacturerSku,
+      line.mfrPartNumber,
+      line.manufacturerPartNumber,
+      line.mpn,
+      line.upc,
+      line.barcode,
+      ...supplierResult.options.flatMap((option) => [
+        option.sourceSku,
+        option.vendorSku,
+        option.manufacturerSku,
+        option.manufacturerPartNumber,
+        option.mfrPartNumber,
+        option.mpn,
+        option.barcode,
+        option.upc
+      ])
+    ].map(normalizeAuditDemandSku).filter(Boolean))];
+    families.push({
+      lineKey: auditLineKey(line),
+      sku: String(line.selectedSupplierSku || line.sku || "").trim(),
+      catalogSku: String(line.sku || "").trim(),
+      title: String(line.title || supplierResult.product?.title || "").trim(),
+      countedQty,
+      supplierCount: new Set(supplierResult.options.map((option) => String(option.vendorId || option.supplierCode || option.supplierName || "").trim().toLowerCase()).filter(Boolean)).size,
+      selectedSupplierName: String(line.selectedSupplierName || "").trim(),
+      candidates,
+      candidateSet: new Set(candidates)
+    });
+  }
+  const lookupSkus = [...new Set(families.flatMap((family) => family.candidates))];
+  const matches = lookupSkus.length ? await postgres.readOrderLinesBySkus(lookupSkus) : [];
+  const demand = [];
+  const seen = new Set();
+  for (const match of matches || []) {
+    if (!auditOrderMatchIsOpen(match)) continue;
+    const rowCandidates = [match.sku, match.mappedSku, match.originalSku, match.lineRaw?.parentSku, match.lineRaw?.baseSku, match.lineRaw?.catalogSku]
+      .map(normalizeAuditDemandSku).filter(Boolean);
+    const family = families.find((entry) => rowCandidates.some((candidate) => entry.candidateSet.has(candidate)));
+    if (!family) continue;
+    const identity = `${match.orderId}:${match.lineId || match.lineIndex}:${family.lineKey}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    const remainingQty = auditOrderLineRemaining(match);
+    const order = match.orderRaw || {};
+    demand.push({
+      id: identity,
+      lineKey: family.lineKey,
+      auditSku: family.sku,
+      catalogSku: family.catalogSku,
+      orderId: match.orderId,
+      lineIndex: Number(match.lineIndex ?? 0),
+      orderNumber: String(match.internalOrderNumber || match.orderNumber || match.marketplaceOrderId || match.orderId || "").trim(),
+      customer: String(order.customerName || order.customer?.displayName || order.customer?.name || order.shippingAddress?.name || "Customer").trim(),
+      orderSku: String(match.sku || match.mappedSku || match.originalSku || "").trim(),
+      title: String(match.lineRaw?.title || match.lineRaw?.name || family.title || "").trim(),
+      remainingQty,
+      matchedBy: rowCandidates.some((candidate) => candidate === normalizeAuditDemandSku(family.catalogSku)) ? "catalog_sku" : "supplier_family"
+    });
+  }
+  const byLine = families.map((family) => {
+    const orders = demand.filter((row) => row.lineKey === family.lineKey);
+    const openDemandQty = orders.reduce((sum, row) => sum + Number(row.remainingQty || 0), 0);
+    return {
+      lineKey: family.lineKey,
+      sku: family.sku,
+      catalogSku: family.catalogSku,
+      title: family.title,
+      countedQty: family.countedQty,
+      supplierCount: family.supplierCount,
+      selectedSupplierName: family.selectedSupplierName,
+      openDemandQty,
+      usableQty: Math.min(family.countedQty, openDemandQty),
+      orders
+    };
+  });
+  return {
+    lines: byLine,
+    orders: demand,
+    orderIds: [...new Set(demand.map((row) => row.orderId).filter(Boolean))],
+    totalCountedQty: byLine.reduce((sum, row) => sum + row.countedQty, 0),
+    totalOpenDemandQty: byLine.reduce((sum, row) => sum + row.openDemandQty, 0),
+    totalUsableQty: byLine.reduce((sum, row) => sum + row.usableQty, 0),
+    affectedOrderCount: new Set(demand.map((row) => row.orderId)).size,
+    multipleSupplierLineCount: byLine.filter((row) => row.supplierCount > 1).length
+  };
+}
+
 function applySourceCatalogOverride(product = {}, overrides = {}, vendorMappings = {}) {
   const override = overrides[String(product.sku || "").toLowerCase()];
   const supplier = sourceTextValue(product.supplier || product.vendor);
@@ -32983,20 +33184,31 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { audit, line, message: decision === "recount" ? `${audit.auditNumber} was returned to counting for ${line.sku}.` : `${line.sku || "Audit line"} marked ${decision}.` });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "action-preview" && postgres.isPostgresEnabled()) {
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (!["in_progress", "pending_review"].includes(String(audit.status || "").toLowerCase())) return sendJson(res, 400, { error: "This audit no longer has inventory awaiting an action." });
+    const preview = await buildWarehouseAuditActionPreview(audit);
+    return sendJson(res, 200, { preview });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "complete" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
-    if (audit.status !== "pending_review") return sendJson(res, 400, { error: "Submit this audit for review before applying inventory counts." });
-    const unreviewedVariances = (audit.lines || []).filter((line) => Number(line.countedQty || 0) !== Number(line.expectedQty || 0) && !["approved", "excluded"].includes(String(line.reviewStatus || "").toLowerCase()));
-    if (unreviewedVariances.length) return sendJson(res, 400, { error: `Review ${unreviewedVariances.length} remaining variance line${unreviewedVariances.length === 1 ? "" : "s"} before applying inventory counts.` });
+    if (!["in_progress", "pending_review"].includes(String(audit.status || "").toLowerCase())) return sendJson(res, 400, { error: "This audit no longer has inventory awaiting an action." });
     const db = await readDbFast({ skipInventory: true });
     db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
     const auditWarehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "") || String(row.name || "").toLowerCase() === String(audit.warehouseName || "").toLowerCase()) || null;
     if (!auditWarehouse || !isPhysicalWarehouse(auditWarehouse)) return sendJson(res, 400, { error: "This audit no longer has a valid physical warehouse." });
     const dispositionType = String(body.dispositionType || "").trim().toLowerCase();
-    if (!["stock_here", "transfer", "return_to_supplier"].includes(dispositionType)) return sendJson(res, 400, { error: "Choose whether to stock, transfer, or return the counted inventory." });
+    if (!["fulfill_orders", "stock_here", "transfer", "return_to_supplier"].includes(dispositionType)) return sendJson(res, 400, { error: "Choose whether to use the stock for open orders, stock it, transfer it, or return it." });
+    const actionPreview = await buildWarehouseAuditActionPreview(audit);
+    if (dispositionType === "return_to_supplier" && actionPreview.totalUsableQty > 0 && body.returnDespiteDemand !== true) {
+      return sendJson(res, 409, { error: `${actionPreview.totalUsableQty} counted unit${actionPreview.totalUsableQty === 1 ? "" : "s"} can serve ${actionPreview.affectedOrderCount} open order${actionPreview.affectedOrderCount === 1 ? "" : "s"}. Review that demand and confirm the supplier return before continuing.`, preview: actionPreview });
+    }
     const destinationWarehouse = dispositionType === "transfer"
       ? (db.warehouses || []).find((row) => String(row.id || "") === String(body.destinationWarehouseId || "")) || null
       : null;
@@ -33031,6 +33243,7 @@ async function handleApi(req, res) {
       if (unresolved.length) return sendJson(res, 400, { error: `Choose a supplier for ${unresolved.slice(0, 8).join(", ")}${unresolved.length > 8 ? ` and ${unresolved.length - 8} more` : ""} before creating supplier returns.` });
     }
     const products = [];
+    const productByAuditLineKey = new Map();
     const dispositionLines = [];
     for (const line of audit.lines || []) {
       if (String(line.reviewStatus || "").toLowerCase() === "excluded") continue;
@@ -33041,7 +33254,7 @@ async function handleApi(req, res) {
       const reservedBefore = stockRow ? Number(stockRow.reserved || 0) : Number(product.reserved || 0);
       const countedQty = Math.max(0, Number(line.countedQty || 0));
       const lineSupplier = returnSelections.get(auditLineKey(line)) || null;
-      if (dispositionType !== "stock_here" && reservedBefore > 0) {
+      if (!["stock_here", "fulfill_orders"].includes(dispositionType) && reservedBefore > 0) {
         return sendJson(res, 409, { error: `${line.sku || "A counted SKU"} has ${reservedBefore} reserved unit${reservedBefore === 1 ? "" : "s"}. Release or reassign those allocations before transferring or returning this audit.` });
       }
       if (stockRow) {
@@ -33083,12 +33296,141 @@ async function handleApi(req, res) {
         syncInventoryTotalsFromWarehouses(product);
         addInventoryLedger(db, product, { type: "supplier_return_hold", source: "warehouse_audit", referenceId: audit.id, referenceNumber: audit.auditNumber, warehouseId: auditWarehouse.id, warehouseName: auditWarehouse.name, locationBin: line.locationBin || stockRow.locationBin || "", quantityChange: 0, reservedChange: countedQty, qtyBefore: countedQty, qtyAfter: countedQty, reservedBefore: 0, reservedAfter: countedQty, reason: String(body.dispositionNote || `Held for return to ${lineSupplier?.supplierName || "supplier"}`).trim(), user: String(body.user || "Approver").trim() || "Approver" });
       }
+      productByAuditLineKey.set(auditLineKey(line), product);
       if (dispositionType !== "return_to_supplier" || countedQty > 0) {
         dispositionLines.push({ sku: product.sku || line.sku, productId: product.id || line.productId || "", title: product.title || line.title || "", quantity: countedQty, locationBin: line.locationBin || stockRow?.locationBin || "", supplierId: lineSupplier?.vendorId || "", supplierName: lineSupplier?.supplierName || "", supplierCode: lineSupplier?.supplierCode || "", vendorSku: lineSupplier?.vendorSku || "", unitCost: Number(lineSupplier?.cost || 0), supplierMatchType: lineSupplier?.matchType || "" });
       }
       products.push(product);
     }
     if (products.length) { await postgres.upsertProductsFromState(products); await postgres.upsertInventoryLevelsFromProducts(products); }
+    const routedOrders = [];
+    if (dispositionType === "fulfill_orders" && actionPreview.orderIds.length) {
+      const [purchaseRequirements, purchaseOrders] = await Promise.all([
+        postgres.readStateField("purchaseRequirements").catch(() => []),
+        postgres.listPurchaseOrders({ limit: 5000 })
+      ]);
+      db.purchaseRequirements = purchaseRequirements || [];
+      db.purchaseOrders = purchaseOrders || [];
+      const orders = await postgres.readOrdersByIds(actionPreview.orderIds);
+      db.orders = [...(db.orders || []).filter((candidate) => !orders.some((order) => String(order.id) === String(candidate.id))), ...orders];
+      const routedProducts = new Map(products.map((product) => [String(product.id || product.sku), product]));
+      const touchedPurchaseOrders = new Map();
+      const remainingByLine = new Map(actionPreview.lines.map((line) => [line.lineKey, Number(line.usableQty || 0)]));
+      const demandByOrder = new Map();
+      for (const demand of actionPreview.orders || []) {
+        if (!demandByOrder.has(String(demand.orderId))) demandByOrder.set(String(demand.orderId), []);
+        demandByOrder.get(String(demand.orderId)).push(demand);
+      }
+      for (const order of orders) {
+        let allocatedQty = 0;
+        let blockedQty = 0;
+        for (const demand of demandByOrder.get(String(order.id)) || []) {
+          let requestedQty = Math.min(Number(demand.remainingQty || 0), Number(remainingByLine.get(demand.lineKey) || 0));
+          if (requestedQty <= 0) continue;
+          const product = productByAuditLineKey.get(demand.lineKey);
+          if (!product) continue;
+          const stock = ensureInventoryWarehouseStock(product, auditWarehouse);
+          const available = Math.max(0, Number(stock.qty || 0) - Number(stock.reserved || 0));
+          requestedQty = Math.min(requestedQty, available);
+          if (requestedQty <= 0) continue;
+          const purchaseRoutes = (order.fulfillmentRoutes || []).filter((route) => Number(route.lineIndex) === Number(demand.lineIndex)
+            && String(route.type || "").toLowerCase() === "purchase"
+            && !["canceled", "cancelled", "closed", "received", "void"].includes(String(route.status || "").toLowerCase()));
+          const committedRoute = purchaseRoutes.find((route) => {
+            if (!route.purchaseOrderId) return false;
+            const po = db.purchaseOrders.find((candidate) => String(candidate.id) === String(route.purchaseOrderId));
+            return po && !purchaseOrderCanReleaseWaitingDemand(po);
+          });
+          if (committedRoute) {
+            blockedQty += requestedQty;
+            continue;
+          }
+          let releaseRemaining = requestedQty;
+          for (const route of purchaseRoutes) {
+            if (releaseRemaining <= 0) break;
+            const routeQty = Math.max(0, Number(route.qty || 0));
+            const released = Math.min(routeQty, releaseRemaining);
+            if (!released) continue;
+            const requirement = db.purchaseRequirements.find((candidate) => String(candidate.routeId || "") === String(route.id || ""));
+            if (requirement) {
+              requirement.qty = Math.max(0, Number(requirement.qty || 0) - released);
+              requirement.updatedAt = new Date().toISOString();
+              if (requirement.qty <= 0) {
+                requirement.status = "superseded_by_audit_stock";
+                requirement.supersededAt = requirement.updatedAt;
+                requirement.supersededByAuditId = audit.id;
+              }
+            }
+            if (route.purchaseOrderId) {
+              const po = db.purchaseOrders.find((candidate) => String(candidate.id) === String(route.purchaseOrderId));
+              if (po) {
+                const poLine = (po.items || []).find((candidate) => String(candidate.routeId || "") === String(route.id || ""));
+                if (poLine) poLine.qty = Math.max(0, Number(poLine.qty || 0) - released);
+                po.items = (po.items || []).filter((candidate) => Number(candidate.qty || 0) > 0);
+                touchedPurchaseOrders.set(po.id, po);
+              }
+            }
+            route.qty = Math.max(0, routeQty - released);
+            route.updatedAt = new Date().toISOString();
+            route.releasedToAuditId = audit.id;
+            route.releasedToAuditQty = Number(route.releasedToAuditQty || 0) + released;
+            if (route.qty <= 0) route.status = "canceled";
+            releaseRemaining -= released;
+          }
+          const line = orderLineItems(order)[Number(demand.lineIndex)] || {};
+          stock.reserved = Number(stock.reserved || 0) + requestedQty;
+          stock.updatedAt = new Date().toISOString();
+          syncInventoryTotalsFromWarehouses(product);
+          product.updatedAt = stock.updatedAt;
+          const route = createWorkflowRoute(order, {
+            type: "warehouse", status: "allocated", lineIndex: Number(demand.lineIndex),
+            sku: String(line.sku || demand.orderSku || product.sku || ""), title: String(line.title || demand.title || product.title || ""),
+            qty: requestedQty, warehouseId: auditWarehouse.id, warehouseName: auditWarehouse.name,
+            productId: product.id, sourceSku: product.sku, supplierFamilyMatch: demand.matchedBy === "supplier_family",
+            sourceAuditId: audit.id, sourceAuditNumber: audit.auditNumber,
+            reservationExpiresAt: new Date(Date.now() + Number(orderRuntimeSettings(db).inventoryReservationExpiryHours || 48) * 60 * 60 * 1000).toISOString()
+          });
+          addInventoryLedger(db, product, {
+            type: "workflow_reservation", source: "warehouse_audit", referenceId: order.id,
+            referenceNumber: order.orderNumber || order.internalOrderNumber || order.id,
+            warehouseId: auditWarehouse.id, warehouseName: auditWarehouse.name,
+            quantityChange: 0, reservedChange: requestedQty,
+            reason: `${audit.auditNumber} inventory allocated to ${order.orderNumber || order.internalOrderNumber || order.id}`,
+            user: body.user || "Warehouse audit"
+          });
+          remainingByLine.set(demand.lineKey, Math.max(0, Number(remainingByLine.get(demand.lineKey) || 0) - requestedQty));
+          allocatedQty += requestedQty;
+          routedProducts.set(String(product.id || product.sku), product);
+          route.updatedAt = new Date().toISOString();
+        }
+        recalculateOrderOperationalStatus(order);
+        if (allocatedQty > 0) addOrderWorkflowEvent(order, {
+          step: "audit_stock_allocation", title: "Audit stock allocated",
+          message: `${allocatedQty} unit${allocatedQty === 1 ? "" : "s"} from ${audit.auditNumber} allocated from ${auditWarehouse.name}.`,
+          user: body.user || "Warehouse audit"
+        });
+        order.updatedAt = new Date().toISOString();
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        routedOrders.push({ id: order.id, orderNumber: order.orderNumber || order.internalOrderNumber || order.marketplaceOrderId || order.id, allocatedQty, blockedQty });
+      }
+      for (const po of touchedPurchaseOrders.values()) {
+        const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+        recalculateWaitingPurchaseOrder(db, po, vendor);
+        if (!(po.items || []).length) {
+          po.status = "superseded";
+          po.workflowStage = "history";
+          po.supersededAt = new Date().toISOString();
+          po.supersededByAuditId = audit.id;
+        }
+      }
+      if (routedProducts.size) {
+        await postgres.upsertProductsFromState([...routedProducts.values()]);
+        await postgres.upsertInventoryLevelsFromProducts([...routedProducts.values()]);
+      }
+      for (const po of touchedPurchaseOrders.values()) await postgres.savePurchaseOrder(po);
+      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [], sequence: db.sequence || {}, inventoryLedger: db.inventoryLedger || [] });
+    }
     const createdSupplierReturns = [];
     if (dispositionType === "return_to_supplier") {
       const supplierReturns = await postgres.readStateField("warehouseSupplierReturns").catch(() => []) || [];
@@ -33108,10 +33450,12 @@ async function handleApi(req, res) {
       await postgres.writeStateDocuments({ warehouseSupplierReturns: supplierReturns.slice(0, 1000) });
     }
     audit.status = "completed"; audit.completedAt = new Date().toISOString(); audit.approvedAt = audit.completedAt; audit.approvedBy = String(body.user || "Approver").trim() || "Approver"; audit.appliedLines = products.length;
-    audit.disposition = { type: dispositionType, label: dispositionType === "transfer" ? "Transferred" : dispositionType === "return_to_supplier" ? "Return to suppliers" : "Stocked here", destinationWarehouseId: destinationWarehouse?.id || "", destinationWarehouseName: destinationWarehouse?.name || "", supplierReturns: createdSupplierReturns.map((row) => ({ id: row.id, returnNumber: row.returnNumber, supplierId: row.supplierId, supplierName: row.supplierName, totalUnits: row.totalUnits })), note: String(body.dispositionNote || "").trim(), appliedAt: audit.completedAt, appliedBy: audit.approvedBy };
+    const allocatedQty = routedOrders.reduce((sum, row) => sum + Number(row.allocatedQty || 0), 0);
+    const blockedQty = routedOrders.reduce((sum, row) => sum + Number(row.blockedQty || 0), 0);
+    audit.disposition = { type: dispositionType, label: dispositionType === "fulfill_orders" ? "Allocated to open orders" : dispositionType === "transfer" ? "Transferred" : dispositionType === "return_to_supplier" ? "Return to suppliers" : "Stocked here", destinationWarehouseId: destinationWarehouse?.id || "", destinationWarehouseName: destinationWarehouse?.name || "", supplierReturns: createdSupplierReturns.map((row) => ({ id: row.id, returnNumber: row.returnNumber, supplierId: row.supplierId, supplierName: row.supplierName, totalUnits: row.totalUnits })), routedOrders, allocatedQty, blockedQty, compatibleDemand: { orderCount: actionPreview.affectedOrderCount, usableQty: actionPreview.totalUsableQty }, note: String(body.dispositionNote || "").trim(), appliedAt: audit.completedAt, appliedBy: audit.approvedBy };
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500), inventoryLedger: db.inventoryLedger || [] });
-    const outcome = dispositionType === "transfer" ? `transferred to ${destinationWarehouse.name}` : dispositionType === "return_to_supplier" ? `placed on hold in ${createdSupplierReturns.length} supplier return draft${createdSupplierReturns.length === 1 ? "" : "s"}` : `stocked in ${auditWarehouse.name}`;
-    return sendJson(res, 200, { audit, supplierReturn: createdSupplierReturns[0] || null, supplierReturns: createdSupplierReturns, message: `${audit.auditNumber} completed. ${products.length} catalog counts were ${outcome}.` });
+    const outcome = dispositionType === "fulfill_orders" ? `stocked in ${auditWarehouse.name}; ${allocatedQty} unit${allocatedQty === 1 ? " was" : "s were"} allocated to open orders${blockedQty ? ` and ${blockedQty} remained tied to submitted supplier POs` : ""}` : dispositionType === "transfer" ? `transferred to ${destinationWarehouse.name}` : dispositionType === "return_to_supplier" ? `placed on hold in ${createdSupplierReturns.length} supplier return draft${createdSupplierReturns.length === 1 ? "" : "s"}` : `stocked in ${auditWarehouse.name}`;
+    return sendJson(res, 200, { audit, supplierReturn: createdSupplierReturns[0] || null, supplierReturns: createdSupplierReturns, routedOrders, actionPreview, message: `${audit.auditNumber} completed. ${products.length} catalog counts were ${outcome}.` });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "export" && postgres.isPostgresEnabled()) {
