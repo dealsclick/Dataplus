@@ -26126,6 +26126,7 @@ async function auditSupplierOptionsForLine(line = {}) {
       sourceSku: String(match.sourceSku || match.sku || "").trim(),
       vendorSku: String(match.vendorSku || match.sourceSku || match.sku || "").trim(),
       manufacturerSku: String(match.mfrPartNumber || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || "").trim(),
+      barcode: String(match.barcode || match.upc || match.gtin || product.barcode || product.upc || product.gtin || "").trim(),
       cost: Number(match.cost || 0),
       qty: Number(match.qty || 0),
       matchType: String(match.matchType || coverage.matchType || "").trim()
@@ -32140,6 +32141,9 @@ async function handleApi(req, res) {
           const singleVendorSku = supplierCount === 1
             ? String(product?.vendorSku || sourceProduct?.vendorSku || sourceProduct?.sourceSku || "").trim()
             : "";
+          const singleSourceSku = supplierCount === 1
+            ? String(product?.sourceSku || sourceProduct?.sourceSku || product?.sku || sourceProduct?.sku || "").trim()
+            : "";
           const singleManufacturerSku = String(product?.mfrPartNumber || product?.manufacturerPartNumber || product?.mpn || sourceProduct?.mfrPartNumber || sourceProduct?.manufacturerPartNumber || sourceProduct?.mpn || "").trim();
           const singleSupplierCost = supplierCount === 1
             ? Number(product?.cost || sourceProduct?.cost || 0)
@@ -32147,15 +32151,17 @@ async function handleApi(req, res) {
           return {
             ...line,
             ...(image ? { image } : {}),
+            barcode: String(line?.barcode || line?.upc || product?.barcode || product?.upc || product?.gtin || sourceProduct?.barcode || sourceProduct?.upc || sourceProduct?.gtin || source?.barcode || source?.upc || "").trim(),
             supplierCount,
             supplierName: String(line?.selectedSupplierName || singleSupplierName || "").trim(),
             selectedSupplierKey: String(line?.selectedSupplierKey || "").trim(),
             selectedSupplierId: String(line?.selectedSupplierId || "").trim(),
             selectedSupplierName: String(line?.selectedSupplierName || "").trim(),
             selectedSupplierCode: String(line?.selectedSupplierCode || singleSupplierCode || "").trim(),
-            selectedSupplierSku: String(line?.selectedSupplierSku || line?.selectedVendorSku || singleVendorSku || "").trim(),
+            selectedSupplierSku: String(line?.selectedSupplierSku || singleSourceSku || line?.sku || "").trim(),
             selectedVendorSku: String(line?.selectedVendorSku || singleVendorSku || "").trim(),
             selectedManufacturerSku: String(line?.selectedManufacturerSku || singleManufacturerSku || "").trim(),
+            selectedSupplierUpc: String(line?.selectedSupplierUpc || line?.barcode || line?.upc || product?.barcode || product?.upc || product?.gtin || sourceProduct?.barcode || sourceProduct?.upc || sourceProduct?.gtin || "").trim(),
             selectedSupplierCost: Number(line?.selectedSupplierCost || singleSupplierCost || 0),
             selectedSupplierQty: Number(line?.selectedSupplierQty || 0),
             selectedSupplierIndexed: Boolean(line?.selectedSupplierIndexed || line?.selectedSupplierKey),
@@ -32693,9 +32699,10 @@ async function handleApi(req, res) {
       selectedSupplierName: selection.supplierName,
       supplierName: selection.supplierName,
       selectedSupplierCode: selection.supplierCode,
-      selectedSupplierSku: selection.vendorSku || selection.sourceSku || "",
+      selectedSupplierSku: selection.sourceSku || selection.vendorSku || "",
       selectedVendorSku: selection.vendorSku,
       selectedManufacturerSku: selection.manufacturerSku,
+      selectedSupplierUpc: selection.barcode,
       selectedSupplierCost: selection.cost,
       selectedSupplierQty: selection.qty,
       selectedSupplierMatchType: selection.matchType,

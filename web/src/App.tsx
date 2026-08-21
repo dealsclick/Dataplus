@@ -10645,6 +10645,7 @@ type AuditSupplierOption = {
   sourceSku?: string
   vendorSku?: string
   manufacturerSku?: string
+  barcode?: string
   cost?: number
   qty?: number
   matchType?: string
@@ -10684,11 +10685,12 @@ function AuditSupplierCell({ auditId, auditStatus, line, onLineUpdate }: { audit
       sourceSku: String(line.selectedSupplierSku || ""),
       vendorSku: String(line.selectedVendorSku || line.selectedSupplierSku || ""),
       manufacturerSku: String(line.selectedManufacturerSku || ""),
+      barcode: String(line.selectedSupplierUpc || line.barcode || line.upc || ""),
       cost: Number(line.selectedSupplierCost || 0),
       qty: Number(line.selectedSupplierQty || 0),
       matchType: String(line.selectedSupplierMatchType || "saved"),
     }, ...current])
-  }, [line.selectedManufacturerSku, line.selectedSupplierCode, line.selectedSupplierCost, line.selectedSupplierId, line.selectedSupplierMatchType, line.selectedSupplierQty, line.selectedSupplierSku, line.selectedVendorSku, selectedKey, selectedName])
+  }, [line.barcode, line.selectedManufacturerSku, line.selectedSupplierCode, line.selectedSupplierCost, line.selectedSupplierId, line.selectedSupplierMatchType, line.selectedSupplierQty, line.selectedSupplierSku, line.selectedSupplierUpc, line.selectedVendorSku, line.upc, selectedKey, selectedName])
 
   const loadOptions = async (force = false) => {
     if ((!force && loaded) || loading) return
@@ -10741,9 +10743,10 @@ function AuditSupplierCell({ auditId, auditStatus, line, onLineUpdate }: { audit
         selectedSupplierId: selected.vendorId || "",
         selectedSupplierName: selected.supplierName,
         selectedSupplierCode: selected.supplierCode || "",
-        selectedSupplierSku: selected.vendorSku || selected.sourceSku || "",
+        selectedSupplierSku: selected.sourceSku || selected.vendorSku || "",
         selectedVendorSku: selected.vendorSku || "",
         selectedManufacturerSku: selected.manufacturerSku || "",
+        selectedSupplierUpc: selected.barcode || String(line.barcode || line.upc || ""),
         selectedSupplierCost: Number(selected.cost || 0),
         selectedSupplierQty: Number(selected.qty || 0),
         selectedSupplierMatchType: selected.matchType || "selected",
@@ -12286,6 +12289,7 @@ function WarehouseAuditPanel({
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-14">Scan</TableHead>
+                    <TableHead>UPC</TableHead>
                     <TableHead>Working SKU</TableHead>
                     <TableHead>Supplier</TableHead>
                     <TableHead>Vendor SKU</TableHead>
@@ -12293,20 +12297,22 @@ function WarehouseAuditPanel({
                     <TableHead>Cost</TableHead>
                     <TableHead>Bin</TableHead>
                     <TableHead>Counted</TableHead>
-                    <TableHead>Created SKU</TableHead>
-                    <TableHead>Created by</TableHead>
                     <TableHead className="text-right">Review</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {lines.map((line) => (
+                  {lines.map((line) => {
+                    const workingSku = String(line.selectedSupplierSku || line.sku || "");
+                    const catalogSku = String(line.sku || "");
+                    return (
                     <TableRow key={`${String(line.productId || line.sku)}-${String(line.locationBin || "")}`}>
                       <TableCell>
                         {String(line.image || "") ? <button type="button" className="relative block size-10 overflow-hidden rounded-md border bg-muted" title="Open product image"><img src={String(line.image)} alt={String(line.sku || "Catalog item")} className="size-full object-cover" /><span className="absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-emerald-600 text-white shadow"><CheckCircle2 className="size-3" /></span></button> : <span className="grid size-8 place-items-center rounded-full border border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300" title="Catalog item matched"><CheckCircle2 className="size-4" /></span>}
                       </TableCell>
+                      <TableCell className="font-mono text-xs">{String(line.selectedSupplierUpc || line.barcode || line.upc || "-")}</TableCell>
                       <TableCell className="font-medium">
-                        {line.sku ? (
-                          <div className="min-w-32"><button className="font-mono font-medium hover:underline" onClick={() => setQuickPreviewItem({ sku: String(line.sku), title: String(line.title || line.sku), defaultImage: String(line.image || "") })} title={`Preview catalog SKU ${String(line.sku)}`}>{String(line.selectedSupplierSku || line.selectedVendorSku || line.sku)}</button>{String(line.selectedSupplierSku || line.selectedVendorSku || "") && String(line.selectedSupplierSku || line.selectedVendorSku) !== String(line.sku) && <p className="mt-0.5 text-xs text-muted-foreground">Catalog: {String(line.sku)}</p>}</div>
+                        {workingSku ? (
+                          <div className="min-w-32"><button className="font-mono font-medium hover:underline" onClick={() => setQuickPreviewItem({ sku: workingSku, title: String(line.title || workingSku), defaultImage: String(line.image || "") })} title={`Preview working SKU ${workingSku}`}>{workingSku}</button>{catalogSku && workingSku !== catalogSku && <p className="mt-0.5 text-xs text-muted-foreground">Matched from: {catalogSku}</p>}</div>
                         ) : "-"}
                       </TableCell>
                       <TableCell><AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onLineUpdate={applyAuditLineUpdate} /></TableCell>
@@ -12320,34 +12326,32 @@ function WarehouseAuditPanel({
                           {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Adjust counted quantity" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
                         </div>
                       </TableCell>
-                      <TableCell>-</TableCell>
-                      <TableCell>-</TableCell>
                       <TableCell className="text-right">
                         {Number(line.countedQty || 0) !== Number(line.expectedQty || 0) ? <Button size="sm" variant="outline" disabled={auditStatus !== "pending_review"} onClick={() => void openLineReview(line)}>{String(line.reviewStatus || "unreviewed").replace(/_/g, " ")}</Button> : <Badge variant="outline">Matched</Badge>}
                       </TableCell>
                     </TableRow>
-                  ))}
+                    );
+                  })}
                   {unknowns.map((item) => (
                     <TableRow key={`unknown-${String(item.barcode)}-${String(item.locationBin || "")}`}>
                       <TableCell>
                         <span className="grid size-8 place-items-center rounded-full border border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300" title="Not found in the catalog"><X className="size-4" /></span>
                       </TableCell>
                       <TableCell className="font-mono font-medium">{String(item.barcode || "-")}</TableCell>
+                      <TableCell>-</TableCell>
                       <TableCell><span className="text-xs text-muted-foreground">-</span></TableCell>
                       <TableCell>-</TableCell>
                       <TableCell>-</TableCell>
                       <TableCell>-</TableCell>
                       <TableCell>{String(item.locationBin || "-")}</TableCell>
                       <TableCell>{numberLabel(Number(item.count || 0))}</TableCell>
-                      <TableCell>{item.createdProductSku ? <a className="font-medium hover:underline" href={`/products/${encodeURIComponent(String(item.createdProductSku))}`} target="_blank" rel="noreferrer">{String(item.createdProductSku)}</a> : "-"}</TableCell>
-                      <TableCell>{String(item.createdProductBy || "-")}</TableCell>
                       <TableCell className="text-right"><Badge variant={item.createdProductSku ? "secondary" : "outline"}>{item.createdProductSku ? "SKU created" : "Needs details"}</Badge></TableCell>
                     </TableRow>
                   ))}
                   {!lines.length && !unknowns.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={11}
+                        colSpan={10}
                         className="h-20 text-center text-muted-foreground"
                       >
                         Scan the first UPC to begin counting.
