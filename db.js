@@ -3524,6 +3524,178 @@ async function findVendorCatalogSupplierMatches(identity = {}) {
   };
 }
 
+function normalizedSupplierIdentifier(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized || normalized.length < 3 || ["none", "unknown", "n/a", "na", "null", "misc"].includes(normalized)) return "";
+  return normalized;
+}
+
+async function ensureProductSupplierIdentifierMatches(client, { productId = "", sku = "" } = {}) {
+  const productResult = await client.query(`
+    select product_id, sku, mfr_part_number, barcode, brand, title, marketplace_title
+    from products
+    where ($1 <> '' and product_id = $1)
+       or ($2 <> '' and lower(sku) = lower($2))
+    order by case when product_id = $1 then 0 else 1 end
+    limit 1
+  `, [productId || "", sku || ""]);
+  const product = productResult.rows[0];
+  if (!product) return;
+
+  const productSku = normalizedSupplierIdentifier(product.sku);
+  const productBarcode = normalizedSupplierIdentifier(product.barcode);
+  const productMpn = normalizedSupplierIdentifier(product.mfr_part_number);
+  const exactResult = await client.query(`
+    select distinct on (item.vendor_id, item.source_sku)
+      item.vendor_id,
+      item.source_sku,
+      case
+        when $1 <> '' and lower(coalesce(item.barcode, '')) = $1 then 'upc'
+        when $2 <> '' and lower(coalesce(item.vendor_sku, '')) = $2 then 'vendor-sku'
+        when $2 <> '' and lower(coalesce(item.internal_sku, '')) = $2 then 'exact-sku'
+        else 'source-sku'
+      end as match_type,
+      case
+        when $1 <> '' and lower(coalesce(item.barcode, '')) = $1 then 'barcode:' || $1
+        else 'sku:' || $2
+      end as match_key
+    from vendor_catalog_items item
+    where ($1 <> '' and lower(coalesce(item.barcode, '')) = $1)
+       or ($2 <> '' and (
+         lower(coalesce(item.vendor_sku, '')) = $2
+         or lower(coalesce(item.internal_sku, '')) = $2
+         or lower(item.source_sku) = $2
+       ))
+    order by item.vendor_id, item.source_sku,
+      case
+        when $1 <> '' and lower(coalesce(item.barcode, '')) = $1 then 0
+        when $2 <> '' and lower(coalesce(item.vendor_sku, '')) = $2 then 1
+        when $2 <> '' and lower(coalesce(item.internal_sku, '')) = $2 then 2
+        else 3
+      end
+    limit 500
+  `, [productBarcode, productSku]);
+  if (exactResult.rows.length) {
+    await client.query(`
+      insert into product_supplier_links (
+        product_id, product_sku, vendor_id, source_sku, match_key, match_type, updated_at
+      )
+      select $1, $2, candidate.vendor_id, candidate.source_sku, candidate.match_key, candidate.match_type, now()
+      from jsonb_to_recordset($3::jsonb) as candidate(
+        vendor_id text,
+        source_sku text,
+        match_key text,
+        match_type text
+      )
+      on conflict (product_id, vendor_id, source_sku, match_type) do update
+      set product_sku = excluded.product_sku,
+          match_key = excluded.match_key,
+          updated_at = now()
+    `, [product.product_id, product.sku, JSON.stringify(exactResult.rows)]);
+  }
+
+  if (!productMpn) return;
+  const seedResult = await client.query(`
+    select item.*
+    from vendor_catalog_items item
+    where lower(coalesce(item.mfr_part_number, '')) = $1
+       or lower(coalesce(item.vendor_sku, '')) = $1
+       or lower(coalesce(item.internal_sku, '')) = $1
+       or lower(item.source_sku) = $1
+    order by item.updated_at desc nulls last, item.last_seen_at desc nulls last
+    limit 100
+  `, [productMpn]);
+  if (!seedResult.rows.length) return;
+
+  const linkedIdentifiers = [...new Set(seedResult.rows.flatMap((row) => [
+    normalizedSupplierIdentifier(row.vendor_sku),
+    normalizedSupplierIdentifier(row.internal_sku),
+    normalizedSupplierIdentifier(row.source_sku)
+  ]).filter(Boolean))].slice(0, 100);
+  const linkedResult = linkedIdentifiers.length
+    ? await client.query(`
+      select item.*
+      from vendor_catalog_items item
+      where lower(coalesce(item.vendor_sku, '')) = any($1::text[])
+         or lower(coalesce(item.internal_sku, '')) = any($1::text[])
+         or lower(item.source_sku) = any($1::text[])
+      order by item.updated_at desc nulls last, item.last_seen_at desc nulls last
+      limit 250
+    `, [linkedIdentifiers])
+    : { rows: [] };
+
+  const candidates = new Map();
+  for (const row of [...seedResult.rows, ...linkedResult.rows]) {
+    const key = `${String(row.vendor_id || "").toLowerCase()}|${String(row.source_sku || "").toLowerCase()}`;
+    if (!row.vendor_id || !row.source_sku || candidates.has(key)) continue;
+    const exactMpn = normalizedSupplierIdentifier(row.mfr_part_number) === productMpn;
+    candidates.set(key, {
+      vendorId: row.vendor_id,
+      sourceSku: row.source_sku,
+      matchType: exactMpn ? "manufacturer-part-number" : "linked-vendor-sku",
+      matchValue: exactMpn ? productMpn : linkedIdentifiers.find((value) => [
+        normalizedSupplierIdentifier(row.vendor_sku),
+        normalizedSupplierIdentifier(row.internal_sku),
+        normalizedSupplierIdentifier(row.source_sku)
+      ].includes(value)) || productMpn,
+      confidence: exactMpn ? 0.82 : 0.74,
+      supplierMpn: row.mfr_part_number || "",
+      supplierVendorSku: row.vendor_sku || "",
+      supplierInternalSku: row.internal_sku || "",
+      supplierBrand: row.brand || "",
+      supplierTitle: row.title || ""
+    });
+  }
+  const confirmed = new Set(exactResult.rows.map((row) => `${String(row.vendor_id || "").toLowerCase()}|${String(row.source_sku || "").toLowerCase()}`));
+  const reviewCandidates = [...candidates.values()].filter((row) => !confirmed.has(`${String(row.vendorId).toLowerCase()}|${String(row.sourceSku).toLowerCase()}`));
+  if (!reviewCandidates.length) return;
+  const payload = reviewCandidates.map((row) => ({
+    match_id: crypto.createHash("md5").update(`${product.product_id}|${row.vendorId}|${row.sourceSku}|${row.matchType}`).digest("hex"),
+    vendor_id: row.vendorId,
+    source_sku: row.sourceSku,
+    match_type: row.matchType,
+    match_value: row.matchValue,
+    confidence: row.confidence,
+    details: {
+      linkedBy: row.matchType === "manufacturer-part-number" ? "exact-manufacturer-part-number" : "manufacturer-part-number-to-shared-vendor-sku",
+      productMpn: product.mfr_part_number || "",
+      supplierMpn: row.supplierMpn,
+      supplierVendorSku: row.supplierVendorSku,
+      supplierInternalSku: row.supplierInternalSku,
+      productBrand: product.brand || "",
+      supplierBrand: row.supplierBrand,
+      supplierTitle: row.supplierTitle,
+      brandUsedForMatching: false
+    }
+  }));
+  await client.query(`
+    insert into supplier_match_reviews (
+      match_id, product_id, product_sku, vendor_id, source_sku, match_type,
+      match_value, status, confidence, details, created_at, updated_at, last_seen_at
+    )
+    select
+      candidate.match_id, $1, $2, candidate.vendor_id, candidate.source_sku,
+      candidate.match_type, candidate.match_value, 'pending', candidate.confidence,
+      candidate.details, now(), now(), now()
+    from jsonb_to_recordset($3::jsonb) as candidate(
+      match_id text,
+      vendor_id text,
+      source_sku text,
+      match_type text,
+      match_value text,
+      confidence numeric,
+      details jsonb
+    )
+    on conflict (product_id, vendor_id, source_sku, match_type) do update
+    set product_sku = excluded.product_sku,
+        match_value = excluded.match_value,
+        confidence = excluded.confidence,
+        details = excluded.details,
+        updated_at = now(),
+        last_seen_at = now()
+  `, [product.product_id, product.sku, JSON.stringify(payload)]);
+}
+
 async function readProductSupplierLinks(identity = {}) {
   const client = getPool();
   if (!client) return { matchType: "none", matches: [], pendingReviewCount: 0, indexed: false };
@@ -3531,6 +3703,7 @@ async function readProductSupplierLinks(identity = {}) {
   const productId = nullableString(identity.productId || identity.id || "");
   const sku = nullableString(identity.sku || identity.internalSku || "");
   if (!productId && !sku) return { matchType: "none", matches: [], pendingReviewCount: 0, indexed: true };
+  await ensureProductSupplierIdentifierMatches(client, { productId, sku });
   const result = await client.query(`
     select
       item.*,
