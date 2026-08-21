@@ -10625,6 +10625,9 @@ type AuditSupplierOption = {
 type AuditSupplierCacheEntry = {
   options: AuditSupplierOption[]
   expiresAt: number
+  indexReady?: boolean
+  indexBuilding?: boolean
+  message?: string
 }
 
 const auditSupplierOptionsCache = new Map<string, AuditSupplierCacheEntry>()
@@ -10641,7 +10644,7 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
   const [supplierMenuOpen, setSupplierMenuOpen] = useState(false)
   const selectedKey = String(line.selectedSupplierKey || "")
   const selectedName = String(line.selectedSupplierName || line.supplierName || "")
-  const supplierCacheKey = `${auditId}:${lineKey}`
+  const supplierCacheKey = String(line.productId || line.sku || lineKey).trim().toLowerCase()
 
   useEffect(() => {
     if (!selectedKey || !selectedName) return
@@ -10664,23 +10667,31 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
     if (!force && cached && cached.expiresAt > Date.now()) {
       setOptions(cached.options)
       setLoaded(true)
-      setLoadError("")
+      setLoadError(cached.message || "")
       return
     }
     setLoading(true)
     setLoadError("")
     const controller = new AbortController()
-    const timeout = window.setTimeout(() => controller.abort(), 10000)
+    const timeout = window.setTimeout(() => controller.abort(), 6000)
     try {
-      const result = await api<{ options?: AuditSupplierOption[] }>(`/api/warehouse-audits/${encodeURIComponent(auditId)}/lines/${encodeURIComponent(lineKey)}/suppliers`, { signal: controller.signal })
+      const result = await api<{ options?: AuditSupplierOption[]; indexReady?: boolean; indexBuilding?: boolean; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(auditId)}/lines/${encodeURIComponent(lineKey)}/suppliers`, { signal: controller.signal })
       const nextOptions = Array.isArray(result.options) ? result.options : []
       setOptions(nextOptions)
-      auditSupplierOptionsCache.set(supplierCacheKey, { options: nextOptions, expiresAt: Date.now() + 15 * 60 * 1000 })
+      const rebuildingMessage = result.indexBuilding && !nextOptions.length ? result.message || "Supplier index is still rebuilding. Saved selections remain available." : ""
+      auditSupplierOptionsCache.set(supplierCacheKey, {
+        options: nextOptions,
+        indexReady: result.indexReady,
+        indexBuilding: result.indexBuilding,
+        message: rebuildingMessage,
+        expiresAt: Date.now() + (result.indexBuilding ? 30 * 1000 : 15 * 60 * 1000),
+      })
+      setLoadError(rebuildingMessage)
       setLoaded(true)
     } catch (error) {
       const message = error instanceof DOMException && error.name === "AbortError" ? "Supplier lookup timed out. Please retry." : error instanceof Error ? error.message : "Supplier options could not be loaded."
       setLoadError(message)
-      toast.error(message)
+      if (!(error instanceof DOMException && error.name === "AbortError")) toast.error(message)
     } finally {
       window.clearTimeout(timeout)
       setLoading(false)
@@ -10707,7 +10718,7 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
   if (supplierCount === 1) {
     return <p className="min-w-32 text-sm font-medium">{selectedName || "Single supplier"}</p>
   }
-  if (supplierCount >= 2) {
+  if (supplierCount >= 2 || possibleSupplierCount >= 2) {
     const editable = ["in_progress", "pending_review"].includes(auditStatus)
     return <Popover open={supplierMenuOpen} onOpenChange={(open) => { setSupplierMenuOpen(open); if (open) void loadOptions() }}><PopoverTrigger asChild><Button size="sm" variant={selectedKey ? "outline" : "secondary"} disabled={saving || !editable} className={cn("min-w-44 justify-between", !selectedKey && "border border-amber-400 bg-amber-50 text-amber-950 hover:bg-amber-100 dark:bg-amber-950/50 dark:text-amber-100")}><span className="truncate">{saving ? "Saving supplier..." : selectedName || "Choose supplier"}</span>{saving ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />}</Button></PopoverTrigger><PopoverContent align="start" className="w-72 p-0"><Command><CommandInput placeholder="Search suppliers..." disabled={loading || Boolean(loadError)} /><CommandList>{loading && <div className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading supplier offers...</div>}{loadError && <div className="space-y-3 p-3"><p className="text-sm text-destructive">{loadError}</p><Button size="sm" variant="outline" onClick={() => { setLoaded(false); void loadOptions(true) }}><RefreshCw className="size-3.5" /> Retry</Button></div>}{loaded && !loading && !loadError && <><CommandEmpty>No confirmed suppliers found.</CommandEmpty><CommandGroup heading="Available suppliers">{options.map((option) => <CommandItem key={option.key} value={`${option.supplierName} ${option.supplierCode || ""}`} onSelect={() => void assignSupplier(option.key)}><CheckCircle2 className={cn("size-4", option.key === selectedKey ? "text-emerald-600" : "text-transparent")} /><span className="truncate">{option.supplierName}</span></CommandItem>)}</CommandGroup></>}</CommandList></Command></PopoverContent></Popover>
   }
@@ -16593,6 +16604,20 @@ function ReleaseHistorySettings({ active }: { active: boolean }) {
   </div>
 }
 
+type SupplierIndexStatus = {
+  enabled?: boolean
+  totalProducts?: number
+  totalLinks?: number
+  linkedProducts?: number
+  multiSupplierProducts?: number
+  unmatchedProducts?: number
+  pendingReviews?: number
+  lastRebuiltAt?: string
+  methodCounts?: Array<{ matchType?: string; productCount?: number; linkCount?: number }>
+  activeJobId?: string
+  activeJob?: ImportJob | null
+}
+
 function SettingsPage({
   settings,
   workerStatus,
@@ -16617,6 +16642,8 @@ function SettingsPage({
     kind: "success" | "error"
     message: string
   } | null>(null)
+  const [supplierIndexStatus, setSupplierIndexStatus] = useState<SupplierIndexStatus | null>(null)
+  const [supplierIndexLoading, setSupplierIndexLoading] = useState(false)
   const [aiUsage, setAiUsage] = useState<Record<string, unknown> | null>(null)
   const [loadingAiUsage, setLoadingAiUsage] = useState(false)
   const [runtime, setRuntime] = useState<Record<string, number> | null>(null)
@@ -16673,6 +16700,21 @@ function SettingsPage({
       .then((state) => setSettingsWarehouses((state.warehouses || []) as Array<Record<string, unknown>>))
       .catch(() => setSettingsWarehouses([]))
   }, [])
+
+  const loadSupplierIndexStatus = async () => {
+    setSupplierIndexLoading(true)
+    try {
+      setSupplierIndexStatus(await api<SupplierIndexStatus>("/api/catalog/supplier-index/status"))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load supplier index status.")
+    } finally {
+      setSupplierIndexLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === "catalog") void loadSupplierIndexStatus()
+  }, [activeTab])
 
   function update(field: string, next: unknown) {
     setDraft((current) => ({ ...current, [field]: next }))
@@ -16732,6 +16774,7 @@ function SettingsPage({
       setCatalogMaintenanceFeedback({ kind: "success", message })
       setCatalogMaintenanceConfirm(null)
       toast.success(message)
+      if (path === "/api/catalog/supplier-index/rebuild") void loadSupplierIndexStatus()
     } catch (error) {
       const message = error instanceof Error ? error.message : `Unable to start ${label.toLowerCase()}.`
       setCatalogMaintenanceFeedback({ kind: "error", message })
@@ -17312,6 +17355,44 @@ function SettingsPage({
               </CardContent>
             </Card>
             <Card>
+              <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
+                <div>
+                  <CardTitle className="text-base">Supplier index status</CardTitle>
+                  <CardDescription>Stored supplier relationships power audit selection and multi-supplier catalog filters without live full-catalog matching.</CardDescription>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button type="button" size="sm" variant="outline" disabled={supplierIndexLoading} onClick={() => void loadSupplierIndexStatus()}>
+                    <RefreshCw className={cn("size-4", supplierIndexLoading && "animate-spin")} /> Refresh
+                  </Button>
+                  <Button type="button" size="sm" disabled={catalogMaintenanceLoading || Boolean(supplierIndexStatus?.activeJob)} onClick={() => requestCatalogMaintenance({
+                    path: "/api/catalog/supplier-index/rebuild",
+                    label: "Supplier matching index",
+                    description: "Rebuild stored UPC, MPN plus brand, exact-SKU, and approved supplier relationships and generate a downloadable matching report.",
+                  })}>
+                    {supplierIndexStatus?.activeJob ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
+                    {supplierIndexStatus?.activeJob ? "Rebuilding" : "Rebuild"}
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent className="grid gap-4">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                  {[
+                    ["Linked products", supplierIndexStatus?.linkedProducts],
+                    ["Supplier links", supplierIndexStatus?.totalLinks],
+                    ["Multiple suppliers", supplierIndexStatus?.multiSupplierProducts],
+                    ["Pending review", supplierIndexStatus?.pendingReviews],
+                    ["Unmatched", supplierIndexStatus?.unmatchedProducts],
+                  ].map(([label, count]) => <div key={String(label)} className="rounded-md border bg-muted/30 p-3"><p className="text-xs font-medium uppercase text-muted-foreground">{label}</p><p className="mt-1 text-xl font-semibold">{supplierIndexLoading && !supplierIndexStatus ? <Loader2 className="size-5 animate-spin" /> : numberLabel(Number(count || 0))}</p></div>)}
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <Badge variant={supplierIndexStatus?.activeJob ? "secondary" : "outline"}>{supplierIndexStatus?.activeJob ? "Rebuild running" : supplierIndexStatus?.lastRebuiltAt ? "Index ready" : "Not built"}</Badge>
+                  <span>Last rebuilt: {supplierIndexStatus?.lastRebuiltAt ? new Date(supplierIndexStatus.lastRebuiltAt).toLocaleString() : "Never"}</span>
+                  {(supplierIndexStatus?.methodCounts || []).map((method) => <Badge key={String(method.matchType)} variant="outline">{method.matchType === "manufacturer-part-and-brand" ? "MPN + brand" : method.matchType === "exact-sku" ? "Exact SKU" : method.matchType === "approved-mfr-part-number" ? "Approved MPN" : String(method.matchType || "Unknown").toUpperCase()}: {numberLabel(Number(method.productCount || 0))}</Badge>)}
+                  {supplierIndexStatus?.activeJob && <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild><a href={`/jobs/${encodeURIComponent(String(supplierIndexStatus.activeJob.id || ""))}`}>Open job</a></Button>}
+                </div>
+              </CardContent>
+            </Card>
+            <Card>
               <CardHeader>
                 <CardTitle className="text-base">Catalog maintenance</CardTitle>
                 <CardDescription>These are background jobs. Every action is confirmed first, returns a job reference, and can be inspected from Jobs.</CardDescription>
@@ -17327,6 +17408,7 @@ function SettingsPage({
                     { path: "/api/catalog/source-search-index/build", label: "Keyword search index", description: "Enables broad text search across the full source feed.", icon: <Search className="size-4" /> },
                     { path: "/api/catalog/performance-indexes/build", label: "Filter performance indexes", description: "Builds PostgreSQL indexes for supplier, status, category, stock, and lifecycle filters.", icon: <Database className="size-4" /> },
                     { path: "/api/catalog/facets/refresh", label: "Refresh filter values", description: "Recounts supplier, brand, category, and stock-status options.", icon: <RefreshCw className="size-4" /> },
+                    { path: "/api/catalog/supplier-index/rebuild", label: "Supplier matching index", description: "Rebuilds cached supplier relationships and creates a downloadable match-method report.", icon: <Users className="size-4" /> },
                     { path: "/api/catalog/datawarehouse-inventory/reclassify", label: "Reclassify DataWarehouse inventory", description: "Moves imported supplier-feed stock into the virtual DataWarehouse location while preserving receipt- and audit-backed physical stock.", icon: <Warehouse className="size-4" />, body: { dryRun: false } },
                     { path: "/api/source-catalog/pricing-inventory/refresh", label: "Refresh pricing and inventory", description: "Imports cost, price, stock, promotions, and closeout changes from the product dump.", icon: <PackageSearch className="size-4" /> },
                     { path: "/api/categories/summary-index/rebuild", label: "Rebuild category index", description: "Rebuilds category summaries used by the main catalog and category mappings.", icon: <RotateCcw className="size-4" />, body: { scope: "both" } },

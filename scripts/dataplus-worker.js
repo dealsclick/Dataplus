@@ -37,6 +37,7 @@ const SUPPORTED_TASKS = [
   "source-search-index",
   "source-performance-indexes",
   "source-facets-refresh",
+  "supplier-coverage-refresh",
   "datawarehouse-inventory-reclassification",
   "jobs-retention-cleanup",
   "mapped-product-export",
@@ -1379,6 +1380,74 @@ async function runEbayCategoryAutoMapJob(job) {
   return dataplus.runEbayCategoryAutoMapWorkerJob(job, job.workerPayload || {});
 }
 
+function supplierReportCsvValue(value) {
+  const text = String(value ?? "");
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+async function runSupplierCoverageRefreshJob(job) {
+  let current = await persistJob(job, {
+    status: "running",
+    phase: "starting",
+    message: "Worker is rebuilding stored supplier matches...",
+    startedAt: job.startedAt || new Date().toISOString()
+  });
+  const heartbeatTimer = setInterval(() => {
+    writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh supplier index heartbeat:", error.message || error));
+  }, 10000);
+  try {
+    const result = await postgres.refreshVendorSupplierCoverage({
+      isCanceled: () => false,
+      onProgress: (patch = {}) => {
+        current = normalizeJobPatch(current, {
+          ...patch,
+          status: "running",
+          message: patch.message || current.message
+        });
+        postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist supplier index progress:", error.message || error));
+        writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh supplier index heartbeat:", error.message || error));
+      }
+    });
+    await redisCache.deleteByPrefix("dataplus:audit-supplier-options:");
+    const status = await postgres.readSupplierIndexStatus();
+    const labels = {
+      upc: "UPC",
+      "manufacturer-part-and-brand": "MPN + brand",
+      "approved-mfr-part-number": "Approved MPN",
+      "exact-sku": "Exact SKU",
+      primary: "Primary supplier"
+    };
+    const reportRows = [
+      ["Match method", "Products", "Supplier links", "Review state"],
+      ...(status.methodCounts || []).map((row) => [labels[row.matchType] || row.matchType || "Unknown", row.productCount || 0, row.linkCount || 0, "Linked"]),
+      ["Unmatched", status.unmatchedProducts || 0, 0, "Needs matching"],
+      ["Review required", status.pendingReviews || 0, 0, "Pending approval"]
+    ];
+    const target = workerExportPath(current, "supplier-matching-report.csv");
+    fs.writeFileSync(target.filePath, reportRows.map((row) => row.map(supplierReportCsvValue).join(",")).join("\n"), "utf8");
+    current = await persistJob(current, {
+      status: "success",
+      phase: "complete",
+      message: `Supplier index rebuilt for ${Number(status.linkedProducts || 0).toLocaleString()} linked products.`,
+      details: `${Number(status.totalLinks || 0).toLocaleString()} supplier links; ${Number(status.multiSupplierProducts || 0).toLocaleString()} multi-supplier products; ${Number(status.pendingReviews || 0).toLocaleString()} pending reviews.`,
+      totalRows: Number(result.totalRows || status.totalProducts || current.totalRows || 0),
+      processedRows: Number(result.processedRows || result.totalRows || status.totalProducts || 0),
+      changed: Number(status.totalLinks || 0),
+      progressPercent: 100,
+      estimatedSecondsRemaining: 0,
+      fileName: target.filename,
+      originalFileName: target.filename,
+      originalFilePath: target.filePath,
+      supplierIndexStatus: status,
+      finishedAt: new Date().toISOString()
+    });
+    await postgres.upsertOperationArtifact(current, "original");
+    return current;
+  } finally {
+    clearInterval(heartbeatTimer);
+  }
+}
+
 async function runDataWarehouseInventoryReclassificationJob(job) {
   const payload = job.workerPayload || {};
   const dryRun = payload.dryRun === true;
@@ -1767,6 +1836,7 @@ async function runJob(job) {
   if (task === "datawarehouse-inventory-reclassification") return runDataWarehouseInventoryReclassificationJob(job);
   if (task === "source-performance-indexes") return runSourcePerformanceIndexesJob(job);
   if (task === "source-facets-refresh") return runSourceFacetsRefreshJob(job);
+  if (task === "supplier-coverage-refresh") return runSupplierCoverageRefreshJob(job);
   if (task === "jobs-retention-cleanup") return runJobsRetentionCleanupJob(job);
   if (task === "mapped-product-export") return runMappedProductExportJob(job);
   if (task === "category-export") return runCategoryExportJob(job);

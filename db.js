@@ -2663,6 +2663,53 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
   }
 }
 
+async function readSupplierIndexStatus() {
+  const client = getPool();
+  if (!client) return { enabled: false, methodCounts: [] };
+  await initRelationalSchema();
+  const [summaryResult, methodResult] = await Promise.all([
+    client.query(`
+      with coverage as (
+        select product_id, count(distinct vendor_id)::integer as supplier_count, max(updated_at) as updated_at
+        from product_supplier_links
+        group by product_id
+      )
+      select
+        (select count(*) from products)::bigint as total_products,
+        (select count(*) from product_supplier_links)::bigint as total_links,
+        count(*)::bigint as linked_products,
+        count(*) filter (where supplier_count >= 2)::bigint as multi_supplier_products,
+        max(updated_at) as last_rebuilt_at,
+        (select count(*) from supplier_match_reviews where status = 'pending')::bigint as pending_reviews
+      from coverage
+    `),
+    client.query(`
+      select match_type, count(*)::bigint as link_count, count(distinct product_id)::bigint as product_count
+      from product_supplier_links
+      group by match_type
+      order by product_count desc, match_type
+    `)
+  ]);
+  const row = summaryResult.rows[0] || {};
+  const totalProducts = Number(row.total_products || 0);
+  const linkedProducts = Number(row.linked_products || 0);
+  return {
+    enabled: true,
+    totalProducts,
+    totalLinks: Number(row.total_links || 0),
+    linkedProducts,
+    multiSupplierProducts: Number(row.multi_supplier_products || 0),
+    unmatchedProducts: Math.max(0, totalProducts - linkedProducts),
+    pendingReviews: Number(row.pending_reviews || 0),
+    lastRebuiltAt: row.last_rebuilt_at || null,
+    methodCounts: methodResult.rows.map((item) => ({
+      matchType: item.match_type || "unknown",
+      linkCount: Number(item.link_count || 0),
+      productCount: Number(item.product_count || 0)
+    }))
+  };
+}
+
 async function vendorCatalogFiltersWithSupplierKeys(client, filters = {}) {
   const suppliers = String(filters.suppliers || filters.supplier || "")
     .split("|")
@@ -8545,6 +8592,7 @@ module.exports = {
   vendorCatalogFacets,
   refreshVendorCatalogFacets,
   refreshVendorSupplierCoverage,
+  readSupplierIndexStatus,
   isPostgresEnabled,
   readState,
   readLiteState,

@@ -26074,7 +26074,7 @@ function confirmedSupplierMatch(row = {}) {
   return ["", "confirmed", "approved"].includes(String(row.matchStatus || "").trim().toLowerCase());
 }
 
-async function auditSupplierOptionsForLine(line = {}, vendors = []) {
+async function auditSupplierOptionsForLine(line = {}) {
   const product = await postgres.readProductByKey(line.productId || line.sku);
   if (!product) return { product: null, options: [], pendingReviewCount: 0 };
   const cacheVersion = String(product.supplierCoverageUpdatedAt || "unindexed").trim();
@@ -26112,19 +26112,16 @@ async function auditSupplierOptionsForLine(line = {}, vendors = []) {
       requiresReview: false
     });
   }
-  const vendorRows = Array.isArray(vendors) ? vendors : [];
   const bySupplier = new Map();
   for (const match of matches.filter(confirmedSupplierMatch)) {
     const supplierName = String(match.supplier || "").trim();
     const supplierCode = String(match.supplierCode || "").trim();
     if (!supplierName && !supplierCode) continue;
-    const vendor = vendorRows.find((row) => (supplierCode && [row.id, row.code, row.vendorCode, row.feedCode].some((value) => String(value || "").trim().toLowerCase() === supplierCode.toLowerCase()))
-      || (supplierName && String(row.name || "").trim().toLowerCase() === supplierName.toLowerCase())) || null;
-    const key = String(vendor?.id || supplierCode || supplierName).trim().toLowerCase();
+    const key = String(match.vendorId || supplierCode || supplierName).trim().toLowerCase();
     const option = {
       key,
-      vendorId: String(vendor?.id || match.vendorId || "").trim(),
-      supplierName: String(vendor?.name || supplierName || supplierCode).trim(),
+      vendorId: String(match.vendorId || "").trim(),
+      supplierName: String(supplierName || supplierCode).trim(),
       supplierCode,
       sourceSku: String(match.sourceSku || match.sku || "").trim(),
       vendorSku: String(match.vendorSku || match.sourceSku || match.sku || "").trim(),
@@ -32639,19 +32636,27 @@ async function handleApi(req, res) {
     const lineKey = decodeURIComponent(parts[4]);
     const line = (audit.lines || []).find((entry) => auditLineKey(entry) === lineKey);
     if (!line) return sendJson(res, 404, { error: "Audit line not found." });
-    const vendors = await postgres.readStateField("vendors").catch(() => []);
     let result;
     try {
-      result = await auditSupplierOptionsForLine(line, Array.isArray(vendors) ? vendors : []);
+      result = await auditSupplierOptionsForLine(line);
     } catch (error) {
       if (["57014", "QUERY_TIMEOUT"].includes(String(error?.code || "")) || /query.*timeout|canceling statement/i.test(String(error?.message || ""))) {
-        return sendJson(res, 504, { error: "Supplier matching took too long. Retry the lookup; the audit remains available." });
+        const indexStatus = await postgres.readSupplierIndexStatus().catch(() => ({}));
+        return sendJson(res, 200, {
+          options: [],
+          pendingReviewCount: Number(indexStatus.pendingReviews || 0),
+          indexReady: false,
+          indexBuilding: true,
+          message: "Supplier index is still rebuilding. Saved selections remain available."
+        });
       }
       throw error;
     }
     return sendJson(res, 200, {
       options: result.options,
       pendingReviewCount: result.pendingReviewCount,
+      indexReady: true,
+      indexBuilding: false,
       selectedSupplierKey: String(line.selectedSupplierKey || ""),
       selectedSupplierName: String(line.selectedSupplierName || "")
     });
@@ -32666,13 +32671,12 @@ async function handleApi(req, res) {
     const lineKey = decodeURIComponent(parts[4]);
     const line = (audit.lines || []).find((entry) => auditLineKey(entry) === lineKey);
     if (!line) return sendJson(res, 404, { error: "Audit line not found." });
-    const vendors = await postgres.readStateField("vendors").catch(() => []);
     let result;
     try {
-      result = await auditSupplierOptionsForLine(line, Array.isArray(vendors) ? vendors : []);
+      result = await auditSupplierOptionsForLine(line);
     } catch (error) {
       if (["57014", "QUERY_TIMEOUT"].includes(String(error?.code || "")) || /query.*timeout|canceling statement/i.test(String(error?.message || ""))) {
-        return sendJson(res, 504, { error: "Supplier matching took too long. Retry the assignment; the audit remains available." });
+        return sendJson(res, 409, { error: "Supplier index is still rebuilding. The audit and its saved supplier selection remain available." });
       }
       throw error;
     }
@@ -32807,7 +32811,7 @@ async function handleApi(req, res) {
             matchType: String(line.selectedSupplierMatchType || "saved").trim()
           };
         } else {
-          const result = await auditSupplierOptionsForLine(line, db.vendors || []);
+          const result = await auditSupplierOptionsForLine(line);
           if (result.options.length === 1) selection = result.options[0];
         }
         if (!selection?.supplierName) unresolved.push(String(line.sku || "Unknown SKU"));
@@ -37622,6 +37626,89 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/catalog/facets") {
     return sendJson(res, 200, await scanCatalogFacets());
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog/supplier-index/status") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 200, { enabled: false, methodCounts: [], activeJob: null });
+    const [status, jobs] = await Promise.all([
+      postgres.readSupplierIndexStatus(),
+      mergedImportJobsAsync({})
+    ]);
+    const active = jobs.find((job) => String(job.workerTask || "") === "supplier-coverage-refresh"
+      && ["queued", "running"].includes(String(job.status || "").toLowerCase())) || null;
+    return sendJson(res, 200, {
+      ...status,
+      activeJobId: active?.id || "",
+      activeJob: active ? normalizeImportJob(active) : null
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/catalog/supplier-index/rebuild") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 400, { error: "Postgres is required for the supplier matching index." });
+    const jobs = await mergedImportJobsAsync({});
+    const active = jobs.find((job) => String(job.workerTask || "") === "supplier-coverage-refresh"
+      && ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+    if (active) return sendJson(res, 200, { job: normalizeImportJob(active), message: "Supplier matching index rebuild is already running." });
+    const status = await postgres.readSupplierIndexStatus();
+    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const job = createImportJob(db, {
+      section: "Catalog",
+      category: "Catalog",
+      operation: "Rebuild supplier matching index",
+      direction: "maintenance",
+      type: "maintenance",
+      source: "supplier-matching-index",
+      status: "queued",
+      phase: "queued",
+      message: "Supplier matching index rebuild queued.",
+      details: "Rebuilds stored UPC, manufacturer-part-and-brand, exact-SKU, and approved supplier links, then produces a matching report.",
+      fileName: "supplier-matching-report.csv",
+      totalRows: Number(status.totalProducts || 0),
+      processedRows: 0,
+      progressPercent: 0,
+      workerTask: shouldRunJobsInline() ? "" : "supplier-coverage-refresh",
+      workerPayload: {}
+    });
+    if (!shouldRunJobsInline()) return sendJson(res, 202, { job: normalizeImportJob(job), message: job.message });
+    activeJobRecords.set(job.id, normalizeImportJob(job));
+    setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: job.totalRows, processedRows: 0, progressPercent: 0 });
+    setTimeout(async () => {
+      const workJob = activeJobRecords.get(job.id) || job;
+      try {
+        workJob.status = "running";
+        workJob.startedAt = workJob.startedAt || new Date().toISOString();
+        workJob.message = "Rebuilding stored supplier matches...";
+        upsertImportJobStore(workJob);
+        const result = await postgres.refreshVendorSupplierCoverage({
+          isCanceled: () => !["queued", "running"].includes(String(activeJobProgress.get(workJob.id)?.status || workJob.status || "").toLowerCase()),
+          onProgress: (patch) => {
+            const next = setActiveJobProgress(workJob.id, { ...patch, status: "running", startedAt: workJob.startedAt });
+            Object.assign(workJob, next);
+            activeJobRecords.set(workJob.id, normalizeImportJob(workJob));
+            upsertImportJobStore(workJob);
+          }
+        });
+        await redisCache.deleteByPrefix("dataplus:audit-supplier-options:");
+        const nextStatus = await postgres.readSupplierIndexStatus();
+        finishImportJob(workJob, {
+          status: "success",
+          message: `Supplier index rebuilt for ${Number(nextStatus.linkedProducts || 0).toLocaleString()} linked products.`,
+          details: `${Number(nextStatus.totalLinks || 0).toLocaleString()} supplier links; ${Number(nextStatus.multiSupplierProducts || 0).toLocaleString()} multi-supplier products; ${Number(nextStatus.pendingReviews || 0).toLocaleString()} pending reviews.`,
+          totalRows: Number(result.totalRows || nextStatus.totalProducts || workJob.totalRows || 0),
+          processedRows: Number(result.processedRows || result.totalRows || nextStatus.totalProducts || 0),
+          changed: Number(nextStatus.totalLinks || 0),
+          progressPercent: 100,
+          phase: "complete",
+          supplierIndexStatus: nextStatus
+        });
+      } catch (error) {
+        finishImportJob(workJob, { status: "failed", phase: "failed", message: error.message, errors: [error.message], missingCount: 1 });
+      } finally {
+        activeJobProgress.delete(workJob.id);
+        activeJobRecords.delete(workJob.id);
+      }
+    }, 10);
+    return sendJson(res, 202, { job: normalizeImportJob(job), message: job.message });
   }
 
   if (req.method === "GET" && url.pathname === "/api/catalog/source-search-index/status") {
