@@ -11045,6 +11045,18 @@ function AuditSupplierCell({ auditId, auditStatus, line, onLineUpdate }: { audit
   return <span className="text-xs text-muted-foreground">No supplier match</span>
 }
 
+const warehouseAuditReasonOptions = [
+  { value: "cycle_count", label: "Cycle count" },
+  { value: "new_inventory_onboarding", label: "New inventory onboarding" },
+  { value: "extra_stock", label: "Extra stock" },
+] as const;
+
+function warehouseAuditReasonLabel(value: unknown, savedLabel?: unknown) {
+  const explicit = String(savedLabel || "").trim();
+  if (explicit) return explicit;
+  return warehouseAuditReasonOptions.find((option) => option.value === String(value || ""))?.label || "";
+}
+
 function WarehouseAuditPanel({
   auditId = "",
   createOnly = false,
@@ -11057,6 +11069,10 @@ function WarehouseAuditPanel({
   const [barcode, setBarcode] = useState("");
   const [warehouse, setWarehouse] = useState("Staten Island");
   const [auditReason, setAuditReason] = useState("cycle_count");
+  const [auditsLoading, setAuditsLoading] = useState(true);
+  const [purposeEditorOpen, setPurposeEditorOpen] = useState(false);
+  const [purposeDraft, setPurposeDraft] = useState("");
+  const [purposeSaving, setPurposeSaving] = useState(false);
   const [auditOwner, setAuditOwner] = useState("Luis");
   const [activeBin, setActiveBin] = useState("");
   const [auditWarehouses, setAuditWarehouses] = useState<Array<{ id?: string; name?: string; code?: string; warehouseType?: string; inventorySourceType?: string; isPhysical?: boolean; bins?: Array<{ id?: string; code?: string; name?: string; nickname?: string; active?: boolean; isDefault?: boolean }> }>>([]);
@@ -11173,13 +11189,18 @@ function WarehouseAuditPanel({
     } catch { /* Camera selection remains optional. */ }
   };
   const load = async () => {
-    const [result, state] = await Promise.all([
-      api<{ audits?: Array<Record<string, unknown>> }>("/api/warehouse-audits"),
-      api<LiteState>("/api/state?lite=1"),
-    ]);
-    setAudits(result.audits || []);
-    setAuditWarehouses((state.warehouses || []) as typeof auditWarehouses);
-    setScannerSettings(state.systemSettings || {});
+    setAuditsLoading(true);
+    try {
+      const [result, state] = await Promise.all([
+        api<{ audits?: Array<Record<string, unknown>> }>("/api/warehouse-audits"),
+        api<LiteState>("/api/state?lite=1"),
+      ]);
+      setAudits(result.audits || []);
+      setAuditWarehouses((state.warehouses || []) as typeof auditWarehouses);
+      setScannerSettings(state.systemSettings || {});
+    } finally {
+      setAuditsLoading(false);
+    }
   };
   const resumedAudit =
     active ||
@@ -11908,6 +11929,27 @@ function WarehouseAuditPanel({
       setCountEditBusy(false);
     }
   };
+  const openPurposeEditor = () => {
+    setPurposeDraft(String(resumedAudit?.reason || ""));
+    setPurposeEditorOpen(true);
+  };
+  const saveAuditPurpose = async () => {
+    if (!resumedAudit?.id || !purposeDraft) return;
+    setPurposeSaving(true);
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}`,
+        { method: "PATCH", body: JSON.stringify({ reason: purposeDraft, user: auditOwner || "Luis" }) },
+      );
+      applyAuditUpdate(result.audit || resumedAudit);
+      setPurposeEditorOpen(false);
+      toast.success(result.message || "Audit purpose saved.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save the audit purpose.");
+    } finally {
+      setPurposeSaving(false);
+    }
+  };
   const current = resumedAudit;
   const lines = Array.isArray(current?.lines)
     ? (current?.lines as Array<Record<string, unknown>>)
@@ -12005,6 +12047,12 @@ function WarehouseAuditPanel({
         </CardContent>
       </Card>
     );
+  if (auditId && auditsLoading) {
+    return <Card><CardContent className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading warehouse audit...</CardContent></Card>;
+  }
+  if (auditId && !current) {
+    return <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Audit not found</AlertTitle><AlertDescription>This warehouse audit could not be loaded. Return to the audit register and try again.</AlertDescription></Alert>;
+  }
   return (
     <Card>
       <CardHeader>
@@ -12052,7 +12100,12 @@ function WarehouseAuditPanel({
                 </p>
                 <div className="mt-2 flex flex-wrap gap-2">
                   <Badge variant={auditStatus === "completed" ? "secondary" : auditStatus === "pending_review" ? "outline" : "default"}>{auditStatus === "pending_review" ? "Action required" : auditStatus === "completed" ? "Applied" : "Counting"}</Badge>
-                  <Badge variant="outline">{String(current.reasonLabel || (current.reason === "new_inventory_onboarding" ? "New inventory onboarding" : current.reason === "extra_stock" ? "Extra stock" : "Cycle count"))}</Badge>
+                  {warehouseAuditReasonLabel(current.reason, current.reasonLabel) ? (
+                    <Badge variant="outline">{warehouseAuditReasonLabel(current.reason, current.reasonLabel)}</Badge>
+                  ) : (
+                    <Badge variant="outline" className="border-amber-400 bg-amber-50 text-amber-950 dark:border-amber-600 dark:bg-amber-950/50 dark:text-amber-100"><AlertTriangle className="mr-1 size-3" /> Reason missing</Badge>
+                  )}
+                  <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={openPurposeEditor}><Pencil className="size-3" /> Edit purpose</Button>
                   {auditDisposition && <Badge variant="secondary">{String(auditDisposition.label || "Inventory outcome applied")}</Badge>}
                   {Boolean(auditDisposition?.supplierReturnNumber) && <Badge variant="outline">{String(auditDisposition?.supplierReturnNumber)} draft</Badge>}
                   {offlineScanCount > 0 && <Badge variant="outline">{syncingOfflineScans ? "Syncing offline scans" : `${offlineScanCount} scan${offlineScanCount === 1 ? "" : "s"} queued offline`}</Badge>}
@@ -12085,6 +12138,21 @@ function WarehouseAuditPanel({
                 <Button size="sm" variant="ghost" className="col-span-2 sm:col-span-1" asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export</a></Button>
               </div>
             </div>
+            <Dialog open={purposeEditorOpen} onOpenChange={setPurposeEditorOpen}>
+              <DialogContent className="max-w-md">
+                <DialogHeader>
+                  <DialogTitle>Edit audit purpose</DialogTitle>
+                  <DialogDescription>Set the reason for this audit without interrupting or restarting the count.</DialogDescription>
+                </DialogHeader>
+                <Field label="Audit purpose">
+                  <Select value={purposeDraft} onValueChange={setPurposeDraft}>
+                    <SelectTrigger><SelectValue placeholder="Select a purpose" /></SelectTrigger>
+                    <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+                  </Select>
+                </Field>
+                <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
+              </DialogContent>
+            </Dialog>
             <div className="grid gap-3 rounded-md border bg-muted/20 p-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
               <div className="grid gap-2">
                 <div className="flex flex-wrap items-center gap-2">

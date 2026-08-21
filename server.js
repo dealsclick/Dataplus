@@ -32573,6 +32573,37 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { audits: hydratedAudits });
   }
 
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const reasonOptions = {
+      cycle_count: "Cycle count",
+      new_inventory_onboarding: "New inventory onboarding",
+      extra_stock: "Extra stock"
+    };
+    const reason = String(body.reason || "").trim();
+    if (!Object.prototype.hasOwnProperty.call(reasonOptions, reason)) {
+      return sendJson(res, 400, { error: "Choose a valid audit purpose." });
+    }
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    const now = new Date().toISOString();
+    const actor = String(body.user || "Luis").trim() || "Luis";
+    const previousReason = String(audit.reason || "").trim();
+    audit.reason = reason;
+    audit.reasonLabel = reasonOptions[reason];
+    audit.updatedAt = now;
+    audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), {
+      type: "purpose_updated",
+      at: now,
+      user: actor,
+      previousReason,
+      reason
+    }].slice(-100);
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    return sendJson(res, 200, { audit, message: `${audit.auditNumber || "Audit"} purpose saved as ${reasonOptions[reason]}.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lock" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
