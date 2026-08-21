@@ -30956,9 +30956,12 @@ async function handleApi(req, res) {
     const primarySku = product.vendorSku || product.sku || "";
     const exists = (coverage.matches || []).some((row) => {
       const confirmed = ["confirmed", "approved", ""].includes(String(row.matchStatus || "").toLowerCase());
+      const supplierIdentifiers = [row.sourceSku, row.vendorSku, row.sku]
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean);
       return confirmed
         && String(row.supplier || "").toLowerCase() === String(primarySupplier).toLowerCase()
-        && String(row.sourceSku || row.vendorSku || row.sku || "").toLowerCase() === String(primarySku).toLowerCase();
+        && supplierIdentifiers.includes(String(primarySku).trim().toLowerCase());
     });
     const matches = exists || !primarySupplier ? coverage.matches : [{
       supplier: primarySupplier,
