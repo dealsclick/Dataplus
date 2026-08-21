@@ -815,6 +815,7 @@ async function checkScheduledTemuOrderImport(force = false) {
     const result = await dataplus.queueTemuOrderImportJob(stateDb, {
       lookbackDays: settings.temuOrderImportLookbackDays,
       limit: settings.temuOrderImportLimit,
+      startDate: settings.temuOrderImportStartDate || "",
       includeCanceled: Boolean(settings.temuOrderImportIncludeCanceled)
     }, { scheduled: true, scheduleKey: scheduleId, operation: "Scheduled Temu order import" });
     scheduleState[scheduleId] = { ...previous, channelId: channel.id || "", channelName: channel.name || "Temu", time: dueSlot, lastRunDate: today, lastAttemptedDate: today, lastRunAt: new Date(nowMs).toISOString(), lastJobId: result.job?.id || "", lastError: result.duplicate ? "A Temu order import is already active." : "" };

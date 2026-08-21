@@ -351,7 +351,34 @@ type ChannelSettings = {
   ebayOrderImportScheduleType?: string
   ebayOrderImportScheduleTimes?: string
   ebayOrderImportScheduleEveryHours?: number
+  temuEndpoint?: string
+  temuAppKey?: string
+  temuAppSecret?: string
+  temuAccessToken?: string
+  temuMallId?: string
+  temuOrderPageSize?: number
+  temuProductSyncEnabled?: boolean
+  temuListingSyncEnabled?: boolean
+  temuListingLaunchEnabled?: boolean
+  temuCatalogSyncEnabled?: boolean
+  temuInventorySyncEnabled?: boolean
+  temuPriceSyncEnabled?: boolean
+  temuTrackingUploadEnabled?: boolean
+  temuFulfillmentSyncEnabled?: boolean
+  temuCancellationNotificationEnabled?: boolean
+  temuReturnSyncEnabled?: boolean
+  temuRefundSyncEnabled?: boolean
+  temuWebhookEnabled?: boolean
+  temuWebhookEndpoint?: string
+  temuWebhookSecretConfigured?: boolean
+  temuDefaultWarehouseId?: string
+  temuInventoryMode?: string
+  temuInventorySafetyQty?: number
+  temuPriceMarkupPercent?: number
+  temuMinMarginPercent?: number
+  temuDefaultCurrency?: string
   temuOrderImportEnabled?: boolean
+  temuOrderImportStartDate?: string
   temuOrderImportLookbackDays?: number
   temuOrderImportLimit?: number
   temuOrderImportIncludeCanceled?: boolean
@@ -3063,6 +3090,8 @@ function ChannelDetail({
   const [temuOrderImportOpen, setTemuOrderImportOpen] = useState(false)
   const [temuOrderImportSaving, setTemuOrderImportSaving] = useState(false)
   const [temuOrderImportDraft, setTemuOrderImportDraft] = useState({ lookbackDays: "30", limit: "250", includeCanceled: false })
+  const [temuAuthorizationCode, setTemuAuthorizationCode] = useState("")
+  const [temuAuthorizing, setTemuAuthorizing] = useState(false)
   const [ebayTemplatesOpen, setEbayTemplatesOpen] = useState(false)
   const [ebayTemplatesSaving, setEbayTemplatesSaving] = useState(false)
   const [ebayTemplateDraft, setEbayTemplateDraft] = useState({ listingTemplates: "[]", itemSpecificTemplates: "[]", storeCategories: "[]", buyerRequirements: "{}", shippingMethodMappings: "[]", customPolicies: "[]" })
@@ -3131,7 +3160,8 @@ function ChannelDetail({
   const ebayWebhookEndpoint = String(settings.ebayWebhookEndpoint || ebayCredentials?.webhookEndpoint || defaultEbayWebhookEndpoint)
   const hasUnsavedChannelChanges = Object.keys(draft).length > 0
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
-  const [activeTab, setActiveTab] = useState(requestedTab === "setup" || requestedTab === "actions" ? requestedTab : "overview")
+  const allowedChannelTabs = new Set(["overview", "connection", "setup", "actions", "rules", "mappings", "attributes", "variants", "skus", "logs"])
+  const [activeTab, setActiveTab] = useState(allowedChannelTabs.has(requestedTab || "") ? String(requestedTab) : "overview")
 
   const mappedShopifyLocations = useMemo(() => {
     const byId = new Map(shopifyLocations.map((location) => [location.id, location]))
@@ -3552,6 +3582,7 @@ function ChannelDetail({
         body: JSON.stringify({
           lookbackDays: Math.max(1, Math.min(365, Number(temuOrderImportDraft.lookbackDays || 30) || 30)),
           limit: Math.max(1, Math.min(5000, Number(temuOrderImportDraft.limit || 250) || 250)),
+          startDate: String(settings.temuOrderImportStartDate || ""),
           includeCanceled: temuOrderImportDraft.includeCanceled,
         }),
       })
@@ -3562,6 +3593,25 @@ function ChannelDetail({
       toast.error(error instanceof Error ? error.message : "Unable to queue Temu order import.")
     } finally {
       setTemuOrderImportSaving(false)
+    }
+  }
+
+  async function connectTemuWithCode() {
+    const code = temuAuthorizationCode.trim()
+    if (!code) return toast.error("Enter the Temu authorization code.")
+    setTemuAuthorizing(true)
+    try {
+      const result = await api<{ authorized?: boolean; mallId?: string }>("/api/temu/exchange-code", {
+        method: "POST",
+        body: JSON.stringify({ code }),
+      })
+      setTemuAuthorizationCode("")
+      toast.success(result.mallId ? `Temu connected for mall ${result.mallId}.` : "Temu connected.")
+      onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to connect Temu.")
+    } finally {
+      setTemuAuthorizing(false)
     }
   }
 
@@ -3749,6 +3799,7 @@ function ChannelDetail({
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="flex flex-wrap">
           <TabsTrigger value="overview">Overview</TabsTrigger>
+          {isTemu && <TabsTrigger value="connection">Connection</TabsTrigger>}
           <TabsTrigger value="setup">Setup</TabsTrigger>
           <TabsTrigger value="actions">Run</TabsTrigger>
           <TabsTrigger value="rules">Rules</TabsTrigger>
@@ -3841,6 +3892,38 @@ function ChannelDetail({
             </CardContent>
           </Card>
         </TabsContent>
+
+        {isTemu && <TabsContent value="connection" className="grid gap-4">
+          <Card className={settings.temuAppKey && (settings.temuAccessToken || channel.connected) ? "border-emerald-300" : "border-amber-300"}>
+            <CardHeader className="flex flex-row items-start justify-between gap-4">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  {settings.temuAppKey && (settings.temuAccessToken || channel.connected) ? <CheckCircle2 className="size-5 text-emerald-600" /> : <ShieldCheck className="size-5" />}
+                  Connect to Temu
+                </CardTitle>
+                <CardDescription>Save the Seller API credentials, then connect the mall account with an access token or authorization code.</CardDescription>
+              </div>
+              {!editing && <Button onClick={() => setEditing(true)}>Edit connection</Button>}
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <Detail label="Connection" value={channel.connected || settings.temuAccessToken ? "Configured" : "Not connected"} />
+              <Detail label="App key" value={settings.temuAppKey ? "Configured" : "Missing"} />
+              <Detail label="Access token" value={settings.temuAccessToken ? "Configured in channel" : channel.connected ? "Stored from auth code" : "Missing"} />
+              <Field label="API request URL"><Input disabled={!editing} value={String(settings.temuEndpoint || "https://openapi-b-us.temu.com/openapi/router")} onChange={(event) => update("temuEndpoint", event.target.value)} /></Field>
+              <Field label="App key"><Input disabled={!editing} value={String(settings.temuAppKey || "")} onChange={(event) => update("temuAppKey", event.target.value)} /></Field>
+              <Field label="App secret"><Input disabled={!editing} type="password" value={String(settings.temuAppSecret || "")} onChange={(event) => update("temuAppSecret", event.target.value)} /></Field>
+              <Field label="Access token"><Input disabled={!editing} type="password" value={String(settings.temuAccessToken || "")} onChange={(event) => update("temuAccessToken", event.target.value)} /></Field>
+              <Field label="Mall ID"><Input disabled={!editing} value={String(settings.temuMallId || "")} onChange={(event) => update("temuMallId", event.target.value)} /></Field>
+              <Field label="Order page size"><Input disabled={!editing} type="number" min="1" max="100" value={String(settings.temuOrderPageSize ?? 50)} onChange={(event) => update("temuOrderPageSize", Number(event.target.value || 50))} /></Field>
+              <Field label="OAuth callback URL"><Input disabled value={`${window.location.origin}/auth/temu/callback`} readOnly /></Field>
+              <div className="grid gap-3 rounded-md border bg-muted/20 p-3 md:col-span-2 xl:col-span-3 md:grid-cols-[minmax(220px,1fr)_auto]">
+                <Field label="Authorization code"><Input disabled={hasUnsavedChannelChanges} type="password" value={temuAuthorizationCode} onChange={(event) => setTemuAuthorizationCode(event.target.value)} /></Field>
+                <div className="flex items-end"><Button type="button" disabled={temuAuthorizing || hasUnsavedChannelChanges || !temuAuthorizationCode.trim()} onClick={() => void connectTemuWithCode()}>{temuAuthorizing ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}Connect Temu</Button></div>
+                {hasUnsavedChannelChanges && <p className="text-xs text-muted-foreground md:col-span-2">Save credential changes before exchanging an authorization code.</p>}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>}
 
         <TabsContent value="setup" id="shopify-schedules">
           <Card>
@@ -3942,8 +4025,42 @@ function ChannelDetail({
                 <ToggleField label="Schedule eBay order imports" checked={Boolean(settings.ebayOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.ebayOrderImportEnabled)} onCheckedChange={(value) => update("ebayOrderImportScheduleEnabled", value)} />
               </>}
               {isTemu && <>
-                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu Seller API</p><p className="pt-1 text-xs text-muted-foreground">Store app credentials in runtime settings, authorize the mall account, then import orders as durable Jobs work.</p></div>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Connect to Temu</p><p className="pt-1 text-xs text-muted-foreground">Enter the Temu Seller API request URL, app key, app secret, and access token or authorization code for this channel.</p></div>
+                <Field label="API request URL"><Input disabled={!editing} value={String(settings.temuEndpoint || "https://openapi-b-us.temu.com/openapi/router")} onChange={(event) => update("temuEndpoint", event.target.value)} /></Field>
+                <Field label="App key"><Input disabled={!editing} value={String(settings.temuAppKey || "")} onChange={(event) => update("temuAppKey", event.target.value)} /></Field>
+                <Field label="App secret"><Input disabled={!editing} type="password" value={String(settings.temuAppSecret || "")} onChange={(event) => update("temuAppSecret", event.target.value)} /></Field>
+                <Field label="Access token"><Input disabled={!editing} type="password" value={String(settings.temuAccessToken || "")} onChange={(event) => update("temuAccessToken", event.target.value)} /></Field>
+                <Field label="Mall ID"><Input disabled={!editing} value={String(settings.temuMallId || "")} onChange={(event) => update("temuMallId", event.target.value)} /></Field>
+                <Field label="Order page size"><Input disabled={!editing} type="number" min="1" max="100" value={String(settings.temuOrderPageSize ?? 50)} onChange={(event) => update("temuOrderPageSize", Number(event.target.value || 50))} /></Field>
+                <Field label="OAuth callback URL"><Input disabled value={`${window.location.origin}/auth/temu/callback`} readOnly /></Field>
+                <div className="col-span-full grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[minmax(220px,1fr)_auto]">
+                  <Field label="Authorization code"><Input disabled={hasUnsavedChannelChanges} type="password" value={temuAuthorizationCode} onChange={(event) => setTemuAuthorizationCode(event.target.value)} /></Field>
+                  <div className="flex items-end"><Button type="button" disabled={temuAuthorizing || hasUnsavedChannelChanges || !temuAuthorizationCode.trim()} onClick={() => void connectTemuWithCode()}>{temuAuthorizing ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}Connect Temu</Button></div>
+                </div>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu API controls</p><p className="pt-1 text-xs text-muted-foreground">Pause each Temu API workflow independently from the master channel switch.</p></div>
+                <ToggleField label="Sync product catalog" checked={Boolean(settings.temuProductSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuProductSyncEnabled", value)} />
+                <ToggleField label="Sync listings" checked={Boolean(settings.temuListingSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuListingSyncEnabled", value)} />
+                <ToggleField label="Launch listings" checked={Boolean(settings.temuListingLaunchEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuListingLaunchEnabled", value)} />
+                <ToggleField label="Sync category catalog" checked={Boolean(settings.temuCatalogSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuCatalogSyncEnabled", value)} />
+                <ToggleField label="Apply inventory" checked={Boolean(settings.temuInventorySyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuInventorySyncEnabled", value)} />
+                <ToggleField label="Apply prices" checked={Boolean(settings.temuPriceSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuPriceSyncEnabled", value)} />
+                <ToggleField label="Upload tracking" checked={Boolean(settings.temuTrackingUploadEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuTrackingUploadEnabled", value)} />
+                <ToggleField label="Sync fulfillment status" checked={Boolean(settings.temuFulfillmentSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuFulfillmentSyncEnabled", value)} />
+                <ToggleField label="Notify cancellations" checked={Boolean(settings.temuCancellationNotificationEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuCancellationNotificationEnabled", value)} />
+                <ToggleField label="Sync returns" checked={Boolean(settings.temuReturnSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuReturnSyncEnabled", value)} />
+                <ToggleField label="Sync refunds" checked={Boolean(settings.temuRefundSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuRefundSyncEnabled", value)} />
+                <ToggleField label="Receive webhooks" checked={Boolean(settings.temuWebhookEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuWebhookEnabled", value)} />
+                <Field label="Webhook endpoint"><Input disabled={!editing} value={String(settings.temuWebhookEndpoint || `${window.location.origin}/api/webhooks/temu`)} onChange={(event) => update("temuWebhookEndpoint", event.target.value)} /></Field>
+                <ToggleField label="Webhook secret configured" checked={Boolean(settings.temuWebhookSecretConfigured)} disabled={!editing} onCheckedChange={(value) => update("temuWebhookSecretConfigured", value)} />
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu inventory and pricing</p></div>
+                <Field label="Inventory mode"><Select disabled={!editing} value={String(settings.temuInventoryMode || "available")} onValueChange={(value) => update("temuInventoryMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="available">Use available inventory</SelectItem><SelectItem value="fixed">Use fixed channel quantity</SelectItem><SelectItem value="disabled">Do not send inventory</SelectItem></SelectContent></Select></Field>
+                <Field label="Inventory safety qty"><Input disabled={!editing} type="number" min="0" value={String(settings.temuInventorySafetyQty ?? 0)} onChange={(event) => update("temuInventorySafetyQty", Number(event.target.value || 0))} /></Field>
+                <Field label="Default warehouse ID"><Input disabled={!editing} value={String(settings.temuDefaultWarehouseId || "")} onChange={(event) => update("temuDefaultWarehouseId", event.target.value)} /></Field>
+                <Field label="Price markup percent"><Input disabled={!editing} type="number" min="0" max="1000" value={String(settings.temuPriceMarkupPercent ?? 60)} onChange={(event) => update("temuPriceMarkupPercent", Number(event.target.value || 0))} /></Field>
+                <Field label="Minimum margin percent"><Input disabled={!editing} type="number" min="0" max="99" value={String(settings.temuMinMarginPercent ?? 0)} onChange={(event) => update("temuMinMarginPercent", Number(event.target.value || 0))} /></Field>
+                <Field label="Currency"><Input disabled={!editing} value={String(settings.temuDefaultCurrency || "USD")} onChange={(event) => update("temuDefaultCurrency", event.target.value.toUpperCase())} /></Field>
                 <ToggleField label="Import orders" checked={Boolean(settings.temuOrderImportEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuOrderImportEnabled", value)} />
+                <Field label="Import orders from date"><Input disabled={!editing} type="date" value={String(settings.temuOrderImportStartDate || "")} onChange={(event) => update("temuOrderImportStartDate", event.target.value)} /></Field>
                 <ToggleField label="Include canceled Temu orders" checked={Boolean(settings.temuOrderImportIncludeCanceled)} disabled={!editing} onCheckedChange={(value) => update("temuOrderImportIncludeCanceled", value)} />
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu order import</p><p className="pt-1 text-xs text-muted-foreground">Import a selected history window on demand, then keep recent Temu orders synchronized on a schedule.</p></div>
                 <Field label="Manual import lookback days"><Select disabled={!editing} value={String(settings.temuOrderImportLookbackDays ?? 30)} onValueChange={(value) => update("temuOrderImportLookbackDays", Number(value))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="1">Last 24 hours</SelectItem><SelectItem value="7">Last 7 days</SelectItem><SelectItem value="30">Last 30 days</SelectItem><SelectItem value="90">Last 90 days</SelectItem><SelectItem value="180">Last 180 days</SelectItem><SelectItem value="365">Last 365 days</SelectItem></SelectContent></Select></Field>
@@ -4300,6 +4417,10 @@ function ChannelDetail({
                 <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                   <Detail label="Connection" value={channel.connected ? "Connected" : "Not connected"} />
                   <Detail label="Order import" value={settings.temuOrderImportEnabled ? "Enabled" : "Disabled in Setup"} />
+                  <Detail label="Inventory sync" value={settings.temuInventorySyncEnabled ? "Enabled" : "Disabled"} />
+                  <Detail label="Price sync" value={settings.temuPriceSyncEnabled ? "Enabled" : "Disabled"} />
+                  <Detail label="Tracking upload" value={settings.temuTrackingUploadEnabled ? "Enabled" : "Disabled"} />
+                  <Detail label="Listing sync" value={settings.temuListingSyncEnabled ? "Enabled" : "Disabled"} />
                   <Detail label="Last sync" value={dateLabel(String((channel as Record<string, unknown>).lastSync || ""))} />
                   <Detail label="Schedule" value={settings.temuOrderImportScheduleEnabled ? "Enabled" : "Manual only"} />
                 </CardContent>

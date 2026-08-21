@@ -824,7 +824,34 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayOrderImportScheduleType: "times",
   ebayOrderImportScheduleTimes: "05:00,17:00",
   ebayOrderImportScheduleEveryHours: 12,
+  temuEndpoint: "https://openapi-b-us.temu.com/openapi/router",
+  temuAppKey: "",
+  temuAppSecret: "",
+  temuAccessToken: "",
+  temuMallId: "",
+  temuOrderPageSize: 50,
+  temuProductSyncEnabled: false,
+  temuListingSyncEnabled: false,
+  temuListingLaunchEnabled: false,
+  temuCatalogSyncEnabled: false,
+  temuInventorySyncEnabled: false,
+  temuPriceSyncEnabled: false,
+  temuTrackingUploadEnabled: false,
+  temuFulfillmentSyncEnabled: false,
+  temuCancellationNotificationEnabled: false,
+  temuReturnSyncEnabled: false,
+  temuRefundSyncEnabled: false,
+  temuWebhookEnabled: false,
+  temuWebhookEndpoint: "",
+  temuWebhookSecretConfigured: false,
+  temuDefaultWarehouseId: "",
+  temuInventoryMode: "available",
+  temuInventorySafetyQty: 0,
+  temuPriceMarkupPercent: 60,
+  temuMinMarginPercent: 0,
+  temuDefaultCurrency: "USD",
   temuOrderImportEnabled: false,
+  temuOrderImportStartDate: "",
   temuOrderImportLookbackDays: 30,
   temuOrderImportLimit: 250,
   temuOrderImportIncludeCanceled: false,
@@ -4156,10 +4183,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -4202,6 +4229,20 @@ function normalizeChannel(channel = {}) {
   settings.ebayWebhookEndpoint = String(settings.ebayWebhookEndpoint || "").trim().replace(/\/+$/, "");
   settings.ebayWebhookVerificationToken = String(settings.ebayWebhookVerificationToken || "").trim();
   settings.ebayNotificationAlertEmail = String(settings.ebayNotificationAlertEmail || "").trim().toLowerCase();
+  settings.temuEndpoint = String(settings.temuEndpoint || DEFAULT_CHANNEL_SETTINGS.temuEndpoint).trim();
+  settings.temuAppKey = String(settings.temuAppKey || "").trim();
+  settings.temuAppSecret = String(settings.temuAppSecret || "").trim();
+  settings.temuAccessToken = String(settings.temuAccessToken || "").trim();
+  settings.temuMallId = String(settings.temuMallId || "").trim();
+  settings.temuOrderPageSize = Math.max(1, Math.min(100, Number(settings.temuOrderPageSize || 50) || 50));
+  settings.temuWebhookEndpoint = String(settings.temuWebhookEndpoint || "").trim().replace(/\/+$/, "");
+  settings.temuDefaultWarehouseId = String(settings.temuDefaultWarehouseId || "").trim();
+  settings.temuOrderImportStartDate = String(settings.temuOrderImportStartDate || "").trim();
+  settings.temuInventoryMode = ["available", "fixed", "disabled"].includes(String(settings.temuInventoryMode || "").trim()) ? String(settings.temuInventoryMode).trim() : DEFAULT_CHANNEL_SETTINGS.temuInventoryMode;
+  settings.temuInventorySafetyQty = Math.max(0, Math.floor(Number(settings.temuInventorySafetyQty || 0) || 0));
+  settings.temuPriceMarkupPercent = Math.max(0, Math.min(1000, Number(settings.temuPriceMarkupPercent || 0) || 0));
+  settings.temuMinMarginPercent = Math.max(0, Math.min(99, Number(settings.temuMinMarginPercent || 0) || 0));
+  settings.temuDefaultCurrency = String(settings.temuDefaultCurrency || DEFAULT_CHANNEL_SETTINGS.temuDefaultCurrency).trim().toUpperCase() || DEFAULT_CHANNEL_SETTINGS.temuDefaultCurrency;
   settings.whatnotApiEnvironment = String(settings.whatnotApiEnvironment || "staging").toLowerCase() === "production" ? "production" : "staging";
   settings.whatnotGraphqlEndpoint = String(settings.whatnotGraphqlEndpoint || (settings.whatnotApiEnvironment === "production" ? "https://api.whatnot.com/seller-api/graphql" : "https://api.stage.whatnot.com/seller-api/graphql")).trim();
   settings.whatnotAuthMode = ["seller-api-key", "oauth"].includes(String(settings.whatnotAuthMode || "")) ? String(settings.whatnotAuthMode) : DEFAULT_CHANNEL_SETTINGS.whatnotAuthMode;
@@ -19838,6 +19879,7 @@ function publicInventoryListItem(item = {}, context = {}) {
 function publicState(db, options = {}) {
   const connectorState = mergedConnectorState(db);
   const ebaySettings = ebayChannelSettings(db);
+  const temuConfig = getTemuConfig(db);
   const lite = Boolean(options.lite);
   const shopifyStatusMap = lite ? {} : readShopifyStatusMapSync();
   const sourceEnrichmentMap = lite ? {} : readProductSourceEnrichmentSync();
@@ -19858,8 +19900,8 @@ function publicState(db, options = {}) {
     vendorCategoryMappings: lite ? {} : (db.vendorCategoryMappings || {}),
     sourceCatalogOverrides: {},
     connectorState: {
-      temuAuthorized: Boolean(connectorState.temuAccessToken),
-      temuMallId: connectorState.temuMallId || "",
+      temuAuthorized: Boolean(temuConfig.accessToken),
+      temuMallId: temuConfig.mallId || "",
       temuLastOrderSync: connectorState.temuLastOrderSync || null,
       ebayAuthorized: Boolean(connectorState.ebayAccessToken || connectorState.ebayRefreshToken),
       ebayCredentialsConfigured: Boolean(process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET && process.env.EBAY_RUNAME),
@@ -20020,13 +20062,20 @@ function demoOrdersFor(source) {
   }));
 }
 
+function temuChannelSettings(db = {}) {
+  const channel = (db.connections || []).find((entry) => String(entry.name || "").trim().toLowerCase() === "temu");
+  return channel ? normalizeChannel(channel).settings || {} : {};
+}
+
 function getTemuConfig(db = {}) {
+  const settings = temuChannelSettings(db);
   return {
-    endpoint: process.env.TEMU_ENDPOINT || "https://openapi-b-us.temu.com/openapi/router",
-    appKey: process.env.TEMU_APP_KEY || "",
-    appSecret: process.env.TEMU_APP_SECRET || "",
-    accessToken: db.connectorState?.temuAccessToken || process.env.TEMU_ACCESS_TOKEN || "",
-    pageSize: Number(process.env.TEMU_ORDER_PAGE_SIZE || 50)
+    endpoint: settings.temuEndpoint || process.env.TEMU_ENDPOINT || "https://openapi-b-us.temu.com/openapi/router",
+    appKey: settings.temuAppKey || process.env.TEMU_APP_KEY || "",
+    appSecret: settings.temuAppSecret || process.env.TEMU_APP_SECRET || "",
+    accessToken: settings.temuAccessToken || db.connectorState?.temuAccessToken || process.env.TEMU_ACCESS_TOKEN || "",
+    mallId: settings.temuMallId || db.connectorState?.temuMallId || "",
+    pageSize: Math.max(1, Math.min(100, Number(settings.temuOrderPageSize || process.env.TEMU_ORDER_PAGE_SIZE || 50) || 50))
   };
 }
 
@@ -20065,7 +20114,7 @@ async function temuRequest(type, payload = {}, options = {}) {
     ...(options.requireAccessToken === false ? [] : [["TEMU_ACCESS_TOKEN", accessToken]])
   ].filter(([, value]) => !value).map(([key]) => key);
   if (missing.length) {
-    throw new Error(`Temu credentials missing: ${missing.join(", ")}. Add them to .env and restart the app.`);
+    throw new Error(`Temu credentials missing: ${missing.join(", ")}. Add them in the Temu channel settings or .env, then try again.`);
   }
 
   const params = {
@@ -22239,13 +22288,23 @@ function extractTemuOrderSn(order) {
   return valueAt(order, ["parentOrderSn", "parent_order_sn", "parentOrderSN", "orderSn", "order_sn"], "");
 }
 
+function unixStartOfDay(value) {
+  const text = String(value || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return 0;
+  const ms = Date.parse(`${text}T00:00:00Z`);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0;
+}
+
 async function importTemuOrders(db, options = {}) {
   const now = Math.floor(Date.now() / 1000);
   db.connectorState = db.connectorState || {};
+  const settings = temuChannelSettings(db);
   const lastSync = Number(db.connectorState.temuLastOrderSync || 0);
   const lookbackDays = Math.max(1, Math.min(365, Number(options.lookbackDays || 30) || 30));
   const limit = Math.max(1, Math.min(5000, Number(options.limit || 250) || 250));
-  const updateAtStart = options.forceLookback === false && lastSync ? Math.max(0, lastSync - 3600) : now - lookbackDays * 24 * 3600;
+  const configuredStart = unixStartOfDay(options.startDate || settings.temuOrderImportStartDate);
+  const lookbackStart = options.forceLookback === false && lastSync ? Math.max(0, lastSync - 3600) : now - lookbackDays * 24 * 3600;
+  const updateAtStart = Math.min(now, configuredStart ? Math.max(configuredStart, lookbackStart) : lookbackStart);
   const includeCanceled = options.includeCanceled === true || String(options.includeCanceled).toLowerCase() === "true";
   const config = getTemuConfig(db);
   const pageSize = Math.min(100, Math.max(1, config.pageSize || 50));
@@ -22313,8 +22372,8 @@ async function importTemuOrders(db, options = {}) {
 async function queueTemuOrderImportJob(db, body = {}, options = {}) {
   const channel = requireEnabledChannel(db, "Temu");
   const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
-  if (!settings.temuOrderImportEnabled) {
-    const error = new Error("Enable Temu order imports in Channel Settings before importing orders.");
+  if (settings.orderDownloadEnabled === false || !settings.temuOrderImportEnabled) {
+    const error = new Error("Enable order downloads and Temu order imports in Channel Settings before importing orders.");
     error.statusCode = 400;
     throw error;
   }
@@ -22323,6 +22382,7 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
   const workerPayload = {
     lookbackDays,
     limit,
+    startDate: String(body.startDate || settings.temuOrderImportStartDate || "").trim(),
     includeCanceled: body.includeCanceled === undefined || body.includeCanceled === null || body.includeCanceled === ""
       ? settings.temuOrderImportIncludeCanceled === true
       : body.includeCanceled === true || String(body.includeCanceled).toLowerCase() === "true",
