@@ -2423,9 +2423,9 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
   await initRelationalSchema();
   const client = await catalogPool.connect();
   if (typeof onProgress === "function") onProgress({
-    phase: "supplier_coverage",
-    message: "building supplier coverage",
-    processedRows: 4,
+    phase: "supplier_coverage_prepare",
+    message: "preparing supplier identifier index",
+    processedRows: 0,
     totalRows: 5
   });
   try {
@@ -3545,36 +3545,34 @@ async function ensureProductSupplierIdentifierMatches(client, { productId = "", 
   const productSku = normalizedSupplierIdentifier(product.sku);
   const productBarcode = normalizedSupplierIdentifier(product.barcode);
   const productMpn = normalizedSupplierIdentifier(product.mfr_part_number);
-  const exactResult = await client.query(`
-    select distinct on (item.vendor_id, item.source_sku)
-      item.vendor_id,
-      item.source_sku,
-      case
-        when $1 <> '' and lower(coalesce(item.barcode, '')) = $1 then 'upc'
-        when $2 <> '' and lower(coalesce(item.vendor_sku, '')) = $2 then 'vendor-sku'
-        when $2 <> '' and lower(coalesce(item.internal_sku, '')) = $2 then 'exact-sku'
-        else 'source-sku'
-      end as match_type,
-      case
-        when $1 <> '' and lower(coalesce(item.barcode, '')) = $1 then 'barcode:' || $1
-        else 'sku:' || $2
-      end as match_key
-    from vendor_catalog_items item
-    where ($1 <> '' and lower(coalesce(item.barcode, '')) = $1)
-       or ($2 <> '' and (
-         lower(coalesce(item.vendor_sku, '')) = $2
-         or lower(coalesce(item.internal_sku, '')) = $2
-         or lower(item.source_sku) = $2
-       ))
-    order by item.vendor_id, item.source_sku,
-      case
-        when $1 <> '' and lower(coalesce(item.barcode, '')) = $1 then 0
-        when $2 <> '' and lower(coalesce(item.vendor_sku, '')) = $2 then 1
-        when $2 <> '' and lower(coalesce(item.internal_sku, '')) = $2 then 2
-        else 3
-      end
-    limit 500
-  `, [productBarcode, productSku]);
+  const exactResult = await client.query({
+    text: `
+      with candidates as (
+        select item.vendor_id, item.source_sku, 'upc'::text as match_type, 'barcode:' || $1 as match_key, 0 as priority
+        from vendor_catalog_items item
+        where $1 <> '' and lower(item.barcode) = $1
+        union all
+        select item.vendor_id, item.source_sku, 'vendor-sku', 'sku:' || $2, 1
+        from vendor_catalog_items item
+        where $2 <> '' and lower(item.vendor_sku) = $2
+        union all
+        select item.vendor_id, item.source_sku, 'exact-sku', 'sku:' || $2, 2
+        from vendor_catalog_items item
+        where $2 <> '' and lower(item.internal_sku) = $2
+        union all
+        select item.vendor_id, item.source_sku, 'source-sku', 'sku:' || $2, 3
+        from vendor_catalog_items item
+        where $2 <> '' and lower(item.source_sku) = $2
+      )
+      select distinct on (vendor_id, source_sku)
+        vendor_id, source_sku, match_type, match_key
+      from candidates
+      order by vendor_id, source_sku, priority
+      limit 500
+    `,
+    values: [productBarcode, productSku],
+    query_timeout: 10000
+  });
   if (exactResult.rows.length) {
     await client.query(`
       insert into product_supplier_links (
@@ -3595,16 +3593,25 @@ async function ensureProductSupplierIdentifierMatches(client, { productId = "", 
   }
 
   if (!productMpn) return;
-  const seedResult = await client.query(`
-    select item.*
-    from vendor_catalog_items item
-    where lower(coalesce(item.mfr_part_number, '')) = $1
-       or lower(coalesce(item.vendor_sku, '')) = $1
-       or lower(coalesce(item.internal_sku, '')) = $1
-       or lower(item.source_sku) = $1
-    order by item.updated_at desc nulls last, item.last_seen_at desc nulls last
-    limit 100
-  `, [productMpn]);
+  const seedResult = await client.query({
+    text: `
+      with candidates as (
+        select item.*, 0 as identifier_priority from vendor_catalog_items item where lower(item.mfr_part_number) = $1
+        union all
+        select item.*, 1 from vendor_catalog_items item where lower(item.vendor_sku) = $1
+        union all
+        select item.*, 2 from vendor_catalog_items item where lower(item.internal_sku) = $1
+        union all
+        select item.*, 3 from vendor_catalog_items item where lower(item.source_sku) = $1
+      )
+      select distinct on (vendor_id, source_sku) *
+      from candidates
+      order by vendor_id, source_sku, identifier_priority, updated_at desc nulls last
+      limit 100
+    `,
+    values: [productMpn],
+    query_timeout: 10000
+  });
   if (!seedResult.rows.length) return;
 
   const linkedIdentifiers = [...new Set(seedResult.rows.flatMap((row) => [
@@ -3613,15 +3620,23 @@ async function ensureProductSupplierIdentifierMatches(client, { productId = "", 
     normalizedSupplierIdentifier(row.source_sku)
   ]).filter(Boolean))].slice(0, 100);
   const linkedResult = linkedIdentifiers.length
-    ? await client.query(`
-      select item.*
-      from vendor_catalog_items item
-      where lower(coalesce(item.vendor_sku, '')) = any($1::text[])
-         or lower(coalesce(item.internal_sku, '')) = any($1::text[])
-         or lower(item.source_sku) = any($1::text[])
-      order by item.updated_at desc nulls last, item.last_seen_at desc nulls last
-      limit 250
-    `, [linkedIdentifiers])
+    ? await client.query({
+      text: `
+        with candidates as (
+          select item.*, 0 as identifier_priority from vendor_catalog_items item where lower(item.vendor_sku) = any($1::text[])
+          union all
+          select item.*, 1 from vendor_catalog_items item where lower(item.internal_sku) = any($1::text[])
+          union all
+          select item.*, 2 from vendor_catalog_items item where lower(item.source_sku) = any($1::text[])
+        )
+        select distinct on (vendor_id, source_sku) *
+        from candidates
+        order by vendor_id, source_sku, identifier_priority, updated_at desc nulls last
+        limit 250
+      `,
+      values: [linkedIdentifiers],
+      query_timeout: 10000
+    })
     : { rows: [] };
 
   const candidates = new Map();
