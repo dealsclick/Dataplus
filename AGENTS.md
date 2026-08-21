@@ -102,9 +102,11 @@ The catalog is the approved operational product system. A product can have sourc
 Match and retain supplier coverage in this order:
 
 1. Exact UPC/GTIN/identifier match.
-2. Exact manufacturer part number plus brand match.
-3. Approved/explicit alias or vendor SKU match.
+2. Exact vendor SKU, source SKU, internal SKU, or approved explicit alias match.
+3. Exact manufacturer part number match as a reviewable candidate unless another confirmed identifier also links the records.
 4. Close match only as a reviewable suggestion; never silently merge it.
+
+Brand is descriptive context only. It must never create, reject, or increase confidence in a supplier-product match because multiple suppliers may carry the same brands and supplier feeds may contain inconsistent brand text. Show every potential identifier-based supplier candidate with the matched UPC, MPN, vendor SKU, source SKU, and match basis so an operator can approve or reject uncertain relationships.
 
 Products may belong to multiple suppliers. Show supplier coverage in the catalog and on the product detail page. Do not use a generic “Load alternates” workflow as the primary relationship model.
 
