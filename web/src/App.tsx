@@ -10642,6 +10642,7 @@ type AuditSupplierOption = {
   vendorId?: string
   supplierName: string
   supplierCode?: string
+  sourceSku?: string
   vendorSku?: string
   manufacturerSku?: string
   cost?: number
@@ -10680,13 +10681,14 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
       vendorId: String(line.selectedSupplierId || ""),
       supplierName: selectedName,
       supplierCode: String(line.selectedSupplierCode || ""),
-      vendorSku: String(line.selectedVendorSku || ""),
+      sourceSku: String(line.selectedSupplierSku || ""),
+      vendorSku: String(line.selectedVendorSku || line.selectedSupplierSku || ""),
       manufacturerSku: String(line.selectedManufacturerSku || ""),
       cost: Number(line.selectedSupplierCost || 0),
       qty: Number(line.selectedSupplierQty || 0),
       matchType: String(line.selectedSupplierMatchType || "saved"),
     }, ...current])
-  }, [line.selectedManufacturerSku, line.selectedSupplierCode, line.selectedSupplierCost, line.selectedSupplierId, line.selectedSupplierMatchType, line.selectedSupplierQty, line.selectedVendorSku, selectedKey, selectedName])
+  }, [line.selectedManufacturerSku, line.selectedSupplierCode, line.selectedSupplierCost, line.selectedSupplierId, line.selectedSupplierMatchType, line.selectedSupplierQty, line.selectedSupplierSku, line.selectedVendorSku, selectedKey, selectedName])
 
   const loadOptions = async (force = false) => {
     if ((!force && loaded) || loading) return
@@ -10742,15 +10744,20 @@ function AuditSupplierCell({ auditId, auditStatus, line, onAuditUpdate }: { audi
     }
   }
 
+  if (selectedKey && selectedName) {
+    const editable = ["in_progress", "pending_review"].includes(auditStatus)
+    return <Popover open={supplierMenuOpen} onOpenChange={(open) => { setSupplierMenuOpen(open); if (open) void loadOptions() }}><PopoverTrigger asChild><Button size="sm" variant="outline" disabled={saving || !editable} className="min-w-44 justify-between border-emerald-500/40 bg-emerald-500/10 text-emerald-800 hover:bg-emerald-500/15 dark:text-emerald-200"><span className="flex min-w-0 items-center gap-1.5"><CheckCircle2 className="size-3.5 shrink-0 text-emerald-600" /><span className="truncate">{saving ? "Saving supplier..." : selectedName}</span></span>{saving ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />}</Button></PopoverTrigger><PopoverContent align="start" className="w-80 p-0"><Command><CommandInput placeholder="Search suppliers, SKU, or MPN..." disabled={loading || Boolean(loadError)} /><CommandList>{loading && <div className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading supplier offers...</div>}{loadError && <div className="space-y-3 p-3"><p className="text-sm text-destructive">{loadError}</p><Button size="sm" variant="outline" onClick={() => { setLoaded(false); void loadOptions(true) }}><RefreshCw className="size-3.5" /> Retry</Button></div>}{loaded && !loading && !loadError && <><CommandEmpty>No confirmed suppliers found.</CommandEmpty><CommandGroup heading="Available suppliers">{options.map((option) => <CommandItem key={option.key} value={`${option.supplierName} ${option.supplierCode || ""} ${option.vendorSku || ""} ${option.manufacturerSku || ""}`} onSelect={() => void assignSupplier(option.key)}><CheckCircle2 className={cn("size-4", option.key === selectedKey ? "text-emerald-600" : "text-transparent")} /><span className="min-w-0 flex-1"><span className="block truncate font-medium">{option.supplierName}</span><span className="block truncate text-xs text-muted-foreground">SKU {option.vendorSku || "-"} · MPN {option.manufacturerSku || "-"}{Number(option.cost || 0) > 0 ? ` · ${moneyLabel(Number(option.cost))}` : ""}</span></span></CommandItem>)}</CommandGroup></>}</CommandList></Command></PopoverContent></Popover>
+  }
+
   if (supplierCount === 1) {
     return <p className="min-w-32 text-sm font-medium">{selectedName || "Single supplier"}</p>
   }
   if (supplierCount >= 2 || possibleSupplierCount >= 2) {
     const editable = ["in_progress", "pending_review"].includes(auditStatus)
-    return <Popover open={supplierMenuOpen} onOpenChange={(open) => { setSupplierMenuOpen(open); if (open) void loadOptions() }}><PopoverTrigger asChild><Button size="sm" variant={selectedKey ? "outline" : "secondary"} disabled={saving || !editable} className={cn("min-w-44 justify-between", !selectedKey && "border border-amber-400 bg-amber-50 text-amber-950 hover:bg-amber-100 dark:bg-amber-950/50 dark:text-amber-100")}><span className="truncate">{saving ? "Saving supplier..." : selectedName || "Choose supplier"}</span>{saving ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />}</Button></PopoverTrigger><PopoverContent align="start" className="w-72 p-0"><Command><CommandInput placeholder="Search suppliers..." disabled={loading || Boolean(loadError)} /><CommandList>{loading && <div className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading supplier offers...</div>}{loadError && <div className="space-y-3 p-3"><p className="text-sm text-destructive">{loadError}</p><Button size="sm" variant="outline" onClick={() => { setLoaded(false); void loadOptions(true) }}><RefreshCw className="size-3.5" /> Retry</Button></div>}{loaded && !loading && !loadError && <><CommandEmpty>No confirmed suppliers found.</CommandEmpty><CommandGroup heading="Available suppliers">{options.map((option) => <CommandItem key={option.key} value={`${option.supplierName} ${option.supplierCode || ""}`} onSelect={() => void assignSupplier(option.key)}><CheckCircle2 className={cn("size-4", option.key === selectedKey ? "text-emerald-600" : "text-transparent")} /><span className="truncate">{option.supplierName}</span></CommandItem>)}</CommandGroup></>}</CommandList></Command></PopoverContent></Popover>
+    return <Popover open={supplierMenuOpen} onOpenChange={(open) => { setSupplierMenuOpen(open); if (open) void loadOptions() }}><PopoverTrigger asChild><Button size="sm" variant="secondary" disabled={saving || !editable} className="min-w-44 justify-between border border-amber-400 bg-amber-50 text-amber-950 hover:bg-amber-100 dark:bg-amber-950/50 dark:text-amber-100"><span className="truncate">{saving ? "Saving supplier..." : "Choose supplier"}</span>{saving ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />}</Button></PopoverTrigger><PopoverContent align="start" className="w-80 p-0"><Command><CommandInput placeholder="Search suppliers, SKU, or MPN..." disabled={loading || Boolean(loadError)} /><CommandList>{loading && <div className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading supplier offers...</div>}{loadError && <div className="space-y-3 p-3"><p className="text-sm text-destructive">{loadError}</p><Button size="sm" variant="outline" onClick={() => { setLoaded(false); void loadOptions(true) }}><RefreshCw className="size-3.5" /> Retry</Button></div>}{loaded && !loading && !loadError && <><CommandEmpty>No confirmed suppliers found.</CommandEmpty><CommandGroup heading="Available suppliers">{options.map((option) => <CommandItem key={option.key} value={`${option.supplierName} ${option.supplierCode || ""} ${option.vendorSku || ""} ${option.manufacturerSku || ""}`} onSelect={() => void assignSupplier(option.key)}><CheckCircle2 className="size-4 text-transparent" /><span className="min-w-0 flex-1"><span className="block truncate font-medium">{option.supplierName}</span><span className="block truncate text-xs text-muted-foreground">SKU {option.vendorSku || "-"} · MPN {option.manufacturerSku || "-"}{Number(option.cost || 0) > 0 ? ` · ${moneyLabel(Number(option.cost))}` : ""}</span></span></CommandItem>)}</CommandGroup></>}</CommandList></Command></PopoverContent></Popover>
   }
   if (possibleSupplierCount >= 2) return <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/60 dark:text-amber-200"><Users className="mr-1 size-3" />{numberLabel(possibleSupplierCount)} possible</Badge>
-  return <span className="text-xs text-muted-foreground">Not indexed</span>
+  return <span className="text-xs text-muted-foreground">No supplier match</span>
 }
 
 function WarehouseAuditPanel({
@@ -12245,7 +12252,7 @@ function WarehouseAuditPanel({
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-14">Scan</TableHead>
-                    <TableHead>UPC / SKU</TableHead>
+                    <TableHead>Working SKU</TableHead>
                     <TableHead>Supplier</TableHead>
                     <TableHead>Vendor SKU</TableHead>
                     <TableHead>Manufacturer SKU</TableHead>
@@ -12265,9 +12272,7 @@ function WarehouseAuditPanel({
                       </TableCell>
                       <TableCell className="font-medium">
                         {line.sku ? (
-                          <button className="font-medium hover:underline" onClick={() => setQuickPreviewItem({ sku: String(line.sku), title: String(line.title || line.sku), defaultImage: String(line.image || "") })} title={`Preview ${String(line.sku)}`}>
-                            {String(line.sku)}
-                          </button>
+                          <div className="min-w-32"><button className="font-mono font-medium hover:underline" onClick={() => setQuickPreviewItem({ sku: String(line.sku), title: String(line.title || line.sku), defaultImage: String(line.image || "") })} title={`Preview catalog SKU ${String(line.sku)}`}>{String(line.selectedSupplierSku || line.selectedVendorSku || line.sku)}</button>{String(line.selectedSupplierSku || line.selectedVendorSku || "") && String(line.selectedSupplierSku || line.selectedVendorSku) !== String(line.sku) && <p className="mt-0.5 text-xs text-muted-foreground">Catalog: {String(line.sku)}</p>}</div>
                         ) : "-"}
                       </TableCell>
                       <TableCell><AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onAuditUpdate={applyAuditUpdate} /></TableCell>

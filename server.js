@@ -32153,10 +32153,12 @@ async function handleApi(req, res) {
             selectedSupplierId: String(line?.selectedSupplierId || "").trim(),
             selectedSupplierName: String(line?.selectedSupplierName || "").trim(),
             selectedSupplierCode: String(line?.selectedSupplierCode || singleSupplierCode || "").trim(),
+            selectedSupplierSku: String(line?.selectedSupplierSku || line?.selectedVendorSku || singleVendorSku || "").trim(),
             selectedVendorSku: String(line?.selectedVendorSku || singleVendorSku || "").trim(),
             selectedManufacturerSku: String(line?.selectedManufacturerSku || singleManufacturerSku || "").trim(),
             selectedSupplierCost: Number(line?.selectedSupplierCost || singleSupplierCost || 0),
             selectedSupplierQty: Number(line?.selectedSupplierQty || 0),
+            selectedSupplierIndexed: Boolean(line?.selectedSupplierIndexed || line?.selectedSupplierKey),
             hasMultipleSuppliers: Boolean(product?.hasMultipleSuppliers || sourceProduct?.hasMultipleSuppliers || supplierCoverage?.hasMultipleSuppliers || supplierCount >= 2),
             possibleSupplierCount,
             hasPossibleMultipleSuppliers: Boolean(supplierCoverage?.hasPossibleMultipleSuppliers || possibleSupplierCount >= 2),
@@ -32690,11 +32692,16 @@ async function handleApi(req, res) {
       selectedSupplierId: selection.vendorId,
       selectedSupplierName: selection.supplierName,
       selectedSupplierCode: selection.supplierCode,
+      selectedSupplierSku: selection.vendorSku || selection.sourceSku || "",
       selectedVendorSku: selection.vendorSku,
       selectedManufacturerSku: selection.manufacturerSku,
       selectedSupplierCost: selection.cost,
       selectedSupplierQty: selection.qty,
       selectedSupplierMatchType: selection.matchType,
+      selectedSupplierIndexed: true,
+      supplierCount: Math.max(Number(line.supplierCount || 0), result.options.length, 1),
+      possibleSupplierCount: Math.max(Number(line.possibleSupplierCount || 0), result.options.length, 1),
+      supplierCoverageMatchType: selection.matchType || line.supplierCoverageMatchType || "selected",
       supplierSelectedAt: now,
       supplierSelectedBy: selectedBy
     });
@@ -32709,7 +32716,7 @@ async function handleApi(req, res) {
       cost: selection.cost
     }].slice(-250);
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
-    return sendJson(res, 200, { audit, line, selection, message: `${selection.supplierName} assigned to ${line.sku || "audit line"}.` });
+    return sendJson(res, 200, { audit, line, selection, message: `${selection.supplierName} assigned. Audit SKU is now ${line.selectedSupplierSku || line.sku || "saved"}.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "count" && postgres.isPostgresEnabled()) {
