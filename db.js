@@ -2392,6 +2392,31 @@ function vendorCatalogWhere(options = {}) {
   };
 }
 
+async function terminateStaleSupplierCoverageQueries({ minimumAgeMinutes = 10 } = {}) {
+  const catalogPool = getPool();
+  if (!catalogPool) return { enabled: false, terminated: 0, pids: [] };
+  const ageMinutes = Math.max(1, Math.min(1440, Number(minimumAgeMinutes) || 10));
+  const result = await catalogPool.query(`
+    select pid, pg_terminate_backend(pid) as terminated
+    from pg_stat_activity
+    where pid <> pg_backend_pid()
+      and datname = current_database()
+      and state <> 'idle'
+      and coalesce(xact_start, query_start) < now() - ($1::text || ' minutes')::interval
+      and (
+        query ilike '%vendor_supplier_coverage_next%'
+        or query ilike '%product_supplier_links_next%'
+        or (query ilike '%supplier_match_reviews%' and query ilike '%linked-vendor-sku%')
+      )
+  `, [String(ageMinutes)]);
+  const terminated = result.rows.filter((row) => row.terminated);
+  return {
+    enabled: true,
+    terminated: terminated.length,
+    pids: terminated.map((row) => Number(row.pid)).filter(Number.isFinite)
+  };
+}
+
 async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
   const catalogPool = getPool();
   if (!catalogPool) return { enabled: false, keys: 0 };
@@ -2404,6 +2429,8 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
     totalRows: 5
   });
   try {
+    await client.query("set lock_timeout to '30s'");
+    await client.query("set statement_timeout to '20min'");
     if (typeof isCanceled === "function" && isCanceled()) throw new Error("Supplier coverage refresh canceled.");
     await client.query("drop table if exists vendor_supplier_coverage_next");
     await client.query("drop table if exists vendor_supplier_identity_next");
@@ -8709,6 +8736,7 @@ module.exports = {
   vendorCatalogFacets,
   refreshVendorCatalogFacets,
   refreshVendorSupplierCoverage,
+  terminateStaleSupplierCoverageQueries,
   readSupplierIndexStatus,
   isPostgresEnabled,
   readState,

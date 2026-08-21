@@ -1915,6 +1915,10 @@ async function tick() {
 
 async function main() {
   if (!postgres.isPostgresEnabled()) throw new Error("DATABASE_URL is required for the worker.");
+  const recovery = await postgres.terminateStaleSupplierCoverageQueries({ minimumAgeMinutes: 10 });
+  if (recovery.terminated) {
+    console.warn(`[${WORKER_ID}] terminated ${recovery.terminated} stale supplier-index session(s): ${recovery.pids.join(", ")}`);
+  }
   await postgres.initDatabase();
   await writeHeartbeat("starting", null, true);
   console.log(`[${WORKER_ID}] started. Supported tasks: ${SUPPORTED_TASKS.join(", ")}`);

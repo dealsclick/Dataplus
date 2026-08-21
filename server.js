@@ -45151,6 +45151,11 @@ async function processScheduledPurchasePooling() {
 function startServer() {
   ensureDb();
   pruneChannelApiLogsSoon(true);
+  postgres.terminateStaleSupplierCoverageQueries({ minimumAgeMinutes: 10 })
+    .then((recovery) => {
+      if (recovery.terminated) console.warn(`Terminated ${recovery.terminated} stale supplier-index session(s): ${recovery.pids.join(", ")}`);
+    })
+    .catch((error) => console.warn(`Supplier-index recovery check failed: ${error.message}`));
 
   const server = http.createServer((req, res) => {
     if (req.url.startsWith("/auth/temu/callback")) {
