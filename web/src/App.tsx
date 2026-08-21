@@ -4026,7 +4026,7 @@ function ChannelDetail({
                 <ToggleField label="Schedule eBay order imports" checked={Boolean(settings.ebayOrderImportScheduleEnabled)} disabled={!editing || !Boolean(settings.ebayOrderImportEnabled)} onCheckedChange={(value) => update("ebayOrderImportScheduleEnabled", value)} />
               </>}
               {isTemu && <>
-                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Connect to Temu</p><p className="pt-1 text-xs text-muted-foreground">Enter the Temu Seller API request URL, app key, and app secret. Then exchange an authorization code to generate the access token.</p></div>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu API credentials</p><p className="pt-1 text-xs text-muted-foreground">Save the Temu Seller API request URL, app key, and app secret here. Use the Connection tab when you need to connect or reconnect the mall account.</p></div>
                 <Field label="API request URL"><Input disabled={!editing} value={String(settings.temuEndpoint || "https://openapi-b-us.temu.com/openapi/router")} onChange={(event) => update("temuEndpoint", event.target.value)} /></Field>
                 <Field label="App key"><Input disabled={!editing} value={String(settings.temuAppKey || "")} onChange={(event) => update("temuAppKey", event.target.value)} /></Field>
                 <Field label="App secret"><Input disabled={!editing} type="password" value={String(settings.temuAppSecret || "")} onChange={(event) => update("temuAppSecret", event.target.value)} /></Field>
@@ -4034,11 +4034,6 @@ function ChannelDetail({
                 <Field label="Mall ID"><Input disabled={!editing} value={String(settings.temuMallId || "")} onChange={(event) => update("temuMallId", event.target.value)} /></Field>
                 <Field label="Order page size"><Input disabled={!editing} type="number" min="1" max="100" value={String(settings.temuOrderPageSize ?? 50)} onChange={(event) => update("temuOrderPageSize", Number(event.target.value || 50))} /></Field>
                 <Field label="OAuth callback URL"><Input disabled value={`${window.location.origin}/auth/temu/callback`} readOnly /></Field>
-                <div className="col-span-full grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[minmax(220px,1fr)_auto]">
-                  <Field label="Authorization code"><Input disabled={hasUnsavedChannelChanges} type="password" value={temuAuthorizationCode} onChange={(event) => setTemuAuthorizationCode(event.target.value)} /></Field>
-                  <div className="flex items-end"><Button type="button" disabled={temuAuthorizing || hasUnsavedChannelChanges || !temuAuthorizationCode.trim()} onClick={() => void connectTemuWithCode()}>{temuAuthorizing ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}Connect Temu</Button></div>
-                  <p className="text-xs text-muted-foreground md:col-span-2">{hasUnsavedChannelChanges ? "Save credential changes before exchanging an authorization code." : "DataPlus uses the app key and secret to request the access token from Temu."}</p>
-                </div>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu API controls</p><p className="pt-1 text-xs text-muted-foreground">Pause each Temu API workflow independently from the master channel switch.</p></div>
                 <ToggleField label="Sync product catalog" checked={Boolean(settings.temuProductSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuProductSyncEnabled", value)} />
                 <ToggleField label="Sync listings" checked={Boolean(settings.temuListingSyncEnabled)} disabled={!editing} onCheckedChange={(value) => update("temuListingSyncEnabled", value)} />
