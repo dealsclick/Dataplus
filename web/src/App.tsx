@@ -658,6 +658,7 @@ type CatalogItem = {
   vendorSku?: string
   supplier?: string
   supplierCode?: string
+  sourceSku?: string
   mainCategory?: string
   sourceCategory?: string
   categoryVerified?: boolean
@@ -867,6 +868,7 @@ type SupplierCoverageEntry = {
   supplier?: string
   supplierCode?: string
   sku?: string
+  sourceSku?: string
   vendorSku?: string
   title?: string
   brand?: string
@@ -885,12 +887,17 @@ type SupplierCoverageEntry = {
   defaultImage?: string
   lastSeenAt?: string
   updatedAt?: string
-  matchType?: "primary" | "upc" | "manufacturer-part-and-brand" | "exact-sku" | "none"
+  matchType?: "primary" | "upc" | "manufacturer-part-number" | "approved-mfr-part-number" | "vendor-sku" | "linked-vendor-sku" | "approved-vendor-sku" | "source-sku" | "exact-sku" | "none"
+  matchStatus?: "confirmed" | "pending" | "approved" | "rejected" | string
+  reviewId?: string
+  confidence?: number | null
+  requiresReview?: boolean
 }
 
 type SupplierCoverageResponse = {
   matchType?: SupplierCoverageEntry["matchType"]
   supplierCount?: number
+  pendingReviewCount?: number
   matches?: SupplierCoverageEntry[]
 }
 
@@ -5701,7 +5708,12 @@ function ProductShadows({ rows }: { rows: NonNullable<ProductItem["shadowSkus"]>
 const supplierMatchPresentation: Record<string, { label: string; className: string }> = {
   primary: { label: "Primary catalog record", className: "border-sky-500/40 bg-sky-500/10 text-sky-800 dark:text-sky-200" },
   upc: { label: "UPC match", className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200" },
-  "manufacturer-part-and-brand": { label: "Manufacturer part + brand", className: "border-violet-500/40 bg-violet-500/10 text-violet-800 dark:text-violet-200" },
+  "manufacturer-part-number": { label: "Potential MPN match", className: "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-200" },
+  "approved-mfr-part-number": { label: "Approved MPN match", className: "border-violet-500/40 bg-violet-500/10 text-violet-800 dark:text-violet-200" },
+  "vendor-sku": { label: "Vendor SKU match", className: "border-blue-500/40 bg-blue-500/10 text-blue-800 dark:text-blue-200" },
+  "linked-vendor-sku": { label: "Potential linked SKU", className: "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-200" },
+  "approved-vendor-sku": { label: "Approved linked SKU", className: "border-violet-500/40 bg-violet-500/10 text-violet-800 dark:text-violet-200" },
+  "source-sku": { label: "Source SKU match", className: "border-cyan-500/40 bg-cyan-500/10 text-cyan-800 dark:text-cyan-200" },
   "exact-sku": { label: "Exact SKU match", className: "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-200" },
   none: { label: "No supplier match", className: "border-muted-foreground/30 bg-muted text-muted-foreground" },
 }
@@ -5710,6 +5722,7 @@ function ProductSupplierCoverage({ product, active }: { product: ProductItem; ac
   const sku = product.sku || ""
   const [coverage, setCoverage] = useState<SupplierCoverageResponse | null>(null)
   const [loading, setLoading] = useState(false)
+  const [reviewing, setReviewing] = useState("")
 
   useEffect(() => { setCoverage(null) }, [sku])
   useEffect(() => {
@@ -5724,12 +5737,26 @@ function ProductSupplierCoverage({ product, active }: { product: ProductItem; ac
   }, [active, coverage, sku])
 
   const matches = coverage?.matches || []
+  const potentialMatches = matches.filter((match) => match.matchStatus === "pending")
   const primaryMatch = supplierMatchPresentation[coverage?.matchType || "none"] || supplierMatchPresentation.none
+  const reviewMatch = async (match: SupplierCoverageEntry, status: "approved" | "rejected") => {
+    if (!match.reviewId) return
+    setReviewing(match.reviewId)
+    try {
+      await api(`/api/inventory/${encodeURIComponent(sku)}/supplier-matches/${encodeURIComponent(match.reviewId)}/review`, { method: "POST", body: JSON.stringify({ status }) })
+      toast.success(status === "approved" ? "Supplier match approved." : "Supplier match rejected.")
+      setCoverage(null)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to review supplier match.")
+    } finally {
+      setReviewing("")
+    }
+  }
   return <div className="grid gap-4">
-    <Alert><Boxes className="size-4" /><AlertTitle>Supplier coverage</AlertTitle><AlertDescription>DataPlus groups the same product by UPC first, then manufacturer part number plus brand, then an exact SKU fallback. This is loaded only when opened.</AlertDescription></Alert>
+    <Alert><Boxes className="size-4" /><AlertTitle>Supplier coverage</AlertTitle><AlertDescription>DataPlus confirms supplier records by UPC or an exact vendor/source SKU. Exact manufacturer part numbers are shown as potential matches for review; brand does not include or exclude a supplier.</AlertDescription></Alert>
     {loading && <div className="grid gap-2"><Skeleton className="h-14" /><Skeleton className="h-14" /></div>}
-    {!loading && <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-3 text-sm"><div><p className="font-medium">{numberLabel(coverage?.supplierCount || matches.length)} supplier record{(coverage?.supplierCount || matches.length) === 1 ? "" : "s"}</p><p className="text-xs text-muted-foreground">UPC: {product.barcode || "Not recorded"} · Mfr part: {product.mfrPartNumber || "Not recorded"}</p></div><Badge variant="outline" className={primaryMatch.className}>{primaryMatch.label}</Badge></div>}
-    {!loading && matches.length > 0 && <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Supplier</TableHead><TableHead>Supplier SKU</TableHead><TableHead>Match basis</TableHead><TableHead>Stock</TableHead><TableHead>Cost</TableHead><TableHead>UOM</TableHead><TableHead>Status</TableHead><TableHead>Last seen</TableHead></TableRow></TableHeader><TableBody>{matches.map((match, index) => { const presentation = supplierMatchPresentation[match.matchType || "none"] || supplierMatchPresentation.none; return <TableRow key={`${match.supplier}-${match.sku || match.vendorSku}-${index}`}><TableCell className="font-medium">{match.supplier || "Unknown supplier"}</TableCell><TableCell className="font-mono text-xs">{match.vendorSku || match.sku || "-"}</TableCell><TableCell><Badge variant="outline" className={presentation.className}>{presentation.label}</Badge></TableCell><TableCell>{numberLabel(match.stockQty ?? match.qty)}</TableCell><TableCell>{moneyLabel(match.cost)}</TableCell><TableCell>{match.uomQty ? `${match.uomQty} ${match.uom || ""}`.trim() : match.uom || "-"}</TableCell><TableCell>{match.discontinued ? <Badge variant="destructive">Discontinued</Badge> : <Badge variant="outline">{match.stockStatus || "Active"}</Badge>}</TableCell><TableCell>{dateLabel(match.lastSeenAt || match.updatedAt)}</TableCell></TableRow> })}</TableBody></Table></div>}
+    {!loading && <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-3 text-sm"><div><p className="font-medium">{numberLabel(coverage?.supplierCount || 0)} confirmed supplier{Number(coverage?.supplierCount || 0) === 1 ? "" : "s"}{potentialMatches.length ? ` · ${potentialMatches.length} potential` : ""}</p><p className="text-xs text-muted-foreground">UPC: {product.barcode || "Not recorded"} · MPN: {product.mfrPartNumber || "Not recorded"}</p></div><Badge variant="outline" className={primaryMatch.className}>{primaryMatch.label}</Badge></div>}
+    {!loading && matches.length > 0 && <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Supplier</TableHead><TableHead>Vendor SKU</TableHead><TableHead>MPN</TableHead><TableHead>UPC</TableHead><TableHead>Match basis</TableHead><TableHead>Stock</TableHead><TableHead>Cost</TableHead><TableHead>UOM</TableHead><TableHead>Status</TableHead><TableHead>Review</TableHead></TableRow></TableHeader><TableBody>{matches.map((match, index) => { const presentation = supplierMatchPresentation[match.matchType || "none"] || supplierMatchPresentation.none; const pending = match.matchStatus === "pending"; return <TableRow key={`${match.supplier}-${match.sourceSku || match.sku || match.vendorSku}-${index}`} className={pending ? "bg-amber-500/5" : ""}><TableCell className="font-medium">{match.supplier || "Unknown supplier"}</TableCell><TableCell className="font-mono text-xs">{match.vendorSku || match.sourceSku || match.sku || "-"}</TableCell><TableCell className="font-mono text-xs">{match.mfrPartNumber || "-"}</TableCell><TableCell className="font-mono text-xs">{match.barcode || "-"}</TableCell><TableCell><Badge variant="outline" className={presentation.className}>{presentation.label}</Badge></TableCell><TableCell>{numberLabel(match.stockQty ?? match.qty)}</TableCell><TableCell>{moneyLabel(match.cost)}</TableCell><TableCell>{match.uomQty ? `${match.uomQty} ${match.uom || ""}`.trim() : match.uom || "-"}</TableCell><TableCell>{match.discontinued ? <Badge variant="destructive">Discontinued</Badge> : <Badge variant="outline">{match.stockStatus || "Active"}</Badge>}</TableCell><TableCell>{pending && match.reviewId ? <div className="flex items-center gap-1"><Button size="icon-sm" variant="outline" title="Approve supplier match" disabled={reviewing === match.reviewId} onClick={() => reviewMatch(match, "approved")}><CheckCircle2 /></Button><Button size="icon-sm" variant="outline" title="Reject supplier match" disabled={reviewing === match.reviewId} onClick={() => reviewMatch(match, "rejected")}><X /></Button></div> : <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{match.matchStatus === "approved" ? "Approved" : "Confirmed"}</Badge>}</TableCell></TableRow> })}</TableBody></Table></div>}
     {!loading && coverage && matches.length === 0 && <p className="rounded-md border border-dashed p-5 text-sm text-muted-foreground">No supplier source record matches this product identity yet.</p>}
   </div>
 }
@@ -17341,7 +17368,7 @@ function SettingsPage({
               </CardHeader>
               <CardContent className="grid gap-4 md:grid-cols-2">
                 <ToggleField label="Match by UPC" description="Use UPC equality as the strongest supplier-product match." checked={boolValue("catalogMatchByUpcEnabled")} disabled={!editing} onCheckedChange={(next) => update("catalogMatchByUpcEnabled", next)} />
-                <ToggleField label="Match by manufacturer part number" description="Use manufacturer part number plus brand as a secondary match." checked={boolValue("catalogMatchByManufacturerPartEnabled")} disabled={!editing} onCheckedChange={(next) => update("catalogMatchByManufacturerPartEnabled", next)} />
+                <ToggleField label="Match by manufacturer part number" description="Show exact manufacturer part numbers as reviewable candidates without using brand as identity evidence." checked={boolValue("catalogMatchByManufacturerPartEnabled")} disabled={!editing} onCheckedChange={(next) => update("catalogMatchByManufacturerPartEnabled", next)} />
                 <ToggleField label="Require approval for close matches" description="Keep uncertain supplier matches pending until a user approves them." checked={boolValue("catalogCloseMatchApprovalRequired")} disabled={!editing} onCheckedChange={(next) => update("catalogCloseMatchApprovalRequired", next)} />
                 <ToggleField label="Cache filter facets" description="Reuse indexed supplier, brand, category, and status values between visits." checked={boolValue("catalogFacetCacheEnabled")} disabled={!editing} onCheckedChange={(next) => update("catalogFacetCacheEnabled", next)} />
                 <Field label="Catalog cache lifetime (seconds)">
@@ -17367,7 +17394,7 @@ function SettingsPage({
                   <Button type="button" size="sm" disabled={catalogMaintenanceLoading || Boolean(supplierIndexStatus?.activeJob)} onClick={() => requestCatalogMaintenance({
                     path: "/api/catalog/supplier-index/rebuild",
                     label: "Supplier matching index",
-                    description: "Rebuild stored UPC, MPN plus brand, exact-SKU, and approved supplier relationships and generate a downloadable matching report.",
+                    description: "Rebuild stored UPC, vendor/source SKU, exact-SKU, MPN candidates, and approved supplier relationships and generate a downloadable matching report.",
                   })}>
                     {supplierIndexStatus?.activeJob ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
                     {supplierIndexStatus?.activeJob ? "Rebuilding" : "Rebuild"}
@@ -17387,7 +17414,7 @@ function SettingsPage({
                 <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                   <Badge variant={supplierIndexStatus?.activeJob ? "secondary" : "outline"}>{supplierIndexStatus?.activeJob ? "Rebuild running" : supplierIndexStatus?.lastRebuiltAt ? "Index ready" : "Not built"}</Badge>
                   <span>Last rebuilt: {supplierIndexStatus?.lastRebuiltAt ? new Date(supplierIndexStatus.lastRebuiltAt).toLocaleString() : "Never"}</span>
-                  {(supplierIndexStatus?.methodCounts || []).map((method) => <Badge key={String(method.matchType)} variant="outline">{method.matchType === "manufacturer-part-and-brand" ? "MPN + brand" : method.matchType === "exact-sku" ? "Exact SKU" : method.matchType === "approved-mfr-part-number" ? "Approved MPN" : String(method.matchType || "Unknown").toUpperCase()}: {numberLabel(Number(method.productCount || 0))}</Badge>)}
+                  {(supplierIndexStatus?.methodCounts || []).map((method) => <Badge key={String(method.matchType)} variant="outline">{method.matchType === "manufacturer-part-number" ? "MPN candidate" : method.matchType === "linked-vendor-sku" ? "Linked SKU candidate" : method.matchType === "vendor-sku" ? "Vendor SKU" : method.matchType === "source-sku" ? "Source SKU" : method.matchType === "exact-sku" ? "Exact SKU" : method.matchType === "approved-mfr-part-number" ? "Approved MPN" : method.matchType === "approved-vendor-sku" ? "Approved linked SKU" : String(method.matchType || "Unknown").toUpperCase()}: {numberLabel(Number(method.productCount || 0))}</Badge>)}
                   {supplierIndexStatus?.activeJob && <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild><a href={`/jobs/${encodeURIComponent(String(supplierIndexStatus.activeJob.id || ""))}`}>Open job</a></Button>}
                 </div>
               </CardContent>

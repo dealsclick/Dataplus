@@ -30948,13 +30948,9 @@ async function handleApi(req, res) {
     const cacheKey = `dataplus:supplier-coverage:v1:${crypto.createHash("sha1").update(`${String(product.sku || parts[2]).toLowerCase()}|${String(product.updatedAt || "")}`).digest("hex")}`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
-    const coverage = await postgres.findVendorCatalogSupplierMatches({
+    const coverage = await postgres.readProductSupplierLinks({
       productId: product.id,
       sku: product.sku,
-      title: product.marketplaceTitle || product.title,
-      barcode: product.barcode,
-      mfrPartNumber: product.mfrPartNumber,
-      brand: product.brand
     });
     const primarySupplier = product.supplier || product.vendor || "";
     const primarySku = product.vendorSku || product.sku || "";
@@ -30962,12 +30958,13 @@ async function handleApi(req, res) {
       const confirmed = ["confirmed", "approved", ""].includes(String(row.matchStatus || "").toLowerCase());
       return confirmed
         && String(row.supplier || "").toLowerCase() === String(primarySupplier).toLowerCase()
-        && String(row.vendorSku || row.sku || "").toLowerCase() === String(primarySku).toLowerCase();
+        && String(row.sourceSku || row.vendorSku || row.sku || "").toLowerCase() === String(primarySku).toLowerCase();
     });
-    const matches = exists ? coverage.matches : [{
+    const matches = exists || !primarySupplier ? coverage.matches : [{
       supplier: primarySupplier,
       supplierCode: product.supplierCode || "",
       sku: product.sku || "",
+      sourceSku: primarySku,
       vendorSku: primarySku,
       title: product.marketplaceTitle || product.title || "",
       brand: product.brand || "",
@@ -37661,7 +37658,7 @@ async function handleApi(req, res) {
       status: "queued",
       phase: "queued",
       message: "Supplier matching index rebuild queued.",
-      details: "Rebuilds stored UPC, manufacturer-part-and-brand, exact-SKU, and approved supplier links, then produces a matching report.",
+      details: "Rebuilds stored UPC, vendor/source SKU, exact-SKU, MPN candidates, and approved supplier links, then produces a matching report.",
       fileName: "supplier-matching-report.csv",
       totalRows: Number(status.totalProducts || 0),
       processedRows: 0,
