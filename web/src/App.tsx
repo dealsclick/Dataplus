@@ -12215,7 +12215,21 @@ function WarehouseAuditPanel({
                   <video ref={videoRef} className="size-full object-contain" autoPlay muted playsInline />
                   {cameraStreamState !== "ready" && !lastScan && <div className="absolute inset-0 grid place-items-center bg-black/85 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{cameraStreamState === "opening" ? "Starting camera..." : cameraStreamState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{cameraStreamState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{cameraStreamState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
                   {!lastScan && <div className="pointer-events-none absolute inset-x-[11%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-0.5 w-full bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,1)]" /><div className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align bin label with this guide" : "Align barcode with this guide"}</div></div>}
-                  {!lastScan && <div className="absolute inset-x-4 bottom-5 rounded-md bg-black/70 px-3 py-2 text-center text-sm font-medium text-white">{cameraLookupBusy ? "Looking up barcode..." : cameraMessage}</div>}
+                  {!lastScan && cameraLookupBusy && (
+                    <div className="absolute inset-x-4 top-4 z-10 flex items-center gap-3 rounded-xl border border-sky-200 bg-sky-600 px-4 py-3 text-white shadow-[0_12px_36px_rgba(2,132,199,0.45)]" role="status" aria-live="assertive">
+                      <span className="grid size-10 shrink-0 place-items-center rounded-full bg-white/20">
+                        <Loader2 className="size-6 animate-spin" />
+                      </span>
+                      <div className="min-w-0">
+                        <p className="font-semibold">{cameraMode === "bin" ? "Bin code scanned" : "UPC scanned"}</p>
+                        <p className="mt-0.5 truncate text-sm text-sky-50">
+                          {cameraMode === "bin" ? "Checking location" : "Searching for product"}
+                          {barcode ? <span className="ml-1 font-mono font-semibold text-white">{barcode}</span> : null}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  {!lastScan && !cameraLookupBusy && <div className="absolute inset-x-4 bottom-5 rounded-md bg-black/70 px-3 py-2 text-center text-sm font-medium text-white">{cameraMessage}</div>}
                   {lastScan && <div className={`absolute inset-x-4 top-4 z-10 rounded-xl border p-4 shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-50 text-emerald-950" : "border-red-300 bg-red-50 text-red-950"}`}><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-emerald-600" /> : <X className="mt-0.5 size-6 shrink-0 text-red-600" />}<div className="min-w-0 flex-1"><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Not found in catalog"}</p><p className="mt-1 font-mono text-sm">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 text-sm">{lastScan.title}</p>}{lastScan.matched ? <div className="mt-3 flex items-center gap-3"><Label htmlFor="camera-scan-quantity" className="shrink-0 text-sm font-medium">Counted quantity</Label><Input id="camera-scan-quantity" className="h-10 max-w-32 bg-white text-base" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmCameraScan(); } }} /></div> : <p className="mt-1 text-sm">Choose Next to add this as an unresolved UPC and create the SKU from the audit workspace.</p>}</div></div></div>}
                 </div>
                 <DialogFooter className="grid shrink-0 grid-cols-3 gap-2 border-t border-white/15 bg-black px-4 pb-[calc(max(1rem,env(safe-area-inset-bottom))+0.3125rem)] pt-3 sm:flex sm:justify-between">
