@@ -30,6 +30,7 @@ const DATA_DIR = path.join(ROOT, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
 const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
+const AUTH_SESSIONS_FILE = path.join(DATA_DIR, "auth-sessions.json");
 const USER_TABLE_PREFERENCES_FILE = path.join(DATA_DIR, "user-table-preferences.json");
 const STATE_SUMMARY_FILE = path.join(DATA_DIR, "state-summary.json");
 const LITE_STATE_FILE = path.join(DATA_DIR, "lite-state.json");
@@ -1120,15 +1121,31 @@ const DEFAULT_SYSTEM_SETTINGS = {
   warehouseImageAnalysisModel: "gpt-4o-mini",
   warehouseImageAnalysisApiKey: "",
   systemUsers: [
-    { id: "owner", name: "Luis", email: "", role: "Owner", status: "active" }
+    { id: "owner", name: "Luis", username: "luis", email: "", role: "Master Admin", status: "active", isMasterAdmin: true, mustChangePassword: true }
   ],
   activeSystemUserId: "owner",
   permissionRoles: [
-    { id: "owner", name: "Owner", permissions: ["all"] },
+    { id: "owner", name: "Master Admin", permissions: ["all"] },
     { id: "admin", name: "Admin", permissions: ["catalog", "orders", "channels", "system"] },
     { id: "operator", name: "Operator", permissions: ["catalog", "orders"] }
   ]
 };
+
+const AUTH_PERMISSION_AREAS = [
+  { id: "overview", label: "Overview", path: "/" },
+  { id: "orders", label: "Orders", path: "/orders" },
+  { id: "fulfillment", label: "Fulfillment", path: "/fulfillment" },
+  { id: "purchasing", label: "Purchasing", path: "/purchasing" },
+  { id: "warehouse", label: "Warehouse", path: "/warehouse" },
+  { id: "catalog", label: "Catalog", path: "/products" },
+  { id: "vendors", label: "Vendors", path: "/vendors" },
+  { id: "brands", label: "Brands", path: "/brands" },
+  { id: "channels", label: "Channels", path: "/channels" },
+  { id: "jobs", label: "Jobs", path: "/jobs" },
+  { id: "ai", label: "David AI", path: "/ai" },
+  { id: "settings", label: "System Settings", path: "/settings" },
+  { id: "users", label: "Manage users", path: "/settings?tab=users" }
+];
 
 const PRODUCT_DUMP_RESOURCE_PROFILES = {
   conservative: { id: "conservative", label: "Conservative", heapMb: 1024, batchSize: 50, description: "For small servers or when other workloads need priority." },
@@ -5124,14 +5141,9 @@ function normalizeSystemSettings(settings = {}) {
   normalized.warehouseImageAnalysisModel = String(normalized.warehouseImageAnalysisModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
   normalized.warehouseImageAnalysisApiKey = String(normalized.warehouseImageAnalysisApiKey || "").trim();
   normalized.systemUsers = (Array.isArray(normalized.systemUsers) ? normalized.systemUsers : DEFAULT_SYSTEM_SETTINGS.systemUsers)
-    .map((user, index) => ({
-      id: String(user.id || crypto.randomUUID?.() || `user-${index + 1}`),
-      name: sourceTextValue(user.name || user.displayName || ""),
-      email: sourceTextValue(user.email || ""),
-      role: sourceTextValue(user.role || "Operator"),
-      status: ["active", "inactive"].includes(String(user.status || "").toLowerCase()) ? String(user.status).toLowerCase() : "active"
-    }))
-    .filter((user) => user.name || user.email);
+    .map((user, index) => normalizeSystemUser(user, index))
+    .filter((user) => user.name || user.email || user.username);
+  if (!normalized.systemUsers.some((user) => user.id === "owner")) normalized.systemUsers.unshift(normalizeSystemUser(DEFAULT_SYSTEM_SETTINGS.systemUsers[0], 0));
   const activeUserIds = new Set(normalized.systemUsers.map((user) => String(user.id || "")));
   normalized.activeSystemUserId = activeUserIds.has(String(normalized.activeSystemUserId || ""))
     ? String(normalized.activeSystemUserId)
@@ -5159,6 +5171,171 @@ function sourceCatalogImportBatchLimit(settings = {}) {
 function shopifyProductLaunchBatchLimit(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
   return Math.max(100, Math.min(25000, Number(normalized.shopifyProductLaunchBatchLimit || 1000) || 1000));
+}
+
+function authPermissionDefaults(isMasterAdmin = false) {
+  return Object.fromEntries(AUTH_PERMISSION_AREAS.map((area) => [area.id, {
+    view: true,
+    read: true,
+    write: Boolean(isMasterAdmin),
+    admin: Boolean(isMasterAdmin)
+  }]));
+}
+
+function normalizeAuthPermissions(value = {}, isMasterAdmin = false) {
+  const defaults = authPermissionDefaults(isMasterAdmin);
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  for (const area of AUTH_PERMISSION_AREAS) {
+    const row = source[area.id] && typeof source[area.id] === "object" ? source[area.id] : {};
+    defaults[area.id] = {
+      view: isMasterAdmin || row.view === true || String(row.view).toLowerCase() === "true",
+      read: isMasterAdmin || row.read === true || String(row.read).toLowerCase() === "true",
+      write: isMasterAdmin || row.write === true || String(row.write).toLowerCase() === "true",
+      admin: isMasterAdmin || row.admin === true || String(row.admin).toLowerCase() === "true"
+    };
+  }
+  return defaults;
+}
+
+function hashUserPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  return { salt, hash: crypto.scryptSync(String(password || ""), salt, 64).toString("hex") };
+}
+
+function verifyUserPassword(user = {}, password = "") {
+  if (!user.passwordHash || !user.passwordSalt) return false;
+  const actual = Buffer.from(hashUserPassword(password, user.passwordSalt).hash, "hex");
+  const expected = Buffer.from(String(user.passwordHash || ""), "hex");
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+function normalizeSystemUser(user = {}, index = 0) {
+  const isMasterAdmin = user.isMasterAdmin === true || String(user.role || "").toLowerCase() === "master admin" || String(user.id || "") === "owner";
+  const normalized = {
+    id: String(user.id || crypto.randomUUID?.() || `user-${index + 1}`),
+    name: sourceTextValue(user.name || user.displayName || ""),
+    username: sourceTextValue(user.username || user.login || user.email || user.name || "").toLowerCase().replace(/\s+/g, "."),
+    email: sourceTextValue(user.email || ""),
+    role: isMasterAdmin ? "Master Admin" : sourceTextValue(user.role || "Operator"),
+    status: ["active", "inactive"].includes(String(user.status || "").toLowerCase()) ? String(user.status).toLowerCase() : "active",
+    isMasterAdmin,
+    mustChangePassword: user.mustChangePassword === true || String(user.mustChangePassword).toLowerCase() === "true",
+    passwordHash: String(user.passwordHash || ""),
+    passwordSalt: String(user.passwordSalt || ""),
+    permissions: normalizeAuthPermissions(user.permissions, isMasterAdmin),
+    createdAt: sourceTextValue(user.createdAt || new Date().toISOString()),
+    updatedAt: sourceTextValue(user.updatedAt || new Date().toISOString()),
+    lastLoginAt: sourceTextValue(user.lastLoginAt || "")
+  };
+  if (normalized.id === "owner") {
+    normalized.name = normalized.name || "Luis";
+    normalized.username = normalized.username || "luis";
+    normalized.isMasterAdmin = true;
+    normalized.role = "Master Admin";
+    normalized.permissions = normalizeAuthPermissions({}, true);
+  }
+  if (!normalized.passwordHash || !normalized.passwordSalt) {
+    const initialPassword = normalized.id === "owner"
+      ? String(process.env.DATAPLUS_LUIS_PASSWORD || "DataPlus2026!")
+      : crypto.randomBytes(18).toString("base64url");
+    const hashed = hashUserPassword(initialPassword);
+    normalized.passwordHash = hashed.hash;
+    normalized.passwordSalt = hashed.salt;
+    normalized.mustChangePassword = true;
+  }
+  return normalized;
+}
+
+function publicSystemUser(user = {}) {
+  return {
+    id: user.id,
+    name: user.name,
+    username: user.username,
+    email: user.email,
+    role: user.role,
+    status: user.status,
+    isMasterAdmin: user.isMasterAdmin === true,
+    mustChangePassword: user.mustChangePassword === true,
+    permissions: normalizeAuthPermissions(user.permissions, user.isMasterAdmin === true),
+    createdAt: user.createdAt || "",
+    updatedAt: user.updatedAt || "",
+    lastLoginAt: user.lastLoginAt || "",
+    passwordConfigured: Boolean(user.passwordHash)
+  };
+}
+
+function readAuthSessions() {
+  if (!fs.existsSync(AUTH_SESSIONS_FILE)) return {};
+  try {
+    const sessions = JSON.parse(fs.readFileSync(AUTH_SESSIONS_FILE, "utf8"));
+    return sessions && typeof sessions === "object" && !Array.isArray(sessions) ? sessions : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAuthSessions(sessions = {}) {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(AUTH_SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+}
+
+function cookieValue(req, name) {
+  const cookies = String(req.headers.cookie || "").split(";").map((row) => row.trim());
+  const prefix = `${name}=`;
+  const match = cookies.find((row) => row.startsWith(prefix));
+  return match ? decodeURIComponent(match.slice(prefix.length)) : "";
+}
+
+function setAuthCookie(res, token, maxAgeSeconds = 60 * 60 * 24 * 14) {
+  res.setHeader("Set-Cookie", `dataplus_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`);
+}
+
+function clearAuthCookie(res) {
+  res.setHeader("Set-Cookie", "dataplus_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+}
+
+function currentAuthUser(req, settings = readSystemSettingsStore(dbCache.data?.systemSettings || {})) {
+  const token = cookieValue(req, "dataplus_session");
+  if (!token) return null;
+  const sessions = readAuthSessions();
+  const session = sessions[token];
+  if (!session || new Date(session.expiresAt || 0).getTime() < Date.now()) return null;
+  const user = (settings.systemUsers || []).find((candidate) => String(candidate.id || "") === String(session.userId || ""));
+  if (!user || user.status !== "active") return null;
+  return user;
+}
+
+function authAreaForPath(pathname = "") {
+  if (pathname.startsWith("/api/auth")) return "";
+  if (/^\/api\/(system-settings|system|order-workflows|user-preferences)/.test(pathname)) return "settings";
+  if (/^\/api\/(users|auth-users)/.test(pathname)) return "users";
+  if (/^\/api\/(orders|drafts|returns|search)/.test(pathname)) return "orders";
+  if (/^\/api\/(fulfillment|shipments|pick-lists)/.test(pathname)) return "fulfillment";
+  if (/^\/api\/(purchase-orders|purchasing|vendors\/[^/]+\/purchase)/.test(pathname)) return "purchasing";
+  if (/^\/api\/(warehouse|inventory|warehouses)/.test(pathname)) return "warehouse";
+  if (/^\/api\/(catalog|products|categories|source-catalog|attribute|brands|vendors)/.test(pathname)) return pathname.includes("/vendors") ? "vendors" : pathname.includes("/brands") ? "brands" : "catalog";
+  if (/^\/api\/(channels|shopify|ebay|temu|webhooks)/.test(pathname)) return "channels";
+  if (/^\/api\/(import-jobs|jobs)/.test(pathname)) return "jobs";
+  if (/^\/api\/ai/.test(pathname)) return "ai";
+  return "overview";
+}
+
+function authActionForMethod(method = "GET") {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return "read";
+  return "write";
+}
+
+function userCan(user = {}, area = "", action = "read") {
+  if (!area || user.isMasterAdmin === true) return true;
+  const permissions = normalizeAuthPermissions(user.permissions, false);
+  const row = permissions[area] || {};
+  if (action === "admin") return row.admin === true;
+  if (action === "write") return row.write === true || row.admin === true;
+  if (action === "read") return row.read === true || row.write === true || row.admin === true;
+  return row.view === true || row.read === true || row.write === true || row.admin === true;
+}
+
+function publicAuthUser(user = {}) {
+  return { ...publicSystemUser(user), permissions: normalizeAuthPermissions(user.permissions, user.isMasterAdmin === true) };
 }
 
 function readSystemSettingsStore(fallback = {}) {
@@ -5192,7 +5369,7 @@ function publicSystemSettings(settings = {}) {
   const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
   const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
   const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
-  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
+  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
 }
 
 function hashWarehouseAuditAdminPin(pin, salt) {
@@ -31028,6 +31205,139 @@ async function handleApi(req, res) {
     } finally {
       shopifyWebhookInFlight = Math.max(0, shopifyWebhookInFlight - 1);
     }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/auth/session") {
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const user = currentAuthUser(req, settings);
+    return sendJson(res, user ? 200 : 401, user
+      ? { authenticated: true, user: publicAuthUser(user), permissionAreas: AUTH_PERMISSION_AREAS }
+      : { authenticated: false, permissionAreas: AUTH_PERMISSION_AREAS });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/auth/login") {
+    const body = await parseBody(req);
+    const login = sourceTextValue(body.username || body.email || body.login || "").toLowerCase();
+    const password = String(body.password || "");
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const user = (settings.systemUsers || []).find((candidate) => [candidate.username, candidate.email, candidate.name].map((value) => sourceTextValue(value).toLowerCase()).includes(login));
+    if (!user || user.status !== "active" || !verifyUserPassword(user, password)) return sendJson(res, 401, { error: "Invalid username or password." });
+    const token = crypto.randomBytes(32).toString("base64url");
+    const sessions = readAuthSessions();
+    sessions[token] = { userId: user.id, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString() };
+    writeAuthSessions(sessions);
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    current.systemUsers = (current.systemUsers || []).map((candidate) => candidate.id === user.id ? { ...candidate, lastLoginAt: new Date().toISOString() } : candidate);
+    const systemSettings = writeSystemSettingsStore(current);
+    publicStateJsonCache = null;
+    if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    setAuthCookie(res, token);
+    const nextUser = systemSettings.systemUsers.find((candidate) => candidate.id === user.id) || user;
+    return sendJson(res, 200, { authenticated: true, user: publicAuthUser(nextUser), permissionAreas: AUTH_PERMISSION_AREAS });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/auth/logout") {
+    const token = cookieValue(req, "dataplus_session");
+    if (token) {
+      const sessions = readAuthSessions();
+      delete sessions[token];
+      writeAuthSessions(sessions);
+    }
+    clearAuthCookie(res);
+    return sendJson(res, 200, { authenticated: false });
+  }
+
+  const authSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+  const authUser = currentAuthUser(req, authSettings);
+  if (!authUser) return sendJson(res, 401, { error: "Sign in to DataPlus first." });
+  const requiredArea = authAreaForPath(url.pathname);
+  const requiredAction = authActionForMethod(req.method);
+  if (!userCan(authUser, requiredArea, requiredAction)) {
+    return sendJson(res, 403, { error: `Your account does not have ${requiredAction} access for ${requiredArea || "this area"}.` });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/users") {
+    if (!userCan(authUser, "users", "read")) return sendJson(res, 403, { error: "Manage Users access is required." });
+    return sendJson(res, 200, { users: authSettings.systemUsers.map(publicSystemUser), permissionAreas: AUTH_PERMISSION_AREAS });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/users") {
+    if (!userCan(authUser, "users", "admin")) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    const body = await parseBody(req);
+    const username = sourceTextValue(body.username || body.email || body.name || "").toLowerCase().replace(/\s+/g, ".");
+    const name = sourceTextValue(body.name || username);
+    if (!username || !/^[a-z0-9._@-]{2,80}$/i.test(username)) return sendJson(res, 400, { error: "Enter a username using letters, numbers, dots, dashes, underscores, or an email address." });
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if ((current.systemUsers || []).some((user) => sourceTextValue(user.username).toLowerCase() === username || (body.email && sourceTextValue(user.email).toLowerCase() === sourceTextValue(body.email).toLowerCase()))) {
+      return sendJson(res, 409, { error: "A user with that username or email already exists." });
+    }
+    const temporaryPassword = sourceTextValue(body.password || "") || crypto.randomBytes(12).toString("base64url");
+    const hashed = hashUserPassword(temporaryPassword);
+    const user = normalizeSystemUser({
+      id: crypto.randomUUID(),
+      name,
+      username,
+      email: sourceTextValue(body.email || ""),
+      role: sourceTextValue(body.role || "Operator"),
+      status: "active",
+      permissions: normalizeAuthPermissions(body.permissions || {}, false),
+      passwordHash: hashed.hash,
+      passwordSalt: hashed.salt,
+      mustChangePassword: true
+    }, current.systemUsers.length);
+    current.systemUsers = [...(current.systemUsers || []), user];
+    const systemSettings = writeSystemSettingsStore(current);
+    publicStateJsonCache = null;
+    if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    return sendJson(res, 201, { user: publicSystemUser(user), temporaryPassword, users: systemSettings.systemUsers.map(publicSystemUser) });
+  }
+
+  const userMatch = url.pathname.match(/^\/api\/users\/([^/]+)$/);
+  if (userMatch && req.method === "PATCH") {
+    if (!userCan(authUser, "users", "admin")) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    const userId = decodeURIComponent(userMatch[1] || "");
+    const body = await parseBody(req);
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const existing = (current.systemUsers || []).find((candidate) => String(candidate.id || "") === userId);
+    if (!existing) return notFound(res);
+    if (existing.isMasterAdmin && authUser.id !== existing.id) return sendJson(res, 403, { error: "Only Luis can edit the master admin account." });
+    const updated = {
+      ...existing,
+      name: body.name === undefined ? existing.name : sourceTextValue(body.name),
+      username: body.username === undefined ? existing.username : sourceTextValue(body.username).toLowerCase().replace(/\s+/g, "."),
+      email: body.email === undefined ? existing.email : sourceTextValue(body.email),
+      role: existing.isMasterAdmin ? "Master Admin" : (body.role === undefined ? existing.role : sourceTextValue(body.role || "Operator")),
+      status: existing.isMasterAdmin ? "active" : (["active", "inactive"].includes(String(body.status || "").toLowerCase()) ? String(body.status).toLowerCase() : existing.status),
+      permissions: existing.isMasterAdmin ? normalizeAuthPermissions({}, true) : (body.permissions === undefined ? existing.permissions : normalizeAuthPermissions(body.permissions, false)),
+      updatedAt: new Date().toISOString()
+    };
+    if (!updated.username || !/^[a-z0-9._@-]{2,80}$/i.test(updated.username)) return sendJson(res, 400, { error: "Enter a valid username." });
+    const duplicate = (current.systemUsers || []).find((candidate) => candidate.id !== existing.id && (sourceTextValue(candidate.username).toLowerCase() === updated.username || (updated.email && sourceTextValue(candidate.email).toLowerCase() === updated.email.toLowerCase())));
+    if (duplicate) return sendJson(res, 409, { error: "Another user already uses that username or email." });
+    current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);
+    const systemSettings = writeSystemSettingsStore(current);
+    publicStateJsonCache = null;
+    if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    return sendJson(res, 200, { user: publicSystemUser(updated), users: systemSettings.systemUsers.map(publicSystemUser) });
+  }
+
+  const resetPasswordMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/password$/);
+  if (resetPasswordMatch && req.method === "POST") {
+    const userId = decodeURIComponent(resetPasswordMatch[1] || "");
+    if (!userCan(authUser, "users", "admin") && authUser.id !== userId) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    const body = await parseBody(req);
+    const password = sourceTextValue(body.password || "") || crypto.randomBytes(12).toString("base64url");
+    if (password.length < 8) return sendJson(res, 400, { error: "Password must be at least 8 characters." });
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const existing = (current.systemUsers || []).find((candidate) => String(candidate.id || "") === userId);
+    if (!existing) return notFound(res);
+    const hashed = hashUserPassword(password);
+    const updated = { ...existing, passwordHash: hashed.hash, passwordSalt: hashed.salt, mustChangePassword: authUser.id !== userId || body.mustChangePassword !== false, updatedAt: new Date().toISOString() };
+    current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);
+    const systemSettings = writeSystemSettingsStore(current);
+    publicStateJsonCache = null;
+    if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    return sendJson(res, 200, { user: publicSystemUser(updated), temporaryPassword: body.password ? "" : password, users: systemSettings.systemUsers.map(publicSystemUser) });
   }
 
   if (req.method === "GET" && url.pathname === "/api/system/database") {

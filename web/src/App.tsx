@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import { createColumnHelper, flexRender, getCoreRowModel, getFilteredRowModel, useReactTable } from "@tanstack/react-table"
 import { useChat } from "@ai-sdk/react"
 import { createChat } from "@shadcn/helpers/ai-sdk"
@@ -685,6 +685,31 @@ type LiteState = {
   catalogImportReviews?: CatalogImportReview[]
 }
 
+type AuthPermission = { view?: boolean; read?: boolean; write?: boolean; admin?: boolean }
+type AuthPermissionMatrix = Record<string, AuthPermission>
+type AuthPermissionArea = { id: string; label: string; path: string }
+type AuthUser = {
+  id: string
+  name?: string
+  username?: string
+  email?: string
+  role?: string
+  status?: string
+  isMasterAdmin?: boolean
+  mustChangePassword?: boolean
+  permissions?: AuthPermissionMatrix
+  createdAt?: string
+  updatedAt?: string
+  lastLoginAt?: string
+  passwordConfigured?: boolean
+}
+
+type AuthSession = {
+  authenticated?: boolean
+  user?: AuthUser
+  permissionAreas?: AuthPermissionArea[]
+}
+
 type CatalogImportReview = {
   id: string
   sku?: string
@@ -1175,6 +1200,43 @@ function jobIdFromPath(pathname = window.location.pathname) {
   return match ? decodeURIComponent(match[1]) : ""
 }
 
+const viewPermissionArea: Record<AppView, string> = {
+  overview: "overview",
+  jobs: "jobs",
+  "job-detail": "jobs",
+  channels: "channels",
+  catalog: "catalog",
+  operations: "orders",
+  warehouse: "warehouse",
+  fulfillment: "fulfillment",
+  purchasing: "purchasing",
+  "po-detail": "purchasing",
+  "order-detail": "orders",
+  "draft-detail": "orders",
+  "product-detail": "catalog",
+  "inventory-detail": "warehouse",
+  "category-detail": "catalog",
+  vendors: "vendors",
+  brands: "brands",
+  "brand-detail": "brands",
+  "ai-chat": "ai",
+  settings: "settings",
+}
+
+function userCan(user: AuthUser | undefined, area: string, action: keyof AuthPermission = "read") {
+  if (!user) return false
+  if (user.isMasterAdmin) return true
+  const permission = user.permissions?.[area] || {}
+  if (action === "admin") return permission.admin === true
+  if (action === "write") return permission.write === true || permission.admin === true
+  if (action === "read") return permission.read === true || permission.write === true || permission.admin === true
+  return permission.view === true || permission.read === true || permission.write === true || permission.admin === true
+}
+
+function userCanView(user: AuthUser | undefined, view: AppView) {
+  return userCan(user, viewPermissionArea[view], "view")
+}
+
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -1422,10 +1484,55 @@ export function FloatingActions({
   )
 }
 
+function LoginPage({ onLogin }: { onLogin: (session: AuthSession) => void }) {
+  const [username, setUsername] = useState("luis")
+  const [password, setPassword] = useState("")
+  const [loading, setLoading] = useState(false)
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setLoading(true)
+    try {
+      const session = await api<AuthSession>("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ username, password }),
+      })
+      toast.success(`Signed in as ${session.user?.name || session.user?.username || "DataPlus user"}.`)
+      onLogin(session)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to sign in.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return <TooltipProvider>
+    <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <div className="mb-2 flex size-10 items-center justify-center rounded-md bg-primary text-primary-foreground"><LockKeyhole className="size-5" /></div>
+          <CardTitle>Sign in to DataPlus</CardTitle>
+          <CardDescription>Use your assigned login to access permitted workspaces.</CardDescription>
+        </CardHeader>
+        <form onSubmit={submit}>
+          <CardContent className="grid gap-4">
+            <Field label="Username"><Input autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></Field>
+            <Field label="Password"><Input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></Field>
+          </CardContent>
+          <CardFooter><Button className="w-full" disabled={loading || !username || !password}>{loading && <Loader2 className="size-4 animate-spin" />} Sign in</Button></CardFooter>
+        </form>
+      </Card>
+      <Toaster richColors />
+    </div>
+  </TooltipProvider>
+}
+
 function App() {
   const { resolvedTheme, setTheme } = useTheme()
   const [view, setView] = useState<AppView>(() => viewFromPath(window.location.pathname))
   const [state, setState] = useState<LiteState>({})
+  const [auth, setAuth] = useState<AuthSession>({})
+  const [authLoading, setAuthLoading] = useState(true)
   const [jobs, setJobs] = useState<ImportJob[]>([])
   const [activeJobs, setActiveJobs] = useState<ImportJob[]>([])
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({})
@@ -1439,6 +1546,16 @@ function App() {
   const [universalQuery, setUniversalQuery] = useState("")
   const [universalResults, setUniversalResults] = useState<UniversalSearchResult[]>([])
   const [universalSearching, setUniversalSearching] = useState(false)
+  const authUser = auth.user
+
+  useEffect(() => {
+    let cancelled = false
+    api<AuthSession>("/api/auth/session")
+      .then((session) => { if (!cancelled) setAuth(session) })
+      .catch(() => { if (!cancelled) setAuth({ authenticated: false }) })
+      .finally(() => { if (!cancelled) setAuthLoading(false) })
+    return () => { cancelled = true }
+  }, [])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1709,12 +1826,19 @@ function App() {
   }
 
   useEffect(() => {
+    if (!auth.authenticated) return
     refreshData()
     // Short Shopify actions can finish before a one-minute refresh. Keep the
     // operations view current without requiring the user to manually reload.
     const timer = window.setInterval(() => refreshData({ quiet: true }), 10_000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [auth.authenticated])
+
+  useEffect(() => {
+    if (!authUser || userCanView(authUser, view)) return
+    const fallback = (["overview", "operations", "catalog", "warehouse", "purchasing", "fulfillment", "channels", "jobs", "settings"] as AppView[]).find((candidate) => userCanView(authUser, candidate)) || "overview"
+    navigateTo(fallback)
+  }, [authUser, view])
 
   useEffect(() => {
     const onPopState = () => setView(viewFromPath(window.location.pathname))
@@ -1736,6 +1860,35 @@ function App() {
   const attentionJobs = jobs.filter(isAttentionJob)
   const selectedJob = jobs.find((job) => job.id === selectedJobId) || (selectedJobId ? undefined : attentionJobs[0] || jobs[0])
 
+  if (authLoading) {
+    return <div className="flex min-h-screen items-center justify-center bg-muted/30 text-sm text-muted-foreground"><Loader2 className="mr-2 size-4 animate-spin" /> Loading DataPlus session...</div>
+  }
+
+  if (!auth.authenticated || !authUser) {
+    return <LoginPage onLogin={(session) => { setAuth(session); void refreshData() }} />
+  }
+
+  const visibleNavGroups = navGroups
+    .map((group) => ({ ...group, items: group.items.filter((item) => userCanView(authUser, item.id)) }))
+    .filter((group) => group.items.length)
+  const visibleOperationsSidebarItems = userCan(authUser, "orders", "view") ? operationsSidebarItems : []
+  const visibleCatalogSidebarItems = catalogSidebarItems.filter((item) => {
+    if (item.path === "/brands") return userCan(authUser, "brands", "view")
+    if (item.path === "/inventory") return userCan(authUser, "warehouse", "view")
+    return userCan(authUser, "catalog", "view")
+  })
+  const visibleWarehouseSidebarItems = warehouseSidebarItems.filter((item) => item.path === "/fulfillment" ? userCan(authUser, "fulfillment", "view") : userCan(authUser, "warehouse", "view"))
+  const commandNavItems = [
+    { label: "Orders", view: "operations" as AppView, path: "/orders" },
+    { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" },
+    { label: "Purchasing", view: "purchasing" as AppView, path: "/purchasing" },
+    { label: "Products", view: "catalog" as AppView, path: "/products" },
+    { label: "Warehouse", view: "warehouse" as AppView, path: "/warehouse" },
+    { label: "Jobs", view: "jobs" as AppView, path: "/jobs" },
+    { label: "Channels", view: "channels" as AppView, path: "/channels" },
+    { label: "Settings", view: "settings" as AppView, path: "/settings" },
+  ].filter((item) => userCanView(authUser, item.view))
+
   return (
     <TooltipProvider>
       <SidebarProvider defaultOpen>
@@ -1747,7 +1900,7 @@ function App() {
             </div>
           </SidebarHeader>
           <SidebarContent>
-            {navGroups.map((group) => <SidebarGroup key={group.label}>
+            {visibleNavGroups.map((group) => <SidebarGroup key={group.label}>
               <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu>
@@ -1758,17 +1911,17 @@ function App() {
                     const operationsActive = item.id === "operations" && (view === "operations" || view === "order-detail" || view === "draft-detail")
                     return <SidebarMenuItem key={item.id}>
                       <SidebarMenuButton isActive={view === item.id || catalogActive || warehouseActive || operationsActive} tooltip={item.label} onClick={() => navigateTo(item.id)}><Icon /><span>{item.label}</span></SidebarMenuButton>
-                      {item.id === "operations" && operationsActive && <SidebarMenuSub>{operationsSidebarItems.map((child) => {
+                      {item.id === "operations" && operationsActive && <SidebarMenuSub>{visibleOperationsSidebarItems.map((child) => {
                         const ChildIcon = child.icon
                         const active = window.location.pathname === child.path || window.location.pathname.startsWith(`${child.path}/`)
                         return <SidebarMenuSubItem key={child.path}><SidebarMenuSubButton asChild isActive={active}><a href={child.path}><ChildIcon /><span>{child.label}</span></a></SidebarMenuSubButton></SidebarMenuSubItem>
                       })}</SidebarMenuSub>}
-                      {item.id === "catalog" && catalogActive && <SidebarMenuSub>{catalogSidebarItems.map((child) => {
+                      {item.id === "catalog" && catalogActive && <SidebarMenuSub>{visibleCatalogSidebarItems.map((child) => {
                         const ChildIcon = child.icon
                         const active = child.path === "/categories" ? window.location.pathname === "/categories" || window.location.pathname.startsWith("/categories/") : window.location.pathname === child.path
                         return <SidebarMenuSubItem key={child.path}><SidebarMenuSubButton asChild isActive={active}><a href={child.path}><ChildIcon /><span>{child.label}</span></a></SidebarMenuSubButton></SidebarMenuSubItem>
                       })}</SidebarMenuSub>}
-                      {item.id === "warehouse" && warehouseActive && <SidebarMenuSub>{warehouseSidebarItems.map((child) => {
+                      {item.id === "warehouse" && warehouseActive && <SidebarMenuSub>{visibleWarehouseSidebarItems.map((child) => {
                         const ChildIcon = child.icon
                         const active = window.location.pathname === child.path || window.location.pathname.startsWith(`${child.path}/`)
                         return <SidebarMenuSubItem key={child.path}><SidebarMenuSubButton asChild isActive={active}><a href={child.path}><ChildIcon /><span>{child.label}</span></a></SidebarMenuSubButton></SidebarMenuSubItem>
@@ -1781,7 +1934,7 @@ function App() {
           </SidebarContent>
           <SidebarFooter className="p-3">
             <SidebarMenu>
-              <SidebarMenuItem><SidebarMenuButton isActive={view === "settings"} tooltip="Settings" onClick={() => navigateTo("settings")}><Settings /><span>Settings</span></SidebarMenuButton></SidebarMenuItem>
+              {userCanView(authUser, "settings") && <SidebarMenuItem><SidebarMenuButton isActive={view === "settings"} tooltip="Settings" onClick={() => navigateTo("settings")}><Settings /><span>Settings</span></SidebarMenuButton></SidebarMenuItem>}
               <SidebarMenuItem><SidebarMenuButton tooltip="Old UI fallback" asChild><a href="/legacy" target="_blank" rel="noreferrer"><ExternalLink /><span>Old UI fallback</span></a></SidebarMenuButton></SidebarMenuItem>
             </SidebarMenu>
           </SidebarFooter>
@@ -1805,6 +1958,20 @@ function App() {
                   <Search className="size-4" /> Search
                   <kbd className="ml-2 rounded border bg-muted px-1 text-[10px] text-muted-foreground">Ctrl K</kbd>
                 </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className="hidden max-w-48 truncate sm:inline-flex"><Users className="size-4" /> {authUser.name || authUser.username}</Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-56">
+                    <DropdownMenuLabel>
+                      <span className="block truncate">{authUser.name || authUser.username}</span>
+                      <span className="block truncate text-xs font-normal text-muted-foreground">{authUser.role || "User"}</span>
+                    </DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                    {userCan(authUser, "users", "read") && <DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/settings?tab=users"); setView("settings") }}><Users className="size-4" /> Manage users</DropdownMenuItem>}
+                    <DropdownMenuItem onClick={() => void api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) }).finally(() => { setAuth({ authenticated: false }); setState({}); setJobs([]) })}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
                 <Button
                   variant="outline"
                   size="icon"
@@ -1834,7 +2001,7 @@ function App() {
                 <CommandList>
                   {!universalQuery.trim() && <>
                     <CommandGroup heading="Navigate">
-                      {[{ label: "Orders", view: "operations" as AppView, path: "/orders" }, { label: "Fulfillment", view: "fulfillment" as AppView, path: "/fulfillment" }, { label: "Purchasing", view: "purchasing" as AppView, path: "/purchasing" }, { label: "Products", view: "catalog" as AppView, path: "/products" }, { label: "Warehouse", view: "warehouse" as AppView, path: "/warehouse" }, { label: "Jobs", view: "jobs" as AppView, path: "/jobs" }, { label: "Channels", view: "channels" as AppView, path: "/channels" }, { label: "Settings", view: "settings" as AppView, path: "/settings" }].map((item) => <CommandItem key={item.label} value={item.label} onSelect={() => { setCommandOpen(false); window.history.pushState({}, "", item.path); setView(item.view) }}><Search className="size-4 text-muted-foreground" />{item.label}</CommandItem>)}
+                      {commandNavItems.map((item) => <CommandItem key={item.label} value={item.label} onSelect={() => { setCommandOpen(false); window.history.pushState({}, "", item.path); setView(item.view) }}><Search className="size-4 text-muted-foreground" />{item.label}</CommandItem>)}
                     </CommandGroup>
                     <CommandGroup heading="Quick actions">
                       <CommandItem value="Refresh workspace" onSelect={() => { setCommandOpen(false); void refreshData() }}><RefreshCw className="size-4 text-muted-foreground" />Refresh workspace</CommandItem>
@@ -1943,6 +2110,8 @@ function App() {
                   <SettingsPage
                     settings={state.systemSettings || {}}
                     workerStatus={workerStatus}
+                    authUser={authUser}
+                    permissionAreas={(auth.permissionAreas || state.systemSettings?.authPermissionAreas || []) as AuthPermissionArea[]}
                     onSaveSettings={saveSystemSettings}
                   />
                 )}
@@ -17219,10 +17388,14 @@ type SupplierIndexStatus = {
 function SettingsPage({
   settings,
   workerStatus,
+  authUser,
+  permissionAreas,
   onSaveSettings,
 }: {
   settings: SystemSettings
   workerStatus: WorkerStatus
+  authUser: AuthUser
+  permissionAreas: AuthPermissionArea[]
   onSaveSettings: (patch: Record<string, unknown>) => Promise<void>
 }) {
   const [editing, setEditing] = useState(false)
@@ -17251,6 +17424,12 @@ function SettingsPage({
   const [routingResetOpen, setRoutingResetOpen] = useState(false)
   const [routingResetLoading, setRoutingResetLoading] = useState(false)
   const [settingsWarehouses, setSettingsWarehouses] = useState<Array<Record<string, unknown>>>([])
+  const [users, setUsers] = useState<AuthUser[]>(() => (Array.isArray(settings.systemUsers) ? settings.systemUsers as AuthUser[] : []))
+  const [selectedUserId, setSelectedUserId] = useState("")
+  const [newUserOpen, setNewUserOpen] = useState(false)
+  const [newUser, setNewUser] = useState({ name: "", username: "", email: "", password: "" })
+  const [userSaving, setUserSaving] = useState(false)
+  const [temporaryPassword, setTemporaryPassword] = useState("")
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const settingsTabs = new Set(["operations", "organization", "orders", "purchasing", "inventory", "notifications", "security", "jobs", "worker", "backups", "catalog", "data-sources", "barcode", "ai", "email", "users", "releases"])
   const [activeTab, setActiveTab] = useState(settingsTabs.has(requestedTab || "") ? String(requestedTab) : "operations")
@@ -17271,6 +17450,9 @@ function SettingsPage({
   const aiToolScopes = () => (value("aiToolScopes") && typeof value("aiToolScopes") === "object" ? value("aiToolScopes") as Record<string, unknown> : {})
   const usageNumber = (field: string, period = "thirtyDays") => Number((aiUsage?.[period] as Record<string, unknown> | undefined)?.[field] || 0).toLocaleString()
   const workflowValue = (section: string, field: string, fallback: unknown) => orderWorkflowDraft[`${section}.${field}`] ?? ((orderWorkflowSettings[section] as Record<string, unknown> | undefined)?.[field]) ?? fallback
+  const canManageUsers = userCan(authUser, "users", "admin")
+  const userAreas = permissionAreas.length ? permissionAreas : ((Array.isArray(settings.authPermissionAreas) ? settings.authPermissionAreas : []) as AuthPermissionArea[])
+  const selectedUser = users.find((user) => user.id === selectedUserId) || users[0]
 
   const loadAiUsage = async () => {
     setLoadingAiUsage(true)
@@ -17298,6 +17480,17 @@ function SettingsPage({
       .then((state) => setSettingsWarehouses((state.warehouses || []) as Array<Record<string, unknown>>))
       .catch(() => setSettingsWarehouses([]))
   }, [])
+  useEffect(() => {
+    setUsers(Array.isArray(settings.systemUsers) ? settings.systemUsers as AuthUser[] : [])
+  }, [settings.systemUsers])
+  useEffect(() => {
+    if (activeTab !== "users") return
+    void loadUsers()
+  }, [activeTab])
+  useEffect(() => {
+    if (selectedUserId || !users.length) return
+    setSelectedUserId(users[0].id)
+  }, [users, selectedUserId])
 
   const loadSupplierIndexStatus = async () => {
     setSupplierIndexLoading(true)
@@ -17322,39 +17515,75 @@ function SettingsPage({
     setOrderWorkflowDraft((current) => ({ ...current, [`${section}.${field}`]: next }))
   }
 
-  function configuredUsers() {
-    const users = value("systemUsers")
-    return (Array.isArray(users) ? users : []) as Array<Record<string, unknown>>
+  async function loadUsers() {
+    try {
+      const result = await api<{ users?: AuthUser[]; permissionAreas?: AuthPermissionArea[] }>("/api/users")
+      setUsers(result.users || [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load users.")
+    }
   }
 
-  function updateSystemUser(userId: string, field: string, next: unknown) {
-    update("systemUsers", configuredUsers().map((user) => String(user.id) === userId ? { ...user, [field]: next } : user))
+  async function createLogin() {
+    setUserSaving(true)
+    setTemporaryPassword("")
+    try {
+      const result = await api<{ user?: AuthUser; users?: AuthUser[]; temporaryPassword?: string }>("/api/users", {
+        method: "POST",
+        body: JSON.stringify(newUser),
+      })
+      setUsers(result.users || (result.user ? [...users, result.user] : users))
+      if (result.user?.id) setSelectedUserId(result.user.id)
+      setTemporaryPassword(result.temporaryPassword || "")
+      setNewUser({ name: "", username: "", email: "", password: "" })
+      setNewUserOpen(false)
+      toast.success("Login created.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to create login.")
+    } finally {
+      setUserSaving(false)
+    }
   }
 
-  function addSystemUser() {
-    update("systemUsers", [...configuredUsers(), { id: crypto.randomUUID(), name: "", email: "", role: "Operator", status: "active" }])
+  async function saveUser(userId: string, patch: Partial<AuthUser>) {
+    setUserSaving(true)
+    try {
+      const result = await api<{ user?: AuthUser; users?: AuthUser[] }>(`/api/users/${encodeURIComponent(userId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      })
+      setUsers(result.users || users.map((user) => user.id === userId ? { ...user, ...(result.user || patch) } : user))
+      toast.success("User profile saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save user.")
+    } finally {
+      setUserSaving(false)
+    }
   }
 
-  function removeSystemUser(userId: string) {
-    const users = configuredUsers()
-    if (users.length <= 1) return toast.error("At least one system user is required.")
-    update("systemUsers", users.filter((user) => String(user.id) !== userId))
-    if (String(value("activeSystemUserId") || "") === userId) update("activeSystemUserId", String(users.find((user) => String(user.id) !== userId)?.id || ""))
+  async function resetUserPassword(userId: string) {
+    setUserSaving(true)
+    setTemporaryPassword("")
+    try {
+      const result = await api<{ user?: AuthUser; users?: AuthUser[]; temporaryPassword?: string }>(`/api/users/${encodeURIComponent(userId)}/password`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      })
+      setUsers(result.users || users)
+      setTemporaryPassword(result.temporaryPassword || "")
+      toast.success("Temporary password generated.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to reset password.")
+    } finally {
+      setUserSaving(false)
+    }
   }
 
-  function configuredRoles() {
-    const roles = value("permissionRoles")
-    return (Array.isArray(roles) ? roles : []) as Array<Record<string, unknown>>
-  }
-
-  function updateRolePermissions(roleId: string, permission: string, enabled: boolean) {
-    update("permissionRoles", configuredRoles().map((role) => {
-      if (String(role.id) !== roleId) return role
-      const permissions = new Set(Array.isArray(role.permissions) ? role.permissions.map(String) : [])
-      if (enabled) permissions.add(permission)
-      else permissions.delete(permission)
-      return { ...role, permissions: Array.from(permissions) }
-    }))
+  function updateSelectedPermission(areaId: string, action: keyof AuthPermission, enabled: boolean) {
+    if (!selectedUser || selectedUser.isMasterAdmin) return
+    const permissions = { ...(selectedUser.permissions || {}) }
+    permissions[areaId] = { ...(permissions[areaId] || {}), [action]: enabled }
+    setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissions } : user))
   }
 
   function requestCatalogMaintenance(request: NonNullable<typeof catalogMaintenanceConfirm>) {
@@ -18037,46 +18266,75 @@ function SettingsPage({
           </AlertDialog>
         </TabsContent>
         <TabsContent value="users">
-          <div className="grid gap-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Users and permissions</CardTitle>
-              <CardDescription>Manage the operators recorded on manual actions and assign a reusable role to each person.</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-4">
-              <div className="grid gap-4 rounded-md border bg-muted/20 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
-                <Field label="Current operator"><Select disabled={!editing} value={String(value("activeSystemUserId") || configuredUsers()[0]?.id || "")} onValueChange={(next) => update("activeSystemUserId", next)}><SelectTrigger><SelectValue placeholder="Select operator" /></SelectTrigger><SelectContent>{configuredUsers().filter((user) => String(user.status || "active") === "active").map((user) => <SelectItem key={String(user.id)} value={String(user.id)}>{String(user.name || user.email || "Unnamed user")}</SelectItem>)}</SelectContent></Select><p className="mt-1 text-xs text-muted-foreground">Manual changes and approvals are attributed to this operator until full sign-in enforcement is enabled.</p></Field>
-                <Button type="button" variant="outline" disabled={!editing} onClick={addSystemUser}>Add user</Button>
-              </div>
-              <div className="overflow-x-auto rounded-md border">
-                <Table>
-                  <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Email</TableHead><TableHead>Role</TableHead><TableHead>Status</TableHead><TableHead className="w-20 text-right">Action</TableHead></TableRow></TableHeader>
-                  <TableBody>{configuredUsers().map((user) => <TableRow key={String(user.id)}>
-                    <TableCell><Input className="min-w-36" disabled={!editing} value={String(user.name || "")} onChange={(event) => updateSystemUser(String(user.id), "name", event.target.value)} placeholder="Full name" /></TableCell>
-                    <TableCell><Input className="min-w-52" disabled={!editing} type="email" value={String(user.email || "")} onChange={(event) => updateSystemUser(String(user.id), "email", event.target.value)} placeholder="user@example.com" /></TableCell>
-                    <TableCell><Select disabled={!editing} value={String(user.role || "Operator")} onValueChange={(next) => updateSystemUser(String(user.id), "role", next)}><SelectTrigger className="min-w-32"><SelectValue /></SelectTrigger><SelectContent>{configuredRoles().map((role) => <SelectItem key={String(role.id)} value={String(role.name)}>{String(role.name)}</SelectItem>)}</SelectContent></Select></TableCell>
-                    <TableCell><Select disabled={!editing || String(user.id) === "owner"} value={String(user.status || "active")} onValueChange={(next) => updateSystemUser(String(user.id), "status", next)}><SelectTrigger className="min-w-28"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></TableCell>
-                    <TableCell className="text-right"><Button type="button" size="sm" variant="ghost" disabled={!editing || String(user.id) === "owner"} onClick={() => removeSystemUser(String(user.id))}>Remove</Button></TableCell>
-                  </TableRow>)}</TableBody>
-                </Table>
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader><CardTitle className="text-base">Role permissions</CardTitle><CardDescription>Permissions are grouped by workspace. Owner always retains full access.</CardDescription></CardHeader>
-            <CardContent className="grid gap-3">
-              {configuredRoles().map((role) => {
-                const permissions = new Set(Array.isArray(role.permissions) ? role.permissions.map(String) : [])
-                const ownerRole = permissions.has("all") || String(role.id) === "owner"
-                return <div key={String(role.id)} className="grid gap-3 rounded-md border p-4 lg:grid-cols-[10rem_1fr] lg:items-start">
-                  <div><p className="font-medium">{String(role.name || role.id)}</p><p className="text-xs text-muted-foreground">{ownerRole ? "Full system access" : `${permissions.size} workspace permissions`}</p></div>
-                  <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">{["catalog", "orders", "fulfillment", "purchasing", "warehouse", "channels", "jobs", "system"].map((permission) => <label key={permission} className="flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm"><Checkbox disabled={!editing || ownerRole} checked={ownerRole || permissions.has(permission)} onCheckedChange={(checked) => updateRolePermissions(String(role.id), permission, checked === true)} /><span className="capitalize">{permission}</span></label>)}</div>
+          <div className="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
+            <Card>
+              <CardHeader className="gap-3 border-b">
+                <div>
+                  <CardTitle className="text-base">Manage users</CardTitle>
+                  <CardDescription>Create logins and choose each user's page and action access.</CardDescription>
                 </div>
-              })}
-              <Alert><ShieldCheck className="size-4" /><AlertTitle>Permission policy is ready for authentication enforcement</AlertTitle><AlertDescription>These roles already control DataPlus operator attribution and provide the permission model for the sign-in layer. Credentials and API secrets remain protected server-side.</AlertDescription></Alert>
-            </CardContent>
-          </Card>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => void loadUsers()}><RefreshCw className="size-4" /> Refresh</Button>
+                  <Button size="sm" disabled={!canManageUsers} onClick={() => setNewUserOpen(true)}><Users className="size-4" /> Add login</Button>
+                </div>
+              </CardHeader>
+              <CardContent className="grid gap-2 p-3">
+                {users.map((user) => <button key={user.id} type="button" onClick={() => setSelectedUserId(user.id)} className={cn("rounded-md border p-3 text-left transition-colors hover:border-primary", selectedUser?.id === user.id && "border-primary bg-primary/5")}>
+                  <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium">{user.name || user.username}</p><p className="truncate text-xs text-muted-foreground">{user.username || user.email}</p></div><Badge variant={user.status === "active" ? "success" : "outline"}>{user.status || "active"}</Badge></div>
+                  <div className="mt-2 flex flex-wrap gap-1"><Badge variant={user.isMasterAdmin ? "default" : "secondary"}>{user.role || "Operator"}</Badge>{user.mustChangePassword && <Badge variant="warning">Reset required</Badge>}</div>
+                </button>)}
+                {!users.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">No users found.</p>}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="border-b">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <CardTitle className="text-base">{selectedUser ? `Profile: ${selectedUser.name || selectedUser.username}` : "User profile"}</CardTitle>
+                    <CardDescription>{selectedUser?.isMasterAdmin ? "Luis is the protected master admin and always keeps full access." : "Save profile changes and permission edits for the selected login."}</CardDescription>
+                  </div>
+                  {selectedUser && <div className="flex gap-2"><Button size="sm" variant="outline" disabled={!canManageUsers || userSaving} onClick={() => void resetUserPassword(selectedUser.id)}><LockKeyhole className="size-4" /> Reset password</Button><Button size="sm" disabled={!canManageUsers || userSaving} onClick={() => void saveUser(selectedUser.id, selectedUser)}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save user</Button></div>}
+                </div>
+              </CardHeader>
+              <CardContent className="grid gap-5 p-4">
+                {temporaryPassword && <Alert className="border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>Temporary password generated</AlertTitle><AlertDescription><span className="font-mono">{temporaryPassword}</span></AlertDescription></Alert>}
+                {selectedUser ? <>
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                    <Field label="Name"><Input disabled={!canManageUsers || selectedUser.isMasterAdmin} value={selectedUser.name || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, name: event.target.value } : user))} /></Field>
+                    <Field label="Username"><Input disabled={!canManageUsers || selectedUser.isMasterAdmin} value={selectedUser.username || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, username: event.target.value } : user))} /></Field>
+                    <Field label="Email"><Input disabled={!canManageUsers} type="email" value={selectedUser.email || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, email: event.target.value } : user))} /></Field>
+                    <Field label="Status"><Select disabled={!canManageUsers || selectedUser.isMasterAdmin} value={selectedUser.status || "active"} onValueChange={(next) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, status: next } : user))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
+                  </div>
+                  <div className="overflow-x-auto rounded-md border">
+                    <Table>
+                      <TableHeader><TableRow><TableHead>Page / feature</TableHead><TableHead className="w-24 text-center">View</TableHead><TableHead className="w-24 text-center">Read</TableHead><TableHead className="w-24 text-center">Write</TableHead><TableHead className="w-24 text-center">Admin</TableHead></TableRow></TableHeader>
+                      <TableBody>{userAreas.map((area) => {
+                        const row = selectedUser.permissions?.[area.id] || {}
+                        return <TableRow key={area.id}>
+                          <TableCell><p className="font-medium">{area.label}</p><p className="text-xs text-muted-foreground">{area.path}</p></TableCell>
+                          {(["view", "read", "write", "admin"] as Array<keyof AuthPermission>).map((action) => <TableCell key={action} className="text-center"><Checkbox disabled={!canManageUsers || selectedUser.isMasterAdmin} checked={selectedUser.isMasterAdmin || row[action] === true} onCheckedChange={(checked) => updateSelectedPermission(area.id, action, checked === true)} /></TableCell>)}
+                        </TableRow>
+                      })}</TableBody>
+                    </Table>
+                  </div>
+                </> : <Empty className="rounded-md border py-10"><EmptyHeader><EmptyMedia variant="icon"><Users /></EmptyMedia><EmptyTitle>Select a user</EmptyTitle><EmptyDescription>Choose a login to edit profile and permissions.</EmptyDescription></EmptyHeader></Empty>}
+              </CardContent>
+            </Card>
           </div>
+
+          <Dialog open={newUserOpen} onOpenChange={setNewUserOpen}>
+            <DialogContent>
+              <DialogHeader><DialogTitle>Create login</DialogTitle><DialogDescription>The user can sign in after you share the password. Leave password empty to generate one.</DialogDescription></DialogHeader>
+              <div className="grid gap-4">
+                <Field label="Name"><Input value={newUser.name} onChange={(event) => setNewUser((current) => ({ ...current, name: event.target.value }))} /></Field>
+                <Field label="Username"><Input value={newUser.username} onChange={(event) => setNewUser((current) => ({ ...current, username: event.target.value }))} placeholder="first.last" /></Field>
+                <Field label="Email"><Input type="email" value={newUser.email} onChange={(event) => setNewUser((current) => ({ ...current, email: event.target.value }))} /></Field>
+                <Field label="Temporary password"><Input type="password" value={newUser.password} onChange={(event) => setNewUser((current) => ({ ...current, password: event.target.value }))} placeholder="Generate automatically" /></Field>
+              </div>
+              <DialogFooter><Button variant="outline" onClick={() => setNewUserOpen(false)}>Cancel</Button><Button disabled={userSaving || !newUser.username} onClick={() => void createLogin()}>{userSaving && <Loader2 className="size-4 animate-spin" />} Create login</Button></DialogFooter>
+            </DialogContent>
+          </Dialog>
         </TabsContent>
       </Tabs>
     </div>
