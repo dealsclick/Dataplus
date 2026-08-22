@@ -685,9 +685,9 @@ type LiteState = {
   catalogImportReviews?: CatalogImportReview[]
 }
 
-type AuthPermission = { view?: boolean; read?: boolean; write?: boolean; admin?: boolean }
+type AuthPermission = { view?: boolean; read?: boolean; write?: boolean; admin?: boolean; [key: string]: boolean | undefined }
 type AuthPermissionMatrix = Record<string, AuthPermission>
-type AuthPermissionArea = { id: string; label: string; path: string }
+type AuthPermissionArea = { id: string; label: string; path: string; actions?: string[] }
 type AuthUser = {
   id: string
   name?: string
@@ -1230,7 +1230,8 @@ function userCan(user: AuthUser | undefined, area: string, action: keyof AuthPer
   if (action === "admin") return permission.admin === true
   if (action === "write") return permission.write === true || permission.admin === true
   if (action === "read") return permission.read === true || permission.write === true || permission.admin === true
-  return permission.view === true || permission.read === true || permission.write === true || permission.admin === true
+  if (action === "view") return permission.view === true || permission.read === true || permission.write === true || permission.admin === true
+  return permission[action] === true || permission.write === true || permission.admin === true
 }
 
 function userCanView(user: AuthUser | undefined, view: AppView) {
@@ -1263,6 +1264,54 @@ function dateLabel(value?: string) {
 
 function numberLabel(value?: number | string) {
   return Number(value || 0).toLocaleString()
+}
+
+const permissionActionLabels: Record<string, string> = {
+  view: "View",
+  edit: "Edit",
+  create: "Create",
+  delete: "Delete",
+  cancel: "Cancel",
+  fulfill: "Fulfill",
+  refund: "Refund",
+  return: "Returns",
+  map_sku: "Map SKU",
+  notes: "Notes",
+  export: "Export",
+  pick: "Pick",
+  pack: "Pack",
+  ship: "Ship",
+  labels: "Labels",
+  submit: "Submit",
+  approve: "Approve",
+  receive: "Receive",
+  resource: "Re-source",
+  adjust: "Adjust",
+  transfer: "Transfer",
+  audit: "Audit",
+  import: "Import",
+  map: "Map",
+  launch: "Launch",
+  sync: "Sync",
+  files: "Files",
+  feeds: "Feeds",
+  credentials: "Credentials",
+  webhooks: "Webhooks",
+  run: "Run",
+  retry: "Retry",
+  stop: "Stop",
+  cleanup: "Cleanup",
+  chat: "Chat",
+  configure: "Configure",
+  backup: "Backup",
+  maintenance: "Maintenance",
+  permissions: "Permissions",
+  passwords: "Passwords",
+  deactivate: "Deactivate",
+}
+
+function permissionActionLabel(action: string) {
+  return permissionActionLabels[action] || action.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
 function scheduleDescription(type: unknown, times: unknown, everyHours: unknown, fallback: string) {
@@ -18347,17 +18396,24 @@ function SettingsPage({
                     <Field label="Email"><Input disabled={!canManageUsers} type="email" value={selectedUser.email || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, email: event.target.value } : user))} /></Field>
                     <Field label="Status"><Select disabled={!canManageUsers || selectedUser.isMasterAdmin} value={selectedUser.status || "active"} onValueChange={(next) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, status: next } : user))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
                   </div>
-                  <div className="overflow-x-auto rounded-md border">
-                    <Table>
-                      <TableHeader><TableRow><TableHead>Page / feature</TableHead><TableHead className="w-24 text-center">View</TableHead><TableHead className="w-24 text-center">Read</TableHead><TableHead className="w-24 text-center">Write</TableHead><TableHead className="w-24 text-center">Admin</TableHead></TableRow></TableHeader>
-                      <TableBody>{userAreas.map((area) => {
-                        const row = selectedUser.permissions?.[area.id] || {}
-                        return <TableRow key={area.id}>
-                          <TableCell><p className="font-medium">{area.label}</p><p className="text-xs text-muted-foreground">{area.path}</p></TableCell>
-                          {(["view", "read", "write", "admin"] as Array<keyof AuthPermission>).map((action) => <TableCell key={action} className="text-center"><Checkbox disabled={!canManageUsers || selectedUser.isMasterAdmin} checked={selectedUser.isMasterAdmin || row[action] === true} onCheckedChange={(checked) => updateSelectedPermission(area.id, action, checked === true)} /></TableCell>)}
-                        </TableRow>
-                      })}</TableBody>
-                    </Table>
+                  <div className="grid gap-3">
+                    {userAreas.map((area) => {
+                      const row = selectedUser.permissions?.[area.id] || {}
+                      const actions = area.actions?.length ? area.actions : ["view", "edit", "create", "delete", "export"]
+                      const enabledCount = selectedUser.isMasterAdmin ? actions.length : actions.filter((action) => row[action] === true || row.admin === true || row.write === true).length
+                      return <div key={area.id} className="rounded-md border bg-background p-3">
+                        <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+                          <div><p className="font-medium">{area.label}</p><p className="text-xs text-muted-foreground">{area.path}</p></div>
+                          <Badge variant={enabledCount ? "secondary" : "outline"}>{selectedUser.isMasterAdmin ? "Full access" : `${enabledCount}/${actions.length} enabled`}</Badge>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                          {actions.map((action) => <label key={`${area.id}-${action}`} className="flex items-center gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+                            <Checkbox disabled={!canManageUsers || selectedUser.isMasterAdmin} checked={selectedUser.isMasterAdmin || row[action] === true || row.admin === true || row.write === true} onCheckedChange={(checked) => updateSelectedPermission(area.id, action as keyof AuthPermission, checked === true)} />
+                            <span>{permissionActionLabel(action)}</span>
+                          </label>)}
+                        </div>
+                      </div>
+                    })}
                   </div>
                 </> : <Empty className="rounded-md border py-10"><EmptyHeader><EmptyMedia variant="icon"><Users /></EmptyMedia><EmptyTitle>Select a user</EmptyTitle><EmptyDescription>Choose a login to edit profile and permissions.</EmptyDescription></EmptyHeader></Empty>}
               </CardContent>

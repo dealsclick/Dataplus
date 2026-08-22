@@ -1132,19 +1132,19 @@ const DEFAULT_SYSTEM_SETTINGS = {
 };
 
 const AUTH_PERMISSION_AREAS = [
-  { id: "overview", label: "Overview", path: "/" },
-  { id: "orders", label: "Orders", path: "/orders" },
-  { id: "fulfillment", label: "Fulfillment", path: "/fulfillment" },
-  { id: "purchasing", label: "Purchasing", path: "/purchasing" },
-  { id: "warehouse", label: "Warehouse", path: "/warehouse" },
-  { id: "catalog", label: "Catalog", path: "/products" },
-  { id: "vendors", label: "Vendors", path: "/vendors" },
-  { id: "brands", label: "Brands", path: "/brands" },
-  { id: "channels", label: "Channels", path: "/channels" },
-  { id: "jobs", label: "Jobs", path: "/jobs" },
-  { id: "ai", label: "David AI", path: "/ai" },
-  { id: "settings", label: "System Settings", path: "/settings" },
-  { id: "users", label: "Manage users", path: "/settings?tab=users" }
+  { id: "overview", label: "Overview", path: "/", actions: ["view"] },
+  { id: "orders", label: "Orders", path: "/orders", actions: ["view", "edit", "create", "cancel", "fulfill", "refund", "return", "map_sku", "notes", "export"] },
+  { id: "fulfillment", label: "Fulfillment", path: "/fulfillment", actions: ["view", "edit", "create", "pick", "pack", "ship", "labels", "export"] },
+  { id: "purchasing", label: "Purchase orders", path: "/purchasing", actions: ["view", "edit", "create", "submit", "approve", "receive", "resource", "return", "delete", "export"] },
+  { id: "warehouse", label: "Warehouse", path: "/warehouse", actions: ["view", "edit", "create", "receive", "adjust", "transfer", "audit", "delete", "export"] },
+  { id: "catalog", label: "Catalog", path: "/products", actions: ["view", "edit", "create", "import", "approve", "map", "launch", "sync", "delete", "export"] },
+  { id: "vendors", label: "Vendors", path: "/vendors", actions: ["view", "edit", "create", "files", "feeds", "delete", "export"] },
+  { id: "brands", label: "Brands", path: "/brands", actions: ["view", "edit", "create", "delete", "export"] },
+  { id: "channels", label: "Channels", path: "/channels", actions: ["view", "edit", "credentials", "sync", "launch", "import", "export", "webhooks"] },
+  { id: "jobs", label: "Jobs", path: "/jobs", actions: ["view", "run", "retry", "stop", "cleanup", "notes", "export"] },
+  { id: "ai", label: "David AI", path: "/ai", actions: ["view", "chat", "approve", "configure"] },
+  { id: "settings", label: "System Settings", path: "/settings", actions: ["view", "edit", "credentials", "backup", "maintenance"] },
+  { id: "users", label: "Manage users", path: "/settings?tab=users", actions: ["view", "create", "edit", "permissions", "passwords", "deactivate"] }
 ];
 
 const PRODUCT_DUMP_RESOURCE_PROFILES = {
@@ -5174,12 +5174,11 @@ function shopifyProductLaunchBatchLimit(settings = {}) {
 }
 
 function authPermissionDefaults(isMasterAdmin = false) {
-  return Object.fromEntries(AUTH_PERMISSION_AREAS.map((area) => [area.id, {
-    view: true,
-    read: true,
-    write: Boolean(isMasterAdmin),
-    admin: Boolean(isMasterAdmin)
-  }]));
+  return Object.fromEntries(AUTH_PERMISSION_AREAS.map((area) => {
+    const row = { view: true, read: true, write: Boolean(isMasterAdmin), admin: Boolean(isMasterAdmin) };
+    for (const action of area.actions || []) row[action] = action === "view" ? true : Boolean(isMasterAdmin);
+    return [area.id, row];
+  }));
 }
 
 function normalizeAuthPermissions(value = {}, isMasterAdmin = false) {
@@ -5187,12 +5186,17 @@ function normalizeAuthPermissions(value = {}, isMasterAdmin = false) {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   for (const area of AUTH_PERMISSION_AREAS) {
     const row = source[area.id] && typeof source[area.id] === "object" ? source[area.id] : {};
-    defaults[area.id] = {
+    const legacyWrite = row.write === true || String(row.write).toLowerCase() === "true";
+    const normalizedRow = {
       view: isMasterAdmin || row.view === true || String(row.view).toLowerCase() === "true",
       read: isMasterAdmin || row.read === true || String(row.read).toLowerCase() === "true",
       write: isMasterAdmin || row.write === true || String(row.write).toLowerCase() === "true",
       admin: isMasterAdmin || row.admin === true || String(row.admin).toLowerCase() === "true"
     };
+    for (const action of area.actions || []) {
+      normalizedRow[action] = isMasterAdmin || row.admin === true || (action === "view" ? normalizedRow.view : (row[action] === true || String(row[action]).toLowerCase() === "true" || legacyWrite));
+    }
+    defaults[area.id] = normalizedRow;
   }
   return defaults;
 }
@@ -5308,10 +5312,10 @@ function authAreaForPath(pathname = "") {
   if (pathname.startsWith("/api/auth")) return "";
   if (/^\/api\/(system-settings|system|order-workflows|user-preferences)/.test(pathname)) return "settings";
   if (/^\/api\/(users|auth-users)/.test(pathname)) return "users";
-  if (/^\/api\/(orders|drafts|returns|search)/.test(pathname)) return "orders";
+  if (/^\/api\/(orders|order-drafts|drafts|returns|customers|search)/.test(pathname)) return "orders";
   if (/^\/api\/(fulfillment|shipments|pick-lists)/.test(pathname)) return "fulfillment";
   if (/^\/api\/(purchase-orders|purchasing|vendors\/[^/]+\/purchase)/.test(pathname)) return "purchasing";
-  if (/^\/api\/(warehouse|inventory|warehouses)/.test(pathname)) return "warehouse";
+  if (/^\/api\/(warehouse|warehouse-audits|inventory|warehouses|barcodes)/.test(pathname)) return "warehouse";
   if (/^\/api\/(catalog|products|categories|source-catalog|attribute|brands|vendors)/.test(pathname)) return pathname.includes("/vendors") ? "vendors" : pathname.includes("/brands") ? "brands" : "catalog";
   if (/^\/api\/(channels|shopify|ebay|temu|webhooks)/.test(pathname)) return "channels";
   if (/^\/api\/(import-jobs|jobs)/.test(pathname)) return "jobs";
@@ -5319,9 +5323,95 @@ function authAreaForPath(pathname = "") {
   return "overview";
 }
 
-function authActionForMethod(method = "GET") {
-  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return "read";
-  return "write";
+function authRequirementForRequest(req, url, parts = []) {
+  const pathname = url.pathname || "";
+  const method = req.method || "GET";
+  const area = authAreaForPath(pathname);
+  if (!area) return { area, action: "view" };
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+    if (/\.csv$|\/export\b|\/export\//.test(pathname)) return { area, action: "export" };
+    return { area, action: "view" };
+  }
+  if (method === "DELETE") return { area, action: "delete" };
+  if (area === "users") {
+    if (pathname.endsWith("/password")) return { area, action: "passwords" };
+    if (method === "POST") return { area, action: "create" };
+    return { area, action: "permissions" };
+  }
+  if (area === "settings") {
+    if (/credential|ai-test|smtp-test/.test(pathname)) return { area, action: "credentials" };
+    if (/backup/.test(pathname)) return { area, action: "backup" };
+    if (/reset|cleanup|rebuild|maintenance/.test(pathname)) return { area, action: "maintenance" };
+    return { area, action: "edit" };
+  }
+  if (area === "jobs") {
+    if (/\/retry$/.test(pathname)) return { area, action: "retry" };
+    if (/\/stop$/.test(pathname)) return { area, action: "stop" };
+    if (/cleanup/.test(pathname)) return { area, action: "cleanup" };
+    if (/notes/.test(pathname)) return { area, action: "notes" };
+    return { area, action: "run" };
+  }
+  if (area === "orders") {
+    if (parts.includes("fulfill")) return { area, action: "fulfill" };
+    if (parts.includes("refunds")) return { area, action: "refund" };
+    if (parts.includes("returns")) return { area, action: "return" };
+    if (parts.includes("map-sku") || parts.includes("unmap-sku") || parts.includes("create-sku")) return { area, action: "map_sku" };
+    if (parts.includes("notes")) return { area, action: "notes" };
+    if (parts.includes("confirm") || parts.includes("cancel") || parts.includes("action")) return { area, action: "cancel" };
+    if (method === "POST") return { area, action: "create" };
+    return { area, action: "edit" };
+  }
+  if (area === "fulfillment") {
+    if (/picked|pick/i.test(pathname)) return { area, action: "pick" };
+    if (/pack/i.test(pathname)) return { area, action: "pack" };
+    if (/ship|tracking|fulfill/i.test(pathname)) return { area, action: "ship" };
+    if (/label/i.test(pathname)) return { area, action: "labels" };
+    if (method === "POST") return { area, action: "create" };
+    return { area, action: "edit" };
+  }
+  if (area === "purchasing") {
+    if (parts.includes("submit")) return { area, action: "submit" };
+    if (parts.includes("approve") || parts.includes("action")) return { area, action: "approve" };
+    if (parts.includes("receive")) return { area, action: "receive" };
+    if (parts.includes("re-source")) return { area, action: "resource" };
+    if (parts.includes("returns")) return { area, action: "return" };
+    if (method === "POST") return { area, action: "create" };
+    return { area, action: "edit" };
+  }
+  if (area === "warehouse") {
+    if (/receiv/i.test(pathname)) return { area, action: "receive" };
+    if (/transfer/i.test(pathname)) return { area, action: "transfer" };
+    if (/audit/i.test(pathname)) return { area, action: method === "DELETE" ? "delete" : "audit" };
+    if (/allocation|adjust|warehouse-stock|serial|shadow/i.test(pathname)) return { area, action: "adjust" };
+    if (method === "POST") return { area, action: "create" };
+    return { area, action: "edit" };
+  }
+  if (area === "catalog") {
+    if (/import|source-enrichment|datadump/.test(pathname)) return { area, action: "import" };
+    if (/review|approve|bulk/.test(pathname)) return { area, action: "approve" };
+    if (/mapping|category|attribute/.test(pathname)) return { area, action: "map" };
+    if (/shopify|ebay|launch|listing|sync/.test(pathname)) return { area, action: /launch|create/.test(pathname) ? "launch" : "sync" };
+    if (method === "POST") return { area, action: "create" };
+    return { area, action: "edit" };
+  }
+  if (area === "vendors") {
+    if (/files/.test(pathname)) return { area, action: "files" };
+    if (/feed|schedule/.test(pathname)) return { area, action: "feeds" };
+    if (method === "POST") return { area, action: "create" };
+    return { area, action: "edit" };
+  }
+  if (area === "brands") return { area, action: method === "POST" ? "create" : "edit" };
+  if (area === "channels") {
+    if (/credentials/.test(pathname)) return { area, action: "credentials" };
+    if (/webhook/.test(pathname)) return { area, action: "webhooks" };
+    if (/import/.test(pathname)) return { area, action: "import" };
+    if (/export/.test(pathname)) return { area, action: "export" };
+    if (/launch|product-create/.test(pathname)) return { area, action: "launch" };
+    if (/sync|verify|check|refresh|reconcile/.test(pathname)) return { area, action: "sync" };
+    return { area, action: "edit" };
+  }
+  if (area === "ai") return { area, action: /approve|apply/.test(pathname) ? "approve" : "chat" };
+  return { area, action: "edit" };
 }
 
 function userCan(user = {}, area = "", action = "read") {
@@ -5331,7 +5421,8 @@ function userCan(user = {}, area = "", action = "read") {
   if (action === "admin") return row.admin === true;
   if (action === "write") return row.write === true || row.admin === true;
   if (action === "read") return row.read === true || row.write === true || row.admin === true;
-  return row.view === true || row.read === true || row.write === true || row.admin === true;
+  if (action === "view") return row.view === true || row.read === true || row.write === true || row.admin === true;
+  return row[action] === true || row.write === true || row.admin === true;
 }
 
 function publicAuthUser(user = {}) {
@@ -5376,11 +5467,12 @@ function hashWarehouseAuditAdminPin(pin, salt) {
   return crypto.scryptSync(String(pin || ""), String(salt || ""), 32).toString("hex");
 }
 
-function verifyWarehouseAuditAdminAccess(settings = {}, body = {}) {
+function verifyWarehouseAuditAdminAccess(settings = {}, body = {}, sessionUser = null) {
   const normalized = normalizeSystemSettings(settings);
-  const requestedUser = String(body.adminUserId || normalized.activeSystemUserId || "").trim();
+  const requestedUser = String(body.adminUserId || sessionUser?.id || normalized.activeSystemUserId || "").trim();
   const user = (normalized.systemUsers || []).find((candidate) => String(candidate.id || "") === requestedUser)
     || (normalized.systemUsers || []).find((candidate) => String(candidate.name || "").trim().toLowerCase() === requestedUser.toLowerCase())
+    || (sessionUser && sessionUser.isMasterAdmin === true ? sessionUser : null)
     || null;
   const allowedRoles = new Set((normalized.warehouseAuditAdminRoles || ["Master Admin", "Owner", "Admin"]).map((role) => String(role).trim().toLowerCase()));
   if (!user || (user.isMasterAdmin !== true && !allowedRoles.has(String(user.role || "").trim().toLowerCase()))) return { error: "This audit action requires an administrator account." };
@@ -31250,8 +31342,7 @@ async function handleApi(req, res) {
   const authSettings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
   const authUser = currentAuthUser(req, authSettings);
   if (!authUser) return sendJson(res, 401, { error: "Sign in to DataPlus first." });
-  const requiredArea = authAreaForPath(url.pathname);
-  const requiredAction = authActionForMethod(req.method);
+  const { area: requiredArea, action: requiredAction } = authRequirementForRequest(req, url, parts);
   if (!userCan(authUser, requiredArea, requiredAction)) {
     return sendJson(res, 403, { error: `Your account does not have ${requiredAction} access for ${requiredArea || "this area"}.` });
   }
@@ -33112,7 +33203,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lock" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
-    const access = verifyWarehouseAuditAdminAccess(settings, body);
+    const access = verifyWarehouseAuditAdminAccess(settings, body, authUser);
     if (access.error) return sendJson(res, 403, { error: access.error });
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
@@ -33131,7 +33222,7 @@ async function handleApi(req, res) {
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
-    const access = verifyWarehouseAuditAdminAccess(settings, body);
+    const access = verifyWarehouseAuditAdminAccess(settings, body, authUser);
     if (access.error) return sendJson(res, 403, { error: access.error });
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
