@@ -18906,7 +18906,7 @@ function SettingsPage({
                       })}
                     </CardContent>
                   </Card>}
-                  {!selectedUser.isMasterAdmin && <Card>
+                  <Card>
                     <CardHeader className="pb-3">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
@@ -18966,7 +18966,7 @@ function SettingsPage({
                         </ScrollArea>}
                       </div>}
                     </CardContent>
-                  </Card>}
+                  </Card>
                   {selectedUser.isMasterAdmin ? <Alert>
                     <ShieldCheck className="size-4" />
                     <AlertTitle>Master admin access is locked on</AlertTitle>

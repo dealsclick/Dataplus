@@ -41,6 +41,7 @@ includes(app, "duplicatePermissionTemplate", "Template manager must support dupl
 includes(app, "templateUsers", "Template manager must show users assigned to each template.");
 includes(app, "permissionMatrixDiffs", "Template manager must compare a user against a template.");
 includes(app, "filteredPermissionTemplates", "Template manager must support template search.");
+assert(!/!\{?selectedUser\.isMasterAdmin[\s\S]{0,500}Role templates/.test(app), "Role template manager must remain visible while Luis/master admin is selected.");
 includes(app, "bulkUpdateUsers", "User manager must support bulk user updates.");
 includes(app, "exportSelectedPermissions", "User manager must export permission matrices.");
 includes(app, "importSelectedPermissions", "User manager must import permission matrices.");
