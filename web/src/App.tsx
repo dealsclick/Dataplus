@@ -1546,6 +1546,9 @@ function App() {
   const [universalQuery, setUniversalQuery] = useState("")
   const [universalResults, setUniversalResults] = useState<UniversalSearchResult[]>([])
   const [universalSearching, setUniversalSearching] = useState(false)
+  const [passwordOpen, setPasswordOpen] = useState(false)
+  const [passwordDraft, setPasswordDraft] = useState({ currentPassword: "", password: "", confirm: "" })
+  const [passwordSaving, setPasswordSaving] = useState(false)
   const authUser = auth.user
 
   useEffect(() => {
@@ -1860,6 +1863,27 @@ function App() {
   const attentionJobs = jobs.filter(isAttentionJob)
   const selectedJob = jobs.find((job) => job.id === selectedJobId) || (selectedJobId ? undefined : attentionJobs[0] || jobs[0])
 
+  async function changeOwnPassword() {
+    if (!authUser) return
+    if (passwordDraft.password.length < 8) return toast.error("Password must be at least 8 characters.")
+    if (passwordDraft.password !== passwordDraft.confirm) return toast.error("New passwords do not match.")
+    setPasswordSaving(true)
+    try {
+      const result = await api<{ user?: AuthUser }>(`/api/users/${encodeURIComponent(authUser.id)}/password`, {
+        method: "POST",
+        body: JSON.stringify({ currentPassword: passwordDraft.currentPassword, password: passwordDraft.password, mustChangePassword: false }),
+      })
+      setAuth((current) => ({ ...current, user: result.user || { ...authUser, mustChangePassword: false } }))
+      setPasswordDraft({ currentPassword: "", password: "", confirm: "" })
+      setPasswordOpen(false)
+      toast.success("Password changed.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to change password.")
+    } finally {
+      setPasswordSaving(false)
+    }
+  }
+
   if (authLoading) {
     return <div className="flex min-h-screen items-center justify-center bg-muted/30 text-sm text-muted-foreground"><Loader2 className="mr-2 size-4 animate-spin" /> Loading DataPlus session...</div>
   }
@@ -1968,6 +1992,7 @@ function App() {
                       <span className="block truncate text-xs font-normal text-muted-foreground">{authUser.role || "User"}</span>
                     </DropdownMenuLabel>
                     <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem>
                     {userCan(authUser, "users", "read") && <DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/settings?tab=users"); setView("settings") }}><Users className="size-4" /> Manage users</DropdownMenuItem>}
                     <DropdownMenuItem onClick={() => void api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) }).finally(() => { setAuth({ authenticated: false }); setState({}); setJobs([]) })}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem>
                   </DropdownMenuContent>
@@ -2027,11 +2052,27 @@ function App() {
             </DialogContent>
           </Dialog>
 
+          <Dialog open={passwordOpen || Boolean(authUser.mustChangePassword)} onOpenChange={(open) => { if (!authUser.mustChangePassword) setPasswordOpen(open) }}>
+            <DialogContent>
+              <DialogHeader><DialogTitle>Change password</DialogTitle><DialogDescription>{authUser.mustChangePassword ? "Set your permanent password to clear the reset requirement." : "Update the password for your signed-in account."}</DialogDescription></DialogHeader>
+              <div className="grid gap-4">
+                <Field label="Current password"><Input type="password" autoComplete="current-password" value={passwordDraft.currentPassword} onChange={(event) => setPasswordDraft((current) => ({ ...current, currentPassword: event.target.value }))} /></Field>
+                <Field label="New password"><Input type="password" autoComplete="new-password" value={passwordDraft.password} onChange={(event) => setPasswordDraft((current) => ({ ...current, password: event.target.value }))} /></Field>
+                <Field label="Confirm new password"><Input type="password" autoComplete="new-password" value={passwordDraft.confirm} onChange={(event) => setPasswordDraft((current) => ({ ...current, confirm: event.target.value }))} /></Field>
+              </div>
+              <DialogFooter>
+                {!authUser.mustChangePassword && <Button variant="outline" onClick={() => setPasswordOpen(false)}>Cancel</Button>}
+                <Button disabled={passwordSaving || !passwordDraft.currentPassword || !passwordDraft.password || !passwordDraft.confirm} onClick={() => void changeOwnPassword()}>{passwordSaving && <Loader2 className="size-4 animate-spin" />} Save password</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
           <div className="min-w-0 p-3 sm:p-5">
             {loading ? (
               <LoadingState />
             ) : (
               <>
+                {authUser.mustChangePassword && <Alert className="mb-4 border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>Password reset required</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-2">Set your own password to clear this account requirement.<Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}>Change password</Button></AlertDescription></Alert>}
                 {view === "overview" && (
                   <OverviewPage
                     jobs={jobs}

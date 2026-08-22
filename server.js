@@ -31331,8 +31331,12 @@ async function handleApi(req, res) {
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
     const existing = (current.systemUsers || []).find((candidate) => String(candidate.id || "") === userId);
     if (!existing) return notFound(res);
+    const selfService = authUser.id === userId && !userCan(authUser, "users", "admin");
+    if (selfService && !verifyUserPassword(existing, String(body.currentPassword || ""))) {
+      return sendJson(res, 401, { error: "Enter your current password before setting a new one." });
+    }
     const hashed = hashUserPassword(password);
-    const updated = { ...existing, passwordHash: hashed.hash, passwordSalt: hashed.salt, mustChangePassword: authUser.id !== userId || body.mustChangePassword !== false, updatedAt: new Date().toISOString() };
+    const updated = { ...existing, passwordHash: hashed.hash, passwordSalt: hashed.salt, mustChangePassword: authUser.id !== userId && body.mustChangePassword !== false, updatedAt: new Date().toISOString() };
     current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
