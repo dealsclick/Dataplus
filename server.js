@@ -830,6 +830,11 @@ const DEFAULT_CHANNEL_SETTINGS = {
   temuAccessToken: "",
   temuMallId: "",
   temuOrderPageSize: 50,
+  temuConnectionOk: false,
+  temuConnectionLiveApiChecked: false,
+  temuConnectionVerifiedAt: "",
+  temuConnectionVerificationMessage: "",
+  temuLastOrderSync: "",
   temuProductSyncEnabled: false,
   temuListingSyncEnabled: false,
   temuListingLaunchEnabled: false,
@@ -4235,6 +4240,9 @@ function normalizeChannel(channel = {}) {
   settings.temuAccessToken = String(settings.temuAccessToken || "").trim();
   settings.temuMallId = String(settings.temuMallId || "").trim();
   settings.temuOrderPageSize = Math.max(1, Math.min(100, Number(settings.temuOrderPageSize || 50) || 50));
+  settings.temuConnectionVerifiedAt = String(settings.temuConnectionVerifiedAt || "").trim();
+  settings.temuConnectionVerificationMessage = String(settings.temuConnectionVerificationMessage || "").trim();
+  settings.temuLastOrderSync = String(settings.temuLastOrderSync || "").trim();
   settings.temuWebhookEndpoint = String(settings.temuWebhookEndpoint || "").trim().replace(/\/+$/, "");
   settings.temuDefaultWarehouseId = String(settings.temuDefaultWarehouseId || "").trim();
   settings.temuOrderImportStartDate = String(settings.temuOrderImportStartDate || "").trim();
@@ -19903,6 +19911,10 @@ function publicState(db, options = {}) {
       temuAuthorized: Boolean(temuConfig.accessToken),
       temuMallId: temuConfig.mallId || "",
       temuLastOrderSync: connectorState.temuLastOrderSync || null,
+      temuConnectionOk: connectorState.temuConnectionOk === true,
+      temuConnectionLiveApiChecked: connectorState.temuConnectionLiveApiChecked === true,
+      temuConnectionVerifiedAt: connectorState.temuConnectionVerifiedAt || null,
+      temuConnectionVerificationMessage: connectorState.temuConnectionVerificationMessage || "",
       ebayAuthorized: Boolean(connectorState.ebayAccessToken || connectorState.ebayRefreshToken),
       ebayCredentialsConfigured: Boolean(process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET && process.env.EBAY_RUNAME),
       ebayEnvironment: process.env.EBAY_ENVIRONMENT || "production",
@@ -20190,6 +20202,72 @@ async function exchangeTemuCode(db, code) {
   });
   await writeDb(db);
   return { mallId: db.connectorState.temuMallId, authorized: true };
+}
+
+async function testTemuConnection(db = {}) {
+  const config = getTemuConfig(db);
+  const connectorState = mergedConnectorState(db);
+  const now = new Date().toISOString();
+  const status = {
+    ok: false,
+    configured: Boolean(config.endpoint && config.appKey && config.appSecret),
+    liveApiChecked: false,
+    hasAccessToken: Boolean(config.accessToken),
+    endpoint: config.endpoint,
+    appKeyPreview: credentialPreview(config.appKey),
+    mallId: config.mallId || connectorState.temuMallId || "",
+    latestOrderSync: connectorState.temuLastOrderSync || "",
+    verifiedAt: now,
+    message: ""
+  };
+
+  if (!status.configured) {
+    status.message = "Temu API request URL, app key, and app secret are required before DataPlus can test this channel.";
+  } else if (!status.hasAccessToken) {
+    status.ok = true;
+    status.message = "Temu API credentials are saved. A generated access token is still needed before live order downloads can run.";
+  } else {
+    try {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      await temuRequest("bg.order.list.v2.get", {
+        pageNumber: 1,
+        pageSize: 1,
+        updateAtStart: nowSeconds - 3600,
+        updateAtEnd: nowSeconds
+      }, { db });
+      status.ok = true;
+      status.liveApiChecked = true;
+      status.message = "Temu live API check passed. Order API credentials can be used for imports.";
+    } catch (error) {
+      status.liveApiChecked = true;
+      status.message = error.message || "Temu live API check failed.";
+    }
+  }
+
+  const channel = (db.connections || []).find((entry) => String(entry.name || "").trim().toLowerCase() === "temu");
+  if (channel) {
+    channel.connected = status.ok;
+    channel.status = status.ok ? "active" : (channel.status || "draft");
+    channel.settings = {
+      ...DEFAULT_CHANNEL_SETTINGS,
+      ...(channel.settings || {}),
+      temuMallId: status.mallId || channel.settings?.temuMallId || "",
+      temuConnectionOk: status.ok,
+      temuConnectionLiveApiChecked: status.liveApiChecked,
+      temuConnectionVerifiedAt: status.verifiedAt,
+      temuConnectionVerificationMessage: status.message,
+      temuLastOrderSync: status.latestOrderSync || channel.settings?.temuLastOrderSync || ""
+    };
+    Object.assign(channel, normalizeChannel(channel));
+  }
+  db.connectorState = {
+    ...(db.connectorState || {}),
+    temuConnectionOk: status.ok,
+    temuConnectionLiveApiChecked: status.liveApiChecked,
+    temuConnectionVerifiedAt: status.verifiedAt,
+    temuConnectionVerificationMessage: status.message
+  };
+  return status;
 }
 
 function firstArrayFrom(value) {
@@ -22366,6 +22444,16 @@ async function importTemuOrders(db, options = {}) {
   }
 
   db.connectorState.temuLastOrderSync = now;
+  const channel = (db.connections || []).find((entry) => String(entry.name || "").trim().toLowerCase() === "temu");
+  if (channel) {
+    channel.lastSync = now;
+    channel.settings = {
+      ...DEFAULT_CHANNEL_SETTINGS,
+      ...(channel.settings || {}),
+      temuLastOrderSync: now
+    };
+    Object.assign(channel, normalizeChannel(channel));
+  }
   return { fetched, created, updated, skipped, errors, rows };
 }
 
@@ -41127,6 +41215,13 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { ...result, state: await postgresLiteState() });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/temu/connection/test" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    const result = await testTemuConnection(db);
+    await writeDb(normalizeDb({ ...db, inventory: [] }));
+    return sendJson(res, 200, { ...result, state: await postgresLiteState({ connections: db.connections }) });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/temu/orders/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
@@ -42601,6 +42696,13 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/temu/exchange-code") {
     const body = await parseBody(req);
     const result = await exchangeTemuCode(db, body.code);
+    const normalized = normalizeDb(await readDb({ skipInventory: postgres.isPostgresEnabled() }));
+    return sendJson(res, 200, { ...result, state: publicState(normalized) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/temu/connection/test") {
+    const result = await testTemuConnection(db);
+    await writeDb(db);
     const normalized = normalizeDb(await readDb({ skipInventory: postgres.isPostgresEnabled() }));
     return sendJson(res, 200, { ...result, state: publicState(normalized) });
   }
