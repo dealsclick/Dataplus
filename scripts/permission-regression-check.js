@@ -33,6 +33,10 @@ includes(app, "selectedUserDirty", "User editor must keep unsaved-change state."
 includes(app, "copyPermissionsFromUser", "User editor must support copying from another user.");
 includes(app, "copyPermissionsFromTemplate", "User editor must support copying from templates.");
 includes(app, "templatePermissionCheckbox", "Template editor must expose permission checks.");
+includes(app, "duplicatePermissionTemplate", "Template manager must support duplicating role templates.");
+includes(app, "templateUsers", "Template manager must show users assigned to each template.");
+includes(app, "permissionMatrixDiffs", "Template manager must compare a user against a template.");
+includes(app, "filteredPermissionTemplates", "Template manager must support template search.");
 includes(app, "permissionAuditLog", "UI must show permission audit history.");
 includes(app, "updateSelectedUserStatus", "UI must confirm/defer deactivation until save.");
 includes(app, "canCreateUsers", "UI must gate user creation independently.");

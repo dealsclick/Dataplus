@@ -17536,6 +17536,8 @@ function SettingsPage({
   const [permissionSearch, setPermissionSearch] = useState("")
   const [copyUserId, setCopyUserId] = useState("")
   const [copyTemplateId, setCopyTemplateId] = useState("")
+  const [templateSearch, setTemplateSearch] = useState("")
+  const [compareTemplateId, setCompareTemplateId] = useState("")
   const [previewOpen, setPreviewOpen] = useState(false)
   const [newUserOpen, setNewUserOpen] = useState(false)
   const [newUser, setNewUser] = useState({ name: "", username: "", email: "", password: "", permissionTemplateId: "custom" })
@@ -17820,6 +17822,31 @@ function SettingsPage({
     }
   }
 
+  async function duplicatePermissionTemplate(template: AuthPermissionTemplate) {
+    const name = window.prompt("Name for duplicated template", `${template.name} copy`)
+    if (!name?.trim()) return
+    setUserSaving(true)
+    try {
+      const result = await api<{ template?: AuthPermissionTemplate; permissionTemplates?: AuthPermissionTemplate[] }>("/api/users/templates", {
+        method: "POST",
+        body: JSON.stringify({
+          name: name.trim(),
+          description: template.description ? `Copied from ${template.name}. ${template.description}` : `Copied from ${template.name}.`,
+          permissions: template.permissions || {},
+        }),
+      })
+      setPermissionTemplates(result.permissionTemplates || (result.template ? [...permissionTemplates, result.template] : permissionTemplates))
+      setSavedPermissionTemplates(result.permissionTemplates || (result.template ? [...savedPermissionTemplates, result.template] : savedPermissionTemplates))
+      if (result.template?.id) setCompareTemplateId(result.template.id)
+      void loadUsers()
+      toast.success("Permission template duplicated.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to duplicate permission template.")
+    } finally {
+      setUserSaving(false)
+    }
+  }
+
   function permissionEnabled(row: AuthPermission, action: string) {
     return Boolean(selectedUser?.isMasterAdmin || row[action] === true || row.admin === true || row.write === true)
   }
@@ -17843,6 +17870,27 @@ function SettingsPage({
     if (user.isMasterAdmin) return true
     const row = user.permissions?.[areaId] || {}
     return row[action] === true || row.write === true || row.admin === true || (action === "view" && (row.view === true || row.read === true))
+  }
+
+  function matrixActionEnabled(matrix: AuthPermissionMatrix | undefined, areaId: string, action: string) {
+    const row = matrix?.[areaId] || {}
+    return row[action] === true || row.write === true || row.admin === true || (action === "view" && (row.view === true || row.read === true))
+  }
+
+  function templateUsers(templateId: string) {
+    return users.filter((user) => user.permissionTemplateId === templateId)
+  }
+
+  function permissionMatrixDiffs(left?: AuthPermissionMatrix, right?: AuthPermissionMatrix) {
+    const diffs: Array<{ areaId: string; label: string; action: string; left: boolean; right: boolean }> = []
+    for (const area of userAreas.flatMap((item) => areaPermissionRows(item))) {
+      for (const action of area.actions || []) {
+        const leftEnabled = matrixActionEnabled(left, area.id, action)
+        const rightEnabled = matrixActionEnabled(right, area.id, action)
+        if (leftEnabled !== rightEnabled) diffs.push({ areaId: area.id, label: area.label, action, left: leftEnabled, right: rightEnabled })
+      }
+    }
+    return diffs
   }
 
   function permissionRowEnabled(area: AuthPermissionArea, action: string) {
@@ -17873,6 +17921,13 @@ function SettingsPage({
     ? filteredPermissionAreas[0]
     : (selectedPermissionAreaCandidate || filteredPermissionAreas[0] || userAreas[0])
   const selectedPermissionRows = areaPermissionRows(selectedPermissionArea).filter((area) => areaMatchesPermissionSearch(area) || !permissionSearch.trim())
+  const filteredPermissionTemplates = permissionTemplates.filter((template) => {
+    const query = templateSearch.trim().toLowerCase()
+    if (!query) return true
+    return [template.name, template.description, template.id].join(" ").toLowerCase().includes(query)
+  })
+  const compareTemplate = permissionTemplates.find((template) => template.id === compareTemplateId)
+  const compareDiffs = selectedUser && compareTemplate ? permissionMatrixDiffs(selectedUser.permissions, compareTemplate.permissions) : []
   const commonPermissionActions = ["view", "create", "edit", "delete", "export"]
   const standardPermissionActions = new Set(["view", "read", "edit", "create", "notes", "export", "pick", "pack", "ship", "labels", "receive", "adjust", "transfer", "audit", "map", "map_sku", "resource", "files", "feeds", "sync", "import", "chat", "run"])
 
@@ -18696,21 +18751,63 @@ function SettingsPage({
                   </Card>}
                   {!selectedUser.isMasterAdmin && <Card>
                     <CardHeader className="pb-3">
-                      <CardTitle className="text-sm">Templates</CardTitle>
-                      <CardDescription>Built-in templates stay available; custom templates can be edited or deleted.</CardDescription>
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <CardTitle className="text-sm">Role templates</CardTitle>
+                          <CardDescription>Search, duplicate, compare, and see which users are assigned to each template.</CardDescription>
+                        </div>
+                        <div className="flex min-w-64 items-center gap-2 rounded-md border bg-background px-2">
+                          <Search className="size-4 text-muted-foreground" />
+                          <Input className="h-9 border-0 px-0 shadow-none focus-visible:ring-0" placeholder="Search templates..." value={templateSearch} onChange={(event) => setTemplateSearch(event.target.value)} />
+                        </div>
+                      </div>
                     </CardHeader>
-                    <CardContent className="flex gap-2 overflow-x-auto pb-4">
-                      {permissionTemplates.map((template) => <div key={template.id} className="rounded-md border p-3">
-                        <div className="flex min-w-60 items-start justify-between gap-2">
+                    <CardContent className="grid gap-4">
+                      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                      {filteredPermissionTemplates.map((template) => {
+                        const assignedUsers = templateUsers(template.id)
+                        const assignedPreview = assignedUsers.slice(0, 3).map((user) => user.name || user.username).join(", ")
+                        return <div key={template.id} className="rounded-md border p-3">
+                        <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0"><p className="truncate text-sm font-medium">{template.name}</p><p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{template.description || "No description."}</p></div>
                           <div className="flex shrink-0 gap-1">{template.builtIn && <Badge variant="outline">Built-in</Badge>}<Badge variant="secondary">v{numberLabel(template.version || 1)}</Badge></div>
                         </div>
-                        <div className="mt-3 flex gap-2">
+                        <div className="mt-3 rounded-md bg-muted/30 p-2 text-xs text-muted-foreground">
+                          <span className="font-medium text-foreground">{numberLabel(assignedUsers.length)}</span> user{assignedUsers.length === 1 ? "" : "s"} assigned{assignedPreview ? `: ${assignedPreview}${assignedUsers.length > 3 ? ` +${assignedUsers.length - 3}` : ""}` : "."}
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
                           <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} onClick={() => applyPermissionTemplate(template.id)}>Apply</Button>
                           <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions} onClick={() => openTemplateDialog(template)}><Pencil className="size-3.5" /> Edit</Button>
+                          <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions || userSaving} onClick={() => void duplicatePermissionTemplate(template)}><Copy className="size-3.5" /> Duplicate</Button>
+                          <Button type="button" size="sm" variant={compareTemplateId === template.id ? "default" : "outline"} onClick={() => setCompareTemplateId(compareTemplateId === template.id ? "" : template.id)}><Eye className="size-3.5" /> Compare</Button>
                           {!template.builtIn && <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions || userSaving} onClick={() => void deletePermissionTemplate(template.id)}><Trash2 className="size-3.5" /> Delete</Button>}
                         </div>
-                      </div>)}
+                      </div>
+                      })}
+                      {!filteredPermissionTemplates.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">No templates match this search.</p>}
+                      </div>
+                      {compareTemplate && <div className="rounded-md border p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium">Compare {selectedUser.name || selectedUser.username} to {compareTemplate.name}</p>
+                            <p className="mt-1 text-xs text-muted-foreground">{compareDiffs.length ? `${numberLabel(compareDiffs.length)} permission difference${compareDiffs.length === 1 ? "" : "s"}.` : "This user's saved permissions match the selected template."}</p>
+                          </div>
+                          <Button type="button" size="sm" variant="outline" onClick={() => setCompareTemplateId("")}>Close compare</Button>
+                        </div>
+                        {!!compareDiffs.length && <ScrollArea className="mt-3 max-h-48 rounded-md border">
+                          <Table>
+                            <TableHeader><TableRow><TableHead>Section</TableHead><TableHead>Action</TableHead><TableHead>{selectedUser.name || selectedUser.username}</TableHead><TableHead>{compareTemplate.name}</TableHead></TableRow></TableHeader>
+                            <TableBody>
+                              {compareDiffs.slice(0, 80).map((diff) => <TableRow key={`${diff.areaId}-${diff.action}`}>
+                                <TableCell>{diff.label}</TableCell>
+                                <TableCell>{permissionActionLabel(diff.action)}</TableCell>
+                                <TableCell><Badge variant={diff.left ? "secondary" : "outline"}>{diff.left ? "On" : "Off"}</Badge></TableCell>
+                                <TableCell><Badge variant={diff.right ? "secondary" : "outline"}>{diff.right ? "On" : "Off"}</Badge></TableCell>
+                              </TableRow>)}
+                            </TableBody>
+                          </Table>
+                        </ScrollArea>}
+                      </div>}
                     </CardContent>
                   </Card>}
                   {selectedUser.isMasterAdmin ? <Alert>
