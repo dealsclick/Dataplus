@@ -694,8 +694,24 @@ type AuthPermissionAuditEvent = { id: string; type?: string; targetType?: string
 type AuthUser = {
   id: string
   name?: string
+  fullName?: string
+  firstName?: string
+  lastName?: string
+  displayName?: string
   username?: string
   email?: string
+  phone?: string
+  mobilePhone?: string
+  jobTitle?: string
+  department?: string
+  team?: string
+  location?: string
+  manager?: string
+  employeeId?: string
+  timezone?: string
+  avatarUrl?: string
+  startDate?: string
+  notes?: string
   role?: string
   status?: string
   isMasterAdmin?: boolean
@@ -706,6 +722,7 @@ type AuthUser = {
   createdAt?: string
   updatedAt?: string
   lastLoginAt?: string
+  archivedAt?: string
   passwordConfigured?: boolean
 }
 
@@ -1257,7 +1274,9 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   })
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
-    throw new Error(payload.error || payload.message || `Request failed: ${response.status}`)
+    const missing = payload.missingPermission && typeof payload.missingPermission === "object" ? payload.missingPermission : null
+    const missingLabel = missing?.area && missing?.action ? ` Missing permission: ${missing.area}/${missing.action}.` : ""
+    throw new Error(`${payload.error || payload.message || `Request failed: ${response.status}`}${missingLabel}`)
   }
   return payload as T
 }
@@ -17538,9 +17557,12 @@ function SettingsPage({
   const [copyTemplateId, setCopyTemplateId] = useState("")
   const [templateSearch, setTemplateSearch] = useState("")
   const [compareTemplateId, setCompareTemplateId] = useState("")
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set())
+  const [bulkTemplateId, setBulkTemplateId] = useState("")
+  const [showArchivedUsers, setShowArchivedUsers] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
   const [newUserOpen, setNewUserOpen] = useState(false)
-  const [newUser, setNewUser] = useState({ name: "", username: "", email: "", password: "", permissionTemplateId: "custom" })
+  const [newUser, setNewUser] = useState({ name: "", fullName: "", firstName: "", lastName: "", username: "", email: "", phone: "", jobTitle: "", department: "", password: "", permissionTemplateId: "custom" })
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false)
   const [templateDraft, setTemplateDraft] = useState<{ id?: string; name: string; description: string; permissions: AuthPermissionMatrix; builtIn?: boolean }>({ name: "", description: "", permissions: {} })
   const [userSaving, setUserSaving] = useState(false)
@@ -17676,7 +17698,7 @@ function SettingsPage({
       setSavedUsers(result.users || (result.user ? [...savedUsers, result.user] : savedUsers))
       if (result.user?.id) setSelectedUserId(result.user.id)
       setTemporaryPassword(result.temporaryPassword || "")
-      setNewUser({ name: "", username: "", email: "", password: "", permissionTemplateId: "custom" })
+      setNewUser({ name: "", fullName: "", firstName: "", lastName: "", username: "", email: "", phone: "", jobTitle: "", department: "", password: "", permissionTemplateId: "custom" })
       setNewUserOpen(false)
       void loadUsers()
       toast.success("Login created.")
@@ -17725,11 +17747,97 @@ function SettingsPage({
     }
   }
 
+  function updateSelectedUserField(field: keyof AuthUser, value: string) {
+    if (!selectedUser) return
+    setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, [field]: value } : user))
+  }
+
   function updateSelectedUserStatus(nextStatus: string) {
     if (!selectedUser || selectedUser.isMasterAdmin) return
-    if (nextStatus === "inactive" && selectedUser.status !== "inactive" && !window.confirm(`Deactivate ${selectedUser.name || selectedUser.username}? This signs out their active sessions after you save.`)) return
+    if (["inactive", "archived"].includes(nextStatus) && selectedUser.status !== nextStatus && !window.confirm(`${nextStatus === "archived" ? "Archive" : "Deactivate"} ${selectedUser.name || selectedUser.username}? This signs out their active sessions after you save.`)) return
     setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, status: nextStatus } : user))
   }
+
+  async function archiveSelectedUser() {
+    if (!selectedUser || selectedUser.isMasterAdmin) return
+    if (!window.confirm(`Archive ${selectedUser.name || selectedUser.username}? They will no longer be able to sign in.`)) return
+    setUserSaving(true)
+    try {
+      const result = await api<{ user?: AuthUser; users?: AuthUser[] }>(`/api/users/${encodeURIComponent(selectedUser.id)}`, { method: "DELETE" })
+      setUsers(result.users || users.map((user) => user.id === selectedUser.id ? { ...user, status: "archived" } : user))
+      setSavedUsers(result.users || savedUsers.map((user) => user.id === selectedUser.id ? { ...user, status: "archived" } : user))
+      void loadUsers()
+      toast.success("User archived.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to archive user.")
+    } finally {
+      setUserSaving(false)
+    }
+  }
+
+  async function bulkUpdateUsers(action: "template" | "inactive" | "archived") {
+    const selectedIds = Array.from(selectedUserIds)
+    if (!selectedIds.length) return
+    const selectedNames = users.filter((user) => selectedIds.includes(user.id)).map((user) => user.name || user.username).join(", ")
+    if (!window.confirm(`Apply this bulk change to ${selectedIds.length} user${selectedIds.length === 1 ? "" : "s"}: ${selectedNames}?`)) return
+    setUserSaving(true)
+    try {
+      for (const userId of selectedIds) {
+        const user = users.find((candidate) => candidate.id === userId)
+        if (!user || user.isMasterAdmin) continue
+        if (action === "template") {
+          const template = permissionTemplates.find((candidate) => candidate.id === bulkTemplateId)
+          if (!template) continue
+          await api(`/api/users/${encodeURIComponent(user.id)}`, { method: "PATCH", body: JSON.stringify({ ...user, permissionTemplateId: template.id }) })
+        } else if (action === "inactive") {
+          await api(`/api/users/${encodeURIComponent(user.id)}`, { method: "PATCH", body: JSON.stringify({ ...user, status: "inactive" }) })
+        } else {
+          await api(`/api/users/${encodeURIComponent(user.id)}`, { method: "DELETE" })
+        }
+      }
+      setSelectedUserIds(new Set())
+      await loadUsers()
+      toast.success("Bulk user update completed.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Bulk update failed.")
+    } finally {
+      setUserSaving(false)
+    }
+  }
+
+  function exportSelectedPermissions() {
+    if (!selectedUser) return
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      user: { id: selectedUser.id, username: selectedUser.username, name: selectedUser.name },
+      permissionTemplateId: selectedUser.permissionTemplateId || "custom",
+      permissions: selectedUser.permissions || {},
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" })
+    const link = document.createElement("a")
+    link.href = URL.createObjectURL(blob)
+    link.download = `dataplus-permissions-${selectedUser.username || selectedUser.id}.json`
+    link.click()
+    URL.revokeObjectURL(link.href)
+  }
+
+  function importSelectedPermissions(file?: File | null) {
+    if (!selectedUser || selectedUser.isMasterAdmin || !file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || "{}"))
+        const permissions = parsed.permissions && typeof parsed.permissions === "object" ? parsed.permissions as AuthPermissionMatrix : parsed
+        if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) throw new Error("Invalid permission file.")
+        setSelectedPermissions(permissions)
+        toast.success("Permissions imported. Save the user to apply them.")
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Unable to import permissions.")
+      }
+    }
+    reader.readAsText(file)
+  }
+
 
   function updateSelectedPermission(areaId: string, action: keyof AuthPermission, enabled: boolean) {
     if (!selectedUser || selectedUser.isMasterAdmin) return
@@ -17740,19 +17848,19 @@ function SettingsPage({
 
   function setSelectedPermissions(nextPermissions: AuthPermissionMatrix) {
     if (!selectedUser || selectedUser.isMasterAdmin) return
-    setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: "custom", permissions: nextPermissions } : user))
+    setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: "custom", permissionTemplateVersion: 0, permissions: nextPermissions } : user))
   }
 
   function applyPermissionTemplate(templateId: string) {
     if (!selectedUser || selectedUser.isMasterAdmin) return
     if (templateId !== "custom" && (selectedUserDirty || selectedTemplateId === "custom") && !window.confirm("Apply this template and replace the user's current permission checks?")) return
     if (templateId === "custom") {
-      setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: "custom" } : user))
+      setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: "custom", permissionTemplateVersion: 0 } : user))
       return
     }
     const template = permissionTemplates.find((candidate) => candidate.id === templateId)
     if (!template) return
-    setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: template.id, permissions: template.permissions } : user))
+    setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: template.id, permissionTemplateVersion: template.version || 1, permissions: template.permissions } : user))
   }
 
   function copyPermissionsFromUser() {
@@ -17928,6 +18036,10 @@ function SettingsPage({
   })
   const compareTemplate = permissionTemplates.find((template) => template.id === compareTemplateId)
   const compareDiffs = selectedUser && compareTemplate ? permissionMatrixDiffs(selectedUser.permissions, compareTemplate.permissions) : []
+  const visibleUsers = users.filter((user) => showArchivedUsers || user.status !== "archived")
+  const selectedUsersForBulk = users.filter((user) => selectedUserIds.has(user.id) && !user.isMasterAdmin)
+  const selectedUserTemplate = selectedUser && selectedUser.permissionTemplateId && selectedUser.permissionTemplateId !== "custom" ? permissionTemplates.find((template) => template.id === selectedUser.permissionTemplateId) : undefined
+  const selectedUserTemplateDrift = Boolean(selectedUserTemplate && selectedUser && Number(selectedUser.permissionTemplateVersion || 0) > 0 && Number(selectedUser.permissionTemplateVersion || 0) < Number(selectedUserTemplate.version || 1))
   const commonPermissionActions = ["view", "create", "edit", "delete", "export"]
   const standardPermissionActions = new Set(["view", "read", "edit", "create", "notes", "export", "pick", "pack", "ship", "labels", "receive", "adjust", "transfer", "audit", "map", "map_sku", "resource", "files", "feeds", "sync", "import", "chat", "run"])
 
@@ -18661,11 +18773,33 @@ function SettingsPage({
                 </div>
               </CardHeader>
               <CardContent className="grid gap-2 p-3">
-                {users.map((user) => <button key={user.id} type="button" onClick={() => setSelectedUserId(user.id)} className={cn("rounded-md border p-3 text-left transition-colors hover:border-primary", selectedUser?.id === user.id && "border-primary bg-primary/5")}>
-                  <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium">{user.name || user.username}</p><p className="truncate text-xs text-muted-foreground">{user.username || user.email}</p></div><Badge variant={user.status === "active" ? "success" : "outline"}>{user.status || "active"}</Badge></div>
-                  <div className="mt-2 flex flex-wrap gap-1"><Badge variant={user.isMasterAdmin ? "default" : "secondary"}>{user.role || "Operator"}</Badge><Badge variant="outline">{userPermissionSummary(user)}</Badge>{JSON.stringify(user) !== JSON.stringify(savedUsers.find((saved) => saved.id === user.id) || null) && <Badge variant="warning">Unsaved</Badge>}{user.mustChangePassword && <Badge variant="warning">Reset required</Badge>}</div>
-                </button>)}
-                {!users.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">No users found.</p>}
+                <label className="flex items-center gap-2 rounded-md border bg-muted/20 p-2 text-xs text-muted-foreground"><Checkbox checked={showArchivedUsers} onCheckedChange={(checked) => setShowArchivedUsers(checked === true)} /> Show archived users</label>
+                {!!selectedUsersForBulk.length && <div className="grid gap-2 rounded-md border bg-muted/20 p-3">
+                  <p className="text-xs font-medium">{numberLabel(selectedUsersForBulk.length)} selected</p>
+                  <Select value={bulkTemplateId || "none"} onValueChange={(value) => setBulkTemplateId(value === "none" ? "" : value)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="none">Bulk template</SelectItem>{permissionTemplates.map((template) => <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>)}</SelectContent>
+                  </Select>
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" disabled={!canEditUserPermissions || !bulkTemplateId || userSaving} onClick={() => void bulkUpdateUsers("template")}>Apply template</Button>
+                    <Button size="sm" variant="outline" disabled={!canDeactivateUsers || userSaving} onClick={() => void bulkUpdateUsers("inactive")}>Deactivate</Button>
+                    <Button size="sm" variant="outline" disabled={!canDeactivateUsers || userSaving} onClick={() => void bulkUpdateUsers("archived")}>Archive</Button>
+                  </div>
+                </div>}
+                {visibleUsers.map((user) => {
+                  const template = user.permissionTemplateId && user.permissionTemplateId !== "custom" ? permissionTemplates.find((candidate) => candidate.id === user.permissionTemplateId) : undefined
+                  const hasDrift = Boolean(template && Number(user.permissionTemplateVersion || 0) > 0 && Number(user.permissionTemplateVersion || 0) < Number(template.version || 1))
+                  return <div key={user.id} className={cn("rounded-md border p-3 transition-colors hover:border-primary", selectedUser?.id === user.id && "border-primary bg-primary/5")}>
+                    <div className="flex items-start gap-2">
+                      <Checkbox disabled={user.isMasterAdmin} checked={selectedUserIds.has(user.id)} onCheckedChange={(checked) => setSelectedUserIds((current) => { const next = new Set(current); if (checked === true) next.add(user.id); else next.delete(user.id); return next })} />
+                      <button type="button" onClick={() => setSelectedUserId(user.id)} className="min-w-0 flex-1 text-left">
+                        <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium">{user.displayName || user.fullName || user.name || user.username}</p><p className="truncate text-xs text-muted-foreground">{user.jobTitle || user.username || user.email}</p></div><Badge variant={user.status === "active" ? "success" : user.status === "archived" ? "outline" : "secondary"}>{user.status || "active"}</Badge></div>
+                        <div className="mt-2 flex flex-wrap gap-1"><Badge variant={user.isMasterAdmin ? "default" : "secondary"}>{user.role || "Operator"}</Badge><Badge variant="outline">{userPermissionSummary(user)}</Badge>{hasDrift && <Badge variant="warning">Template v{numberLabel(user.permissionTemplateVersion || 0)} → v{numberLabel(template?.version || 1)}</Badge>}{JSON.stringify(user) !== JSON.stringify(savedUsers.find((saved) => saved.id === user.id) || null) && <Badge variant="warning">Unsaved</Badge>}{user.mustChangePassword && <Badge variant="warning">Reset required</Badge>}</div>
+                      </button>
+                    </div>
+                  </div>
+                })}
+                {!visibleUsers.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">No users found.</p>}
               </CardContent>
             </Card>
 
@@ -18676,18 +18810,37 @@ function SettingsPage({
                     <CardTitle className="flex flex-wrap items-center gap-2 text-base">{selectedUser ? `Profile: ${selectedUser.name || selectedUser.username}` : "User profile"}{selectedUserDirty && <Badge variant="warning">Unsaved changes</Badge>}{previewOpen && <Badge variant="secondary">Preview open</Badge>}</CardTitle>
                     <CardDescription>{selectedUser?.isMasterAdmin ? "Luis is the protected master admin and always keeps full access." : "Save profile changes and permission edits for the selected login."}</CardDescription>
                   </div>
-                  {selectedUser && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setPreviewOpen((open) => !open)}><Eye className="size-4" /> Preview</Button><Button size="sm" variant="outline" disabled={!canResetUserPasswords || userSaving} onClick={() => void resetUserPassword(selectedUser.id)}><LockKeyhole className="size-4" /> Reset password</Button><Button size="sm" disabled={!(canEditUserAccounts || canEditUserPermissions) || userSaving || !selectedUserDirty} onClick={() => void saveUser(selectedUser.id, selectedUser)}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save user</Button></div>}
+                  {selectedUser && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setPreviewOpen((open) => !open)}><Eye className="size-4" /> Preview</Button><Button size="sm" variant="outline" disabled={!canResetUserPasswords || userSaving || selectedUser.status === "archived"} onClick={() => void resetUserPassword(selectedUser.id)}><LockKeyhole className="size-4" /> Reset password</Button><Button size="sm" variant="outline" disabled={!canDeactivateUsers || userSaving || selectedUser.isMasterAdmin || selectedUser.status === "archived"} onClick={() => void archiveSelectedUser()}><Trash2 className="size-4" /> Archive</Button><Button size="sm" disabled={!(canEditUserAccounts || canEditUserPermissions) || userSaving || !selectedUserDirty} onClick={() => void saveUser(selectedUser.id, selectedUser)}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save user</Button></div>}
                 </div>
               </CardHeader>
               <CardContent className="grid gap-5 p-4">
                 {temporaryPassword && <Alert className="border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>Temporary password generated</AlertTitle><AlertDescription><span className="font-mono">{temporaryPassword}</span></AlertDescription></Alert>}
                 {selectedUser ? <>
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                    <Field label="Name"><Input disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.name || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, name: event.target.value } : user))} /></Field>
-                    <Field label="Username"><Input disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.username || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, username: event.target.value } : user))} /></Field>
-                    <Field label="Email"><Input disabled={!canEditUserAccounts} type="email" value={selectedUser.email || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, email: event.target.value } : user))} /></Field>
-                    <Field label="Status"><Select disabled={!(canEditUserAccounts && canDeactivateUsers) || selectedUser.isMasterAdmin} value={selectedUser.status || "active"} onValueChange={updateSelectedUserStatus}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
-                  </div>
+                  {selectedUserTemplateDrift && <Alert className="border-amber-500/40 bg-amber-500/5"><AlertCircle className="size-4" /><AlertTitle>Template version drift</AlertTitle><AlertDescription>{selectedUser.name || selectedUser.username} was assigned {selectedUserTemplate?.name} v{numberLabel(selectedUser.permissionTemplateVersion || 0)}, but the template is now v{numberLabel(selectedUserTemplate?.version || 1)}. Apply the template again to sync it.</AlertDescription></Alert>}
+                  <Card>
+                    <CardHeader className="pb-3"><CardTitle className="text-sm">Company profile</CardTitle><CardDescription>Identity, contact, team, and HR context for this login.</CardDescription></CardHeader>
+                    <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                      <Field label="Full name"><Input disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.fullName || selectedUser.name || ""} onChange={(event) => { updateSelectedUserField("fullName", event.target.value); updateSelectedUserField("name", event.target.value) }} /></Field>
+                      <Field label="Preferred display name"><Input disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.displayName || ""} onChange={(event) => updateSelectedUserField("displayName", event.target.value)} /></Field>
+                      <Field label="First name"><Input disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.firstName || ""} onChange={(event) => updateSelectedUserField("firstName", event.target.value)} /></Field>
+                      <Field label="Last name"><Input disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.lastName || ""} onChange={(event) => updateSelectedUserField("lastName", event.target.value)} /></Field>
+                      <Field label="Username"><Input disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.username || ""} onChange={(event) => updateSelectedUserField("username", event.target.value)} /></Field>
+                      <Field label="Email"><Input disabled={!canEditUserAccounts} type="email" value={selectedUser.email || ""} onChange={(event) => updateSelectedUserField("email", event.target.value)} /></Field>
+                      <Field label="Phone"><Input disabled={!canEditUserAccounts} value={selectedUser.phone || ""} onChange={(event) => updateSelectedUserField("phone", event.target.value)} /></Field>
+                      <Field label="Mobile phone"><Input disabled={!canEditUserAccounts} value={selectedUser.mobilePhone || ""} onChange={(event) => updateSelectedUserField("mobilePhone", event.target.value)} /></Field>
+                      <Field label="Job title"><Input disabled={!canEditUserAccounts} value={selectedUser.jobTitle || ""} onChange={(event) => updateSelectedUserField("jobTitle", event.target.value)} /></Field>
+                      <Field label="Department"><Input disabled={!canEditUserAccounts} value={selectedUser.department || ""} onChange={(event) => updateSelectedUserField("department", event.target.value)} /></Field>
+                      <Field label="Team"><Input disabled={!canEditUserAccounts} value={selectedUser.team || ""} onChange={(event) => updateSelectedUserField("team", event.target.value)} /></Field>
+                      <Field label="Manager"><Input disabled={!canEditUserAccounts} value={selectedUser.manager || ""} onChange={(event) => updateSelectedUserField("manager", event.target.value)} /></Field>
+                      <Field label="Location"><Input disabled={!canEditUserAccounts} value={selectedUser.location || ""} onChange={(event) => updateSelectedUserField("location", event.target.value)} /></Field>
+                      <Field label="Employee ID"><Input disabled={!canEditUserAccounts} value={selectedUser.employeeId || ""} onChange={(event) => updateSelectedUserField("employeeId", event.target.value)} /></Field>
+                      <Field label="Timezone"><Input disabled={!canEditUserAccounts} value={selectedUser.timezone || ""} onChange={(event) => updateSelectedUserField("timezone", event.target.value)} placeholder="America/New_York" /></Field>
+                      <Field label="Start date"><Input disabled={!canEditUserAccounts} type="date" value={selectedUser.startDate || ""} onChange={(event) => updateSelectedUserField("startDate", event.target.value)} /></Field>
+                      <Field label="Avatar URL"><Input disabled={!canEditUserAccounts} value={selectedUser.avatarUrl || ""} onChange={(event) => updateSelectedUserField("avatarUrl", event.target.value)} /></Field>
+                      <Field label="Status"><Select disabled={!(canEditUserAccounts && canDeactivateUsers) || selectedUser.isMasterAdmin} value={selectedUser.status || "active"} onValueChange={updateSelectedUserStatus}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem><SelectItem value="archived">Archived</SelectItem></SelectContent></Select></Field>
+                      <Field label="Profile notes"><Textarea disabled={!canEditUserAccounts} className="min-h-24 xl:col-span-2" value={selectedUser.notes || ""} onChange={(event) => updateSelectedUserField("notes", event.target.value)} /></Field>
+                    </CardContent>
+                  </Card>
                   <Card className="border-dashed">
                     <CardHeader className="pb-3">
                       <CardTitle className="text-sm">Permission template</CardTitle>
@@ -18704,6 +18857,10 @@ function SettingsPage({
                       </Select>
                       <div className="flex flex-wrap gap-2">
                         <Button type="button" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} onClick={() => openTemplateDialog()}><Save className="size-4" /> Save as template</Button>
+                        <Button type="button" variant="outline" disabled={!selectedUser} onClick={exportSelectedPermissions}><FileDown className="size-4" /> Export JSON</Button>
+                        <Button type="button" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} asChild>
+                          <label className="cursor-pointer"><FileUp className="size-4" /> Import JSON<input type="file" accept="application/json,.json" className="sr-only" onChange={(event) => { importSelectedPermissions(event.target.files?.[0]); event.currentTarget.value = "" }} /></label>
+                        </Button>
                         {selectedTemplateId !== "custom" && selectedTemplateId !== "master-admin" && !permissionTemplates.find((template) => template.id === selectedTemplateId)?.builtIn && <Button type="button" variant="outline" disabled={!canEditUserPermissions || userSaving} onClick={() => {
                           const template = permissionTemplates.find((candidate) => candidate.id === selectedTemplateId)
                           if (template) setTemplateDraft({ id: template.id, name: template.name, description: template.description || "", permissions: selectedUser.permissions || {}, builtIn: template.builtIn })
@@ -18896,6 +19053,19 @@ function SettingsPage({
                     </CardContent>
                   </Card>}
                   <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm">User activity</CardTitle>
+                      <CardDescription>Password resets, permission changes, template changes, deactivation, and archive events for this login.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="grid gap-2">
+                      {permissionAuditLog.filter((event) => event.targetId === selectedUser.id).slice(0, 8).map((event) => <div key={`user-activity-${event.id}`} className="rounded-md border p-3 text-sm">
+                        <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{event.message || event.type || "Activity"}</span><span className="text-xs text-muted-foreground">{dateLabel(event.createdAt)}</span></div>
+                        <p className="mt-1 text-xs text-muted-foreground">By {event.actorName || "System"} · {numberLabel(event.beforeCount)} to {numberLabel(event.afterCount)} enabled actions</p>
+                      </div>)}
+                      {!permissionAuditLog.some((event) => event.targetId === selectedUser.id) && <p className="rounded-md border p-4 text-sm text-muted-foreground">No recorded user activity yet.</p>}
+                    </CardContent>
+                  </Card>
+                  <Card>
                     <CardHeader className="flex-row items-start justify-between gap-3 space-y-0 pb-3">
                       <div>
                         <CardTitle className="text-sm">Permission audit log</CardTitle>
@@ -18988,9 +19158,17 @@ function SettingsPage({
             <DialogContent>
               <DialogHeader><DialogTitle>Create login</DialogTitle><DialogDescription>The user can sign in after you share the password. Leave password empty to generate one.</DialogDescription></DialogHeader>
               <div className="grid gap-4">
-                <Field label="Name"><Input disabled={!canCreateUsers} value={newUser.name} onChange={(event) => setNewUser((current) => ({ ...current, name: event.target.value }))} /></Field>
+                <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Full name"><Input disabled={!canCreateUsers} value={newUser.fullName} onChange={(event) => setNewUser((current) => ({ ...current, fullName: event.target.value, name: event.target.value }))} /></Field>
+                <Field label="Preferred name"><Input disabled={!canCreateUsers} value={newUser.name} onChange={(event) => setNewUser((current) => ({ ...current, name: event.target.value }))} /></Field>
+                <Field label="First name"><Input disabled={!canCreateUsers} value={newUser.firstName} onChange={(event) => setNewUser((current) => ({ ...current, firstName: event.target.value }))} /></Field>
+                <Field label="Last name"><Input disabled={!canCreateUsers} value={newUser.lastName} onChange={(event) => setNewUser((current) => ({ ...current, lastName: event.target.value }))} /></Field>
                 <Field label="Username"><Input disabled={!canCreateUsers} value={newUser.username} onChange={(event) => setNewUser((current) => ({ ...current, username: event.target.value }))} placeholder="first.last" /></Field>
                 <Field label="Email"><Input disabled={!canCreateUsers} type="email" value={newUser.email} onChange={(event) => setNewUser((current) => ({ ...current, email: event.target.value }))} /></Field>
+                <Field label="Phone"><Input disabled={!canCreateUsers} value={newUser.phone} onChange={(event) => setNewUser((current) => ({ ...current, phone: event.target.value }))} /></Field>
+                <Field label="Job title"><Input disabled={!canCreateUsers} value={newUser.jobTitle} onChange={(event) => setNewUser((current) => ({ ...current, jobTitle: event.target.value }))} /></Field>
+                <Field label="Department"><Input disabled={!canCreateUsers} value={newUser.department} onChange={(event) => setNewUser((current) => ({ ...current, department: event.target.value }))} /></Field>
+                </div>
                 <Field label="Permission template">
                   <Select disabled={!canCreateUsers} value={newUser.permissionTemplateId} onValueChange={(value) => setNewUser((current) => ({ ...current, permissionTemplateId: value }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>

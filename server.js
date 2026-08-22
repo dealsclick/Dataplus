@@ -5420,13 +5420,32 @@ function verifyUserPassword(user = {}, password = "") {
 
 function normalizeSystemUser(user = {}, index = 0) {
   const isMasterAdmin = user.isMasterAdmin === true || String(user.role || "").toLowerCase() === "master admin" || String(user.id || "") === "owner";
+  const firstName = sourceTextValue(user.firstName || "");
+  const lastName = sourceTextValue(user.lastName || "");
+  const fullName = sourceTextValue(user.fullName || user.name || [firstName, lastName].filter(Boolean).join(" "));
   const normalized = {
     id: String(user.id || crypto.randomUUID?.() || `user-${index + 1}`),
-    name: sourceTextValue(user.name || user.displayName || ""),
+    name: sourceTextValue(user.name || user.displayName || fullName),
+    fullName,
+    firstName,
+    lastName,
+    displayName: sourceTextValue(user.displayName || user.name || fullName),
     username: sourceTextValue(user.username || user.login || user.email || user.name || "").toLowerCase().replace(/\s+/g, "."),
     email: sourceTextValue(user.email || ""),
+    phone: sourceTextValue(user.phone || ""),
+    mobilePhone: sourceTextValue(user.mobilePhone || user.mobile || ""),
+    jobTitle: sourceTextValue(user.jobTitle || user.title || ""),
+    department: sourceTextValue(user.department || ""),
+    team: sourceTextValue(user.team || ""),
+    location: sourceTextValue(user.location || ""),
+    manager: sourceTextValue(user.manager || ""),
+    employeeId: sourceTextValue(user.employeeId || ""),
+    timezone: sourceTextValue(user.timezone || ""),
+    avatarUrl: sourceTextValue(user.avatarUrl || ""),
+    startDate: sourceTextValue(user.startDate || ""),
+    notes: sourceTextValue(user.notes || ""),
     role: isMasterAdmin ? "Master Admin" : sourceTextValue(user.role || "Operator"),
-    status: ["active", "inactive"].includes(String(user.status || "").toLowerCase()) ? String(user.status).toLowerCase() : "active",
+    status: ["active", "inactive", "archived"].includes(String(user.status || "").toLowerCase()) ? String(user.status).toLowerCase() : "active",
     isMasterAdmin,
     mustChangePassword: user.mustChangePassword === true || String(user.mustChangePassword).toLowerCase() === "true",
     passwordHash: String(user.passwordHash || ""),
@@ -5440,6 +5459,8 @@ function normalizeSystemUser(user = {}, index = 0) {
   };
   if (normalized.id === "owner") {
     normalized.name = normalized.name || "Luis";
+    normalized.fullName = normalized.fullName || "Luis";
+    normalized.displayName = normalized.displayName || normalized.fullName;
     normalized.username = normalized.username || "luis";
     normalized.isMasterAdmin = true;
     normalized.role = "Master Admin";
@@ -5461,8 +5482,24 @@ function publicSystemUser(user = {}) {
   return {
     id: user.id,
     name: user.name,
+    fullName: user.fullName || user.name || "",
+    firstName: user.firstName || "",
+    lastName: user.lastName || "",
+    displayName: user.displayName || user.name || "",
     username: user.username,
     email: user.email,
+    phone: user.phone || "",
+    mobilePhone: user.mobilePhone || "",
+    jobTitle: user.jobTitle || "",
+    department: user.department || "",
+    team: user.team || "",
+    location: user.location || "",
+    manager: user.manager || "",
+    employeeId: user.employeeId || "",
+    timezone: user.timezone || "",
+    avatarUrl: user.avatarUrl || "",
+    startDate: user.startDate || "",
+    notes: user.notes || "",
     role: user.role,
     status: user.status,
     isMasterAdmin: user.isMasterAdmin === true,
@@ -31596,7 +31633,10 @@ async function handleApi(req, res) {
   if (!authUser) return sendJson(res, 401, { error: "Sign in to DataPlus first." });
   const { area: requiredArea, action: requiredAction } = authRequirementForRequest(req, url, parts);
   if (!userCan(authUser, requiredArea, requiredAction)) {
-    return sendJson(res, 403, { error: `Your account does not have ${requiredAction} access for ${requiredArea || "this area"}.` });
+    return sendJson(res, 403, {
+      error: `Your account does not have ${requiredAction} access for ${requiredArea || "this area"}.`,
+      missingPermission: { area: requiredArea || "", action: requiredAction || "view" }
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/users") {
@@ -31621,8 +31661,24 @@ async function handleApi(req, res) {
     const user = normalizeSystemUser({
       id: crypto.randomUUID(),
       name,
+      fullName: sourceTextValue(body.fullName || name),
+      firstName: sourceTextValue(body.firstName || ""),
+      lastName: sourceTextValue(body.lastName || ""),
+      displayName: sourceTextValue(body.displayName || name),
       username,
       email: sourceTextValue(body.email || ""),
+      phone: sourceTextValue(body.phone || ""),
+      mobilePhone: sourceTextValue(body.mobilePhone || ""),
+      jobTitle: sourceTextValue(body.jobTitle || ""),
+      department: sourceTextValue(body.department || ""),
+      team: sourceTextValue(body.team || ""),
+      location: sourceTextValue(body.location || ""),
+      manager: sourceTextValue(body.manager || ""),
+      employeeId: sourceTextValue(body.employeeId || ""),
+      timezone: sourceTextValue(body.timezone || ""),
+      avatarUrl: sourceTextValue(body.avatarUrl || ""),
+      startDate: sourceTextValue(body.startDate || ""),
+      notes: sourceTextValue(body.notes || ""),
       role: sourceTextValue(body.role || "Operator"),
       status: "active",
       permissionTemplateId: selectedTemplate ? selectedTemplate.id : "custom",
@@ -31723,16 +31779,33 @@ async function handleApi(req, res) {
     const updated = {
       ...existing,
       name: body.name === undefined ? existing.name : sourceTextValue(body.name),
+      fullName: body.fullName === undefined ? existing.fullName : sourceTextValue(body.fullName),
+      firstName: body.firstName === undefined ? existing.firstName : sourceTextValue(body.firstName),
+      lastName: body.lastName === undefined ? existing.lastName : sourceTextValue(body.lastName),
+      displayName: body.displayName === undefined ? existing.displayName : sourceTextValue(body.displayName),
       username: body.username === undefined ? existing.username : sourceTextValue(body.username).toLowerCase().replace(/\s+/g, "."),
       email: body.email === undefined ? existing.email : sourceTextValue(body.email),
+      phone: body.phone === undefined ? existing.phone : sourceTextValue(body.phone),
+      mobilePhone: body.mobilePhone === undefined ? existing.mobilePhone : sourceTextValue(body.mobilePhone),
+      jobTitle: body.jobTitle === undefined ? existing.jobTitle : sourceTextValue(body.jobTitle),
+      department: body.department === undefined ? existing.department : sourceTextValue(body.department),
+      team: body.team === undefined ? existing.team : sourceTextValue(body.team),
+      location: body.location === undefined ? existing.location : sourceTextValue(body.location),
+      manager: body.manager === undefined ? existing.manager : sourceTextValue(body.manager),
+      employeeId: body.employeeId === undefined ? existing.employeeId : sourceTextValue(body.employeeId),
+      timezone: body.timezone === undefined ? existing.timezone : sourceTextValue(body.timezone),
+      avatarUrl: body.avatarUrl === undefined ? existing.avatarUrl : sourceTextValue(body.avatarUrl),
+      startDate: body.startDate === undefined ? existing.startDate : sourceTextValue(body.startDate),
+      notes: body.notes === undefined ? existing.notes : sourceTextValue(body.notes),
       role: existing.isMasterAdmin ? "Master Admin" : (body.role === undefined ? existing.role : sourceTextValue(body.role || "Operator")),
-      status: existing.isMasterAdmin ? "active" : (["active", "inactive"].includes(String(body.status || "").toLowerCase()) ? String(body.status).toLowerCase() : existing.status),
+      status: existing.isMasterAdmin ? "active" : (["active", "inactive", "archived"].includes(String(body.status || "").toLowerCase()) ? String(body.status).toLowerCase() : existing.status),
       permissionTemplateId: existing.isMasterAdmin ? "master-admin" : (selectedTemplate ? selectedTemplate.id : "custom"),
       permissionTemplateVersion: existing.isMasterAdmin ? 0 : (selectedTemplate ? selectedTemplate.version : 0),
       permissions: existing.isMasterAdmin ? normalizeAuthPermissions({}, true) : (selectedTemplate ? normalizeAuthPermissions(selectedTemplate.permissions, false) : (body.permissions === undefined ? existing.permissions : normalizeAuthPermissions(body.permissions, false))),
       updatedAt: new Date().toISOString()
     };
-    const accountChanged = existing.name !== updated.name || existing.username !== updated.username || existing.email !== updated.email || existing.role !== updated.role || existing.status !== updated.status;
+    const profileFields = ["name", "fullName", "firstName", "lastName", "displayName", "username", "email", "phone", "mobilePhone", "jobTitle", "department", "team", "location", "manager", "employeeId", "timezone", "avatarUrl", "startDate", "notes", "role", "status"];
+    const accountChanged = profileFields.some((field) => String(existing[field] || "") !== String(updated[field] || ""));
     const permissionChanged = existing.permissionTemplateId !== updated.permissionTemplateId || Number(existing.permissionTemplateVersion || 0) !== Number(updated.permissionTemplateVersion || 0) || JSON.stringify(normalizeAuthPermissions(existing.permissions, false)) !== JSON.stringify(normalizeAuthPermissions(updated.permissions, false));
     if (accountChanged && !userCan(authUser, "users.accounts", "edit")) return sendJson(res, 403, { error: "User account edit access is required." });
     if (existing.status !== updated.status && !userCan(authUser, "users.accounts", "deactivate")) return sendJson(res, 403, { error: "Deactivate user access is required." });
@@ -31744,6 +31817,24 @@ async function handleApi(req, res) {
     appendAuthPermissionAudit(current, authUser, { type: "user_updated", targetType: "user", targetId: updated.id, targetName: updated.name || updated.username, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), templateId: updated.permissionTemplateId, templateVersion: updated.permissionTemplateVersion, diffs: permissionDiffDetails(existing.permissions, updated.permissions), message: `Updated ${updated.name || updated.username}.` });
     const systemSettings = writeSystemSettingsStore(current);
     if ((permissionChanged || existing.status !== updated.status) && String(authUser.id || "") !== String(updated.id || "")) revokeAuthSessionsForUser(updated.id);
+    publicStateJsonCache = null;
+    if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    return sendJson(res, 200, { user: publicSystemUser(updated), users: systemSettings.systemUsers.map(publicSystemUser) });
+  }
+
+  if (userMatch && req.method === "DELETE") {
+    if (!userCan(authUser, "users.accounts", "deactivate")) return sendJson(res, 403, { error: "Archive user access is required." });
+    const userId = decodeURIComponent(userMatch[1] || "");
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const existing = (current.systemUsers || []).find((candidate) => String(candidate.id || "") === userId);
+    if (!existing) return notFound(res);
+    if (existing.isMasterAdmin) return sendJson(res, 403, { error: "The master admin account cannot be archived." });
+    if (String(authUser.id || "") === String(existing.id || "")) return sendJson(res, 400, { error: "You cannot archive your own active account." });
+    const updated = { ...existing, status: "archived", archivedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);
+    appendAuthPermissionAudit(current, authUser, { type: "user_archived", targetType: "user", targetId: updated.id, targetName: updated.name || updated.username, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), templateId: updated.permissionTemplateId, templateVersion: updated.permissionTemplateVersion, message: `Archived ${updated.name || updated.username}.` });
+    const systemSettings = writeSystemSettingsStore(current);
+    revokeAuthSessionsForUser(updated.id);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
     return sendJson(res, 200, { user: publicSystemUser(updated), users: systemSettings.systemUsers.map(publicSystemUser) });

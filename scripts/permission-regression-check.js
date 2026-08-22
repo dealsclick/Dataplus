@@ -21,6 +21,10 @@ includes(server, "normalizeAuthPermissions({}, true)", "Master admin permissions
 includes(server, "function permissionDiffDetails", "Permission audit diffs must be recorded.");
 includes(server, "function revokeAuthSessionsForUser", "Permission/session changes must revoke stale sessions.");
 includes(server, "permissionTemplateVersion", "Template version metadata must be persisted on users/templates.");
+includes(server, "fullName", "User profiles must persist full-name profile fields.");
+includes(server, "jobTitle", "User profiles must persist company role fields.");
+includes(server, "user_archived", "User archive workflow must write an audit event.");
+includes(server, "missingPermission", "403 responses must include missing permission details.");
 
 routeGuard("/api/users/templates", "\"users.permissions\"", "\"permissions\"");
 routeGuard("/password", "\"users.accounts\"", "\"passwords\"");
@@ -37,6 +41,13 @@ includes(app, "duplicatePermissionTemplate", "Template manager must support dupl
 includes(app, "templateUsers", "Template manager must show users assigned to each template.");
 includes(app, "permissionMatrixDiffs", "Template manager must compare a user against a template.");
 includes(app, "filteredPermissionTemplates", "Template manager must support template search.");
+includes(app, "bulkUpdateUsers", "User manager must support bulk user updates.");
+includes(app, "exportSelectedPermissions", "User manager must export permission matrices.");
+includes(app, "importSelectedPermissions", "User manager must import permission matrices.");
+includes(app, "selectedUserTemplateDrift", "User manager must warn on template version drift.");
+includes(app, "archiveSelectedUser", "User manager must support user archive workflow.");
+includes(app, "User activity", "User manager must show per-user activity.");
+includes(app, "Company profile", "User manager must show rich company profile fields.");
 includes(app, "permissionAuditLog", "UI must show permission audit history.");
 includes(app, "updateSelectedUserStatus", "UI must confirm/defer deactivation until save.");
 includes(app, "canCreateUsers", "UI must gate user creation independently.");
