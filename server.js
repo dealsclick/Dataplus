@@ -1128,7 +1128,8 @@ const DEFAULT_SYSTEM_SETTINGS = {
     { id: "owner", name: "Master Admin", permissions: ["all"] },
     { id: "admin", name: "Admin", permissions: ["catalog", "orders", "channels", "system"] },
     { id: "operator", name: "Operator", permissions: ["catalog", "orders"] }
-  ]
+  ],
+  authPermissionTemplates: []
 };
 
 const AUTH_PERMISSION_AREAS = [
@@ -1202,6 +1203,62 @@ function authPermissionRows() {
     area,
     ...(area.sections || []).map((section) => ({ ...section, parentId: area.id }))
   ]);
+}
+
+function permissionMatrix(actionsByArea = {}, fallbackView = false) {
+  return Object.fromEntries(authPermissionRows().map((area) => {
+    const requested = actionsByArea[area.id] || actionsByArea[area.parentId] || [];
+    const actions = requested === "*" ? ["*"] : (Array.isArray(requested) ? requested : []);
+    const all = actions.includes("*");
+    const view = fallbackView || all || actions.includes("view");
+    const row = { view, read: view || all || actions.includes("read"), write: all || actions.includes("write"), admin: all || actions.includes("admin") };
+    for (const action of area.actions || []) row[action] = all || actions.includes(action);
+    return [area.id, row];
+  }));
+}
+
+function defaultAuthPermissionTemplates() {
+  return [
+    { id: "admin", name: "Administrator", description: "Full operational access without master-admin account protection.", builtIn: true, permissions: permissionMatrix(Object.fromEntries(authPermissionRows().map((area) => [area.id, "*"]))) },
+    { id: "operations", name: "Operations", description: "Orders, fulfillment, warehouse movement, and PO receiving.", builtIn: true, permissions: permissionMatrix({
+      overview: ["view"],
+      orders: "*",
+      fulfillment: "*",
+      "purchasing.queue": ["view", "edit", "create", "export"],
+      "purchasing.po": ["view", "edit", "create"],
+      "purchasing.receiving": ["view", "receive", "return"],
+      warehouse: "*",
+      "catalog.products": ["view"],
+      "vendors.profiles": ["view"],
+      jobs: ["view"]
+    }) },
+    { id: "warehouse", name: "Warehouse", description: "Warehouse locations, inventory movement, audits, receiving, picking, and shipping.", builtIn: true, permissions: permissionMatrix({
+      overview: ["view"],
+      "orders.queue": ["view"],
+      fulfillment: "*",
+      warehouse: "*",
+      "catalog.products": ["view"],
+      jobs: ["view"]
+    }) },
+    { id: "purchasing", name: "Purchasing", description: "Purchase order creation, sourcing, approvals, receiving, vendors, and read-only order context.", builtIn: true, permissions: permissionMatrix({
+      overview: ["view"],
+      "orders.queue": ["view", "notes"],
+      purchasing: "*",
+      "warehouse.receiving": ["view", "receive"],
+      "catalog.products": ["view"],
+      vendors: ["view", "edit", "files", "feeds", "export"],
+      jobs: ["view"]
+    }) },
+    { id: "catalog", name: "Catalog", description: "Product, category, import, vendor, brand, and marketplace catalog work.", builtIn: true, permissions: permissionMatrix({
+      overview: ["view"],
+      catalog: "*",
+      vendors: ["view", "edit", "create", "files", "feeds", "export"],
+      brands: "*",
+      channels: ["view", "sync", "launch", "import", "export"],
+      jobs: ["view", "run", "retry", "notes", "export"]
+    }) },
+    { id: "read-only", name: "Read-only", description: "View-only access across the application.", builtIn: true, permissions: permissionMatrix({}, true) }
+  ];
 }
 
 const PRODUCT_DUMP_RESOURCE_PROFILES = {
@@ -5212,6 +5269,16 @@ function normalizeSystemSettings(settings = {}) {
       permissions: Array.isArray(role.permissions) ? role.permissions.map(sourceTextValue).filter(Boolean) : parseList(role.permissions)
     }))
     .filter((role) => role.name);
+  const templateSource = Array.isArray(normalized.authPermissionTemplates) ? normalized.authPermissionTemplates : [];
+  const templatesById = new Map(defaultAuthPermissionTemplates().map((template, index) => {
+    const normalizedTemplate = normalizeAuthPermissionTemplate(template, index);
+    return [normalizedTemplate.id, normalizedTemplate];
+  }));
+  for (const template of templateSource) {
+    const normalizedTemplate = normalizeAuthPermissionTemplate(template, templatesById.size);
+    if (normalizedTemplate.name) templatesById.set(normalizedTemplate.id, { ...templatesById.get(normalizedTemplate.id), ...normalizedTemplate });
+  }
+  normalized.authPermissionTemplates = Array.from(templatesById.values()).filter((template) => template.name);
   return normalized;
 }
 
@@ -5262,6 +5329,19 @@ function normalizeAuthPermissions(value = {}, isMasterAdmin = false) {
   return defaults;
 }
 
+function normalizeAuthPermissionTemplate(template = {}, index = 0) {
+  const id = sourceTextValue(template.id || template.name || `template-${index + 1}`).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || `template-${index + 1}`;
+  return {
+    id,
+    name: sourceTextValue(template.name || id),
+    description: sourceTextValue(template.description || ""),
+    builtIn: template.builtIn === true || String(template.builtIn).toLowerCase() === "true",
+    permissions: normalizeAuthPermissions(template.permissions || {}, false),
+    createdAt: sourceTextValue(template.createdAt || new Date().toISOString()),
+    updatedAt: sourceTextValue(template.updatedAt || "")
+  };
+}
+
 function hashUserPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
   return { salt, hash: crypto.scryptSync(String(password || ""), salt, 64).toString("hex") };
 }
@@ -5287,6 +5367,7 @@ function normalizeSystemUser(user = {}, index = 0) {
     passwordHash: String(user.passwordHash || ""),
     passwordSalt: String(user.passwordSalt || ""),
     permissions: normalizeAuthPermissions(user.permissions, isMasterAdmin),
+    permissionTemplateId: isMasterAdmin ? "master-admin" : sourceTextValue(user.permissionTemplateId || "custom"),
     createdAt: sourceTextValue(user.createdAt || new Date().toISOString()),
     updatedAt: sourceTextValue(user.updatedAt || new Date().toISOString()),
     lastLoginAt: sourceTextValue(user.lastLoginAt || "")
@@ -5320,6 +5401,7 @@ function publicSystemUser(user = {}) {
     status: user.status,
     isMasterAdmin: user.isMasterAdmin === true,
     mustChangePassword: user.mustChangePassword === true,
+    permissionTemplateId: user.isMasterAdmin === true ? "master-admin" : sourceTextValue(user.permissionTemplateId || "custom"),
     permissions: normalizeAuthPermissions(user.permissions, user.isMasterAdmin === true),
     createdAt: user.createdAt || "",
     updatedAt: user.updatedAt || "",
@@ -5394,6 +5476,7 @@ function authRequirementForRequest(req, url, parts = []) {
     return { area, action: "view" };
   }
   if (area === "users") {
+    if (pathname.startsWith("/api/users/templates")) return { area: "users.permissions", action: method === "GET" ? "view" : "permissions" };
     if (pathname.endsWith("/password")) return { area: "users.accounts", action: "passwords" };
     if (method === "POST") return { area: "users.accounts", action: "create" };
     return { area: "users.permissions", action: "permissions" };
@@ -5502,6 +5585,19 @@ function publicAuthUser(user = {}) {
   return { ...publicSystemUser(user), permissions: normalizeAuthPermissions(user.permissions, user.isMasterAdmin === true) };
 }
 
+function publicAuthPermissionTemplate(template = {}) {
+  const normalized = normalizeAuthPermissionTemplate(template);
+  return {
+    id: normalized.id,
+    name: normalized.name,
+    description: normalized.description,
+    builtIn: normalized.builtIn === true,
+    permissions: normalizeAuthPermissions(normalized.permissions, false),
+    createdAt: normalized.createdAt || "",
+    updatedAt: normalized.updatedAt || ""
+  };
+}
+
 function readSystemSettingsStore(fallback = {}) {
   if (postgres.isPostgresEnabled() && fallback && typeof fallback === "object" && Object.keys(fallback).length) {
     return normalizeSystemSettings(fallback);
@@ -5533,7 +5629,7 @@ function publicSystemSettings(settings = {}) {
   const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
   const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
   const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
-  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
+  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
 }
 
 function hashWarehouseAuditAdminPin(pin, salt) {
@@ -31422,7 +31518,7 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/users") {
     if (!userCan(authUser, "users", "read")) return sendJson(res, 403, { error: "Manage Users access is required." });
-    return sendJson(res, 200, { users: authSettings.systemUsers.map(publicSystemUser), permissionAreas: AUTH_PERMISSION_AREAS });
+    return sendJson(res, 200, { users: authSettings.systemUsers.map(publicSystemUser), permissionAreas: AUTH_PERMISSION_AREAS, permissionTemplates: authSettings.authPermissionTemplates.map(publicAuthPermissionTemplate) });
   }
 
   if (req.method === "POST" && url.pathname === "/api/users") {
@@ -31437,6 +31533,8 @@ async function handleApi(req, res) {
     }
     const temporaryPassword = sourceTextValue(body.password || "") || crypto.randomBytes(12).toString("base64url");
     const hashed = hashUserPassword(temporaryPassword);
+    const templateId = sourceTextValue(body.permissionTemplateId || "custom");
+    const selectedTemplate = templateId && templateId !== "custom" ? (current.authPermissionTemplates || []).find((template) => template.id === templateId) : null;
     const user = normalizeSystemUser({
       id: crypto.randomUUID(),
       name,
@@ -31444,7 +31542,8 @@ async function handleApi(req, res) {
       email: sourceTextValue(body.email || ""),
       role: sourceTextValue(body.role || "Operator"),
       status: "active",
-      permissions: normalizeAuthPermissions(body.permissions || {}, false),
+      permissionTemplateId: selectedTemplate ? selectedTemplate.id : "custom",
+      permissions: normalizeAuthPermissions(selectedTemplate ? selectedTemplate.permissions : (body.permissions || {}), false),
       passwordHash: hashed.hash,
       passwordSalt: hashed.salt,
       mustChangePassword: true
@@ -31456,6 +31555,66 @@ async function handleApi(req, res) {
     return sendJson(res, 201, { user: publicSystemUser(user), temporaryPassword, users: systemSettings.systemUsers.map(publicSystemUser) });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/users/templates") {
+    if (!userCan(authUser, "users", "admin")) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    const body = await parseBody(req);
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const name = sourceTextValue(body.name || "");
+    if (!name) return sendJson(res, 400, { error: "Enter a template name." });
+    const template = normalizeAuthPermissionTemplate({
+      id: crypto.randomUUID(),
+      name,
+      description: sourceTextValue(body.description || ""),
+      permissions: body.permissions || {},
+      builtIn: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, (current.authPermissionTemplates || []).length);
+    current.authPermissionTemplates = [...(current.authPermissionTemplates || []), template];
+    const systemSettings = writeSystemSettingsStore(current);
+    publicStateJsonCache = null;
+    if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    return sendJson(res, 201, { template: publicAuthPermissionTemplate(template), permissionTemplates: systemSettings.authPermissionTemplates.map(publicAuthPermissionTemplate) });
+  }
+
+  const templateMatch = url.pathname.match(/^\/api\/users\/templates\/([^/]+)$/);
+  if (templateMatch && req.method === "PATCH") {
+    if (!userCan(authUser, "users", "admin")) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    const templateId = decodeURIComponent(templateMatch[1] || "");
+    const body = await parseBody(req);
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const existing = (current.authPermissionTemplates || []).find((template) => String(template.id || "") === templateId);
+    if (!existing) return notFound(res);
+    const updated = normalizeAuthPermissionTemplate({
+      ...existing,
+      name: body.name === undefined ? existing.name : sourceTextValue(body.name),
+      description: body.description === undefined ? existing.description : sourceTextValue(body.description),
+      permissions: body.permissions === undefined ? existing.permissions : body.permissions,
+      builtIn: existing.builtIn === true,
+      updatedAt: new Date().toISOString()
+    });
+    current.authPermissionTemplates = (current.authPermissionTemplates || []).map((template) => template.id === existing.id ? updated : template);
+    const systemSettings = writeSystemSettingsStore(current);
+    publicStateJsonCache = null;
+    if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    return sendJson(res, 200, { template: publicAuthPermissionTemplate(updated), permissionTemplates: systemSettings.authPermissionTemplates.map(publicAuthPermissionTemplate) });
+  }
+
+  if (templateMatch && req.method === "DELETE") {
+    if (!userCan(authUser, "users", "admin")) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    const templateId = decodeURIComponent(templateMatch[1] || "");
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const existing = (current.authPermissionTemplates || []).find((template) => String(template.id || "") === templateId);
+    if (!existing) return notFound(res);
+    if (existing.builtIn) return sendJson(res, 400, { error: "Built-in templates cannot be deleted." });
+    current.authPermissionTemplates = (current.authPermissionTemplates || []).filter((template) => template.id !== existing.id);
+    current.systemUsers = (current.systemUsers || []).map((user) => user.permissionTemplateId === existing.id ? { ...user, permissionTemplateId: "custom" } : user);
+    const systemSettings = writeSystemSettingsStore(current);
+    publicStateJsonCache = null;
+    if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    return sendJson(res, 200, { permissionTemplates: systemSettings.authPermissionTemplates.map(publicAuthPermissionTemplate), users: systemSettings.systemUsers.map(publicSystemUser) });
+  }
+
   const userMatch = url.pathname.match(/^\/api\/users\/([^/]+)$/);
   if (userMatch && req.method === "PATCH") {
     if (!userCan(authUser, "users", "admin")) return sendJson(res, 403, { error: "Manage Users admin access is required." });
@@ -31465,6 +31624,8 @@ async function handleApi(req, res) {
     const existing = (current.systemUsers || []).find((candidate) => String(candidate.id || "") === userId);
     if (!existing) return notFound(res);
     if (existing.isMasterAdmin && authUser.id !== existing.id) return sendJson(res, 403, { error: "Only Luis can edit the master admin account." });
+    const templateId = sourceTextValue(body.permissionTemplateId || existing.permissionTemplateId || "custom");
+    const selectedTemplate = !existing.isMasterAdmin && templateId && templateId !== "custom" ? (current.authPermissionTemplates || []).find((template) => template.id === templateId) : null;
     const updated = {
       ...existing,
       name: body.name === undefined ? existing.name : sourceTextValue(body.name),
@@ -31472,7 +31633,8 @@ async function handleApi(req, res) {
       email: body.email === undefined ? existing.email : sourceTextValue(body.email),
       role: existing.isMasterAdmin ? "Master Admin" : (body.role === undefined ? existing.role : sourceTextValue(body.role || "Operator")),
       status: existing.isMasterAdmin ? "active" : (["active", "inactive"].includes(String(body.status || "").toLowerCase()) ? String(body.status).toLowerCase() : existing.status),
-      permissions: existing.isMasterAdmin ? normalizeAuthPermissions({}, true) : (body.permissions === undefined ? existing.permissions : normalizeAuthPermissions(body.permissions, false)),
+      permissionTemplateId: existing.isMasterAdmin ? "master-admin" : (selectedTemplate ? selectedTemplate.id : "custom"),
+      permissions: existing.isMasterAdmin ? normalizeAuthPermissions({}, true) : (selectedTemplate ? normalizeAuthPermissions(selectedTemplate.permissions, false) : (body.permissions === undefined ? existing.permissions : normalizeAuthPermissions(body.permissions, false))),
       updatedAt: new Date().toISOString()
     };
     if (!updated.username || !/^[a-z0-9._@-]{2,80}$/i.test(updated.username)) return sendJson(res, 400, { error: "Enter a valid username." });

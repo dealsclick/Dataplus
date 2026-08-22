@@ -688,6 +688,7 @@ type LiteState = {
 type AuthPermission = { view?: boolean; read?: boolean; write?: boolean; admin?: boolean; [key: string]: boolean | undefined }
 type AuthPermissionMatrix = Record<string, AuthPermission>
 type AuthPermissionArea = { id: string; label: string; path: string; actions?: string[]; sections?: AuthPermissionArea[]; parentId?: string }
+type AuthPermissionTemplate = { id: string; name: string; description?: string; builtIn?: boolean; permissions: AuthPermissionMatrix }
 type AuthUser = {
   id: string
   name?: string
@@ -697,6 +698,7 @@ type AuthUser = {
   status?: string
   isMasterAdmin?: boolean
   mustChangePassword?: boolean
+  permissionTemplateId?: string
   permissions?: AuthPermissionMatrix
   createdAt?: string
   updatedAt?: string
@@ -17522,9 +17524,12 @@ function SettingsPage({
   const [routingResetLoading, setRoutingResetLoading] = useState(false)
   const [settingsWarehouses, setSettingsWarehouses] = useState<Array<Record<string, unknown>>>([])
   const [users, setUsers] = useState<AuthUser[]>(() => (Array.isArray(settings.systemUsers) ? settings.systemUsers as AuthUser[] : []))
+  const [permissionTemplates, setPermissionTemplates] = useState<AuthPermissionTemplate[]>(() => (Array.isArray(settings.authPermissionTemplates) ? settings.authPermissionTemplates as AuthPermissionTemplate[] : []))
   const [selectedUserId, setSelectedUserId] = useState("")
   const [newUserOpen, setNewUserOpen] = useState(false)
-  const [newUser, setNewUser] = useState({ name: "", username: "", email: "", password: "" })
+  const [newUser, setNewUser] = useState({ name: "", username: "", email: "", password: "", permissionTemplateId: "custom" })
+  const [templateDialogOpen, setTemplateDialogOpen] = useState(false)
+  const [templateDraft, setTemplateDraft] = useState<{ id?: string; name: string; description: string; permissions: AuthPermissionMatrix; builtIn?: boolean }>({ name: "", description: "", permissions: {} })
   const [userSaving, setUserSaving] = useState(false)
   const [temporaryPassword, setTemporaryPassword] = useState("")
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
@@ -17550,6 +17555,7 @@ function SettingsPage({
   const canManageUsers = userCan(authUser, "users", "admin")
   const userAreas = permissionAreas.length ? permissionAreas : ((Array.isArray(settings.authPermissionAreas) ? settings.authPermissionAreas : []) as AuthPermissionArea[])
   const selectedUser = users.find((user) => user.id === selectedUserId) || users[0]
+  const selectedTemplateId = selectedUser?.isMasterAdmin ? "master-admin" : (selectedUser?.permissionTemplateId || "custom")
 
   const loadAiUsage = async () => {
     setLoadingAiUsage(true)
@@ -17581,6 +17587,10 @@ function SettingsPage({
     if (activeTab === "users" && users.length) return
     setUsers(Array.isArray(settings.systemUsers) ? settings.systemUsers as AuthUser[] : [])
   }, [settings.systemUsers, activeTab, users.length])
+  useEffect(() => {
+    if (activeTab === "users" && permissionTemplates.length) return
+    setPermissionTemplates(Array.isArray(settings.authPermissionTemplates) ? settings.authPermissionTemplates as AuthPermissionTemplate[] : [])
+  }, [settings.authPermissionTemplates, activeTab, permissionTemplates.length])
   useEffect(() => {
     if (activeTab !== "users") return
     void loadUsers()
@@ -17615,8 +17625,9 @@ function SettingsPage({
 
   async function loadUsers() {
     try {
-      const result = await api<{ users?: AuthUser[]; permissionAreas?: AuthPermissionArea[] }>("/api/users")
+      const result = await api<{ users?: AuthUser[]; permissionAreas?: AuthPermissionArea[]; permissionTemplates?: AuthPermissionTemplate[] }>("/api/users")
       setUsers(result.users || [])
+      setPermissionTemplates(result.permissionTemplates || [])
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load users.")
     }
@@ -17633,7 +17644,7 @@ function SettingsPage({
       setUsers(result.users || (result.user ? [...users, result.user] : users))
       if (result.user?.id) setSelectedUserId(result.user.id)
       setTemporaryPassword(result.temporaryPassword || "")
-      setNewUser({ name: "", username: "", email: "", password: "" })
+      setNewUser({ name: "", username: "", email: "", password: "", permissionTemplateId: "custom" })
       setNewUserOpen(false)
       toast.success("Login created.")
     } catch (error) {
@@ -17681,7 +17692,56 @@ function SettingsPage({
     if (!selectedUser || selectedUser.isMasterAdmin) return
     const permissions = { ...(selectedUser.permissions || {}) }
     permissions[areaId] = { ...(permissions[areaId] || {}), [action]: enabled }
-    setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissions } : user))
+    setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: "custom", permissions } : user))
+  }
+
+  function applyPermissionTemplate(templateId: string) {
+    if (!selectedUser || selectedUser.isMasterAdmin) return
+    if (templateId === "custom") {
+      setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: "custom" } : user))
+      return
+    }
+    const template = permissionTemplates.find((candidate) => candidate.id === templateId)
+    if (!template) return
+    setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: template.id, permissions: template.permissions } : user))
+  }
+
+  function openTemplateDialog(template?: AuthPermissionTemplate) {
+    setTemplateDraft(template ? { id: template.id, name: template.name, description: template.description || "", permissions: template.permissions, builtIn: template.builtIn } : { name: "", description: "", permissions: selectedUser?.permissions || {} })
+    setTemplateDialogOpen(true)
+  }
+
+  async function savePermissionTemplate() {
+    setUserSaving(true)
+    try {
+      const editingTemplate = Boolean(templateDraft.id)
+      const result = await api<{ template?: AuthPermissionTemplate; permissionTemplates?: AuthPermissionTemplate[] }>(editingTemplate ? `/api/users/templates/${encodeURIComponent(String(templateDraft.id))}` : "/api/users/templates", {
+        method: editingTemplate ? "PATCH" : "POST",
+        body: JSON.stringify(templateDraft),
+      })
+      setPermissionTemplates(result.permissionTemplates || (result.template ? [...permissionTemplates.filter((template) => template.id !== result.template?.id), result.template] : permissionTemplates))
+      setTemplateDialogOpen(false)
+      toast.success(editingTemplate ? "Permission template saved." : "Permission template created.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save permission template.")
+    } finally {
+      setUserSaving(false)
+    }
+  }
+
+  async function deletePermissionTemplate(templateId: string) {
+    if (!window.confirm("Delete this permission template? Users using it will become Custom.")) return
+    setUserSaving(true)
+    try {
+      const result = await api<{ users?: AuthUser[]; permissionTemplates?: AuthPermissionTemplate[] }>(`/api/users/templates/${encodeURIComponent(templateId)}`, { method: "DELETE" })
+      setPermissionTemplates(result.permissionTemplates || permissionTemplates.filter((template) => template.id !== templateId))
+      setUsers(result.users || users.map((user) => user.permissionTemplateId === templateId ? { ...user, permissionTemplateId: "custom" } : user))
+      toast.success("Permission template deleted.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to delete permission template.")
+    } finally {
+      setUserSaving(false)
+    }
   }
 
   function permissionEnabled(row: AuthPermission, action: string) {
@@ -18432,6 +18492,49 @@ function SettingsPage({
                     <Field label="Email"><Input disabled={!canManageUsers} type="email" value={selectedUser.email || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, email: event.target.value } : user))} /></Field>
                     <Field label="Status"><Select disabled={!canManageUsers || selectedUser.isMasterAdmin} value={selectedUser.status || "active"} onValueChange={(next) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, status: next } : user))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
                   </div>
+                  <Card className="border-dashed">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm">Permission template</CardTitle>
+                      <CardDescription>Apply a saved template or choose Custom to adjust individual checks below.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+                      <Select disabled={!canManageUsers || selectedUser.isMasterAdmin} value={selectedTemplateId} onValueChange={applyPermissionTemplate}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="custom">Custom</SelectItem>
+                          {selectedUser.isMasterAdmin && <SelectItem value="master-admin">Master admin</SelectItem>}
+                          {permissionTemplates.map((template) => <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                      <div className="flex flex-wrap gap-2">
+                        <Button type="button" variant="outline" disabled={!canManageUsers || selectedUser.isMasterAdmin} onClick={() => openTemplateDialog()}><Save className="size-4" /> Save as template</Button>
+                        {selectedTemplateId !== "custom" && selectedTemplateId !== "master-admin" && !permissionTemplates.find((template) => template.id === selectedTemplateId)?.builtIn && <Button type="button" variant="outline" disabled={!canManageUsers || userSaving} onClick={() => {
+                          const template = permissionTemplates.find((candidate) => candidate.id === selectedTemplateId)
+                          if (template) setTemplateDraft({ id: template.id, name: template.name, description: template.description || "", permissions: selectedUser.permissions || {}, builtIn: template.builtIn })
+                          setTemplateDialogOpen(true)
+                        }}><RefreshCw className="size-4" /> Update template</Button>}
+                      </div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm">Templates</CardTitle>
+                      <CardDescription>Built-in templates stay available; custom templates can be edited or deleted.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                      {permissionTemplates.map((template) => <div key={template.id} className="rounded-md border p-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0"><p className="truncate text-sm font-medium">{template.name}</p><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{template.description || "No description."}</p></div>
+                          {template.builtIn && <Badge variant="outline">Built-in</Badge>}
+                        </div>
+                        <div className="mt-3 flex gap-2">
+                          <Button type="button" size="sm" variant="outline" disabled={!canManageUsers || selectedUser.isMasterAdmin} onClick={() => applyPermissionTemplate(template.id)}>Apply</Button>
+                          <Button type="button" size="sm" variant="outline" disabled={!canManageUsers} onClick={() => openTemplateDialog(template)}><Pencil className="size-3.5" /> Edit</Button>
+                          {!template.builtIn && <Button type="button" size="sm" variant="outline" disabled={!canManageUsers || userSaving} onClick={() => void deletePermissionTemplate(template.id)}><Trash2 className="size-3.5" /> Delete</Button>}
+                        </div>
+                      </div>)}
+                    </CardContent>
+                  </Card>
                   <div className="grid gap-3">
                     {userAreas.map((area) => permissionAreaControl(area))}
                   </div>
@@ -18440,6 +18543,28 @@ function SettingsPage({
             </Card>
           </div>
 
+          <Dialog open={templateDialogOpen} onOpenChange={setTemplateDialogOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>{templateDraft.id ? "Edit permission template" : "Create permission template"}</DialogTitle>
+                <DialogDescription>{templateDraft.id ? "Update the template name, description, and saved permissions." : "This saves the selected user's current permission checks as a reusable template."}</DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4">
+                <Field label="Template name"><Input value={templateDraft.name} onChange={(event) => setTemplateDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Warehouse receiver" /></Field>
+                <Field label="Description"><Textarea value={templateDraft.description} onChange={(event) => setTemplateDraft((current) => ({ ...current, description: event.target.value }))} placeholder="What this template allows." /></Field>
+                <Alert>
+                  <ShieldCheck className="size-4" />
+                  <AlertTitle>Saved permissions</AlertTitle>
+                  <AlertDescription>{templateDraft.id ? "The template will save the permission set currently attached to this template. Use Update template from the profile to replace it with the selected user's current checks." : "The current selected user's permission checks will become the template."}</AlertDescription>
+                </Alert>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setTemplateDialogOpen(false)}>Cancel</Button>
+                <Button disabled={userSaving || !templateDraft.name.trim()} onClick={() => void savePermissionTemplate()}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save template</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
           <Dialog open={newUserOpen} onOpenChange={setNewUserOpen}>
             <DialogContent>
               <DialogHeader><DialogTitle>Create login</DialogTitle><DialogDescription>The user can sign in after you share the password. Leave password empty to generate one.</DialogDescription></DialogHeader>
@@ -18447,6 +18572,15 @@ function SettingsPage({
                 <Field label="Name"><Input value={newUser.name} onChange={(event) => setNewUser((current) => ({ ...current, name: event.target.value }))} /></Field>
                 <Field label="Username"><Input value={newUser.username} onChange={(event) => setNewUser((current) => ({ ...current, username: event.target.value }))} placeholder="first.last" /></Field>
                 <Field label="Email"><Input type="email" value={newUser.email} onChange={(event) => setNewUser((current) => ({ ...current, email: event.target.value }))} /></Field>
+                <Field label="Permission template">
+                  <Select value={newUser.permissionTemplateId} onValueChange={(value) => setNewUser((current) => ({ ...current, permissionTemplateId: value }))}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="custom">Custom</SelectItem>
+                      {permissionTemplates.map((template) => <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </Field>
                 <Field label="Temporary password"><Input type="password" value={newUser.password} onChange={(event) => setNewUser((current) => ({ ...current, password: event.target.value }))} placeholder="Generate automatically" /></Field>
               </div>
               <DialogFooter><Button variant="outline" onClick={() => setNewUserOpen(false)}>Cancel</Button><Button disabled={userSaving || !newUser.username} onClick={() => void createLogin()}>{userSaving && <Loader2 className="size-4 animate-spin" />} Create login</Button></DialogFooter>
