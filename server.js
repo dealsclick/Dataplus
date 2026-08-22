@@ -1077,7 +1077,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   requireAdminConfirmationForDeletes: true,
   warehouseAuditAdminPinHash: "",
   warehouseAuditAdminPinSalt: "",
-  warehouseAuditAdminRoles: ["Owner", "Admin"],
+  warehouseAuditAdminRoles: ["Master Admin", "Owner", "Admin"],
   smtpEnabled: false,
   smtpHost: "",
   smtpPort: 587,
@@ -5082,7 +5082,7 @@ function normalizeSystemSettings(settings = {}) {
   normalized.jobsRetentionAutoCleanupEnabled = normalized.jobsRetentionAutoCleanupEnabled !== false;
   normalized.warehouseAuditAdminPinHash = String(normalized.warehouseAuditAdminPinHash || "");
   normalized.warehouseAuditAdminPinSalt = String(normalized.warehouseAuditAdminPinSalt || "");
-  normalized.warehouseAuditAdminRoles = (Array.isArray(normalized.warehouseAuditAdminRoles) ? normalized.warehouseAuditAdminRoles : ["Owner", "Admin"])
+  normalized.warehouseAuditAdminRoles = (Array.isArray(normalized.warehouseAuditAdminRoles) ? normalized.warehouseAuditAdminRoles : ["Master Admin", "Owner", "Admin"])
     .map((role) => String(role || "").trim()).filter(Boolean);
   normalized.smtpEnabled = normalized.smtpEnabled === true || String(normalized.smtpEnabled).toLowerCase() === "true";
   normalized.smtpHost = String(normalized.smtpHost || "").trim();
@@ -5382,8 +5382,8 @@ function verifyWarehouseAuditAdminAccess(settings = {}, body = {}) {
   const user = (normalized.systemUsers || []).find((candidate) => String(candidate.id || "") === requestedUser)
     || (normalized.systemUsers || []).find((candidate) => String(candidate.name || "").trim().toLowerCase() === requestedUser.toLowerCase())
     || null;
-  const allowedRoles = new Set((normalized.warehouseAuditAdminRoles || ["Owner", "Admin"]).map((role) => String(role).trim().toLowerCase()));
-  if (!user || !allowedRoles.has(String(user.role || "").trim().toLowerCase())) return { error: "This audit action requires an administrator account." };
+  const allowedRoles = new Set((normalized.warehouseAuditAdminRoles || ["Master Admin", "Owner", "Admin"]).map((role) => String(role).trim().toLowerCase()));
+  if (!user || (user.isMasterAdmin !== true && !allowedRoles.has(String(user.role || "").trim().toLowerCase()))) return { error: "This audit action requires an administrator account." };
   if (!normalized.warehouseAuditAdminPinHash || !normalized.warehouseAuditAdminPinSalt) return { error: "Set the Warehouse audit administrator PIN in System Settings before locking or deleting audits." };
   const expected = Buffer.from(normalized.warehouseAuditAdminPinHash, "hex");
   const actual = Buffer.from(hashWarehouseAuditAdminPin(body.adminPin, normalized.warehouseAuditAdminPinSalt), "hex");
