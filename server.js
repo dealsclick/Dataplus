@@ -1129,7 +1129,8 @@ const DEFAULT_SYSTEM_SETTINGS = {
     { id: "admin", name: "Admin", permissions: ["catalog", "orders", "channels", "system"] },
     { id: "operator", name: "Operator", permissions: ["catalog", "orders"] }
   ],
-  authPermissionTemplates: []
+  authPermissionTemplates: [],
+  authPermissionAuditLog: []
 };
 
 const AUTH_PERMISSION_AREAS = [
@@ -5279,6 +5280,11 @@ function normalizeSystemSettings(settings = {}) {
     if (normalizedTemplate.name) templatesById.set(normalizedTemplate.id, { ...templatesById.get(normalizedTemplate.id), ...normalizedTemplate });
   }
   normalized.authPermissionTemplates = Array.from(templatesById.values()).filter((template) => template.name);
+  normalized.authPermissionAuditLog = (Array.isArray(normalized.authPermissionAuditLog) ? normalized.authPermissionAuditLog : [])
+    .map(normalizeAuthPermissionAuditEvent)
+    .filter((event) => event.id && event.message)
+    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+    .slice(0, 250);
   return normalized;
 }
 
@@ -5340,6 +5346,39 @@ function normalizeAuthPermissionTemplate(template = {}, index = 0) {
     createdAt: sourceTextValue(template.createdAt || new Date().toISOString()),
     updatedAt: sourceTextValue(template.updatedAt || "")
   };
+}
+
+function permissionEnabledCount(permissions = {}) {
+  const normalized = normalizeAuthPermissions(permissions, false);
+  return authPermissionRows().reduce((sum, area) => sum + (area.actions || []).filter((action) => normalized[area.id]?.[action] === true).length, 0);
+}
+
+function normalizeAuthPermissionAuditEvent(event = {}) {
+  return {
+    id: sourceTextValue(event.id || crypto.randomUUID?.() || `audit-${Date.now()}`),
+    type: sourceTextValue(event.type || "permission_change"),
+    targetType: sourceTextValue(event.targetType || ""),
+    targetId: sourceTextValue(event.targetId || ""),
+    targetName: sourceTextValue(event.targetName || ""),
+    actorId: sourceTextValue(event.actorId || ""),
+    actorName: sourceTextValue(event.actorName || ""),
+    message: sourceTextValue(event.message || ""),
+    beforeCount: Number(event.beforeCount || 0) || 0,
+    afterCount: Number(event.afterCount || 0) || 0,
+    templateId: sourceTextValue(event.templateId || ""),
+    createdAt: sourceTextValue(event.createdAt || new Date().toISOString())
+  };
+}
+
+function appendAuthPermissionAudit(settings = {}, actor = {}, event = {}) {
+  const normalizedEvent = normalizeAuthPermissionAuditEvent({
+    ...event,
+    actorId: actor.id || event.actorId || "",
+    actorName: actor.name || actor.username || event.actorName || "System",
+    createdAt: new Date().toISOString()
+  });
+  settings.authPermissionAuditLog = [normalizedEvent, ...(Array.isArray(settings.authPermissionAuditLog) ? settings.authPermissionAuditLog : [])].slice(0, 250);
+  return settings;
 }
 
 function hashUserPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
@@ -5629,7 +5668,7 @@ function publicSystemSettings(settings = {}) {
   const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
   const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
   const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
-  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
+  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), authPermissionAuditLog: normalized.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
 }
 
 function hashWarehouseAuditAdminPin(pin, salt) {
@@ -31518,7 +31557,7 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/users") {
     if (!userCan(authUser, "users", "read")) return sendJson(res, 403, { error: "Manage Users access is required." });
-    return sendJson(res, 200, { users: authSettings.systemUsers.map(publicSystemUser), permissionAreas: AUTH_PERMISSION_AREAS, permissionTemplates: authSettings.authPermissionTemplates.map(publicAuthPermissionTemplate) });
+    return sendJson(res, 200, { users: authSettings.systemUsers.map(publicSystemUser), permissionAreas: AUTH_PERMISSION_AREAS, permissionTemplates: authSettings.authPermissionTemplates.map(publicAuthPermissionTemplate), permissionAuditLog: authSettings.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent) });
   }
 
   if (req.method === "POST" && url.pathname === "/api/users") {
@@ -31549,6 +31588,7 @@ async function handleApi(req, res) {
       mustChangePassword: true
     }, current.systemUsers.length);
     current.systemUsers = [...(current.systemUsers || []), user];
+    appendAuthPermissionAudit(current, authUser, { type: "user_created", targetType: "user", targetId: user.id, targetName: user.name || user.username, afterCount: permissionEnabledCount(user.permissions), templateId: user.permissionTemplateId, message: `Created login for ${user.name || user.username}.` });
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
@@ -31571,6 +31611,7 @@ async function handleApi(req, res) {
       updatedAt: new Date().toISOString()
     }, (current.authPermissionTemplates || []).length);
     current.authPermissionTemplates = [...(current.authPermissionTemplates || []), template];
+    appendAuthPermissionAudit(current, authUser, { type: "template_created", targetType: "template", targetId: template.id, targetName: template.name, afterCount: permissionEnabledCount(template.permissions), message: `Created permission template ${template.name}.` });
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
@@ -31594,6 +31635,7 @@ async function handleApi(req, res) {
       updatedAt: new Date().toISOString()
     });
     current.authPermissionTemplates = (current.authPermissionTemplates || []).map((template) => template.id === existing.id ? updated : template);
+    appendAuthPermissionAudit(current, authUser, { type: "template_updated", targetType: "template", targetId: updated.id, targetName: updated.name, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), message: `Updated permission template ${updated.name}.` });
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
@@ -31609,6 +31651,7 @@ async function handleApi(req, res) {
     if (existing.builtIn) return sendJson(res, 400, { error: "Built-in templates cannot be deleted." });
     current.authPermissionTemplates = (current.authPermissionTemplates || []).filter((template) => template.id !== existing.id);
     current.systemUsers = (current.systemUsers || []).map((user) => user.permissionTemplateId === existing.id ? { ...user, permissionTemplateId: "custom" } : user);
+    appendAuthPermissionAudit(current, authUser, { type: "template_deleted", targetType: "template", targetId: existing.id, targetName: existing.name, beforeCount: permissionEnabledCount(existing.permissions), message: `Deleted permission template ${existing.name}.` });
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
@@ -31641,6 +31684,7 @@ async function handleApi(req, res) {
     const duplicate = (current.systemUsers || []).find((candidate) => candidate.id !== existing.id && (sourceTextValue(candidate.username).toLowerCase() === updated.username || (updated.email && sourceTextValue(candidate.email).toLowerCase() === updated.email.toLowerCase())));
     if (duplicate) return sendJson(res, 409, { error: "Another user already uses that username or email." });
     current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);
+    appendAuthPermissionAudit(current, authUser, { type: "user_updated", targetType: "user", targetId: updated.id, targetName: updated.name || updated.username, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), templateId: updated.permissionTemplateId, message: `Updated ${updated.name || updated.username}.` });
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
@@ -31664,6 +31708,7 @@ async function handleApi(req, res) {
     const hashed = hashUserPassword(password);
     const updated = { ...existing, passwordHash: hashed.hash, passwordSalt: hashed.salt, mustChangePassword: authUser.id !== userId && body.mustChangePassword !== false, updatedAt: new Date().toISOString() };
     current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);
+    appendAuthPermissionAudit(current, authUser, { type: "password_reset", targetType: "user", targetId: updated.id, targetName: updated.name || updated.username, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), message: authUser.id === updated.id ? `Password changed for ${updated.name || updated.username}.` : `Password reset for ${updated.name || updated.username}.` });
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;

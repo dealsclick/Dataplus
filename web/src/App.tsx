@@ -689,6 +689,7 @@ type AuthPermission = { view?: boolean; read?: boolean; write?: boolean; admin?:
 type AuthPermissionMatrix = Record<string, AuthPermission>
 type AuthPermissionArea = { id: string; label: string; path: string; actions?: string[]; sections?: AuthPermissionArea[]; parentId?: string }
 type AuthPermissionTemplate = { id: string; name: string; description?: string; builtIn?: boolean; permissions: AuthPermissionMatrix }
+type AuthPermissionAuditEvent = { id: string; type?: string; targetType?: string; targetId?: string; targetName?: string; actorName?: string; message?: string; beforeCount?: number; afterCount?: number; templateId?: string; createdAt?: string }
 type AuthUser = {
   id: string
   name?: string
@@ -1204,23 +1205,23 @@ function jobIdFromPath(pathname = window.location.pathname) {
 
 const viewPermissionArea: Record<AppView, string> = {
   overview: "overview",
-  jobs: "jobs",
-  "job-detail": "jobs",
-  channels: "channels",
-  catalog: "catalog",
+  jobs: "jobs.queue",
+  "job-detail": "jobs.artifacts",
+  channels: "channels.settings",
+  catalog: "catalog.products",
   operations: "orders",
-  warehouse: "warehouse",
-  fulfillment: "fulfillment",
-  purchasing: "purchasing",
-  "po-detail": "purchasing",
+  warehouse: "warehouse.locations",
+  fulfillment: "fulfillment.work",
+  purchasing: "purchasing.queue",
+  "po-detail": "purchasing.po",
   "order-detail": "orders",
   "draft-detail": "orders",
-  "product-detail": "catalog",
-  "inventory-detail": "warehouse",
-  "category-detail": "catalog",
-  vendors: "vendors",
-  brands: "brands",
-  "brand-detail": "brands",
+  "product-detail": "catalog.products",
+  "inventory-detail": "warehouse.inventory",
+  "category-detail": "catalog.categories",
+  vendors: "vendors.profiles",
+  brands: "brands.profiles",
+  "brand-detail": "brands.profiles",
   "ai-chat": "ai",
   settings: "settings",
 }
@@ -17524,10 +17525,16 @@ function SettingsPage({
   const [routingResetLoading, setRoutingResetLoading] = useState(false)
   const [settingsWarehouses, setSettingsWarehouses] = useState<Array<Record<string, unknown>>>([])
   const [users, setUsers] = useState<AuthUser[]>(() => (Array.isArray(settings.systemUsers) ? settings.systemUsers as AuthUser[] : []))
+  const [savedUsers, setSavedUsers] = useState<AuthUser[]>(() => (Array.isArray(settings.systemUsers) ? settings.systemUsers as AuthUser[] : []))
   const [permissionTemplates, setPermissionTemplates] = useState<AuthPermissionTemplate[]>(() => (Array.isArray(settings.authPermissionTemplates) ? settings.authPermissionTemplates as AuthPermissionTemplate[] : []))
+  const [savedPermissionTemplates, setSavedPermissionTemplates] = useState<AuthPermissionTemplate[]>(() => (Array.isArray(settings.authPermissionTemplates) ? settings.authPermissionTemplates as AuthPermissionTemplate[] : []))
+  const [permissionAuditLog, setPermissionAuditLog] = useState<AuthPermissionAuditEvent[]>(() => (Array.isArray(settings.authPermissionAuditLog) ? settings.authPermissionAuditLog as AuthPermissionAuditEvent[] : []))
   const [selectedUserId, setSelectedUserId] = useState("")
   const [selectedPermissionAreaId, setSelectedPermissionAreaId] = useState("")
   const [permissionSearch, setPermissionSearch] = useState("")
+  const [copyUserId, setCopyUserId] = useState("")
+  const [copyTemplateId, setCopyTemplateId] = useState("")
+  const [previewOpen, setPreviewOpen] = useState(false)
   const [newUserOpen, setNewUserOpen] = useState(false)
   const [newUser, setNewUser] = useState({ name: "", username: "", email: "", password: "", permissionTemplateId: "custom" })
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false)
@@ -17555,9 +17562,13 @@ function SettingsPage({
   const usageNumber = (field: string, period = "thirtyDays") => Number((aiUsage?.[period] as Record<string, unknown> | undefined)?.[field] || 0).toLocaleString()
   const workflowValue = (section: string, field: string, fallback: unknown) => orderWorkflowDraft[`${section}.${field}`] ?? ((orderWorkflowSettings[section] as Record<string, unknown> | undefined)?.[field]) ?? fallback
   const canManageUsers = userCan(authUser, "users", "admin")
+  const canEditUserAccounts = userCan(authUser, "users.accounts", "edit")
+  const canEditUserPermissions = userCan(authUser, "users.permissions", "permissions")
   const userAreas = permissionAreas.length ? permissionAreas : ((Array.isArray(settings.authPermissionAreas) ? settings.authPermissionAreas : []) as AuthPermissionArea[])
   const selectedUser = users.find((user) => user.id === selectedUserId) || users[0]
+  const savedSelectedUser = savedUsers.find((user) => user.id === selectedUser?.id)
   const selectedTemplateId = selectedUser?.isMasterAdmin ? "master-admin" : (selectedUser?.permissionTemplateId || "custom")
+  const selectedUserDirty = Boolean(selectedUser && JSON.stringify(selectedUser) !== JSON.stringify(savedSelectedUser || null))
 
   const loadAiUsage = async () => {
     setLoadingAiUsage(true)
@@ -17587,11 +17598,15 @@ function SettingsPage({
   }, [])
   useEffect(() => {
     if (activeTab === "users" && users.length) return
-    setUsers(Array.isArray(settings.systemUsers) ? settings.systemUsers as AuthUser[] : [])
+    const nextUsers = Array.isArray(settings.systemUsers) ? settings.systemUsers as AuthUser[] : []
+    setUsers(nextUsers)
+    setSavedUsers(nextUsers)
   }, [settings.systemUsers, activeTab, users.length])
   useEffect(() => {
     if (activeTab === "users" && permissionTemplates.length) return
-    setPermissionTemplates(Array.isArray(settings.authPermissionTemplates) ? settings.authPermissionTemplates as AuthPermissionTemplate[] : [])
+    const nextTemplates = Array.isArray(settings.authPermissionTemplates) ? settings.authPermissionTemplates as AuthPermissionTemplate[] : []
+    setPermissionTemplates(nextTemplates)
+    setSavedPermissionTemplates(nextTemplates)
   }, [settings.authPermissionTemplates, activeTab, permissionTemplates.length])
   useEffect(() => {
     if (activeTab !== "users") return
@@ -17632,9 +17647,12 @@ function SettingsPage({
 
   async function loadUsers() {
     try {
-      const result = await api<{ users?: AuthUser[]; permissionAreas?: AuthPermissionArea[]; permissionTemplates?: AuthPermissionTemplate[] }>("/api/users")
+      const result = await api<{ users?: AuthUser[]; permissionAreas?: AuthPermissionArea[]; permissionTemplates?: AuthPermissionTemplate[]; permissionAuditLog?: AuthPermissionAuditEvent[] }>("/api/users")
       setUsers(result.users || [])
+      setSavedUsers(result.users || [])
       setPermissionTemplates(result.permissionTemplates || [])
+      setSavedPermissionTemplates(result.permissionTemplates || [])
+      setPermissionAuditLog(result.permissionAuditLog || [])
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load users.")
     }
@@ -17649,10 +17667,12 @@ function SettingsPage({
         body: JSON.stringify(newUser),
       })
       setUsers(result.users || (result.user ? [...users, result.user] : users))
+      setSavedUsers(result.users || (result.user ? [...savedUsers, result.user] : savedUsers))
       if (result.user?.id) setSelectedUserId(result.user.id)
       setTemporaryPassword(result.temporaryPassword || "")
       setNewUser({ name: "", username: "", email: "", password: "", permissionTemplateId: "custom" })
       setNewUserOpen(false)
+      void loadUsers()
       toast.success("Login created.")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to create login.")
@@ -17669,6 +17689,8 @@ function SettingsPage({
         body: JSON.stringify(patch),
       })
       setUsers(result.users || users.map((user) => user.id === userId ? { ...user, ...(result.user || patch) } : user))
+      setSavedUsers(result.users || users.map((user) => user.id === userId ? { ...user, ...(result.user || patch) } : user))
+      void loadUsers()
       toast.success("User profile saved.")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to save user.")
@@ -17686,6 +17708,8 @@ function SettingsPage({
         body: JSON.stringify({}),
       })
       setUsers(result.users || users)
+      setSavedUsers(result.users || users)
+      void loadUsers()
       setTemporaryPassword(result.temporaryPassword || "")
       toast.success("Temporary password generated.")
     } catch (error) {
@@ -17709,6 +17733,7 @@ function SettingsPage({
 
   function applyPermissionTemplate(templateId: string) {
     if (!selectedUser || selectedUser.isMasterAdmin) return
+    if (templateId !== "custom" && (selectedUserDirty || selectedTemplateId === "custom") && !window.confirm("Apply this template and replace the user's current permission checks?")) return
     if (templateId === "custom") {
       setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: "custom" } : user))
       return
@@ -17718,9 +17743,33 @@ function SettingsPage({
     setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: template.id, permissions: template.permissions } : user))
   }
 
+  function copyPermissionsFromUser() {
+    if (!selectedUser || selectedUser.isMasterAdmin || !copyUserId) return
+    const source = users.find((user) => user.id === copyUserId)
+    if (!source || !window.confirm(`Copy permissions from ${source.name || source.username} to ${selectedUser.name || selectedUser.username}?`)) return
+    setSelectedPermissions({ ...(source.permissions || {}) })
+  }
+
+  function copyPermissionsFromTemplate() {
+    if (!selectedUser || selectedUser.isMasterAdmin || !copyTemplateId) return
+    const source = permissionTemplates.find((template) => template.id === copyTemplateId)
+    if (!source || !window.confirm(`Copy template ${source.name} to ${selectedUser.name || selectedUser.username}?`)) return
+    setSelectedPermissions({ ...(source.permissions || {}) })
+  }
+
   function openTemplateDialog(template?: AuthPermissionTemplate) {
     setTemplateDraft(template ? { id: template.id, name: template.name, description: template.description || "", permissions: template.permissions, builtIn: template.builtIn } : { name: "", description: "", permissions: selectedUser?.permissions || {} })
     setTemplateDialogOpen(true)
+  }
+
+  function updateTemplateDraftPermission(areaId: string, action: keyof AuthPermission, enabled: boolean) {
+    setTemplateDraft((current) => ({
+      ...current,
+      permissions: {
+        ...(current.permissions || {}),
+        [areaId]: { ...(current.permissions?.[areaId] || {}), [action]: enabled },
+      },
+    }))
   }
 
   async function savePermissionTemplate() {
@@ -17732,7 +17781,9 @@ function SettingsPage({
         body: JSON.stringify(templateDraft),
       })
       setPermissionTemplates(result.permissionTemplates || (result.template ? [...permissionTemplates.filter((template) => template.id !== result.template?.id), result.template] : permissionTemplates))
+      setSavedPermissionTemplates(result.permissionTemplates || (result.template ? [...savedPermissionTemplates.filter((template) => template.id !== result.template?.id), result.template] : savedPermissionTemplates))
       setTemplateDialogOpen(false)
+      void loadUsers()
       toast.success(editingTemplate ? "Permission template saved." : "Permission template created.")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to save permission template.")
@@ -17747,7 +17798,10 @@ function SettingsPage({
     try {
       const result = await api<{ users?: AuthUser[]; permissionTemplates?: AuthPermissionTemplate[] }>(`/api/users/templates/${encodeURIComponent(templateId)}`, { method: "DELETE" })
       setPermissionTemplates(result.permissionTemplates || permissionTemplates.filter((template) => template.id !== templateId))
+      setSavedPermissionTemplates(result.permissionTemplates || savedPermissionTemplates.filter((template) => template.id !== templateId))
       setUsers(result.users || users.map((user) => user.permissionTemplateId === templateId ? { ...user, permissionTemplateId: "custom" } : user))
+      setSavedUsers(result.users || savedUsers.map((user) => user.permissionTemplateId === templateId ? { ...user, permissionTemplateId: "custom" } : user))
+      void loadUsers()
       toast.success("Permission template deleted.")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to delete permission template.")
@@ -17758,6 +17812,27 @@ function SettingsPage({
 
   function permissionEnabled(row: AuthPermission, action: string) {
     return Boolean(selectedUser?.isMasterAdmin || row[action] === true || row.admin === true || row.write === true)
+  }
+
+  function permissionMatrixCount(permissions?: AuthPermissionMatrix) {
+    return userAreas.reduce((sum, area) => sum + areaPermissionRows(area).reduce((areaSum, row) => areaSum + (row.actions || []).filter((action) => permissions?.[row.id]?.[action] === true || permissions?.[row.id]?.write === true || permissions?.[row.id]?.admin === true).length, 0), 0)
+  }
+
+  function templateName(id?: string) {
+    if (!id || id === "custom") return "Custom"
+    if (id === "master-admin") return "Master admin"
+    return permissionTemplates.find((template) => template.id === id)?.name || "Custom"
+  }
+
+  function userPermissionSummary(user: AuthUser) {
+    if (user.isMasterAdmin) return "Master admin"
+    return `${templateName(user.permissionTemplateId)} · ${permissionMatrixCount(user.permissions)} enabled`
+  }
+
+  function userCanFromMatrix(user: AuthUser, areaId: string, action: string) {
+    if (user.isMasterAdmin) return true
+    const row = user.permissions?.[areaId] || {}
+    return row[action] === true || row.write === true || row.admin === true || (action === "view" && (row.view === true || row.read === true))
   }
 
   function permissionRowEnabled(area: AuthPermissionArea, action: string) {
@@ -17793,6 +17868,7 @@ function SettingsPage({
 
   function applyPermissionPreset(area: AuthPermissionArea, preset: "none" | "view" | "standard" | "full") {
     if (!selectedUser || selectedUser.isMasterAdmin) return
+    if (preset === "none" && !window.confirm(`Remove all access for ${area.label}?`)) return
     const permissions = { ...(selectedUser.permissions || {}) }
     for (const rowArea of areaPermissionRows(area)) {
       const row: AuthPermission = { ...(permissions[rowArea.id] || {}) }
@@ -17810,7 +17886,13 @@ function SettingsPage({
 
   function permissionCheckbox(area: AuthPermissionArea, action: string) {
     if (!(area.actions || []).includes(action)) return <span className="text-xs text-muted-foreground">-</span>
-    return <Checkbox disabled={!canManageUsers || selectedUser?.isMasterAdmin} checked={permissionRowEnabled(area, action)} onCheckedChange={(checked) => updateSelectedPermission(area.id, action as keyof AuthPermission, checked === true)} />
+    return <Checkbox disabled={!canEditUserPermissions || selectedUser?.isMasterAdmin} checked={permissionRowEnabled(area, action)} onCheckedChange={(checked) => updateSelectedPermission(area.id, action as keyof AuthPermission, checked === true)} />
+  }
+
+  function templatePermissionCheckbox(area: AuthPermissionArea, action: string) {
+    if (!(area.actions || []).includes(action)) return <span className="text-xs text-muted-foreground">-</span>
+    const row = templateDraft.permissions?.[area.id] || {}
+    return <Checkbox disabled={!canEditUserPermissions} checked={row[action] === true || row.write === true || row.admin === true} onCheckedChange={(checked) => updateTemplateDraftPermission(area.id, action as keyof AuthPermission, checked === true)} />
   }
 
   function permissionSummary(area: AuthPermissionArea) {
@@ -18516,7 +18598,7 @@ function SettingsPage({
               <CardContent className="grid gap-2 p-3">
                 {users.map((user) => <button key={user.id} type="button" onClick={() => setSelectedUserId(user.id)} className={cn("rounded-md border p-3 text-left transition-colors hover:border-primary", selectedUser?.id === user.id && "border-primary bg-primary/5")}>
                   <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium">{user.name || user.username}</p><p className="truncate text-xs text-muted-foreground">{user.username || user.email}</p></div><Badge variant={user.status === "active" ? "success" : "outline"}>{user.status || "active"}</Badge></div>
-                  <div className="mt-2 flex flex-wrap gap-1"><Badge variant={user.isMasterAdmin ? "default" : "secondary"}>{user.role || "Operator"}</Badge>{user.mustChangePassword && <Badge variant="warning">Reset required</Badge>}</div>
+                  <div className="mt-2 flex flex-wrap gap-1"><Badge variant={user.isMasterAdmin ? "default" : "secondary"}>{user.role || "Operator"}</Badge><Badge variant="outline">{userPermissionSummary(user)}</Badge>{JSON.stringify(user) !== JSON.stringify(savedUsers.find((saved) => saved.id === user.id) || null) && <Badge variant="warning">Unsaved</Badge>}{user.mustChangePassword && <Badge variant="warning">Reset required</Badge>}</div>
                 </button>)}
                 {!users.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">No users found.</p>}
               </CardContent>
@@ -18526,20 +18608,20 @@ function SettingsPage({
               <CardHeader className="sticky top-0 z-10 border-b bg-card/95 backdrop-blur">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <CardTitle className="text-base">{selectedUser ? `Profile: ${selectedUser.name || selectedUser.username}` : "User profile"}</CardTitle>
+                    <CardTitle className="flex flex-wrap items-center gap-2 text-base">{selectedUser ? `Profile: ${selectedUser.name || selectedUser.username}` : "User profile"}{selectedUserDirty && <Badge variant="warning">Unsaved changes</Badge>}{previewOpen && <Badge variant="secondary">Preview open</Badge>}</CardTitle>
                     <CardDescription>{selectedUser?.isMasterAdmin ? "Luis is the protected master admin and always keeps full access." : "Save profile changes and permission edits for the selected login."}</CardDescription>
                   </div>
-                  {selectedUser && <div className="flex gap-2"><Button size="sm" variant="outline" disabled={!canManageUsers || userSaving} onClick={() => void resetUserPassword(selectedUser.id)}><LockKeyhole className="size-4" /> Reset password</Button><Button size="sm" disabled={!canManageUsers || userSaving} onClick={() => void saveUser(selectedUser.id, selectedUser)}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save user</Button></div>}
+                  {selectedUser && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setPreviewOpen((open) => !open)}><Eye className="size-4" /> Preview</Button><Button size="sm" variant="outline" disabled={!canEditUserAccounts || userSaving} onClick={() => void resetUserPassword(selectedUser.id)}><LockKeyhole className="size-4" /> Reset password</Button><Button size="sm" disabled={!canManageUsers || userSaving || !selectedUserDirty} onClick={() => void saveUser(selectedUser.id, selectedUser)}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save user</Button></div>}
                 </div>
               </CardHeader>
               <CardContent className="grid gap-5 p-4">
                 {temporaryPassword && <Alert className="border-amber-500/40 bg-amber-500/5"><LockKeyhole className="size-4" /><AlertTitle>Temporary password generated</AlertTitle><AlertDescription><span className="font-mono">{temporaryPassword}</span></AlertDescription></Alert>}
                 {selectedUser ? <>
                   <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                    <Field label="Name"><Input disabled={!canManageUsers || selectedUser.isMasterAdmin} value={selectedUser.name || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, name: event.target.value } : user))} /></Field>
-                    <Field label="Username"><Input disabled={!canManageUsers || selectedUser.isMasterAdmin} value={selectedUser.username || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, username: event.target.value } : user))} /></Field>
-                    <Field label="Email"><Input disabled={!canManageUsers} type="email" value={selectedUser.email || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, email: event.target.value } : user))} /></Field>
-                    <Field label="Status"><Select disabled={!canManageUsers || selectedUser.isMasterAdmin} value={selectedUser.status || "active"} onValueChange={(next) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, status: next } : user))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
+                    <Field label="Name"><Input disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.name || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, name: event.target.value } : user))} /></Field>
+                    <Field label="Username"><Input disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.username || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, username: event.target.value } : user))} /></Field>
+                    <Field label="Email"><Input disabled={!canEditUserAccounts} type="email" value={selectedUser.email || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, email: event.target.value } : user))} /></Field>
+                    <Field label="Status"><Select disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.status || "active"} onValueChange={(next) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, status: next } : user))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
                   </div>
                   <Card className="border-dashed">
                     <CardHeader className="pb-3">
@@ -18547,7 +18629,7 @@ function SettingsPage({
                       <CardDescription>Apply a saved template or choose Custom to adjust individual checks below.</CardDescription>
                     </CardHeader>
                     <CardContent className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
-                      <Select disabled={!canManageUsers || selectedUser.isMasterAdmin} value={selectedTemplateId} onValueChange={applyPermissionTemplate}>
+                      <Select disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} value={selectedTemplateId} onValueChange={applyPermissionTemplate}>
                         <SelectTrigger><SelectValue /></SelectTrigger>
                         <SelectContent>
                           <SelectItem value="custom">Custom</SelectItem>
@@ -18556,7 +18638,7 @@ function SettingsPage({
                         </SelectContent>
                       </Select>
                       <div className="flex flex-wrap gap-2">
-                        <Button type="button" variant="outline" disabled={!canManageUsers || selectedUser.isMasterAdmin} onClick={() => openTemplateDialog()}><Save className="size-4" /> Save as template</Button>
+                        <Button type="button" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} onClick={() => openTemplateDialog()}><Save className="size-4" /> Save as template</Button>
                         {selectedTemplateId !== "custom" && selectedTemplateId !== "master-admin" && !permissionTemplates.find((template) => template.id === selectedTemplateId)?.builtIn && <Button type="button" variant="outline" disabled={!canManageUsers || userSaving} onClick={() => {
                           const template = permissionTemplates.find((candidate) => candidate.id === selectedTemplateId)
                           if (template) setTemplateDraft({ id: template.id, name: template.name, description: template.description || "", permissions: selectedUser.permissions || {}, builtIn: template.builtIn })
@@ -18565,6 +18647,43 @@ function SettingsPage({
                       </div>
                     </CardContent>
                   </Card>
+                  {!selectedUser.isMasterAdmin && <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm">Copy access</CardTitle>
+                      <CardDescription>Copy a full permission set from another user or from a template, then save this user.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="grid gap-3 md:grid-cols-2">
+                      <div className="flex gap-2">
+                        <Select value={copyUserId || "none"} onValueChange={(value) => setCopyUserId(value === "none" ? "" : value)}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent><SelectItem value="none">Copy from user</SelectItem>{users.filter((user) => user.id !== selectedUser.id).map((user) => <SelectItem key={user.id} value={user.id}>{user.name || user.username}</SelectItem>)}</SelectContent>
+                        </Select>
+                        <Button type="button" variant="outline" disabled={!canEditUserPermissions || !copyUserId} onClick={copyPermissionsFromUser}><Copy className="size-4" /> Copy</Button>
+                      </div>
+                      <div className="flex gap-2">
+                        <Select value={copyTemplateId || "none"} onValueChange={(value) => setCopyTemplateId(value === "none" ? "" : value)}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent><SelectItem value="none">Copy from template</SelectItem>{permissionTemplates.map((template) => <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>)}</SelectContent>
+                        </Select>
+                        <Button type="button" variant="outline" disabled={!canEditUserPermissions || !copyTemplateId} onClick={copyPermissionsFromTemplate}><Copy className="size-4" /> Copy</Button>
+                      </div>
+                    </CardContent>
+                  </Card>}
+                  {previewOpen && selectedUser && <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm">Preview as {selectedUser.name || selectedUser.username}</CardTitle>
+                      <CardDescription>Visible areas and access summary before you hand over this login.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                      {userAreas.map((area) => {
+                        const visible = userCanFromMatrix(selectedUser, area.id, "view") || (area.sections || []).some((section) => userCanFromMatrix(selectedUser, section.id, "view"))
+                        return <div key={`preview-${area.id}`} className={cn("rounded-md border p-3", visible ? "bg-background" : "bg-muted/30 opacity-70")}>
+                          <div className="flex items-center justify-between gap-2"><p className="truncate text-sm font-medium">{area.label}</p><Badge variant={visible ? "secondary" : "outline"}>{visible ? "Visible" : "Hidden"}</Badge></div>
+                          <p className="mt-1 text-xs text-muted-foreground">{permissionSummary(area)}</p>
+                        </div>
+                      })}
+                    </CardContent>
+                  </Card>}
                   {!selectedUser.isMasterAdmin && <Card>
                     <CardHeader className="pb-3">
                       <CardTitle className="text-sm">Templates</CardTitle>
@@ -18626,10 +18745,10 @@ function SettingsPage({
                               <p className="text-xs text-muted-foreground">{selectedPermissionArea.path} · {permissionSummary(selectedPermissionArea)}</p>
                             </div>
                             <div className="flex flex-wrap gap-2">
-                              <Button type="button" size="sm" variant="outline" disabled={!canManageUsers} onClick={() => applyPermissionPreset(selectedPermissionArea, "none")}>No access</Button>
-                              <Button type="button" size="sm" variant="outline" disabled={!canManageUsers} onClick={() => applyPermissionPreset(selectedPermissionArea, "view")}>View only</Button>
-                              <Button type="button" size="sm" variant="outline" disabled={!canManageUsers} onClick={() => applyPermissionPreset(selectedPermissionArea, "standard")}>Standard</Button>
-                              <Button type="button" size="sm" disabled={!canManageUsers} onClick={() => applyPermissionPreset(selectedPermissionArea, "full")}>Full access</Button>
+                              <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions} onClick={() => applyPermissionPreset(selectedPermissionArea, "none")}>No access</Button>
+                              <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions} onClick={() => applyPermissionPreset(selectedPermissionArea, "view")}>View only</Button>
+                              <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions} onClick={() => applyPermissionPreset(selectedPermissionArea, "standard")}>Standard</Button>
+                              <Button type="button" size="sm" disabled={!canEditUserPermissions} onClick={() => applyPermissionPreset(selectedPermissionArea, "full")}>Full access</Button>
                             </div>
                           </div>
                           <ScrollArea className="max-h-[30rem] rounded-md border">
@@ -18669,13 +18788,39 @@ function SettingsPage({
                       </div>
                     </CardContent>
                   </Card>}
+                  <Card>
+                    <CardHeader className="flex-row items-start justify-between gap-3 space-y-0 pb-3">
+                      <div>
+                        <CardTitle className="text-sm">Permission audit log</CardTitle>
+                        <CardDescription>Recent user, template, and password permission events.</CardDescription>
+                      </div>
+                      <Button type="button" size="sm" variant="outline" onClick={() => void loadUsers()}><RefreshCw className="size-4" /> Refresh</Button>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      <ScrollArea className="max-h-64">
+                        <Table>
+                          <TableHeader><TableRow><TableHead>When</TableHead><TableHead>Actor</TableHead><TableHead>Target</TableHead><TableHead>Change</TableHead><TableHead className="text-right">Enabled</TableHead></TableRow></TableHeader>
+                          <TableBody>
+                            {permissionAuditLog.slice(0, 40).map((event) => <TableRow key={event.id}>
+                              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{dateLabel(event.createdAt)}</TableCell>
+                              <TableCell>{event.actorName || "System"}</TableCell>
+                              <TableCell>{event.targetName || event.targetId || "-"}</TableCell>
+                              <TableCell className="max-w-md"><span className="line-clamp-2">{event.message || event.type || "Permission change"}</span></TableCell>
+                              <TableCell className="text-right">{numberLabel(event.beforeCount)} <span className="text-muted-foreground">to</span> {numberLabel(event.afterCount)}</TableCell>
+                            </TableRow>)}
+                            {!permissionAuditLog.length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No permission audit events yet.</TableCell></TableRow>}
+                          </TableBody>
+                        </Table>
+                      </ScrollArea>
+                    </CardContent>
+                  </Card>
                 </> : <Empty className="rounded-md border py-10"><EmptyHeader><EmptyMedia variant="icon"><Users /></EmptyMedia><EmptyTitle>Select a user</EmptyTitle><EmptyDescription>Choose a login to edit profile and permissions.</EmptyDescription></EmptyHeader></Empty>}
               </CardContent>
             </Card>
           </div>
 
           <Dialog open={templateDialogOpen} onOpenChange={setTemplateDialogOpen}>
-            <DialogContent>
+            <DialogContent className="max-h-[92vh] overflow-hidden sm:max-w-5xl">
               <DialogHeader>
                 <DialogTitle>{templateDraft.id ? "Edit permission template" : "Create permission template"}</DialogTitle>
                 <DialogDescription>{templateDraft.id ? "Update the template name, description, and saved permissions." : "This saves the selected user's current permission checks as a reusable template."}</DialogDescription>
@@ -18683,11 +18828,41 @@ function SettingsPage({
               <div className="grid gap-4">
                 <Field label="Template name"><Input value={templateDraft.name} onChange={(event) => setTemplateDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Warehouse receiver" /></Field>
                 <Field label="Description"><Textarea value={templateDraft.description} onChange={(event) => setTemplateDraft((current) => ({ ...current, description: event.target.value }))} placeholder="What this template allows." /></Field>
-                <Alert>
-                  <ShieldCheck className="size-4" />
-                  <AlertTitle>Saved permissions</AlertTitle>
-                  <AlertDescription>{templateDraft.id ? "The template will save the permission set currently attached to this template. Use Update template from the profile to replace it with the selected user's current checks." : "The current selected user's permission checks will become the template."}</AlertDescription>
-                </Alert>
+                <div className="rounded-md border">
+                  <div className="border-b p-3">
+                    <p className="text-sm font-medium">Template permissions</p>
+                    <p className="text-xs text-muted-foreground">Edit the same permission rows that can be applied to users.</p>
+                  </div>
+                  <ScrollArea className="h-[26rem]">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="min-w-56">Section</TableHead>
+                          {commonPermissionActions.map((action) => <TableHead key={`template-head-${action}`} className="w-24 text-center">{permissionActionLabel(action)}</TableHead>)}
+                          <TableHead>Special actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {userAreas.flatMap((area) => areaPermissionRows(area)).map((area) => {
+                          const specialActions = (area.actions || []).filter((action) => !commonPermissionActions.includes(action))
+                          return <TableRow key={`template-${area.id}`}>
+                            <TableCell className="align-top"><div className="font-medium">{area.label}</div><div className="text-xs text-muted-foreground">{area.path}</div></TableCell>
+                            {commonPermissionActions.map((action) => <TableCell key={`template-${area.id}-${action}`} className="text-center align-top">{templatePermissionCheckbox(area, action)}</TableCell>)}
+                            <TableCell className="align-top">
+                              <div className="flex flex-wrap gap-2">
+                                {specialActions.map((action) => <label key={`template-${area.id}-${action}`} className="flex h-8 items-center gap-2 rounded-md border bg-background px-2 text-xs">
+                                  {templatePermissionCheckbox(area, action)}
+                                  <span>{permissionActionLabel(action)}</span>
+                                </label>)}
+                                {!specialActions.length && <span className="text-xs text-muted-foreground">No special actions</span>}
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        })}
+                      </TableBody>
+                    </Table>
+                  </ScrollArea>
+                </div>
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setTemplateDialogOpen(false)}>Cancel</Button>
