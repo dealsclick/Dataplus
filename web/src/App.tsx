@@ -352,6 +352,7 @@ type ChannelSettings = {
   ebayOrderImportScheduleTimes?: string
   ebayOrderImportScheduleEveryHours?: number
   temuEndpoint?: string
+  temuAuthorizationUrl?: string
   temuAppKey?: string
   temuAppSecret?: string
   temuAccessToken?: string
@@ -3097,6 +3098,7 @@ function ChannelDetail({
   const [temuOrderImportDraft, setTemuOrderImportDraft] = useState({ lookbackDays: "30", limit: "250", includeCanceled: false })
   const [temuConnectionTest, setTemuConnectionTest] = useState<{ ok?: boolean; configured?: boolean; liveApiChecked?: boolean; hasAccessToken?: boolean; endpoint?: string; appKeyPreview?: string; mallId?: string; latestOrderSync?: string; verifiedAt?: string; message?: string } | null>(null)
   const [temuTestingConnection, setTemuTestingConnection] = useState(false)
+  const [temuConnecting, setTemuConnecting] = useState(false)
   const [ebayTemplatesOpen, setEbayTemplatesOpen] = useState(false)
   const [ebayTemplatesSaving, setEbayTemplatesSaving] = useState(false)
   const [ebayTemplateDraft, setEbayTemplateDraft] = useState({ listingTemplates: "[]", itemSpecificTemplates: "[]", storeCategories: "[]", buyerRequirements: "{}", shippingMethodMappings: "[]", customPolicies: "[]" })
@@ -3249,6 +3251,24 @@ function ChannelDetail({
     window.addEventListener("message", onEbayAuthorization)
     return () => window.removeEventListener("message", onEbayAuthorization)
   }, [isEbay, onRefreshData])
+
+  useEffect(() => {
+    if (!isTemu) return
+    function onTemuAuthorization(event: MessageEvent) {
+      if (event.origin !== window.location.origin || !event.data || typeof event.data !== "object") return
+      const payload = event.data as { type?: string; message?: string }
+      if (payload.type === "dataplus:temu-authorized") {
+        toast.success(payload.message || "Temu seller account connected.")
+        setTemuConnectionTest(null)
+        onRefreshData()
+      }
+      if (payload.type === "dataplus:temu-authorization-error") {
+        toast.error(payload.message || "Temu seller authorization did not complete.")
+      }
+    }
+    window.addEventListener("message", onTemuAuthorization)
+    return () => window.removeEventListener("message", onTemuAuthorization)
+  }, [isTemu, onRefreshData])
 
   function update(field: string, value: unknown) {
     setDraft((current) => ({ ...current, [field]: value }))
@@ -3626,6 +3646,25 @@ function ChannelDetail({
     }
   }
 
+  async function connectTemuSeller() {
+    if (hasUnsavedChannelChanges) {
+      toast.error("Save Temu connection changes before connecting.")
+      return
+    }
+    setTemuConnecting(true)
+    try {
+      const result = await api<{ authUrl?: string; redirectUri?: string }>("/api/temu/auth-url")
+      if (!result.authUrl) throw new Error("Temu authorization URL was not returned.")
+      const popup = window.open(result.authUrl, "dataplus-temu-auth", "popup,width=860,height=820")
+      if (!popup) window.location.assign(result.authUrl)
+      else toast.message("Continue with Temu in the authorization window.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to start Temu authorization.")
+    } finally {
+      setTemuConnecting(false)
+    }
+  }
+
   function openEbayTemplateControls() {
     const pretty = (value: unknown, fallback: string) => {
       try { return JSON.stringify(value ?? JSON.parse(fallback), null, 2) } catch { return fallback }
@@ -3915,6 +3954,10 @@ function ChannelDetail({
                 <CardDescription>Save the Temu Seller API request URL, app key, and app secret. DataPlus will use generated channel values when Temu returns them.</CardDescription>
               </div>
               <div className="flex flex-wrap gap-2">
+                <Button onClick={() => void connectTemuSeller()} disabled={temuConnecting || hasUnsavedChannelChanges || !settings.temuAppKey || !settings.temuAppSecret}>
+                  {temuConnecting ? <Loader2 className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
+                  Connect Temu
+                </Button>
                 <Button variant="outline" onClick={() => void testTemuConnection()} disabled={temuTestingConnection || hasUnsavedChannelChanges || !settings.temuAppKey || !settings.temuAppSecret}>
                   {temuTestingConnection ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
                   Test connection
@@ -3930,6 +3973,7 @@ function ChannelDetail({
               <Detail label="Last verified" value={dateLabel(temuConnectionVerifiedAt)} />
               <Detail label="Latest order sync" value={dateLabel(temuLatestOrderSync)} />
               <Field label="API request URL"><Input disabled={!editing} value={String(settings.temuEndpoint || "https://openapi-b-us.temu.com/openapi/router")} onChange={(event) => update("temuEndpoint", event.target.value)} /></Field>
+              <Field label="Seller authorization URL"><Input disabled={!editing} value={String(settings.temuAuthorizationUrl || "https://seller.temu.com/open-platform/client-manage/authorization")} onChange={(event) => update("temuAuthorizationUrl", event.target.value)} /><p className="text-xs text-muted-foreground">Used by Connect Temu to open the seller authorization page.</p></Field>
               <Field label="App key"><Input disabled={!editing} value={String(settings.temuAppKey || "")} onChange={(event) => update("temuAppKey", event.target.value)} /></Field>
               <Field label="App secret"><Input disabled={!editing} type="password" value={String(settings.temuAppSecret || "")} onChange={(event) => update("temuAppSecret", event.target.value)} /></Field>
               <Field label="Generated access token"><Input disabled value={temuGeneratedTokenLabel} readOnly /><p className="text-xs text-muted-foreground">Auto-populated from the channel when Temu returns or stores a token.</p></Field>
@@ -4045,6 +4089,7 @@ function ChannelDetail({
               {isTemu && <>
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu API credentials</p><p className="pt-1 text-xs text-muted-foreground">Save the Temu Seller API request URL, app key, and app secret here. Use the Connection tab when you need to connect or reconnect the mall account.</p></div>
                 <Field label="API request URL"><Input disabled={!editing} value={String(settings.temuEndpoint || "https://openapi-b-us.temu.com/openapi/router")} onChange={(event) => update("temuEndpoint", event.target.value)} /></Field>
+                <Field label="Seller authorization URL"><Input disabled={!editing} value={String(settings.temuAuthorizationUrl || "https://seller.temu.com/open-platform/client-manage/authorization")} onChange={(event) => update("temuAuthorizationUrl", event.target.value)} /></Field>
                 <Field label="App key"><Input disabled={!editing} value={String(settings.temuAppKey || "")} onChange={(event) => update("temuAppKey", event.target.value)} /></Field>
                 <Field label="App secret"><Input disabled={!editing} type="password" value={String(settings.temuAppSecret || "")} onChange={(event) => update("temuAppSecret", event.target.value)} /></Field>
                 <Field label="Generated access token"><Input disabled value={temuGeneratedTokenLabel} readOnly /><p className="text-xs text-muted-foreground">Generated from the Temu channel connection.</p></Field>

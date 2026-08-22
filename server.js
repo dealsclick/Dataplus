@@ -825,6 +825,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayOrderImportScheduleTimes: "05:00,17:00",
   ebayOrderImportScheduleEveryHours: 12,
   temuEndpoint: "https://openapi-b-us.temu.com/openapi/router",
+  temuAuthorizationUrl: "https://seller.temu.com/open-platform/client-manage/authorization",
   temuAppKey: "",
   temuAppSecret: "",
   temuAccessToken: "",
@@ -4235,6 +4236,7 @@ function normalizeChannel(channel = {}) {
   settings.ebayWebhookVerificationToken = String(settings.ebayWebhookVerificationToken || "").trim();
   settings.ebayNotificationAlertEmail = String(settings.ebayNotificationAlertEmail || "").trim().toLowerCase();
   settings.temuEndpoint = String(settings.temuEndpoint || DEFAULT_CHANNEL_SETTINGS.temuEndpoint).trim();
+  settings.temuAuthorizationUrl = String(settings.temuAuthorizationUrl || DEFAULT_CHANNEL_SETTINGS.temuAuthorizationUrl).trim();
   settings.temuAppKey = String(settings.temuAppKey || "").trim();
   settings.temuAppSecret = String(settings.temuAppSecret || "").trim();
   settings.temuAccessToken = String(settings.temuAccessToken || "").trim();
@@ -20083,6 +20085,7 @@ function getTemuConfig(db = {}) {
   const settings = temuChannelSettings(db);
   return {
     endpoint: settings.temuEndpoint || process.env.TEMU_ENDPOINT || "https://openapi-b-us.temu.com/openapi/router",
+    authorizationUrl: settings.temuAuthorizationUrl || process.env.TEMU_AUTHORIZATION_URL || "https://seller.temu.com/open-platform/client-manage/authorization",
     appKey: settings.temuAppKey || process.env.TEMU_APP_KEY || "",
     appSecret: settings.temuAppSecret || process.env.TEMU_APP_SECRET || "",
     accessToken: settings.temuAccessToken || db.connectorState?.temuAccessToken || process.env.TEMU_ACCESS_TOKEN || "",
@@ -20097,6 +20100,36 @@ function missingTemuConfig(config) {
     ["TEMU_APP_SECRET", config.appSecret],
     ["TEMU_ACCESS_TOKEN", config.accessToken]
   ].filter(([, value]) => !value).map(([key]) => key);
+}
+
+function temuCallbackUrlFromRequest(req) {
+  const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${PORT}`;
+  const proto = req.headers["x-forwarded-proto"] || (String(host).includes("localhost") ? "http" : "https");
+  return `${String(proto).split(",")[0]}://${String(host).split(",")[0]}/auth/temu/callback`;
+}
+
+function buildTemuAuthorizationUrl(db = {}, options = {}) {
+  const config = getTemuConfig(db);
+  if (!config.appKey) {
+    const error = new Error("Temu app key is required before starting seller authorization.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const redirectUri = String(options.redirectUri || "").trim();
+  if (!redirectUri) {
+    const error = new Error("Temu callback URL is required before starting seller authorization.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const state = crypto.randomBytes(16).toString("hex");
+  db.connectorState = db.connectorState || {};
+  db.connectorState.temuOauthState = state;
+  db.connectorState.temuOauthStateExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  const authUrl = new URL(config.authorizationUrl || DEFAULT_CHANNEL_SETTINGS.temuAuthorizationUrl);
+  authUrl.searchParams.set("appKey", config.appKey);
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("state", state);
+  return { authUrl: authUrl.toString(), redirectUri, state };
 }
 
 function stableJson(value) {
@@ -20170,7 +20203,7 @@ async function exchangeTemuCode(db, code) {
   const trimmedCode = String(code || "").trim();
   if (!trimmedCode) throw new Error("Temu authorization code is required.");
 
-  const response = await temuRequest("bg.open.accesstoken.create", {}, {
+  const response = await temuRequest("bg.open.accesstoken.create", { code: trimmedCode }, {
     db,
     accessToken: trimmedCode,
     requireAccessToken: false
@@ -41215,6 +41248,13 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { ...result, state: await postgresLiteState() });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/temu/auth-url" && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true });
+    const result = buildTemuAuthorizationUrl(db, { redirectUri: temuCallbackUrlFromRequest(req) });
+    await writeDb(normalizeDb({ ...db, inventory: [] }));
+    return sendJson(res, 200, result);
+  }
+
   if (req.method === "POST" && url.pathname === "/api/temu/connection/test" && postgres.isPostgresEnabled()) {
     const db = await readDbFast({ skipInventory: true });
     const result = await testTemuConnection(db);
@@ -42698,6 +42738,12 @@ async function handleApi(req, res) {
     const result = await exchangeTemuCode(db, body.code);
     const normalized = normalizeDb(await readDb({ skipInventory: postgres.isPostgresEnabled() }));
     return sendJson(res, 200, { ...result, state: publicState(normalized) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/temu/auth-url") {
+    const result = buildTemuAuthorizationUrl(db, { redirectUri: temuCallbackUrlFromRequest(req) });
+    await writeDb(db);
+    return sendJson(res, 200, result);
   }
 
   if (req.method === "POST" && url.pathname === "/api/temu/connection/test") {
@@ -45618,6 +45664,9 @@ async function handleTemuCallback(req, res) {
   if (error) {
     return sendHtml(res, 400, `
       <!doctype html>
+      <script>
+        if (window.opener) window.opener.postMessage({ type: "dataplus:temu-authorization-error", message: ${JSON.stringify(error)} }, window.location.origin);
+      </script>
       <title>Temu Authorization Failed</title>
       <body style="font-family:system-ui;padding:32px">
         <h1>Temu authorization failed</h1>
@@ -45631,6 +45680,12 @@ async function handleTemuCallback(req, res) {
     const result = await exchangeTemuCode(db, code);
     return sendHtml(res, 200, `
       <!doctype html>
+      <script>
+        if (window.opener) {
+          window.opener.postMessage({ type: "dataplus:temu-authorized", message: "Temu seller authorization saved." }, window.location.origin);
+          setTimeout(() => window.close(), 800);
+        }
+      </script>
       <title>Temu Connected</title>
       <body style="font-family:system-ui;padding:32px">
         <h1>Temu connected</h1>
@@ -45641,6 +45696,9 @@ async function handleTemuCallback(req, res) {
   } catch (exchangeError) {
     return sendHtml(res, 500, `
       <!doctype html>
+      <script>
+        if (window.opener) window.opener.postMessage({ type: "dataplus:temu-authorization-error", message: ${JSON.stringify(exchangeError.message)} }, window.location.origin);
+      </script>
       <title>Temu Token Exchange Failed</title>
       <body style="font-family:system-ui;padding:32px">
         <h1>Temu token exchange failed</h1>
