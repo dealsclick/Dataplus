@@ -688,8 +688,9 @@ type LiteState = {
 type AuthPermission = { view?: boolean; read?: boolean; write?: boolean; admin?: boolean; [key: string]: boolean | undefined }
 type AuthPermissionMatrix = Record<string, AuthPermission>
 type AuthPermissionArea = { id: string; label: string; path: string; actions?: string[]; sections?: AuthPermissionArea[]; parentId?: string }
-type AuthPermissionTemplate = { id: string; name: string; description?: string; builtIn?: boolean; permissions: AuthPermissionMatrix }
-type AuthPermissionAuditEvent = { id: string; type?: string; targetType?: string; targetId?: string; targetName?: string; actorName?: string; message?: string; beforeCount?: number; afterCount?: number; templateId?: string; createdAt?: string }
+type AuthPermissionTemplate = { id: string; name: string; description?: string; builtIn?: boolean; version?: number; permissions: AuthPermissionMatrix }
+type AuthPermissionAuditDiff = { area?: string; areaLabel?: string; action?: string; before?: boolean; after?: boolean }
+type AuthPermissionAuditEvent = { id: string; type?: string; targetType?: string; targetId?: string; targetName?: string; actorName?: string; message?: string; beforeCount?: number; afterCount?: number; templateId?: string; templateVersion?: number; diffs?: AuthPermissionAuditDiff[]; createdAt?: string }
 type AuthUser = {
   id: string
   name?: string
@@ -700,6 +701,7 @@ type AuthUser = {
   isMasterAdmin?: boolean
   mustChangePassword?: boolean
   permissionTemplateId?: string
+  permissionTemplateVersion?: number
   permissions?: AuthPermissionMatrix
   createdAt?: string
   updatedAt?: string
@@ -17561,8 +17563,10 @@ function SettingsPage({
   const aiToolScopes = () => (value("aiToolScopes") && typeof value("aiToolScopes") === "object" ? value("aiToolScopes") as Record<string, unknown> : {})
   const usageNumber = (field: string, period = "thirtyDays") => Number((aiUsage?.[period] as Record<string, unknown> | undefined)?.[field] || 0).toLocaleString()
   const workflowValue = (section: string, field: string, fallback: unknown) => orderWorkflowDraft[`${section}.${field}`] ?? ((orderWorkflowSettings[section] as Record<string, unknown> | undefined)?.[field]) ?? fallback
-  const canManageUsers = userCan(authUser, "users", "admin")
   const canEditUserAccounts = userCan(authUser, "users.accounts", "edit")
+  const canCreateUsers = userCan(authUser, "users.accounts", "create")
+  const canResetUserPasswords = userCan(authUser, "users.accounts", "passwords")
+  const canDeactivateUsers = userCan(authUser, "users.accounts", "deactivate")
   const canEditUserPermissions = userCan(authUser, "users.permissions", "permissions")
   const userAreas = permissionAreas.length ? permissionAreas : ((Array.isArray(settings.authPermissionAreas) ? settings.authPermissionAreas : []) as AuthPermissionArea[])
   const selectedUser = users.find((user) => user.id === selectedUserId) || users[0]
@@ -17717,6 +17721,12 @@ function SettingsPage({
     } finally {
       setUserSaving(false)
     }
+  }
+
+  function updateSelectedUserStatus(nextStatus: string) {
+    if (!selectedUser || selectedUser.isMasterAdmin) return
+    if (nextStatus === "inactive" && selectedUser.status !== "inactive" && !window.confirm(`Deactivate ${selectedUser.name || selectedUser.username}? This signs out their active sessions after you save.`)) return
+    setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, status: nextStatus } : user))
   }
 
   function updateSelectedPermission(areaId: string, action: keyof AuthPermission, enabled: boolean) {
@@ -18592,7 +18602,7 @@ function SettingsPage({
                 </div>
                 <div className="flex gap-2">
                   <Button size="sm" variant="outline" onClick={() => void loadUsers()}><RefreshCw className="size-4" /> Refresh</Button>
-                  <Button size="sm" disabled={!canManageUsers} onClick={() => setNewUserOpen(true)}><Users className="size-4" /> Add login</Button>
+                  <Button size="sm" disabled={!canCreateUsers} onClick={() => setNewUserOpen(true)}><Users className="size-4" /> Add login</Button>
                 </div>
               </CardHeader>
               <CardContent className="grid gap-2 p-3">
@@ -18611,7 +18621,7 @@ function SettingsPage({
                     <CardTitle className="flex flex-wrap items-center gap-2 text-base">{selectedUser ? `Profile: ${selectedUser.name || selectedUser.username}` : "User profile"}{selectedUserDirty && <Badge variant="warning">Unsaved changes</Badge>}{previewOpen && <Badge variant="secondary">Preview open</Badge>}</CardTitle>
                     <CardDescription>{selectedUser?.isMasterAdmin ? "Luis is the protected master admin and always keeps full access." : "Save profile changes and permission edits for the selected login."}</CardDescription>
                   </div>
-                  {selectedUser && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setPreviewOpen((open) => !open)}><Eye className="size-4" /> Preview</Button><Button size="sm" variant="outline" disabled={!canEditUserAccounts || userSaving} onClick={() => void resetUserPassword(selectedUser.id)}><LockKeyhole className="size-4" /> Reset password</Button><Button size="sm" disabled={!canManageUsers || userSaving || !selectedUserDirty} onClick={() => void saveUser(selectedUser.id, selectedUser)}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save user</Button></div>}
+                  {selectedUser && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setPreviewOpen((open) => !open)}><Eye className="size-4" /> Preview</Button><Button size="sm" variant="outline" disabled={!canResetUserPasswords || userSaving} onClick={() => void resetUserPassword(selectedUser.id)}><LockKeyhole className="size-4" /> Reset password</Button><Button size="sm" disabled={!(canEditUserAccounts || canEditUserPermissions) || userSaving || !selectedUserDirty} onClick={() => void saveUser(selectedUser.id, selectedUser)}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save user</Button></div>}
                 </div>
               </CardHeader>
               <CardContent className="grid gap-5 p-4">
@@ -18621,7 +18631,7 @@ function SettingsPage({
                     <Field label="Name"><Input disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.name || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, name: event.target.value } : user))} /></Field>
                     <Field label="Username"><Input disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.username || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, username: event.target.value } : user))} /></Field>
                     <Field label="Email"><Input disabled={!canEditUserAccounts} type="email" value={selectedUser.email || ""} onChange={(event) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, email: event.target.value } : user))} /></Field>
-                    <Field label="Status"><Select disabled={!canEditUserAccounts || selectedUser.isMasterAdmin} value={selectedUser.status || "active"} onValueChange={(next) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, status: next } : user))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
+                    <Field label="Status"><Select disabled={!(canEditUserAccounts && canDeactivateUsers) || selectedUser.isMasterAdmin} value={selectedUser.status || "active"} onValueChange={updateSelectedUserStatus}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
                   </div>
                   <Card className="border-dashed">
                     <CardHeader className="pb-3">
@@ -18639,7 +18649,7 @@ function SettingsPage({
                       </Select>
                       <div className="flex flex-wrap gap-2">
                         <Button type="button" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} onClick={() => openTemplateDialog()}><Save className="size-4" /> Save as template</Button>
-                        {selectedTemplateId !== "custom" && selectedTemplateId !== "master-admin" && !permissionTemplates.find((template) => template.id === selectedTemplateId)?.builtIn && <Button type="button" variant="outline" disabled={!canManageUsers || userSaving} onClick={() => {
+                        {selectedTemplateId !== "custom" && selectedTemplateId !== "master-admin" && !permissionTemplates.find((template) => template.id === selectedTemplateId)?.builtIn && <Button type="button" variant="outline" disabled={!canEditUserPermissions || userSaving} onClick={() => {
                           const template = permissionTemplates.find((candidate) => candidate.id === selectedTemplateId)
                           if (template) setTemplateDraft({ id: template.id, name: template.name, description: template.description || "", permissions: selectedUser.permissions || {}, builtIn: template.builtIn })
                           setTemplateDialogOpen(true)
@@ -18693,12 +18703,12 @@ function SettingsPage({
                       {permissionTemplates.map((template) => <div key={template.id} className="rounded-md border p-3">
                         <div className="flex min-w-60 items-start justify-between gap-2">
                           <div className="min-w-0"><p className="truncate text-sm font-medium">{template.name}</p><p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{template.description || "No description."}</p></div>
-                          {template.builtIn && <Badge variant="outline">Built-in</Badge>}
+                          <div className="flex shrink-0 gap-1">{template.builtIn && <Badge variant="outline">Built-in</Badge>}<Badge variant="secondary">v{numberLabel(template.version || 1)}</Badge></div>
                         </div>
                         <div className="mt-3 flex gap-2">
-                          <Button type="button" size="sm" variant="outline" disabled={!canManageUsers || selectedUser.isMasterAdmin} onClick={() => applyPermissionTemplate(template.id)}>Apply</Button>
-                          <Button type="button" size="sm" variant="outline" disabled={!canManageUsers} onClick={() => openTemplateDialog(template)}><Pencil className="size-3.5" /> Edit</Button>
-                          {!template.builtIn && <Button type="button" size="sm" variant="outline" disabled={!canManageUsers || userSaving} onClick={() => void deletePermissionTemplate(template.id)}><Trash2 className="size-3.5" /> Delete</Button>}
+                          <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} onClick={() => applyPermissionTemplate(template.id)}>Apply</Button>
+                          <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions} onClick={() => openTemplateDialog(template)}><Pencil className="size-3.5" /> Edit</Button>
+                          {!template.builtIn && <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions || userSaving} onClick={() => void deletePermissionTemplate(template.id)}><Trash2 className="size-3.5" /> Delete</Button>}
                         </div>
                       </div>)}
                     </CardContent>
@@ -18805,7 +18815,13 @@ function SettingsPage({
                               <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{dateLabel(event.createdAt)}</TableCell>
                               <TableCell>{event.actorName || "System"}</TableCell>
                               <TableCell>{event.targetName || event.targetId || "-"}</TableCell>
-                              <TableCell className="max-w-md"><span className="line-clamp-2">{event.message || event.type || "Permission change"}</span></TableCell>
+                              <TableCell className="max-w-md">
+                                <span className="line-clamp-2">{event.message || event.type || "Permission change"}</span>
+                                {!!event.diffs?.length && <div className="mt-1 grid gap-1 text-xs text-muted-foreground">
+                                  {event.diffs.slice(0, 3).map((diff, index) => <span key={`${event.id}-${diff.area}-${diff.action}-${index}`}>{diff.areaLabel || diff.area} / {permissionActionLabel(diff.action || "")}: {diff.before ? "on" : "off"} to {diff.after ? "on" : "off"}</span>)}
+                                  {event.diffs.length > 3 && <span>+{event.diffs.length - 3} more permission change{event.diffs.length - 3 === 1 ? "" : "s"}</span>}
+                                </div>}
+                              </TableCell>
                               <TableCell className="text-right">{numberLabel(event.beforeCount)} <span className="text-muted-foreground">to</span> {numberLabel(event.afterCount)}</TableCell>
                             </TableRow>)}
                             {!permissionAuditLog.length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No permission audit events yet.</TableCell></TableRow>}
@@ -18826,8 +18842,8 @@ function SettingsPage({
                 <DialogDescription>{templateDraft.id ? "Update the template name, description, and saved permissions." : "This saves the selected user's current permission checks as a reusable template."}</DialogDescription>
               </DialogHeader>
               <div className="grid gap-4">
-                <Field label="Template name"><Input value={templateDraft.name} onChange={(event) => setTemplateDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Warehouse receiver" /></Field>
-                <Field label="Description"><Textarea value={templateDraft.description} onChange={(event) => setTemplateDraft((current) => ({ ...current, description: event.target.value }))} placeholder="What this template allows." /></Field>
+                <Field label="Template name"><Input disabled={!canEditUserPermissions} value={templateDraft.name} onChange={(event) => setTemplateDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Warehouse receiver" /></Field>
+                <Field label="Description"><Textarea disabled={!canEditUserPermissions} value={templateDraft.description} onChange={(event) => setTemplateDraft((current) => ({ ...current, description: event.target.value }))} placeholder="What this template allows." /></Field>
                 <div className="rounded-md border">
                   <div className="border-b p-3">
                     <p className="text-sm font-medium">Template permissions</p>
@@ -18866,7 +18882,7 @@ function SettingsPage({
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setTemplateDialogOpen(false)}>Cancel</Button>
-                <Button disabled={userSaving || !templateDraft.name.trim()} onClick={() => void savePermissionTemplate()}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save template</Button>
+                <Button disabled={!canEditUserPermissions || userSaving || !templateDraft.name.trim()} onClick={() => void savePermissionTemplate()}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save template</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
@@ -18875,11 +18891,11 @@ function SettingsPage({
             <DialogContent>
               <DialogHeader><DialogTitle>Create login</DialogTitle><DialogDescription>The user can sign in after you share the password. Leave password empty to generate one.</DialogDescription></DialogHeader>
               <div className="grid gap-4">
-                <Field label="Name"><Input value={newUser.name} onChange={(event) => setNewUser((current) => ({ ...current, name: event.target.value }))} /></Field>
-                <Field label="Username"><Input value={newUser.username} onChange={(event) => setNewUser((current) => ({ ...current, username: event.target.value }))} placeholder="first.last" /></Field>
-                <Field label="Email"><Input type="email" value={newUser.email} onChange={(event) => setNewUser((current) => ({ ...current, email: event.target.value }))} /></Field>
+                <Field label="Name"><Input disabled={!canCreateUsers} value={newUser.name} onChange={(event) => setNewUser((current) => ({ ...current, name: event.target.value }))} /></Field>
+                <Field label="Username"><Input disabled={!canCreateUsers} value={newUser.username} onChange={(event) => setNewUser((current) => ({ ...current, username: event.target.value }))} placeholder="first.last" /></Field>
+                <Field label="Email"><Input disabled={!canCreateUsers} type="email" value={newUser.email} onChange={(event) => setNewUser((current) => ({ ...current, email: event.target.value }))} /></Field>
                 <Field label="Permission template">
-                  <Select value={newUser.permissionTemplateId} onValueChange={(value) => setNewUser((current) => ({ ...current, permissionTemplateId: value }))}>
+                  <Select disabled={!canCreateUsers} value={newUser.permissionTemplateId} onValueChange={(value) => setNewUser((current) => ({ ...current, permissionTemplateId: value }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="custom">Custom</SelectItem>
@@ -18887,9 +18903,9 @@ function SettingsPage({
                     </SelectContent>
                   </Select>
                 </Field>
-                <Field label="Temporary password"><Input type="password" value={newUser.password} onChange={(event) => setNewUser((current) => ({ ...current, password: event.target.value }))} placeholder="Generate automatically" /></Field>
+                <Field label="Temporary password"><Input disabled={!canCreateUsers} type="password" value={newUser.password} onChange={(event) => setNewUser((current) => ({ ...current, password: event.target.value }))} placeholder="Generate automatically" /></Field>
               </div>
-              <DialogFooter><Button variant="outline" onClick={() => setNewUserOpen(false)}>Cancel</Button><Button disabled={userSaving || !newUser.username} onClick={() => void createLogin()}>{userSaving && <Loader2 className="size-4 animate-spin" />} Create login</Button></DialogFooter>
+              <DialogFooter><Button variant="outline" onClick={() => setNewUserOpen(false)}>Cancel</Button><Button disabled={!canCreateUsers || userSaving || !newUser.username} onClick={() => void createLogin()}>{userSaving && <Loader2 className="size-4 animate-spin" />} Create login</Button></DialogFooter>
             </DialogContent>
           </Dialog>
         </TabsContent>

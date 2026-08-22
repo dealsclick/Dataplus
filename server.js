@@ -5342,6 +5342,7 @@ function normalizeAuthPermissionTemplate(template = {}, index = 0) {
     name: sourceTextValue(template.name || id),
     description: sourceTextValue(template.description || ""),
     builtIn: template.builtIn === true || String(template.builtIn).toLowerCase() === "true",
+    version: Math.max(1, Number(template.version || 1) || 1),
     permissions: normalizeAuthPermissions(template.permissions || {}, false),
     createdAt: sourceTextValue(template.createdAt || new Date().toISOString()),
     updatedAt: sourceTextValue(template.updatedAt || "")
@@ -5353,7 +5354,30 @@ function permissionEnabledCount(permissions = {}) {
   return authPermissionRows().reduce((sum, area) => sum + (area.actions || []).filter((action) => normalized[area.id]?.[action] === true).length, 0);
 }
 
+function permissionDiffDetails(before = {}, after = {}) {
+  const left = normalizeAuthPermissions(before, false);
+  const right = normalizeAuthPermissions(after, false);
+  const diffs = [];
+  for (const area of authPermissionRows()) {
+    for (const action of area.actions || []) {
+      const beforeValue = left[area.id]?.[action] === true;
+      const afterValue = right[area.id]?.[action] === true;
+      if (beforeValue !== afterValue) {
+        diffs.push({ area: area.id, areaLabel: area.label, action, before: beforeValue, after: afterValue });
+      }
+    }
+  }
+  return diffs.slice(0, 200);
+}
+
 function normalizeAuthPermissionAuditEvent(event = {}) {
+  const diffs = Array.isArray(event.diffs) ? event.diffs.map((diff) => ({
+    area: sourceTextValue(diff?.area || ""),
+    areaLabel: sourceTextValue(diff?.areaLabel || diff?.area || ""),
+    action: sourceTextValue(diff?.action || ""),
+    before: diff?.before === true,
+    after: diff?.after === true
+  })).filter((diff) => diff.area && diff.action).slice(0, 200) : [];
   return {
     id: sourceTextValue(event.id || crypto.randomUUID?.() || `audit-${Date.now()}`),
     type: sourceTextValue(event.type || "permission_change"),
@@ -5366,6 +5390,8 @@ function normalizeAuthPermissionAuditEvent(event = {}) {
     beforeCount: Number(event.beforeCount || 0) || 0,
     afterCount: Number(event.afterCount || 0) || 0,
     templateId: sourceTextValue(event.templateId || ""),
+    templateVersion: Math.max(0, Number(event.templateVersion || 0) || 0),
+    diffs,
     createdAt: sourceTextValue(event.createdAt || new Date().toISOString())
   };
 }
@@ -5407,6 +5433,7 @@ function normalizeSystemUser(user = {}, index = 0) {
     passwordSalt: String(user.passwordSalt || ""),
     permissions: normalizeAuthPermissions(user.permissions, isMasterAdmin),
     permissionTemplateId: isMasterAdmin ? "master-admin" : sourceTextValue(user.permissionTemplateId || "custom"),
+    permissionTemplateVersion: isMasterAdmin ? 0 : Math.max(0, Number(user.permissionTemplateVersion || 0) || 0),
     createdAt: sourceTextValue(user.createdAt || new Date().toISOString()),
     updatedAt: sourceTextValue(user.updatedAt || new Date().toISOString()),
     lastLoginAt: sourceTextValue(user.lastLoginAt || "")
@@ -5441,6 +5468,7 @@ function publicSystemUser(user = {}) {
     isMasterAdmin: user.isMasterAdmin === true,
     mustChangePassword: user.mustChangePassword === true,
     permissionTemplateId: user.isMasterAdmin === true ? "master-admin" : sourceTextValue(user.permissionTemplateId || "custom"),
+    permissionTemplateVersion: user.isMasterAdmin === true ? 0 : Math.max(0, Number(user.permissionTemplateVersion || 0) || 0),
     permissions: normalizeAuthPermissions(user.permissions, user.isMasterAdmin === true),
     createdAt: user.createdAt || "",
     updatedAt: user.updatedAt || "",
@@ -5462,6 +5490,21 @@ function readAuthSessions() {
 function writeAuthSessions(sessions = {}) {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(AUTH_SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+}
+
+function revokeAuthSessionsForUser(userId = "") {
+  const targetId = String(userId || "");
+  if (!targetId) return false;
+  const sessions = readAuthSessions();
+  let changed = false;
+  for (const [token, session] of Object.entries(sessions)) {
+    if (String(session?.userId || "") === targetId) {
+      delete sessions[token];
+      changed = true;
+    }
+  }
+  if (changed) writeAuthSessions(sessions);
+  return changed;
 }
 
 function cookieValue(req, name) {
@@ -5518,7 +5561,7 @@ function authRequirementForRequest(req, url, parts = []) {
     if (pathname.startsWith("/api/users/templates")) return { area: "users.permissions", action: method === "GET" ? "view" : "permissions" };
     if (pathname.endsWith("/password")) return { area: "users.accounts", action: "passwords" };
     if (method === "POST") return { area: "users.accounts", action: "create" };
-    return { area: "users.permissions", action: "permissions" };
+    return { area: "users", action: "view" };
   }
   if (area === "settings") {
     if (/credential|ai-test|smtp-test|api-key|auth/i.test(pathname)) return { area: "settings.security", action: "credentials" };
@@ -5631,6 +5674,7 @@ function publicAuthPermissionTemplate(template = {}) {
     name: normalized.name,
     description: normalized.description,
     builtIn: normalized.builtIn === true,
+    version: normalized.version,
     permissions: normalizeAuthPermissions(normalized.permissions, false),
     createdAt: normalized.createdAt || "",
     updatedAt: normalized.updatedAt || ""
@@ -31561,7 +31605,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/users") {
-    if (!userCan(authUser, "users", "admin")) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    if (!userCan(authUser, "users.accounts", "create")) return sendJson(res, 403, { error: "Create user access is required." });
     const body = await parseBody(req);
     const username = sourceTextValue(body.username || body.email || body.name || "").toLowerCase().replace(/\s+/g, ".");
     const name = sourceTextValue(body.name || username);
@@ -31582,13 +31626,14 @@ async function handleApi(req, res) {
       role: sourceTextValue(body.role || "Operator"),
       status: "active",
       permissionTemplateId: selectedTemplate ? selectedTemplate.id : "custom",
+      permissionTemplateVersion: selectedTemplate ? selectedTemplate.version : 0,
       permissions: normalizeAuthPermissions(selectedTemplate ? selectedTemplate.permissions : (body.permissions || {}), false),
       passwordHash: hashed.hash,
       passwordSalt: hashed.salt,
       mustChangePassword: true
     }, current.systemUsers.length);
     current.systemUsers = [...(current.systemUsers || []), user];
-    appendAuthPermissionAudit(current, authUser, { type: "user_created", targetType: "user", targetId: user.id, targetName: user.name || user.username, afterCount: permissionEnabledCount(user.permissions), templateId: user.permissionTemplateId, message: `Created login for ${user.name || user.username}.` });
+    appendAuthPermissionAudit(current, authUser, { type: "user_created", targetType: "user", targetId: user.id, targetName: user.name || user.username, afterCount: permissionEnabledCount(user.permissions), templateId: user.permissionTemplateId, templateVersion: user.permissionTemplateVersion, diffs: permissionDiffDetails({}, user.permissions), message: `Created login for ${user.name || user.username}.` });
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
@@ -31596,7 +31641,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/users/templates") {
-    if (!userCan(authUser, "users", "admin")) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    if (!userCan(authUser, "users.permissions", "permissions")) return sendJson(res, 403, { error: "Permission template access is required." });
     const body = await parseBody(req);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
     const name = sourceTextValue(body.name || "");
@@ -31607,11 +31652,12 @@ async function handleApi(req, res) {
       description: sourceTextValue(body.description || ""),
       permissions: body.permissions || {},
       builtIn: false,
+      version: 1,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }, (current.authPermissionTemplates || []).length);
     current.authPermissionTemplates = [...(current.authPermissionTemplates || []), template];
-    appendAuthPermissionAudit(current, authUser, { type: "template_created", targetType: "template", targetId: template.id, targetName: template.name, afterCount: permissionEnabledCount(template.permissions), message: `Created permission template ${template.name}.` });
+    appendAuthPermissionAudit(current, authUser, { type: "template_created", targetType: "template", targetId: template.id, targetName: template.name, afterCount: permissionEnabledCount(template.permissions), templateVersion: template.version, diffs: permissionDiffDetails({}, template.permissions), message: `Created permission template ${template.name} v${template.version}.` });
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
@@ -31620,7 +31666,7 @@ async function handleApi(req, res) {
 
   const templateMatch = url.pathname.match(/^\/api\/users\/templates\/([^/]+)$/);
   if (templateMatch && req.method === "PATCH") {
-    if (!userCan(authUser, "users", "admin")) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    if (!userCan(authUser, "users.permissions", "permissions")) return sendJson(res, 403, { error: "Permission template access is required." });
     const templateId = decodeURIComponent(templateMatch[1] || "");
     const body = await parseBody(req);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
@@ -31632,10 +31678,11 @@ async function handleApi(req, res) {
       description: body.description === undefined ? existing.description : sourceTextValue(body.description),
       permissions: body.permissions === undefined ? existing.permissions : body.permissions,
       builtIn: existing.builtIn === true,
+      version: Math.max(1, Number(existing.version || 1) + 1),
       updatedAt: new Date().toISOString()
     });
     current.authPermissionTemplates = (current.authPermissionTemplates || []).map((template) => template.id === existing.id ? updated : template);
-    appendAuthPermissionAudit(current, authUser, { type: "template_updated", targetType: "template", targetId: updated.id, targetName: updated.name, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), message: `Updated permission template ${updated.name}.` });
+    appendAuthPermissionAudit(current, authUser, { type: "template_updated", targetType: "template", targetId: updated.id, targetName: updated.name, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), templateVersion: updated.version, diffs: permissionDiffDetails(existing.permissions, updated.permissions), message: `Updated permission template ${updated.name} to v${updated.version}.` });
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
@@ -31643,16 +31690,20 @@ async function handleApi(req, res) {
   }
 
   if (templateMatch && req.method === "DELETE") {
-    if (!userCan(authUser, "users", "admin")) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    if (!userCan(authUser, "users.permissions", "permissions")) return sendJson(res, 403, { error: "Permission template access is required." });
     const templateId = decodeURIComponent(templateMatch[1] || "");
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
     const existing = (current.authPermissionTemplates || []).find((template) => String(template.id || "") === templateId);
     if (!existing) return notFound(res);
     if (existing.builtIn) return sendJson(res, 400, { error: "Built-in templates cannot be deleted." });
+    const affectedUserIds = (current.systemUsers || []).filter((user) => user.permissionTemplateId === existing.id).map((user) => user.id);
     current.authPermissionTemplates = (current.authPermissionTemplates || []).filter((template) => template.id !== existing.id);
-    current.systemUsers = (current.systemUsers || []).map((user) => user.permissionTemplateId === existing.id ? { ...user, permissionTemplateId: "custom" } : user);
-    appendAuthPermissionAudit(current, authUser, { type: "template_deleted", targetType: "template", targetId: existing.id, targetName: existing.name, beforeCount: permissionEnabledCount(existing.permissions), message: `Deleted permission template ${existing.name}.` });
+    current.systemUsers = (current.systemUsers || []).map((user) => user.permissionTemplateId === existing.id ? { ...user, permissionTemplateId: "custom", permissionTemplateVersion: 0 } : user);
+    appendAuthPermissionAudit(current, authUser, { type: "template_deleted", targetType: "template", targetId: existing.id, targetName: existing.name, beforeCount: permissionEnabledCount(existing.permissions), templateVersion: existing.version, message: `Deleted permission template ${existing.name}.` });
     const systemSettings = writeSystemSettingsStore(current);
+    for (const affectedUserId of affectedUserIds) {
+      if (String(affectedUserId || "") !== String(authUser.id || "")) revokeAuthSessionsForUser(affectedUserId);
+    }
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
     return sendJson(res, 200, { permissionTemplates: systemSettings.authPermissionTemplates.map(publicAuthPermissionTemplate), users: systemSettings.systemUsers.map(publicSystemUser) });
@@ -31660,7 +31711,7 @@ async function handleApi(req, res) {
 
   const userMatch = url.pathname.match(/^\/api\/users\/([^/]+)$/);
   if (userMatch && req.method === "PATCH") {
-    if (!userCan(authUser, "users", "admin")) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    if (!userCan(authUser, "users.accounts", "edit") && !userCan(authUser, "users.permissions", "permissions")) return sendJson(res, 403, { error: "User account or permission edit access is required." });
     const userId = decodeURIComponent(userMatch[1] || "");
     const body = await parseBody(req);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
@@ -31677,15 +31728,22 @@ async function handleApi(req, res) {
       role: existing.isMasterAdmin ? "Master Admin" : (body.role === undefined ? existing.role : sourceTextValue(body.role || "Operator")),
       status: existing.isMasterAdmin ? "active" : (["active", "inactive"].includes(String(body.status || "").toLowerCase()) ? String(body.status).toLowerCase() : existing.status),
       permissionTemplateId: existing.isMasterAdmin ? "master-admin" : (selectedTemplate ? selectedTemplate.id : "custom"),
+      permissionTemplateVersion: existing.isMasterAdmin ? 0 : (selectedTemplate ? selectedTemplate.version : 0),
       permissions: existing.isMasterAdmin ? normalizeAuthPermissions({}, true) : (selectedTemplate ? normalizeAuthPermissions(selectedTemplate.permissions, false) : (body.permissions === undefined ? existing.permissions : normalizeAuthPermissions(body.permissions, false))),
       updatedAt: new Date().toISOString()
     };
+    const accountChanged = existing.name !== updated.name || existing.username !== updated.username || existing.email !== updated.email || existing.role !== updated.role || existing.status !== updated.status;
+    const permissionChanged = existing.permissionTemplateId !== updated.permissionTemplateId || Number(existing.permissionTemplateVersion || 0) !== Number(updated.permissionTemplateVersion || 0) || JSON.stringify(normalizeAuthPermissions(existing.permissions, false)) !== JSON.stringify(normalizeAuthPermissions(updated.permissions, false));
+    if (accountChanged && !userCan(authUser, "users.accounts", "edit")) return sendJson(res, 403, { error: "User account edit access is required." });
+    if (existing.status !== updated.status && !userCan(authUser, "users.accounts", "deactivate")) return sendJson(res, 403, { error: "Deactivate user access is required." });
+    if (permissionChanged && !userCan(authUser, "users.permissions", "permissions")) return sendJson(res, 403, { error: "User permission edit access is required." });
     if (!updated.username || !/^[a-z0-9._@-]{2,80}$/i.test(updated.username)) return sendJson(res, 400, { error: "Enter a valid username." });
     const duplicate = (current.systemUsers || []).find((candidate) => candidate.id !== existing.id && (sourceTextValue(candidate.username).toLowerCase() === updated.username || (updated.email && sourceTextValue(candidate.email).toLowerCase() === updated.email.toLowerCase())));
     if (duplicate) return sendJson(res, 409, { error: "Another user already uses that username or email." });
     current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);
-    appendAuthPermissionAudit(current, authUser, { type: "user_updated", targetType: "user", targetId: updated.id, targetName: updated.name || updated.username, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), templateId: updated.permissionTemplateId, message: `Updated ${updated.name || updated.username}.` });
+    appendAuthPermissionAudit(current, authUser, { type: "user_updated", targetType: "user", targetId: updated.id, targetName: updated.name || updated.username, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), templateId: updated.permissionTemplateId, templateVersion: updated.permissionTemplateVersion, diffs: permissionDiffDetails(existing.permissions, updated.permissions), message: `Updated ${updated.name || updated.username}.` });
     const systemSettings = writeSystemSettingsStore(current);
+    if ((permissionChanged || existing.status !== updated.status) && String(authUser.id || "") !== String(updated.id || "")) revokeAuthSessionsForUser(updated.id);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
     return sendJson(res, 200, { user: publicSystemUser(updated), users: systemSettings.systemUsers.map(publicSystemUser) });
@@ -31694,7 +31752,7 @@ async function handleApi(req, res) {
   const resetPasswordMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/password$/);
   if (resetPasswordMatch && req.method === "POST") {
     const userId = decodeURIComponent(resetPasswordMatch[1] || "");
-    if (!userCan(authUser, "users", "admin") && authUser.id !== userId) return sendJson(res, 403, { error: "Manage Users admin access is required." });
+    if (!userCan(authUser, "users.accounts", "passwords") && authUser.id !== userId) return sendJson(res, 403, { error: "Reset password access is required." });
     const body = await parseBody(req);
     const password = sourceTextValue(body.password || "") || crypto.randomBytes(12).toString("base64url");
     if (password.length < 8) return sendJson(res, 400, { error: "Password must be at least 8 characters." });
@@ -31708,8 +31766,9 @@ async function handleApi(req, res) {
     const hashed = hashUserPassword(password);
     const updated = { ...existing, passwordHash: hashed.hash, passwordSalt: hashed.salt, mustChangePassword: authUser.id !== userId && body.mustChangePassword !== false, updatedAt: new Date().toISOString() };
     current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);
-    appendAuthPermissionAudit(current, authUser, { type: "password_reset", targetType: "user", targetId: updated.id, targetName: updated.name || updated.username, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), message: authUser.id === updated.id ? `Password changed for ${updated.name || updated.username}.` : `Password reset for ${updated.name || updated.username}.` });
+    appendAuthPermissionAudit(current, authUser, { type: "password_reset", targetType: "user", targetId: updated.id, targetName: updated.name || updated.username, beforeCount: permissionEnabledCount(existing.permissions), afterCount: permissionEnabledCount(updated.permissions), templateId: updated.permissionTemplateId, templateVersion: updated.permissionTemplateVersion, message: authUser.id === updated.id ? `Password changed for ${updated.name || updated.username}.` : `Password reset for ${updated.name || updated.username}.` });
     const systemSettings = writeSystemSettingsStore(current);
+    if (String(authUser.id || "") !== String(updated.id || "")) revokeAuthSessionsForUser(updated.id);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
     return sendJson(res, 200, { user: publicSystemUser(updated), temporaryPassword: body.password ? "" : password, users: systemSettings.systemUsers.map(publicSystemUser) });
