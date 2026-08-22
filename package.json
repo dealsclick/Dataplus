@@ -18,7 +18,10 @@
     "purchasing:clear": "node scripts/clear-purchase-orders.js",
     "releases:generate": "node scripts/generate-release-history.js",
     "shopify:truevalue-variation-dry-run": "node scripts/truevalue-variation-repair-dry-run.js",
-    "shopify:truevalue-variation-repair": "node scripts/truevalue-variation-repair-apply.js"
+    "shopify:truevalue-variation-repair": "node scripts/truevalue-variation-repair-apply.js",
+    "shopify:min-quantity-preview": "node scripts/shopify-min-quantity-enforcement.js",
+    "shopify:min-quantity-metafields": "node scripts/shopify-min-quantity-enforcement.js --apply --metafields-only",
+    "shopify:min-quantity-enforce": "node scripts/shopify-min-quantity-enforcement.js --apply --delete-each-only"
   },
   "engines": {
     "node": ">=20"

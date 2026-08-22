@@ -675,6 +675,22 @@ function normalizeDumpRecord(record) {
   return Object.fromEntries(Object.entries(record || {}).map(([key, value]) => [key, normalizeDumpValue(value)]));
 }
 
+function canonicalDumpFieldKey(key) {
+  return String(key || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function dumpFieldValue(record = {}, aliases = []) {
+  const keys = Array.isArray(aliases) ? aliases : [aliases];
+  for (const key of keys) {
+    if (record[key] !== undefined && record[key] !== null && textValue(record[key])) return record[key];
+  }
+  const wanted = new Set(keys.map(canonicalDumpFieldKey).filter(Boolean));
+  for (const [key, value] of Object.entries(record || {})) {
+    if (wanted.has(canonicalDumpFieldKey(key)) && value !== undefined && value !== null && textValue(value)) return value;
+  }
+  return undefined;
+}
+
 function readDumpRecords(dumpPath) {
   const compressed = fs.readFileSync(dumpPath);
   const buffer = dumpPath.endsWith(".gz") ? zlib.gunzipSync(compressed) : compressed;
@@ -730,7 +746,17 @@ function buildProduct(record) {
   const vendorWebsitePrice = numberValue(normalizedRecord.vendor_website_price || normalizedRecord.vendorWebsitePrice);
   const websitePrice = vendorWebsitePrice > 0 ? vendorWebsitePrice : sourceCost > 0 ? Math.round((sourceCost * 1.35) * 100) / 100 : 0;
   const stockQty = numberValue(normalizedRecord.stock_qty ?? normalizedRecord.stockQty ?? normalizedRecord.qty ?? normalizedRecord.quantity);
-  const minQuantity = textValue(normalizedRecord.min_quantity || normalizedRecord.minQuantity || normalizedRecord.minimum_quantity);
+  const minQuantity = textValue(dumpFieldValue(normalizedRecord, [
+    "min_quantity",
+    "minQuantity",
+    "minimum_quantity",
+    "minimumQuantity",
+    "minimum qty",
+    "minimum quantity",
+    "min qty",
+    "min quantity",
+    "MIN min quantity"
+  ]));
   const checkedImage = normalizedRecord.checked_image && typeof normalizedRecord.checked_image === "object" ? normalizedRecord.checked_image : {};
   const sourceBrand = textValue(normalizedRecord.sourceBrand || normalizedRecord.brand);
   const sourceCategory = formatCategoryName(normalizedRecord.category || normalizedRecord.product_type);
@@ -775,7 +801,19 @@ function buildProduct(record) {
     uom: textValue(normalizedRecord.uom),
     uomQty: textValue(normalizedRecord.uom_qty || normalizedRecord.uomQty),
     minQuantity,
-    quantityIncrements: textValue(normalizedRecord.quantity_increments || normalizedRecord.quantityIncrements),
+    quantityIncrements: textValue(dumpFieldValue(normalizedRecord, [
+      "quantity_increments",
+      "quantityIncrements",
+      "quantity increments",
+      "quantity increment",
+      "qty_increments",
+      "qtyIncrement",
+      "qty increment",
+      "order_increment",
+      "order increment",
+      "sell_increment",
+      "sell increment"
+    ])),
     addTags: listValue(normalizedRecord.add_tags),
     removeTags: listValue(normalizedRecord.remove_tags),
     binLocation: textValue(normalizedRecord.bin_location),

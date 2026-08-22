@@ -120,8 +120,8 @@ function repairAction({ eachStatus, packStatus, eachVariant, packVariant }) {
     const actualLooksPack = actualSku.toLowerCase() === text(packVariant?.sku).toLowerCase();
     return actualLooksPack ? "create_each_variant_existing_pack" : "create_pack_variant_existing_each";
   }
-  if (!eachId && packId) return "create_each_variant";
-  if (eachId && !packId) return "create_pack_variant";
+  if (!eachId && packId) return eachVariant?.sku ? "create_each_variant" : "none";
+  if (eachId && !packId) return packVariant?.sku ? "create_pack_variant" : "none";
   if (!eachId && !packId) return "review_missing_shopify_product";
   return "none";
 }
