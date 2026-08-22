@@ -17882,6 +17882,11 @@ function SettingsPage({
     setTemplateDialogOpen(true)
   }
 
+  function openBlankTemplateDialog() {
+    setTemplateDraft({ name: "", description: "", permissions: {} })
+    setTemplateDialogOpen(true)
+  }
+
   function updateTemplateDraftPermission(areaId: string, action: keyof AuthPermission, enabled: boolean) {
     setTemplateDraft((current) => ({
       ...current,
@@ -18843,8 +18848,8 @@ function SettingsPage({
                   </Card>
                   <Card className="border-dashed">
                     <CardHeader className="pb-3">
-                      <CardTitle className="text-sm">Permission template</CardTitle>
-                      <CardDescription>Apply a saved template or choose Custom to adjust individual checks below.</CardDescription>
+                      <CardTitle className="text-sm">User access template</CardTitle>
+                      <CardDescription>This applies a reusable template to {selectedUser.name || selectedUser.username}. Choose Custom when this user should have individual checks.</CardDescription>
                     </CardHeader>
                     <CardContent className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
                       <Select disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} value={selectedTemplateId} onValueChange={applyPermissionTemplate}>
@@ -18856,16 +18861,11 @@ function SettingsPage({
                         </SelectContent>
                       </Select>
                       <div className="flex flex-wrap gap-2">
-                        <Button type="button" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} onClick={() => openTemplateDialog()}><Save className="size-4" /> Save as template</Button>
+                        <Button type="button" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} onClick={() => openTemplateDialog()}><Save className="size-4" /> Create template from user</Button>
                         <Button type="button" variant="outline" disabled={!selectedUser} onClick={exportSelectedPermissions}><FileDown className="size-4" /> Export JSON</Button>
                         <Button type="button" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} asChild>
                           <label className="cursor-pointer"><FileUp className="size-4" /> Import JSON<input type="file" accept="application/json,.json" className="sr-only" onChange={(event) => { importSelectedPermissions(event.target.files?.[0]); event.currentTarget.value = "" }} /></label>
                         </Button>
-                        {selectedTemplateId !== "custom" && selectedTemplateId !== "master-admin" && !permissionTemplates.find((template) => template.id === selectedTemplateId)?.builtIn && <Button type="button" variant="outline" disabled={!canEditUserPermissions || userSaving} onClick={() => {
-                          const template = permissionTemplates.find((candidate) => candidate.id === selectedTemplateId)
-                          if (template) setTemplateDraft({ id: template.id, name: template.name, description: template.description || "", permissions: selectedUser.permissions || {}, builtIn: template.builtIn })
-                          setTemplateDialogOpen(true)
-                        }}><RefreshCw className="size-4" /> Update template</Button>}
                       </div>
                     </CardContent>
                   </Card>
@@ -18910,12 +18910,15 @@ function SettingsPage({
                     <CardHeader className="pb-3">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
-                          <CardTitle className="text-sm">Role templates</CardTitle>
-                          <CardDescription>Search, duplicate, compare, and see which users are assigned to each template.</CardDescription>
+                          <CardTitle className="text-sm">Template library</CardTitle>
+                          <CardDescription>Create and manage reusable templates. Template edits happen here, not in the user permission matrix below.</CardDescription>
                         </div>
-                        <div className="flex min-w-64 items-center gap-2 rounded-md border bg-background px-2">
-                          <Search className="size-4 text-muted-foreground" />
-                          <Input className="h-9 border-0 px-0 shadow-none focus-visible:ring-0" placeholder="Search templates..." value={templateSearch} onChange={(event) => setTemplateSearch(event.target.value)} />
+                        <div className="flex flex-wrap gap-2">
+                          <Button type="button" size="sm" disabled={!canEditUserPermissions} onClick={openBlankTemplateDialog}><Save className="size-4" /> Create template</Button>
+                          <div className="flex min-w-64 items-center gap-2 rounded-md border bg-background px-2">
+                            <Search className="size-4 text-muted-foreground" />
+                            <Input className="h-9 border-0 px-0 shadow-none focus-visible:ring-0" placeholder="Search templates..." value={templateSearch} onChange={(event) => setTemplateSearch(event.target.value)} />
+                          </div>
                         </div>
                       </div>
                     </CardHeader>
@@ -18975,8 +18978,8 @@ function SettingsPage({
                     <CardHeader className="gap-3 border-b">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
-                          <CardTitle className="text-sm">Permission editor</CardTitle>
-                          <CardDescription>Select a category, then manage its actions in a compact table.</CardDescription>
+                          <CardTitle className="flex flex-wrap items-center gap-2 text-sm">User permission matrix <Badge variant="secondary">Editing {selectedUser.name || selectedUser.username}</Badge></CardTitle>
+                          <CardDescription>These checks change only this user. Use Template library above to create or edit reusable templates.</CardDescription>
                         </div>
                         <div className="flex min-w-64 items-center gap-2 rounded-md border bg-background px-2">
                           <Search className="size-4 text-muted-foreground" />
@@ -19006,7 +19009,7 @@ function SettingsPage({
                           <div className="flex flex-wrap items-start justify-between gap-3">
                             <div>
                               <p className="text-base font-semibold">{selectedPermissionArea.label}</p>
-                              <p className="text-xs text-muted-foreground">{selectedPermissionArea.path} · {permissionSummary(selectedPermissionArea)}</p>
+                              <p className="text-xs text-muted-foreground">{selectedPermissionArea.path} · {permissionSummary(selectedPermissionArea)} · saved as {templateName(selectedUser.permissionTemplateId)}</p>
                             </div>
                             <div className="flex flex-wrap gap-2">
                               <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions} onClick={() => applyPermissionPreset(selectedPermissionArea, "none")}>No access</Button>
@@ -19106,7 +19109,7 @@ function SettingsPage({
             <DialogContent className="max-h-[92vh] overflow-hidden sm:max-w-5xl">
               <DialogHeader>
                 <DialogTitle>{templateDraft.id ? "Edit permission template" : "Create permission template"}</DialogTitle>
-                <DialogDescription>{templateDraft.id ? "Update the template name, description, and saved permissions." : "This saves the selected user's current permission checks as a reusable template."}</DialogDescription>
+                <DialogDescription>{templateDraft.id ? "You are changing this reusable template for future use. Assigned users keep their saved permissions until you apply the template again." : Object.keys(templateDraft.permissions || {}).length ? "This creates a new reusable template from the selected user's current checks." : "This creates a blank reusable template. Choose the permissions below, then save it."}</DialogDescription>
               </DialogHeader>
               <div className="grid gap-4">
                 <Field label="Template name"><Input disabled={!canEditUserPermissions} value={templateDraft.name} onChange={(event) => setTemplateDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Warehouse receiver" /></Field>
