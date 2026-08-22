@@ -1133,19 +1133,76 @@ const DEFAULT_SYSTEM_SETTINGS = {
 
 const AUTH_PERMISSION_AREAS = [
   { id: "overview", label: "Overview", path: "/", actions: ["view"] },
-  { id: "orders", label: "Orders", path: "/orders", actions: ["view", "edit", "create", "cancel", "fulfill", "refund", "return", "map_sku", "notes", "export"] },
-  { id: "fulfillment", label: "Fulfillment", path: "/fulfillment", actions: ["view", "edit", "create", "pick", "pack", "ship", "labels", "export"] },
-  { id: "purchasing", label: "Purchase orders", path: "/purchasing", actions: ["view", "edit", "create", "submit", "approve", "receive", "resource", "return", "delete", "export"] },
-  { id: "warehouse", label: "Warehouse", path: "/warehouse", actions: ["view", "edit", "create", "receive", "adjust", "transfer", "audit", "delete", "export"] },
-  { id: "catalog", label: "Catalog", path: "/products", actions: ["view", "edit", "create", "import", "approve", "map", "launch", "sync", "delete", "export"] },
-  { id: "vendors", label: "Vendors", path: "/vendors", actions: ["view", "edit", "create", "files", "feeds", "delete", "export"] },
-  { id: "brands", label: "Brands", path: "/brands", actions: ["view", "edit", "create", "delete", "export"] },
-  { id: "channels", label: "Channels", path: "/channels", actions: ["view", "edit", "credentials", "sync", "launch", "import", "export", "webhooks"] },
-  { id: "jobs", label: "Jobs", path: "/jobs", actions: ["view", "run", "retry", "stop", "cleanup", "notes", "export"] },
+  { id: "orders", label: "Orders", path: "/orders", actions: ["view", "edit", "create", "cancel", "fulfill", "refund", "return", "map_sku", "notes", "export"], sections: [
+    { id: "orders.queue", label: "Order queue", path: "/orders", actions: ["view", "edit", "create", "cancel", "notes", "export"] },
+    { id: "orders.lines", label: "Line items and SKU matching", path: "/orders/:id", actions: ["view", "edit", "map_sku", "create"] },
+    { id: "orders.fulfillment", label: "Order fulfillment", path: "/orders/:id/fulfillment", actions: ["view", "fulfill", "ship", "labels"] },
+    { id: "orders.returns", label: "Returns and refunds", path: "/orders/:id/returns", actions: ["view", "return", "refund", "edit"] }
+  ] },
+  { id: "fulfillment", label: "Fulfillment", path: "/fulfillment", actions: ["view", "edit", "create", "pick", "pack", "ship", "labels", "export"], sections: [
+    { id: "fulfillment.work", label: "Fulfillment work", path: "/fulfillment", actions: ["view", "edit", "create", "export"] },
+    { id: "fulfillment.picking", label: "Picking and packing", path: "/fulfillment/pick-lists", actions: ["view", "pick", "pack"] },
+    { id: "fulfillment.shipping", label: "Shipping and labels", path: "/fulfillment/shipments", actions: ["view", "ship", "labels"] }
+  ] },
+  { id: "purchasing", label: "Purchase orders", path: "/purchasing", actions: ["view", "edit", "create", "submit", "approve", "receive", "resource", "return", "delete", "export"], sections: [
+    { id: "purchasing.queue", label: "Purchasing queues", path: "/purchasing", actions: ["view", "edit", "create", "export"] },
+    { id: "purchasing.po", label: "Purchase order documents", path: "/purchasing/:id", actions: ["view", "edit", "create", "delete"] },
+    { id: "purchasing.approvals", label: "Approvals and submission", path: "/purchasing/ready-to-send", actions: ["view", "submit", "approve"] },
+    { id: "purchasing.receiving", label: "PO receiving and returns", path: "/purchasing/:id/receiving", actions: ["view", "receive", "return"] },
+    { id: "purchasing.sourcing", label: "Sourcing and re-source", path: "/purchasing/waiting-for-po", actions: ["view", "resource", "edit"] }
+  ] },
+  { id: "warehouse", label: "Warehouse", path: "/warehouse", actions: ["view", "edit", "create", "receive", "adjust", "transfer", "audit", "delete", "export"], sections: [
+    { id: "warehouse.locations", label: "Warehouses and bins", path: "/warehouse", actions: ["view", "edit", "create", "delete"] },
+    { id: "warehouse.inventory", label: "Inventory movement", path: "/inventory", actions: ["view", "adjust", "transfer", "export"] },
+    { id: "warehouse.audits", label: "Warehouse audits", path: "/warehouse/audits", actions: ["view", "audit", "delete", "export"] },
+    { id: "warehouse.receiving", label: "Receiving", path: "/warehouse/receiving", actions: ["view", "receive", "edit"] },
+    { id: "warehouse.barcodes", label: "Barcode tools", path: "/warehouse/barcodes", actions: ["view", "create", "edit"] }
+  ] },
+  { id: "catalog", label: "Catalog", path: "/products", actions: ["view", "edit", "create", "import", "approve", "map", "launch", "sync", "delete", "export"], sections: [
+    { id: "catalog.products", label: "Products", path: "/products", actions: ["view", "edit", "create", "delete", "export"] },
+    { id: "catalog.imports", label: "Imports and review", path: "/catalog/import-review", actions: ["view", "import", "approve", "export"] },
+    { id: "catalog.categories", label: "Categories and attributes", path: "/categories", actions: ["view", "edit", "map", "sync"] },
+    { id: "catalog.marketplace", label: "Catalog marketplace actions", path: "/products/channel-actions", actions: ["view", "launch", "sync", "export"] },
+    { id: "catalog.quality", label: "Quality and readiness", path: "/catalog/readiness", actions: ["view", "run", "export"] }
+  ] },
+  { id: "vendors", label: "Vendors", path: "/vendors", actions: ["view", "edit", "create", "files", "feeds", "delete", "export"], sections: [
+    { id: "vendors.profiles", label: "Vendor profiles", path: "/vendors", actions: ["view", "edit", "create", "delete", "export"] },
+    { id: "vendors.files", label: "Vendor files", path: "/vendors/:id/files", actions: ["view", "files", "create", "delete"] },
+    { id: "vendors.feeds", label: "Vendor feeds", path: "/vendors/:id/feeds", actions: ["view", "feeds", "create", "edit"] }
+  ] },
+  { id: "brands", label: "Brands", path: "/brands", actions: ["view", "edit", "create", "delete", "export"], sections: [
+    { id: "brands.profiles", label: "Brand profiles", path: "/brands", actions: ["view", "edit", "create", "delete", "export"] }
+  ] },
+  { id: "channels", label: "Channels", path: "/channels", actions: ["view", "edit", "credentials", "sync", "launch", "import", "export", "webhooks"], sections: [
+    { id: "channels.settings", label: "Channel settings", path: "/channels", actions: ["view", "edit", "credentials"] },
+    { id: "channels.shopify", label: "Shopify", path: "/channels/shopify", actions: ["view", "sync", "launch", "import", "export", "webhooks"] },
+    { id: "channels.ebay", label: "eBay", path: "/channels/ebay", actions: ["view", "sync", "launch", "import", "export", "webhooks"] },
+    { id: "channels.logs", label: "Channel logs", path: "/channels/activity", actions: ["view", "export"] }
+  ] },
+  { id: "jobs", label: "Jobs", path: "/jobs", actions: ["view", "run", "retry", "stop", "cleanup", "notes", "export"], sections: [
+    { id: "jobs.queue", label: "Job queue", path: "/jobs", actions: ["view", "run", "retry", "stop", "cleanup"] },
+    { id: "jobs.artifacts", label: "Artifacts and notes", path: "/jobs/:id", actions: ["view", "export", "notes"] }
+  ] },
   { id: "ai", label: "David AI", path: "/ai", actions: ["view", "chat", "approve", "configure"] },
-  { id: "settings", label: "System Settings", path: "/settings", actions: ["view", "edit", "credentials", "backup", "maintenance"] },
-  { id: "users", label: "Manage users", path: "/settings?tab=users", actions: ["view", "create", "edit", "permissions", "passwords", "deactivate"] }
+  { id: "settings", label: "System Settings", path: "/settings", actions: ["view", "edit", "credentials", "backup", "maintenance"], sections: [
+    { id: "settings.operations", label: "Operations settings", path: "/settings", actions: ["view", "edit", "maintenance"] },
+    { id: "settings.security", label: "Security settings", path: "/settings?tab=security", actions: ["view", "edit", "credentials"] },
+    { id: "settings.integrations", label: "Integrations", path: "/settings?tab=data-sources", actions: ["view", "edit", "credentials"] },
+    { id: "settings.backups", label: "Backups and maintenance", path: "/settings?tab=backups", actions: ["view", "backup", "maintenance"] },
+    { id: "settings.catalog", label: "Catalog system settings", path: "/settings?tab=catalog", actions: ["view", "edit", "maintenance"] }
+  ] },
+  { id: "users", label: "Manage users", path: "/settings?tab=users", actions: ["view", "create", "edit", "permissions", "passwords", "deactivate"], sections: [
+    { id: "users.accounts", label: "User accounts", path: "/settings?tab=users", actions: ["view", "create", "edit", "passwords", "deactivate"] },
+    { id: "users.permissions", label: "Permission matrix", path: "/settings?tab=users", actions: ["view", "permissions", "edit"] }
+  ] }
 ];
+
+function authPermissionRows() {
+  return AUTH_PERMISSION_AREAS.flatMap((area) => [
+    area,
+    ...(area.sections || []).map((section) => ({ ...section, parentId: area.id }))
+  ]);
+}
 
 const PRODUCT_DUMP_RESOURCE_PROFILES = {
   conservative: { id: "conservative", label: "Conservative", heapMb: 1024, batchSize: 50, description: "For small servers or when other workloads need priority." },
@@ -5174,7 +5231,7 @@ function shopifyProductLaunchBatchLimit(settings = {}) {
 }
 
 function authPermissionDefaults(isMasterAdmin = false) {
-  return Object.fromEntries(AUTH_PERMISSION_AREAS.map((area) => {
+  return Object.fromEntries(authPermissionRows().map((area) => {
     const row = { view: true, read: true, write: Boolean(isMasterAdmin), admin: Boolean(isMasterAdmin) };
     for (const action of area.actions || []) row[action] = action === "view" ? true : Boolean(isMasterAdmin);
     return [area.id, row];
@@ -5184,17 +5241,21 @@ function authPermissionDefaults(isMasterAdmin = false) {
 function normalizeAuthPermissions(value = {}, isMasterAdmin = false) {
   const defaults = authPermissionDefaults(isMasterAdmin);
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  for (const area of AUTH_PERMISSION_AREAS) {
-    const row = source[area.id] && typeof source[area.id] === "object" ? source[area.id] : {};
-    const legacyWrite = row.write === true || String(row.write).toLowerCase() === "true";
+  for (const area of authPermissionRows()) {
+    const rowExists = source[area.id] && typeof source[area.id] === "object";
+    const row = rowExists ? source[area.id] : {};
+    const parentRow = area.parentId && source[area.parentId] && typeof source[area.parentId] === "object" ? source[area.parentId] : {};
+    const inheritParent = Boolean(area.parentId && !rowExists);
+    const legacyWrite = row.write === true || String(row.write).toLowerCase() === "true" || (inheritParent && (parentRow.write === true || String(parentRow.write).toLowerCase() === "true"));
+    const legacyAdmin = row.admin === true || String(row.admin).toLowerCase() === "true" || (inheritParent && (parentRow.admin === true || String(parentRow.admin).toLowerCase() === "true"));
     const normalizedRow = {
-      view: isMasterAdmin || row.view === true || String(row.view).toLowerCase() === "true",
-      read: isMasterAdmin || row.read === true || String(row.read).toLowerCase() === "true",
-      write: isMasterAdmin || row.write === true || String(row.write).toLowerCase() === "true",
-      admin: isMasterAdmin || row.admin === true || String(row.admin).toLowerCase() === "true"
+      view: isMasterAdmin || row.view === true || String(row.view).toLowerCase() === "true" || (inheritParent && (parentRow.view === true || String(parentRow.view).toLowerCase() === "true")),
+      read: isMasterAdmin || row.read === true || String(row.read).toLowerCase() === "true" || (inheritParent && (parentRow.read === true || String(parentRow.read).toLowerCase() === "true")),
+      write: isMasterAdmin || legacyWrite,
+      admin: isMasterAdmin || legacyAdmin
     };
     for (const action of area.actions || []) {
-      normalizedRow[action] = isMasterAdmin || row.admin === true || (action === "view" ? normalizedRow.view : (row[action] === true || String(row[action]).toLowerCase() === "true" || legacyWrite));
+      normalizedRow[action] = isMasterAdmin || legacyAdmin || (action === "view" ? normalizedRow.view : (row[action] === true || String(row[action]).toLowerCase() === "true" || (inheritParent && (parentRow[action] === true || String(parentRow[action]).toLowerCase() === "true")) || legacyWrite));
     }
     defaults[area.id] = normalizedRow;
   }
@@ -5332,85 +5393,90 @@ function authRequirementForRequest(req, url, parts = []) {
     if (/\.csv$|\/export\b|\/export\//.test(pathname)) return { area, action: "export" };
     return { area, action: "view" };
   }
-  if (method === "DELETE") return { area, action: "delete" };
   if (area === "users") {
-    if (pathname.endsWith("/password")) return { area, action: "passwords" };
-    if (method === "POST") return { area, action: "create" };
-    return { area, action: "permissions" };
+    if (pathname.endsWith("/password")) return { area: "users.accounts", action: "passwords" };
+    if (method === "POST") return { area: "users.accounts", action: "create" };
+    return { area: "users.permissions", action: "permissions" };
   }
   if (area === "settings") {
-    if (/credential|ai-test|smtp-test/.test(pathname)) return { area, action: "credentials" };
-    if (/backup/.test(pathname)) return { area, action: "backup" };
-    if (/reset|cleanup|rebuild|maintenance/.test(pathname)) return { area, action: "maintenance" };
-    return { area, action: "edit" };
+    if (/credential|ai-test|smtp-test|api-key|auth/i.test(pathname)) return { area: "settings.security", action: "credentials" };
+    if (/backup/.test(pathname)) return { area: "settings.backups", action: "backup" };
+    if (/catalog|source|datadump|supplier-index|category/i.test(pathname)) return { area: "settings.catalog", action: /reset|cleanup|rebuild|maintenance/i.test(pathname) ? "maintenance" : "edit" };
+    if (/data-source|feed|integration|shopify|ebay|smtp/i.test(pathname)) return { area: "settings.integrations", action: /credential|test/i.test(pathname) ? "credentials" : "edit" };
+    if (/reset|cleanup|rebuild|maintenance/.test(pathname)) return { area: "settings.operations", action: "maintenance" };
+    return { area: "settings.operations", action: "edit" };
   }
   if (area === "jobs") {
-    if (/\/retry$/.test(pathname)) return { area, action: "retry" };
-    if (/\/stop$/.test(pathname)) return { area, action: "stop" };
-    if (/cleanup/.test(pathname)) return { area, action: "cleanup" };
-    if (/notes/.test(pathname)) return { area, action: "notes" };
-    return { area, action: "run" };
+    if (/\/retry$/.test(pathname)) return { area: "jobs.queue", action: "retry" };
+    if (/\/stop$/.test(pathname)) return { area: "jobs.queue", action: "stop" };
+    if (/cleanup/.test(pathname)) return { area: "jobs.queue", action: "cleanup" };
+    if (/notes/.test(pathname)) return { area: "jobs.artifacts", action: "notes" };
+    return { area: "jobs.queue", action: "run" };
   }
   if (area === "orders") {
-    if (parts.includes("fulfill")) return { area, action: "fulfill" };
-    if (parts.includes("refunds")) return { area, action: "refund" };
-    if (parts.includes("returns")) return { area, action: "return" };
-    if (parts.includes("map-sku") || parts.includes("unmap-sku") || parts.includes("create-sku")) return { area, action: "map_sku" };
-    if (parts.includes("notes")) return { area, action: "notes" };
-    if (parts.includes("confirm") || parts.includes("cancel") || parts.includes("action")) return { area, action: "cancel" };
-    if (method === "POST") return { area, action: "create" };
-    return { area, action: "edit" };
+    if (parts.includes("fulfill")) return { area: "orders.fulfillment", action: "fulfill" };
+    if (parts.includes("refunds")) return { area: "orders.returns", action: "refund" };
+    if (parts.includes("returns")) return { area: "orders.returns", action: "return" };
+    if (parts.includes("map-sku") || parts.includes("unmap-sku") || parts.includes("create-sku") || parts.includes("items")) return { area: "orders.lines", action: "map_sku" };
+    if (parts.includes("notes")) return { area: "orders.queue", action: "notes" };
+    if (parts.includes("confirm") || parts.includes("cancel") || parts.includes("action")) return { area: "orders.queue", action: "cancel" };
+    if (method === "POST") return { area: "orders.queue", action: "create" };
+    return { area: "orders.queue", action: "edit" };
   }
   if (area === "fulfillment") {
-    if (/picked|pick/i.test(pathname)) return { area, action: "pick" };
-    if (/pack/i.test(pathname)) return { area, action: "pack" };
-    if (/ship|tracking|fulfill/i.test(pathname)) return { area, action: "ship" };
-    if (/label/i.test(pathname)) return { area, action: "labels" };
-    if (method === "POST") return { area, action: "create" };
-    return { area, action: "edit" };
+    if (/picked|pick/i.test(pathname)) return { area: "fulfillment.picking", action: "pick" };
+    if (/pack/i.test(pathname)) return { area: "fulfillment.picking", action: "pack" };
+    if (/ship|tracking|fulfill/i.test(pathname)) return { area: "fulfillment.shipping", action: "ship" };
+    if (/label/i.test(pathname)) return { area: "fulfillment.shipping", action: "labels" };
+    if (method === "POST") return { area: "fulfillment.work", action: "create" };
+    return { area: "fulfillment.work", action: "edit" };
   }
   if (area === "purchasing") {
-    if (parts.includes("submit")) return { area, action: "submit" };
-    if (parts.includes("approve") || parts.includes("action")) return { area, action: "approve" };
-    if (parts.includes("receive")) return { area, action: "receive" };
-    if (parts.includes("re-source")) return { area, action: "resource" };
-    if (parts.includes("returns")) return { area, action: "return" };
-    if (method === "POST") return { area, action: "create" };
-    return { area, action: "edit" };
+    if (parts.includes("submit")) return { area: "purchasing.approvals", action: "submit" };
+    if (parts.includes("approve") || parts.includes("action")) return { area: "purchasing.approvals", action: "approve" };
+    if (parts.includes("receive")) return { area: "purchasing.receiving", action: "receive" };
+    if (parts.includes("re-source")) return { area: "purchasing.sourcing", action: "resource" };
+    if (parts.includes("returns")) return { area: "purchasing.receiving", action: "return" };
+    if (method === "POST") return { area: "purchasing.po", action: "create" };
+    return { area: "purchasing.po", action: "edit" };
   }
   if (area === "warehouse") {
-    if (/receiv/i.test(pathname)) return { area, action: "receive" };
-    if (/transfer/i.test(pathname)) return { area, action: "transfer" };
-    if (/audit/i.test(pathname)) return { area, action: method === "DELETE" ? "delete" : "audit" };
-    if (/allocation|adjust|warehouse-stock|serial|shadow/i.test(pathname)) return { area, action: "adjust" };
-    if (method === "POST") return { area, action: "create" };
-    return { area, action: "edit" };
+    if (/audit/i.test(pathname)) return { area: "warehouse.audits", action: method === "DELETE" ? "delete" : "audit" };
+    if (/receiv/i.test(pathname)) return { area: "warehouse.receiving", action: "receive" };
+    if (/barcode/i.test(pathname)) return { area: "warehouse.barcodes", action: method === "POST" ? "create" : "edit" };
+    if (/transfer/i.test(pathname)) return { area: "warehouse.inventory", action: "transfer" };
+    if (/allocation|adjust|warehouse-stock|serial|shadow|inventory/i.test(pathname)) return { area: "warehouse.inventory", action: "adjust" };
+    if (method === "POST") return { area: "warehouse.locations", action: "create" };
+    return { area: "warehouse.locations", action: "edit" };
   }
   if (area === "catalog") {
-    if (/import|source-enrichment|datadump/.test(pathname)) return { area, action: "import" };
-    if (/review|approve|bulk/.test(pathname)) return { area, action: "approve" };
-    if (/mapping|category|attribute/.test(pathname)) return { area, action: "map" };
-    if (/shopify|ebay|launch|listing|sync/.test(pathname)) return { area, action: /launch|create/.test(pathname) ? "launch" : "sync" };
-    if (method === "POST") return { area, action: "create" };
-    return { area, action: "edit" };
+    if (/import|source-enrichment|datadump/.test(pathname)) return { area: "catalog.imports", action: "import" };
+    if (/review|approve|bulk/.test(pathname)) return { area: "catalog.imports", action: "approve" };
+    if (/mapping|category|attribute/.test(pathname)) return { area: "catalog.categories", action: "map" };
+    if (/quality|readiness|supplier-index|performance-index|facets/.test(pathname)) return { area: "catalog.quality", action: /rebuild|refresh|run|build/.test(pathname) ? "run" : "view" };
+    if (/shopify|ebay|launch|listing|sync/.test(pathname)) return { area: "catalog.marketplace", action: /launch|create/.test(pathname) ? "launch" : "sync" };
+    if (method === "POST") return { area: "catalog.products", action: "create" };
+    return { area: "catalog.products", action: "edit" };
   }
   if (area === "vendors") {
-    if (/files/.test(pathname)) return { area, action: "files" };
-    if (/feed|schedule/.test(pathname)) return { area, action: "feeds" };
-    if (method === "POST") return { area, action: "create" };
-    return { area, action: "edit" };
+    if (/files/.test(pathname)) return { area: "vendors.files", action: "files" };
+    if (/feed|schedule/.test(pathname)) return { area: "vendors.feeds", action: "feeds" };
+    if (method === "POST") return { area: "vendors.profiles", action: "create" };
+    return { area: "vendors.profiles", action: "edit" };
   }
-  if (area === "brands") return { area, action: method === "POST" ? "create" : "edit" };
+  if (area === "brands") return { area: "brands.profiles", action: method === "POST" ? "create" : "edit" };
   if (area === "channels") {
-    if (/credentials/.test(pathname)) return { area, action: "credentials" };
-    if (/webhook/.test(pathname)) return { area, action: "webhooks" };
-    if (/import/.test(pathname)) return { area, action: "import" };
-    if (/export/.test(pathname)) return { area, action: "export" };
-    if (/launch|product-create/.test(pathname)) return { area, action: "launch" };
-    if (/sync|verify|check|refresh|reconcile/.test(pathname)) return { area, action: "sync" };
-    return { area, action: "edit" };
+    const channelArea = /ebay/i.test(pathname) ? "channels.ebay" : /shopify/i.test(pathname) ? "channels.shopify" : /log|activity|ledger/i.test(pathname) ? "channels.logs" : "channels.settings";
+    if (/credentials/.test(pathname)) return { area: "channels.settings", action: "credentials" };
+    if (/webhook/.test(pathname)) return { area: channelArea, action: "webhooks" };
+    if (/import/.test(pathname)) return { area: channelArea, action: "import" };
+    if (/export/.test(pathname)) return { area: channelArea, action: "export" };
+    if (/launch|product-create/.test(pathname)) return { area: channelArea, action: "launch" };
+    if (/sync|verify|check|refresh|reconcile/.test(pathname)) return { area: channelArea, action: "sync" };
+    return { area: channelArea, action: "edit" };
   }
   if (area === "ai") return { area, action: /approve|apply/.test(pathname) ? "approve" : "chat" };
+  if (method === "DELETE") return { area, action: "delete" };
   return { area, action: "edit" };
 }
 
@@ -5418,11 +5484,18 @@ function userCan(user = {}, area = "", action = "read") {
   if (!area || user.isMasterAdmin === true) return true;
   const permissions = normalizeAuthPermissions(user.permissions, false);
   const row = permissions[area] || {};
-  if (action === "admin") return row.admin === true;
-  if (action === "write") return row.write === true || row.admin === true;
-  if (action === "read") return row.read === true || row.write === true || row.admin === true;
-  if (action === "view") return row.view === true || row.read === true || row.write === true || row.admin === true;
-  return row[action] === true || row.write === true || row.admin === true;
+  const parentArea = area.includes(".") ? area.split(".")[0] : "";
+  const parentRow = parentArea ? (permissions[parentArea] || {}) : {};
+  const childRows = !parentArea ? Object.entries(permissions).filter(([key]) => key.startsWith(`${area}.`)).map(([, value]) => value || {}) : [];
+  const rowAllows = (candidate = {}) => {
+    if (action === "admin") return candidate.admin === true;
+    if (action === "write") return candidate.write === true || candidate.admin === true;
+    if (action === "read") return candidate.read === true || candidate.view === true || candidate.write === true || candidate.admin === true;
+    if (action === "view") return candidate.view === true || candidate.read === true || candidate.write === true || candidate.admin === true;
+    return candidate[action] === true || candidate.write === true || candidate.admin === true;
+  };
+  if (parentArea) return rowAllows(row) || (!permissions[area] && rowAllows(parentRow));
+  return rowAllows(row) || childRows.some(rowAllows);
 }
 
 function publicAuthUser(user = {}) {

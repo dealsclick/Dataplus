@@ -687,7 +687,7 @@ type LiteState = {
 
 type AuthPermission = { view?: boolean; read?: boolean; write?: boolean; admin?: boolean; [key: string]: boolean | undefined }
 type AuthPermissionMatrix = Record<string, AuthPermission>
-type AuthPermissionArea = { id: string; label: string; path: string; actions?: string[] }
+type AuthPermissionArea = { id: string; label: string; path: string; actions?: string[]; sections?: AuthPermissionArea[]; parentId?: string }
 type AuthUser = {
   id: string
   name?: string
@@ -1227,11 +1227,18 @@ function userCan(user: AuthUser | undefined, area: string, action: keyof AuthPer
   if (!user) return false
   if (user.isMasterAdmin) return true
   const permission = user.permissions?.[area] || {}
-  if (action === "admin") return permission.admin === true
-  if (action === "write") return permission.write === true || permission.admin === true
-  if (action === "read") return permission.read === true || permission.write === true || permission.admin === true
-  if (action === "view") return permission.view === true || permission.read === true || permission.write === true || permission.admin === true
-  return permission[action] === true || permission.write === true || permission.admin === true
+  const parentArea = area.includes(".") ? area.split(".")[0] : ""
+  const parentPermission = parentArea ? (user.permissions?.[parentArea] || {}) : {}
+  const childPermissions = !parentArea ? Object.entries(user.permissions || {}).filter(([key]) => key.startsWith(`${area}.`)).map(([, value]) => value || {}) : []
+  const allows = (row: AuthPermission) => {
+    if (action === "admin") return row.admin === true
+    if (action === "write") return row.write === true || row.admin === true
+    if (action === "read") return row.read === true || row.view === true || row.write === true || row.admin === true
+    if (action === "view") return row.view === true || row.read === true || row.write === true || row.admin === true
+    return row[action] === true || row.write === true || row.admin === true
+  }
+  if (parentArea) return allows(permission) || (!user.permissions?.[area] && allows(parentPermission))
+  return allows(permission) || childPermissions.some(allows)
 }
 
 function userCanView(user: AuthUser | undefined, view: AppView) {
@@ -17571,8 +17578,9 @@ function SettingsPage({
       .catch(() => setSettingsWarehouses([]))
   }, [])
   useEffect(() => {
+    if (activeTab === "users" && users.length) return
     setUsers(Array.isArray(settings.systemUsers) ? settings.systemUsers as AuthUser[] : [])
-  }, [settings.systemUsers])
+  }, [settings.systemUsers, activeTab, users.length])
   useEffect(() => {
     if (activeTab !== "users") return
     void loadUsers()
@@ -17674,6 +17682,34 @@ function SettingsPage({
     const permissions = { ...(selectedUser.permissions || {}) }
     permissions[areaId] = { ...(permissions[areaId] || {}), [action]: enabled }
     setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissions } : user))
+  }
+
+  function permissionEnabled(row: AuthPermission, action: string) {
+    return Boolean(selectedUser?.isMasterAdmin || row[action] === true || row.admin === true || row.write === true)
+  }
+
+  function permissionAreaControl(area: AuthPermissionArea, nested = false) {
+    const row = selectedUser?.permissions?.[area.id] || {}
+    const actions = area.actions?.length ? area.actions : ["view", "edit", "create", "delete", "export"]
+    const enabledCount = selectedUser?.isMasterAdmin ? actions.length : actions.filter((action) => permissionEnabled(row, action)).length
+    return <div key={area.id} className={cn("rounded-md border bg-background p-3", nested && "bg-muted/20")}>
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className={cn("font-medium", nested && "text-sm")}>{area.label}</p>
+          <p className="text-xs text-muted-foreground">{area.path}</p>
+        </div>
+        <Badge variant={enabledCount ? "secondary" : "outline"}>{selectedUser?.isMasterAdmin ? "Full access" : `${enabledCount}/${actions.length} enabled`}</Badge>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {actions.map((action) => <label key={`${area.id}-${action}`} className="flex min-h-10 items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
+          <Checkbox disabled={!canManageUsers || selectedUser?.isMasterAdmin} checked={permissionEnabled(row, action)} onCheckedChange={(checked) => updateSelectedPermission(area.id, action as keyof AuthPermission, checked === true)} />
+          <span>{permissionActionLabel(action)}</span>
+        </label>)}
+      </div>
+      {area.sections?.length ? <div className="mt-3 grid gap-2 border-l pl-3">
+        {area.sections.map((section) => permissionAreaControl(section, true))}
+      </div> : null}
+    </div>
   }
 
   function requestCatalogMaintenance(request: NonNullable<typeof catalogMaintenanceConfirm>) {
@@ -18397,23 +18433,7 @@ function SettingsPage({
                     <Field label="Status"><Select disabled={!canManageUsers || selectedUser.isMasterAdmin} value={selectedUser.status || "active"} onValueChange={(next) => setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, status: next } : user))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent></Select></Field>
                   </div>
                   <div className="grid gap-3">
-                    {userAreas.map((area) => {
-                      const row = selectedUser.permissions?.[area.id] || {}
-                      const actions = area.actions?.length ? area.actions : ["view", "edit", "create", "delete", "export"]
-                      const enabledCount = selectedUser.isMasterAdmin ? actions.length : actions.filter((action) => row[action] === true || row.admin === true || row.write === true).length
-                      return <div key={area.id} className="rounded-md border bg-background p-3">
-                        <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
-                          <div><p className="font-medium">{area.label}</p><p className="text-xs text-muted-foreground">{area.path}</p></div>
-                          <Badge variant={enabledCount ? "secondary" : "outline"}>{selectedUser.isMasterAdmin ? "Full access" : `${enabledCount}/${actions.length} enabled`}</Badge>
-                        </div>
-                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                          {actions.map((action) => <label key={`${area.id}-${action}`} className="flex items-center gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
-                            <Checkbox disabled={!canManageUsers || selectedUser.isMasterAdmin} checked={selectedUser.isMasterAdmin || row[action] === true || row.admin === true || row.write === true} onCheckedChange={(checked) => updateSelectedPermission(area.id, action as keyof AuthPermission, checked === true)} />
-                            <span>{permissionActionLabel(action)}</span>
-                          </label>)}
-                        </div>
-                      </div>
-                    })}
+                    {userAreas.map((area) => permissionAreaControl(area))}
                   </div>
                 </> : <Empty className="rounded-md border py-10"><EmptyHeader><EmptyMedia variant="icon"><Users /></EmptyMedia><EmptyTitle>Select a user</EmptyTitle><EmptyDescription>Choose a login to edit profile and permissions.</EmptyDescription></EmptyHeader></Empty>}
               </CardContent>
