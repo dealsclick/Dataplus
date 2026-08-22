@@ -42,8 +42,11 @@ includes(app, "templateUsers", "Template manager must show users assigned to eac
 includes(app, "permissionMatrixDiffs", "Template manager must compare a user against a template.");
 includes(app, "filteredPermissionTemplates", "Template manager must support template search.");
 assert(!/!\{?selectedUser\.isMasterAdmin[\s\S]{0,500}Role templates/.test(app), "Role template manager must remain visible while Luis/master admin is selected.");
+includes(app, "userAdminView", "User manager must separate Users and Roles views.");
+includes(app, "Manage roles", "User profile must link to the dedicated roles page.");
+includes(app, "Create role", "Dedicated roles page must support creating a reusable role.");
 includes(app, "openBlankTemplateDialog", "Template manager must support creating a blank reusable template.");
-includes(app, "Template library", "Template manager must be labeled separately from user permission editing.");
+includes(app, "Roles", "Template manager must be presented as a dedicated roles page.");
 includes(app, "User permission matrix", "User permission editor must clearly identify selected-user editing.");
 includes(app, "Create template from user", "User permissions must offer an explicit create-from-user action.");
 includes(app, "bulkUpdateUsers", "User manager must support bulk user updates.");

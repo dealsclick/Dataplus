@@ -17555,6 +17555,7 @@ function SettingsPage({
   const [permissionSearch, setPermissionSearch] = useState("")
   const [copyUserId, setCopyUserId] = useState("")
   const [copyTemplateId, setCopyTemplateId] = useState("")
+  const [userAdminView, setUserAdminView] = useState<"users" | "roles">("users")
   const [templateSearch, setTemplateSearch] = useState("")
   const [compareTemplateId, setCompareTemplateId] = useState("")
   const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set())
@@ -18765,6 +18766,83 @@ function SettingsPage({
           </AlertDialog>
         </TabsContent>
         <TabsContent value="users">
+          <div className="grid gap-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 p-2">
+              <div className="flex flex-wrap gap-1">
+                <Button type="button" size="sm" variant={userAdminView === "users" ? "default" : "ghost"} onClick={() => setUserAdminView("users")}><Users className="size-4" /> Users</Button>
+                <Button type="button" size="sm" variant={userAdminView === "roles" ? "default" : "ghost"} onClick={() => setUserAdminView("roles")}><ShieldCheck className="size-4" /> Roles</Button>
+              </div>
+              <p className="text-xs text-muted-foreground">Manage logins separately from reusable role templates.</p>
+            </div>
+            {userAdminView === "roles" ? <div className="grid gap-4">
+              <Card>
+                <CardHeader className="gap-3 border-b">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <CardTitle className="text-base">Roles</CardTitle>
+                      <CardDescription>Reusable permission templates for warehouse, purchasing, catalog, operations, and read-only access.</CardDescription>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="button" disabled={!canEditUserPermissions} onClick={openBlankTemplateDialog}><Save className="size-4" /> Create role</Button>
+                      <div className="flex min-w-64 items-center gap-2 rounded-md border bg-background px-2">
+                        <Search className="size-4 text-muted-foreground" />
+                        <Input className="h-9 border-0 px-0 shadow-none focus-visible:ring-0" placeholder="Search roles..." value={templateSearch} onChange={(event) => setTemplateSearch(event.target.value)} />
+                      </div>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent className="grid gap-4 p-4">
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {filteredPermissionTemplates.map((template) => {
+                      const assignedUsers = templateUsers(template.id)
+                      const assignedPreview = assignedUsers.slice(0, 3).map((user) => user.displayName || user.name || user.username).join(", ")
+                      return <div key={template.id} className="grid gap-3 rounded-md border bg-background p-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">{template.name}</p>
+                            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{template.description || "No description."}</p>
+                          </div>
+                          <div className="flex shrink-0 gap-1">{template.builtIn && <Badge variant="outline">Built-in</Badge>}<Badge variant="secondary">v{numberLabel(template.version || 1)}</Badge></div>
+                        </div>
+                        <div className="grid gap-2 rounded-md bg-muted/30 p-2 text-xs text-muted-foreground">
+                          <span><span className="font-medium text-foreground">{numberLabel(permissionMatrixCount(template.permissions))}</span> enabled permission{permissionMatrixCount(template.permissions) === 1 ? "" : "s"}</span>
+                          <span><span className="font-medium text-foreground">{numberLabel(assignedUsers.length)}</span> user{assignedUsers.length === 1 ? "" : "s"} assigned{assignedPreview ? `: ${assignedPreview}${assignedUsers.length > 3 ? ` +${assignedUsers.length - 3}` : ""}` : "."}</span>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions} onClick={() => openTemplateDialog(template)}><Pencil className="size-3.5" /> Edit</Button>
+                          <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions || userSaving} onClick={() => void duplicatePermissionTemplate(template)}><Copy className="size-3.5" /> Duplicate</Button>
+                          <Button type="button" size="sm" variant={compareTemplateId === template.id ? "default" : "outline"} disabled={!selectedUser} onClick={() => setCompareTemplateId(compareTemplateId === template.id ? "" : template.id)}><Eye className="size-3.5" /> Compare</Button>
+                          {!template.builtIn && <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions || userSaving} onClick={() => void deletePermissionTemplate(template.id)}><Trash2 className="size-3.5" /> Delete</Button>}
+                        </div>
+                      </div>
+                    })}
+                    {!filteredPermissionTemplates.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">No roles match this search.</p>}
+                  </div>
+                  {compareTemplate && selectedUser && <div className="rounded-md border p-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-medium">Compare {selectedUser.name || selectedUser.username} to {compareTemplate.name}</p>
+                        <p className="mt-1 text-xs text-muted-foreground">{compareDiffs.length ? `${numberLabel(compareDiffs.length)} permission difference${compareDiffs.length === 1 ? "" : "s"}.` : "This user's saved permissions match the selected role."}</p>
+                      </div>
+                      <Button type="button" size="sm" variant="outline" onClick={() => setCompareTemplateId("")}>Close compare</Button>
+                    </div>
+                    {!!compareDiffs.length && <ScrollArea className="mt-3 max-h-64 rounded-md border">
+                      <Table>
+                        <TableHeader><TableRow><TableHead>Section</TableHead><TableHead>Action</TableHead><TableHead>{selectedUser.name || selectedUser.username}</TableHead><TableHead>{compareTemplate.name}</TableHead></TableRow></TableHeader>
+                        <TableBody>
+                          {compareDiffs.slice(0, 120).map((diff) => <TableRow key={`${diff.areaId}-${diff.action}`}>
+                            <TableCell>{diff.label}</TableCell>
+                            <TableCell>{permissionActionLabel(diff.action)}</TableCell>
+                            <TableCell><Badge variant={diff.left ? "secondary" : "outline"}>{diff.left ? "On" : "Off"}</Badge></TableCell>
+                            <TableCell><Badge variant={diff.right ? "secondary" : "outline"}>{diff.right ? "On" : "Off"}</Badge></TableCell>
+                          </TableRow>)}
+                        </TableBody>
+                      </Table>
+                    </ScrollArea>}
+                  </div>}
+                </CardContent>
+              </Card>
+            </div> : (
           <div className="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
             <Card>
               <CardHeader className="gap-3 border-b">
@@ -18861,6 +18939,7 @@ function SettingsPage({
                         </SelectContent>
                       </Select>
                       <div className="flex flex-wrap gap-2">
+                        <Button type="button" variant="outline" onClick={() => setUserAdminView("roles")}><ShieldCheck className="size-4" /> Manage roles</Button>
                         <Button type="button" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} onClick={() => openTemplateDialog()}><Save className="size-4" /> Create template from user</Button>
                         <Button type="button" variant="outline" disabled={!selectedUser} onClick={exportSelectedPermissions}><FileDown className="size-4" /> Export JSON</Button>
                         <Button type="button" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} asChild>
@@ -18906,70 +18985,6 @@ function SettingsPage({
                       })}
                     </CardContent>
                   </Card>}
-                  <Card>
-                    <CardHeader className="pb-3">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <CardTitle className="text-sm">Template library</CardTitle>
-                          <CardDescription>Create and manage reusable templates. Template edits happen here, not in the user permission matrix below.</CardDescription>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <Button type="button" size="sm" disabled={!canEditUserPermissions} onClick={openBlankTemplateDialog}><Save className="size-4" /> Create template</Button>
-                          <div className="flex min-w-64 items-center gap-2 rounded-md border bg-background px-2">
-                            <Search className="size-4 text-muted-foreground" />
-                            <Input className="h-9 border-0 px-0 shadow-none focus-visible:ring-0" placeholder="Search templates..." value={templateSearch} onChange={(event) => setTemplateSearch(event.target.value)} />
-                          </div>
-                        </div>
-                      </div>
-                    </CardHeader>
-                    <CardContent className="grid gap-4">
-                      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                      {filteredPermissionTemplates.map((template) => {
-                        const assignedUsers = templateUsers(template.id)
-                        const assignedPreview = assignedUsers.slice(0, 3).map((user) => user.name || user.username).join(", ")
-                        return <div key={template.id} className="rounded-md border p-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0"><p className="truncate text-sm font-medium">{template.name}</p><p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{template.description || "No description."}</p></div>
-                          <div className="flex shrink-0 gap-1">{template.builtIn && <Badge variant="outline">Built-in</Badge>}<Badge variant="secondary">v{numberLabel(template.version || 1)}</Badge></div>
-                        </div>
-                        <div className="mt-3 rounded-md bg-muted/30 p-2 text-xs text-muted-foreground">
-                          <span className="font-medium text-foreground">{numberLabel(assignedUsers.length)}</span> user{assignedUsers.length === 1 ? "" : "s"} assigned{assignedPreview ? `: ${assignedPreview}${assignedUsers.length > 3 ? ` +${assignedUsers.length - 3}` : ""}` : "."}
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions || selectedUser.isMasterAdmin} onClick={() => applyPermissionTemplate(template.id)}>Apply</Button>
-                          <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions} onClick={() => openTemplateDialog(template)}><Pencil className="size-3.5" /> Edit</Button>
-                          <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions || userSaving} onClick={() => void duplicatePermissionTemplate(template)}><Copy className="size-3.5" /> Duplicate</Button>
-                          <Button type="button" size="sm" variant={compareTemplateId === template.id ? "default" : "outline"} onClick={() => setCompareTemplateId(compareTemplateId === template.id ? "" : template.id)}><Eye className="size-3.5" /> Compare</Button>
-                          {!template.builtIn && <Button type="button" size="sm" variant="outline" disabled={!canEditUserPermissions || userSaving} onClick={() => void deletePermissionTemplate(template.id)}><Trash2 className="size-3.5" /> Delete</Button>}
-                        </div>
-                      </div>
-                      })}
-                      {!filteredPermissionTemplates.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">No templates match this search.</p>}
-                      </div>
-                      {compareTemplate && <div className="rounded-md border p-3">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-medium">Compare {selectedUser.name || selectedUser.username} to {compareTemplate.name}</p>
-                            <p className="mt-1 text-xs text-muted-foreground">{compareDiffs.length ? `${numberLabel(compareDiffs.length)} permission difference${compareDiffs.length === 1 ? "" : "s"}.` : "This user's saved permissions match the selected template."}</p>
-                          </div>
-                          <Button type="button" size="sm" variant="outline" onClick={() => setCompareTemplateId("")}>Close compare</Button>
-                        </div>
-                        {!!compareDiffs.length && <ScrollArea className="mt-3 max-h-48 rounded-md border">
-                          <Table>
-                            <TableHeader><TableRow><TableHead>Section</TableHead><TableHead>Action</TableHead><TableHead>{selectedUser.name || selectedUser.username}</TableHead><TableHead>{compareTemplate.name}</TableHead></TableRow></TableHeader>
-                            <TableBody>
-                              {compareDiffs.slice(0, 80).map((diff) => <TableRow key={`${diff.areaId}-${diff.action}`}>
-                                <TableCell>{diff.label}</TableCell>
-                                <TableCell>{permissionActionLabel(diff.action)}</TableCell>
-                                <TableCell><Badge variant={diff.left ? "secondary" : "outline"}>{diff.left ? "On" : "Off"}</Badge></TableCell>
-                                <TableCell><Badge variant={diff.right ? "secondary" : "outline"}>{diff.right ? "On" : "Off"}</Badge></TableCell>
-                              </TableRow>)}
-                            </TableBody>
-                          </Table>
-                        </ScrollArea>}
-                      </div>}
-                    </CardContent>
-                  </Card>
                   {selectedUser.isMasterAdmin ? <Alert>
                     <ShieldCheck className="size-4" />
                     <AlertTitle>Master admin access is locked on</AlertTitle>
@@ -18979,7 +18994,7 @@ function SettingsPage({
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
                           <CardTitle className="flex flex-wrap items-center gap-2 text-sm">User permission matrix <Badge variant="secondary">Editing {selectedUser.name || selectedUser.username}</Badge></CardTitle>
-                          <CardDescription>These checks change only this user. Use Template library above to create or edit reusable templates.</CardDescription>
+                          <CardDescription>These checks change only this user. Use the Roles view to create or edit reusable templates.</CardDescription>
                         </div>
                         <div className="flex min-w-64 items-center gap-2 rounded-md border bg-background px-2">
                           <Search className="size-4 text-muted-foreground" />
@@ -19103,6 +19118,8 @@ function SettingsPage({
                 </> : <Empty className="rounded-md border py-10"><EmptyHeader><EmptyMedia variant="icon"><Users /></EmptyMedia><EmptyTitle>Select a user</EmptyTitle><EmptyDescription>Choose a login to edit profile and permissions.</EmptyDescription></EmptyHeader></Empty>}
               </CardContent>
             </Card>
+          </div>
+            )}
           </div>
 
           <Dialog open={templateDialogOpen} onOpenChange={setTemplateDialogOpen}>
