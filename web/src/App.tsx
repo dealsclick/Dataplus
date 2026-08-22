@@ -17569,7 +17569,26 @@ function SettingsPage({
   const [userSaving, setUserSaving] = useState(false)
   const [temporaryPassword, setTemporaryPassword] = useState("")
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
-  const settingsTabs = new Set(["operations", "organization", "orders", "purchasing", "inventory", "notifications", "security", "jobs", "worker", "backups", "catalog", "data-sources", "barcode", "ai", "email", "users", "releases"])
+  const settingsTabItems = [
+    { id: "operations", label: "Operations" },
+    { id: "organization", label: "Organization" },
+    { id: "orders", label: "Orders" },
+    { id: "purchasing", label: "Purchasing" },
+    { id: "inventory", label: "Inventory & fulfillment" },
+    { id: "notifications", label: "Notifications" },
+    { id: "security", label: "Security" },
+    { id: "jobs", label: "Jobs" },
+    { id: "worker", label: "Worker" },
+    { id: "backups", label: "Backups" },
+    { id: "catalog", label: "Catalog" },
+    { id: "data-sources", label: "Data sources" },
+    { id: "barcode", label: "Barcode lookups" },
+    { id: "ai", label: "AI integration" },
+    { id: "email", label: "Email" },
+    { id: "users", label: "Users" },
+    { id: "releases", label: "Releases" },
+  ]
+  const settingsTabs = new Set(settingsTabItems.map((item) => item.id))
   const [activeTab, setActiveTab] = useState(settingsTabs.has(requestedTab || "") ? String(requestedTab) : "operations")
   const value = (field: string) => draft[field] ?? settings[field]
   const boolValue = (field: string) => Boolean(value(field))
@@ -18218,25 +18237,23 @@ function SettingsPage({
       />
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="flex flex-wrap">
-          <TabsTrigger value="operations">Operations</TabsTrigger>
-          <TabsTrigger value="organization">Organization</TabsTrigger>
-          <TabsTrigger value="orders">Orders</TabsTrigger>
-          <TabsTrigger value="purchasing">Purchasing</TabsTrigger>
-          <TabsTrigger value="inventory">Inventory & fulfillment</TabsTrigger>
-          <TabsTrigger value="notifications">Notifications</TabsTrigger>
-          <TabsTrigger value="security">Security</TabsTrigger>
-          <TabsTrigger value="jobs">Jobs</TabsTrigger>
-          <TabsTrigger value="worker">Worker</TabsTrigger>
-          <TabsTrigger value="backups">Backups</TabsTrigger>
-          <TabsTrigger value="catalog">Catalog</TabsTrigger>
-          <TabsTrigger value="data-sources">Data sources</TabsTrigger>
-          <TabsTrigger value="barcode">Barcode lookups</TabsTrigger>
-          <TabsTrigger value="ai">AI integration</TabsTrigger>
-          <TabsTrigger value="email">Email</TabsTrigger>
-          <TabsTrigger value="users">Users</TabsTrigger>
-          <TabsTrigger value="releases">Releases</TabsTrigger>
-        </TabsList>
+        <div className="md:hidden">
+          <Field label="Settings section">
+            <Select value={activeTab} onValueChange={setActiveTab}>
+              <SelectTrigger className="h-11 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {settingsTabItems.map((item) => <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </Field>
+        </div>
+        <div className="hidden md:block">
+          <TabsList className="flex flex-wrap">
+            {settingsTabItems.map((item) => <TabsTrigger key={item.id} value={item.id}>{item.label}</TabsTrigger>)}
+          </TabsList>
+        </div>
         <TabsContent value="releases"><ReleaseHistorySettings active={activeTab === "releases"} /></TabsContent>
         <TabsContent value="organization" className="grid gap-4">
           <Card>
