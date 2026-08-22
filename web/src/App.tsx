@@ -18237,7 +18237,7 @@ function SettingsPage({
       />
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <div className="md:hidden">
+        <div className="lg:hidden">
           <Field label="Settings section">
             <Select value={activeTab} onValueChange={setActiveTab}>
               <SelectTrigger className="h-11 w-full">
@@ -18249,7 +18249,7 @@ function SettingsPage({
             </Select>
           </Field>
         </div>
-        <div className="hidden md:block">
+        <div className="hidden lg:block">
           <TabsList className="flex flex-wrap">
             {settingsTabItems.map((item) => <TabsTrigger key={item.id} value={item.id}>{item.label}</TabsTrigger>)}
           </TabsList>
