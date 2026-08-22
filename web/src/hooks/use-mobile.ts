@@ -1,6 +1,7 @@
 import * as React from "react"
 
 const MOBILE_BREAKPOINT = 768
+const COMPACT_DEVICE_QUERY = "(max-width: 1023px), (hover: none), (pointer: coarse)"
 
 export function useIsMobile() {
   const [isMobile, setIsMobile] = React.useState<boolean | undefined>(undefined)
@@ -16,4 +17,18 @@ export function useIsMobile() {
   }, [])
 
   return !!isMobile
+}
+
+export function useIsCompactDevice() {
+  const [isCompact, setIsCompact] = React.useState<boolean | undefined>(undefined)
+
+  React.useEffect(() => {
+    const mql = window.matchMedia(COMPACT_DEVICE_QUERY)
+    const onChange = () => setIsCompact(mql.matches)
+    onChange()
+    mql.addEventListener("change", onChange)
+    return () => mql.removeEventListener("change", onChange)
+  }, [])
+
+  return !!isCompact
 }

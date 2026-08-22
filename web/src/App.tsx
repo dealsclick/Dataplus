@@ -129,6 +129,7 @@ import { Field as FormField, FieldDescription, FieldGroup, FieldLabel, FieldLege
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { cn } from "@/lib/utils"
+import { useIsCompactDevice } from "@/hooks/use-mobile"
 
 type AppView = "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "operations" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "settings"
 
@@ -17519,6 +17520,7 @@ function SettingsPage({
   permissionAreas: AuthPermissionArea[]
   onSaveSettings: (patch: Record<string, unknown>) => Promise<void>
 }) {
+  const compactSettingsNav = useIsCompactDevice()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [testingSmtp, setTestingSmtp] = useState(false)
@@ -18237,7 +18239,7 @@ function SettingsPage({
       />
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <div className="lg:hidden">
+        {compactSettingsNav ? (
           <Field label="Settings section">
             <Select value={activeTab} onValueChange={setActiveTab}>
               <SelectTrigger className="h-11 w-full">
@@ -18248,12 +18250,11 @@ function SettingsPage({
               </SelectContent>
             </Select>
           </Field>
-        </div>
-        <div className="hidden lg:block">
+        ) : (
           <TabsList className="flex flex-wrap">
             {settingsTabItems.map((item) => <TabsTrigger key={item.id} value={item.id}>{item.label}</TabsTrigger>)}
           </TabsList>
-        </div>
+        )}
         <TabsContent value="releases"><ReleaseHistorySettings active={activeTab === "releases"} /></TabsContent>
         <TabsContent value="organization" className="grid gap-4">
           <Card>
