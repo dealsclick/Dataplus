@@ -17526,6 +17526,8 @@ function SettingsPage({
   const [users, setUsers] = useState<AuthUser[]>(() => (Array.isArray(settings.systemUsers) ? settings.systemUsers as AuthUser[] : []))
   const [permissionTemplates, setPermissionTemplates] = useState<AuthPermissionTemplate[]>(() => (Array.isArray(settings.authPermissionTemplates) ? settings.authPermissionTemplates as AuthPermissionTemplate[] : []))
   const [selectedUserId, setSelectedUserId] = useState("")
+  const [selectedPermissionAreaId, setSelectedPermissionAreaId] = useState("")
+  const [permissionSearch, setPermissionSearch] = useState("")
   const [newUserOpen, setNewUserOpen] = useState(false)
   const [newUser, setNewUser] = useState({ name: "", username: "", email: "", password: "", permissionTemplateId: "custom" })
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false)
@@ -17599,6 +17601,11 @@ function SettingsPage({
     if (selectedUserId || !users.length) return
     setSelectedUserId(users[0].id)
   }, [users, selectedUserId])
+  useEffect(() => {
+    if (!userAreas.length) return
+    if (selectedPermissionAreaId && userAreas.some((area) => area.id === selectedPermissionAreaId)) return
+    setSelectedPermissionAreaId(userAreas[0].id)
+  }, [userAreas, selectedPermissionAreaId])
 
   const loadSupplierIndexStatus = async () => {
     setSupplierIndexLoading(true)
@@ -17695,6 +17702,11 @@ function SettingsPage({
     setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: "custom", permissions } : user))
   }
 
+  function setSelectedPermissions(nextPermissions: AuthPermissionMatrix) {
+    if (!selectedUser || selectedUser.isMasterAdmin) return
+    setUsers((current) => current.map((user) => user.id === selectedUser.id ? { ...user, permissionTemplateId: "custom", permissions: nextPermissions } : user))
+  }
+
   function applyPermissionTemplate(templateId: string) {
     if (!selectedUser || selectedUser.isMasterAdmin) return
     if (templateId === "custom") {
@@ -17748,28 +17760,65 @@ function SettingsPage({
     return Boolean(selectedUser?.isMasterAdmin || row[action] === true || row.admin === true || row.write === true)
   }
 
-  function permissionAreaControl(area: AuthPermissionArea, nested = false) {
-    const row = selectedUser?.permissions?.[area.id] || {}
-    const actions = area.actions?.length ? area.actions : ["view", "edit", "create", "delete", "export"]
-    const enabledCount = selectedUser?.isMasterAdmin ? actions.length : actions.filter((action) => permissionEnabled(row, action)).length
-    return <div key={area.id} className={cn("rounded-md border bg-background p-3", nested && "bg-muted/20")}>
-      <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
-        <div>
-          <p className={cn("font-medium", nested && "text-sm")}>{area.label}</p>
-          <p className="text-xs text-muted-foreground">{area.path}</p>
-        </div>
-        <Badge variant={enabledCount ? "secondary" : "outline"}>{selectedUser?.isMasterAdmin ? "Full access" : `${enabledCount}/${actions.length} enabled`}</Badge>
-      </div>
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {actions.map((action) => <label key={`${area.id}-${action}`} className="flex min-h-10 items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
-          <Checkbox disabled={!canManageUsers || selectedUser?.isMasterAdmin} checked={permissionEnabled(row, action)} onCheckedChange={(checked) => updateSelectedPermission(area.id, action as keyof AuthPermission, checked === true)} />
-          <span>{permissionActionLabel(action)}</span>
-        </label>)}
-      </div>
-      {area.sections?.length ? <div className="mt-3 grid gap-2 border-l pl-3">
-        {area.sections.map((section) => permissionAreaControl(section, true))}
-      </div> : null}
-    </div>
+  function permissionRowEnabled(area: AuthPermissionArea, action: string) {
+    return permissionEnabled(selectedUser?.permissions?.[area.id] || {}, action)
+  }
+
+  function areaPermissionRows(area?: AuthPermissionArea) {
+    return area ? [area, ...(area.sections || [])] : []
+  }
+
+  function permissionAreaCounts(area: AuthPermissionArea) {
+    const rows = areaPermissionRows(area)
+    const total = rows.reduce((sum, row) => sum + (row.actions?.length || 0), 0)
+    const enabled = rows.reduce((sum, row) => sum + (row.actions || []).filter((action) => permissionRowEnabled(row, action)).length, 0)
+    return { total, enabled }
+  }
+
+  function areaMatchesPermissionSearch(area: AuthPermissionArea) {
+    const query = permissionSearch.trim().toLowerCase()
+    if (!query) return true
+    const haystack = [area.id, area.label, area.path, ...(area.actions || []), ...(area.sections || []).flatMap((section) => [section.id, section.label, section.path, ...(section.actions || [])])].join(" ").toLowerCase()
+    return haystack.includes(query)
+  }
+
+  const filteredPermissionAreas = userAreas.filter(areaMatchesPermissionSearch)
+  const selectedPermissionAreaCandidate = userAreas.find((area) => area.id === selectedPermissionAreaId)
+  const selectedPermissionArea = permissionSearch.trim() && selectedPermissionAreaCandidate && !filteredPermissionAreas.some((area) => area.id === selectedPermissionAreaCandidate.id)
+    ? filteredPermissionAreas[0]
+    : (selectedPermissionAreaCandidate || filteredPermissionAreas[0] || userAreas[0])
+  const selectedPermissionRows = areaPermissionRows(selectedPermissionArea).filter((area) => areaMatchesPermissionSearch(area) || !permissionSearch.trim())
+  const commonPermissionActions = ["view", "create", "edit", "delete", "export"]
+  const standardPermissionActions = new Set(["view", "read", "edit", "create", "notes", "export", "pick", "pack", "ship", "labels", "receive", "adjust", "transfer", "audit", "map", "map_sku", "resource", "files", "feeds", "sync", "import", "chat", "run"])
+
+  function applyPermissionPreset(area: AuthPermissionArea, preset: "none" | "view" | "standard" | "full") {
+    if (!selectedUser || selectedUser.isMasterAdmin) return
+    const permissions = { ...(selectedUser.permissions || {}) }
+    for (const rowArea of areaPermissionRows(area)) {
+      const row: AuthPermission = { ...(permissions[rowArea.id] || {}) }
+      for (const action of rowArea.actions || []) {
+        row[action] = preset === "full" || (preset === "view" && action === "view") || (preset === "standard" && standardPermissionActions.has(action))
+      }
+      row.view = preset !== "none"
+      row.read = preset !== "none"
+      row.write = preset === "full"
+      row.admin = false
+      permissions[rowArea.id] = row
+    }
+    setSelectedPermissions(permissions)
+  }
+
+  function permissionCheckbox(area: AuthPermissionArea, action: string) {
+    if (!(area.actions || []).includes(action)) return <span className="text-xs text-muted-foreground">-</span>
+    return <Checkbox disabled={!canManageUsers || selectedUser?.isMasterAdmin} checked={permissionRowEnabled(area, action)} onCheckedChange={(checked) => updateSelectedPermission(area.id, action as keyof AuthPermission, checked === true)} />
+  }
+
+  function permissionSummary(area: AuthPermissionArea) {
+    const { total, enabled } = permissionAreaCounts(area)
+    if (!total) return "No actions"
+    if (enabled === total) return "Full access"
+    if (!enabled) return "No access"
+    return `${enabled}/${total} enabled`
   }
 
   function requestCatalogMaintenance(request: NonNullable<typeof catalogMaintenanceConfirm>) {
@@ -18474,7 +18523,7 @@ function SettingsPage({
             </Card>
 
             <Card>
-              <CardHeader className="border-b">
+              <CardHeader className="sticky top-0 z-10 border-b bg-card/95 backdrop-blur">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <CardTitle className="text-base">{selectedUser ? `Profile: ${selectedUser.name || selectedUser.username}` : "User profile"}</CardTitle>
@@ -18516,15 +18565,15 @@ function SettingsPage({
                       </div>
                     </CardContent>
                   </Card>
-                  <Card>
+                  {!selectedUser.isMasterAdmin && <Card>
                     <CardHeader className="pb-3">
                       <CardTitle className="text-sm">Templates</CardTitle>
                       <CardDescription>Built-in templates stay available; custom templates can be edited or deleted.</CardDescription>
                     </CardHeader>
-                    <CardContent className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                    <CardContent className="flex gap-2 overflow-x-auto pb-4">
                       {permissionTemplates.map((template) => <div key={template.id} className="rounded-md border p-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0"><p className="truncate text-sm font-medium">{template.name}</p><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{template.description || "No description."}</p></div>
+                        <div className="flex min-w-60 items-start justify-between gap-2">
+                          <div className="min-w-0"><p className="truncate text-sm font-medium">{template.name}</p><p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{template.description || "No description."}</p></div>
                           {template.builtIn && <Badge variant="outline">Built-in</Badge>}
                         </div>
                         <div className="mt-3 flex gap-2">
@@ -18534,10 +18583,92 @@ function SettingsPage({
                         </div>
                       </div>)}
                     </CardContent>
-                  </Card>
-                  <div className="grid gap-3">
-                    {userAreas.map((area) => permissionAreaControl(area))}
-                  </div>
+                  </Card>}
+                  {selectedUser.isMasterAdmin ? <Alert>
+                    <ShieldCheck className="size-4" />
+                    <AlertTitle>Master admin access is locked on</AlertTitle>
+                    <AlertDescription>Luis always has full access across every page, feature, and action. The detailed permission matrix is hidden for this protected account.</AlertDescription>
+                  </Alert> : <Card className="overflow-hidden">
+                    <CardHeader className="gap-3 border-b">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <CardTitle className="text-sm">Permission editor</CardTitle>
+                          <CardDescription>Select a category, then manage its actions in a compact table.</CardDescription>
+                        </div>
+                        <div className="flex min-w-64 items-center gap-2 rounded-md border bg-background px-2">
+                          <Search className="size-4 text-muted-foreground" />
+                          <Input className="h-9 border-0 px-0 shadow-none focus-visible:ring-0" placeholder="Search permissions..." value={permissionSearch} onChange={(event) => setPermissionSearch(event.target.value)} />
+                        </div>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="grid gap-0 p-0 lg:grid-cols-[260px_minmax(0,1fr)]">
+                      <div className="border-b bg-muted/20 p-3 lg:border-b-0 lg:border-r">
+                        <ScrollArea className="h-[32rem] pr-3">
+                          <div className="grid gap-2">
+                            {filteredPermissionAreas.map((area) => {
+                              const active = selectedPermissionArea?.id === area.id
+                              return <button key={area.id} type="button" onClick={() => setSelectedPermissionAreaId(area.id)} className={cn("rounded-md border bg-background p-3 text-left transition-colors hover:border-primary", active && "border-primary bg-primary/5")}>
+                                <div className="flex items-start justify-between gap-2">
+                                  <span className="min-w-0"><span className="block truncate text-sm font-medium">{area.label}</span><span className="mt-1 block truncate text-xs text-muted-foreground">{area.sections?.length || 0} deeper section{area.sections?.length === 1 ? "" : "s"}</span></span>
+                                  <Badge variant={permissionAreaCounts(area).enabled ? "secondary" : "outline"}>{permissionSummary(area)}</Badge>
+                                </div>
+                              </button>
+                            })}
+                            {!filteredPermissionAreas.length && <p className="rounded-md border bg-background p-4 text-sm text-muted-foreground">No permission categories match this search.</p>}
+                          </div>
+                        </ScrollArea>
+                      </div>
+                      <div className="min-w-0 p-4">
+                        {selectedPermissionArea ? <div className="grid gap-4">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <p className="text-base font-semibold">{selectedPermissionArea.label}</p>
+                              <p className="text-xs text-muted-foreground">{selectedPermissionArea.path} · {permissionSummary(selectedPermissionArea)}</p>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button type="button" size="sm" variant="outline" disabled={!canManageUsers} onClick={() => applyPermissionPreset(selectedPermissionArea, "none")}>No access</Button>
+                              <Button type="button" size="sm" variant="outline" disabled={!canManageUsers} onClick={() => applyPermissionPreset(selectedPermissionArea, "view")}>View only</Button>
+                              <Button type="button" size="sm" variant="outline" disabled={!canManageUsers} onClick={() => applyPermissionPreset(selectedPermissionArea, "standard")}>Standard</Button>
+                              <Button type="button" size="sm" disabled={!canManageUsers} onClick={() => applyPermissionPreset(selectedPermissionArea, "full")}>Full access</Button>
+                            </div>
+                          </div>
+                          <ScrollArea className="max-h-[30rem] rounded-md border">
+                            <Table>
+                              <TableHeader>
+                                <TableRow>
+                                  <TableHead className="min-w-56">Section</TableHead>
+                                  {commonPermissionActions.map((action) => <TableHead key={action} className="w-24 text-center">{permissionActionLabel(action)}</TableHead>)}
+                                  <TableHead>Special actions</TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {selectedPermissionRows.map((area) => {
+                                  const specialActions = (area.actions || []).filter((action) => !commonPermissionActions.includes(action))
+                                  return <TableRow key={area.id}>
+                                    <TableCell className="align-top">
+                                      <div className="font-medium">{area.label}</div>
+                                      <div className="text-xs text-muted-foreground">{area.path}</div>
+                                      <Badge className="mt-2" variant={permissionAreaCounts(area).enabled ? "secondary" : "outline"}>{permissionSummary(area)}</Badge>
+                                    </TableCell>
+                                    {commonPermissionActions.map((action) => <TableCell key={`${area.id}-${action}`} className="text-center align-top">{permissionCheckbox(area, action)}</TableCell>)}
+                                    <TableCell className="align-top">
+                                      <div className="flex flex-wrap gap-2">
+                                        {specialActions.map((action) => <label key={`${area.id}-${action}`} className="flex h-8 items-center gap-2 rounded-md border bg-background px-2 text-xs">
+                                          {permissionCheckbox(area, action)}
+                                          <span>{permissionActionLabel(action)}</span>
+                                        </label>)}
+                                        {!specialActions.length && <span className="text-xs text-muted-foreground">No special actions</span>}
+                                      </div>
+                                    </TableCell>
+                                  </TableRow>
+                                })}
+                              </TableBody>
+                            </Table>
+                          </ScrollArea>
+                        </div> : <Empty className="rounded-md border py-10"><EmptyHeader><EmptyMedia variant="icon"><ShieldCheck /></EmptyMedia><EmptyTitle>No category selected</EmptyTitle><EmptyDescription>Select a permission category to edit access.</EmptyDescription></EmptyHeader></Empty>}
+                      </div>
+                    </CardContent>
+                  </Card>}
                 </> : <Empty className="rounded-md border py-10"><EmptyHeader><EmptyMedia variant="icon"><Users /></EmptyMedia><EmptyTitle>Select a user</EmptyTitle><EmptyDescription>Choose a login to edit profile and permissions.</EmptyDescription></EmptyHeader></Empty>}
               </CardContent>
             </Card>
