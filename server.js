@@ -20744,8 +20744,10 @@ async function temuRequest(type, payload = {}, options = {}) {
     throw new Error(`Temu returned non-JSON response (${response.status}): ${text.slice(0, 180)}`);
   }
   if (!response.ok) throw new Error(`Temu HTTP ${response.status}: ${JSON.stringify(data).slice(0, 240)}`);
-  const hasUsableErrorResult = options.allowErrorResult === true && data.result && typeof data.result === "object";
-  if (data.errorCode || data.error_code || (data.success === false && !hasUsableErrorResult)) {
+  const hasResultPayload = data.result && typeof data.result === "object";
+  const hasTemuError = Boolean(data.errorCode || data.error_code || data.errorMsg || data.error_msg);
+  const hasUsableErrorResult = options.allowErrorResult === true && hasResultPayload;
+  if (hasTemuError || (data.success === false && !hasResultPayload && !hasUsableErrorResult)) {
     throw new Error(`Temu API error: ${JSON.stringify(data).slice(0, 300)}`);
   }
   return data;
