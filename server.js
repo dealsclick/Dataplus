@@ -20745,10 +20745,12 @@ async function temuRequest(type, payload = {}, options = {}) {
   }
   if (!response.ok) throw new Error(`Temu HTTP ${response.status}: ${JSON.stringify(data).slice(0, 240)}`);
   const hasResultPayload = data.result && typeof data.result === "object";
+  const nestedResult = hasResultPayload && data.result.result && typeof data.result.result === "object" ? data.result.result : null;
+  const hasNestedFailureWithoutPayload = hasResultPayload && data.result.success === false && !nestedResult;
   const hasTokenResult = hasResultPayload && Boolean(data.result.accessToken || data.result.access_token || data.result.token);
   const hasTemuError = Boolean(data.errorCode || data.error_code || data.errorMsg || data.error_msg);
   const hasUsableErrorResult = options.allowErrorResult === true && hasResultPayload;
-  if ((hasTemuError && !(options.allowTokenResult === true && hasTokenResult) && !hasUsableErrorResult) || (data.success === false && !hasResultPayload && !hasUsableErrorResult)) {
+  if (hasNestedFailureWithoutPayload || (hasTemuError && !(options.allowTokenResult === true && hasTokenResult) && !hasUsableErrorResult) || (data.success === false && !hasResultPayload && !hasUsableErrorResult)) {
     throw new Error(`Temu API error: ${JSON.stringify(data).slice(0, 300)}`);
   }
   return data;
@@ -20840,15 +20842,20 @@ async function testTemuConnection(db = {}) {
   } else {
     try {
       const nowSeconds = Math.floor(Date.now() / 1000);
-      await temuRequest("bg.order.list.v2.get", {
+      const listResponse = await temuRequest("bg.order.list.v2.get", {
         pageNumber: 1,
         pageSize: 1,
         updateAtStart: nowSeconds - 3600,
         updateAtEnd: nowSeconds
       }, { db, allowErrorResult: true });
+      const sampleOrder = firstArrayFrom(listResponse)[0] || {};
+      const sampleOrderSn = extractTemuOrderSn(sampleOrder);
+      if (sampleOrderSn) {
+        await temuRequest("bg.order.amount.query", { parentOrderSn: sampleOrderSn }, { db, allowErrorResult: true });
+      }
       status.ok = true;
       status.liveApiChecked = true;
-      status.message = "Temu live API check passed. Order API credentials can be used for imports.";
+      status.message = "Temu live API check passed. Order list and amount permissions are available for imports.";
     } catch (error) {
       status.liveApiChecked = true;
       status.message = error.message || "Temu live API check failed.";
@@ -23145,13 +23152,9 @@ async function importTemuOrders(db, options = {}) {
       try {
         if (parentOrderSn) shipping = await temuRequest("bg.order.shippinginfo.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
       } catch (error) {
-        try {
-          if (parentOrderSn) shipping = await temuRequest("bg.order.shippinginfo.get", { parentOrderSn }, { db, allowErrorResult: true });
-        } catch (fallbackError) {
-          const message = `shipping ${parentOrderSn || "unknown"}: ${fallbackError.message || error.message}`;
-          errors.push(message);
-          orderErrors.push(message);
-        }
+        const message = `shipping ${parentOrderSn || "unknown"}: ${error.message}`;
+        errors.push(message);
+        orderErrors.push(message);
       }
 
       const mappedOrder = mapTemuOrder(listOrder, detail, shipping, amount, orderErrors);
