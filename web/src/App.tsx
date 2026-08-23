@@ -3469,6 +3469,7 @@ function ChannelDetail({
   const temuCanRunLive = temuHasLiveToken || Boolean(channel.connected)
   const temuSetupGuideCompleted = Boolean(settings.temuInitialSetupGuideCompleted)
   const temuSetupGuideLabel = temuSetupGuideCompleted ? "Relaunch setup guide" : "Launch setup guide"
+  const temuAuthActionLabel = temuCanRunLive ? "Reconnect Temu" : "Connect Temu"
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const allowedChannelTabs = new Set(["overview", "connection", "setup", "actions", "rules", "mappings", "attributes", "variants", "skus", "logs"])
   const [activeTab, setActiveTab] = useState(allowedChannelTabs.has(requestedTab || "") ? String(requestedTab) : "overview")
@@ -4321,14 +4322,14 @@ function ChannelDetail({
               <div>
                 <CardTitle className="flex items-center gap-2 text-base">
                   {settings.temuAppKey && settings.temuAppSecret ? <CheckCircle2 className="size-5 text-emerald-600" /> : <ShieldCheck className="size-5" />}
-                  Connect to Temu
+                  Temu connection
                 </CardTitle>
-                <CardDescription>Save the Temu Seller API request URL, app key, and app secret. DataPlus will use generated channel values when Temu returns them.</CardDescription>
+                <CardDescription>{temuCanRunLive ? "Temu is connected. Use reconnect only when the seller authorization or generated token needs to be refreshed." : "Save the Temu Seller API request URL, app key, and app secret, then connect the seller account."}</CardDescription>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button onClick={() => void connectTemuSeller()} disabled={temuConnecting || hasUnsavedChannelChanges || !settings.temuAppKey || !settings.temuAppSecret}>
-                  {temuConnecting ? <Loader2 className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
-                  Connect Temu
+                <Button variant={temuCanRunLive ? "outline" : "default"} onClick={() => void connectTemuSeller()} disabled={temuConnecting || hasUnsavedChannelChanges || !settings.temuAppKey || !settings.temuAppSecret}>
+                  {temuConnecting ? <Loader2 className="size-4 animate-spin" /> : temuCanRunLive ? <RotateCcw className="size-4" /> : <ExternalLink className="size-4" />}
+                  {temuAuthActionLabel}
                 </Button>
                 <Button variant="outline" onClick={() => void testTemuConnection()} disabled={temuTestingConnection || hasUnsavedChannelChanges || !settings.temuAppKey || !settings.temuAppSecret}>
                   {temuTestingConnection ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
@@ -4344,12 +4345,13 @@ function ChannelDetail({
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               <Detail label="API credentials" value={settings.temuAppKey && settings.temuAppSecret ? "Configured" : "Missing"} />
               <Detail label="App key" value={settings.temuAppKey ? "Configured" : "Missing"} />
-              <Detail label="Generated token" value={temuHasLiveToken ? temuGeneratedTokenLabel : "Waiting for channel"} />
+              <Detail label="Seller connection" value={temuCanRunLive ? "Connected" : "Not connected"} />
+              <Detail label="Generated token" value={temuCanRunLive ? temuGeneratedTokenLabel : "Waiting for channel"} />
               <Detail label="Live API check" value={temuConnectionTest?.liveApiChecked || settings.temuConnectionLiveApiChecked ? (temuConnectionTest?.ok ?? settings.temuConnectionOk ? "Passed" : "Needs attention") : "Not checked"} />
               <Detail label="Last verified" value={dateLabel(temuConnectionVerifiedAt)} />
               <Detail label="Latest order sync" value={dateLabel(temuLatestOrderSync)} />
               <Field label="API request URL"><Input disabled={!editing} value={String(settings.temuEndpoint || "https://openapi-b-us.temu.com/openapi/router")} onChange={(event) => update("temuEndpoint", event.target.value)} /></Field>
-              <Field label="Seller authorization URL"><Input disabled={!editing} value={String(settings.temuAuthorizationUrl || "https://seller.temu.com/open-platform/client-manage/authorization")} onChange={(event) => update("temuAuthorizationUrl", event.target.value)} /><p className="text-xs text-muted-foreground">Used by Connect Temu to open the seller authorization page.</p></Field>
+              <Field label="Seller authorization URL"><Input disabled={!editing} value={String(settings.temuAuthorizationUrl || "https://seller.temu.com/open-platform/client-manage/authorization")} onChange={(event) => update("temuAuthorizationUrl", event.target.value)} /><p className="text-xs text-muted-foreground">Used by the Temu connect and reconnect action to open the seller authorization page.</p></Field>
               <Field label="App key"><Input disabled={!editing} value={String(settings.temuAppKey || "")} onChange={(event) => update("temuAppKey", event.target.value)} /></Field>
               <Field label="App secret"><Input disabled={!editing} type="password" value={String(settings.temuAppSecret || "")} onChange={(event) => update("temuAppSecret", event.target.value)} /></Field>
               <Field label="Access token override"><Input disabled={!editing} type="password" value={String(settings.temuAccessToken || "")} placeholder={temuGeneratedTokenLabel} onChange={(event) => update("temuAccessToken", event.target.value)} /><p className="text-xs text-muted-foreground">Usually auto-populated by Connect Temu. Paste a token here only when Temu provides one manually or a reconnect needs a temporary override.</p></Field>
