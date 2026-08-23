@@ -20986,6 +20986,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
     const sku = externalSku || channelSku || channelVariantId || "TEMU-SKU";
     return {
       sku,
+      mappedSku: externalSku || "",
       originalSku: channelSku || channelVariantId || sku,
       channelSku: channelSku || externalSku || sku,
       channelVariantSku: channelSku || "",
@@ -21002,6 +21003,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
   }) : [
     {
       sku: temuSellerSku(raw) || String(valueAt(raw, ["sku", "skuSn", "skuId"], "TEMU-SKU")),
+      mappedSku: temuSellerSku(raw) || "",
       originalSku: String(valueAt(raw, ["sku", "skuSn", "skuId"], "")),
       channelSku: String(valueAt(raw, ["sku", "skuSn", "goodsSkuSn"], "")),
       channelVariantId: String(valueAt(raw, ["skuId", "goodsSkuId"], "")),
@@ -21016,7 +21018,11 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
   const total = nestedMoney(valueAt(raw, ["parentOrderAmount", "orderAmount", "payAmount", "totalAmount", "settlementAmount"], 0))
     || items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
   const shipTo = shippingPayload.shippingAddress || shippingPayload.address || shippingPayload.receiverAddress || shippingPayload.recipientAddress || shippingPayload;
-  const buyer = String(valueAt(shipTo, ["name", "receiverName", "recipientName", "receiverFullName", "fullName"], valueAt(raw, ["buyerName", "customerName", "receiverName"], "Temu buyer")));
+  const addressExtra = shipTo.addressExtra && typeof shipTo.addressExtra === "object" ? shipTo.addressExtra : {};
+  const firstName = String(valueAt(addressExtra, ["firstName", "additionalFirstName"], "")).trim();
+  const lastName = String(valueAt(addressExtra, ["lastName", "additionalLastName"], "")).trim();
+  const receiverFromParts = [firstName, lastName].filter(Boolean).join(" ").trim();
+  const buyer = String(valueAt(shipTo, ["name", "receiverName", "recipientName", "receiverFullName", "fullName", "receiptName", "receiptAdditionalName"], valueAt(raw, ["buyerName", "customerName", "receiverName"], receiverFromParts || "Temu buyer"))).trim() || "Temu buyer";
 
   return {
     id: crypto.randomUUID(),
@@ -21025,16 +21031,16 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
     marketplaceOrderId: parentOrderSn || "",
     source: "Temu",
     buyer,
-    buyerEmail: String(valueAt(raw, ["buyerEmail", "email"], valueAt(shipTo, ["email", "buyerEmail"], ""))),
+    buyerEmail: String(valueAt(raw, ["buyerEmail", "email"], valueAt(shipTo, ["email", "buyerEmail", "mail"], ""))),
     phone: String(valueAt(shipTo, ["phone", "mobile", "receiverPhone", "receiverMobile", "telephone"], "")),
     address: {
       name: buyer,
-      line1: String(valueAt(shipTo, ["addressLine1", "line1", "address1", "detailAddress", "addressDetail"], "")),
+      line1: String(valueAt(shipTo, ["addressLine1", "line1", "address1", "detailAddress", "addressDetail", "address", "fullAddress", "receiptAddress"], "")),
       line2: String(valueAt(shipTo, ["addressLine2", "line2", "address2"], "")),
-      city: String(valueAt(shipTo, ["city", "cityName", "town"], "")),
-      state: String(valueAt(shipTo, ["state", "province", "regionName", "stateName"], "")),
-      postalCode: String(valueAt(shipTo, ["postalCode", "zipCode", "postCode"], "")),
-      country: String(valueAt(shipTo, ["country", "countryCode"], "US"))
+      city: String(valueAt(shipTo, ["city", "cityName", "town", "regionName3"], "")),
+      state: String(valueAt(shipTo, ["state", "province", "regionName", "stateName", "regionName2"], "")),
+      postalCode: String(valueAt(shipTo, ["postalCode", "zipCode", "postCode", "postCodeMask", "zipcode"], "")),
+      country: String(valueAt(shipTo, ["country", "countryCode", "regionName1"], "US"))
     },
     sku: items[0]?.sku || "TEMU-SKU",
     title: items[0]?.title || "Temu order",
