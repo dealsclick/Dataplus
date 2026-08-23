@@ -23073,12 +23073,12 @@ async function importTemuOrders(db, options = {}) {
       let detail = {};
       let shipping = {};
       try {
-        if (parentOrderSn) detail = await temuRequest("bg.order.detail.v2.get", { parentOrderSn }, { db });
+        if (parentOrderSn) detail = await temuRequest("bg.order.detail.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
       } catch (error) {
         errors.push(`detail ${parentOrderSn || "unknown"}: ${error.message}`);
       }
       try {
-        if (parentOrderSn) shipping = await temuRequest("bg.order.shippinginfo.v2.get", { parentOrderSn }, { db });
+        if (parentOrderSn) shipping = await temuRequest("bg.order.shippinginfo.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
       } catch (error) {
         errors.push(`shipping ${parentOrderSn || "unknown"}: ${error.message}`);
       }
