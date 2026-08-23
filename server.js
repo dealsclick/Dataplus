@@ -20916,9 +20916,25 @@ function deepValueAt(source, keys, fallback = "") {
 
 function temuPayload(value) {
   if (!value || typeof value !== "object") return {};
+  if (value.result && typeof value.result === "object" && value.result.result && typeof value.result.result === "object") return temuPayload(value.result);
   if (value.result && typeof value.result === "object") return value.result;
   if (value.data && typeof value.data === "object") return value.data;
   return value;
+}
+
+function temuAmount(value) {
+  const amount = nestedMoney(value);
+  return amount ? amount / 100 : 0;
+}
+
+function temuAmountByOrderSn(amountPayload = {}) {
+  const rows = firstArrayFrom(amountPayload.orderList || amountPayload.items || amountPayload);
+  const byOrderSn = new Map();
+  for (const row of rows) {
+    const orderSn = String(valueAt(row, ["orderSn", "order_sn"], "")).trim();
+    if (orderSn) byOrderSn.set(orderSn, row);
+  }
+  return byOrderSn;
 }
 
 function temuItemProductList(item = {}) {
@@ -20964,6 +20980,12 @@ function temuDate(value) {
 }
 
 function mapTemuStatus(status) {
+  const numeric = Number(status);
+  if (numeric === 1) return "pending";
+  if (numeric === 2) return "ready";
+  if (numeric === 3) return "canceled";
+  if ([4, 5].includes(numeric)) return "fulfilled";
+  if ([41, 51].includes(numeric)) return "partial";
   const text = String(status ?? "").toLowerCase();
   if (["confirmed", "shipped", "delivered", "completed"].some((item) => text.includes(item))) return "confirmed";
   if (["ready", "awaiting", "pending"].some((item) => text.includes(item))) return "ready";
@@ -20971,14 +20993,19 @@ function mapTemuStatus(status) {
   return "new";
 }
 
-function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
+function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErrors = []) {
   const listPayload = temuPayload(listOrder);
   const detailPayload = temuPayload(detail);
   const shippingPayload = temuPayload(shipping);
-  const raw = { ...listPayload, ...(listPayload.parentOrderMap || {}), ...detailPayload, ...(detailPayload.parentOrderMap || {}) };
+  const amountPayload = temuPayload(amount);
+  const amountParent = amountPayload.parentOrderMap || amountPayload;
+  const amountByOrderSn = temuAmountByOrderSn(amountPayload);
+  const raw = { ...listPayload, ...(listPayload.parentOrderMap || {}), ...detailPayload, ...(detailPayload.parentOrderMap || {}), ...amountParent };
   const parentOrderSn = deepValueAt(raw, ["parentOrderSn", "parent_order_sn", "parentOrderSN", "parentOrderSNStr", "parentOrderNo", "parentOrderId", "parent_order_id", "orderSn", "order_sn"]);
   const childItems = firstArrayFrom(raw.orderList || raw.orderDetailList || raw.skuList || raw.goodsList || raw.items || raw);
   const items = childItems.length ? childItems.map((item) => {
+    const orderSn = String(valueAt(item, ["orderSn", "order_sn"], "")).trim();
+    const amountLine = amountByOrderSn.get(orderSn) || {};
     const externalSku = temuSellerSku(item);
     const channelSku = String(valueAt(item, ["sku", "skuSn", "goodsSkuSn", "productSku", "goodsSku"], "")).trim();
     const channelVariantId = String(valueAt(item, ["skuId", "goodsSkuId", "goodsSkuSn", "productSkuId"], "")).trim();
@@ -20997,7 +21024,8 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
       temuExternalSku: externalSku,
       title: String(valueAt(item, ["goodsName", "productName", "title", "name"], "Temu item")),
       qty: Number(valueAt(item, ["quantity", "qty", "goodsNumber"], 1)) || 1,
-      price: nestedMoney(valueAt(item, ["salePrice", "retailPrice", "orderAmount", "price"], 0)),
+      price: temuAmount(valueAt(amountLine, ["unitBasePrice", "unitRetailPriceVatIncl", "basePrice"], 0))
+        || nestedMoney(valueAt(item, ["salePrice", "retailPrice", "orderAmount", "price"], 0)),
       external: { source: "Temu", raw: item }
     };
   }) : [
@@ -21010,13 +21038,16 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
       channelProductId: String(valueAt(raw, ["goodsId", "productId"], "")),
       title: String(valueAt(raw, ["goodsName", "productName", "title"], "Temu order")),
       qty: Number(valueAt(raw, ["quantity", "qty"], 1)) || 1,
-      price: nestedMoney(valueAt(raw, ["orderAmount", "payAmount", "totalAmount"], 0)),
+      price: temuAmount(valueAt(amountParent, ["basePriceTotal", "estimatedRevenue"], 0))
+        || nestedMoney(valueAt(raw, ["orderAmount", "payAmount", "totalAmount"], 0)),
       external: { source: "Temu", raw }
     }
   ];
 
-  const total = nestedMoney(valueAt(raw, ["parentOrderAmount", "orderAmount", "payAmount", "totalAmount", "settlementAmount"], 0))
+  const total = temuAmount(valueAt(amountParent, ["estimatedRevenue", "basePriceTotal"], 0))
+    || nestedMoney(valueAt(raw, ["parentOrderAmount", "orderAmount", "payAmount", "totalAmount", "settlementAmount"], 0))
     || items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
+  const shippingCost = temuAmount(valueAt(amountParent, ["shippingAmountTotal"], 0));
   const shippingCandidate = shippingPayload.shippingAddress || shippingPayload.address || shippingPayload.receiverAddress || shippingPayload.recipientAddress || shippingPayload;
   const shippingHasAddress = Boolean(deepValueAt(shippingCandidate, ["addressLine1", "line1", "address1", "detailAddress", "addressDetail", "address", "fullAddress", "receiptAddress", "regionName1", "regionName2", "regionName3", "mail", "mobile"], ""));
   const shipTo = shippingHasAddress ? shippingCandidate : raw;
@@ -21051,18 +21082,29 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
     total,
     productCost: 0,
     marketplaceFees: 0,
-    shippingCost: 0,
+    shippingCost,
     refundAmount: 0,
     shippingService: String(valueAt(raw, ["shippingService", "logisticsServiceName"], "Temu fulfillment")),
     trackingNumber: String(valueAt(raw, ["trackingNumber", "trackingNo"], "")),
     shipBy: temuDate(valueAt(raw, ["expectShipLatestTime", "latestShipTime", "shipBy"])).slice(0, 10),
     createdAt: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),
     updatedAt: new Date().toISOString(),
-    notes: "Imported from Temu API.",
+    notes: apiErrors.length ? `Imported from Temu API with ${apiErrors.length} order data warning${apiErrors.length === 1 ? "" : "s"}.` : "Imported from Temu API.",
+    workflowExceptions: apiErrors.length ? apiErrors.map((message) => ({
+      id: crypto.randomUUID(),
+      owner: "Orders",
+      severity: "warning",
+      status: "open",
+      title: "Temu order download warning",
+      message,
+      createdAt: new Date().toISOString()
+    })) : [],
     items,
     external: {
       source: "Temu",
       parentOrderSn,
+      amount: amountPayload,
+      importWarnings: apiErrors,
       importedAt: new Date().toISOString()
     }
   };
@@ -23080,18 +23122,39 @@ async function importTemuOrders(db, options = {}) {
       const parentOrderSn = extractTemuOrderSn(listOrder);
       let detail = {};
       let shipping = {};
+      let amount = {};
+      const orderErrors = [];
       try {
         if (parentOrderSn) detail = await temuRequest("bg.order.detail.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
       } catch (error) {
-        errors.push(`detail ${parentOrderSn || "unknown"}: ${error.message}`);
+        try {
+          if (parentOrderSn) detail = await temuRequest("bg.order.detail.get", { parentOrderSn }, { db, allowErrorResult: true });
+        } catch (fallbackError) {
+          const message = `detail ${parentOrderSn || "unknown"}: ${fallbackError.message || error.message}`;
+          errors.push(message);
+          orderErrors.push(message);
+        }
+      }
+      try {
+        if (parentOrderSn) amount = await temuRequest("bg.order.amount.query", { parentOrderSn }, { db, allowErrorResult: true });
+      } catch (error) {
+        const message = `amount ${parentOrderSn || "unknown"}: ${error.message}`;
+        errors.push(message);
+        orderErrors.push(message);
       }
       try {
         if (parentOrderSn) shipping = await temuRequest("bg.order.shippinginfo.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
       } catch (error) {
-        errors.push(`shipping ${parentOrderSn || "unknown"}: ${error.message}`);
+        try {
+          if (parentOrderSn) shipping = await temuRequest("bg.order.shippinginfo.get", { parentOrderSn }, { db, allowErrorResult: true });
+        } catch (fallbackError) {
+          const message = `shipping ${parentOrderSn || "unknown"}: ${fallbackError.message || error.message}`;
+          errors.push(message);
+          orderErrors.push(message);
+        }
       }
 
-      const mappedOrder = mapTemuOrder(listOrder, detail, shipping);
+      const mappedOrder = mapTemuOrder(listOrder, detail, shipping, amount, orderErrors);
       if (!includeCanceled && String(mappedOrder.status || "").toLowerCase() === "canceled") {
         skipped += 1;
         fetched += 1;
