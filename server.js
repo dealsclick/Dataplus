@@ -20975,7 +20975,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
   const listPayload = temuPayload(listOrder);
   const detailPayload = temuPayload(detail);
   const shippingPayload = temuPayload(shipping);
-  const raw = { ...listPayload, ...(listPayload.parentOrderMap || {}), ...detailPayload };
+  const raw = { ...listPayload, ...(listPayload.parentOrderMap || {}), ...detailPayload, ...(detailPayload.parentOrderMap || {}) };
   const parentOrderSn = deepValueAt(raw, ["parentOrderSn", "parent_order_sn", "parentOrderSN", "parentOrderSNStr", "parentOrderNo", "parentOrderId", "parent_order_id", "orderSn", "order_sn"]);
   const childItems = firstArrayFrom(raw.orderList || raw.orderDetailList || raw.skuList || raw.goodsList || raw.items || raw);
   const items = childItems.length ? childItems.map((item) => {
@@ -21017,7 +21017,9 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
 
   const total = nestedMoney(valueAt(raw, ["parentOrderAmount", "orderAmount", "payAmount", "totalAmount", "settlementAmount"], 0))
     || items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
-  const shipTo = shippingPayload.shippingAddress || shippingPayload.address || shippingPayload.receiverAddress || shippingPayload.recipientAddress || shippingPayload;
+  const shippingCandidate = shippingPayload.shippingAddress || shippingPayload.address || shippingPayload.receiverAddress || shippingPayload.recipientAddress || shippingPayload;
+  const shippingHasAddress = Boolean(deepValueAt(shippingCandidate, ["addressLine1", "line1", "address1", "detailAddress", "addressDetail", "address", "fullAddress", "receiptAddress", "regionName1", "regionName2", "regionName3", "mail", "mobile"], ""));
+  const shipTo = shippingHasAddress ? shippingCandidate : raw;
   const addressExtra = shipTo.addressExtra && typeof shipTo.addressExtra === "object" ? shipTo.addressExtra : {};
   const firstName = String(valueAt(addressExtra, ["firstName", "additionalFirstName"], "")).trim();
   const lastName = String(valueAt(addressExtra, ["lastName", "additionalLastName"], "")).trim();
