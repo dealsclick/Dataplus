@@ -20748,7 +20748,7 @@ async function temuRequest(type, payload = {}, options = {}) {
   const hasTokenResult = hasResultPayload && Boolean(data.result.accessToken || data.result.access_token || data.result.token);
   const hasTemuError = Boolean(data.errorCode || data.error_code || data.errorMsg || data.error_msg);
   const hasUsableErrorResult = options.allowErrorResult === true && hasResultPayload;
-  if ((hasTemuError && !(options.allowTokenResult === true && hasTokenResult)) || (data.success === false && !hasResultPayload && !hasUsableErrorResult)) {
+  if ((hasTemuError && !(options.allowTokenResult === true && hasTokenResult) && !hasUsableErrorResult) || (data.success === false && !hasResultPayload && !hasUsableErrorResult)) {
     throw new Error(`Temu API error: ${JSON.stringify(data).slice(0, 300)}`);
   }
   return data;
@@ -20845,7 +20845,7 @@ async function testTemuConnection(db = {}) {
         pageSize: 1,
         updateAtStart: nowSeconds - 3600,
         updateAtEnd: nowSeconds
-      }, { db });
+      }, { db, allowErrorResult: true });
       status.ok = true;
       status.liveApiChecked = true;
       status.message = "Temu live API check passed. Order API credentials can be used for imports.";
@@ -23012,7 +23012,7 @@ async function importTemuOrders(db, options = {}) {
       pageSize,
       updateAtStart,
       updateAtEnd: now
-    }, { db });
+    }, { db, allowErrorResult: true });
     const list = firstArrayFrom(listResponse);
     if (!list.length) break;
 
