@@ -20902,6 +20902,42 @@ function valueAt(source, keys, fallback = "") {
   return fallback;
 }
 
+function deepValueAt(source, keys, fallback = "") {
+  const direct = valueAt(source, keys, "");
+  if (direct !== "") return direct;
+  if (!source || typeof source !== "object") return fallback;
+  for (const child of Object.values(source)) {
+    if (!child || typeof child !== "object") continue;
+    const value = deepValueAt(child, keys, "");
+    if (value !== "") return value;
+  }
+  return fallback;
+}
+
+function temuPayload(value) {
+  if (!value || typeof value !== "object") return {};
+  if (value.result && typeof value.result === "object") return value.result;
+  if (value.data && typeof value.data === "object") return value.data;
+  return value;
+}
+
+function temuItemProductList(item = {}) {
+  if (Array.isArray(item.productList)) return item.productList;
+  if (Array.isArray(item.product_list)) return item.product_list;
+  if (Array.isArray(item.productInfoList)) return item.productInfoList;
+  return [];
+}
+
+function temuSellerSku(item = {}) {
+  const direct = String(valueAt(item, ["extCode", "externalSku", "sellerSku", "outSkuSn", "outSku", "merchantSku", "merchant_sku"], "")).trim();
+  if (direct) return direct;
+  const productRows = temuItemProductList(item);
+  const candidates = productRows
+    .map((row) => String(valueAt(row, ["extCode", "externalSku", "sellerSku", "outSkuSn", "outSku", "merchantSku", "merchant_sku"], "")).trim())
+    .filter(Boolean);
+  return candidates.find((value) => /^BUS/i.test(value)) || candidates[0] || "";
+}
+
 function nestedMoney(value) {
   if (value === undefined || value === null || value === "") return 0;
   if (typeof value === "number") return value;
@@ -20936,11 +20972,14 @@ function mapTemuStatus(status) {
 }
 
 function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
-  const raw = { ...listOrder, ...detail };
-  const parentOrderSn = valueAt(raw, ["parentOrderSn", "parent_order_sn", "parentOrderSN", "orderSn", "order_sn"]);
+  const listPayload = temuPayload(listOrder);
+  const detailPayload = temuPayload(detail);
+  const shippingPayload = temuPayload(shipping);
+  const raw = { ...listPayload, ...(listPayload.parentOrderMap || {}), ...detailPayload };
+  const parentOrderSn = deepValueAt(raw, ["parentOrderSn", "parent_order_sn", "parentOrderSN", "parentOrderSNStr", "parentOrderNo", "parentOrderId", "parent_order_id", "orderSn", "order_sn"]);
   const childItems = firstArrayFrom(raw.orderList || raw.orderDetailList || raw.skuList || raw.goodsList || raw.items || raw);
   const items = childItems.length ? childItems.map((item) => {
-    const externalSku = String(valueAt(item, ["extCode", "externalSku", "sellerSku", "outSkuSn", "outSku", "merchantSku"], "")).trim();
+    const externalSku = temuSellerSku(item);
     const channelSku = String(valueAt(item, ["sku", "skuSn", "goodsSkuSn", "productSku", "goodsSku"], "")).trim();
     const channelVariantId = String(valueAt(item, ["skuId", "goodsSkuId", "goodsSkuSn", "productSkuId"], "")).trim();
     const channelProductId = String(valueAt(item, ["goodsId", "productId", "goods_id"], "")).trim();
@@ -20962,7 +21001,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
     };
   }) : [
     {
-      sku: String(valueAt(raw, ["extCode", "externalSku", "sellerSku", "sku", "skuSn", "skuId"], "TEMU-SKU")),
+      sku: temuSellerSku(raw) || String(valueAt(raw, ["sku", "skuSn", "skuId"], "TEMU-SKU")),
       originalSku: String(valueAt(raw, ["sku", "skuSn", "skuId"], "")),
       channelSku: String(valueAt(raw, ["sku", "skuSn", "goodsSkuSn"], "")),
       channelVariantId: String(valueAt(raw, ["skuId", "goodsSkuId"], "")),
@@ -20976,8 +21015,8 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
 
   const total = nestedMoney(valueAt(raw, ["parentOrderAmount", "orderAmount", "payAmount", "totalAmount", "settlementAmount"], 0))
     || items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
-  const shipTo = shipping.shippingAddress || shipping.address || shipping.receiverAddress || shipping;
-  const buyer = String(valueAt(shipTo, ["name", "receiverName", "recipientName"], valueAt(raw, ["buyerName", "customerName"], "Temu buyer")));
+  const shipTo = shippingPayload.shippingAddress || shippingPayload.address || shippingPayload.receiverAddress || shippingPayload.recipientAddress || shippingPayload;
+  const buyer = String(valueAt(shipTo, ["name", "receiverName", "recipientName", "receiverFullName", "fullName"], valueAt(raw, ["buyerName", "customerName", "receiverName"], "Temu buyer")));
 
   return {
     id: crypto.randomUUID(),
@@ -20986,14 +21025,14 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}) {
     marketplaceOrderId: parentOrderSn || "",
     source: "Temu",
     buyer,
-    buyerEmail: String(valueAt(raw, ["buyerEmail", "email"], "")),
-    phone: String(valueAt(shipTo, ["phone", "mobile", "receiverPhone"], "")),
+    buyerEmail: String(valueAt(raw, ["buyerEmail", "email"], valueAt(shipTo, ["email", "buyerEmail"], ""))),
+    phone: String(valueAt(shipTo, ["phone", "mobile", "receiverPhone", "receiverMobile", "telephone"], "")),
     address: {
       name: buyer,
-      line1: String(valueAt(shipTo, ["addressLine1", "line1", "address1", "detailAddress"], "")),
+      line1: String(valueAt(shipTo, ["addressLine1", "line1", "address1", "detailAddress", "addressDetail"], "")),
       line2: String(valueAt(shipTo, ["addressLine2", "line2", "address2"], "")),
-      city: String(valueAt(shipTo, ["city", "cityName"], "")),
-      state: String(valueAt(shipTo, ["state", "province", "regionName"], "")),
+      city: String(valueAt(shipTo, ["city", "cityName", "town"], "")),
+      state: String(valueAt(shipTo, ["state", "province", "regionName", "stateName"], "")),
       postalCode: String(valueAt(shipTo, ["postalCode", "zipCode", "postCode"], "")),
       country: String(valueAt(shipTo, ["country", "countryCode"], "US"))
     },
@@ -22974,7 +23013,19 @@ function upsertOrder(db, incoming) {
 }
 
 function extractTemuOrderSn(order) {
-  return valueAt(order, ["parentOrderSn", "parent_order_sn", "parentOrderSN", "orderSn", "order_sn"], "");
+  const payload = temuPayload(order);
+  const flattened = { ...payload, ...(payload.parentOrderMap || {}) };
+  return String(deepValueAt(flattened, [
+    "parentOrderSn",
+    "parent_order_sn",
+    "parentOrderSN",
+    "parentOrderSNStr",
+    "parentOrderNo",
+    "parentOrderId",
+    "parent_order_id",
+    "orderSn",
+    "order_sn",
+  ], "")).trim();
 }
 
 function unixStartOfDay(value) {
