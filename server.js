@@ -20745,9 +20745,10 @@ async function temuRequest(type, payload = {}, options = {}) {
   }
   if (!response.ok) throw new Error(`Temu HTTP ${response.status}: ${JSON.stringify(data).slice(0, 240)}`);
   const hasResultPayload = data.result && typeof data.result === "object";
+  const hasTokenResult = hasResultPayload && Boolean(data.result.accessToken || data.result.access_token || data.result.token);
   const hasTemuError = Boolean(data.errorCode || data.error_code || data.errorMsg || data.error_msg);
   const hasUsableErrorResult = options.allowErrorResult === true && hasResultPayload;
-  if (hasTemuError || (data.success === false && !hasResultPayload && !hasUsableErrorResult)) {
+  if ((hasTemuError && !(options.allowTokenResult === true && hasTokenResult)) || (data.success === false && !hasResultPayload && !hasUsableErrorResult)) {
     throw new Error(`Temu API error: ${JSON.stringify(data).slice(0, 300)}`);
   }
   return data;
@@ -20768,7 +20769,8 @@ async function exchangeTemuCode(db, code) {
     db,
     accessToken: trimmedCode,
     requireAccessToken: false,
-    allowErrorResult: true
+    allowErrorResult: true,
+    allowTokenResult: true
   });
   const payload = findTokenPayload(response);
   const accessToken = payload.access_token || payload.accessToken || payload.token;
