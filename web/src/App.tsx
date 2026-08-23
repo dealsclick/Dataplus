@@ -3906,6 +3906,7 @@ function ChannelDetail({
   }
 
   function openTemuSetupGuide() {
+    setActiveTab("actions")
     setTemuSetupGuideDraft({
       downloadOrders: true,
       lookbackDays: String(settings.temuOrderImportLookbackDays || 30),
