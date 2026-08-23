@@ -3467,6 +3467,8 @@ function ChannelDetail({
   const temuLatestOrderSync = temuConnectionTest?.latestOrderSync || String(settings.temuLastOrderSync || (channel as Record<string, unknown>).lastSync || "")
   const temuHasLiveToken = Boolean(settings.temuAccessToken || temuConnectionTest?.hasAccessToken)
   const temuCanRunLive = temuHasLiveToken || Boolean(channel.connected)
+  const temuSetupGuideCompleted = Boolean(settings.temuInitialSetupGuideCompleted)
+  const temuSetupGuideLabel = temuSetupGuideCompleted ? "Relaunch setup guide" : "Launch setup guide"
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const allowedChannelTabs = new Set(["overview", "connection", "setup", "actions", "rules", "mappings", "attributes", "variants", "skus", "logs"])
   const [activeTab, setActiveTab] = useState(allowedChannelTabs.has(requestedTab || "") ? String(requestedTab) : "overview")
@@ -3557,7 +3559,7 @@ function ChannelDetail({
         toast.success(payload.message || "Temu seller account connected.")
         setTemuConnectionTest(null)
         onRefreshData()
-        openTemuSetupGuide()
+        if (!temuSetupGuideCompleted) openTemuSetupGuide()
       }
       if (payload.type === "dataplus:temu-authorization-error") {
         toast.error(payload.message || "Temu seller authorization did not complete.")
@@ -3954,6 +3956,7 @@ function ChannelDetail({
         temuOrderImportLimit: limit,
         temuOrderImportStartDate: temuSetupGuideDraft.startDate,
         temuOrderImportIncludeCanceled: temuSetupGuideDraft.includeCanceled,
+        temuInitialSetupGuideCompleted: true,
       }
       if (temuSetupGuideDraft.downloadOrders) {
         settingsPatch.orderDownloadEnabled = true
@@ -4332,7 +4335,7 @@ function ChannelDetail({
                 </Button>
                 <Button variant="outline" onClick={openTemuSetupGuide} disabled={hasUnsavedChannelChanges || !temuCanRunLive}>
                   <ListChecks className="size-4" />
-                  Setup guide
+                  {temuSetupGuideLabel}
                 </Button>
                 {!editing && <Button onClick={() => setEditing(true)}>Edit connection</Button>}
               </div>
@@ -4863,7 +4866,7 @@ function ChannelDetail({
                     {settings.temuOrderImportScheduleEnabled ? "The scheduler will queue Temu order imports at the configured times when the channel is enabled." : "Order import is manual until the Temu order import schedule is enabled in Setup."} {temuCanRunLive ? "The generated token is available for live Temu API calls." : "A generated Temu access token is still needed before live order downloads can complete."}
                   </p>
                   <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" onClick={openTemuSetupGuide} disabled={!temuCanRunLive}>Setup guide</Button>
+                    <Button variant="outline" onClick={openTemuSetupGuide} disabled={!temuCanRunLive}>{temuSetupGuideLabel}</Button>
                     <Button variant="outline" onClick={() => {
                       if (settings.orderDownloadEnabled === false) {
                         toast.error("Enable order downloads in Setup before starting a Temu import.")
@@ -4934,7 +4937,7 @@ function ChannelDetail({
               <Dialog open={temuSetupGuideOpen} onOpenChange={setTemuSetupGuideOpen}>
                 <DialogContent className="sm:max-w-2xl">
                   <DialogHeader>
-                    <DialogTitle>Temu is connected. Choose what happens next.</DialogTitle>
+                    <DialogTitle>{temuSetupGuideCompleted ? "Relaunch Temu setup guide" : "Temu is connected. Choose what happens next."}</DialogTitle>
                     <DialogDescription>Connection only saves credentials. Select the first jobs and settings DataPlus should apply now.</DialogDescription>
                   </DialogHeader>
                   <div className="grid gap-4">
