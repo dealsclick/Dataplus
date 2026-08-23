@@ -20744,7 +20744,8 @@ async function temuRequest(type, payload = {}, options = {}) {
     throw new Error(`Temu returned non-JSON response (${response.status}): ${text.slice(0, 180)}`);
   }
   if (!response.ok) throw new Error(`Temu HTTP ${response.status}: ${JSON.stringify(data).slice(0, 240)}`);
-  if (data.errorCode || data.error_code || data.success === false) {
+  const hasUsableErrorResult = options.allowErrorResult === true && data.result && typeof data.result === "object";
+  if (data.errorCode || data.error_code || (data.success === false && !hasUsableErrorResult)) {
     throw new Error(`Temu API error: ${JSON.stringify(data).slice(0, 300)}`);
   }
   return data;
@@ -20764,7 +20765,8 @@ async function exchangeTemuCode(db, code) {
   const response = await temuRequest("bg.open.accesstoken.create", { code: trimmedCode }, {
     db,
     accessToken: trimmedCode,
-    requireAccessToken: false
+    requireAccessToken: false,
+    allowErrorResult: true
   });
   const payload = findTokenPayload(response);
   const accessToken = payload.access_token || payload.accessToken || payload.token;
@@ -20776,12 +20778,26 @@ async function exchangeTemuCode(db, code) {
   db.connectorState.temuAccessToken = accessToken;
   db.connectorState.temuRefreshToken = payload.refresh_token || payload.refreshToken || db.connectorState.temuRefreshToken || "";
   db.connectorState.temuMallId = payload.mall_id || payload.mallId || payload.mallIdList?.[0] || "";
+  db.connectorState.temuAccessTokenExpiresAt = payload.expiredTime ? new Date(Number(payload.expiredTime) * 1000).toISOString() : db.connectorState.temuAccessTokenExpiresAt || "";
+  db.connectorState.temuApiScopeList = Array.isArray(payload.apiScopeList) ? payload.apiScopeList : db.connectorState.temuApiScopeList || [];
   db.connectorState.temuTokenCreatedAt = new Date().toISOString();
+  delete db.connectorState.temuOauthState;
+  delete db.connectorState.temuOauthStateExpiresAt;
 
   const connection = db.connections.find((item) => item.name === "Temu");
   if (connection) {
     connection.connected = true;
     connection.lastSync = null;
+    connection.settings = {
+      ...DEFAULT_CHANNEL_SETTINGS,
+      ...(connection.settings || {}),
+      temuAccessToken: accessToken,
+      temuMallId: String(db.connectorState.temuMallId || ""),
+      temuConnectionOk: true,
+      temuConnectionVerifiedAt: new Date().toISOString(),
+      temuConnectionVerificationMessage: "Temu access token generated from seller authorization."
+    };
+    Object.assign(connection, normalizeChannel(connection));
   }
   db.syncRuns.unshift({
     id: crypto.randomUUID(),
