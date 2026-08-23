@@ -3138,6 +3138,66 @@ function JobIssueSummary({ job }: { job: ImportJob }) {
   )
 }
 
+function jobChannelName(job: ImportJob) {
+  const source = String((job as Record<string, unknown>).source || "")
+  const text = `${job.operation || ""} ${source} ${job.workerTask || ""}`.toLowerCase()
+  if (text.includes("temu")) return "Temu"
+  if (text.includes("ebay")) return "eBay"
+  if (text.includes("shopify")) return "Shopify"
+  if (text.includes("whatnot")) return "Whatnot"
+  return ""
+}
+
+function JobChannelActivity({ job }: { job: ImportJob }) {
+  const [logs, setLogs] = useState<ChannelLogEntry[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState("")
+  const channel = jobChannelName(job)
+
+  useEffect(() => {
+    if (!job.id || !channel) return
+    setLoading(true)
+    setError("")
+    const params = new URLSearchParams({ days: "365", limit: "25", query: job.id, channel })
+    api<{ logs?: ChannelLogEntry[] }>(`/api/channel-api-logs?${params.toString()}`)
+      .then((result) => setLogs(result.logs || []))
+      .catch((loadError) => {
+        setLogs([])
+        setError(loadError instanceof Error ? loadError.message : "Unable to load channel activity for this job.")
+      })
+      .finally(() => setLoading(false))
+  }, [job.id, channel])
+
+  if (!channel) return null
+  return (
+    <div className="rounded-md border bg-muted/20 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="font-medium">{channel} activity for this job</p>
+          <p className="text-xs text-muted-foreground">API calls and channel job events recorded with this job ID.</p>
+        </div>
+        <Badge variant="outline">{loading ? "Loading" : `${numberLabel(logs.length)} event${logs.length === 1 ? "" : "s"}`}</Badge>
+      </div>
+      {error ? <p className="mt-3 text-xs text-destructive">{error}</p> : null}
+      {!loading && !error && !logs.length ? <p className="mt-3 text-xs text-muted-foreground">No channel activity was found for this job ID.</p> : null}
+      {logs.length ? (
+        <div className="mt-3 grid gap-2">
+          {logs.slice(0, 6).map((entry) => (
+            <div key={String(entry.id || `${entry.createdAt}-${entry.operation}`)} className="rounded-md border bg-background p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-medium">{entry.operation || "Channel event"}</p>
+                <Badge variant={entry.ok === false ? "destructive" : entry.ok === true ? "default" : "outline"}>{channelLogStatusLabel(entry)}</Badge>
+              </div>
+              <p className="mt-1 break-words text-xs text-muted-foreground">{entry.message || entry.path || "No message recorded."}</p>
+              <p className="mt-1 text-[11px] text-muted-foreground">{dateLabel(entry.createdAt)}{entry.requestId ? ` / request ${entry.requestId}` : ""}</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?: ImportJob; onRetry: (job: ImportJob) => void; onStop: (job: ImportJob) => void; onUpdate: (job: ImportJob) => void; fullPage?: boolean }) {
   const [notes, setNotes] = useState("")
   const [savingNotes, setSavingNotes] = useState(false)
@@ -3235,6 +3295,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
           </div>
         )}
         <JobIssueSummary job={job} />
+        <JobChannelActivity job={job} />
         <JobArtifactDownloads job={job} />
         <div className="overflow-hidden rounded-md border bg-zinc-950 text-zinc-100">
           <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
