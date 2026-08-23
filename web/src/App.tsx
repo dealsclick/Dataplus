@@ -27,6 +27,7 @@ import {
   Home,
   LockKeyhole,
   Loader2,
+  ListChecks,
   Link2,
   Mail,
   MessageSquare,
@@ -3386,7 +3387,10 @@ function ChannelDetail({
   const [ebayOrderImportDraft, setEbayOrderImportDraft] = useState({ lookbackDays: "30", limit: "250", includeCanceled: false })
   const [temuOrderImportOpen, setTemuOrderImportOpen] = useState(false)
   const [temuOrderImportSaving, setTemuOrderImportSaving] = useState(false)
-  const [temuOrderImportDraft, setTemuOrderImportDraft] = useState({ lookbackDays: "30", limit: "250", includeCanceled: false })
+  const [temuOrderImportDraft, setTemuOrderImportDraft] = useState({ lookbackDays: "30", startDate: "", limit: "250", includeCanceled: false })
+  const [temuSetupGuideOpen, setTemuSetupGuideOpen] = useState(false)
+  const [temuSetupGuideSaving, setTemuSetupGuideSaving] = useState(false)
+  const [temuSetupGuideDraft, setTemuSetupGuideDraft] = useState({ downloadOrders: true, lookbackDays: "30", startDate: "", limit: "250", includeCanceled: false, prepareSkuMapping: true, enableSchedule: false, scheduleEveryHours: "12" })
   const [temuConnectionTest, setTemuConnectionTest] = useState<{ ok?: boolean; configured?: boolean; liveApiChecked?: boolean; hasAccessToken?: boolean; endpoint?: string; appKeyPreview?: string; mallId?: string; latestOrderSync?: string; verifiedAt?: string; message?: string } | null>(null)
   const [temuTestingConnection, setTemuTestingConnection] = useState(false)
   const [temuConnecting, setTemuConnecting] = useState(false)
@@ -3462,6 +3466,7 @@ function ChannelDetail({
   const temuConnectionVerifiedAt = temuConnectionTest?.verifiedAt || String(settings.temuConnectionVerifiedAt || "")
   const temuLatestOrderSync = temuConnectionTest?.latestOrderSync || String(settings.temuLastOrderSync || (channel as Record<string, unknown>).lastSync || "")
   const temuHasLiveToken = Boolean(settings.temuAccessToken || temuConnectionTest?.hasAccessToken)
+  const temuCanRunLive = temuHasLiveToken || Boolean(channel.connected)
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const allowedChannelTabs = new Set(["overview", "connection", "setup", "actions", "rules", "mappings", "attributes", "variants", "skus", "logs"])
   const [activeTab, setActiveTab] = useState(allowedChannelTabs.has(requestedTab || "") ? String(requestedTab) : "overview")
@@ -3552,6 +3557,7 @@ function ChannelDetail({
         toast.success(payload.message || "Temu seller account connected.")
         setTemuConnectionTest(null)
         onRefreshData()
+        openTemuSetupGuide()
       }
       if (payload.type === "dataplus:temu-authorization-error") {
         toast.error(payload.message || "Temu seller authorization did not complete.")
@@ -3890,10 +3896,25 @@ function ChannelDetail({
   function openTemuOrderImport() {
     setTemuOrderImportDraft({
       lookbackDays: String(settings.temuOrderImportLookbackDays || 30),
+      startDate: String(settings.temuOrderImportStartDate || ""),
       limit: String(settings.temuOrderImportLimit || 250),
       includeCanceled: settings.temuOrderImportIncludeCanceled === true,
     })
     setTemuOrderImportOpen(true)
+  }
+
+  function openTemuSetupGuide() {
+    setTemuSetupGuideDraft({
+      downloadOrders: true,
+      lookbackDays: String(settings.temuOrderImportLookbackDays || 30),
+      startDate: String(settings.temuOrderImportStartDate || ""),
+      limit: String(settings.temuOrderImportLimit || 250),
+      includeCanceled: settings.temuOrderImportIncludeCanceled === true,
+      prepareSkuMapping: settings.temuListingSyncEnabled !== false || settings.temuCatalogSyncEnabled !== false,
+      enableSchedule: Boolean(settings.temuOrderImportScheduleEnabled),
+      scheduleEveryHours: String(settings.temuOrderImportScheduleEveryHours || 12),
+    })
+    setTemuSetupGuideOpen(true)
   }
 
   async function queueTemuOrderImport() {
@@ -3904,7 +3925,7 @@ function ChannelDetail({
         body: JSON.stringify({
           lookbackDays: Math.max(1, Math.min(365, Number(temuOrderImportDraft.lookbackDays || 30) || 30)),
           limit: Math.max(1, Math.min(5000, Number(temuOrderImportDraft.limit || 250) || 250)),
-          startDate: String(settings.temuOrderImportStartDate || ""),
+          startDate: String(temuOrderImportDraft.startDate || ""),
           includeCanceled: temuOrderImportDraft.includeCanceled,
         }),
       })
@@ -3915,6 +3936,62 @@ function ChannelDetail({
       toast.error(error instanceof Error ? error.message : "Unable to queue Temu order import.")
     } finally {
       setTemuOrderImportSaving(false)
+    }
+  }
+
+  async function runTemuSetupGuide() {
+    if (!temuCanRunLive) {
+      toast.error("Temu needs a generated access token before live order downloads can run.")
+      return
+    }
+    setTemuSetupGuideSaving(true)
+    try {
+      const lookbackDays = Math.max(1, Math.min(365, Number(temuSetupGuideDraft.lookbackDays || 30) || 30))
+      const limit = Math.max(1, Math.min(5000, Number(temuSetupGuideDraft.limit || 250) || 250))
+      const scheduleEveryHours = Math.max(1, Math.min(24, Number(temuSetupGuideDraft.scheduleEveryHours || 12) || 12))
+      const settingsPatch: Record<string, unknown> = {
+        temuOrderImportLookbackDays: lookbackDays,
+        temuOrderImportLimit: limit,
+        temuOrderImportStartDate: temuSetupGuideDraft.startDate,
+        temuOrderImportIncludeCanceled: temuSetupGuideDraft.includeCanceled,
+      }
+      if (temuSetupGuideDraft.downloadOrders) {
+        settingsPatch.orderDownloadEnabled = true
+        settingsPatch.temuOrderImportEnabled = true
+      }
+      if (temuSetupGuideDraft.enableSchedule) {
+        settingsPatch.temuOrderImportScheduleEnabled = true
+        settingsPatch.temuOrderImportScheduleType = "interval"
+        settingsPatch.temuOrderImportScheduleEveryHours = scheduleEveryHours
+      }
+      if (temuSetupGuideDraft.prepareSkuMapping) {
+        settingsPatch.temuListingSyncEnabled = true
+        settingsPatch.temuCatalogSyncEnabled = true
+      }
+      await onSave(channel.id, settingsPatch)
+      if (temuSetupGuideDraft.downloadOrders) {
+        const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>("/api/temu/orders/import", {
+          method: "POST",
+          body: JSON.stringify({
+            lookbackDays,
+            limit,
+            startDate: temuSetupGuideDraft.startDate,
+            includeCanceled: temuSetupGuideDraft.includeCanceled,
+          }),
+        })
+        toast.success(result.message || (result.duplicate ? "An equivalent Temu order import is already running." : "Temu order import queued."))
+      } else {
+        toast.success("Temu next-step settings saved.")
+      }
+      if (temuSetupGuideDraft.prepareSkuMapping) {
+        toast.message("Temu SKU mapping prep is enabled. Listing download is waiting on the Temu listing importer worker.")
+      }
+      setTemuSetupGuideOpen(false)
+      onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to run the Temu setup guide.")
+    } finally {
+      setTemuSetupGuideSaving(false)
     }
   }
 
@@ -4252,6 +4329,10 @@ function ChannelDetail({
                 <Button variant="outline" onClick={() => void testTemuConnection()} disabled={temuTestingConnection || hasUnsavedChannelChanges || !settings.temuAppKey || !settings.temuAppSecret}>
                   {temuTestingConnection ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
                   Test connection
+                </Button>
+                <Button variant="outline" onClick={openTemuSetupGuide} disabled={hasUnsavedChannelChanges || !temuCanRunLive}>
+                  <ListChecks className="size-4" />
+                  Setup guide
                 </Button>
                 {!editing && <Button onClick={() => setEditing(true)}>Edit connection</Button>}
               </div>
@@ -4774,28 +4855,31 @@ function ChannelDetail({
                   <Detail label="Listing sync" value={settings.temuListingSyncEnabled ? "Enabled" : "Disabled"} />
                   <Detail label="Latest order sync" value={dateLabel(temuLatestOrderSync)} />
                   <Detail label="Import mode" value={settings.temuOrderImportScheduleEnabled ? `Scheduled ${String(settings.temuOrderImportScheduleType || "times") === "interval" ? `every ${settings.temuOrderImportScheduleEveryHours || 12} hours` : `at ${temuOrderImportScheduleTimes.join(" and ") || "05:00 and 17:00"}`}` : "Manual only"} />
-                  <Detail label="Generated token" value={temuHasLiveToken ? "Available" : "Needed for live import"} />
+                  <Detail label="Generated token" value={temuCanRunLive ? "Available" : "Needed for live import"} />
                   <Detail label="Last connection test" value={dateLabel(temuConnectionVerifiedAt)} />
                 </CardContent>
                 <CardFooter className="flex flex-wrap items-center justify-between gap-3 border-t">
                   <p className="max-w-3xl text-xs text-muted-foreground">
-                    {settings.temuOrderImportScheduleEnabled ? "The scheduler will queue Temu order imports at the configured times when the channel is enabled." : "Order import is manual until the Temu order import schedule is enabled in Setup."} {temuHasLiveToken ? "The generated token is available for live Temu API calls." : "A generated Temu access token is still needed before live order downloads can complete."}
+                    {settings.temuOrderImportScheduleEnabled ? "The scheduler will queue Temu order imports at the configured times when the channel is enabled." : "Order import is manual until the Temu order import schedule is enabled in Setup."} {temuCanRunLive ? "The generated token is available for live Temu API calls." : "A generated Temu access token is still needed before live order downloads can complete."}
                   </p>
-                  <Button variant="outline" onClick={() => {
-                    if (settings.orderDownloadEnabled === false) {
-                      toast.error("Enable order downloads in Setup before starting a Temu import.")
-                      return
-                    }
-                    if (!settings.temuOrderImportEnabled) {
-                      toast.error("Enable Temu order imports in Setup before starting an import.")
-                      return
-                    }
-                    if (!temuHasLiveToken) {
-                      toast.error("Temu needs a generated access token before order imports can run.")
-                      return
-                    }
-                    openTemuOrderImport()
-                  }}>Import Temu orders</Button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" onClick={openTemuSetupGuide} disabled={!temuCanRunLive}>Setup guide</Button>
+                    <Button variant="outline" onClick={() => {
+                      if (settings.orderDownloadEnabled === false) {
+                        toast.error("Enable order downloads in Setup before starting a Temu import.")
+                        return
+                      }
+                      if (!settings.temuOrderImportEnabled) {
+                        toast.error("Enable Temu order imports in Setup before starting an import.")
+                        return
+                      }
+                      if (!temuHasLiveToken) {
+                        toast.error("Temu needs a generated access token before order imports can run.")
+                        return
+                      }
+                      openTemuOrderImport()
+                    }}>Import Temu orders</Button>
+                  </div>
                 </CardFooter>
               </Card>
               <Dialog open={temuOrderImportOpen} onOpenChange={setTemuOrderImportOpen}>
@@ -4818,6 +4902,10 @@ function ChannelDetail({
                         </SelectContent>
                       </Select>
                     </Field>
+                    <Field label="Import from date">
+                      <Input type="date" value={temuOrderImportDraft.startDate} onChange={(event) => setTemuOrderImportDraft((current) => ({ ...current, startDate: event.target.value }))} />
+                      <p className="text-xs text-muted-foreground">Optional hard start date. Leave blank to use the look-back window.</p>
+                    </Field>
                     <Field label="Maximum orders">
                       <Select value={temuOrderImportDraft.limit} onValueChange={(value) => setTemuOrderImportDraft((current) => ({ ...current, limit: value }))}>
                         <SelectTrigger><SelectValue /></SelectTrigger>
@@ -4839,6 +4927,100 @@ function ChannelDetail({
                     <Button variant="outline" onClick={() => setTemuOrderImportOpen(false)} disabled={temuOrderImportSaving}>Cancel</Button>
                     <Button onClick={() => void queueTemuOrderImport()} disabled={temuOrderImportSaving}>
                       {temuOrderImportSaving && <Loader2 className="size-4 animate-spin" />} Import orders
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+              <Dialog open={temuSetupGuideOpen} onOpenChange={setTemuSetupGuideOpen}>
+                <DialogContent className="sm:max-w-2xl">
+                  <DialogHeader>
+                    <DialogTitle>Temu is connected. Choose what happens next.</DialogTitle>
+                    <DialogDescription>Connection only saves credentials. Select the first jobs and settings DataPlus should apply now.</DialogDescription>
+                  </DialogHeader>
+                  <div className="grid gap-4">
+                    <div className="rounded-md border p-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <p className="text-sm font-semibold">Download Temu orders now</p>
+                          <p className="text-xs text-muted-foreground">Queues a background order import job and saves these import defaults.</p>
+                        </div>
+                        <Switch checked={temuSetupGuideDraft.downloadOrders} onCheckedChange={(checked) => setTemuSetupGuideDraft((current) => ({ ...current, downloadOrders: checked }))} />
+                      </div>
+                      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                        <Field label="Look back">
+                          <Select value={temuSetupGuideDraft.lookbackDays} onValueChange={(value) => setTemuSetupGuideDraft((current) => ({ ...current, lookbackDays: value }))} disabled={!temuSetupGuideDraft.downloadOrders}>
+                            <SelectTrigger><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="1">Last 24 hours</SelectItem>
+                              <SelectItem value="7">Last 7 days</SelectItem>
+                              <SelectItem value="30">Last 30 days</SelectItem>
+                              <SelectItem value="90">Last 90 days</SelectItem>
+                              <SelectItem value="180">Last 180 days</SelectItem>
+                              <SelectItem value="365">Last 365 days</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                        <Field label="Import from date">
+                          <Input type="date" disabled={!temuSetupGuideDraft.downloadOrders} value={temuSetupGuideDraft.startDate} onChange={(event) => setTemuSetupGuideDraft((current) => ({ ...current, startDate: event.target.value }))} />
+                          <p className="text-xs text-muted-foreground">Optional hard start date. Leave blank to use the look-back window.</p>
+                        </Field>
+                        <Field label="Maximum orders">
+                          <Select value={temuSetupGuideDraft.limit} onValueChange={(value) => setTemuSetupGuideDraft((current) => ({ ...current, limit: value }))} disabled={!temuSetupGuideDraft.downloadOrders}>
+                            <SelectTrigger><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="250">250 orders</SelectItem>
+                              <SelectItem value="500">500 orders</SelectItem>
+                              <SelectItem value="1000">1,000 orders</SelectItem>
+                              <SelectItem value="2500">2,500 orders</SelectItem>
+                              <SelectItem value="5000">5,000 orders</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                        <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/20 p-3">
+                          <div>
+                            <p className="text-sm font-medium">Include canceled orders</p>
+                            <p className="text-xs text-muted-foreground">Usually off for the active order queue.</p>
+                          </div>
+                          <Switch disabled={!temuSetupGuideDraft.downloadOrders} checked={temuSetupGuideDraft.includeCanceled} onCheckedChange={(checked) => setTemuSetupGuideDraft((current) => ({ ...current, includeCanceled: checked }))} />
+                        </div>
+                      </div>
+                    </div>
+                    <div className="rounded-md border p-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <p className="text-sm font-semibold">Keep downloading orders on a schedule</p>
+                          <p className="text-xs text-muted-foreground">Saves a recurring Temu order import schedule after the first manual run.</p>
+                        </div>
+                        <Switch checked={temuSetupGuideDraft.enableSchedule} onCheckedChange={(checked) => setTemuSetupGuideDraft((current) => ({ ...current, enableSchedule: checked }))} />
+                      </div>
+                      <div className="mt-4 max-w-xs">
+                        <Field label="Run every">
+                          <Select value={temuSetupGuideDraft.scheduleEveryHours} onValueChange={(value) => setTemuSetupGuideDraft((current) => ({ ...current, scheduleEveryHours: value }))} disabled={!temuSetupGuideDraft.enableSchedule}>
+                            <SelectTrigger><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="1">Every hour</SelectItem>
+                              <SelectItem value="3">Every 3 hours</SelectItem>
+                              <SelectItem value="6">Every 6 hours</SelectItem>
+                              <SelectItem value="12">Every 12 hours</SelectItem>
+                              <SelectItem value="24">Every 24 hours</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                      </div>
+                    </div>
+                    <div className="flex items-start justify-between gap-4 rounded-md border p-4">
+                      <div>
+                        <p className="text-sm font-semibold">Prepare Temu SKU mapping</p>
+                        <p className="text-xs text-muted-foreground">Enables Temu listing and category sync settings for mapping review. Product publish actions stay separate.</p>
+                      </div>
+                      <Switch checked={temuSetupGuideDraft.prepareSkuMapping} onCheckedChange={(checked) => setTemuSetupGuideDraft((current) => ({ ...current, prepareSkuMapping: checked }))} />
+                    </div>
+                    {!temuCanRunLive && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Generated token needed</AlertTitle><AlertDescription>Connect Temu first so DataPlus has a generated access token for live imports.</AlertDescription></Alert>}
+                  </div>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setTemuSetupGuideOpen(false)} disabled={temuSetupGuideSaving}>Not now</Button>
+                    <Button onClick={() => void runTemuSetupGuide()} disabled={temuSetupGuideSaving || !temuCanRunLive}>
+                      {temuSetupGuideSaving && <Loader2 className="size-4 animate-spin" />} Run selected steps
                     </Button>
                   </DialogFooter>
                 </DialogContent>
