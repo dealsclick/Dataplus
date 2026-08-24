@@ -21507,6 +21507,131 @@ function temuShippingLabelRates(order = {}) {
   }));
 }
 
+function temuLogisticsRows(payload = {}) {
+  const normalized = temuPayload(payload);
+  const rows = firstArrayFrom(
+    normalized.shippingServiceList
+      || normalized.shippingServices
+      || normalized.serviceList
+      || normalized.channelList
+      || normalized.channelInfoList
+      || normalized.logisticsServiceList
+      || normalized.companyList
+      || normalized.logisticsCompanyList
+      || normalized.warehouseList
+      || normalized.list
+      || normalized
+  );
+  return rows.filter((row) => row && typeof row === "object");
+}
+
+function normalizeTemuWarehouse(row = {}, index = 0) {
+  return {
+    id: String(deepValueAt(row, ["warehouseId", "warehouse_id", "whId", "id"], "") || `temu-warehouse-${index}`),
+    name: String(deepValueAt(row, ["warehouseName", "warehouse_name", "name"], "") || `Temu warehouse ${index + 1}`),
+    raw: row
+  };
+}
+
+function normalizeTemuShippingService(row = {}, index = 0, context = {}) {
+  const shipCompanyId = String(deepValueAt(row, ["shipCompanyId", "ship_company_id", "companyId", "carrierId", "logisticsCompanyId", "id"], "")).trim();
+  const channelId = String(deepValueAt(row, ["channelId", "channel_id", "shippingChannelId", "logisticsChannelId", "serviceId"], "")).trim();
+  const carrier = String(deepValueAt(row, ["shipCompanyName", "companyName", "carrierName", "logisticsCompanyName", "name"], "") || "Temu");
+  const service = String(deepValueAt(row, ["channelName", "serviceName", "shippingServiceName", "logisticsServiceName", "displayName"], "") || carrier || "Temu shipping");
+  const amount = Number(firstMoney(
+    deepValueAt(row, ["shippingFee", "shippingAmount", "estimateShippingFee", "estimatedFee", "price", "amount"], 0),
+    deepValueAt(row, ["totalCharge", "totalCost", "cost"], 0)
+  )) || 0;
+  const deliveryDays = Number(deepValueAt(row, ["deliveryDays", "estimatedDeliveryDays", "promiseDeliveryDays", "deliveryTime"], 0)) || 0;
+  return {
+    id: `temu-service-${shipCompanyId || "company"}-${channelId || index}`,
+    provider: "temu",
+    carrier,
+    service,
+    amount,
+    currency: String(context.currency || "USD"),
+    deliveryDays,
+    deliveryEstimate: String(deepValueAt(row, ["deliveryEstimate", "estimatedDeliveryTime", "promiseDeliveryTime", "deliveryTimeDesc"], "") || (deliveryDays ? `${deliveryDays} day${deliveryDays === 1 ? "" : "s"}` : "Provided by Temu")),
+    action: "create_shipment",
+    documentType: "SHIPPING_LABEL_PDF",
+    shipCompanyId,
+    channelId,
+    warehouseId: String(context.warehouseId || ""),
+    raw: { ...row, warehouseId: String(context.warehouseId || ""), parentOrderSn: String(context.parentOrderSn || "") }
+  };
+}
+
+function temuOrderSendInfoList(order = {}, body = {}) {
+  const requested = Array.isArray(body.lines) ? body.lines : [];
+  const items = Array.isArray(order.items) ? order.items : [];
+  const selected = requested.length ? requested : items.map((line, lineIndex) => ({ ...line, lineIndex, qty: Number(line.qty || 0) }));
+  return selected.map((line) => {
+    const source = items[Number(line.lineIndex || 0)] || line;
+    return {
+      quantity: Math.max(1, Number(line.qty || source.qty || 1) || 1),
+      orderSn: String(source.temuOrderItemId || source.channelOrderItemId || source.orderSn || "").trim(),
+      parentOrderSn: String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim(),
+      goodsId: String(source.temuGoodsId || source.channelProductId || source.goodsId || "").trim(),
+      skuId: String(source.temuSkuId || source.channelVariantId || source.skuId || "").trim()
+    };
+  }).filter((row) => row.orderSn && row.parentOrderSn && row.goodsId && row.skuId && row.quantity > 0);
+}
+
+async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel = {}) {
+  const parentOrderSn = String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
+  const orderSendInfoList = temuOrderSendInfoList(order, body);
+  if (!parentOrderSn || !orderSendInfoList.length) return { rates: [], warnings: ["Temu needs order item, goods, and SKU IDs before it can create marketplace shipping options. Refresh the Temu order, then try again."] };
+  const warnings = [];
+  const warehousesResponse = await temuRequest("bg.logistics.warehouse.list.get", {}, { db, allowErrorResult: true });
+  const warehouses = temuLogisticsRows(warehousesResponse).map(normalizeTemuWarehouse).filter((row) => row.id);
+  const selectedWarehouse = warehouses[0];
+  if (!selectedWarehouse?.id) return { rates: [], warnings: ["Temu did not return a shipping warehouse. Confirm the Temu app has Logistics Warehouse access."] };
+  let services = [];
+  const serviceBase = {
+    warehouseId: selectedWarehouse.id,
+    length: String(parcel.length || 0),
+    width: String(parcel.width || 0),
+    height: String(parcel.height || 0),
+    weight: String(parcel.weight || 0),
+    dimensionUnit: String(parcel.dimension_unit || "in"),
+    weightUnit: String(parcel.weight_unit || "lb"),
+    orderSendInfoList
+  };
+  const attempts = [
+    serviceBase,
+    { parentOrderSn, ...serviceBase },
+    { sendRequestList: [serviceBase] }
+  ];
+  for (const payload of attempts) {
+    try {
+      const response = await temuRequest("bg.logistics.shippingservices.get", payload, { db, allowErrorResult: true });
+      const rows = temuLogisticsRows(response);
+      if (rows.length) {
+        services = rows;
+        order.external = { ...(order.external || {}), temuShippingServices: temuPayload(response), temuLogisticsWarehouse: selectedWarehouse };
+        break;
+      }
+    } catch (error) {
+      warnings.push(error.message || "Temu shipping services lookup failed.");
+    }
+  }
+  if (!services.length) {
+    try {
+      const companyResponse = await temuRequest("bg.logistics.companies.get", {}, { db, allowErrorResult: true });
+      const companies = temuLogisticsRows(companyResponse);
+      if (companies.length) warnings.push("Temu returned carrier companies, but did not return shipment service/channel IDs needed to quote or create a label.");
+      order.external = { ...(order.external || {}), temuLogisticsCompanies: temuPayload(companyResponse), temuLogisticsWarehouse: selectedWarehouse };
+    } catch (error) {
+      warnings.push(error.message || "Temu carrier lookup failed.");
+    }
+  }
+  const rates = services
+    .map((row, index) => normalizeTemuShippingService(row, index, { currency: order.currency || "USD", warehouseId: selectedWarehouse.id, parentOrderSn }))
+    .filter((rate) => rate.shipCompanyId && rate.channelId);
+  if (!rates.length && services.length) warnings.push("Temu returned shipping service data without both shipCompanyId and channelId, so DataPlus cannot safely create the label yet.");
+  return { rates, warnings };
+}
+
 function firstTemuDocumentPayload(response = {}) {
   const payload = temuPayload(response);
   const rows = firstArrayFrom(payload.documentList || payload.shippingLabelList || payload.labelList || payload.fileList || payload);
@@ -21537,12 +21662,49 @@ async function fetchTemuDocumentContent(url, db = {}) {
   return { content, mimeType: contentType === "application/octet-stream" ? "application/pdf" : contentType };
 }
 
+async function createTemuShipmentPackage(order, db = {}, options = {}) {
+  const parentOrderSn = String(options.parentOrderSn || order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
+  const rate = options.rate && typeof options.rate === "object" ? options.rate : {};
+  const parcel = options.package && typeof options.package === "object" ? options.package : {};
+  const orderSendInfoList = temuOrderSendInfoList(order, options);
+  if (!parentOrderSn) throw new Error("This Temu order does not have a parent order number.");
+  if (!orderSendInfoList.length) throw new Error("Temu needs order item, goods, and SKU IDs before it can create a shipment. Refresh the Temu order, then try again.");
+  const warehouseId = String(options.warehouseId || rate.warehouseId || rate.raw?.warehouseId || order.external?.temuLogisticsWarehouse?.id || "").trim();
+  const shipCompanyId = Number(rate.shipCompanyId || rate.raw?.shipCompanyId || rate.raw?.ship_company_id || rate.raw?.companyId || 0) || 0;
+  const channelId = Number(rate.channelId || rate.raw?.channelId || rate.raw?.channel_id || rate.raw?.shippingChannelId || 0) || 0;
+  if (!warehouseId) throw new Error("Choose a Temu warehouse/service before creating the label.");
+  if (!shipCompanyId || !channelId) throw new Error("Temu did not return the shipCompanyId and channelId required to create this label.");
+  const request = {
+    sendType: 0,
+    sendRequestList: [{
+      warehouseId,
+      length: String(parcel.length || options.packageLength || 0),
+      width: String(parcel.width || options.packageWidth || 0),
+      height: String(parcel.height || options.packageHeight || 0),
+      weight: String(parcel.weight || options.packageWeight || 0),
+      dimensionUnit: String(parcel.dimension_unit || options.dimensionUnit || "in"),
+      weightUnit: String(parcel.weight_unit || options.weightUnit || "lb"),
+      shipCompanyId,
+      channelId,
+      orderSendInfoList
+    }]
+  };
+  const response = await temuRequest("bg.logistics.shipment.create", request, { db, allowErrorResult: true });
+  const packageSnList = [...new Set(extractTemuPackageSns(response))];
+  order.external = { ...(order.external || {}), temuShipmentCreate: temuPayload(response) };
+  if (!packageSnList.length) throw new Error(`Temu accepted the shipment request but did not return a package number yet: ${JSON.stringify(response).slice(0, 240)}`);
+  return packageSnList;
+}
+
 async function attachTemuShippingLabel(order, db = {}, options = {}) {
   const parentOrderSn = String(options.parentOrderSn || order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
   if (!parentOrderSn) throw new Error("This Temu order does not have a parent order number.");
 
   let packageSnList = Array.isArray(options.packageSnList) ? options.packageSnList.map(String).filter(Boolean) : [];
   packageSnList = packageSnList.length ? packageSnList : extractTemuPackageSns(order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
+  if (!packageSnList.length && String(options.rate?.action || "").toLowerCase() === "create_shipment") {
+    packageSnList = await createTemuShipmentPackage(order, db, options);
+  }
   if (!packageSnList.length) {
     const unshipped = await temuRequest("bg.order.unshipped.package.get", { parentOrderSn }, { db, allowErrorResult: true });
     const combined = await temuRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, allowErrorResult: true });
@@ -21829,7 +21991,15 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   if (String(order.source || "").toLowerCase() === "temu") {
     const temuRates = temuShippingLabelRates(order);
     rates.push(...temuRates);
-    if (!temuRates.length) {
+    if (!temuRates.length && !blockers.length) {
+      try {
+        const serviceResult = await temuShippingServiceRates(order, db, body, parcel);
+        rates.push(...serviceResult.rates);
+        if (!serviceResult.rates.length) providerErrors.push({ provider: "Temu", message: serviceResult.warnings.join(" ") || temuShippingProviderWarning(order) });
+      } catch (error) {
+        providerErrors.push({ provider: "Temu", message: error.message || temuShippingProviderWarning(order) });
+      }
+    } else if (!temuRates.length) {
       providerErrors.push({ provider: "Temu", message: temuShippingProviderWarning(order) });
     }
   }
@@ -36797,12 +36967,15 @@ async function handleApi(req, res) {
       let result;
       if (provider === "temu") {
         result = await attachTemuShippingLabel(order, db, {
+          rate: body.rate || {},
           documentType: body.documentType || body.rate?.documentType || "SHIPPING_LABEL_PDF",
           packageSnList: Array.isArray(body.packageSnList)
             ? body.packageSnList
             : Array.isArray(body.rate?.packageSnList)
               ? body.rate.packageSnList
-              : []
+              : [],
+          package: packageForShippingRates(body, readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {})),
+          lines: Array.isArray(body.lines) ? body.lines : []
         });
       } else if (provider === "veeqo") {
         const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
