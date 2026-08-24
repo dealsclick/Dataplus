@@ -9936,7 +9936,7 @@ function getOrderRoutingState(order: Record<string, unknown>): OrderRoutingState
   })
   const payments = Array.isArray(order.payments) ? order.payments as Array<Record<string, unknown>> : []
   const financialStatus = String(order.financialStatus || order.paymentStatus || "").trim().toLowerCase()
-  const paymentCleared = ["paid", "partially paid", "partially_paid", "authorized"].includes(financialStatus)
+  const paymentCleared = ["paid", "partially paid", "partially_paid", "authorized", "temu confirmed"].includes(financialStatus)
     || payments.some((payment) => ["authorized", "captured", "paid"].includes(String(payment.status || "").trim().toLowerCase()))
   const orderStatus = String(order.status || "").trim().toLowerCase()
   const operationalStatus = String(order.operationalStatus || order.workflowStatus || "").trim().toLowerCase()
@@ -11241,7 +11241,7 @@ function OperationsPage() {
           const hasPo = (Array.isArray(row.purchaseOrderIds) && row.purchaseOrderIds.length > 0) || (Array.isArray(row.purchaseOrderNumbers) && row.purchaseOrderNumbers.length > 0) || (Array.isArray(row.fulfillmentRoutes) && (row.fulfillmentRoutes as Array<Record<string, unknown>>).some((route) => Boolean(route.purchaseOrderId)))
           const linkedOrderId = String(row.orderId || "")
           const paymentStatus = String(row.financialStatus || row.paymentStatus || "Unpaid")
-          const paymentPaid = paymentStatus.toLowerCase() === "paid"
+          const paymentPaid = ["paid", "temu confirmed"].includes(paymentStatus.toLowerCase())
           return <TableRow key={`${reference}-${index}`} data-state={selectedIds.has(id) ? "selected" : undefined}>
             <TableCell><Checkbox aria-label={`Select ${reference}`} checked={selectedIds.has(id)} onCheckedChange={(checked) => setSelectedIds((current) => { const next = new Set(current); if (checked === true) next.add(id); else next.delete(id); return next })} /></TableCell>
             <TableCell className="min-w-44"><div className="group flex items-center gap-1">{tab === "orders" ? <><a href={`/orders/${encodeURIComponent(id || reference)}`} className="font-medium hover:underline">{reference}</a><OrderListPreview order={row} orderId={id} reference={reference} itemCount={itemCount} hasPo={hasPo} queue={orderQueue} /></> : <a href={`/orders/${encodeURIComponent(linkedOrderId)}`} className="font-medium hover:underline">{reference}</a>}</div><p className="text-xs text-muted-foreground">{tab === "orders" ? String(row.source || "Manual") : `Order ${String(row.orderNumber || "-")}`}</p></TableCell>
