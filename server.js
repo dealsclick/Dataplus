@@ -20850,12 +20850,39 @@ async function testTemuConnection(db = {}) {
       }, { db, allowErrorResult: true });
       const sampleOrder = firstArrayFrom(listResponse)[0] || {};
       const sampleOrderSn = extractTemuOrderSn(sampleOrder);
+      const scopeWarnings = [];
       if (sampleOrderSn) {
-        await temuRequest("bg.order.amount.query", { parentOrderSn: sampleOrderSn }, { db, allowErrorResult: true });
+        let sampleDetail = {};
+        for (const check of [
+          ["detail", "bg.order.detail.v2.get", { parentOrderSn: sampleOrderSn }],
+          ["amount", "bg.order.amount.query", { parentOrderSn: sampleOrderSn }],
+          ["amount_v2", "temu.order.amount.v2.query", { parentOrderSn: sampleOrderSn }],
+          ["shipping", "bg.order.shippinginfo.v2.get", { parentOrderSn: sampleOrderSn }],
+          ["decrypt_shipping", "bg.order.decryptshippinginfo.get", { parentOrderSn: sampleOrderSn }],
+          ["unshipped_package", "bg.order.unshipped.package.get", { parentOrderSn: sampleOrderSn }],
+          ["combined_shipment", "bg.order.combinedshipment.list.get", { parentOrderSn: sampleOrderSn }],
+        ]) {
+          try {
+            const response = await temuRequest(check[1], check[2], { db, allowErrorResult: true });
+            if (check[0] === "detail") sampleDetail = response;
+          } catch (error) {
+            scopeWarnings.push(`${check[0]}: ${error.message}`);
+          }
+        }
+        const sampleChildOrderSns = [...new Set(childItemsFromTemuPayload(sampleDetail, sampleOrder).map((item) => String(valueAt(item, ["orderSn", "order_sn"], "")).trim()).filter(Boolean))];
+        if (sampleChildOrderSns.length) {
+          try {
+            await temuRequest("bg.order.customization.get", { orderSnList: sampleChildOrderSns }, { db, allowErrorResult: true });
+          } catch (error) {
+            scopeWarnings.push(`customization: ${error.message}`);
+          }
+        }
       }
       status.ok = true;
       status.liveApiChecked = true;
-      status.message = "Temu live API check passed. Order list and amount permissions are available for imports.";
+      status.message = scopeWarnings.length
+        ? `Temu order list works, but ${scopeWarnings.length} order permission check${scopeWarnings.length === 1 ? "" : "s"} need review: ${scopeWarnings.slice(0, 3).join(" | ")}`
+        : "Temu live API check passed. Order list, detail, amount, shipping, decrypt, package, combined shipment, and customization checks are available.";
     } catch (error) {
       status.liveApiChecked = true;
       status.message = error.message || "Temu live API check failed.";
@@ -20944,6 +20971,27 @@ function temuAmountByOrderSn(amountPayload = {}) {
   return byOrderSn;
 }
 
+function childItemsFromTemuPayload(...payloads) {
+  for (const payload of payloads) {
+    const normalized = temuPayload(payload);
+    const rows = firstArrayFrom(normalized.orderList || normalized.orderDetailList || normalized.skuList || normalized.goodsList || normalized.items || normalized);
+    if (rows.length) return rows;
+  }
+  return [];
+}
+
+async function optionalTemuOrderRequest(type, payload, context = {}) {
+  const { db, parentOrderSn, label, errors = [], orderErrors = [] } = context;
+  try {
+    return await temuRequest(type, payload, { db, allowErrorResult: true });
+  } catch (error) {
+    const message = `${label || type} ${parentOrderSn || "unknown"}: ${error.message}`;
+    errors.push(message);
+    orderErrors.push(message);
+    return {};
+  }
+}
+
 function temuItemProductList(item = {}) {
   if (Array.isArray(item.productList)) return item.productList;
   if (Array.isArray(item.product_list)) return item.product_list;
@@ -21000,13 +21048,19 @@ function mapTemuStatus(status) {
   return "new";
 }
 
-function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErrors = []) {
+function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErrors = [], extras = {}) {
   const listPayload = temuPayload(listOrder);
   const detailPayload = temuPayload(detail);
   const shippingPayload = temuPayload(shipping);
   const amountPayload = temuPayload(amount);
-  const amountParent = amountPayload.parentOrderMap || amountPayload;
-  const amountByOrderSn = temuAmountByOrderSn(amountPayload);
+  const decryptPayload = temuPayload(extras.decryptShipping || {});
+  const unshippedPackagePayload = temuPayload(extras.unshippedPackage || {});
+  const combinedShipmentPayload = temuPayload(extras.combinedShipment || {});
+  const customizationPayload = temuPayload(extras.customization || {});
+  const amountV2Payload = temuPayload(extras.amountV2 || {});
+  const effectiveAmountPayload = Object.keys(amountPayload).length ? amountPayload : amountV2Payload;
+  const amountParent = effectiveAmountPayload.parentOrderMap || effectiveAmountPayload;
+  const amountByOrderSn = temuAmountByOrderSn(effectiveAmountPayload);
   const raw = { ...listPayload, ...(listPayload.parentOrderMap || {}), ...detailPayload, ...(detailPayload.parentOrderMap || {}), ...amountParent };
   const parentOrderSn = deepValueAt(raw, ["parentOrderSn", "parent_order_sn", "parentOrderSN", "parentOrderSNStr", "parentOrderNo", "parentOrderId", "parent_order_id", "orderSn", "order_sn"]);
   const childItems = firstArrayFrom(raw.orderList || raw.orderDetailList || raw.skuList || raw.goodsList || raw.items || raw);
@@ -21055,7 +21109,9 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     || nestedMoney(valueAt(raw, ["parentOrderAmount", "orderAmount", "payAmount", "totalAmount", "settlementAmount"], 0))
     || items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
   const shippingCost = temuAmount(valueAt(amountParent, ["shippingAmountTotal"], 0));
-  const shippingCandidate = shippingPayload.shippingAddress || shippingPayload.address || shippingPayload.receiverAddress || shippingPayload.recipientAddress || shippingPayload;
+  const decryptedCandidate = decryptPayload.shippingAddress || decryptPayload.address || decryptPayload.receiverAddress || decryptPayload.recipientAddress || decryptPayload;
+  const decryptedHasAddress = Boolean(deepValueAt(decryptedCandidate, ["addressLine1", "line1", "address1", "detailAddress", "addressDetail", "address", "fullAddress", "receiptAddress", "regionName1", "regionName2", "regionName3", "mail", "mobile"], ""));
+  const shippingCandidate = decryptedHasAddress ? decryptedCandidate : (shippingPayload.shippingAddress || shippingPayload.address || shippingPayload.receiverAddress || shippingPayload.recipientAddress || shippingPayload);
   const shippingHasAddress = Boolean(deepValueAt(shippingCandidate, ["addressLine1", "line1", "address1", "detailAddress", "addressDetail", "address", "fullAddress", "receiptAddress", "regionName1", "regionName2", "regionName3", "mail", "mobile"], ""));
   const shipTo = shippingHasAddress ? shippingCandidate : raw;
   const addressExtra = shipTo.addressExtra && typeof shipTo.addressExtra === "object" ? shipTo.addressExtra : {};
@@ -21110,7 +21166,13 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     external: {
       source: "Temu",
       parentOrderSn,
-      amount: amountPayload,
+      amount: effectiveAmountPayload,
+      amountV2: amountV2Payload,
+      shipping: shippingPayload,
+      decryptedShipping: decryptPayload,
+      unshippedPackage: unshippedPackagePayload,
+      combinedShipment: combinedShipmentPayload,
+      customization: customizationPayload,
       importWarnings: apiErrors,
       importedAt: new Date().toISOString()
     }
@@ -23130,6 +23192,11 @@ async function importTemuOrders(db, options = {}) {
       let detail = {};
       let shipping = {};
       let amount = {};
+      let amountV2 = {};
+      let decryptShipping = {};
+      let unshippedPackage = {};
+      let combinedShipment = {};
+      let customization = {};
       const orderErrors = [];
       try {
         if (parentOrderSn) detail = await temuRequest("bg.order.detail.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
@@ -23142,22 +23209,28 @@ async function importTemuOrders(db, options = {}) {
           orderErrors.push(message);
         }
       }
-      try {
-        if (parentOrderSn) amount = await temuRequest("bg.order.amount.query", { parentOrderSn }, { db, allowErrorResult: true });
-      } catch (error) {
-        const message = `amount ${parentOrderSn || "unknown"}: ${error.message}`;
-        errors.push(message);
-        orderErrors.push(message);
+      if (parentOrderSn) {
+        amount = await optionalTemuOrderRequest("bg.order.amount.query", { parentOrderSn }, { db, parentOrderSn, label: "amount", errors, orderErrors });
+        if (!Object.keys(temuPayload(amount)).length) {
+          amountV2 = await optionalTemuOrderRequest("temu.order.amount.v2.query", { parentOrderSn }, { db, parentOrderSn, label: "amount_v2", errors, orderErrors });
+        }
+        shipping = await optionalTemuOrderRequest("bg.order.shippinginfo.v2.get", { parentOrderSn }, { db, parentOrderSn, label: "shipping", errors, orderErrors });
+        decryptShipping = await optionalTemuOrderRequest("bg.order.decryptshippinginfo.get", { parentOrderSn }, { db, parentOrderSn, label: "decrypt_shipping", errors, orderErrors });
+        unshippedPackage = await optionalTemuOrderRequest("bg.order.unshipped.package.get", { parentOrderSn }, { db, parentOrderSn, label: "unshipped_package", errors, orderErrors });
+        combinedShipment = await optionalTemuOrderRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, parentOrderSn, label: "combined_shipment", errors, orderErrors });
       }
-      try {
-        if (parentOrderSn) shipping = await temuRequest("bg.order.shippinginfo.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
-      } catch (error) {
-        const message = `shipping ${parentOrderSn || "unknown"}: ${error.message}`;
-        errors.push(message);
-        orderErrors.push(message);
+      const childOrderSns = [...new Set(childItemsFromTemuPayload(detail, listOrder).map((item) => String(valueAt(item, ["orderSn", "order_sn"], "")).trim()).filter(Boolean))];
+      if (childOrderSns.length) {
+        customization = await optionalTemuOrderRequest("bg.order.customization.get", { orderSnList: childOrderSns }, { db, parentOrderSn, label: "customization", errors, orderErrors });
       }
 
-      const mappedOrder = mapTemuOrder(listOrder, detail, shipping, amount, orderErrors);
+      const mappedOrder = mapTemuOrder(listOrder, detail, shipping, amount, orderErrors, {
+        amountV2,
+        decryptShipping,
+        unshippedPackage,
+        combinedShipment,
+        customization
+      });
       if (!includeCanceled && String(mappedOrder.status || "").toLowerCase() === "canceled") {
         skipped += 1;
         fetched += 1;
