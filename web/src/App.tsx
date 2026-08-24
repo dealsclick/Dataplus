@@ -9959,6 +9959,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const [loading, setLoading] = useState(false)
   const [rates, setRates] = useState<Array<Record<string, unknown>>>([])
   const [blockers, setBlockers] = useState<string[]>([])
+  const [providerErrors, setProviderErrors] = useState<Array<Record<string, unknown>>>([])
   const [labelRules, setLabelRules] = useState<Record<string, unknown>>({})
   const [packagePresets, setPackagePresets] = useState<Array<Record<string, unknown>>>([
     { id: "poly-mailer", name: "Poly mailer", packageType: "poly_mailer", weight: 0.1, length: 14, width: 10, height: 1 },
@@ -9989,6 +9990,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     setDraft({ warehouseId: String(order.fulfillmentWarehouseId || warehouses[0]?.id || ""), packagePresetId: "", packageType: String(defaultPreset?.packageType || "box"), packageWeight: label(weight || Number(defaultPreset?.weight || 0)), packageLength: label(length || Number(defaultPreset?.length || 0)), packageWidth: label(width || Number(defaultPreset?.width || 0)), packageHeight: label(height || Number(defaultPreset?.height || 0)), shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF", printPackingSlip: Boolean(labelRules.printPackingSlipWithLabel) })
     setRates([])
     setBlockers([])
+    setProviderErrors([])
     setSelectedId("")
     autoLoadKeyRef.current = ""
   }, [open, order, warehouses, lines])
@@ -10009,7 +10011,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const loadRates = async () => {
     setLoading(true)
     try {
-      const result = await api<{ rates?: Array<Record<string, unknown>>; blockers?: string[]; packagePresets?: Array<Record<string, unknown>>; labelRules?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/rates`, { method: "POST", body: JSON.stringify({ ...draft, lines: selectedLines }) })
+      const result = await api<{ rates?: Array<Record<string, unknown>>; blockers?: string[]; providerErrors?: Array<Record<string, unknown>>; packagePresets?: Array<Record<string, unknown>>; labelRules?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/rates`, { method: "POST", body: JSON.stringify({ ...draft, lines: selectedLines }) })
       const nextRates = result.rates || []
       const nextRules = result.labelRules || {}
       setLabelRules(nextRules)
@@ -10017,6 +10019,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
       if (Array.isArray(result.packagePresets) && result.packagePresets.length) setPackagePresets(result.packagePresets)
       setRates(nextRates)
       setBlockers(result.blockers || [])
+      setProviderErrors(result.providerErrors || [])
       setSelectedId(chooseDefaultRate(nextRates, nextRules))
       toast.success(result.message || "Shipping rates loaded.")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load shipping rates.") } finally { setLoading(false) }
@@ -10121,6 +10124,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
             <Button size="sm" onClick={() => void loadRates()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Load options</Button>
           </div>
           {blockers.length > 0 && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Rates need setup</AlertTitle><AlertDescription>{blockers.join(" ")}</AlertDescription></Alert>}
+          {providerErrors.length > 0 && <Alert><AlertCircle className="size-4" /><AlertTitle>Some providers did not return rates</AlertTitle><AlertDescription>{providerErrors.map((entry) => `${String(entry.provider || "Provider")}: ${String(entry.message || "No details returned.")}`).join(" ")}</AlertDescription></Alert>}
           <div className="grid gap-3">
             {suggestedRateId && rates.length ? <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">Suggested option</span><Badge variant="secondary">{suggestedRateId === cheapestRateId ? "Cheapest" : "Auto-selected"}</Badge></div><p className="mt-1 text-muted-foreground">DataPlus selected the best available rate based on your Fulfillment settings. You can choose a different service before printing.</p></div> : null}
             {sortedRates.map((rate) => {

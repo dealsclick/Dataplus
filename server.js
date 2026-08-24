@@ -21107,6 +21107,39 @@ function extractTemuPackageSns(...sources) {
   return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
+function temuShippingLabelRates(order = {}) {
+  const packageSnList = extractTemuPackageSns(order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
+  if (!packageSnList.length) {
+    return [{
+      id: "temu-existing-label",
+      provider: "temu",
+      carrier: "Temu",
+      service: "Marketplace shipping label",
+      amount: null,
+      currency: String(order.currency || "USD"),
+      action: "retrieve_existing_label",
+      deliveryEstimate: "Provided by Temu",
+      raw: {}
+    }];
+  }
+  return packageSnList.map((packageSn, index) => ({
+    id: `temu-package-${packageSn}`,
+    provider: "temu",
+    carrier: "Temu",
+    service: packageSnList.length > 1 ? `Marketplace label package ${index + 1}` : "Marketplace shipping label",
+    amount: null,
+    currency: String(order.currency || "USD"),
+    action: "retrieve_existing_label",
+    deliveryEstimate: "Provided by Temu",
+    packageSnList: [packageSn],
+    raw: {
+      packageSn,
+      packageSnList: [packageSn],
+      parentOrderSn: order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || ""
+    }
+  }));
+}
+
 function firstTemuDocumentPayload(response = {}) {
   const payload = temuPayload(response);
   const rows = firstArrayFrom(payload.documentList || payload.shippingLabelList || payload.labelList || payload.fileList || payload);
@@ -21297,7 +21330,7 @@ function shippingAddressForRates(order = {}, settings = {}) {
     town: String(address.city || ""),
     county: String(address.state || ""),
     postcode: String(address.postalCode || ""),
-    country_code: String(address.country || settings.organizationCountry || "US").slice(0, 2).toUpperCase()
+    country_code: normalizeCountryCode(address.country || settings.organizationCountry || "US")
   };
 }
 
@@ -21312,7 +21345,7 @@ function shipFromAddressForRates(settings = {}, warehouse = {}) {
     town: String(warehouse.city || settings.organizationCity || ""),
     county: String(warehouse.state || settings.organizationState || ""),
     postcode: String(warehouse.postalCode || settings.organizationPostalCode || ""),
-    country_code: String(warehouse.country || settings.organizationCountry || "US").slice(0, 2).toUpperCase()
+    country_code: normalizeCountryCode(warehouse.country || settings.organizationCountry || "US")
   };
 }
 
@@ -21425,8 +21458,9 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   if (![fromAddress.line1, fromAddress.town, fromAddress.postcode, fromAddress.country_code].every(Boolean)) blockers.push("Ship-from address is incomplete in System Settings or warehouse settings.");
   if (settings.fulfillmentRequirePackageDataBeforeLabel && (!parcel.weight || !parcel.length || !parcel.width || !parcel.height)) blockers.push("Package weight, length, width, and height are required.");
   const rates = [];
+  const providerErrors = [];
   if (String(order.source || "").toLowerCase() === "temu") {
-    rates.push({ id: "temu-existing-label", provider: "temu", carrier: "Temu", service: "Marketplace shipping label", amount: null, currency: String(order.currency || "USD"), action: "retrieve_existing_label", deliveryEstimate: "Provided by Temu", raw: {} });
+    rates.push(...temuShippingLabelRates(order));
   }
   if (!blockers.length && veeqoConfig(settings).enabled) {
     const payload = {
@@ -21440,20 +21474,31 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       preferred_shipment_date: new Date().toISOString(),
       channel_items: orderLinesForShippingRates(order, body)
     };
-    const response = await veeqoRequest("/shipping/api/v1/rates", { method: "POST", body: payload }, settings);
-    const available = Array.isArray(response.available) ? response.available : firstArrayFrom(response.rates || response.shipments || response);
-    rates.push(...available.map(normalizeVeeqoRate));
+    try {
+      const response = await veeqoRequest("/shipping/api/v1/rates", { method: "POST", body: payload }, settings);
+      const available = Array.isArray(response.available) ? response.available : firstArrayFrom(response.rates || response.shipments || response);
+      rates.push(...available.map(normalizeVeeqoRate));
+    } catch (error) {
+      providerErrors.push({ provider: "Veeqo", message: error.message || "Veeqo did not return shipping rates." });
+      if (!rates.length) throw error;
+    }
   }
+  const status = blockers.length ? "blocked" : providerErrors.length ? "partial" : "loaded";
+  const message = blockers.length
+    ? blockers.join(" ")
+    : providerErrors.length
+      ? `${rates.length} shipping option${rates.length === 1 ? "" : "s"} loaded. ${providerErrors.map((entry) => `${entry.provider}: ${entry.message}`).join(" ")}`
+      : `${rates.length} shipping option${rates.length === 1 ? "" : "s"} loaded.`;
   appendOrderShippingEvent(order, {
     provider: "universal",
     action: "rates",
-    status: blockers.length ? "blocked" : "loaded",
-    message: blockers.length ? blockers.join(" ") : `${rates.length} shipping option${rates.length === 1 ? "" : "s"} loaded.`,
-    details: { rateCount: rates.length, warehouseId, package: parcel, durationMs: Date.now() - startedAt }
+    status,
+    message,
+    details: { rateCount: rates.length, warehouseId, package: parcel, providerErrors, durationMs: Date.now() - startedAt }
   });
-  appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates", statusCode: blockers.length ? 400 : 200, ok: blockers.length === 0, durationMs: Date.now() - startedAt, entityType: "order", entityId: order.id, message: blockers.length ? blockers.join(" ") : `${rates.length} shipping option(s) loaded.` });
+  appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates", statusCode: blockers.length ? 400 : providerErrors.length ? 207 : 200, ok: blockers.length === 0, durationMs: Date.now() - startedAt, entityType: "order", entityId: order.id, message });
   const config = veeqoConfig(settings);
-  return { rates, blockers, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), labelRules: shippingLabelRules(settings), warehouseId, providers: { temu: String(order.source || "").toLowerCase() === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) } };
+  return { rates, blockers, providerErrors, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), labelRules: shippingLabelRules(settings), warehouseId, providers: { temu: String(order.source || "").toLowerCase() === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) } };
 }
 
 async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
@@ -21668,7 +21713,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
       city: String(valueAt(shipTo, ["city", "cityName", "town", "regionName3"], "")),
       state: String(valueAt(shipTo, ["state", "province", "regionName", "stateName", "regionName2"], "")),
       postalCode: String(valueAt(shipTo, ["postalCode", "zipCode", "postCode", "postCodeMask", "zipcode"], "")),
-      country: String(valueAt(shipTo, ["country", "countryCode", "regionName1"], "US"))
+      country: normalizeCountryCode(valueAt(shipTo, ["country", "countryCode", "regionName1"], "US"))
     },
     sku: items[0]?.sku || "TEMU-SKU",
     title: items[0]?.title || "Temu order",
@@ -23636,6 +23681,12 @@ function upsertOrder(db, incoming) {
     return "created";
   }
 
+  const isTemu = String(incoming.source || "").toLowerCase() === "temu";
+  const incomingAddressUseful = orderAddressHasUsefulData(incoming.address);
+  const existingAddressUseful = orderAddressHasUsefulData(existing.address);
+  const incomingBuyerPlaceholder = isPlaceholderTemuBuyer(incoming.buyer);
+  const existingBuyerUseful = !isPlaceholderTemuBuyer(existing.buyer);
+
   Object.assign(existing, {
     ...incoming,
     id: existing.id,
@@ -23657,10 +23708,27 @@ function upsertOrder(db, incoming) {
     shippingCarrier: incoming.shippingCarrier || existing.shippingCarrier,
     carrierName: incoming.carrierName || existing.carrierName,
     shippingService: incoming.shippingService || existing.shippingService,
+    buyer: isTemu && incomingBuyerPlaceholder && existingBuyerUseful ? existing.buyer : incoming.buyer,
+    buyerEmail: isTemu && !String(incoming.buyerEmail || "").trim() && String(existing.buyerEmail || "").trim() ? existing.buyerEmail : incoming.buyerEmail,
+    phone: isTemu && !String(incoming.phone || "").trim() && String(existing.phone || "").trim() ? existing.phone : incoming.phone,
+    address: isTemu && !incomingAddressUseful && existingAddressUseful ? existing.address : incoming.address,
     shipDate: incoming.shipDate || existing.shipDate,
     shipments: Array.isArray(incoming.shipments) && incoming.shipments.length ? incoming.shipments : existing.shipments
   });
   return "updated";
+}
+
+function orderAddressHasUsefulData(address = {}) {
+  return Boolean(
+    String(address?.line1 || "").trim()
+    && String(address?.city || "").trim()
+    && String(address?.postalCode || "").trim()
+  );
+}
+
+function isPlaceholderTemuBuyer(value = "") {
+  const text = String(value || "").trim().toLowerCase();
+  return !text || text === "temu buyer";
 }
 
 function extractTemuOrderSn(order) {
@@ -31275,6 +31343,24 @@ function orderAddressLabel(address = {}) {
     .join(" | ");
 }
 
+function normalizeCountryCode(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const upper = text.toUpperCase();
+  if (/^[A-Z]{2}$/.test(upper)) return upper;
+  return ({
+    "UNITED STATES": "US",
+    "UNITED STATES OF AMERICA": "US",
+    USA: "US",
+    "U.S.A": "US",
+    US: "US",
+    CANADA: "CA",
+    MEXICO: "MX",
+    "UNITED KINGDOM": "GB",
+    UK: "GB"
+  }[upper] || upper.slice(0, 2));
+}
+
 function orderSkuBaseFromUomVariant(sku = "") {
   const value = String(sku || "").trim();
   // These are DataPlus-generated sell-unit suffixes. Restricting the fallback to
@@ -35752,7 +35838,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/orders") {
     if (postgres.isPostgresEnabled()) {
       const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get("limit") || 5000)));
-      const cacheKey = `dataplus:orders:${limit}`;
+      const cacheKey = `dataplus:orders:v2:${limit}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const [orders, orderDrafts, returns, customers] = await Promise.all([
@@ -35769,7 +35855,7 @@ async function handleApi(req, res) {
         ordersLoaded: true,
         storage: "postgres"
       };
-      await redisCache.setJson(cacheKey, payload, 45);
+      await redisCache.setJson(cacheKey, payload, 180);
       return sendJson(res, 200, payload);
     }
     const db = await readDbFast();
@@ -36003,7 +36089,14 @@ async function handleApi(req, res) {
     try {
       let result;
       if (provider === "temu") {
-        result = await attachTemuShippingLabel(order, db, { documentType: body.documentType || "SHIPPING_LABEL_PDF" });
+        result = await attachTemuShippingLabel(order, db, {
+          documentType: body.documentType || body.rate?.documentType || "SHIPPING_LABEL_PDF",
+          packageSnList: Array.isArray(body.packageSnList)
+            ? body.packageSnList
+            : Array.isArray(body.rate?.packageSnList)
+              ? body.rate.packageSnList
+              : []
+        });
       } else if (provider === "veeqo") {
         const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
         const rules = shippingLabelRules(settings);
