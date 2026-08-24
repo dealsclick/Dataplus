@@ -10095,18 +10095,21 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     autoLoadKeyRef.current = ""
   }, [open, order, warehouses, lines])
   const selected = rates.find((rate) => String(rate.id) === selectedId)
+  const selectedIsReference = Boolean(selected?.purchaseDisabled || String(selected?.action || "") === "reference_only")
+  const isPrintableRate = (rate: Record<string, unknown>) => !Boolean(rate.purchaseDisabled || String(rate.action || "") === "reference_only")
   const selectedLines = lines.map((line, lineIndex) => ({ sku: String(line.sku || ""), lineIndex, qty: remaining(line, lineIndex) })).filter((line) => line.sku && line.qty > 0)
   const chooseDefaultRate = (nextRates: Array<Record<string, unknown>>, rules: Record<string, unknown>) => {
-    const priced = nextRates.filter((rate) => Number(rate.amount || 0) > 0)
+    const printable = nextRates.filter(isPrintableRate)
+    const priced = printable.filter((rate) => Number(rate.amount || 0) > 0)
     const preferredCarrier = String(rules.preferredCarrier || "").trim().toLowerCase()
     const preferredService = String(rules.preferredService || "").trim().toLowerCase()
-    const preferred = nextRates.find((rate) => (!preferredCarrier || String(rate.carrier || "").toLowerCase().includes(preferredCarrier)) && (!preferredService || String(rate.service || "").toLowerCase().includes(preferredService)))
+    const preferred = printable.find((rate) => (!preferredCarrier || String(rate.carrier || "").toLowerCase().includes(preferredCarrier)) && (!preferredService || String(rate.service || "").toLowerCase().includes(preferredService)))
     const fastest = priced.filter((rate) => Number(rate.deliveryDays || 0) > 0).sort((a, b) => Number(a.deliveryDays || 9999) - Number(b.deliveryDays || 9999))[0]
     const cheapest = priced.sort((a, b) => Number(a.amount || 999999) - Number(b.amount || 999999))[0]
     if (String(rules.autoSelectRule || "cheapest") === "preferred" && preferred) return String(preferred.id)
     if (String(rules.autoSelectRule || "cheapest") === "fastest" && fastest) return String(fastest.id)
     if (String(rules.autoSelectRule || "cheapest") === "none") return ""
-    return String((cheapest || nextRates[0] || {}).id || "")
+    return String((cheapest || printable[0] || {}).id || "")
   }
   const loadRates = async () => {
     setLoading(true)
@@ -10134,6 +10137,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   }, [open, loading, rates.length, blockers.length, draft.warehouseId, draft.packageType, draft.packageWeight, draft.packageLength, draft.packageWidth, draft.packageHeight, selectedLines.length])
   const buy = async () => {
     if (!selected) return toast.error("Choose a shipping option first.")
+    if (selectedIsReference) return toast.error("This shipping option is reference-only. Choose Veeqo, Temu, or another label provider to print a label.")
     const printWindow = window.open("", "_blank")
     setLoading(true)
     try {
@@ -10178,6 +10182,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     if (normalized.includes("ups")) return { text: "UPS", className: "border-amber-600/50 bg-amber-500/10 text-amber-800 dark:text-amber-300" }
     if (normalized.includes("fedex")) return { text: "FDX", className: "border-purple-500/50 bg-purple-500/10 text-purple-700 dark:text-purple-300" }
     if (normalized.includes("dhl")) return { text: "DHL", className: "border-yellow-500/50 bg-yellow-500/10 text-yellow-800 dark:text-yellow-300" }
+    if (normalized.includes("shopify")) return { text: "SHOP", className: "border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" }
     if (normalized.includes("temu")) return { text: "TM", className: "border-orange-500/50 bg-orange-500/10 text-orange-700 dark:text-orange-300" }
     if (normalized.includes("veeqo")) return { text: "VQ", className: "border-sky-500/50 bg-sky-500/10 text-sky-700 dark:text-sky-300" }
     return { text: carrier.slice(0, 3).toUpperCase() || "SHP", className: "border-muted-foreground/30 bg-muted text-muted-foreground" }
@@ -10194,21 +10199,23 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     if (!Number.isNaN(date.getTime())) return Math.max(0, Math.ceil((date.getTime() - Date.now()) / 86400000))
     return Number.MAX_SAFE_INTEGER
   }
-  const cheapestRateId = String([...rates].filter((rate) => Number(rate.amount || 0) > 0).sort((a, b) => Number(a.amount || 999999) - Number(b.amount || 999999))[0]?.id || "")
+  const cheapestRateId = String([...rates].filter((rate) => isPrintableRate(rate) && Number(rate.amount || 0) > 0).sort((a, b) => Number(a.amount || 999999) - Number(b.amount || 999999))[0]?.id || "")
   const suggestedRateId = selectedId || chooseDefaultRate(rates, labelRules)
   const sortedRates = [...rates].sort((a, b) => {
+    const referenceA = isPrintableRate(a) ? 0 : 1
+    const referenceB = isPrintableRate(b) ? 0 : 1
     const amountA = Number(a.amount || 0) > 0 ? Number(a.amount) : Number.MAX_SAFE_INTEGER
     const amountB = Number(b.amount || 0) > 0 ? Number(b.amount) : Number.MAX_SAFE_INTEGER
-    if (sortMode === "cost-desc") return amountB - amountA
-    if (sortMode === "speed") return etaSortValue(a) - etaSortValue(b) || amountA - amountB
-    if (sortMode === "carrier") return carrierDisplay(a).localeCompare(carrierDisplay(b)) || amountA - amountB
-    if (sortMode === "provider") return String(a.provider || "").localeCompare(String(b.provider || "")) || amountA - amountB
+    if (sortMode === "cost-desc") return referenceA - referenceB || amountB - amountA
+    if (sortMode === "speed") return referenceA - referenceB || etaSortValue(a) - etaSortValue(b) || amountA - amountB
+    if (sortMode === "carrier") return carrierDisplay(a).localeCompare(carrierDisplay(b)) || referenceA - referenceB || amountA - amountB
+    if (sortMode === "provider") return String(a.provider || "").localeCompare(String(b.provider || "")) || referenceA - referenceB || amountA - amountB
     if (sortMode === "recommended") {
       const suggestedA = String(a.id || "") === suggestedRateId ? -1 : 0
       const suggestedB = String(b.id || "") === suggestedRateId ? -1 : 0
-      return suggestedA - suggestedB || amountA - amountB || etaSortValue(a) - etaSortValue(b)
+      return suggestedA - suggestedB || referenceA - referenceB || amountA - amountB || etaSortValue(a) - etaSortValue(b)
     }
-    return amountA - amountB
+    return referenceA - referenceB || amountA - amountB
   })
   const selectedWarehouse = warehouses.find((warehouse) => String(warehouse.id || "") === String(draft.warehouseId || ""))
   const selectedPreset = packagePresets.find((preset) => String(preset.id || "") === String(draft.packagePresetId || ""))
@@ -10290,6 +10297,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
               const isSelected = selectedId === String(rate.id)
               const isCheapest = cheapestRateId && String(rate.id) === cheapestRateId
               const isSuggested = suggestedRateId && String(rate.id) === suggestedRateId
+              const isReference = !isPrintableRate(rate)
               const carrier = carrierDisplay(rate)
               const mark = carrierMark(carrier)
               return <button key={String(rate.id)} type="button" onClick={() => setSelectedId(String(rate.id))} className={cn("grid gap-3 rounded-md border p-4 text-left text-sm hover:bg-muted/40", isSelected && "border-primary bg-primary/10")}>
@@ -10302,6 +10310,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
                       <Badge variant="outline">{String(rate.provider || "provider")}</Badge>
                       {isSuggested && <Badge>Suggested</Badge>}
                       {isCheapest && <Badge variant="secondary">Cheapest</Badge>}
+                      {isReference && <Badge variant="secondary">Reference only</Badge>}
                     </div>
                     <p className="mt-1 text-muted-foreground">{String(rate.service || "Shipping method")}</p>
                     </div>
@@ -10325,7 +10334,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button disabled={loading || !selected} onClick={() => void buy()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Print selected label</Button>
+          <Button disabled={loading || !selected || selectedIsReference} onClick={() => void buy()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} {selectedIsReference ? "Choose label provider" : "Print selected label"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

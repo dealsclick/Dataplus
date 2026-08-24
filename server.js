@@ -22020,6 +22020,65 @@ function normalizeVeeqoRate(rate = {}, index = 0) {
   };
 }
 
+function shopifyCheckoutShippingRates(order = {}) {
+  const rows = [
+    ...(Array.isArray(order.shippingLines) ? order.shippingLines : []),
+    ...(Array.isArray(order.shipping_lines) ? order.shipping_lines : [])
+  ];
+  const normalizedRows = rows.map((line, index) => {
+    const title = String(valueAt(line, ["title", "name", "service", "serviceName", "code"], "Shopify shipping")).trim() || "Shopify shipping";
+    const amount = nestedMoney(line.priceSet?.shopMoney || line.originalPriceSet?.shopMoney || line.discountedPriceSet?.shopMoney || line.price_set?.shop_money || line.price || line.amount);
+    return {
+      id: `shopify-checkout-${index}-${String(line.code || title).replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`,
+      provider: "shopify",
+      carrier: "Shopify",
+      service: title,
+      amount,
+      currency: String(line.currency || line.currencyCode || order.currency || "USD"),
+      deliveryDays: 0,
+      deliveryEstimate: String(valueAt(line, ["deliveryEstimate", "delivery_estimate", "description"], "Customer checkout method")),
+      action: "reference_only",
+      purchaseDisabled: true,
+      warning: "Shopify checkout shipping is shown for reference. Use Veeqo, Temu, or another label provider to buy the label.",
+      raw: line
+    };
+  });
+  if (!normalizedRows.length && (Number(order.shippingCost || 0) > 0 || order.shippingService || order.shippingMethod)) {
+    normalizedRows.push({
+      id: "shopify-checkout-order-shipping",
+      provider: "shopify",
+      carrier: "Shopify",
+      service: String(order.shippingService || order.shippingMethod || "Shopify checkout shipping"),
+      amount: Number(order.shippingCost || 0) || 0,
+      currency: String(order.currency || "USD"),
+      deliveryDays: 0,
+      deliveryEstimate: "Customer checkout method",
+      action: "reference_only",
+      purchaseDisabled: true,
+      warning: "Shopify checkout shipping is shown for reference. Use Veeqo, Temu, or another label provider to buy the label.",
+      raw: { shippingCost: order.shippingCost }
+    });
+  }
+  return normalizedRows;
+}
+
+function normalizeShopifyDeliveryRate(rate = {}, index = 0, quote = {}) {
+  return {
+    id: `shopify-delivery-${String(quote.id || "quote")}-${String(rate.handle || index)}`,
+    provider: "shopify",
+    carrier: "Shopify",
+    service: String(rate.title || rate.service || rate.handle || "Shopify delivery"),
+    amount: Number(rate.amount || 0) || 0,
+    currency: String(rate.currency || "USD"),
+    deliveryDays: 0,
+    deliveryEstimate: "Calculated by Shopify",
+    action: "reference_only",
+    purchaseDisabled: true,
+    warning: "Shopify calculated delivery options are customer-facing rates. Select a purchasable provider to print a label.",
+    raw: { quoteId: quote.id, ...rate }
+  };
+}
+
 function shippingLabelRules(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
   return {
@@ -22055,7 +22114,26 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   if (settings.fulfillmentRequirePackageDataBeforeLabel && (!parcel.weight || !parcel.length || !parcel.width || !parcel.height)) blockers.push("Package weight, length, width, and height are required.");
   const rates = [];
   const providerErrors = [];
-  if (String(order.source || "").toLowerCase() === "temu") {
+  const sourceKey = String(order.source || "").toLowerCase();
+  if (sourceKey === "shopify") {
+    const checkoutRates = shopifyCheckoutShippingRates(order);
+    rates.push(...checkoutRates);
+    if (!blockers.length) {
+      try {
+        const quote = await quoteShopifyOrderShipping(order, body.lines || []);
+        const calculatedRates = (quote.options || []).map((rate, index) => normalizeShopifyDeliveryRate(rate, index, quote));
+        rates.push(...calculatedRates);
+        if (!calculatedRates.length) {
+          providerErrors.push({ provider: "Shopify", message: checkoutRates.length ? "Shopify returned no calculated delivery options; showing the saved checkout method only." : "Shopify did not return checkout or calculated delivery options for this order." });
+        }
+      } catch (error) {
+        providerErrors.push({ provider: "Shopify", message: checkoutRates.length ? `Calculated delivery options failed: ${error.message || "Shopify did not return delivery options."}` : error.message || "Shopify did not return delivery options." });
+      }
+    } else if (!checkoutRates.length) {
+      providerErrors.push({ provider: "Shopify", message: "A complete shipment is required before Shopify can calculate delivery options." });
+    }
+  }
+  if (sourceKey === "temu") {
     const temuRates = temuShippingLabelRates(order);
     rates.push(...temuRates);
     if (!temuRates.length && !blockers.length) {
@@ -22105,7 +22183,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   });
   appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates", statusCode: blockers.length ? 400 : providerErrors.length ? 207 : 200, ok: blockers.length === 0, durationMs: Date.now() - startedAt, entityType: "order", entityId: order.id, message });
   const config = veeqoConfig(settings);
-  return { rates, blockers, providerErrors, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), labelRules: shippingLabelRules(settings), warehouseId, providers: { temu: String(order.source || "").toLowerCase() === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) } };
+  return { rates, blockers, providerErrors, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), labelRules: shippingLabelRules(settings), warehouseId, providers: { shopify: sourceKey === "shopify", temu: sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) } };
 }
 
 async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
