@@ -1036,7 +1036,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   veeqoApiKey: "",
   veeqoClientId: "",
   veeqoClientSecret: "",
-  veeqoRedirectUri: "https://dataplusapp.duckdns.org/auth/veeqo/callback",
+  veeqoRedirectUri: "https://dataplusapp.duckdns.org/",
   veeqoAccessToken: "",
   veeqoTokenType: "bearer",
   veeqoTokenCreatedAt: 0,
@@ -5210,7 +5210,7 @@ function normalizeSystemSettings(settings = {}) {
   normalized.veeqoApiKey = String(normalized.veeqoApiKey || "").trim();
   normalized.veeqoClientId = String(normalized.veeqoClientId || process.env.VEEQO_CLIENT_ID || "").trim();
   normalized.veeqoClientSecret = String(normalized.veeqoClientSecret || process.env.VEEQO_CLIENT_SECRET || "").trim();
-  normalized.veeqoRedirectUri = String(normalized.veeqoRedirectUri || process.env.VEEQO_REDIRECT_URI || "https://dataplusapp.duckdns.org/auth/veeqo/callback").trim();
+  normalized.veeqoRedirectUri = String(normalized.veeqoRedirectUri || process.env.VEEQO_REDIRECT_URI || "https://dataplusapp.duckdns.org/").trim();
   normalized.veeqoAccessToken = String(normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN || "").trim();
   normalized.veeqoTokenType = String(normalized.veeqoTokenType || "bearer").trim().toLowerCase() || "bearer";
   normalized.veeqoTokenCreatedAt = Math.max(0, Number(normalized.veeqoTokenCreatedAt || 0) || 0);
@@ -5803,6 +5803,17 @@ function readSystemSettingsStore(fallback = {}) {
     }
   }
   return normalizeSystemSettings(fallback);
+}
+
+async function readRuntimeSystemSettings(fallback = {}) {
+  if (postgres.isPostgresEnabled()) {
+    const stored = await postgres.readStateField("systemSettings").catch((error) => {
+      console.warn("Unable to read system settings from Postgres", error.message || error);
+      return null;
+    });
+    if (stored && typeof stored === "object") return readSystemSettingsStore(stored);
+  }
+  return readSystemSettingsStore(fallback);
 }
 
 function writeSystemSettingsStore(settings = {}) {
@@ -21206,7 +21217,7 @@ function veeqoConfig(settings = {}) {
     apiKey: String(normalized.veeqoApiKey || process.env.VEEQO_API_KEY || "").trim(),
     clientId: String(normalized.veeqoClientId || process.env.VEEQO_CLIENT_ID || "").trim(),
     clientSecret: String(normalized.veeqoClientSecret || process.env.VEEQO_CLIENT_SECRET || "").trim(),
-    redirectUri: String(normalized.veeqoRedirectUri || process.env.VEEQO_REDIRECT_URI || "https://dataplusapp.duckdns.org/auth/veeqo/callback").trim(),
+    redirectUri: String(normalized.veeqoRedirectUri || process.env.VEEQO_REDIRECT_URI || "https://dataplusapp.duckdns.org/").trim(),
     accessToken: String(normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN || "").trim(),
     tokenType: String(normalized.veeqoTokenType || "bearer").trim().toLowerCase() || "bearer",
     sellerDisplayName: String(normalized.veeqoSellerDisplayName || normalized.organizationName || "DataPlus").trim() || "DataPlus",
@@ -32325,7 +32336,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/auth/session") {
-    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     const user = currentAuthUser(req, settings);
     return sendJson(res, user ? 200 : 401, user
       ? { authenticated: true, user: publicAuthUser(user), permissionAreas: AUTH_PERMISSION_AREAS }
@@ -32336,7 +32347,7 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const login = sourceTextValue(body.username || body.email || body.login || "").toLowerCase();
     const password = String(body.password || "");
-    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     const user = (settings.systemUsers || []).find((candidate) => [candidate.username, candidate.email, candidate.name].map((value) => sourceTextValue(value).toLowerCase()).includes(login));
     if (!user || user.status !== "active" || !verifyUserPassword(user, password)) return sendJson(res, 401, { error: "Invalid username or password." });
     const token = crypto.randomBytes(32).toString("base64url");
@@ -33916,7 +33927,7 @@ async function handleApi(req, res) {
   const davidCategoryApplyMatch = url.pathname.match(/^\/api\/ai\/categories\/([^/]+)\/apply$/);
   if (req.method === "POST" && davidCategoryApplyMatch) {
     const body = await parseBody(req);
-    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     if (!settings.aiEnabled || !davidToolEnabled(settings, "categories.apply")) {
       return sendJson(res, 403, { error: "David category approvals are disabled in System Settings." });
     }
@@ -34100,7 +34111,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/ai/ebay-category-research") {
     const body = await parseBody(req);
-    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     if (!settings.aiEnabled) return sendJson(res, 403, { error: "David is not enabled. Verify and enable an AI provider in System Settings first." });
     const product = body.product && typeof body.product === "object" ? body.product : {};
     const query = String(body.query || product.title || product.mainCategory || product.category || product.brand || "")
@@ -39885,7 +39896,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/auth/veeqo/start") {
-    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     try {
       const next = writeSystemSettingsStore({
         ...settings,
@@ -39910,7 +39921,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/auth/veeqo/launch") {
-    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     try {
       const authUrl = veeqoAuthorizeUrl(settings);
       return sendHtml(res, 200, `<!doctype html><title>Connect Veeqo</title><style>body{font-family:Arial,sans-serif;max-width:760px;margin:48px auto;padding:0 20px;line-height:1.45;color:#111}a.button{display:inline-block;background:#2563eb;color:#fff;padding:10px 14px;border-radius:8px;text-decoration:none;font-weight:700}.muted{color:#555}</style><h1>Connect Veeqo</h1><p>DataPlus will send you to Veeqo to approve access. After approval, Veeqo redirects back to DataPlus with a short authorization code. DataPlus then exchanges that code for an access token and stores the token.</p><p class="muted">Redirect URI: ${escapeHtml(settings.veeqoRedirectUri || "")}</p><p><a class="button" href="/auth/veeqo/start">Continue to Veeqo</a></p><p><a href="/settings?tab=fulfillment">Return to Fulfillment settings</a></p>`);
@@ -39923,19 +39934,19 @@ async function handleApi(req, res) {
     const code = String(url.searchParams.get("code") || "").trim();
     const errorParam = String(url.searchParams.get("error") || "").trim();
     if (errorParam) {
-      const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+      const current = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
       const next = writeSystemSettingsStore({ ...current, veeqoLastAuthCallbackAt: new Date().toISOString(), veeqoLastAuthStatus: "failed", veeqoLastAuthMessage: errorParam });
       if (dbCache.data) dbCache.data.systemSettings = next;
       return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(errorParam)}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
     }
     if (!code) {
-      const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+      const current = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
       const message = "Veeqo did not return an authorization code.";
       const next = writeSystemSettingsStore({ ...current, veeqoLastAuthCallbackAt: new Date().toISOString(), veeqoLastAuthStatus: "failed", veeqoLastAuthMessage: message });
       if (dbCache.data) dbCache.data.systemSettings = next;
       return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(message)}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
     }
-    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const current = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     try {
       const token = await exchangeVeeqoAuthorizationCode(current, code);
       const next = writeSystemSettingsStore({
@@ -39962,7 +39973,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/system-settings/veeqo-test") {
     const body = await parseBody(req);
-    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const current = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     const settings = normalizeSystemSettings({ ...current, ...body });
     try {
       const response = await veeqoRequest("/current_user", { method: "GET" }, settings);
