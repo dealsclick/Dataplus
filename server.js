@@ -21574,6 +21574,37 @@ function temuOrderSendInfoList(order = {}, body = {}) {
   }).filter((row) => row.orderSn && row.parentOrderSn && row.goodsId && row.skuId && row.quantity > 0);
 }
 
+function temuPackagePayload(parcel = {}, body = {}) {
+  const weightUnit = String(parcel.weight_unit || body.weightUnit || "lb").toLowerCase();
+  const dimensionUnit = String(parcel.dimension_unit || body.dimensionUnit || "in").toLowerCase();
+  const weight = Number(parcel.weight || body.packageWeight || body.weight || 0) || 0;
+  const length = Number(parcel.length || body.packageLength || body.length || 0) || 0;
+  const width = Number(parcel.width || body.packageWidth || body.width || 0) || 0;
+  const height = Number(parcel.height || body.packageHeight || body.height || 0) || 0;
+  const grams = weightUnit === "kg"
+    ? weight * 1000
+    : weightUnit === "g" || weightUnit === "gram" || weightUnit === "grams"
+      ? weight
+      : weightUnit === "oz"
+        ? weight * 28.349523125
+        : weight * 453.59237;
+  const toCentimeters = (value) => {
+    if (!value) return 0;
+    if (dimensionUnit === "cm" || dimensionUnit === "centimeter" || dimensionUnit === "centimeters") return value;
+    if (dimensionUnit === "mm") return value / 10;
+    if (dimensionUnit === "m") return value * 100;
+    return value * 2.54;
+  };
+  return {
+    weight: String(Math.max(1, Math.round(grams))),
+    weightUnit: "g",
+    length: String(Math.max(1, Math.ceil(toCentimeters(length)))),
+    width: String(Math.max(1, Math.ceil(toCentimeters(width)))),
+    height: String(Math.max(1, Math.ceil(toCentimeters(height)))),
+    dimensionUnit: "cm"
+  };
+}
+
 async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel = {}) {
   const parentOrderSn = String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
   const orderSendInfoList = temuOrderSendInfoList(order, body);
@@ -21585,22 +21616,14 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   if (!selectedWarehouse?.id) return { rates: [], warnings: ["Temu did not return a shipping warehouse. Confirm the Temu app has Logistics Warehouse access."] };
   let services = [];
   const orderSnList = [...new Set(orderSendInfoList.map((row) => row.orderSn).filter(Boolean))];
-  const parentOrderSnOrderSnList = orderSnList.map((orderSn) => ({ parentOrderSn, orderSn }));
+  const shipOrderInfoList = orderSendInfoList.map((row) => ({ parentOrderSn: row.parentOrderSn, orderSn: row.orderSn, quantity: row.quantity }));
   const serviceBase = {
     warehouseId: selectedWarehouse.id,
-    length: String(parcel.length || 0),
-    width: String(parcel.width || 0),
-    height: String(parcel.height || 0),
-    weight: String(parcel.weight || 0),
-    dimensionUnit: String(parcel.dimension_unit || "in"),
-    weightUnit: String(parcel.weight_unit || "lb")
+    ...temuPackagePayload(parcel, body)
   };
   const attempts = [
     { ...serviceBase, orderSnList },
-    { ...serviceBase, parentOrderSnOrderSnList },
-    { ...serviceBase, parentOrderSnAndOrderSnList: parentOrderSnOrderSnList },
-    { parentOrderSn, ...serviceBase, orderSnList },
-    { sendRequestList: [{ ...serviceBase, orderSnList }] }
+    { ...serviceBase, shipOrderInfoList }
   ];
   for (const payload of attempts) {
     try {
@@ -21674,16 +21697,12 @@ async function createTemuShipmentPackage(order, db = {}, options = {}) {
   const channelId = Number(rate.channelId || rate.raw?.channelId || rate.raw?.channel_id || rate.raw?.shippingChannelId || 0) || 0;
   if (!warehouseId) throw new Error("Choose a Temu warehouse/service before creating the label.");
   if (!shipCompanyId || !channelId) throw new Error("Temu did not return the shipCompanyId and channelId required to create this label.");
+  const packagePayload = temuPackagePayload(parcel, options);
   const request = {
     sendType: 0,
     sendRequestList: [{
       warehouseId,
-      length: String(parcel.length || options.packageLength || 0),
-      width: String(parcel.width || options.packageWidth || 0),
-      height: String(parcel.height || options.packageHeight || 0),
-      weight: String(parcel.weight || options.packageWeight || 0),
-      dimensionUnit: String(parcel.dimension_unit || options.dimensionUnit || "in"),
-      weightUnit: String(parcel.weight_unit || options.weightUnit || "lb"),
+      ...packagePayload,
       shipCompanyId,
       channelId,
       orderSendInfoList
