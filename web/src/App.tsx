@@ -10222,7 +10222,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
             <Button size="sm" onClick={() => void loadRates()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Load options</Button>
           </div>
           {blockers.length > 0 && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Rates need setup</AlertTitle><AlertDescription>{blockers.join(" ")}</AlertDescription></Alert>}
-          {providerErrors.length > 0 && <Alert><AlertCircle className="size-4" /><AlertTitle>Some providers did not return rates</AlertTitle><AlertDescription>{providerErrors.map((entry) => `${String(entry.provider || "Provider")}: ${String(entry.message || "No details returned.")}`).join(" ")}</AlertDescription></Alert>}
+          {providerErrors.length > 0 && <Alert variant={rates.length ? "default" : "destructive"}><AlertCircle className="size-4" /><AlertTitle>{rates.length ? "Some providers did not return rates" : "No provider returned a printable label option"}</AlertTitle><AlertDescription>{providerErrors.map((entry) => `${String(entry.provider || "Provider")}: ${String(entry.message || "No details returned.")}`).join(" ")}</AlertDescription></Alert>}
           <div className="grid gap-3">
             {suggestedRateId && rates.length ? <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">Suggested option</span><Badge variant="secondary">{suggestedRateId === cheapestRateId ? "Cheapest" : "Auto-selected"}</Badge></div><p className="mt-1 text-muted-foreground">DataPlus selected the best available rate based on your Fulfillment settings. You can choose a different service before printing.</p></div> : null}
             {sortedRates.map((rate) => {
@@ -10254,7 +10254,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
                 {rate.warning ? <p className="text-xs text-amber-700 dark:text-amber-300">{String(rate.warning)}</p> : null}
               </button>
             })}
-            {!rates.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">Load options to compare available shipping labels for this order.</p>}
+            {!rates.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">{providerErrors.length ? "No printable shipping options are available from the connected providers for this order yet." : "Load options to compare available shipping labels for this order."}</p>}
           </div>
         </div>
         <DialogFooter>

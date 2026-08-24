@@ -21469,21 +21469,26 @@ function extractTemuPackageSns(...sources) {
   return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
-function temuShippingLabelRates(order = {}) {
-  const packageSnList = extractTemuPackageSns(order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
-  if (!packageSnList.length) {
-    return [{
-      id: "temu-existing-label",
-      provider: "temu",
-      carrier: "Temu",
-      service: "Marketplace shipping label",
-      amount: null,
-      currency: String(order.currency || "USD"),
-      action: "retrieve_existing_label",
-      deliveryEstimate: "Provided by Temu",
-      raw: {}
-    }];
+function temuShippingPackageSnsForOrder(order = {}) {
+  return extractTemuPackageSns(order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
+}
+
+function temuShippingProviderWarning(order = {}) {
+  const parentOrderSn = String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
+  const warnings = Array.isArray(order.external?.importWarnings) ? order.external.importWarnings.map((entry) => String(entry || "")) : [];
+  const statusBlocked = warnings.find((entry) => /current order status cannot be viewed/i.test(entry));
+  const scopeBlocked = warnings.find((entry) => /access_token|api access|scope/i.test(entry));
+  if (statusBlocked) {
+    return `Temu has not exposed package/label data for ${parentOrderSn || "this order"} yet. Temu returned: The current order status cannot be viewed. Refresh the order after Temu releases the shipment/package data.`;
   }
+  if (scopeBlocked) {
+    return `Temu did not allow one of the order/shipping API calls for ${parentOrderSn || "this order"}. Confirm the app has Order Fulfillment/Logistics document access, then reconnect Temu so a new token includes that scope.`;
+  }
+  return `Temu has not returned a package number for ${parentOrderSn || "this order"} yet. Create or confirm the shipment in Temu, then refresh the order before printing the marketplace label.`;
+}
+
+function temuShippingLabelRates(order = {}) {
+  const packageSnList = temuShippingPackageSnsForOrder(order);
   return packageSnList.map((packageSn, index) => ({
     id: `temu-package-${packageSn}`,
     provider: "temu",
@@ -21822,7 +21827,11 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   const rates = [];
   const providerErrors = [];
   if (String(order.source || "").toLowerCase() === "temu") {
-    rates.push(...temuShippingLabelRates(order));
+    const temuRates = temuShippingLabelRates(order);
+    rates.push(...temuRates);
+    if (!temuRates.length) {
+      providerErrors.push({ provider: "Temu", message: temuShippingProviderWarning(order) });
+    }
   }
   if (!blockers.length && veeqoConfig(settings).enabled) {
     const payload = {
@@ -21842,7 +21851,6 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       rates.push(...available.map(normalizeVeeqoRate));
     } catch (error) {
       providerErrors.push({ provider: "Veeqo", message: error.message || "Veeqo did not return shipping rates." });
-      if (!rates.length) throw error;
     }
   }
   const status = blockers.length ? "blocked" : providerErrors.length ? "partial" : "loaded";
