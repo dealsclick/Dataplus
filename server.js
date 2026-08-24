@@ -13616,6 +13616,314 @@ async function publicCategoriesPage(params = {}) {
   };
 }
 
+function categoryReviewChannel(value = "ebay") {
+  const channel = String(value || "ebay").trim().toLowerCase();
+  return channel === "shopify" ? "shopify" : "ebay";
+}
+
+function categoryReviewScope(value = "main") {
+  return value === "source" ? "source" : "main";
+}
+
+function categoryReviewStatus(value = "pending") {
+  const status = String(value || "pending").trim().toLowerCase();
+  return ["pending", "mapped", "missing", "all"].includes(status) ? status : "pending";
+}
+
+function categoryReviewRowMatches(row = {}, options = {}) {
+  const channel = categoryReviewChannel(options.channel);
+  const status = categoryReviewStatus(options.status);
+  const mapping = normalizeChannelCategoryMapping(row?.mappings?.[channel] || {});
+  const pending = mapping.pendingSuggestion || null;
+  const hasPending = Boolean(pending?.categoryId || String(mapping.status || "").toLowerCase().includes("review"));
+  const hasMapping = Boolean(mapping.categoryId);
+  if (status === "pending" && !hasPending) return false;
+  if (status === "mapped" && !hasMapping) return false;
+  if (status === "missing" && (hasPending || hasMapping)) return false;
+  const minimumProducts = Math.max(0, Number(options.minimumProducts || 0) || 0);
+  if (minimumProducts > Number(row.productCount || 0)) return false;
+  const confidence = categoryMappingListConfidence(mapping);
+  if (options.confidence === "high" && (confidence === null || confidence < 0.75)) return false;
+  if (options.confidence === "medium" && (confidence === null || confidence < 0.5 || confidence >= 0.75)) return false;
+  if (options.confidence === "low" && (confidence === null || confidence >= 0.5)) return false;
+  if (options.confidence === "none" && confidence !== null) return false;
+  const q = String(options.q || "").trim().toLowerCase();
+  if (!q) return true;
+  return [
+    row.id,
+    row.categoryId,
+    row.name,
+    row.status,
+    row.owner,
+    mapping.categoryId,
+    mapping.categoryPath,
+    pending?.categoryId,
+    pending?.categoryPath,
+    pending?.rationale,
+    ...(row.topVendors || []).map((vendor) => vendor.name),
+    ...(row.topBrands || []).map((brand) => brand.name)
+  ].join(" ").toLowerCase().includes(q);
+}
+
+function categoryReviewPublicRow(row = {}, channel = "ebay") {
+  const mapping = normalizeChannelCategoryMapping(row?.mappings?.[channel] || {});
+  const pending = mapping.pendingSuggestion || null;
+  return {
+    id: row.id || row.categoryId || categoryIdentity(row.name || "", "main").id,
+    categoryId: row.categoryId || row.id || "",
+    name: row.name || "",
+    status: row.status || "",
+    lifecycle: row.lifecycle || "",
+    productCount: Number(row.productCount || 0),
+    activeProductCount: Number(row.activeProductCount || 0),
+    stockProductCount: Number(row.stockProductCount || 0),
+    topVendors: Array.isArray(row.topVendors) ? row.topVendors.slice(0, 5) : [],
+    mapping,
+    pendingSuggestion: pending,
+    confidence: categoryMappingListConfidence(mapping),
+    updatedAt: row.updatedAt || mapping.matchedAt || pending?.reviewedAt || "",
+    locked: mapping.locked === true
+  };
+}
+
+async function categoryReviewDb(scope = "main") {
+  if (postgres.isPostgresEnabled()) {
+    const [baseDb, categoryDb, mainRows] = await Promise.all([
+      readDbFast({ skipInventory: true }),
+      postgres.readCategoryState(),
+      scope === "main" ? postgres.listCategoryProductStats() : Promise.resolve([])
+    ]);
+    return normalizeDb({
+      ...baseDb,
+      ...(categoryDb || {}),
+      __mainCategoryRows: mainRows || [],
+      connections: baseDb.connections || [],
+      channels: baseDb.channels || [],
+      systemSettings: baseDb.systemSettings || {},
+      sequence: baseDb.sequence || {}
+    });
+  }
+  return normalizeDb(await readDbFast({ skipInventory: false }));
+}
+
+function categoryReviewRows(db = {}, options = {}) {
+  const scope = categoryReviewScope(options.scope);
+  const channel = categoryReviewChannel(options.channel);
+  return (publicCategories(db, "", scope).categories || [])
+    .filter((row) => categoryReviewRowMatches(row, { ...options, channel, scope }))
+    .sort((left, right) => {
+      const leftPending = left?.mappings?.[channel]?.pendingSuggestion;
+      const rightPending = right?.mappings?.[channel]?.pendingSuggestion;
+      const leftConfidence = Number(leftPending?.confidence ?? left?.mappings?.[channel]?.confidence ?? -1);
+      const rightConfidence = Number(rightPending?.confidence ?? right?.mappings?.[channel]?.confidence ?? -1);
+      return rightConfidence - leftConfidence || Number(right.productCount || 0) - Number(left.productCount || 0) || String(left.name || "").localeCompare(String(right.name || ""));
+    });
+}
+
+function categoryReviewSelectionRows(db = {}, options = {}) {
+  const ids = new Set((Array.isArray(options.ids) ? options.ids : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean));
+  const rows = categoryReviewRows(db, options);
+  if (options.allFiltered === true || String(options.allFiltered || "").toLowerCase() === "true") return rows;
+  return rows.filter((row) => ids.has(String(row.id || row.categoryId || "")) || ids.has(String(row.categoryId || row.id || "")));
+}
+
+async function persistCategoryReviewDb(db = {}, changedCategories = []) {
+  if (postgres.isPostgresEnabled()) {
+    await postgres.writeStateDocuments({ categorySettings: db.categorySettings || [] });
+    if (changedCategories.length) await postgres.upsertCategoryChannelMappingsFromState(changedCategories, { replace: false });
+    publicStateJsonCache = null;
+    clearCategoryResponseCache();
+    return;
+  }
+  await writeDb(normalizeDb(db));
+  clearCategoryResponseCache();
+}
+
+async function applyPendingCategoryReviewSuggestions(db = {}, options = {}) {
+  const channel = categoryReviewChannel(options.channel);
+  const reviewedBy = sourceTextValue(options.reviewedBy) || "Luis";
+  const rows = categoryReviewSelectionRows(db, { ...options, channel, status: options.status || "pending" });
+  const changedCategories = [];
+  const skipped = [];
+  const now = new Date().toISOString();
+  for (const row of rows) {
+    const pending = normalizeChannelCategoryMapping(row?.mappings?.[channel] || {}).pendingSuggestion;
+    if (!pending?.categoryId) {
+      skipped.push({ id: row.id || row.categoryId, category: row.name, reason: "No pending category suggestion is available." });
+      continue;
+    }
+    const category = findOrCreateCategorySetting(db, row.name);
+    const current = normalizeChannelCategoryMapping(category.mappings?.[channel] || row?.mappings?.[channel] || {});
+    if (categoryMappingIsLocked(current) && current.categoryId && current.categoryId !== pending.categoryId) {
+      skipped.push({ id: row.id || row.categoryId, category: row.name, reason: "Mapping is locked. Unlock it before replacing the category." });
+      continue;
+    }
+    let approvedMapping = {
+      ...current,
+      categoryId: pending.categoryId,
+      categoryPath: pending.categoryPath,
+      categoryHandle: pending.categoryHandle,
+      taxonomyVersion: pending.taxonomyVersion,
+      categoryTreeVersion: pending.categoryTreeVersion,
+      status: "mapped",
+      confidence: pending.confidence,
+      confidenceLevel: categoryConfidenceLevel(Number(pending.confidence || 0)),
+      matchSource: `${channel}-category-review-approved`,
+      matchedAt: now,
+      reviewedBy,
+      reviewedAt: now,
+      aiProvider: pending.provider || current.aiProvider || "",
+      aiModel: pending.model || current.aiModel || "",
+      aiRationale: pending.rationale || current.aiRationale || "",
+      pendingSuggestion: null,
+      locked: true,
+      lockedAt: now,
+      lockedBy: reviewedBy,
+      unlockedAt: "",
+      unlockedBy: ""
+    };
+    if (channel === "shopify") approvedMapping = enrichShopifyCategoryMapping(approvedMapping);
+    if (channel === "ebay") approvedMapping = await enrichEbayCategoryMapping(db, approvedMapping);
+    category.mappings[channel] = withCategoryMappingHistory(current, approvedMapping, "approved-category-review", reviewedBy);
+    category.status = "mapped";
+    category.updatedBy = reviewedBy;
+    category.updatedAt = now;
+    changedCategories.push(category);
+  }
+  if (changedCategories.length) await persistCategoryReviewDb(db, changedCategories);
+  return { changed: changedCategories.length, skipped, rows: changedCategories };
+}
+
+const bulkCategoryMappingJobTimers = new Map();
+
+function scheduleBulkCategoryMappingRefreshJob(jobId, payload = {}) {
+  const scheduledAt = payload.scheduledFor ? new Date(payload.scheduledFor).getTime() : Date.now();
+  const delay = Number.isFinite(scheduledAt) ? Math.max(0, scheduledAt - Date.now()) : 0;
+  if (bulkCategoryMappingJobTimers.has(jobId)) clearTimeout(bulkCategoryMappingJobTimers.get(jobId));
+  const timer = setTimeout(async () => {
+    bulkCategoryMappingJobTimers.delete(jobId);
+    let workingDb = null;
+    let job = null;
+    try {
+      const channel = categoryReviewChannel(payload.channel);
+      const scope = categoryReviewScope(payload.scope);
+      workingDb = await categoryReviewDb(scope);
+      job = findImportJob(workingDb, jobId) || readImportJobStore().find((row) => row.id === jobId) || activeJobRecords.get(jobId);
+      if (!job) return;
+      if (["success", "warning", "failed", "stopped"].includes(String(job.status || "").toLowerCase())) return;
+      if (payload.scheduledFor && new Date(payload.scheduledFor).getTime() > Date.now() + 500) {
+        scheduleBulkCategoryMappingRefreshJob(jobId, payload);
+        return;
+      }
+      const rows = categoryReviewSelectionRows(workingDb, payload).filter((row) => normalizeChannelCategoryMapping(row?.mappings?.[channel] || {}).categoryId);
+      job = await persistWorkerImportJob(job, {
+        status: "running",
+        phase: "refreshing_category_mappings",
+        totalRows: rows.length,
+        processedRows: 0,
+        progressPercent: 0,
+        startedAt: job.startedAt || new Date().toISOString(),
+        message: `Refreshing ${channel === "shopify" ? "Shopify" : "eBay"} category mappings for ${rows.length.toLocaleString()} categor${rows.length === 1 ? "y" : "ies"}...`
+      });
+      let changedProducts = 0;
+      let refreshedCategories = 0;
+      const errors = [];
+      for (let index = 0; index < rows.length; index += 1) {
+        const source = rows[index];
+        try {
+          const category = findOrCreateCategorySetting(workingDb, source.name);
+          const mapping = normalizeChannelCategoryMapping(category.mappings?.[channel] || source.mappings?.[channel] || {});
+          if (!mapping.categoryId) continue;
+          let changed = 0;
+          if (postgres.isPostgresEnabled()) {
+            let page = 1;
+            const pageSize = 1000;
+            while (true) {
+              const result = await postgres.listProducts({ page, limit: pageSize, filters: { category: formatCategoryName(source.name || "") } });
+              const products = result?.inventory || [];
+              if (!products.length) break;
+              const touched = products.filter((item) => applyCategoryMappingToProduct(item, source, mapping, channel, {
+                updateExistingSkus: payload.updateExistingSkus !== false,
+                updateChannelRecords: payload.updateChannelRecords !== false,
+                force: payload.force === true
+              }, workingDb, new Date().toISOString()));
+              if (touched.length) await postgres.upsertProductsFromState(touched);
+              changed += touched.length;
+              if (products.length < pageSize) break;
+              page += 1;
+            }
+          } else {
+            for (const item of workingDb.inventory || []) {
+              if (applyCategoryMappingToProduct(item, source, mapping, channel, {
+                updateExistingSkus: payload.updateExistingSkus !== false,
+                updateChannelRecords: payload.updateChannelRecords !== false,
+                force: payload.force === true
+              }, workingDb, new Date().toISOString())) changed += 1;
+            }
+          }
+          changedProducts += changed;
+          refreshedCategories += 1;
+        } catch (error) {
+          errors.push(`${source.name || source.id}: ${error.message || error}`);
+        }
+        if ((index + 1) % 10 === 0 || index + 1 === rows.length) {
+          await persistWorkerImportJob(job, {
+            status: "running",
+            phase: "refreshing_category_mappings",
+            totalRows: rows.length,
+            processedRows: index + 1,
+            changed: changedProducts,
+            missingCount: errors.length,
+            progressPercent: progressPercent(index + 1, rows.length),
+            message: `Refreshed ${refreshedCategories.toLocaleString()} categor${refreshedCategories === 1 ? "y" : "ies"} and updated ${changedProducts.toLocaleString()} SKU records.`
+          });
+        }
+      }
+      if (!postgres.isPostgresEnabled()) await writeDb(normalizeDb(workingDb));
+      finishImportJob(job, {
+        status: errors.length ? "warning" : "success",
+        phase: "complete",
+        totalRows: rows.length,
+        processedRows: rows.length,
+        changed: changedProducts,
+        missingCount: errors.length,
+        errors: errors.slice(0, 100),
+        progressPercent: 100,
+        estimatedSecondsRemaining: 0,
+        message: `Bulk ${channel} category refresh complete: ${refreshedCategories.toLocaleString()} categor${refreshedCategories === 1 ? "y" : "ies"} refreshed and ${changedProducts.toLocaleString()} SKU records updated.`,
+        finishedAt: new Date().toISOString()
+      });
+      if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+      upsertImportJobStore(job);
+      publicStateJsonCache = null;
+      clearCategoryResponseCache();
+    } catch (error) {
+      try {
+        const db = workingDb || await categoryReviewDb(payload.scope);
+        const failedJob = job || findImportJob(db, jobId) || readImportJobStore().find((row) => row.id === jobId) || activeJobRecords.get(jobId);
+        if (failedJob) {
+          finishImportJob(failedJob, {
+            status: "failed",
+            phase: "failed",
+            message: error.message || "Bulk category mapping refresh failed.",
+            errors: [error.message || "Bulk category mapping refresh failed."],
+            missingCount: 1,
+            finishedAt: new Date().toISOString()
+          });
+          if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(failedJob);
+          upsertImportJobStore(failedJob);
+        }
+      } catch (writeError) {
+        console.error("Unable to finish bulk category mapping refresh job", writeError);
+      }
+    }
+  }, Math.min(delay, 2_147_000_000));
+  timer.unref?.();
+  bulkCategoryMappingJobTimers.set(jobId, timer);
+}
+
 function inventoryPurchaseOrderRows(purchaseOrders = [], item = {}) {
   return purchaseOrders.flatMap((po) => {
     const receiptItems = [...(po.receipts || []), ...(po.receiptDrafts || [])]
@@ -23731,6 +24039,24 @@ function isPlaceholderTemuBuyer(value = "") {
   return !text || text === "temu buyer";
 }
 
+function temuOrderNeedsRepair(order = {}) {
+  if (String(order.source || "").toLowerCase() !== "temu") return false;
+  return isPlaceholderTemuBuyer(order.buyer)
+    || !orderAddressHasUsefulData(order.address)
+    || !String(order.buyerEmail || "").trim()
+    || !String(order.phone || "").trim();
+}
+
+function temuParentOrderSnFromStoredOrder(order = {}) {
+  return String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
+}
+
+function chunkTemuList(values = [], size = 20) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) chunks.push(values.slice(index, index + size));
+  return chunks;
+}
+
 function extractTemuOrderSn(order) {
   const payload = temuPayload(order);
   const flattened = { ...payload, ...(payload.parentOrderMap || {}) };
@@ -23767,6 +24093,16 @@ async function importTemuOrders(db, options = {}) {
   const includeCanceled = options.includeCanceled === true || String(options.includeCanceled).toLowerCase() === "true";
   const config = getTemuConfig(db);
   const pageSize = Math.min(100, Math.max(1, config.pageSize || 50));
+  const repairBlind = options.repairBlind === true || String(options.repairBlind).toLowerCase() === "true";
+  const repairOrderSns = repairBlind
+    ? [...new Set((db.orders || [])
+      .filter(temuOrderNeedsRepair)
+      .map(temuParentOrderSnFromStoredOrder)
+      .filter(Boolean))]
+      .slice(0, limit)
+    : [];
+  const repairChunks = chunkTemuList(repairOrderSns, 20);
+  const targetRows = repairBlind ? Math.max(1, repairOrderSns.length) : limit;
   let pageNumber = 1;
   let created = 0;
   let updated = 0;
@@ -23776,15 +24112,23 @@ async function importTemuOrders(db, options = {}) {
   const rows = [];
 
   const maxPages = Math.ceil(limit / pageSize);
-  while (pageNumber <= Math.max(1, maxPages) && fetched < limit) {
-    const listResponse = await temuRequest("bg.order.list.v2.get", {
+  while ((repairBlind ? repairChunks.length > 0 : pageNumber <= Math.max(1, maxPages)) && fetched < limit) {
+    const repairChunk = repairBlind ? repairChunks.shift() : [];
+    const listResponse = await temuRequest("bg.order.list.v2.get", repairBlind ? {
+      pageNumber: 1,
+      pageSize: Math.max(1, repairChunk.length),
+      parentOrderSnList: repairChunk
+    } : {
       pageNumber,
       pageSize,
       updateAtStart,
       updateAtEnd: now
     }, { db, allowErrorResult: true });
     const list = firstArrayFrom(listResponse);
-    if (!list.length) break;
+    if (!list.length) {
+      if (repairBlind) continue;
+      break;
+    }
 
     for (const listOrder of list) {
       if (fetched >= limit) break;
@@ -23850,26 +24194,29 @@ async function importTemuOrders(db, options = {}) {
       fetched += 1;
       rows.push({ orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber, status: mappedOrder.status, action, itemCount: mappedOrder.items?.length || 0, buyer: mappedOrder.buyer || "" });
       if (typeof options.progress === "function") {
-        await options.progress({ phase: "importing_temu_orders", processedRows: fetched, totalRows: limit });
+        await options.progress({ phase: repairBlind ? "repairing_temu_orders" : "importing_temu_orders", processedRows: fetched, totalRows: targetRows });
       }
     }
 
-    if (list.length < pageSize) break;
-    pageNumber += 1;
+    if (!repairBlind) {
+      if (list.length < pageSize) break;
+      pageNumber += 1;
+    }
   }
 
-  db.connectorState.temuLastOrderSync = now;
+  if (!repairBlind) db.connectorState.temuLastOrderSync = now;
   const channel = (db.connections || []).find((entry) => String(entry.name || "").trim().toLowerCase() === "temu");
   if (channel) {
-    channel.lastSync = now;
+    if (!repairBlind) channel.lastSync = now;
     channel.settings = {
       ...DEFAULT_CHANNEL_SETTINGS,
       ...(channel.settings || {}),
-      temuLastOrderSync: now
+      ...(repairBlind ? {} : { temuLastOrderSync: now }),
+      temuLastBlindOrderRepairAt: repairBlind ? new Date().toISOString() : channel.settings?.temuLastBlindOrderRepairAt || ""
     };
     Object.assign(channel, normalizeChannel(channel));
   }
-  return { fetched, created, updated, skipped, errors, rows };
+  return { fetched, created, updated, skipped, errors, rows, repairBlind, repairCandidateCount: repairOrderSns.length };
 }
 
 async function queueTemuOrderImportJob(db, body = {}, options = {}) {
@@ -25592,7 +25939,12 @@ async function recoverScheduledCategoryMappingJobs() {
     const jobs = await mergedImportJobsAsync(db);
     for (const job of jobs) {
       const payload = job.workerPayload && typeof job.workerPayload === "object" ? job.workerPayload : {};
-      if (!["queued", "running"].includes(String(job.status || "").toLowerCase()) || !payload.categoryMappingRefresh || categoryMappingJobTimers.has(job.id)) continue;
+      if (!["queued", "running"].includes(String(job.status || "").toLowerCase())) continue;
+      if (payload.categoryMappingBulkRefresh) {
+        if (!bulkCategoryMappingJobTimers.has(job.id)) scheduleBulkCategoryMappingRefreshJob(job.id, payload);
+        continue;
+      }
+      if (!payload.categoryMappingRefresh || categoryMappingJobTimers.has(job.id)) continue;
       scheduleChannelCategoryMappingJob(job.id, payload.sourceId, payload.scope || "main", payload.channel || "ebay", payload);
     }
   } catch (error) {
@@ -40947,6 +41299,128 @@ async function handleApi(req, res) {
     return sendJson(res, 202, {
       ...result,
       message: `eBay category mapping queued as Job ${result.job.jobNumber || result.job.id}. Track progress and download results from Jobs.`
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/categories/channel-review") {
+    const scope = categoryReviewScope(url.searchParams.get("scope") || "main");
+    const channel = categoryReviewChannel(url.searchParams.get("channel") || "ebay");
+    const pageSize = Math.max(25, Math.min(250, Number(url.searchParams.get("limit") || 100) || 100));
+    const requestedPage = Math.max(1, Number(url.searchParams.get("page") || 1) || 1);
+    const db = await categoryReviewDb(scope);
+    const rows = categoryReviewRows(db, {
+      scope,
+      channel,
+      status: url.searchParams.get("status") || "pending",
+      q: url.searchParams.get("q") || "",
+      confidence: url.searchParams.get("confidence") || "",
+      minimumProducts: url.searchParams.get("minimumProducts") || ""
+    });
+    const total = rows.length;
+    const pageCount = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(requestedPage, pageCount);
+    const slice = rows.slice((page - 1) * pageSize, page * pageSize);
+    const allRows = categoryReviewRows(db, { scope, channel, status: "all" });
+    const pendingRows = allRows.filter((row) => categoryReviewRowMatches(row, { scope, channel, status: "pending" }));
+    const mappedRows = allRows.filter((row) => categoryReviewRowMatches(row, { scope, channel, status: "mapped" }));
+    return sendJson(res, 200, {
+      channel,
+      scope,
+      page,
+      pageSize,
+      pageCount,
+      total,
+      rows: slice.map((row) => categoryReviewPublicRow(row, channel)),
+      summary: {
+        total: allRows.length,
+        pending: pendingRows.length,
+        mapped: mappedRows.length,
+        missing: allRows.length - mappedRows.length - pendingRows.length,
+        pendingProducts: pendingRows.reduce((sum, row) => sum + Number(row.productCount || 0), 0),
+        mappedProducts: mappedRows.reduce((sum, row) => sum + Number(row.productCount || 0), 0)
+      }
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/categories/channel-review/apply") {
+    const body = await parseBody(req);
+    const scope = categoryReviewScope(body.scope || "main");
+    const channel = categoryReviewChannel(body.channel || "ebay");
+    const db = await categoryReviewDb(scope);
+    const result = await applyPendingCategoryReviewSuggestions(db, {
+      ...body,
+      scope,
+      channel,
+      status: "pending",
+      reviewedBy: body.reviewedBy || "Luis"
+    });
+    return sendJson(res, 200, {
+      ...result,
+      message: `Approved ${result.changed.toLocaleString()} ${channel === "shopify" ? "Shopify" : "eBay"} category mapping${result.changed === 1 ? "" : "s"}.${result.skipped.length ? ` ${result.skipped.length.toLocaleString()} skipped.` : ""}`
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/categories/channel-review/refresh-products") {
+    const body = await parseBody(req);
+    const scope = categoryReviewScope(body.scope || "main");
+    const channel = categoryReviewChannel(body.channel || "ebay");
+    const db = await categoryReviewDb(scope);
+    const selectedRows = categoryReviewSelectionRows(db, {
+      ...body,
+      scope,
+      channel,
+      status: body.status || "mapped"
+    }).filter((row) => normalizeChannelCategoryMapping(row?.mappings?.[channel] || {}).categoryId);
+    if (!selectedRows.length) return sendJson(res, 400, { error: "Select at least one approved category mapping to refresh." });
+    const options = categoryMappingRefreshOptions({
+      updateExistingSkus: body.updateExistingSkus !== false,
+      updateChannelRecords: body.updateChannelRecords !== false,
+      force: body.force === true,
+      scheduledFor: body.scheduledFor
+    });
+    if (!options.updateExistingSkus && !options.updateChannelRecords) {
+      return sendJson(res, 400, { error: "Select existing SKU records, DataPlus channel records, or both." });
+    }
+    if (options.scheduledFor) {
+      const scheduledTime = new Date(options.scheduledFor).getTime();
+      if (!Number.isFinite(scheduledTime)) return sendJson(res, 400, { error: "Choose a valid scheduled time." });
+      if (scheduledTime <= Date.now()) return sendJson(res, 400, { error: "Choose a future scheduled time." });
+      options.scheduledFor = new Date(scheduledTime).toISOString();
+    }
+    const channelLabel = channel === "shopify" ? "Shopify" : "eBay";
+    const scheduledLabel = options.scheduledFor ? new Date(options.scheduledFor).toLocaleString("en-US", { timeZone: process.env.TZ || "America/New_York" }) : "";
+    const job = createImportJob(db, {
+      section: "Categories",
+      category: "Category mapping",
+      operation: `${channelLabel} bulk category SKU refresh`,
+      direction: "import",
+      status: "queued",
+      phase: "queued",
+      startedAt: "",
+      fileName: `${channel}-category-bulk-refresh.json`,
+      scheduledFor: options.scheduledFor,
+      totalRows: selectedRows.length,
+      processedRows: 0,
+      progressPercent: 0,
+      message: options.scheduledFor
+        ? `Scheduled ${channelLabel} category refresh for ${selectedRows.length.toLocaleString()} categor${selectedRows.length === 1 ? "y" : "ies"} at ${scheduledLabel}.`
+        : `Queued ${channelLabel} category refresh for ${selectedRows.length.toLocaleString()} categor${selectedRows.length === 1 ? "y" : "ies"}.`,
+      details: "This updates DataPlus SKU/channel category metadata only. It does not publish or revise marketplace listings.",
+      workerPayload: {
+        categoryMappingBulkRefresh: true,
+        scope,
+        channel,
+        ids: selectedRows.map((row) => row.id || row.categoryId).filter(Boolean),
+        ...options
+      }
+    });
+    if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+    else await writeDb(normalizeDb(db));
+    scheduleBulkCategoryMappingRefreshJob(job.id, job.workerPayload);
+    return sendJson(res, 202, {
+      queued: true,
+      job: normalizeImportJob(job),
+      message: job.message
     });
   }
 

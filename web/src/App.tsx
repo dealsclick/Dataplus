@@ -1212,7 +1212,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (/^\/brands\/[^/]+$/.test(path)) return "brand-detail"
   if (path.startsWith("/brands")) return "brands"
   if (path.startsWith("/products") || path.startsWith("/catalog")) return "catalog"
-  if (["/categories", "/source-catalog", "/import-review", "/sku-changes", "/vendor-category-mappings", "/attributes", "/groups", "/inventory", "/templates", "/readiness"].some((prefix) => path.startsWith(prefix))) return "catalog"
+  if (["/categories", "/source-catalog", "/import-review", "/sku-changes", "/category-review", "/vendor-category-mappings", "/attributes", "/groups", "/inventory", "/templates", "/readiness"].some((prefix) => path.startsWith(prefix))) return "catalog"
   if (path.startsWith("/vendors")) return "vendors"
   if (path.startsWith("/ai")) return "ai-chat"
   if (path.startsWith("/settings")) return "settings"
@@ -8663,7 +8663,7 @@ function ToggleRow({ label, description, checked, disabled, onCheckedChange }: {
   return <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-medium">{label}</p><p className="text-xs text-muted-foreground">{description}</p></div><Switch aria-label={label} checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} /></div>
 }
 
-type CatalogWorkspaceTab = "products" | "review" | "changes" | "categories" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "readiness"
+type CatalogWorkspaceTab = "products" | "review" | "changes" | "category-review" | "categories" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "readiness"
 
 type CategoryAttribute = {
   id?: string
@@ -8884,6 +8884,7 @@ const catalogWorkspaceTabs: Array<{ id: CatalogWorkspaceTab; label: string }> = 
   { id: "products", label: "Catalog" },
   { id: "review", label: "Import Review" },
   { id: "changes", label: "SKU Changes" },
+  { id: "category-review", label: "Category Review" },
   { id: "categories", label: "Categories" },
   { id: "mappings", label: "Vendor Mappings" },
   { id: "attributes", label: "Attributes" },
@@ -8898,6 +8899,7 @@ function catalogWorkspaceTabFromPath() {
   if (path.startsWith("/source-catalog") || path === "/source") return "products"
   if (path.startsWith("/import-review")) return "review"
   if (path.startsWith("/sku-changes")) return "changes"
+  if (path.startsWith("/category-review")) return "category-review"
   if (path.startsWith("/categories")) return "categories"
   if (path.startsWith("/vendor-category-mappings")) return "mappings"
   if (path.startsWith("/attributes")) return "attributes"
@@ -8952,6 +8954,34 @@ type CategoryAiReviewProposal = {
   provider?: string
   model?: string
   expiresAt?: string
+}
+
+type CategoryReviewRow = {
+  id?: string
+  categoryId?: string
+  name?: string
+  status?: string
+  lifecycle?: string
+  productCount?: number
+  activeProductCount?: number
+  stockProductCount?: number
+  topVendors?: Array<{ name?: string; count?: number }>
+  mapping?: CategoryChannelMapping
+  pendingSuggestion?: CategoryChannelMapping["pendingSuggestion"]
+  confidence?: number | null
+  updatedAt?: string
+  locked?: boolean
+}
+
+type CategoryReviewResponse = {
+  rows?: CategoryReviewRow[]
+  summary?: { total?: number; pending?: number; mapped?: number; missing?: number; pendingProducts?: number; mappedProducts?: number }
+  total?: number
+  page?: number
+  pageSize?: number
+  pageCount?: number
+  channel?: "shopify" | "ebay"
+  scope?: "main" | "source"
 }
 
 function CategoryRequirementsDataTable({ channel, attributes, mappings, onChange }: { channel: string; attributes: CategoryAttribute[]; mappings: CategoryAttribute[]; onChange: (next: CategoryAttribute[]) => void }) {
@@ -9798,11 +9828,11 @@ function StandaloneCategoryPage() {
   return <CategoriesWorkspace categoryId={categoryId} initialScope={scope} standalone />
 }
 
-const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "categories">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
+const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "category-review" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "categories">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
   readiness: { endpoint: "/api/data-quality/products?limit=100", title: "Readiness", description: "Product readiness queue for missing content, dimensions, category, or marketplace requirements.", rows: "rows", columns: [["sku", "SKU"], ["title", "Product"], ["issues", "Missing or invalid"], ["channel", "Channel"], ["status", "Status"]] },
 }
 
-function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "categories"> }) {
+function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "category-review" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "categories"> }) {
   const config = catalogResourceConfig[tab]
   const [rows, setRows] = useState<Array<Record<string, unknown>>>([])
   const [loading, setLoading] = useState(true)
@@ -14909,6 +14939,142 @@ function ImportReviewPage() {
   </div>
 }
 
+function CategoryReviewPage() {
+  const [rows, setRows] = useState<CategoryReviewRow[]>([])
+  const [summary, setSummary] = useState<CategoryReviewResponse["summary"]>({})
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [query, setQuery] = useState("")
+  const [channel, setChannel] = useState<"shopify" | "ebay">("ebay")
+  const [status, setStatus] = useState("pending")
+  const [confidence, setConfidence] = useState("all")
+  const [page, setPage] = useState(1)
+  const [pageCount, setPageCount] = useState(1)
+  const [total, setTotal] = useState(0)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [allFiltered, setAllFiltered] = useState(false)
+  const limit = 100
+  const selectedCount = allFiltered ? total : selected.size
+
+  async function load(nextPage = page) {
+    setLoading(true)
+    try {
+      const params = new URLSearchParams({ channel, scope: "main", status, page: String(nextPage), limit: String(limit) })
+      if (query.trim()) params.set("q", query.trim())
+      if (confidence !== "all") params.set("confidence", confidence)
+      const result = await api<CategoryReviewResponse>(`/api/categories/channel-review?${params}`)
+      setRows(result.rows || [])
+      setSummary(result.summary || {})
+      setPage(Number(result.page || nextPage))
+      setPageCount(Number(result.pageCount || 1))
+      setTotal(Number(result.total || result.rows?.length || 0))
+      setSelected(new Set())
+      setAllFiltered(false)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load category review.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void load(1) }, [channel, status, confidence])
+
+  function rowId(row: CategoryReviewRow) {
+    return String(row.id || row.categoryId || row.name || "")
+  }
+
+  function toggleRow(id: string, checked: boolean) {
+    setAllFiltered(false)
+    setSelected((current) => {
+      const next = new Set(current)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  function requestPayload(extra: Record<string, unknown> = {}) {
+    return {
+      channel,
+      scope: "main",
+      ids: [...selected],
+      allFiltered,
+      q: query,
+      status,
+      confidence: confidence === "all" ? "" : confidence,
+      ...extra,
+    }
+  }
+
+  async function approveMappings(ids?: string[]) {
+    const count = ids?.length || selectedCount
+    if (!count) return toast.error("Select category suggestions to approve.")
+    if (!window.confirm(`Approve and lock ${numberLabel(count)} ${channel === "ebay" ? "eBay" : "Shopify"} category mapping${count === 1 ? "" : "s"}?`)) return
+    setBusy(true)
+    try {
+      const result = await api<{ changed?: number; skipped?: unknown[]; message?: string }>("/api/categories/channel-review/apply", {
+        method: "POST",
+        body: JSON.stringify(requestPayload(ids ? { ids, allFiltered: false, status: "pending" } : { status: "pending" })),
+      })
+      toast.success(result.message || `Approved ${numberLabel(result.changed || 0)} mapping${Number(result.changed || 0) === 1 ? "" : "s"}.`)
+      await load(1)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to approve category mappings.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function refreshSkus() {
+    if (!selectedCount) return toast.error("Select approved mappings to refresh.")
+    if (!window.confirm(`Queue a DataPlus SKU refresh for ${numberLabel(selectedCount)} approved ${channel === "ebay" ? "eBay" : "Shopify"} category mapping${selectedCount === 1 ? "" : "s"}? This updates local SKU/channel metadata only.`)) return
+    setBusy(true)
+    try {
+      const result = await api<{ job?: ImportJob; message?: string }>("/api/categories/channel-review/refresh-products", {
+        method: "POST",
+        body: JSON.stringify(requestPayload({ status: "mapped", updateExistingSkus: true, updateChannelRecords: true })),
+      })
+      toast.success(result.message || "Category SKU refresh queued.")
+      if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", `/jobs/${encodeURIComponent(result.job!.id)}`); window.dispatchEvent(new PopStateEvent("popstate")) }, 600)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue SKU refresh.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const pageIds = rows.map(rowId).filter(Boolean)
+  const pageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id))
+  const pendingRows = rows.filter((row) => row.pendingSuggestion?.categoryId)
+  const mappedRows = rows.filter((row) => row.mapping?.categoryId)
+  const actionHint = status === "pending"
+    ? "Approve saves and locks the suggested mapping. It does not update SKUs until you run the refresh."
+    : "Refresh updates DataPlus SKU/channel category metadata. It does not publish or revise live listings."
+
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Catalog" title="Category Review" description="Review channel category suggestions in one queue, approve mappings in bulk, then decide when affected SKU records should refresh." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void load()} disabled={loading || busy}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button>{status === "pending" ? <Button size="sm" onClick={() => void approveMappings()} disabled={!selectedCount || busy}>{busy ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Approve selected</Button> : <Button size="sm" onClick={() => void refreshSkus()} disabled={!selectedCount || busy}>{busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh SKUs</Button>}</div>} />
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Detail label="Pending review" value={numberLabel(summary?.pending || 0)} /><Detail label="Pending products" value={numberLabel(summary?.pendingProducts || 0)} /><Detail label="Mapped categories" value={numberLabel(summary?.mapped || 0)} /><Detail label="Mapped products" value={numberLabel(summary?.mappedProducts || 0)} /><Detail label="Missing" value={numberLabel(summary?.missing || 0)} /></div>
+    <Card>
+      <CardHeader className="gap-4 border-b">
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">{channel === "ebay" ? "eBay" : "Shopify"} category decisions</CardTitle><CardDescription>{actionHint}</CardDescription></div>{selectedCount ? <Badge variant="secondary">{numberLabel(selectedCount)} selected</Badge> : null}</div>
+        <div className="grid gap-2 md:grid-cols-[180px_180px_180px_minmax(220px,1fr)_auto]">
+          <Select value={channel} onValueChange={(value) => setChannel(value as "shopify" | "ebay")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="ebay">eBay</SelectItem><SelectItem value="shopify">Shopify / Google</SelectItem></SelectContent></Select>
+          <Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pending">Needs review</SelectItem><SelectItem value="mapped">Approved / mapped</SelectItem><SelectItem value="missing">Missing</SelectItem><SelectItem value="all">All categories</SelectItem></SelectContent></Select>
+          <Select value={confidence} onValueChange={setConfidence}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any confidence</SelectItem><SelectItem value="high">75%+</SelectItem><SelectItem value="medium">50-74%</SelectItem><SelectItem value="low">Below 50%</SelectItem><SelectItem value="none">No score</SelectItem></SelectContent></Select>
+          <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void load(1)} placeholder="Search category, vendor, current or suggested channel path" /></div>
+          <Button onClick={() => void load(1)} disabled={loading}>Search</Button>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+          <div className="flex flex-wrap items-center gap-3"><label className="flex items-center gap-2"><Checkbox checked={pageSelected || allFiltered} onCheckedChange={(checked) => { const next = checked === true; setAllFiltered(false); setSelected(next ? new Set(pageIds) : new Set()) }} /> Select page</label><Button size="sm" variant={allFiltered ? "secondary" : "outline"} disabled={!total} onClick={() => { setAllFiltered(true); setSelected(new Set()) }}>Select all filtered ({numberLabel(total)})</Button></div>
+          <div className="flex flex-wrap gap-2">{status === "pending" ? <Button size="sm" disabled={!selectedCount || busy} onClick={() => void approveMappings()}>Approve selected</Button> : null}<Button size="sm" variant="outline" disabled={!selectedCount || busy || (status !== "mapped" && !mappedRows.length)} onClick={() => void refreshSkus()}>Refresh SKUs from approved mappings</Button></div>
+        </div>
+      </CardHeader>
+      <CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-12" /><TableHead>Internal category</TableHead><TableHead>Products</TableHead><TableHead>Current mapping</TableHead><TableHead>Suggested mapping</TableHead><TableHead>Confidence</TableHead><TableHead>Source</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => { const id = rowId(row); const suggestion = row.pendingSuggestion; const confidenceLabel = row.confidence === null || row.confidence === undefined ? "-" : `${Math.round(Number(row.confidence) * 100)}%`; return <TableRow key={id}><TableCell><Checkbox aria-label={`Select ${row.name}`} checked={allFiltered || selected.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} /></TableCell><TableCell className="min-w-72"><a className="font-medium hover:underline" href={`/categories/${encodeURIComponent(id)}`}>{row.name || "Unnamed category"}</a><p className="mt-1 truncate text-xs text-muted-foreground">{(row.topVendors || []).slice(0, 2).map((vendor) => vendor.name).filter(Boolean).join(" / ") || "No vendor summary"}</p></TableCell><TableCell><p>{numberLabel(row.productCount || 0)}</p><p className="text-xs text-muted-foreground">{numberLabel(row.stockProductCount || 0)} in stock</p></TableCell><TableCell className="max-w-80"><p className="line-clamp-2 text-sm">{row.mapping?.categoryPath || row.mapping?.categoryId || "Not mapped"}</p>{row.mapping?.locked ? <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p> : null}</TableCell><TableCell className="max-w-96"><p className="line-clamp-2 text-sm font-medium">{suggestion?.categoryPath || suggestion?.categoryId || "No suggestion"}</p>{suggestion?.rationale ? <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{suggestion.rationale}</p> : null}</TableCell><TableCell><Badge variant={Number(row.confidence || 0) >= 0.75 ? "default" : Number(row.confidence || 0) >= 0.5 ? "secondary" : "outline"}>{confidenceLabel}</Badge></TableCell><TableCell className="max-w-44 truncate text-xs text-muted-foreground">{suggestion?.provider || row.mapping?.matchSource || "-"}</TableCell><TableCell><div className="flex justify-end gap-2">{suggestion?.categoryId ? <Button size="sm" disabled={busy} onClick={() => void approveMappings([id])}>Approve</Button> : null}<Button size="sm" variant="outline" asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open</a></Button></div></TableCell></TableRow>})}{!rows.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No category mappings match this review view.</TableCell></TableRow>}</TableBody></Table>{pendingRows.length === 0 && status === "pending" && rows.length > 0 ? <p className="border-t px-4 py-3 text-xs text-muted-foreground">These rows need review but do not have a directly applicable suggestion. Open the category to search manually.</p> : null}</div>}</CardContent>
+      <CardFooter className="flex flex-wrap items-center justify-between gap-3 border-t text-sm text-muted-foreground"><span>Page {page} of {pageCount} | {numberLabel(total)} categories</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => void load(page - 1)}>Previous</Button><Button size="sm" variant="outline" disabled={loading || page >= pageCount} onClick={() => void load(page + 1)}>Next</Button></div></CardFooter>
+    </Card>
+  </div>
+}
+
 function SkuChangesPage() {
   const [rows, setRows] = useState<CatalogChange[]>([])
   const [summary, setSummary] = useState<Record<string, number>>({})
@@ -16637,10 +16803,10 @@ function CatalogPage({ channels = [], systemSettings = {} }: { channels?: Channe
   const selectTab = (next: string) => {
     const selected = next as CatalogWorkspaceTab
     setTab(selected)
-    const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", review: "/import-review", changes: "/sku-changes", categories: "/categories", mappings: "/vendor-category-mappings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
+    const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", review: "/import-review", changes: "/sku-changes", "category-review": "/category-review", categories: "/categories", mappings: "/vendor-category-mappings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
     window.history.replaceState({}, "", paths[selected])
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
+  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
 }
 
 export function SourceCatalogPage() {
