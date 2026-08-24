@@ -550,6 +550,7 @@ async function initRelationalSchema() {
     create index if not exists order_records_status_idx on order_records (status, created_at desc);
     create index if not exists order_records_source_idx on order_records (lower(source), created_at desc);
     create index if not exists order_records_customer_idx on order_records (customer_id, created_at desc);
+    create index if not exists order_records_created_idx on order_records (created_at desc, order_number desc);
     create index if not exists order_records_order_number_idx on order_records (lower(order_number));
     create index if not exists order_records_marketplace_order_idx on order_records (lower(marketplace_order_id));
     create index if not exists order_records_tracking_number_idx on order_records (lower(tracking_number));
@@ -5149,42 +5150,42 @@ function orderRowToSummary(row = {}, lines = []) {
     source: row.source || raw.source || "",
     channelSource: row.channel_source || raw.channelSource || raw.salesChannel || raw.sourceChannel || "",
     status: row.status || raw.status || "",
-    financialStatus: raw.financialStatus || raw.paymentStatus || "",
-    paymentStatus: raw.paymentStatus || raw.financialStatus || "",
-    operationalStatus: raw.operationalStatus || raw.workflowStatus || "",
-    workflowStatus: raw.workflowStatus || raw.operationalStatus || "",
-    fulfillmentStatus: raw.fulfillmentStatus || raw.fulfillmentStage || "",
-    fulfillmentStage: raw.fulfillmentStage || raw.fulfillmentStatus || "",
-    allocationStatus: raw.allocationStatus || "",
+    financialStatus: row.financial_status || raw.financialStatus || raw.paymentStatus || "",
+    paymentStatus: row.payment_status || raw.paymentStatus || raw.financialStatus || "",
+    operationalStatus: row.operational_status || raw.operationalStatus || raw.workflowStatus || "",
+    workflowStatus: row.workflow_status || raw.workflowStatus || raw.operationalStatus || "",
+    fulfillmentStatus: row.fulfillment_status || raw.fulfillmentStatus || raw.fulfillmentStage || "",
+    fulfillmentStage: row.fulfillment_stage || raw.fulfillmentStage || raw.fulfillmentStatus || "",
+    allocationStatus: row.allocation_status || raw.allocationStatus || "",
     buyer: row.buyer || raw.buyer || raw.customerName || "",
     buyerEmail: row.buyer_email || raw.buyerEmail || "",
-    customerName: raw.customerName || row.buyer || "",
-    customerEmail: raw.customerEmail || row.buyer_email || "",
+    customerName: row.customer_name || raw.customerName || row.buyer || "",
+    customerEmail: row.customer_email || raw.customerEmail || row.buyer_email || "",
     total: row.total ?? raw.total,
     paidAmount: row.paid_amount ?? raw.paidAmount ?? raw.paid,
     qty: row.qty ?? raw.qty,
     shipBy: row.ship_by?.toISOString?.().slice(0, 10) || raw.shipBy || "",
     createdAt: row.created_at?.toISOString?.() || raw.createdAt || "",
     updatedAt: row.updated_at?.toISOString?.() || raw.updatedAt || "",
-    purchaseOrderIds: Array.isArray(raw.purchaseOrderIds) ? raw.purchaseOrderIds : [],
-    purchaseOrderNumbers: Array.isArray(raw.purchaseOrderNumbers) ? raw.purchaseOrderNumbers : [],
-    workflowExceptions: Array.isArray(raw.workflowExceptions) ? raw.workflowExceptions : [],
-    shipments: Array.isArray(raw.shipments) ? raw.shipments.map((shipment) => ({
+    purchaseOrderIds: Array.isArray(row.purchase_order_ids) ? row.purchase_order_ids : (Array.isArray(raw.purchaseOrderIds) ? raw.purchaseOrderIds : []),
+    purchaseOrderNumbers: Array.isArray(row.purchase_order_numbers) ? row.purchase_order_numbers : (Array.isArray(raw.purchaseOrderNumbers) ? raw.purchaseOrderNumbers : []),
+    workflowExceptions: Array.isArray(row.workflow_exceptions) ? row.workflow_exceptions : (Array.isArray(raw.workflowExceptions) ? raw.workflowExceptions : []),
+    shipments: Array.isArray(row.shipments) ? row.shipments : (Array.isArray(raw.shipments) ? raw.shipments.map((shipment) => ({
       id: shipment.id,
       status: shipment.status,
       trackingNumber: shipment.trackingNumber,
       carrier: shipment.carrier,
       service: shipment.service
-    })) : [],
-    backorderLines: Array.isArray(raw.backorderLines) ? raw.backorderLines : [],
-    fulfillmentRoutes: Array.isArray(raw.fulfillmentRoutes) ? raw.fulfillmentRoutes.map((route) => ({
+    })) : []),
+    backorderLines: Array.isArray(row.backorder_lines) ? row.backorder_lines : (Array.isArray(raw.backorderLines) ? raw.backorderLines : []),
+    fulfillmentRoutes: Array.isArray(row.fulfillment_routes) ? row.fulfillment_routes : (Array.isArray(raw.fulfillmentRoutes) ? raw.fulfillmentRoutes.map((route) => ({
       id: route.id,
       type: route.type,
       status: route.status,
       purchaseOrderId: route.purchaseOrderId,
       warehouseId: route.warehouseId,
       sku: route.sku
-    })) : [],
+    })) : []),
     items: lines.length ? lines.map(orderLineRowToSummary) : (Array.isArray(raw.items) ? raw.items.map((item) => ({
       id: item.id,
       sku: item.sku,
@@ -5452,11 +5453,66 @@ async function listOrders(options = {}) {
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   params.push(limit);
-  const orders = await client.query(`
+  const orderSelect = summary ? `
+    select
+      order_id,
+      order_number,
+      internal_order_number,
+      marketplace_order_id,
+      source,
+      channel_source,
+      status,
+      buyer,
+      buyer_email,
+      customer_id,
+      total,
+      paid_amount,
+      qty,
+      ship_by,
+      created_at,
+      updated_at,
+      raw->>'financialStatus' as financial_status,
+      raw->>'paymentStatus' as payment_status,
+      raw->>'operationalStatus' as operational_status,
+      raw->>'workflowStatus' as workflow_status,
+      raw->>'fulfillmentStatus' as fulfillment_status,
+      raw->>'fulfillmentStage' as fulfillment_stage,
+      raw->>'allocationStatus' as allocation_status,
+      raw->>'customerName' as customer_name,
+      raw->>'customerEmail' as customer_email,
+      case when jsonb_typeof(raw->'purchaseOrderIds') = 'array' then raw->'purchaseOrderIds' else '[]'::jsonb end as purchase_order_ids,
+      case when jsonb_typeof(raw->'purchaseOrderNumbers') = 'array' then raw->'purchaseOrderNumbers' else '[]'::jsonb end as purchase_order_numbers,
+      case when jsonb_typeof(raw->'workflowExceptions') = 'array' then raw->'workflowExceptions' else '[]'::jsonb end as workflow_exceptions,
+      (
+        select coalesce(jsonb_agg(jsonb_build_object(
+          'id', shipment->>'id',
+          'status', shipment->>'status',
+          'trackingNumber', shipment->>'trackingNumber',
+          'carrier', shipment->>'carrier',
+          'service', shipment->>'service'
+        )), '[]'::jsonb)
+        from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment
+      ) as shipments,
+      case when jsonb_typeof(raw->'backorderLines') = 'array' then raw->'backorderLines' else '[]'::jsonb end as backorder_lines,
+      (
+        select coalesce(jsonb_agg(jsonb_build_object(
+          'id', route->>'id',
+          'type', route->>'type',
+          'status', route->>'status',
+          'purchaseOrderId', route->>'purchaseOrderId',
+          'warehouseId', route->>'warehouseId',
+          'sku', route->>'sku'
+        )), '[]'::jsonb)
+        from jsonb_array_elements(case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end) route
+      ) as fulfillment_routes
+  ` : `
     select *
+  `;
+  const orders = await client.query(`
+    ${orderSelect}
     from order_records
     ${whereSql}
-    order by coalesce(created_at, updated_at) desc, order_number desc
+    order by created_at desc, order_number desc
     limit $${params.length}
   `, params);
   const ids = orders.rows.map((row) => row.order_id).filter(Boolean);
