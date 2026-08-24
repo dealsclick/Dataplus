@@ -20856,7 +20856,7 @@ async function testTemuConnection(db = {}) {
         for (const check of [
           ["detail", "bg.order.detail.v2.get", { parentOrderSn: sampleOrderSn }],
           ["amount", "bg.order.amount.query", { parentOrderSn: sampleOrderSn }],
-          ["amount_v2", "temu.order.amount.v2.query", { parentOrderSn: sampleOrderSn }],
+          ...(temuScopeAvailable(db, "temu.order.amount.v2.query") ? [["amount_v2", "temu.order.amount.v2.query", { parentOrderSn: sampleOrderSn }]] : []),
           ["shipping", "bg.order.shippinginfo.v2.get", { parentOrderSn: sampleOrderSn }],
           ["decrypt_shipping", "bg.order.decryptshippinginfo.get", { parentOrderSn: sampleOrderSn }],
           ["unshipped_package", "bg.order.unshipped.package.get", { parentOrderSn: sampleOrderSn }],
@@ -20866,7 +20866,9 @@ async function testTemuConnection(db = {}) {
             const response = await temuRequest(check[1], check[2], { db, allowErrorResult: true });
             if (check[0] === "detail") sampleDetail = response;
           } catch (error) {
-            scopeWarnings.push(`${check[0]}: ${error.message}`);
+            const message = `${check[0]}: ${error.message}`;
+            if (check[0] === "unshipped_package" && /BUSINESS_SERVICE_ERROR/i.test(message)) continue;
+            scopeWarnings.push(message);
           }
         }
         const sampleChildOrderSns = [...new Set(childItemsFromTemuPayload(sampleDetail, sampleOrder).map((item) => String(valueAt(item, ["orderSn", "order_sn"], "")).trim()).filter(Boolean))];
@@ -20874,7 +20876,8 @@ async function testTemuConnection(db = {}) {
           try {
             await temuRequest("bg.order.customization.get", { orderSnList: sampleChildOrderSns }, { db, allowErrorResult: true });
           } catch (error) {
-            scopeWarnings.push(`customization: ${error.message}`);
+            const message = `customization: ${error.message}`;
+            if (!/do not contain a custom type order/i.test(message)) scopeWarnings.push(message);
           }
         }
       }
@@ -20981,15 +20984,21 @@ function childItemsFromTemuPayload(...payloads) {
 }
 
 async function optionalTemuOrderRequest(type, payload, context = {}) {
-  const { db, parentOrderSn, label, errors = [], orderErrors = [] } = context;
+  const { db, parentOrderSn, label, errors = [], orderErrors = [], suppressErrorPatterns = [] } = context;
   try {
     return await temuRequest(type, payload, { db, allowErrorResult: true });
   } catch (error) {
     const message = `${label || type} ${parentOrderSn || "unknown"}: ${error.message}`;
+    if (suppressErrorPatterns.some((pattern) => pattern.test(message))) return {};
     errors.push(message);
     orderErrors.push(message);
     return {};
   }
+}
+
+function temuScopeAvailable(db, scope) {
+  const scopes = mergedConnectorState(db).temuApiScopeList;
+  return Array.isArray(scopes) && scopes.some((value) => String(value || "").trim() === scope);
 }
 
 function temuItemProductList(item = {}) {
@@ -23211,17 +23220,23 @@ async function importTemuOrders(db, options = {}) {
       }
       if (parentOrderSn) {
         amount = await optionalTemuOrderRequest("bg.order.amount.query", { parentOrderSn }, { db, parentOrderSn, label: "amount", errors, orderErrors });
-        if (!Object.keys(temuPayload(amount)).length) {
+        if (!Object.keys(temuPayload(amount)).length && temuScopeAvailable(db, "temu.order.amount.v2.query")) {
           amountV2 = await optionalTemuOrderRequest("temu.order.amount.v2.query", { parentOrderSn }, { db, parentOrderSn, label: "amount_v2", errors, orderErrors });
         }
         shipping = await optionalTemuOrderRequest("bg.order.shippinginfo.v2.get", { parentOrderSn }, { db, parentOrderSn, label: "shipping", errors, orderErrors });
         decryptShipping = await optionalTemuOrderRequest("bg.order.decryptshippinginfo.get", { parentOrderSn }, { db, parentOrderSn, label: "decrypt_shipping", errors, orderErrors });
-        unshippedPackage = await optionalTemuOrderRequest("bg.order.unshipped.package.get", { parentOrderSn }, { db, parentOrderSn, label: "unshipped_package", errors, orderErrors });
+        unshippedPackage = await optionalTemuOrderRequest("bg.order.unshipped.package.get", { parentOrderSn }, {
+          db, parentOrderSn, label: "unshipped_package", errors, orderErrors,
+          suppressErrorPatterns: [/BUSINESS_SERVICE_ERROR/i]
+        });
         combinedShipment = await optionalTemuOrderRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, parentOrderSn, label: "combined_shipment", errors, orderErrors });
       }
       const childOrderSns = [...new Set(childItemsFromTemuPayload(detail, listOrder).map((item) => String(valueAt(item, ["orderSn", "order_sn"], "")).trim()).filter(Boolean))];
       if (childOrderSns.length) {
-        customization = await optionalTemuOrderRequest("bg.order.customization.get", { orderSnList: childOrderSns }, { db, parentOrderSn, label: "customization", errors, orderErrors });
+        customization = await optionalTemuOrderRequest("bg.order.customization.get", { orderSnList: childOrderSns }, {
+          db, parentOrderSn, label: "customization", errors, orderErrors,
+          suppressErrorPatterns: [/do not contain a custom type order/i]
+        });
       }
 
       const mappedOrder = mapTemuOrder(listOrder, detail, shipping, amount, orderErrors, {
