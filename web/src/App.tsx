@@ -9895,7 +9895,7 @@ function OrderActionsMenu({ order, busy, onAction, onRefresh, onRefreshRouting, 
       ...(onRefresh ? [{ id: "refresh", label: "Refresh order", description: "Reload the order, its channel data, and current workflow state.", icon: <RefreshCw className="size-4" />, onSelect: onRefresh }] : []),
       ...(onRefreshRouting ? [{ id: "refresh-routing", label: "Refresh routing", description: "Re-evaluate warehouse stock, allocations, and supplier purchase requirements.", icon: <RefreshCw className="size-4" />, onSelect: onRefreshRouting }] : []),
       { id: "packing-slip", label: "Print packing slip", description: "Open a printable packing slip in a new tab.", icon: <FileDown className="size-4" />, onSelect: () => window.open(packingSlipUrl, "_blank", "noopener,noreferrer") },
-      ...(isTemu && onPrintTemuLabel ? [{ id: "temu-label", label: "Print Temu shipping label", description: "Fetch the current Temu waybill, attach it to Documents, and open it for printing.", icon: <Truck className="size-4" />, onSelect: onPrintTemuLabel }] : []),
+      ...(onPrintTemuLabel ? [{ id: "shipping-label", label: "Print shipping label", description: isTemu ? "Load Temu and universal carrier label options." : "Load universal carrier label options for this order.", icon: <Truck className="size-4" />, onSelect: onPrintTemuLabel }] : []),
       { id: "accounting-export", label: "Export accounting CSV", description: "Download a CSV for order accounting review.", icon: <FileDown className="size-4" />, group: "Utilities", onSelect: () => window.open("/api/orders/accounting-export.csv", "_blank", "noopener,noreferrer") },
       ...(isShopify ? [{ id: "sync-address", label: "Send address to Shopify", description: "Push the current order address to Shopify.", icon: <RefreshCw className="size-4" />, onSelect: () => void onAction("sync-address") }] : []),
       { id: "fulfill-all", label: "Record full shipment", description: "Open fulfillment for every remaining line item.", icon: <Truck className="size-4" />, onSelect: () => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-all" } })) },
@@ -9953,6 +9953,101 @@ function OrderFinancePanel({ orderId, order, lines, onUpdated }: { orderId: stri
   const recordPayment = async () => { await run(`/api/orders/${encodeURIComponent(orderId)}/payments`, { ...payment, amount: Number(payment.amount || 0) }); setPaymentOpen(false) }
   const recordRefund = async () => { await run(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { ...refund, amount: Number(refund.amount || 0), items: lines.map((line, lineIndex) => ({ sku: String(line.sku || ""), title: String(line.title || ""), qty: Number(line.qty || 0), price: Number(line.price || 0), lineIndex })) }); setRefundOpen(false) }
   return <div className="grid gap-4"><div className="flex flex-wrap gap-2"><Button onClick={() => { setPayment({ amount: String(Math.max(0, total - paid)), provider: "Manual", status: "captured", transactionId: "" }); setPaymentOpen(true) }}>Record payment</Button><Button variant="outline" onClick={() => { setRefund({ amount: String(Math.max(0, total - refunded)), method: "manual", reference: "", reason: "Customer request", note: "" }); setRefundOpen(true) }}>Record refund</Button></div><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Order total" value={moneyLabel(total)} /><Detail label="Captured / paid" value={moneyLabel(paid)} /><Detail label="Refunded" value={moneyLabel(refunded)} /><Detail label="Open balance" value={moneyLabel(Math.max(0, total - paid + refunded))} /></div><Card><CardHeader><CardTitle className="text-sm">Transactions</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Provider</TableHead><TableHead>Reference</TableHead><TableHead>Kind</TableHead><TableHead>Amount</TableHead><TableHead>Status</TableHead><TableHead>Recorded</TableHead></TableRow></TableHeader><TableBody>{payments.map((row) => <TableRow key={String(row.id)}><TableCell>{String(row.provider || "-")}</TableCell><TableCell>{String(row.transactionId || "-")}</TableCell><TableCell>{String(row.kind || "payment")}</TableCell><TableCell>{moneyLabel(Number(row.amount || 0))}</TableCell><TableCell><Badge variant={String(row.status || "").toLowerCase() === "voided" ? "outline" : "secondary"}>{String(row.status || "-")}</Badge></TableCell><TableCell>{dateLabel(String(row.createdAt || ""))}</TableCell></TableRow>)}{!payments.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No payment transactions recorded.</TableCell></TableRow>}</TableBody></Table></CardContent></Card>{refunds.length > 0 && <Card><CardHeader><CardTitle className="text-sm">Refunds</CardTitle></CardHeader><CardContent className="grid gap-2">{refunds.map((row) => <div key={String(row.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><span>{String(row.reason || "Refund")} / {String(row.method || "manual")}</span><span className="font-medium">{moneyLabel(Number(row.amount || 0))}</span><span className="text-muted-foreground">{dateLabel(String(row.refundedAt || row.createdAt || ""))}</span></div>)}</CardContent></Card>}<Dialog open={paymentOpen} onOpenChange={setPaymentOpen}><DialogContent><DialogHeader><DialogTitle>Record payment</DialogTitle><DialogDescription>This records an operational payment transaction in DataPlus.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Amount"><Input type="number" min="0" step="0.01" value={payment.amount} onChange={(event) => setPayment({ ...payment, amount: event.target.value })} /></Field><Field label="Provider"><Input value={payment.provider} onChange={(event) => setPayment({ ...payment, provider: event.target.value })} /></Field><Field label="Transaction reference"><Input value={payment.transactionId} onChange={(event) => setPayment({ ...payment, transactionId: event.target.value })} /></Field><Field label="Status"><Select value={payment.status} onValueChange={(status) => setPayment({ ...payment, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="authorized">Authorized</SelectItem><SelectItem value="captured">Captured</SelectItem><SelectItem value="paid">Paid</SelectItem></SelectContent></Select></Field></div><DialogFooter><Button variant="outline" onClick={() => setPaymentOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void recordPayment()}>Save payment</Button></DialogFooter></DialogContent></Dialog><Dialog open={refundOpen} onOpenChange={setRefundOpen}><DialogContent><DialogHeader><DialogTitle>Record refund</DialogTitle><DialogDescription>This records a local refund and keeps the order margin audit accurate. It does not send a refund to Shopify.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Amount"><Input type="number" min="0" step="0.01" value={refund.amount} onChange={(event) => setRefund({ ...refund, amount: event.target.value })} /></Field><Field label="Method"><Input value={refund.method} onChange={(event) => setRefund({ ...refund, method: event.target.value })} /></Field><Field label="Reference"><Input value={refund.reference} onChange={(event) => setRefund({ ...refund, reference: event.target.value })} /></Field><Field label="Reason"><Input value={refund.reason} onChange={(event) => setRefund({ ...refund, reason: event.target.value })} /></Field><Field label="Internal note"><Textarea value={refund.note} onChange={(event) => setRefund({ ...refund, note: event.target.value })} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setRefundOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void recordRefund()}>Save refund</Button></DialogFooter></DialogContent></Dialog></div>
+}
+
+function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, warehouses, lines, remaining, onUpdated }: { open: boolean; onOpenChange: (open: boolean) => void; orderId: string; order: Record<string, unknown>; warehouses: Array<Record<string, unknown>>; lines: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number; onUpdated: () => Promise<void> }) {
+  const [loading, setLoading] = useState(false)
+  const [rates, setRates] = useState<Array<Record<string, unknown>>>([])
+  const [blockers, setBlockers] = useState<string[]>([])
+  const [selectedId, setSelectedId] = useState("")
+  const [draft, setDraft] = useState({ warehouseId: "", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "", shipDate: new Date().toISOString().slice(0, 10) })
+  useEffect(() => {
+    if (!open) return
+    let weight = 0, length = 0, width = 0, height = 0
+    lines.forEach((line, index) => {
+      const qty = remaining(line, index)
+      const product = (line.localProduct || {}) as Record<string, unknown>
+      const numeric = (...values: unknown[]) => values.map(Number).find((value) => Number.isFinite(value) && value > 0) || 0
+      weight += numeric(product.packageWeight, product.itemWeight, line.packageWeight, line.itemWeight, line.weight) * qty
+      length = Math.max(length, numeric(product.packageLength, product.itemLength, line.packageLength, line.itemLength))
+      width = Math.max(width, numeric(product.packageWidth, product.itemWidth, line.packageWidth, line.itemWidth))
+      height = Math.max(height, numeric(product.packageHeight, product.itemHeight, line.packageHeight, line.itemHeight))
+    })
+    const label = (value: number) => value > 0 ? String(Math.round(value * 100) / 100) : ""
+    setDraft({ warehouseId: String(order.fulfillmentWarehouseId || warehouses[0]?.id || ""), packageWeight: label(weight), packageLength: label(length), packageWidth: label(width), packageHeight: label(height), shipDate: new Date().toISOString().slice(0, 10) })
+    setRates([])
+    setBlockers([])
+    setSelectedId("")
+  }, [open, order, warehouses, lines])
+  const selected = rates.find((rate) => String(rate.id) === selectedId)
+  const selectedLines = lines.map((line, lineIndex) => ({ sku: String(line.sku || ""), lineIndex, qty: remaining(line, lineIndex) })).filter((line) => line.sku && line.qty > 0)
+  const loadRates = async () => {
+    setLoading(true)
+    try {
+      const result = await api<{ rates?: Array<Record<string, unknown>>; blockers?: string[]; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/rates`, { method: "POST", body: JSON.stringify({ ...draft, lines: selectedLines }) })
+      const nextRates = result.rates || []
+      setRates(nextRates)
+      setBlockers(result.blockers || [])
+      setSelectedId(String(nextRates.find((rate) => Number(rate.amount) > 0)?.id || nextRates[0]?.id || ""))
+      toast.success(result.message || "Shipping rates loaded.")
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load shipping rates.") } finally { setLoading(false) }
+  }
+  const buy = async () => {
+    if (!selected) return toast.error("Choose a shipping option first.")
+    const printWindow = window.open("", "_blank")
+    setLoading(true)
+    try {
+      const result = await api<{ document?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, labelFormat: "PDF", lines: selectedLines }) })
+      const url = String(result.document?.url || "")
+      if (url) {
+        if (printWindow) printWindow.location.href = url
+        else window.open(url, "_blank", "noopener,noreferrer")
+      } else if (printWindow) printWindow.close()
+      await onUpdated()
+      onOpenChange(false)
+      toast.success(result.message || "Shipping label ready.")
+    } catch (error) { if (printWindow) printWindow.close(); toast.error(error instanceof Error ? error.message : "Unable to print shipping label.") } finally { setLoading(false) }
+  }
+  const sortedRates = [...rates].sort((a, b) => (Number(a.amount || Number.MAX_SAFE_INTEGER) || Number.MAX_SAFE_INTEGER) - (Number(b.amount || Number.MAX_SAFE_INTEGER) || Number.MAX_SAFE_INTEGER))
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>Print shipping label</DialogTitle>
+          <DialogDescription>Load available label options for this order, choose a rate, then print the attached label.</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4">
+          <div className="grid gap-3 md:grid-cols-3">
+            <Field label="Warehouse"><Select value={draft.warehouseId || "none"} onValueChange={(value) => setDraft((current) => ({ ...current, warehouseId: value === "none" ? "" : value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">No warehouse</SelectItem>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select></Field>
+            <Field label="Ship date"><Input type="date" value={draft.shipDate} onChange={(event) => setDraft((current) => ({ ...current, shipDate: event.target.value }))} /></Field>
+            <Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={draft.packageWeight} onChange={(event) => setDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field>
+            <Field label="Length (in)"><Input type="number" min="0" step="0.01" value={draft.packageLength} onChange={(event) => setDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field>
+            <Field label="Width (in)"><Input type="number" min="0" step="0.01" value={draft.packageWidth} onChange={(event) => setDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field>
+            <Field label="Height (in)"><Input type="number" min="0" step="0.01" value={draft.packageHeight} onChange={(event) => setDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/25 p-3 text-sm">
+            <span>{selectedLines.length} line{selectedLines.length === 1 ? "" : "s"} selected for remaining quantities.</span>
+            <Button size="sm" onClick={() => void loadRates()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Load options</Button>
+          </div>
+          {blockers.length > 0 && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Rates need setup</AlertTitle><AlertDescription>{blockers.join(" ")}</AlertDescription></Alert>}
+          <div className="grid gap-2">
+            {sortedRates.map((rate, index) => <button key={String(rate.id)} type="button" onClick={() => setSelectedId(String(rate.id))} className={cn("grid gap-1 rounded-md border p-3 text-left text-sm hover:bg-muted/40", selectedId === String(rate.id) && "border-primary bg-primary/10")}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium">{String(rate.carrier || rate.provider)} / {String(rate.service || "Shipping")}</span>
+                <div className="flex items-center gap-2">{index === 0 && Number(rate.amount || 0) > 0 && <Badge variant="secondary">Lowest</Badge>}<Badge variant="outline">{String(rate.provider || "provider")}</Badge><span className="font-semibold">{Number(rate.amount || 0) > 0 ? moneyLabel(Number(rate.amount || 0)) : "Channel label"}</span></div>
+              </div>
+              {Array.isArray(rate.protections) && rate.protections.length > 0 && <p className="text-xs text-muted-foreground">Protections: {rate.protections.map(String).join(", ")}</p>}
+            </button>)}
+            {!rates.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">Load options to compare available shipping labels for this order.</p>}
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button disabled={loading || !selected} onClick={() => void buy()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Print selected label</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 function LinkedPurchaseOrdersTable({ purchaseOrders }: { purchaseOrders: Array<Record<string, unknown>> }) {
@@ -10191,6 +10286,7 @@ function OrderDetailWorkspace() {
   const [loading, setLoading] = useState(true)
   const [fulfillOpen, setFulfillOpen] = useState(false)
   const [labelWorkflow, setLabelWorkflow] = useState(false)
+  const [shippingLabelOpen, setShippingLabelOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [warehouseId, setWarehouseId] = useState("")
   const [carrier, setCarrier] = useState("UPS")
@@ -10291,7 +10387,6 @@ function OrderDetailWorkspace() {
     setLineQty(quantities)
     applyShipmentPackageDefaults(quantities)
   }
-  const openShippingLabel = () => { openFulfill(true); setLabelWorkflow(true) }
   useEffect(() => {
     const handleDetailAction = (event: Event) => {
       const action = (event as CustomEvent<{ action?: string }>).detail?.action
@@ -10390,37 +10485,13 @@ function OrderDetailWorkspace() {
       setSaving(false)
     }
   }
-  async function printTemuShippingLabel() {
-    const printWindow = window.open("", "_blank")
-    setSaving(true)
-    try {
-      const result = await api<{ order?: Record<string, unknown>; document?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(String(order?.id || orderId))}/shipping-labels/temu`, { method: "POST", body: JSON.stringify({ documentType: "SHIPPING_LABEL_PDF" }) })
-      setOrder(result.order || order)
-      const url = String(result.document?.url || "")
-      if (url) {
-        if (printWindow) printWindow.location.href = url
-        else window.open(url, "_blank", "noopener,noreferrer")
-      } else if (printWindow) {
-        printWindow.close()
-      }
-      await load()
-      toast.success(result.message || "Temu shipping label is ready.")
-      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
-    } catch (error) {
-      if (printWindow) printWindow.close()
-      toast.error(error instanceof Error ? error.message : "Unable to print Temu shipping label.")
-    } finally {
-      setSaving(false)
-    }
-  }
   if (loading) return <div className="grid gap-4"><Skeleton className="h-24" /><Skeleton className="h-44" /><Skeleton className="h-72" /></div>
   if (!order) return <Card><CardContent className="p-8 text-center text-muted-foreground">This order was not found.</CardContent></Card>
   const routingState = getOrderRoutingState(order)
-  const isTemuOrder = String(order.source || "").toLowerCase() === "temu"
-  const fulfillmentWorkspace = <Card className="h-full"><CardHeader className="gap-3 border-b"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{String(order.fulfillmentWarehouseName || "Staten Island warehouse")}</Badge><Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Order-level fulfillment status. Each line below shows its own remaining quantity.</TooltipContent></Tooltip></div><div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{String(order.shippingService || "Shipping service will be selected with the label")}</p><p className="mt-1 text-muted-foreground">{String(order.shippingAddressLabel || "Delivery address")}</p></div></CardHeader><CardContent className="grid gap-3 p-3"><OrderFulfillmentItemRows lines={lines} remaining={remaining} /><div className="flex flex-wrap justify-end gap-2 border-t pt-3"><Button size="sm" variant="outline" onClick={() => openFulfill(true)}>Mark as fulfilled</Button>{String(order.source || "").toLowerCase() === "shopify" && <Button size="sm" onClick={openShippingLabel}><Truck className="size-4" /> Create shipping label</Button>}{isTemuOrder && <Button size="sm" disabled={saving} onClick={() => void printTemuShippingLabel()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Print Temu label</Button>}</div></CardContent></Card>
+  const fulfillmentWorkspace = <Card className="h-full"><CardHeader className="gap-3 border-b"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{String(order.fulfillmentWarehouseName || "Staten Island warehouse")}</Badge><Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Order-level fulfillment status. Each line below shows its own remaining quantity.</TooltipContent></Tooltip></div><div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">{String(order.shippingService || "Shipping service will be selected with the label")}</p><p className="mt-1 text-muted-foreground">{String(order.shippingAddressLabel || "Delivery address")}</p></div></CardHeader><CardContent className="grid gap-3 p-3"><OrderFulfillmentItemRows lines={lines} remaining={remaining} /><div className="flex flex-wrap justify-end gap-2 border-t pt-3"><Button size="sm" variant="outline" onClick={() => openFulfill(true)}>Mark as fulfilled</Button><Button size="sm" disabled={saving} onClick={() => setShippingLabelOpen(true)}><Truck className="size-4" /> Print shipping label</Button></div></CardContent></Card>
   const orderContext = <div className="grid content-start gap-4"><Card><Collapsible defaultOpen><CardHeader className="flex flex-row items-start justify-between gap-3 pb-2"><div><CardTitle className="text-sm">Customer</CardTitle><CardDescription>{String(order.buyer || order.buyerEmail || "Customer")}</CardDescription></div><CollapsibleTrigger asChild><Button size="sm" variant="outline">Details</Button></CollapsibleTrigger></CardHeader><CollapsibleContent><CardContent className="grid gap-3 text-sm"><div><p className="font-medium">Contact information</p><p className="mt-1 break-words text-muted-foreground">{String(order.buyerEmail || "No email")}</p><p className="text-muted-foreground">{String(order.phone || "No phone")}</p></div><div><p className="font-medium">Shipping address</p><p className="mt-1 whitespace-pre-line text-muted-foreground">{addressText(order.address)}</p></div></CardContent></CollapsibleContent></Collapsible></Card><Card><CardHeader className="pb-2"><CardTitle className="text-sm">Payment</CardTitle></CardHeader><CardContent className="grid gap-2 text-sm"><div className="flex justify-between"><span>Items</span><span>{moneyLabel(Number(pnl.itemRevenue || order.total || 0))}</span></div><div className="flex justify-between"><span>Shipping</span><span>{moneyLabel(Number(pnl.shippingCollected || 0))}</span></div><div className="flex justify-between border-t pt-2 font-medium"><span>Total</span><span>{moneyLabel(Number(order.total || 0))}</span></div></CardContent></Card></div>
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button><OrderActionsMenu order={order} busy={saving} onAction={runOrderAction} onRefresh={() => void load()} onRefreshRouting={() => void refreshRouting()} onCreatePurchaseOrders={() => void createPurchaseOrders()} onPrintTemuLabel={() => void printTemuShippingLabel()} /></div>} />
+    <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")} / ${String(order.channelSource || "Unclassified sales channel")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button><OrderActionsMenu order={order} busy={saving} onAction={runOrderAction} onRefresh={() => void load()} onRefreshRouting={() => void refreshRouting()} onCreatePurchaseOrders={() => void createPurchaseOrders()} onPrintTemuLabel={() => setShippingLabelOpen(true)} /></div>} />
     <TooltipProvider><div className="flex flex-wrap items-center gap-2 text-sm"><Tooltip><TooltipTrigger asChild><Badge variant="outline">{String(order.financialStatus || "Unpaid")}</Badge></TooltipTrigger><TooltipContent>Payment state reported by the sales channel.</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Overall fulfillment state. Line-level status appears in the fulfillment workspace.</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={routingState.needsRouting ? "destructive" : routingState.hasActiveRoutes ? "secondary" : "outline"} className={routingState.hasActiveRoutes ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1"}>{routingState.needsRouting ? <AlertCircle className="size-3.5" /> : routingState.hasActiveRoutes ? <CheckCircle2 className="size-3.5" /> : null}{routingState.label}</Badge></TooltipTrigger><TooltipContent>{routingState.detail}</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={hasPurchaseOrders ? "secondary" : "outline"} className={hasPurchaseOrders ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1 text-muted-foreground"}>{hasPurchaseOrders ? <CheckCircle2 className="size-3.5" /> : <AlertCircle className="size-3.5" />}{hasPurchaseOrders ? "Has PO" : "No PO"}</Badge></TooltipTrigger><TooltipContent>{hasPurchaseOrders ? "At least one supplier purchase order is linked to this order." : "No supplier purchase order is linked yet."}</TooltipContent></Tooltip><span className="text-muted-foreground">{dateLabel(String(order.createdAt || order.importedAt || ""))} from {String(order.channelSource || order.source || "channel")}</span></div></TooltipProvider>
     <div className="grid gap-4 lg:hidden">{fulfillmentWorkspace}{orderContext}</div>
     <ResizablePanelGroup orientation="horizontal" className="hidden min-h-[360px] overflow-hidden rounded-lg border bg-card lg:flex"><ResizablePanel defaultSize={72} minSize={45}><ScrollArea className="h-[440px] p-3">{fulfillmentWorkspace}</ScrollArea></ResizablePanel><ResizableHandle withHandle /><ResizablePanel defaultSize={28} minSize={20}><ScrollArea className="h-[440px] p-3">{orderContext}</ScrollArea></ResizablePanel></ResizablePanelGroup>
@@ -10481,6 +10552,7 @@ function OrderDetailWorkspace() {
         <DialogFooter><Button variant="outline" onClick={() => setFulfillOpen(false)}>Cancel</Button>{!labelWorkflow && <Button disabled={saving} onClick={() => void saveFulfillment()}>Record shipment</Button>}</DialogFooter>
       </DialogContent>
     </Dialog>
+    <UniversalShippingLabelDialog open={shippingLabelOpen} onOpenChange={setShippingLabelOpen} orderId={orderId} order={order} warehouses={warehouses} lines={lines} remaining={remaining} onUpdated={load} />
   </div>
 }
 
@@ -18601,6 +18673,17 @@ function SettingsPage({
               <ToggleField label="Auto-create pick lists" checked={boolValue("fulfillmentAutoCreatePickLists")} disabled={!editing} onCheckedChange={(next) => update("fulfillmentAutoCreatePickLists", next)} />
               <Field label="Default weight unit"><Select disabled={!editing} value={String(value("fulfillmentDefaultWeightUnit") || "lb")} onValueChange={(next) => update("fulfillmentDefaultWeightUnit", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="lb">Pounds</SelectItem><SelectItem value="oz">Ounces</SelectItem><SelectItem value="kg">Kilograms</SelectItem><SelectItem value="g">Grams</SelectItem></SelectContent></Select></Field>
               <Field label="Default dimension unit"><Select disabled={!editing} value={String(value("fulfillmentDefaultDimensionUnit") || "in")} onValueChange={(next) => update("fulfillmentDefaultDimensionUnit", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="in">Inches</SelectItem><SelectItem value="cm">Centimeters</SelectItem></SelectContent></Select></Field>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle className="text-base">Universal shipping rater</CardTitle><CardDescription>Use one order label workflow while DataPlus loads channel-native labels and third-party carrier rates.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <ToggleField label="Enable Veeqo rates and labels" checked={boolValue("shippingRaterVeeqoEnabled")} disabled={!editing} onCheckedChange={(next) => update("shippingRaterVeeqoEnabled", next)} />
+              <Field label="Veeqo API base URL"><Input disabled={!editing} value={String(value("veeqoApiBaseUrl") || "https://api.veeqo.com")} onChange={(event) => update("veeqoApiBaseUrl", event.target.value)} /></Field>
+              <Field label="Veeqo API key"><Input disabled={!editing} type="password" value={String(draft.veeqoApiKey || "")} onChange={(event) => update("veeqoApiKey", event.target.value)} placeholder={settings.veeqoApiKeyConfigured ? "Configured (enter only to replace)" : "Veeqo x-api-key"} /></Field>
+              <Field label="Seller display name"><Input disabled={!editing} value={String(value("veeqoSellerDisplayName") || "DataPlus")} onChange={(event) => update("veeqoSellerDisplayName", event.target.value)} /></Field>
+              <Field label="Default label format"><Select disabled={!editing} value={String(value("veeqoDefaultLabelFormat") || "PDF")} onValueChange={(next) => update("veeqoDefaultLabelFormat", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem><SelectItem value="ZPL">ZPL</SelectItem><SelectItem value="JPEG">JPEG</SelectItem></SelectContent></Select></Field>
+              <div className="rounded-md border bg-muted/25 p-3 text-sm text-muted-foreground xl:col-span-3">Veeqo rate shopping uses package dimensions, ship-from address, order value, and selected order lines. Temu orders can still show the marketplace label option in the same print workflow.</div>
             </CardContent>
           </Card>
         </TabsContent>

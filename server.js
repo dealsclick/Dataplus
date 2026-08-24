@@ -1031,6 +1031,11 @@ const DEFAULT_SYSTEM_SETTINGS = {
   fulfillmentAutoCreatePickLists: false,
   fulfillmentDefaultWeightUnit: "lb",
   fulfillmentDefaultDimensionUnit: "in",
+  shippingRaterVeeqoEnabled: false,
+  veeqoApiBaseUrl: "https://api.veeqo.com",
+  veeqoApiKey: "",
+  veeqoSellerDisplayName: "DataPlus",
+  veeqoDefaultLabelFormat: "PDF",
   notificationsEnabled: true,
   notificationRecipients: [],
   notificationInAppEnabled: true,
@@ -5153,6 +5158,11 @@ function normalizeSystemSettings(settings = {}) {
     ? String(normalized.fulfillmentDefaultWeightUnit).toLowerCase() : "lb";
   normalized.fulfillmentDefaultDimensionUnit = ["in", "cm"].includes(String(normalized.fulfillmentDefaultDimensionUnit || "").toLowerCase())
     ? String(normalized.fulfillmentDefaultDimensionUnit).toLowerCase() : "in";
+  normalized.veeqoApiBaseUrl = String(normalized.veeqoApiBaseUrl || "https://api.veeqo.com").trim().replace(/\/+$/, "") || "https://api.veeqo.com";
+  if (normalized.veeqoApiKey === undefined && process.env.VEEQO_API_KEY) normalized.veeqoApiKey = process.env.VEEQO_API_KEY;
+  normalized.veeqoApiKey = String(normalized.veeqoApiKey || "").trim();
+  normalized.veeqoSellerDisplayName = String(normalized.veeqoSellerDisplayName || normalized.organizationName || "DataPlus").trim() || "DataPlus";
+  normalized.veeqoDefaultLabelFormat = ["PDF", "PNG", "ZPL", "JPEG"].includes(String(normalized.veeqoDefaultLabelFormat || "").toUpperCase()) ? String(normalized.veeqoDefaultLabelFormat).toUpperCase() : "PDF";
   normalized.backupDestination = ["local", "s3", "digitalocean-spaces"].includes(String(normalized.backupDestination || "").toLowerCase())
     ? String(normalized.backupDestination).toLowerCase() : "local";
   for (const field of [
@@ -5160,6 +5170,7 @@ function normalizeSystemSettings(settings = {}) {
     "ordersRemoveCanceledLinesFromDraftPos", "ordersRemoveRefundedLinesFromDraftPos", "ordersNotifyRoutingExceptions",
     "inventoryAllowNegativePhysicalStock", "inventoryAutoReleaseCanceledReservations", "fulfillmentAllowPartialShipments",
     "fulfillmentRequirePickedBeforeLabel", "fulfillmentRequirePackageDataBeforeLabel", "fulfillmentAutoCreatePickLists",
+    "shippingRaterVeeqoEnabled",
     "notificationsEnabled", "notificationInAppEnabled", "notificationEmailEnabled", "notifyJobFailures", "notifyFeedFailures",
     "notifyChannelAuthFailures", "notifyLowStock", "notifyStaleFeeds", "notifyOverduePurchaseOrders",
     "notifyReceivingExceptions", "securityAuditLoggingEnabled", "securityCredentialChangeLoggingEnabled",
@@ -5749,7 +5760,7 @@ function publicSystemSettings(settings = {}) {
   const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
   const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
   const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
-  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), authPermissionAuditLog: normalized.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
+  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), authPermissionAuditLog: normalized.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), veeqoApiKey: "", veeqoApiKeyConfigured: Boolean(normalized.veeqoApiKey || process.env.VEEQO_API_KEY), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
 }
 
 function hashWarehouseAuditAdminPin(pin, salt) {
@@ -21102,6 +21113,187 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   return { document, packageSnList, response: documentPayload };
 }
 
+function veeqoConfig(settings = {}) {
+  const normalized = normalizeSystemSettings(settings);
+  return {
+    enabled: normalized.shippingRaterVeeqoEnabled === true,
+    baseUrl: String(normalized.veeqoApiBaseUrl || "https://api.veeqo.com").replace(/\/+$/, ""),
+    apiKey: String(normalized.veeqoApiKey || process.env.VEEQO_API_KEY || "").trim(),
+    sellerDisplayName: String(normalized.veeqoSellerDisplayName || normalized.organizationName || "DataPlus").trim() || "DataPlus",
+    labelFormat: String(normalized.veeqoDefaultLabelFormat || "PDF").toUpperCase()
+  };
+}
+
+async function veeqoRequest(pathName, options = {}, settings = {}) {
+  const config = veeqoConfig(settings);
+  if (!config.enabled) throw new Error("Enable Veeqo in Fulfillment settings before requesting Veeqo rates.");
+  if (!config.apiKey) throw new Error("Add the Veeqo API key in Fulfillment settings before requesting Veeqo rates.");
+  const url = /^https?:\/\//i.test(String(pathName)) ? String(pathName) : `${config.baseUrl}${String(pathName).startsWith("/") ? "" : "/"}${pathName}`;
+  const response = await fetch(url, {
+    method: options.method || "GET",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": config.apiKey,
+      ...(options.headers || {})
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  const contentType = String(response.headers.get("content-type") || "");
+  if (options.raw) {
+    if (!response.ok) throw new Error(`Veeqo HTTP ${response.status}`);
+    return { response, content: Buffer.from(await response.arrayBuffer()), contentType };
+  }
+  const text = await response.text();
+  const data = text ? (() => { try { return JSON.parse(text); } catch { return { raw: text }; } })() : {};
+  if (!response.ok) throw new Error(`Veeqo API error: ${JSON.stringify(data).slice(0, 300)}`);
+  return data;
+}
+
+function shippingAddressForRates(order = {}, settings = {}) {
+  const address = order.address || {};
+  return {
+    name: String(address.name || order.buyer || "Customer"),
+    company: String(address.company || ""),
+    phone: String(order.phone || address.phone || ""),
+    email: String(order.buyerEmail || ""),
+    line1: String(address.line1 || ""),
+    line2: String(address.line2 || ""),
+    town: String(address.city || ""),
+    county: String(address.state || ""),
+    postcode: String(address.postalCode || ""),
+    country_code: String(address.country || settings.organizationCountry || "US").slice(0, 2).toUpperCase()
+  };
+}
+
+function shipFromAddressForRates(settings = {}, warehouse = {}) {
+  return {
+    name: String(warehouse.name || settings.organizationName || "DataPlus"),
+    company: String(settings.organizationLegalName || settings.organizationName || "DataPlus"),
+    phone: String(warehouse.phone || settings.organizationPhone || ""),
+    email: String(settings.organizationEmail || ""),
+    line1: String(warehouse.addressLine1 || warehouse.line1 || settings.organizationAddressLine1 || ""),
+    line2: String(warehouse.addressLine2 || warehouse.line2 || settings.organizationAddressLine2 || ""),
+    town: String(warehouse.city || settings.organizationCity || ""),
+    county: String(warehouse.state || settings.organizationState || ""),
+    postcode: String(warehouse.postalCode || settings.organizationPostalCode || ""),
+    country_code: String(warehouse.country || settings.organizationCountry || "US").slice(0, 2).toUpperCase()
+  };
+}
+
+function packageForShippingRates(body = {}, settings = {}) {
+  return {
+    weight: Math.max(0, Number(body.packageWeight || body.weightPounds || body.weight || 0) || 0),
+    weight_unit: String(body.weightUnit || settings.fulfillmentDefaultWeightUnit || "lb").toLowerCase(),
+    length: Math.max(0, Number(body.packageLength || body.lengthInches || body.length || 0) || 0),
+    width: Math.max(0, Number(body.packageWidth || body.widthInches || body.width || 0) || 0),
+    height: Math.max(0, Number(body.packageHeight || body.heightInches || body.height || 0) || 0),
+    dimension_unit: String(body.dimensionUnit || settings.fulfillmentDefaultDimensionUnit || "in").toLowerCase()
+  };
+}
+
+function orderLinesForShippingRates(order = {}, body = {}) {
+  const requested = Array.isArray(body.lines) ? body.lines : [];
+  const items = Array.isArray(order.items) ? order.items : [];
+  const selected = requested.length ? requested : items.map((line, lineIndex) => ({ ...line, lineIndex, qty: Number(line.qty || 0) }));
+  return selected.map((line) => {
+    const source = items[Number(line.lineIndex || 0)] || line;
+    return {
+      remote_id: String(source.channelVariantId || source.temuSkuId || source.sku || source.id || crypto.randomUUID()),
+      title: String(source.title || source.sku || "Item"),
+      sku: String(source.sku || ""),
+      quantity: Math.max(1, Number(line.qty || source.qty || 1) || 1),
+      value: String(Number(source.price || 0).toFixed(2)),
+      currency_code: String(order.currency || "USD")
+    };
+  });
+}
+
+function normalizeVeeqoRate(rate = {}, index = 0) {
+  const amount = Number(rate.total_charge?.value || rate.totalCharge?.value || rate.charge?.value || rate.price?.value || rate.base_rate || rate.value || rate.amount || 0) || 0;
+  return {
+    id: String(rate.name || rate.rate_id || rate.rateId || rate.id || `veeqo-rate-${index}`),
+    provider: "veeqo",
+    carrier: String(rate.carrier || rate.carrier_name || rate.carrierName || "Veeqo"),
+    service: String(rate.service_name || rate.serviceName || rate.service_type || rate.serviceType || rate.name || "Shipping"),
+    amount,
+    currency: String(rate.total_charge?.unit || rate.currency_code || rate.currency || "USD"),
+    remoteShipmentId: String(rate.remote_shipment_id || rate.remoteShipmentId || ""),
+    serviceType: String(rate.service_type || rate.serviceType || ""),
+    requestToken: String(rate.request_token || rate.requestToken || ""),
+    protections: Array.isArray(rate.protections) ? rate.protections : [],
+    raw: rate
+  };
+}
+
+async function getUniversalShippingRates(order, db = {}, body = {}) {
+  const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+  const warehouseId = String(body.warehouseId || order.fulfillmentWarehouseId || settings.inventoryDefaultFulfillmentWarehouseId || "").trim();
+  const warehouse = (db.warehouses || []).find((row) => String(row.id || "") === warehouseId) || {};
+  const parcel = packageForShippingRates(body, settings);
+  const blockers = [];
+  const toAddress = shippingAddressForRates(order, settings);
+  const fromAddress = shipFromAddressForRates(settings, warehouse);
+  if (![toAddress.line1, toAddress.town, toAddress.postcode, toAddress.country_code].every(Boolean)) blockers.push("Shipping address is incomplete.");
+  if (![fromAddress.line1, fromAddress.town, fromAddress.postcode, fromAddress.country_code].every(Boolean)) blockers.push("Ship-from address is incomplete in System Settings or warehouse settings.");
+  if (settings.fulfillmentRequirePackageDataBeforeLabel && (!parcel.weight || !parcel.length || !parcel.width || !parcel.height)) blockers.push("Package weight, length, width, and height are required.");
+  const rates = [];
+  if (String(order.source || "").toLowerCase() === "temu") {
+    rates.push({ id: "temu-existing-label", provider: "temu", carrier: "Temu", service: "Marketplace shipping label", amount: null, currency: String(order.currency || "USD"), action: "retrieve_existing_label", raw: {} });
+  }
+  if (!blockers.length && veeqoConfig(settings).enabled) {
+    const payload = {
+      to_address: toAddress,
+      from_address: fromAddress,
+      parcels: [parcel],
+      customer_reference: String(order.marketplaceOrderNumber || order.orderNumber || order.id || ""),
+      estimated_value: String(Number(order.total || 0).toFixed(2)),
+      currency_code: String(order.currency || "USD"),
+      seller_display_name: veeqoConfig(settings).sellerDisplayName,
+      preferred_shipment_date: new Date().toISOString(),
+      channel_items: orderLinesForShippingRates(order, body)
+    };
+    const response = await veeqoRequest("/shipping/api/v1/rates", { method: "POST", body: payload }, settings);
+    const available = Array.isArray(response.available) ? response.available : firstArrayFrom(response.rates || response.shipments || response);
+    rates.push(...available.map(normalizeVeeqoRate));
+  }
+  return { rates, blockers, package: parcel, warehouseId, providers: { temu: String(order.source || "").toLowerCase() === "temu", veeqo: veeqoConfig(settings).enabled && Boolean(veeqoConfig(settings).apiKey) } };
+}
+
+async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
+  const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+  const format = String(options.labelFormat || veeqoConfig(settings).labelFormat || "PDF").toUpperCase();
+  const response = await veeqoRequest("/shipping/api/v1/shipments", {
+    method: "POST",
+    body: {
+      label_format: format,
+      request_token: selectedRate.requestToken || selectedRate.raw?.request_token || undefined,
+      shipments: [{
+        remote_shipment_id: selectedRate.remoteShipmentId || selectedRate.raw?.remote_shipment_id,
+        rate_id: selectedRate.id || selectedRate.raw?.name
+      }]
+    }
+  }, settings);
+  const shipment = firstArrayFrom(response.shipments || response)[0] || response;
+  const labelUrl = String(shipment.label_url || shipment.labelUrl || response.label_url || response.labelUrl || "").trim();
+  if (!labelUrl) throw new Error(`Veeqo did not return a label URL: ${JSON.stringify(response).slice(0, 240)}`);
+  const downloadPath = /^https?:\/\//i.test(labelUrl) ? labelUrl : `${veeqoConfig(settings).baseUrl}${labelUrl.startsWith("/") ? "" : "/"}${labelUrl}`;
+  const downloaded = await veeqoRequest(downloadPath, { raw: true, headers: { accept: format === "PDF" ? "application/pdf" : "*/*" } }, settings);
+  const now = new Date().toISOString();
+  const attachmentId = crypto.randomUUID();
+  const mimeType = orderAttachmentMimeType(downloaded.contentType || (format === "PDF" ? "application/pdf" : "application/octet-stream"));
+  const name = safeOrderAttachmentName(`Veeqo label ${order.orderNumber || order.id}.${format.toLowerCase()}`);
+  fs.mkdirSync(ORDER_ATTACHMENT_DIR, { recursive: true });
+  const storageKey = `${attachmentId}${orderAttachmentExtension(name, mimeType)}`;
+  fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), downloaded.content);
+  const document = { id: attachmentId, name, type: "shipping_label", note: `${selectedRate.carrier || "Veeqo"} ${selectedRate.service || "shipping label"}`, mimeType, size: downloaded.content.length, storage: "local", storageKey, sourceUrl: labelUrl, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Veeqo" };
+  order.documents = [document, ...(Array.isArray(order.documents) ? order.documents : [])];
+  order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+  order.shipments.unshift({ id: crypto.randomUUID(), reference: `${String(order.orderNumber || order.id).replace(/^#/, "")}-VQ${order.shipments.length + 1}`, status: "label_purchased", carrier: selectedRate.carrier || shipment.carrier || "Veeqo", carrierName: selectedRate.carrier || shipment.carrier || "Veeqo", service: selectedRate.service || shipment.service_name || "Shipping", trackingNumber: shipment.tracking_number || shipment.trackingNumber || "", trackingUrl: shipment.tracking_url || shipment.trackingUrl || "", documents: [{ url: document.url, format, documentType: "shipping_label" }], channelSync: { provider: "veeqo", status: "label_purchased", message: "Purchased through the universal shipping rater." }, createdAt: now });
+  addOrderTimeline(order, { type: "shipping_label", title: "Veeqo shipping label purchased", message: `${document.note} attached to this order.`, user: "Veeqo" });
+  order.updatedAt = now;
+  return { document, shipment };
+}
+
 function temuItemProductList(item = {}) {
   if (Array.isArray(item.productList)) return item.productList;
   if (Array.isArray(item.product_list)) return item.product_list;
@@ -35544,6 +35736,42 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping" && parts[4] === "rates" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const result = await getUniversalShippingRates(order, db, body);
+      return sendJson(res, 200, { ...result, message: result.rates.length ? "Shipping rates loaded." : "No shipping rates were returned." });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Shipping rate lookup failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping" && parts[4] === "labels" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const body = await parseBody(req);
+    const provider = String(body.provider || body.rate?.provider || "").toLowerCase();
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      let result;
+      if (provider === "temu") {
+        result = await attachTemuShippingLabel(order, db, { documentType: body.documentType || "SHIPPING_LABEL_PDF" });
+      } else if (provider === "veeqo") {
+        result = await attachVeeqoShippingLabel(order, db, body.rate || {}, { labelFormat: body.labelFormat });
+      } else {
+        return sendJson(res, 400, { error: "Choose a shipping rate before printing a label." });
+      }
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 200, { order, document: result.document, shipment: result.shipment || null, message: "Shipping label attached. Opening it for print." });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Shipping label print failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-quotes" && parts[4] === "shopify" && postgres.isPostgresEnabled()) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
@@ -39411,7 +39639,7 @@ async function handleApi(req, res) {
       else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") current[field] = Number(body[field] || 0);
       else if (Array.isArray(DEFAULT_SYSTEM_SETTINGS[field])) current[field] = Array.isArray(body[field]) ? body[field] : current[field];
       else if (DEFAULT_SYSTEM_SETTINGS[field] && typeof DEFAULT_SYSTEM_SETTINGS[field] === "object") current[field] = body[field] && typeof body[field] === "object" ? body[field] : current[field];
-      else if (["smtpPassword", "aiApiKey", "openAiApiKey", "geminiApiKey", "warehouseImageAnalysisApiKey"].includes(field) && !String(body[field] || "")) current[field] = current[field];
+      else if (["smtpPassword", "veeqoApiKey", "aiApiKey", "openAiApiKey", "geminiApiKey", "warehouseImageAnalysisApiKey"].includes(field) && !String(body[field] || "")) current[field] = current[field];
       else current[field] = String(body[field] || "");
     }
     const aiConfig = getAiRuntimeConfig(current);
