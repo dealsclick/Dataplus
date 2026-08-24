@@ -21984,9 +21984,31 @@ function mapTemuStatus(status) {
   if (["delivered", "completed", "complete", "done"].some((item) => text.includes(item))) return "completed";
   if (["shipped", "fulfilled"].some((item) => text.includes(item))) return "shipped";
   if (["confirmed"].some((item) => text.includes(item))) return "confirmed";
-  if (["ready", "awaiting", "pending"].some((item) => text.includes(item))) return "ready";
+  if (["pending", "unpaid", "awaiting payment", "awaiting_payment"].some((item) => text.includes(item))) return "pending";
+  if (["ready", "awaiting shipment", "awaiting_ship", "unshipped"].some((item) => text.includes(item))) return "ready";
   if (["cancel"].some((item) => text.includes(item))) return "canceled";
   return "new";
+}
+
+function temuOrderStatusImpliesPaid(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  return ["ready", "confirmed", "partial", "shipped", "fulfilled", "completed"].includes(normalized);
+}
+
+function temuOrderIsImportable(mappedOrder = {}, existingOrder = null, includeCanceled = false) {
+  const status = String(mappedOrder.status || mappedOrder.fulfillmentStatus || "").trim().toLowerCase();
+  if (!temuOrderStatusImpliesPaid(status)) {
+    if (status === "canceled") return includeCanceled && Boolean(existingOrder);
+    return false;
+  }
+  return true;
+}
+
+function temuFinancialStatusForOrder(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (temuOrderStatusImpliesPaid(normalized)) return "Paid";
+  if (normalized === "canceled") return "Canceled";
+  return "Pending";
 }
 
 function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErrors = [], extras = {}) {
@@ -22113,6 +22135,8 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
   const lastName = String(valueAt(addressExtra, ["lastName", "additionalLastName"], "")).trim();
   const receiverFromParts = [firstName, lastName].filter(Boolean).join(" ").trim();
   const buyer = String(valueAt(shipTo, ["name", "receiverName", "recipientName", "receiverFullName", "fullName", "receiptName", "receiptAdditionalName"], valueAt(raw, ["buyerName", "customerName", "receiverName"], receiverFromParts || "Temu buyer"))).trim() || "Temu buyer";
+  const orderStatus = mapTemuStatus(valueAt(raw, ["parentOrderStatus", "orderStatus", "status"]));
+  const financialStatus = temuFinancialStatusForOrder(orderStatus);
 
   return {
     id: crypto.randomUUID(),
@@ -22135,8 +22159,10 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     sku: items[0]?.sku || "TEMU-SKU",
     title: items[0]?.title || "Temu order",
     qty: items.reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1,
-    status: mapTemuStatus(valueAt(raw, ["parentOrderStatus", "orderStatus", "status"])),
-    fulfillmentStatus: mapTemuStatus(valueAt(raw, ["parentOrderStatus", "orderStatus", "status"])),
+    status: orderStatus,
+    fulfillmentStatus: orderStatus,
+    financialStatus,
+    paymentStatus: financialStatus,
     subtotal: basePriceTotal,
     total,
     productCost: 0,
@@ -22215,6 +22241,35 @@ function deletedOrderMatches(order = {}, incoming = {}) {
 function isDeletedMarketplaceOrder(db, incoming) {
   db.deletedOrders = Array.isArray(db.deletedOrders) ? db.deletedOrders : [];
   return db.deletedOrders.some((record) => deletedOrderMatches(record, incoming));
+}
+
+function findExistingMarketplaceOrder(db, incoming) {
+  const incomingMarketplaceNumber = incoming.marketplaceOrderNumber || incoming.marketplaceOrderId || incoming.orderNumber;
+  if (!incomingMarketplaceNumber) return null;
+  return (db.orders || []).find((order) => {
+    const existingMarketplaceNumber = order.marketplaceOrderNumber || order.marketplaceOrderId;
+    return order.source === incoming.source && existingMarketplaceNumber === incomingMarketplaceNumber;
+  }) || null;
+}
+
+function removeUnpaidTemuOrderFromQueue(db, incoming) {
+  const existing = findExistingMarketplaceOrder(db, incoming);
+  if (!existing || String(existing.status || "").toLowerCase() === "deleted") return false;
+  existing.status = "deleted";
+  existing.operationalStatus = "pending_payment";
+  existing.workflowStatus = "pending_payment";
+  existing.fulfillmentStatus = "pending";
+  existing.financialStatus = "Pending";
+  existing.paymentStatus = "Pending";
+  existing.localRemovalReason = "Temu order is pending/unpaid and should not create active DataPlus demand.";
+  existing.updatedAt = new Date().toISOString();
+  addOrderTimeline(existing, {
+    type: "temu_pending_removed",
+    title: "Temu pending order removed",
+    message: "Temu reported this order as pending/unpaid, so DataPlus removed it from the active order queue. It can import again if Temu later marks it ship-ready.",
+    user: "DataPlus"
+  });
+  return true;
 }
 
 function deletedOrderTombstone(order = {}, body = {}) {
@@ -24121,10 +24176,7 @@ function upsertOrder(db, incoming) {
   if (isDeletedMarketplaceOrder(db, incoming)) return "skipped";
   applyOrderSkuAliases(db, incoming);
   const incomingMarketplaceNumber = incoming.marketplaceOrderNumber || incoming.marketplaceOrderId || incoming.orderNumber;
-  const existing = db.orders.find((order) => {
-    const existingMarketplaceNumber = order.marketplaceOrderNumber || order.marketplaceOrderId;
-    return order.source === incoming.source && existingMarketplaceNumber === incomingMarketplaceNumber;
-  });
+  const existing = findExistingMarketplaceOrder(db, incoming);
   if (existing?.status === "void") return "skipped";
   if (!existing) {
     incoming.internalOrderNumber = nextOrderNumber(db);
@@ -24357,6 +24409,29 @@ async function importTemuOrders(db, options = {}) {
         combinedShipment,
         customization
       });
+      const existingOrder = findExistingMarketplaceOrder(db, mappedOrder);
+      if (!temuOrderIsImportable(mappedOrder, existingOrder, includeCanceled)) {
+        const mappedStatus = String(mappedOrder.status || "").toLowerCase();
+        if (mappedStatus === "canceled") {
+          skipped += 1;
+          fetched += 1;
+          rows.push({ orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber, status: mappedOrder.status, action: "skipped_canceled", itemCount: mappedOrder.items?.length || 0 });
+          continue;
+        }
+        const removedExisting = removeUnpaidTemuOrderFromQueue(db, mappedOrder);
+        if (removedExisting) updated += 1;
+        else skipped += 1;
+        fetched += 1;
+        rows.push({
+          orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber,
+          status: mappedOrder.status,
+          action: removedExisting ? "removed_unpaid" : "skipped_unpaid",
+          itemCount: mappedOrder.items?.length || 0,
+          buyer: mappedOrder.buyer || "",
+          message: "Temu order is pending/unpaid and was not imported into the active order queue."
+        });
+        continue;
+      }
       if (!includeCanceled && String(mappedOrder.status || "").toLowerCase() === "canceled") {
         skipped += 1;
         fetched += 1;
