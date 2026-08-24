@@ -21574,13 +21574,37 @@ function temuOrderSendInfoList(order = {}, body = {}) {
   }).filter((row) => row.orderSn && row.parentOrderSn && row.goodsId && row.skuId && row.quantity > 0);
 }
 
-function temuPackagePayload(parcel = {}, body = {}) {
+function temuPackagePayload(parcel = {}, body = {}, order = {}) {
   const weightUnit = String(parcel.weight_unit || body.weightUnit || "lb").toLowerCase();
   const dimensionUnit = String(parcel.dimension_unit || body.dimensionUnit || "in").toLowerCase();
   const weight = Number(parcel.weight || body.packageWeight || body.weight || 0) || 0;
   const length = Number(parcel.length || body.packageLength || body.length || 0) || 0;
   const width = Number(parcel.width || body.packageWidth || body.width || 0) || 0;
   const height = Number(parcel.height || body.packageHeight || body.height || 0) || 0;
+  const countryCode = normalizeCountryCode(order.address?.country || order.shippingAddress?.country || body.country || "US");
+  const toPounds = () => {
+    if (weightUnit === "kg") return weight * 2.2046226218;
+    if (weightUnit === "g" || weightUnit === "gram" || weightUnit === "grams") return weight / 453.59237;
+    if (weightUnit === "oz") return weight / 16;
+    return weight;
+  };
+  const toInches = (value) => {
+    if (!value) return 0;
+    if (dimensionUnit === "cm" || dimensionUnit === "centimeter" || dimensionUnit === "centimeters") return value / 2.54;
+    if (dimensionUnit === "mm") return value / 25.4;
+    if (dimensionUnit === "m") return value * 39.37007874;
+    return value;
+  };
+  if (countryCode === "US") {
+    return {
+      weight: String(Math.max(1, Math.ceil(toPounds()))),
+      weightUnit: "lb",
+      length: String(Math.max(1, Math.ceil(toInches(length)))),
+      width: String(Math.max(1, Math.ceil(toInches(width)))),
+      height: String(Math.max(1, Math.ceil(toInches(height)))),
+      dimensionUnit: "in"
+    };
+  }
   const grams = weightUnit === "kg"
     ? weight * 1000
     : weightUnit === "g" || weightUnit === "gram" || weightUnit === "grams"
@@ -21619,7 +21643,7 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   const shipOrderInfoList = orderSendInfoList.map((row) => ({ parentOrderSn: row.parentOrderSn, orderSn: row.orderSn, quantity: row.quantity }));
   const serviceBase = {
     warehouseId: selectedWarehouse.id,
-    ...temuPackagePayload(parcel, body)
+    ...temuPackagePayload(parcel, body, order)
   };
   const attempts = [
     { ...serviceBase, orderSnList },
@@ -21697,7 +21721,7 @@ async function createTemuShipmentPackage(order, db = {}, options = {}) {
   const channelId = Number(rate.channelId || rate.raw?.channelId || rate.raw?.channel_id || rate.raw?.shippingChannelId || 0) || 0;
   if (!warehouseId) throw new Error("Choose a Temu warehouse/service before creating the label.");
   if (!shipCompanyId || !channelId) throw new Error("Temu did not return the shipCompanyId and channelId required to create this label.");
-  const packagePayload = temuPackagePayload(parcel, options);
+  const packagePayload = temuPackagePayload(parcel, options, order);
   const request = {
     sendType: 0,
     sendRequestList: [{
