@@ -39880,15 +39880,15 @@ async function handleApi(req, res) {
       res.writeHead(302, { Location: veeqoAuthorizeUrl(settings) });
       return res.end();
     } catch (error) {
-      return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><p>${escapeHtml(error.message || "Unable to start Veeqo authorization.")}</p><p><a href="/settings?tab=inventory">Return to DataPlus</a></p>`);
+      return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><p>${escapeHtml(error.message || "Unable to start Veeqo authorization.")}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
     }
   }
 
-  if (req.method === "GET" && url.pathname === "/auth/veeqo/callback") {
+  if (req.method === "GET" && (url.pathname === "/auth/veeqo/callback" || (url.pathname === "/" && (url.searchParams.has("code") || url.searchParams.has("error"))))) {
     const code = String(url.searchParams.get("code") || "").trim();
     const errorParam = String(url.searchParams.get("error") || "").trim();
-    if (errorParam) return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(errorParam)}</p><p><a href="/settings?tab=inventory">Return to DataPlus</a></p>`);
-    if (!code) return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>Veeqo did not return an authorization code.</p><p><a href="/settings?tab=inventory">Return to DataPlus</a></p>`);
+    if (errorParam) return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(errorParam)}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
+    if (!code) return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>Veeqo did not return an authorization code.</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
     try {
       const token = await exchangeVeeqoAuthorizationCode(current, code);
@@ -39902,10 +39902,10 @@ async function handleApi(req, res) {
       });
       dbCache.data.systemSettings = next;
       appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "POST", path: "/oauth/token", operation: "Veeqo OAuth connected", statusCode: 200, ok: true, message: "Veeqo OAuth access token generated and stored." });
-      return sendHtml(res, 200, `<!doctype html><title>Veeqo connected</title><h1>Veeqo connected</h1><p>DataPlus stored the Veeqo access token. You can close this tab or return to settings.</p><p><a href="/settings?tab=inventory">Return to DataPlus</a></p>`);
+      return sendHtml(res, 200, `<!doctype html><title>Veeqo connected</title><h1>Veeqo connected</h1><p>DataPlus stored the Veeqo access token. You can close this tab or return to settings.</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
     } catch (error) {
       appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "POST", path: "/oauth/token", operation: "Veeqo OAuth failed", statusCode: 502, ok: false, message: error.message || "Veeqo OAuth failed." });
-      return sendHtml(res, 502, `<!doctype html><title>Veeqo connection</title><h1>Veeqo token exchange failed</h1><p>${escapeHtml(error.message || "Unable to exchange the authorization code.")}</p><p><a href="/settings?tab=inventory">Return to DataPlus</a></p>`);
+      return sendHtml(res, 502, `<!doctype html><title>Veeqo connection</title><h1>Veeqo token exchange failed</h1><p>${escapeHtml(error.message || "Unable to exchange the authorization code.")}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
     }
   }
 
