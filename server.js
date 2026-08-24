@@ -21584,6 +21584,8 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   const selectedWarehouse = warehouses[0];
   if (!selectedWarehouse?.id) return { rates: [], warnings: ["Temu did not return a shipping warehouse. Confirm the Temu app has Logistics Warehouse access."] };
   let services = [];
+  const orderSnList = [...new Set(orderSendInfoList.map((row) => row.orderSn).filter(Boolean))];
+  const parentOrderSnOrderSnList = orderSnList.map((orderSn) => ({ parentOrderSn, orderSn }));
   const serviceBase = {
     warehouseId: selectedWarehouse.id,
     length: String(parcel.length || 0),
@@ -21591,13 +21593,14 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
     height: String(parcel.height || 0),
     weight: String(parcel.weight || 0),
     dimensionUnit: String(parcel.dimension_unit || "in"),
-    weightUnit: String(parcel.weight_unit || "lb"),
-    orderSendInfoList
+    weightUnit: String(parcel.weight_unit || "lb")
   };
   const attempts = [
-    serviceBase,
-    { parentOrderSn, ...serviceBase },
-    { sendRequestList: [serviceBase] }
+    { ...serviceBase, orderSnList },
+    { ...serviceBase, parentOrderSnOrderSnList },
+    { ...serviceBase, parentOrderSnAndOrderSnList: parentOrderSnOrderSnList },
+    { parentOrderSn, ...serviceBase, orderSnList },
+    { sendRequestList: [{ ...serviceBase, orderSnList }] }
   ];
   for (const payload of attempts) {
     try {
