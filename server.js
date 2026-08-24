@@ -19387,14 +19387,17 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
   const limit = Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250) || 250));
   const lookbackDays = Math.max(1, Math.min(365, Number(payload.lookbackDays || 30) || 30));
+  const repairBlind = payload.repairBlind === true || String(payload.repairBlind).toLowerCase() === "true";
   const startedAt = job.startedAt || new Date().toISOString();
   job = await persistWorkerImportJob(job, {
     status: "running",
-    phase: "importing_temu_orders",
+    phase: repairBlind ? "repairing_temu_orders" : "importing_temu_orders",
     totalRows: limit,
     processedRows: 0,
     startedAt,
-    message: payload.scheduled
+    message: repairBlind
+      ? `Repairing blind Temu orders, up to ${limit.toLocaleString()} records...`
+      : payload.scheduled
       ? "Reconciling Temu orders changed since the last successful sync..."
       : `Importing Temu orders from the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
   });
@@ -19424,7 +19427,9 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
     const errorRows = (result.errors || []).map((message) => standardImportError({ source: "Temu", issue: message }));
     attachImportJobErrorsFile(job, errorRows);
     const status = result.errors?.length ? "done_with_warnings" : "success";
-    const message = `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} Temu order${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`;
+    const message = repairBlind
+      ? `Repaired ${Number(result.fetched || 0).toLocaleString()} blind Temu order${Number(result.fetched || 0) === 1 ? "" : "s"} from ${Number(result.repairCandidateCount || 0).toLocaleString()} candidate${Number(result.repairCandidateCount || 0) === 1 ? "" : "s"}: ${Number(result.updated || 0).toLocaleString()} updated.`
+      : `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} Temu order${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`;
     finishImportJob(job, {
       status,
       phase: "complete",
@@ -24236,11 +24241,12 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     includeCanceled: body.includeCanceled === undefined || body.includeCanceled === null || body.includeCanceled === ""
       ? settings.temuOrderImportIncludeCanceled === true
       : body.includeCanceled === true || String(body.includeCanceled).toLowerCase() === "true",
+    repairBlind: body.repairBlind === true || String(body.repairBlind).toLowerCase() === "true",
     forceLookback: options.forceLookback === true || options.scheduled !== true,
     scheduled: options.scheduled === true,
     scheduleKey: options.scheduleKey || ""
   };
-  const operation = options.operation || "Temu order import";
+  const operation = options.operation || (workerPayload.repairBlind ? "Repair blind Temu orders" : "Temu order import");
   const activeImport = await findActiveImportJobByWorkerTask(db, "temu-order-import");
   if (activeImport) return { duplicate: true, job: activeImport, workerPayload };
   const duplicate = await findActiveDuplicateImportJob(db, {
@@ -24265,7 +24271,9 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : "temu-order-import",
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
-    message: options.scheduled
+    message: workerPayload.repairBlind
+      ? `Blind Temu order repair queued, up to ${limit.toLocaleString()} existing orders.`
+      : options.scheduled
       ? `Scheduled Temu order reconciliation queued. It will use the last sync point, or the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"} on its first run, up to ${limit.toLocaleString()} orders.`
       : `Temu order import queued for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}, up to ${limit.toLocaleString()} orders.`
   });
@@ -24276,7 +24284,7 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     transport: "Job",
     method: "QUEUE",
     path: "temu-orders",
-    operation: options.scheduled ? "Scheduled Temu order import queued" : "Temu order import queued",
+    operation: workerPayload.repairBlind ? "Blind Temu order repair queued" : options.scheduled ? "Scheduled Temu order import queued" : "Temu order import queued",
     statusCode: 202,
     ok: true,
     jobId: job.id,

@@ -365,6 +365,7 @@ type ChannelSettings = {
   temuConnectionVerifiedAt?: string
   temuConnectionVerificationMessage?: string
   temuLastOrderSync?: string
+  temuLastBlindOrderRepairAt?: string
   temuProductSyncEnabled?: boolean
   temuListingSyncEnabled?: boolean
   temuListingLaunchEnabled?: boolean
@@ -4004,6 +4005,26 @@ function ChannelDetail({
     }
   }
 
+  async function queueTemuBlindOrderRepair() {
+    setTemuOrderImportSaving(true)
+    try {
+      const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>("/api/temu/orders/import", {
+        method: "POST",
+        body: JSON.stringify({
+          repairBlind: true,
+          limit: Math.max(1, Math.min(5000, Number(settings.temuOrderImportLimit || 250) || 250)),
+          includeCanceled: true,
+        }),
+      })
+      toast.success(result.message || (result.duplicate ? "An equivalent Temu repair job is already running." : "Blind Temu order repair queued."))
+      onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue blind Temu order repair.")
+    } finally {
+      setTemuOrderImportSaving(false)
+    }
+  }
+
   async function runTemuSetupGuide() {
     if (!temuCanRunLive) {
       toast.error("Temu needs a generated access token before live order downloads can run.")
@@ -4921,6 +4942,7 @@ function ChannelDetail({
                   <Detail label="Tracking upload" value={settings.temuTrackingUploadEnabled ? "Enabled" : "Disabled"} />
                   <Detail label="Listing sync" value={settings.temuListingSyncEnabled ? "Enabled" : "Disabled"} />
                   <Detail label="Latest order sync" value={dateLabel(temuLatestOrderSync)} />
+                  <Detail label="Last blind-order repair" value={dateLabel(String(settings.temuLastBlindOrderRepairAt || ""))} />
                   <Detail label="Import mode" value={settings.temuOrderImportScheduleEnabled ? `Scheduled ${String(settings.temuOrderImportScheduleType || "times") === "interval" ? `every ${settings.temuOrderImportScheduleEveryHours || 12} hours` : `at ${temuOrderImportScheduleTimes.join(" and ") || "05:00 and 17:00"}`}` : "Manual only"} />
                   <Detail label="Generated token" value={temuCanRunLive ? "Available" : "Needed for live import"} />
                   <Detail label="Last connection test" value={dateLabel(temuConnectionVerifiedAt)} />
@@ -4931,6 +4953,17 @@ function ChannelDetail({
                   </p>
                   <div className="flex flex-wrap gap-2">
                     <Button variant="outline" onClick={openTemuSetupGuide} disabled={!temuCanRunLive}>{temuSetupGuideLabel}</Button>
+                    <Button variant="outline" onClick={() => {
+                      if (settings.orderDownloadEnabled === false || !settings.temuOrderImportEnabled) {
+                        toast.error("Enable order downloads and Temu order imports in Setup before repairing orders.")
+                        return
+                      }
+                      if (!temuHasLiveToken) {
+                        toast.error("Temu needs a generated access token before order repair can run.")
+                        return
+                      }
+                      void queueTemuBlindOrderRepair()
+                    }} disabled={temuOrderImportSaving}>Repair blind orders</Button>
                     <Button variant="outline" onClick={() => {
                       if (settings.orderDownloadEnabled === false) {
                         toast.error("Enable order downloads in Setup before starting a Temu import.")
