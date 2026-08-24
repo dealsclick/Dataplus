@@ -39893,7 +39893,7 @@ async function handleApi(req, res) {
         veeqoLastAuthStatus: "redirected",
         veeqoLastAuthMessage: "Redirected to Veeqo authorization."
       });
-      dbCache.data.systemSettings = next;
+      if (dbCache.data) dbCache.data.systemSettings = next;
       appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "GET", path: "/oauth/authorize", operation: "Veeqo OAuth started", statusCode: 302, ok: true, message: "Operator redirected to Veeqo authorization." });
       res.writeHead(302, { Location: veeqoAuthorizeUrl(settings) });
       return res.end();
@@ -39904,7 +39904,7 @@ async function handleApi(req, res) {
         veeqoLastAuthStatus: "failed",
         veeqoLastAuthMessage: error.message || "Unable to start Veeqo authorization."
       });
-      dbCache.data.systemSettings = next;
+      if (dbCache.data) dbCache.data.systemSettings = next;
       return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><p>${escapeHtml(error.message || "Unable to start Veeqo authorization.")}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
     }
   }
@@ -39925,14 +39925,14 @@ async function handleApi(req, res) {
     if (errorParam) {
       const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
       const next = writeSystemSettingsStore({ ...current, veeqoLastAuthCallbackAt: new Date().toISOString(), veeqoLastAuthStatus: "failed", veeqoLastAuthMessage: errorParam });
-      dbCache.data.systemSettings = next;
+      if (dbCache.data) dbCache.data.systemSettings = next;
       return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(errorParam)}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
     }
     if (!code) {
       const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
       const message = "Veeqo did not return an authorization code.";
       const next = writeSystemSettingsStore({ ...current, veeqoLastAuthCallbackAt: new Date().toISOString(), veeqoLastAuthStatus: "failed", veeqoLastAuthMessage: message });
-      dbCache.data.systemSettings = next;
+      if (dbCache.data) dbCache.data.systemSettings = next;
       return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(message)}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
     }
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
@@ -39949,12 +39949,12 @@ async function handleApi(req, res) {
         veeqoLastAuthMessage: "Veeqo OAuth access token generated and stored.",
         shippingRaterVeeqoEnabled: true
       });
-      dbCache.data.systemSettings = next;
+      if (dbCache.data) dbCache.data.systemSettings = next;
       appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "POST", path: "/oauth/token", operation: "Veeqo OAuth connected", statusCode: 200, ok: true, message: "Veeqo OAuth access token generated and stored." });
       return sendHtml(res, 200, `<!doctype html><title>Veeqo connected</title><h1>Veeqo connected</h1><p>DataPlus received the authorization code, exchanged it with Veeqo, and stored the access token.</p><p>Next: return to Fulfillment settings and click Test Veeqo.</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
     } catch (error) {
       const failed = writeSystemSettingsStore({ ...current, veeqoLastAuthCallbackAt: new Date().toISOString(), veeqoLastAuthStatus: "failed", veeqoLastAuthMessage: error.message || "Veeqo OAuth failed." });
-      dbCache.data.systemSettings = failed;
+      if (dbCache.data) dbCache.data.systemSettings = failed;
       appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "POST", path: "/oauth/token", operation: "Veeqo OAuth failed", statusCode: 502, ok: false, message: error.message || "Veeqo OAuth failed." });
       return sendHtml(res, 502, `<!doctype html><title>Veeqo connection</title><h1>Veeqo token exchange failed</h1><p>${escapeHtml(error.message || "Unable to exchange the authorization code.")}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
     }
@@ -39969,13 +39969,13 @@ async function handleApi(req, res) {
       const currentUser = response && typeof response === "object" ? { id: response.id || response.user_id || "", email: response.email || "", name: response.name || response.full_name || "" } : {};
       const message = `Veeqo connection verified${currentUser.email ? ` for ${currentUser.email}` : ""}.`;
       const next = writeSystemSettingsStore({ ...current, veeqoLastTestedAt: new Date().toISOString(), veeqoLastTestStatus: "verified", veeqoLastTestMessage: message });
-      dbCache.data.systemSettings = next;
+      if (dbCache.data) dbCache.data.systemSettings = next;
       appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: "/current_user", operation: "Veeqo connection test", statusCode: 200, ok: true, message });
       return sendJson(res, 200, { message, currentUser, systemSettings: publicSystemSettings(next) });
     } catch (error) {
       const message = error.message || "Unable to verify Veeqo connection.";
       const next = writeSystemSettingsStore({ ...current, veeqoLastTestedAt: new Date().toISOString(), veeqoLastTestStatus: "failed", veeqoLastTestMessage: message });
-      dbCache.data.systemSettings = next;
+      if (dbCache.data) dbCache.data.systemSettings = next;
       appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: "/current_user", operation: "Veeqo connection test failed", statusCode: 502, ok: false, message });
       return sendJson(res, 502, { error: error.message || "Unable to verify Veeqo connection." });
     }
