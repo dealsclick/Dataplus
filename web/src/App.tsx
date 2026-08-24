@@ -10,6 +10,7 @@ import {
   AlertTriangle,
   Archive,
   ArrowRight,
+  ArrowUpDown,
   Bell,
   Boxes,
   CheckCircle2,
@@ -10065,6 +10066,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     { id: "medium-box", name: "Medium box", packageType: "box", weight: 0.45, length: 12, width: 10, height: 8 },
   ])
   const [selectedId, setSelectedId] = useState("")
+  const [sortMode, setSortMode] = useState("recommended")
   const [draft, setDraft] = useState({ warehouseId: "", packagePresetId: "", packageType: "box", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "", shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF", printPackingSlip: false })
   const autoLoadKeyRef = useRef("")
   const applyPreset = (presetId: string) => {
@@ -10160,15 +10162,70 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
       }
     } finally { setLoading(false) }
   }
-  const sortedRates = [...rates].sort((a, b) => (Number(a.amount || Number.MAX_SAFE_INTEGER) || Number.MAX_SAFE_INTEGER) - (Number(b.amount || Number.MAX_SAFE_INTEGER) || Number.MAX_SAFE_INTEGER))
-  const cheapestRateId = String(sortedRates.find((rate) => Number(rate.amount || 0) > 0)?.id || "")
+  const carrierDisplay = (rate: Record<string, unknown>) => {
+    const carrier = String(rate.carrier || "").trim()
+    const service = String(rate.service || "").trim()
+    const provider = String(rate.provider || "").trim().toLowerCase()
+    if (provider === "veeqo" && (!carrier || carrier.toLowerCase() === "veeqo")) {
+      const match = service.match(/\b(USPS|UPS|FedEx|DHL|OnTrac|LaserShip)\b/i)
+      return match ? match[1].replace(/fedex/i, "FedEx") : "Veeqo"
+    }
+    return carrier || String(rate.provider || "Carrier")
+  }
+  const carrierMark = (carrier: string) => {
+    const normalized = carrier.toLowerCase()
+    if (normalized.includes("usps")) return { text: "USPS", className: "border-blue-500/50 bg-blue-500/10 text-blue-700 dark:text-blue-300" }
+    if (normalized.includes("ups")) return { text: "UPS", className: "border-amber-600/50 bg-amber-500/10 text-amber-800 dark:text-amber-300" }
+    if (normalized.includes("fedex")) return { text: "FDX", className: "border-purple-500/50 bg-purple-500/10 text-purple-700 dark:text-purple-300" }
+    if (normalized.includes("dhl")) return { text: "DHL", className: "border-yellow-500/50 bg-yellow-500/10 text-yellow-800 dark:text-yellow-300" }
+    if (normalized.includes("temu")) return { text: "TM", className: "border-orange-500/50 bg-orange-500/10 text-orange-700 dark:text-orange-300" }
+    if (normalized.includes("veeqo")) return { text: "VQ", className: "border-sky-500/50 bg-sky-500/10 text-sky-700 dark:text-sky-300" }
+    return { text: carrier.slice(0, 3).toUpperCase() || "SHP", className: "border-muted-foreground/30 bg-muted text-muted-foreground" }
+  }
+  const etaSortValue = (rate: Record<string, unknown>) => {
+    const days = Number(rate.deliveryDays || 0)
+    if (days > 0) return days
+    const eta = String(rate.deliveryEstimate || "")
+    const range = eta.match(/(\d+)\s*-\s*(\d+)/)
+    if (range) return Number(range[2])
+    const single = eta.match(/(\d+)\s*(business|work|calendar)?\s*days?/i)
+    if (single) return Number(single[1])
+    const date = new Date(eta)
+    if (!Number.isNaN(date.getTime())) return Math.max(0, Math.ceil((date.getTime() - Date.now()) / 86400000))
+    return Number.MAX_SAFE_INTEGER
+  }
+  const cheapestRateId = String([...rates].filter((rate) => Number(rate.amount || 0) > 0).sort((a, b) => Number(a.amount || 999999) - Number(b.amount || 999999))[0]?.id || "")
   const suggestedRateId = selectedId || chooseDefaultRate(rates, labelRules)
+  const sortedRates = [...rates].sort((a, b) => {
+    const amountA = Number(a.amount || 0) > 0 ? Number(a.amount) : Number.MAX_SAFE_INTEGER
+    const amountB = Number(b.amount || 0) > 0 ? Number(b.amount) : Number.MAX_SAFE_INTEGER
+    if (sortMode === "cost-desc") return amountB - amountA
+    if (sortMode === "speed") return etaSortValue(a) - etaSortValue(b) || amountA - amountB
+    if (sortMode === "carrier") return carrierDisplay(a).localeCompare(carrierDisplay(b)) || amountA - amountB
+    if (sortMode === "provider") return String(a.provider || "").localeCompare(String(b.provider || "")) || amountA - amountB
+    if (sortMode === "recommended") {
+      const suggestedA = String(a.id || "") === suggestedRateId ? -1 : 0
+      const suggestedB = String(b.id || "") === suggestedRateId ? -1 : 0
+      return suggestedA - suggestedB || amountA - amountB || etaSortValue(a) - etaSortValue(b)
+    }
+    return amountA - amountB
+  })
   const selectedWarehouse = warehouses.find((warehouse) => String(warehouse.id || "") === String(draft.warehouseId || ""))
   const selectedPreset = packagePresets.find((preset) => String(preset.id || "") === String(draft.packagePresetId || ""))
   const packageName = selectedPreset ? String(selectedPreset.name || selectedPreset.id || "Package") : "Custom package"
   const packageSummary = `${String(draft.packageType || "box").replace(/_/g, " ")} / ${draft.packageWeight || "0"} lb / ${draft.packageLength || "0"} x ${draft.packageWidth || "0"} x ${draft.packageHeight || "0"} in`
   const rateCostLabel = (rate: Record<string, unknown>) => Number(rate.amount || 0) > 0 ? moneyLabel(Number(rate.amount || 0)) : String(rate.action || "") === "retrieve_existing_label" ? "Channel label" : "Cost not returned"
-  const rateEtaLabel = (rate: Record<string, unknown>) => String(rate.deliveryEstimate || "").trim() || (Number(rate.deliveryDays || 0) > 0 ? `${Number(rate.deliveryDays)} day${Number(rate.deliveryDays) === 1 ? "" : "s"}` : "ETA not returned")
+  const rateEtaLabel = (rate: Record<string, unknown>) => {
+    const eta = String(rate.deliveryEstimate || "").trim()
+    if (eta) {
+      const date = new Date(eta)
+      if (!Number.isNaN(date.getTime()) && /T|\d{4}-\d{2}-\d{2}/.test(eta)) {
+        return new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric" }).format(date)
+      }
+      return eta.replace(/\s*\+\d{2}:?\d{2}$/, "")
+    }
+    return Number(rate.deliveryDays || 0) > 0 ? `${Number(rate.deliveryDays)} day${Number(rate.deliveryDays) === 1 ? "" : "s"}` : "ETA not returned"
+  }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
@@ -10224,21 +10281,30 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
           {blockers.length > 0 && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Rates need setup</AlertTitle><AlertDescription>{blockers.join(" ")}</AlertDescription></Alert>}
           {providerErrors.length > 0 && <Alert variant={rates.length ? "default" : "destructive"}><AlertCircle className="size-4" /><AlertTitle>{rates.length ? "Some providers did not return rates" : "No provider returned a printable label option"}</AlertTitle><AlertDescription>{providerErrors.map((entry) => `${String(entry.provider || "Provider")}: ${String(entry.message || "No details returned.")}`).join(" ")}</AlertDescription></Alert>}
           <div className="grid gap-3">
+            {rates.length ? <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><p className="text-sm font-semibold">Shipping options</p><p className="text-xs text-muted-foreground">Compare carrier, method, cost, and delivery estimate before printing.</p></div>
+              <Field label="Sort by"><Select value={sortMode} onValueChange={setSortMode}><SelectTrigger className="w-[190px]"><ArrowUpDown className="size-4" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="recommended">Recommended</SelectItem><SelectItem value="cost">Cost low to high</SelectItem><SelectItem value="cost-desc">Cost high to low</SelectItem><SelectItem value="speed">Fastest delivery</SelectItem><SelectItem value="carrier">Carrier</SelectItem><SelectItem value="provider">Provider</SelectItem></SelectContent></Select></Field>
+            </div> : null}
             {suggestedRateId && rates.length ? <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">Suggested option</span><Badge variant="secondary">{suggestedRateId === cheapestRateId ? "Cheapest" : "Auto-selected"}</Badge></div><p className="mt-1 text-muted-foreground">DataPlus selected the best available rate based on your Fulfillment settings. You can choose a different service before printing.</p></div> : null}
             {sortedRates.map((rate) => {
               const isSelected = selectedId === String(rate.id)
               const isCheapest = cheapestRateId && String(rate.id) === cheapestRateId
               const isSuggested = suggestedRateId && String(rate.id) === suggestedRateId
+              const carrier = carrierDisplay(rate)
+              const mark = carrierMark(carrier)
               return <button key={String(rate.id)} type="button" onClick={() => setSelectedId(String(rate.id))} className={cn("grid gap-3 rounded-md border p-4 text-left text-sm hover:bg-muted/40", isSelected && "border-primary bg-primary/10")}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0">
+                  <div className="flex min-w-0 items-start gap-3">
+                    <span className={cn("grid h-9 min-w-12 place-items-center rounded-md border px-2 text-[11px] font-bold leading-none", mark.className)}>{mark.text}</span>
+                    <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-semibold">{String(rate.carrier || rate.provider || "Carrier")}</span>
+                      <span className="font-semibold">{carrier}</span>
                       <Badge variant="outline">{String(rate.provider || "provider")}</Badge>
                       {isSuggested && <Badge>Suggested</Badge>}
                       {isCheapest && <Badge variant="secondary">Cheapest</Badge>}
                     </div>
                     <p className="mt-1 text-muted-foreground">{String(rate.service || "Shipping method")}</p>
+                    </div>
                   </div>
                   <div className="grid gap-1 text-right">
                     <span className="text-lg font-semibold">{rateCostLabel(rate)}</span>
