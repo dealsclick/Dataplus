@@ -22006,7 +22006,7 @@ function temuOrderIsImportable(mappedOrder = {}, existingOrder = null, includeCa
 
 function temuFinancialStatusForOrder(status) {
   const normalized = String(status || "").trim().toLowerCase();
-  if (temuOrderStatusImpliesPaid(normalized)) return "Temu confirmed";
+  if (temuOrderStatusImpliesPaid(normalized)) return "Paid";
   if (normalized === "canceled") return "Canceled";
   return "Pending";
 }
@@ -22661,7 +22661,7 @@ function addOrderWorkflowEvent(order, event = {}) {
 // picking, or on a vendor drop shipment.
 function isOrderPaymentCleared(order = {}) {
   const financial = String(order.financialStatus || "").toLowerCase();
-  if (["paid", "partially paid", "partially_paid", "authorized", "temu confirmed"].includes(financial)) return true;
+  if (["paid", "partially paid", "partially_paid", "authorized"].includes(financial)) return true;
   if (String(order.source || "").toLowerCase() === "temu" && temuOrderStatusImpliesPaid(order.status || order.fulfillmentStatus)) return true;
   return (order.payments || []).some((payment) => ["authorized", "captured", "paid"].includes(String(payment.status || "").toLowerCase()));
 }
@@ -23022,8 +23022,8 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   order.status = terminalStatus;
   order.fulfillmentStatus = closedDemand ? terminalStatus : order.fulfillmentStatus;
   if (closedDemand && String(order.source || "").toLowerCase() === "temu" && !String(order.financialStatus || order.paymentStatus || "").trim()) {
-    order.financialStatus = "Temu confirmed";
-    order.paymentStatus = "Temu confirmed";
+    order.financialStatus = "Paid";
+    order.paymentStatus = "Paid";
     changed = true;
   }
   order.operationalStatus = terminalOperational;
