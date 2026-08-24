@@ -17990,7 +17990,8 @@ function SettingsPage({
     { id: "organization", label: "Organization" },
     { id: "orders", label: "Orders" },
     { id: "purchasing", label: "Purchasing" },
-    { id: "inventory", label: "Inventory & fulfillment" },
+    { id: "inventory", label: "Inventory" },
+    { id: "fulfillment", label: "Fulfillment" },
     { id: "notifications", label: "Notifications" },
     { id: "security", label: "Security" },
     { id: "jobs", label: "Jobs" },
@@ -18757,6 +18758,8 @@ function SettingsPage({
               <ToggleField label="Auto-release canceled reservations" checked={boolValue("inventoryAutoReleaseCanceledReservations")} disabled={!editing} onCheckedChange={(next) => update("inventoryAutoReleaseCanceledReservations", next)} />
             </CardContent>
           </Card>
+        </TabsContent>
+        <TabsContent value="fulfillment" className="grid gap-4">
           <Card>
             <CardHeader><CardTitle className="text-base">Fulfillment gates</CardTitle><CardDescription>Required operational checks before items can be labeled and shipped.</CardDescription></CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -18769,7 +18772,7 @@ function SettingsPage({
             </CardContent>
           </Card>
           <Card>
-            <CardHeader><CardTitle className="text-base">Universal shipping rater</CardTitle><CardDescription>Use one order label workflow while DataPlus loads channel-native labels and third-party carrier rates.</CardDescription></CardHeader>
+            <CardHeader><CardTitle className="text-base">Shipping providers and universal rater</CardTitle><CardDescription>Use one label workflow while DataPlus loads channel-native labels, Veeqo rates, and future direct carrier providers.</CardDescription></CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               <ToggleField label="Enable Veeqo rates and labels" checked={boolValue("shippingRaterVeeqoEnabled")} disabled={!editing} onCheckedChange={(next) => update("shippingRaterVeeqoEnabled", next)} />
               <div className="rounded-md border bg-muted/25 p-3 text-sm">
