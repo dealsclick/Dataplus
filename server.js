@@ -21358,7 +21358,46 @@ function temuPayload(value) {
 
 function temuAmount(value) {
   const amount = nestedMoney(value);
-  return amount ? amount / 100 : 0;
+  if (!amount) return 0;
+  if (typeof value === "number") return Number.isInteger(value) ? amount / 100 : amount;
+  if (typeof value === "string") return value.includes(".") ? amount : amount / 100;
+  if (value && typeof value === "object") {
+    if (value.centAmount !== undefined && value.centAmount !== null && value.centAmount !== "") return amount;
+    for (const key of ["amount", "value", "convertedFromValue", "price"]) {
+      const raw = value[key];
+      if (raw === undefined || raw === null || raw === "") continue;
+      if (typeof raw === "number" && !Number.isInteger(raw)) return amount;
+      if (typeof raw === "string" && raw.includes(".")) return amount;
+      return amount / 100;
+    }
+  }
+  return amount / 100;
+}
+
+function firstMoney(...values) {
+  for (const value of values) {
+    const amount = temuAmount(value);
+    if (amount) return amount;
+  }
+  return 0;
+}
+
+function mergeMarketplaceReferences(...lists) {
+  const seen = new Set();
+  const merged = [];
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const reference of list) {
+      if (!reference || typeof reference !== "object") continue;
+      const value = String(reference.value || "").trim();
+      if (!value) continue;
+      const key = `${String(reference.source || "")}:${String(reference.type || "")}:${value}`.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(reference);
+    }
+  }
+  return merged;
 }
 
 function temuAmountByOrderSn(amountPayload = {}) {
@@ -21962,6 +22001,27 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     const channelVariantId = String(valueAt(item, ["skuId", "goodsSkuId", "goodsSkuSn", "productSkuId"], "")).trim();
     const channelProductId = String(valueAt(item, ["goodsId", "productId", "goods_id"], "")).trim();
     const sku = externalSku || channelSku || channelVariantId || "TEMU-SKU";
+    const qty = Number(valueAt(item, ["quantity", "qty", "goodsNumber"], 1)) || 1;
+    const unitBasePrice = firstMoney(
+      valueAt(amountLine, ["unitBasePrice", "unit_base_price", "basePrice"], 0),
+      valueAt(item, ["unitBasePrice", "basePrice"], 0)
+    );
+    const unitRetailPrice = firstMoney(
+      valueAt(amountLine, ["unitRetailPriceVatIncl", "unitRetailPrice", "retailPriceVatIncl", "retailPrice"], 0),
+      valueAt(item, ["unitRetailPriceVatIncl", "retailPrice", "salePrice"], 0)
+    );
+    const lineBaseSubtotal = firstMoney(
+      valueAt(amountLine, ["basePriceSubtotal", "basePriceTotal", "basePriceAmount"], 0),
+      valueAt(item, ["basePriceSubtotal", "basePriceTotal", "orderAmount"], 0)
+    ) || unitBasePrice * qty;
+    const lineShippingProceeds = firstMoney(
+      valueAt(amountLine, ["shippingAmount", "shippingAmountTotal", "shippingFee", "shippingCost"], 0),
+      valueAt(item, ["shippingAmount", "shippingFee"], 0)
+    );
+    const lineEstimatedRevenue = firstMoney(
+      valueAt(amountLine, ["estimatedRevenue", "sellerRevenue", "settlementAmount", "proceeds"], 0),
+      valueAt(item, ["estimatedRevenue", "settlementAmount"], 0)
+    ) || lineBaseSubtotal + lineShippingProceeds;
     return {
       sku,
       mappedSku: externalSku || "",
@@ -21970,14 +22030,24 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
       channelVariantSku: channelSku || "",
       channelVariantId,
       channelProductId,
+      channelOrderItemId: orderSn,
       temuGoodsId: channelProductId,
       temuSkuId: channelVariantId,
+      temuOrderItemId: orderSn,
       temuExternalSku: externalSku,
       title: String(valueAt(item, ["goodsName", "productName", "title", "name"], "Temu item")),
-      qty: Number(valueAt(item, ["quantity", "qty", "goodsNumber"], 1)) || 1,
-      price: temuAmount(valueAt(amountLine, ["unitBasePrice", "unitRetailPriceVatIncl", "basePrice"], 0))
-        || nestedMoney(valueAt(item, ["salePrice", "retailPrice", "orderAmount", "price"], 0)),
-      external: { source: "Temu", raw: item }
+      qty,
+      price: unitBasePrice || unitRetailPrice || nestedMoney(valueAt(item, ["salePrice", "retailPrice", "orderAmount", "price"], 0)),
+      channelFinancials: {
+        basis: "seller_proceeds",
+        basisLabel: "Temu seller proceeds",
+        unitBasePrice,
+        unitRetailPrice,
+        lineBaseSubtotal,
+        lineShippingProceeds,
+        lineEstimatedRevenue
+      },
+      external: { source: "Temu", raw: item, amount: amountLine }
     };
   }) : [
     {
@@ -21987,18 +22057,40 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
       channelSku: String(valueAt(raw, ["sku", "skuSn", "goodsSkuSn"], "")),
       channelVariantId: String(valueAt(raw, ["skuId", "goodsSkuId"], "")),
       channelProductId: String(valueAt(raw, ["goodsId", "productId"], "")),
+      channelOrderItemId: String(valueAt(raw, ["orderSn", "order_sn"], "")),
       title: String(valueAt(raw, ["goodsName", "productName", "title"], "Temu order")),
       qty: Number(valueAt(raw, ["quantity", "qty"], 1)) || 1,
-      price: temuAmount(valueAt(amountParent, ["basePriceTotal", "estimatedRevenue"], 0))
+      price: firstMoney(valueAt(amountParent, ["basePriceTotal", "estimatedRevenue"], 0))
         || nestedMoney(valueAt(raw, ["orderAmount", "payAmount", "totalAmount"], 0)),
-      external: { source: "Temu", raw }
+      channelFinancials: {
+        basis: "seller_proceeds",
+        basisLabel: "Temu seller proceeds",
+        unitBasePrice: firstMoney(valueAt(amountParent, ["basePriceTotal"], 0)),
+        unitRetailPrice: 0,
+        lineBaseSubtotal: firstMoney(valueAt(amountParent, ["basePriceTotal"], 0)),
+        lineShippingProceeds: firstMoney(valueAt(amountParent, ["shippingAmountTotal"], 0)),
+        lineEstimatedRevenue: firstMoney(valueAt(amountParent, ["estimatedRevenue"], 0))
+      },
+      external: { source: "Temu", raw, amount: amountParent }
     }
   ];
 
-  const total = temuAmount(valueAt(amountParent, ["estimatedRevenue", "basePriceTotal"], 0))
+  const basePriceTotal = firstMoney(valueAt(amountParent, ["basePriceTotal", "basePriceSubtotal"], 0))
+    || items.reduce((sum, item) => sum + Number(item.channelFinancials?.lineBaseSubtotal || 0), 0);
+  const shippingProceedsTotal = firstMoney(valueAt(amountParent, ["shippingAmountTotal", "shippingAmount", "shippingFee"], 0))
+    || items.reduce((sum, item) => sum + Number(item.channelFinancials?.lineShippingProceeds || 0), 0);
+  const estimatedRevenue = firstMoney(valueAt(amountParent, ["estimatedRevenue", "sellerRevenue", "settlementAmount"], 0))
+    || basePriceTotal + shippingProceedsTotal;
+  const total = estimatedRevenue
     || nestedMoney(valueAt(raw, ["parentOrderAmount", "orderAmount", "payAmount", "totalAmount", "settlementAmount"], 0))
     || items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
-  const shippingCost = temuAmount(valueAt(amountParent, ["shippingAmountTotal"], 0));
+  const marketplaceReferences = mergeMarketplaceReferences([
+    { source: "Temu", type: "parent_order", label: "Temu PO", value: parentOrderSn, primary: true },
+    { source: "Temu", type: "order", label: "Channel order number", value: parentOrderSn, primary: true },
+    ...items.map((item) => ({ source: "Temu", type: "order_item", label: "Order item ID", value: item.temuOrderItemId || item.channelOrderItemId })),
+    ...items.map((item) => ({ source: "Temu", type: "sku_id", label: "Temu SKU ID", value: item.temuSkuId })),
+    ...items.map((item) => ({ source: "Temu", type: "goods_id", label: "Temu Goods ID", value: item.temuGoodsId }))
+  ]);
   const decryptedCandidate = decryptPayload.shippingAddress || decryptPayload.address || decryptPayload.receiverAddress || decryptPayload.recipientAddress || decryptPayload;
   const decryptedHasAddress = Boolean(deepValueAt(decryptedCandidate, ["addressLine1", "line1", "address1", "detailAddress", "addressDetail", "address", "fullAddress", "receiptAddress", "regionName1", "regionName2", "regionName3", "mail", "mobile"], ""));
   const shippingCandidate = decryptedHasAddress ? decryptedCandidate : (shippingPayload.shippingAddress || shippingPayload.address || shippingPayload.receiverAddress || shippingPayload.recipientAddress || shippingPayload);
@@ -22032,10 +22124,12 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     title: items[0]?.title || "Temu order",
     qty: items.reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1,
     status: mapTemuStatus(valueAt(raw, ["parentOrderStatus", "orderStatus", "status"])),
+    subtotal: basePriceTotal,
     total,
     productCost: 0,
     marketplaceFees: 0,
-    shippingCost,
+    shippingCost: 0,
+    shippingPaid: shippingProceedsTotal,
     refundAmount: 0,
     shippingService: String(valueAt(raw, ["shippingService", "logisticsServiceName"], "Temu fulfillment")),
     trackingNumber: String(valueAt(raw, ["trackingNumber", "trackingNo"], "")),
@@ -22052,10 +22146,27 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
       message,
       createdAt: new Date().toISOString()
     })) : [],
+    marketplaceReferences,
+    channelFinancials: {
+      basis: "seller_proceeds",
+      basisLabel: "Temu seller proceeds / estimated revenue",
+      customerPaidAvailable: false,
+      customerPaidNote: "Temu order APIs return seller proceeds and estimated revenue. They do not expose the buyer's final customer-paid total to DataPlus.",
+      basePriceTotal,
+      shippingProceedsTotal,
+      estimatedRevenue
+    },
     items,
     external: {
       source: "Temu",
       parentOrderSn,
+      marketplaceReferences,
+      channelFinancials: {
+        basis: "seller_proceeds",
+        basePriceTotal,
+        shippingProceedsTotal,
+        estimatedRevenue
+      },
       amount: effectiveAmountPayload,
       amountV2: amountV2Payload,
       shipping: shippingPayload,
@@ -24008,13 +24119,13 @@ function upsertOrder(db, incoming) {
     displayOrderNumber: existing.internalOrderNumber,
     marketplaceOrderNumber: incomingMarketplaceNumber,
     marketplaceOrderId: incomingMarketplaceNumber,
-    marketplaceReferences: existing.marketplaceReferences?.length ? existing.marketplaceReferences : incoming.marketplaceReferences,
+    marketplaceReferences: isTemu ? mergeMarketplaceReferences(existing.marketplaceReferences, incoming.marketplaceReferences) : (existing.marketplaceReferences?.length ? existing.marketplaceReferences : incoming.marketplaceReferences),
     productCost: incoming.source === "eBay" ? incoming.productCost : existing.productCost || incoming.productCost,
     marketplaceFees: incoming.source === "eBay" ? incoming.marketplaceFees : existing.marketplaceFees || incoming.marketplaceFees,
-    shippingCost: incoming.source === "eBay" ? incoming.shippingCost : existing.shippingCost || incoming.shippingCost,
+    shippingCost: incoming.source === "eBay" || isTemu ? incoming.shippingCost : existing.shippingCost || incoming.shippingCost,
     refundAmount: incoming.source === "eBay" ? incoming.refundAmount : existing.refundAmount || incoming.refundAmount,
-    subtotal: incoming.source === "eBay" ? incoming.subtotal : existing.subtotal || incoming.subtotal,
-    shippingPaid: incoming.source === "eBay" ? incoming.shippingPaid : existing.shippingPaid || incoming.shippingPaid,
+    subtotal: incoming.source === "eBay" || isTemu ? incoming.subtotal : existing.subtotal || incoming.subtotal,
+    shippingPaid: incoming.source === "eBay" || isTemu ? incoming.shippingPaid : existing.shippingPaid || incoming.shippingPaid,
     taxAmount: incoming.source === "eBay" ? incoming.taxAmount : existing.taxAmount || incoming.taxAmount,
     trackingNumber: incoming.trackingNumber || existing.trackingNumber,
     trackingUrl: incoming.trackingUrl || existing.trackingUrl,
