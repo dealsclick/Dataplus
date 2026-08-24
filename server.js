@@ -24317,6 +24317,7 @@ async function importTemuOrders(db, options = {}) {
   const config = getTemuConfig(db);
   const pageSize = Math.min(100, Math.max(1, config.pageSize || 50));
   const repairBlind = options.repairBlind === true || String(options.repairBlind).toLowerCase() === "true";
+  const removeUnpaidExisting = options.removeUnpaidExisting === true || String(options.removeUnpaidExisting).toLowerCase() === "true";
   const requestedOrderSns = [...new Set((Array.isArray(options.parentOrderSnList) ? options.parentOrderSnList : [])
     .map((value) => String(value || "").trim())
     .filter(Boolean))]
@@ -24418,17 +24419,19 @@ async function importTemuOrders(db, options = {}) {
           rows.push({ orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber, status: mappedOrder.status, action: "skipped_canceled", itemCount: mappedOrder.items?.length || 0 });
           continue;
         }
-        const removedExisting = removeUnpaidTemuOrderFromQueue(db, mappedOrder);
+        const removedExisting = removeUnpaidExisting ? removeUnpaidTemuOrderFromQueue(db, mappedOrder) : false;
         if (removedExisting) updated += 1;
         else skipped += 1;
         fetched += 1;
         rows.push({
           orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber,
           status: mappedOrder.status,
-          action: removedExisting ? "removed_unpaid" : "skipped_unpaid",
+          action: removedExisting ? "removed_unpaid" : existingOrder ? "skipped_unpaid_existing" : "skipped_unpaid",
           itemCount: mappedOrder.items?.length || 0,
           buyer: mappedOrder.buyer || "",
-          message: "Temu order is pending/unpaid and was not imported into the active order queue."
+          message: existingOrder && !removedExisting
+            ? "Temu order is pending/unpaid and was left unchanged because existing-order cleanup was not requested."
+            : "Temu order is pending/unpaid and was not imported into the active order queue."
         });
         continue;
       }
