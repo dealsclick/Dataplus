@@ -1034,6 +1034,13 @@ const DEFAULT_SYSTEM_SETTINGS = {
   shippingRaterVeeqoEnabled: false,
   veeqoApiBaseUrl: "https://api.veeqo.com",
   veeqoApiKey: "",
+  veeqoClientId: "",
+  veeqoClientSecret: "",
+  veeqoRedirectUri: "https://dataplusapp.duckdns.org/auth/veeqo/callback",
+  veeqoAccessToken: "",
+  veeqoTokenType: "bearer",
+  veeqoTokenCreatedAt: 0,
+  veeqoConnectedAt: "",
   veeqoSellerDisplayName: "DataPlus",
   veeqoDefaultLabelFormat: "PDF",
   shippingLabelAutoSelectRule: "cheapest",
@@ -5194,6 +5201,13 @@ function normalizeSystemSettings(settings = {}) {
   normalized.veeqoApiBaseUrl = String(normalized.veeqoApiBaseUrl || "https://api.veeqo.com").trim().replace(/\/+$/, "") || "https://api.veeqo.com";
   if (normalized.veeqoApiKey === undefined && process.env.VEEQO_API_KEY) normalized.veeqoApiKey = process.env.VEEQO_API_KEY;
   normalized.veeqoApiKey = String(normalized.veeqoApiKey || "").trim();
+  normalized.veeqoClientId = String(normalized.veeqoClientId || process.env.VEEQO_CLIENT_ID || "").trim();
+  normalized.veeqoClientSecret = String(normalized.veeqoClientSecret || process.env.VEEQO_CLIENT_SECRET || "").trim();
+  normalized.veeqoRedirectUri = String(normalized.veeqoRedirectUri || process.env.VEEQO_REDIRECT_URI || "https://dataplusapp.duckdns.org/auth/veeqo/callback").trim();
+  normalized.veeqoAccessToken = String(normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN || "").trim();
+  normalized.veeqoTokenType = String(normalized.veeqoTokenType || "bearer").trim().toLowerCase() || "bearer";
+  normalized.veeqoTokenCreatedAt = Math.max(0, Number(normalized.veeqoTokenCreatedAt || 0) || 0);
+  normalized.veeqoConnectedAt = sourceTextValue(normalized.veeqoConnectedAt || "");
   normalized.veeqoSellerDisplayName = String(normalized.veeqoSellerDisplayName || normalized.organizationName || "DataPlus").trim() || "DataPlus";
   normalized.veeqoDefaultLabelFormat = ["PDF", "PNG", "ZPL", "JPEG"].includes(String(normalized.veeqoDefaultLabelFormat || "").toUpperCase()) ? String(normalized.veeqoDefaultLabelFormat).toUpperCase() : "PDF";
   normalized.shippingLabelAutoSelectRule = ["cheapest", "preferred", "fastest", "none"].includes(String(normalized.shippingLabelAutoSelectRule || "").toLowerCase()) ? String(normalized.shippingLabelAutoSelectRule).toLowerCase() : "cheapest";
@@ -5798,7 +5812,7 @@ function publicSystemSettings(settings = {}) {
   const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
   const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
   const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
-  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), authPermissionAuditLog: normalized.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), veeqoApiKey: "", veeqoApiKeyConfigured: Boolean(normalized.veeqoApiKey || process.env.VEEQO_API_KEY), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
+  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), authPermissionAuditLog: normalized.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), veeqoApiKey: "", veeqoApiKeyConfigured: Boolean(normalized.veeqoApiKey || process.env.VEEQO_API_KEY), veeqoClientSecret: "", veeqoClientSecretConfigured: Boolean(normalized.veeqoClientSecret || process.env.VEEQO_CLIENT_SECRET), veeqoAccessToken: "", veeqoAccessTokenConfigured: Boolean(normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN), veeqoAuthMode: normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN ? "oauth" : normalized.veeqoApiKey || process.env.VEEQO_API_KEY ? "api_key" : "not_connected", aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
 }
 
 function hashWarehouseAuditAdminPin(pin, salt) {
@@ -21180,21 +21194,61 @@ function veeqoConfig(settings = {}) {
     enabled: normalized.shippingRaterVeeqoEnabled === true,
     baseUrl: String(normalized.veeqoApiBaseUrl || "https://api.veeqo.com").replace(/\/+$/, ""),
     apiKey: String(normalized.veeqoApiKey || process.env.VEEQO_API_KEY || "").trim(),
+    clientId: String(normalized.veeqoClientId || process.env.VEEQO_CLIENT_ID || "").trim(),
+    clientSecret: String(normalized.veeqoClientSecret || process.env.VEEQO_CLIENT_SECRET || "").trim(),
+    redirectUri: String(normalized.veeqoRedirectUri || process.env.VEEQO_REDIRECT_URI || "https://dataplusapp.duckdns.org/auth/veeqo/callback").trim(),
+    accessToken: String(normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN || "").trim(),
+    tokenType: String(normalized.veeqoTokenType || "bearer").trim().toLowerCase() || "bearer",
     sellerDisplayName: String(normalized.veeqoSellerDisplayName || normalized.organizationName || "DataPlus").trim() || "DataPlus",
     labelFormat: String(normalized.veeqoDefaultLabelFormat || "PDF").toUpperCase()
   };
 }
 
+function veeqoAuthorizeUrl(settings = {}) {
+  const config = veeqoConfig(settings);
+  if (!config.clientId) throw new Error("Add the Veeqo client ID before connecting OAuth.");
+  if (!config.redirectUri) throw new Error("Add the Veeqo redirect URI before connecting OAuth.");
+  const authUrl = new URL("https://app.veeqo.com/oauth/authorize");
+  authUrl.searchParams.set("client_id", config.clientId);
+  authUrl.searchParams.set("redirect_uri", config.redirectUri);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", "");
+  return authUrl.toString();
+}
+
+async function exchangeVeeqoAuthorizationCode(settings = {}, code = "") {
+  const config = veeqoConfig(settings);
+  if (!config.clientId || !config.clientSecret) throw new Error("Add the Veeqo client ID and client secret before exchanging the authorization code.");
+  if (!config.redirectUri) throw new Error("Add the Veeqo redirect URI before exchanging the authorization code.");
+  const response = await fetch(`${config.baseUrl}/oauth/token`, {
+    method: "POST",
+    headers: { "accept": "application/json", "content-type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "authorization_code",
+      redirect_uri: config.redirectUri,
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      code
+    })
+  });
+  const text = await response.text();
+  const data = text ? (() => { try { return JSON.parse(text); } catch { return { raw: text }; } })() : {};
+  if (!response.ok) throw new Error(`Veeqo OAuth token exchange failed: ${JSON.stringify(data).slice(0, 300)}`);
+  if (!data.access_token) throw new Error(`Veeqo OAuth did not return an access token: ${JSON.stringify(data).slice(0, 240)}`);
+  return data;
+}
+
 async function veeqoRequest(pathName, options = {}, settings = {}) {
   const config = veeqoConfig(settings);
   if (!config.enabled) throw new Error("Enable Veeqo in Fulfillment settings before requesting Veeqo rates.");
-  if (!config.apiKey) throw new Error("Add the Veeqo API key in Fulfillment settings before requesting Veeqo rates.");
+  if (!config.accessToken && !config.apiKey) throw new Error("Connect Veeqo with OAuth or add a private API key in Fulfillment settings before requesting Veeqo rates.");
   const url = /^https?:\/\//i.test(String(pathName)) ? String(pathName) : `${config.baseUrl}${String(pathName).startsWith("/") ? "" : "/"}${pathName}`;
+  const authHeaders = config.accessToken ? { "authorization": `${config.tokenType === "bearer" ? "Bearer" : config.tokenType} ${config.accessToken}` } : { "x-api-key": config.apiKey };
   const response = await fetch(url, {
     method: options.method || "GET",
     headers: {
       "content-type": "application/json",
-      "x-api-key": config.apiKey,
+      ...authHeaders,
       ...(options.headers || {})
     },
     body: options.body ? JSON.stringify(options.body) : undefined
@@ -21368,7 +21422,8 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     details: { rateCount: rates.length, warehouseId, package: parcel, durationMs: Date.now() - startedAt }
   });
   appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates", statusCode: blockers.length ? 400 : 200, ok: blockers.length === 0, durationMs: Date.now() - startedAt, entityType: "order", entityId: order.id, message: blockers.length ? blockers.join(" ") : `${rates.length} shipping option(s) loaded.` });
-  return { rates, blockers, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), labelRules: shippingLabelRules(settings), warehouseId, providers: { temu: String(order.source || "").toLowerCase() === "temu", veeqo: veeqoConfig(settings).enabled && Boolean(veeqoConfig(settings).apiKey) } };
+  const config = veeqoConfig(settings);
+  return { rates, blockers, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), labelRules: shippingLabelRules(settings), warehouseId, providers: { temu: String(order.source || "").toLowerCase() === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) } };
 }
 
 async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
@@ -39819,6 +39874,53 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "GET" && url.pathname === "/auth/veeqo/start") {
+    const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    try {
+      res.writeHead(302, { Location: veeqoAuthorizeUrl(settings) });
+      return res.end();
+    } catch (error) {
+      return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><p>${escapeHtml(error.message || "Unable to start Veeqo authorization.")}</p><p><a href="/settings?tab=inventory">Return to DataPlus</a></p>`);
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/auth/veeqo/callback") {
+    const code = String(url.searchParams.get("code") || "").trim();
+    const errorParam = String(url.searchParams.get("error") || "").trim();
+    if (errorParam) return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(errorParam)}</p><p><a href="/settings?tab=inventory">Return to DataPlus</a></p>`);
+    if (!code) return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>Veeqo did not return an authorization code.</p><p><a href="/settings?tab=inventory">Return to DataPlus</a></p>`);
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    try {
+      const token = await exchangeVeeqoAuthorizationCode(current, code);
+      const next = writeSystemSettingsStore({
+        ...current,
+        veeqoAccessToken: String(token.access_token || ""),
+        veeqoTokenType: String(token.token_type || "bearer"),
+        veeqoTokenCreatedAt: Number(token.created_at || Math.floor(Date.now() / 1000)) || Math.floor(Date.now() / 1000),
+        veeqoConnectedAt: new Date().toISOString(),
+        shippingRaterVeeqoEnabled: true
+      });
+      dbCache.data.systemSettings = next;
+      appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "POST", path: "/oauth/token", operation: "Veeqo OAuth connected", statusCode: 200, ok: true, message: "Veeqo OAuth access token generated and stored." });
+      return sendHtml(res, 200, `<!doctype html><title>Veeqo connected</title><h1>Veeqo connected</h1><p>DataPlus stored the Veeqo access token. You can close this tab or return to settings.</p><p><a href="/settings?tab=inventory">Return to DataPlus</a></p>`);
+    } catch (error) {
+      appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "POST", path: "/oauth/token", operation: "Veeqo OAuth failed", statusCode: 502, ok: false, message: error.message || "Veeqo OAuth failed." });
+      return sendHtml(res, 502, `<!doctype html><title>Veeqo connection</title><h1>Veeqo token exchange failed</h1><p>${escapeHtml(error.message || "Unable to exchange the authorization code.")}</p><p><a href="/settings?tab=inventory">Return to DataPlus</a></p>`);
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/system-settings/veeqo-test") {
+    const body = await parseBody(req);
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const settings = normalizeSystemSettings({ ...current, ...body });
+    try {
+      const response = await veeqoRequest("/current_user", { method: "GET" }, settings);
+      return sendJson(res, 200, { message: "Veeqo connection verified.", currentUser: response && typeof response === "object" ? { id: response.id || response.user_id || "", email: response.email || "", name: response.name || response.full_name || "" } : {} });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message || "Unable to verify Veeqo connection." });
+    }
+  }
+
   if (req.method === "POST" && url.pathname === "/api/system-settings/ai-test") {
     const body = await parseBody(req);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
@@ -39883,7 +39985,7 @@ async function handleApi(req, res) {
       else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") current[field] = Number(body[field] || 0);
       else if (Array.isArray(DEFAULT_SYSTEM_SETTINGS[field])) current[field] = Array.isArray(body[field]) ? body[field] : current[field];
       else if (DEFAULT_SYSTEM_SETTINGS[field] && typeof DEFAULT_SYSTEM_SETTINGS[field] === "object") current[field] = body[field] && typeof body[field] === "object" ? body[field] : current[field];
-      else if (["smtpPassword", "veeqoApiKey", "aiApiKey", "openAiApiKey", "geminiApiKey", "warehouseImageAnalysisApiKey"].includes(field) && !String(body[field] || "")) current[field] = current[field];
+      else if (["smtpPassword", "veeqoApiKey", "veeqoClientSecret", "veeqoAccessToken", "aiApiKey", "openAiApiKey", "geminiApiKey", "warehouseImageAnalysisApiKey"].includes(field) && !String(body[field] || "")) current[field] = current[field];
       else current[field] = String(body[field] || "");
     }
     const aiConfig = getAiRuntimeConfig(current);

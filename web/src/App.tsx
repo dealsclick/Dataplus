@@ -17938,6 +17938,7 @@ function SettingsPage({
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [testingSmtp, setTestingSmtp] = useState(false)
   const [testingAi, setTestingAi] = useState(false)
+  const [testingVeeqo, setTestingVeeqo] = useState(false)
   const [catalogMaintenanceLoading, setCatalogMaintenanceLoading] = useState(false)
   const [catalogMaintenanceConfirm, setCatalogMaintenanceConfirm] = useState<{
     path: string
@@ -18627,6 +18628,19 @@ function SettingsPage({
     } finally { setTestingSmtp(false) }
   }
 
+  async function testVeeqoConnection() {
+    setTestingVeeqo(true)
+    try {
+      const result = await api<{ message?: string }>("/api/system-settings/veeqo-test", {
+        method: "POST",
+        body: JSON.stringify(draft),
+      })
+      toast.success(result.message || "Veeqo connection verified.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Veeqo connection test failed.")
+    } finally { setTestingVeeqo(false) }
+  }
+
   async function testAiConnection() {
     setTestingAi(true)
     try {
@@ -18758,10 +18772,21 @@ function SettingsPage({
             <CardHeader><CardTitle className="text-base">Universal shipping rater</CardTitle><CardDescription>Use one order label workflow while DataPlus loads channel-native labels and third-party carrier rates.</CardDescription></CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               <ToggleField label="Enable Veeqo rates and labels" checked={boolValue("shippingRaterVeeqoEnabled")} disabled={!editing} onCheckedChange={(next) => update("shippingRaterVeeqoEnabled", next)} />
+              <div className="rounded-md border bg-muted/25 p-3 text-sm">
+                <p className="font-medium">Veeqo connection</p>
+                <p className="mt-1 text-muted-foreground">{settings.veeqoAccessTokenConfigured ? `OAuth connected${settings.veeqoConnectedAt ? ` / ${dateLabel(String(settings.veeqoConnectedAt))}` : ""}` : settings.veeqoApiKeyConfigured ? "Private API key configured" : "Not connected"}</p>
+              </div>
               <Field label="Veeqo API base URL"><Input disabled={!editing} value={String(value("veeqoApiBaseUrl") || "https://api.veeqo.com")} onChange={(event) => update("veeqoApiBaseUrl", event.target.value)} /></Field>
-              <Field label="Veeqo API key"><Input disabled={!editing} type="password" value={String(draft.veeqoApiKey || "")} onChange={(event) => update("veeqoApiKey", event.target.value)} placeholder={settings.veeqoApiKeyConfigured ? "Configured (enter only to replace)" : "Veeqo x-api-key"} /></Field>
+              <Field label="OAuth redirect URI"><Input disabled={!editing} value={String(value("veeqoRedirectUri") || "https://dataplusapp.duckdns.org/auth/veeqo/callback")} onChange={(event) => update("veeqoRedirectUri", event.target.value)} /></Field>
+              <Field label="Veeqo client ID"><Input disabled={!editing} value={String(value("veeqoClientId") || "")} onChange={(event) => update("veeqoClientId", event.target.value)} /></Field>
+              <Field label="Veeqo client secret"><Input disabled={!editing} type="password" value={String(draft.veeqoClientSecret || "")} onChange={(event) => update("veeqoClientSecret", event.target.value)} placeholder={settings.veeqoClientSecretConfigured ? "Configured (enter only to replace)" : "OAuth client secret"} /></Field>
+              <Field label="Private API key fallback"><Input disabled={!editing} type="password" value={String(draft.veeqoApiKey || "")} onChange={(event) => update("veeqoApiKey", event.target.value)} placeholder={settings.veeqoApiKeyConfigured ? "Configured (enter only to replace)" : "Optional x-api-key"} /></Field>
               <Field label="Seller display name"><Input disabled={!editing} value={String(value("veeqoSellerDisplayName") || "DataPlus")} onChange={(event) => update("veeqoSellerDisplayName", event.target.value)} /></Field>
               <Field label="Default label format"><Select disabled={!editing} value={String(value("veeqoDefaultLabelFormat") || "PDF")} onValueChange={(next) => update("veeqoDefaultLabelFormat", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem><SelectItem value="ZPL">ZPL</SelectItem><SelectItem value="JPEG">JPEG</SelectItem></SelectContent></Select></Field>
+              <div className="flex flex-wrap items-end gap-2 xl:col-span-3">
+                <Button type="button" variant="outline" disabled={editing || !String(value("veeqoClientId") || "").trim()} asChild><a href="/auth/veeqo/start" target="_blank" rel="noreferrer"><ShieldCheck className="size-4" /> Connect Veeqo OAuth</a></Button>
+                <Button type="button" variant="outline" disabled={testingVeeqo || (!settings.veeqoAccessTokenConfigured && !settings.veeqoApiKeyConfigured && !String(draft.veeqoApiKey || "").trim())} onClick={() => void testVeeqoConnection()}>{testingVeeqo ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test Veeqo</Button>
+              </div>
               <Field label="Auto-select rate"><Select disabled={!editing} value={String(value("shippingLabelAutoSelectRule") || "cheapest")} onValueChange={(next) => update("shippingLabelAutoSelectRule", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cheapest">Cheapest</SelectItem><SelectItem value="preferred">Preferred carrier/service</SelectItem><SelectItem value="fastest">Fastest</SelectItem><SelectItem value="none">Do not auto-select</SelectItem></SelectContent></Select></Field>
               <Field label="Preferred carrier"><Input disabled={!editing} value={String(value("shippingLabelPreferredCarrier") || "")} onChange={(event) => update("shippingLabelPreferredCarrier", event.target.value)} placeholder="UPS, USPS, FedEx" /></Field>
               <Field label="Preferred service"><Input disabled={!editing} value={String(value("shippingLabelPreferredService") || "")} onChange={(event) => update("shippingLabelPreferredService", event.target.value)} placeholder="Ground, Priority, 2 Day" /></Field>
