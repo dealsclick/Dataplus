@@ -36308,12 +36308,14 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/orders") {
     if (postgres.isPostgresEnabled()) {
-      const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get("limit") || 5000)));
-      const cacheKey = `dataplus:orders:v2:${limit}`;
+      const summary = url.searchParams.get("summary") === "1" || String(url.searchParams.get("summary")).toLowerCase() === "true";
+      const defaultLimit = summary ? 1000 : 5000;
+      const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get("limit") || defaultLimit)));
+      const cacheKey = `dataplus:orders:v3:${summary ? "summary" : "full"}:${limit}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       const [orders, orderDrafts, returns, customers] = await Promise.all([
-        postgres.listOrders({ limit }),
+        postgres.listOrders({ limit, summary }),
         postgres.readStateField("orderDrafts"),
         postgres.readStateField("returns"),
         postgres.readStateField("customers")
@@ -36324,9 +36326,10 @@ async function handleApi(req, res) {
         returns: returns || [],
         customers: customers || [],
         ordersLoaded: true,
+        summary,
         storage: "postgres"
       };
-      await redisCache.setJson(cacheKey, payload, 180);
+      await redisCache.setJson(cacheKey, payload, summary ? 300 : 180);
       return sendJson(res, 200, payload);
     }
     const db = await readDbFast();

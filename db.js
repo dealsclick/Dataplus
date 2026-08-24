@@ -5123,6 +5123,78 @@ function orderRowToState(row = {}, lines = []) {
   };
 }
 
+function orderLineRowToSummary(row = {}) {
+  return {
+    id: row.line_id,
+    lineId: row.line_id,
+    sku: row.sku || "",
+    mappedSku: row.mapped_sku || "",
+    originalSku: row.original_sku || "",
+    title: row.title || "",
+    qty: row.qty,
+    price: row.price,
+    cost: row.cost
+  };
+}
+
+function orderRowToSummary(row = {}, lines = []) {
+  const raw = row.raw || {};
+  return {
+    id: row.order_id || raw.id,
+    orderId: row.order_id || raw.orderId,
+    orderNumber: row.order_number || raw.orderNumber || raw.displayOrderNumber || "",
+    internalOrderNumber: row.internal_order_number || raw.internalOrderNumber || "",
+    marketplaceOrderId: row.marketplace_order_id || raw.marketplaceOrderId || "",
+    marketplaceOrderNumber: row.marketplace_order_id || raw.marketplaceOrderNumber || "",
+    source: row.source || raw.source || "",
+    channelSource: row.channel_source || raw.channelSource || raw.salesChannel || raw.sourceChannel || "",
+    status: row.status || raw.status || "",
+    financialStatus: raw.financialStatus || raw.paymentStatus || "",
+    paymentStatus: raw.paymentStatus || raw.financialStatus || "",
+    operationalStatus: raw.operationalStatus || raw.workflowStatus || "",
+    workflowStatus: raw.workflowStatus || raw.operationalStatus || "",
+    fulfillmentStatus: raw.fulfillmentStatus || raw.fulfillmentStage || "",
+    fulfillmentStage: raw.fulfillmentStage || raw.fulfillmentStatus || "",
+    allocationStatus: raw.allocationStatus || "",
+    buyer: row.buyer || raw.buyer || raw.customerName || "",
+    buyerEmail: row.buyer_email || raw.buyerEmail || "",
+    customerName: raw.customerName || row.buyer || "",
+    customerEmail: raw.customerEmail || row.buyer_email || "",
+    total: row.total ?? raw.total,
+    paidAmount: row.paid_amount ?? raw.paidAmount ?? raw.paid,
+    qty: row.qty ?? raw.qty,
+    shipBy: row.ship_by?.toISOString?.().slice(0, 10) || raw.shipBy || "",
+    createdAt: row.created_at?.toISOString?.() || raw.createdAt || "",
+    updatedAt: row.updated_at?.toISOString?.() || raw.updatedAt || "",
+    purchaseOrderIds: Array.isArray(raw.purchaseOrderIds) ? raw.purchaseOrderIds : [],
+    purchaseOrderNumbers: Array.isArray(raw.purchaseOrderNumbers) ? raw.purchaseOrderNumbers : [],
+    workflowExceptions: Array.isArray(raw.workflowExceptions) ? raw.workflowExceptions : [],
+    shipments: Array.isArray(raw.shipments) ? raw.shipments.map((shipment) => ({
+      id: shipment.id,
+      status: shipment.status,
+      trackingNumber: shipment.trackingNumber,
+      carrier: shipment.carrier,
+      service: shipment.service
+    })) : [],
+    backorderLines: Array.isArray(raw.backorderLines) ? raw.backorderLines : [],
+    fulfillmentRoutes: Array.isArray(raw.fulfillmentRoutes) ? raw.fulfillmentRoutes.map((route) => ({
+      id: route.id,
+      type: route.type,
+      status: route.status,
+      purchaseOrderId: route.purchaseOrderId,
+      warehouseId: route.warehouseId,
+      sku: route.sku
+    })) : [],
+    items: lines.length ? lines.map(orderLineRowToSummary) : (Array.isArray(raw.items) ? raw.items.map((item) => ({
+      id: item.id,
+      sku: item.sku,
+      title: item.title,
+      qty: item.qty,
+      price: item.price
+    })) : [])
+  };
+}
+
 function purchaseOrderLineRowToState(row = {}) {
   return {
     ...(row.raw || {}),
@@ -5351,6 +5423,7 @@ async function listOrders(options = {}) {
   if (!client) return null;
   await initRelationalSchema();
   const limit = Math.max(1, Math.min(10000, Number(options.limit || 5000)));
+  const summary = options.summary === true || String(options.summary).toLowerCase() === "true";
   const status = nullableString(options.status);
   const params = [];
   const where = [];
@@ -5389,7 +5462,12 @@ async function listOrders(options = {}) {
   const ids = orders.rows.map((row) => row.order_id).filter(Boolean);
   let lineRows = [];
   if (ids.length) {
-    const lines = await client.query(`
+    const lines = await client.query(summary ? `
+      select line_id, order_id, line_index, sku, mapped_sku, original_sku, title, qty, price, cost
+      from order_line_items
+      where order_id = any($1::text[])
+      order by order_id, line_index
+    ` : `
       select *
       from order_line_items
       where order_id = any($1::text[])
@@ -5402,7 +5480,7 @@ async function listOrders(options = {}) {
     if (!byOrder.has(line.order_id)) byOrder.set(line.order_id, []);
     byOrder.get(line.order_id).push(line);
   }
-  return orders.rows.map((row) => orderRowToState(row, byOrder.get(row.order_id) || []));
+  return orders.rows.map((row) => summary ? orderRowToSummary(row, byOrder.get(row.order_id) || []) : orderRowToState(row, byOrder.get(row.order_id) || []));
 }
 
 async function readOrderLinesBySkus(skus = []) {

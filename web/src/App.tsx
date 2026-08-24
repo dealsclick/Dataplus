@@ -10899,6 +10899,35 @@ function OrderListPreview({ order, orderId, reference, itemCount, hasPo, queue }
   </HoverCard>
 }
 
+function orderListSearchText(row: Record<string, unknown>) {
+  const address = (row.address || row.shippingAddress || {}) as Record<string, unknown>
+  const items = Array.isArray(row.items) ? row.items as Array<Record<string, unknown>> : []
+  return [
+    row.orderNumber,
+    row.reference,
+    row.returnNumber,
+    row.id,
+    row.marketplaceOrderNumber,
+    row.marketplaceOrderId,
+    row.buyer,
+    row.customerName,
+    row.customerEmail,
+    row.buyerEmail,
+    row.source,
+    row.channelSource,
+    row.salesChannel,
+    row.sourceChannel,
+    row.status,
+    row.returnStatus,
+    address.name,
+    address.line1,
+    address.city,
+    address.state,
+    address.postalCode,
+    ...items.slice(0, 12).flatMap((item) => [item.sku, item.title, item.originalSku, item.mappedSku])
+  ].filter(Boolean).join(" ").toLowerCase()
+}
+
 function OperationsPage() {
   const initial = window.location.pathname.startsWith("/returns") ? "returns" : window.location.pathname.startsWith("/drafts") ? "drafts" : "orders"
   const [tab, setTab] = useState(initial)
@@ -10929,7 +10958,7 @@ function OperationsPage() {
         return
       }
       const [orders, state] = await Promise.all([
-        api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>> }>("/api/orders?limit=5000"),
+        api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>> }>("/api/orders?summary=1&limit=1000"),
         api<LiteState>("/api/state?lite=1"),
       ])
       setData(orders)
@@ -11087,8 +11116,9 @@ function OperationsPage() {
   const rows = tab === "orders" ? orderRows : tab === "drafts" ? data.orderDrafts || [] : data.returns || []
   const sourceValues = [...new Set(rows.map((row) => String(row.source || row.channelSource || "")).filter(Boolean))].sort()
   const statusValues = [...new Set(rows.map((row) => String(row.status || row.returnStatus || "")).filter(Boolean))].sort()
-  const filtered = rows
-    .filter((row) => JSON.stringify(row).toLowerCase().includes(query.trim().toLowerCase()))
+  const searchTerm = query.trim().toLowerCase()
+  const filtered = useMemo(() => rows
+    .filter((row) => !searchTerm || orderListSearchText(row).includes(searchTerm))
     .filter((row) => tab !== "orders" || queue === "all" || queueFor(row) === queue)
     .filter((row) => status === "all" || String(row.status || row.returnStatus || "") === status)
     .filter((row) => source === "all" || String(row.source || row.channelSource || "") === source)
@@ -11098,8 +11128,9 @@ function OperationsPage() {
       const rightValue = sort.startsWith("total") ? Number(right.total || right.refundAmount || 0) : sort.startsWith("customer") ? String(right.buyer || right.customerName || "") : new Date(String(right.createdAt || right.updatedAt || 0)).getTime()
       const result = typeof leftValue === "number" && typeof rightValue === "number" ? leftValue - rightValue : String(leftValue).localeCompare(String(rightValue))
       return sort.endsWith("asc") ? result : -result
-    })
-  const selectedVisible = filtered.filter((row) => selectedIds.has(String(row.id || "")))
+    }), [rows, searchTerm, tab, queue, status, source, orderDate, sort])
+  const visibleRows = filtered.slice(0, 300)
+  const selectedVisible = visibleRows.filter((row) => selectedIds.has(String(row.id || "")))
   const current: Record<string, unknown> = detail || selected || {}
   const currentShipments = Array.isArray(current.shipments) ? current.shipments as Array<Record<string, unknown>> : []
   const currentPayments = Array.isArray(current.payments) ? current.payments as Array<Record<string, unknown>> : []
@@ -11119,14 +11150,14 @@ function OperationsPage() {
           <Select value={sort} onValueChange={setSort}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest first</SelectItem><SelectItem value="created-asc">Oldest first</SelectItem><SelectItem value="total-desc">Highest total</SelectItem><SelectItem value="total-asc">Lowest total</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
           <Popover><PopoverTrigger asChild><Button variant="outline" className="justify-start font-normal"><CalendarDays className="size-4" />{orderDate ? new Date(`${orderDate}T12:00:00`).toLocaleDateString() : "Any date"}</Button></PopoverTrigger><PopoverContent align="end" className="w-auto p-0"><Calendar mode="single" selected={orderDate ? new Date(`${orderDate}T12:00:00`) : undefined} onSelect={(date) => setOrderDate(date ? date.toISOString().slice(0, 10) : "")} /><div className="border-t p-2"><Button size="sm" variant="ghost" className="w-full" disabled={!orderDate} onClick={() => setOrderDate("")}>Clear date</Button></div></PopoverContent></Popover>
         </div>
-        <CardDescription>{numberLabel(filtered.length)} records shown. Select rows for bulk actions; the order number opens the full operational record.</CardDescription>
+        <CardDescription>{numberLabel(visibleRows.length)} of {numberLabel(filtered.length)} records shown. Use search or filters to narrow more results; the order number opens the full operational record.</CardDescription>
       </CardHeader>
       {selectedVisible.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-4 py-2"><span className="text-sm font-medium">{selectedVisible.length} selected</span><Button size="sm" disabled={busy} onClick={() => void createSupplierPos(selectedVisible.map((row) => String(row.id)))}>Create supplier POs</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "hold")}>Put on hold</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "done")}>Mark done</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setSelectedIds(new Set())}>Clear</Button></div>}
       <CardContent className="p-0">
         {tab === "drafts" && loading && <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div>}
         {tab === "drafts" && !loading && <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Quote</TableHead><TableHead>Customer</TableHead><TableHead>Ship to</TableHead><TableHead>Items</TableHead><TableHead>Total</TableHead><TableHead>Status</TableHead><TableHead>Source</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader><TableBody>{filtered.map((draft, index) => { const id = String(draft.id || ""); const address = (draft.shippingAddress || {}) as Record<string, unknown>; const shipTo = [address.city, address.state || address.province, address.postalCode || address.zip].filter(Boolean).join(", ") || "No address"; const items = Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []; const total = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0); return <TableRow key={`${id}-${index}`}><TableCell><a href={`/drafts/${encodeURIComponent(id || String(draft.draftNumber || ""))}`} className="font-medium hover:underline">{String(draft.draftNumber || id)}</a></TableCell><TableCell><div>{String(draft.buyer || "-")}</div><p className="text-xs text-muted-foreground">{String(draft.buyerEmail || "")}</p></TableCell><TableCell>{shipTo}</TableCell><TableCell>{numberLabel(items.reduce((sum, item) => sum + Number(item.qty || 0), 0))}</TableCell><TableCell className="font-medium">{moneyLabel(total)}</TableCell><TableCell><Badge variant="outline">{String(draft.status || "draft")}</Badge></TableCell><TableCell>{String(draft.source || "Manual")}</TableCell><TableCell>{dateLabel(String(draft.updatedAt || draft.createdAt || ""))}</TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" title="Quote actions"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem asChild><a href={`/drafts/${encodeURIComponent(id || String(draft.draftNumber || ""))}`}>Open quote</a></DropdownMenuItem><DropdownMenuItem onSelect={() => void duplicateDraft(draft)}>Duplicate quote</DropdownMenuItem><DropdownMenuItem onSelect={() => void convertDraft(draft)}>Convert to order</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem asChild><a href={`/api/order-drafts/${encodeURIComponent(id)}/export/pdf`} target="_blank" rel="noreferrer">Download quote</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow> })}{!filtered.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No draft quotes match the current filters.</TableCell></TableRow>}</TableBody></Table></div>}
         {tab !== "drafts" && <>
-        {loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible records" checked={filtered.length > 0 && selectedVisible.length === filtered.length} onCheckedChange={(checked) => setSelectedIds(checked === true ? new Set(filtered.map((row) => String(row.id || ""))) : new Set())} /></TableHead><TableHead>{tab === "orders" ? "Order" : "Return"}</TableHead><TableHead>Customer</TableHead><TableHead>{tab === "orders" ? "Delivery" : "Warehouse"}</TableHead><TableHead>{tab === "orders" ? "Items" : "Reason"}</TableHead><TableHead>{tab === "orders" ? "Total" : "Amount"}</TableHead><TableHead>{tab === "orders" ? "Payment" : "Status"}</TableHead><TableHead>{tab === "orders" ? "Supply" : "Disposition"}</TableHead><TableHead>{tab === "orders" ? "PO" : "Channel sync"}</TableHead><TableHead>Channel</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader><TableBody>{filtered.map((row, index) => {
+        {loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible records" checked={visibleRows.length > 0 && selectedVisible.length === visibleRows.length} onCheckedChange={(checked) => setSelectedIds(checked === true ? new Set(visibleRows.map((row) => String(row.id || ""))) : new Set())} /></TableHead><TableHead>{tab === "orders" ? "Order" : "Return"}</TableHead><TableHead>Customer</TableHead><TableHead>{tab === "orders" ? "Delivery" : "Warehouse"}</TableHead><TableHead>{tab === "orders" ? "Items" : "Reason"}</TableHead><TableHead>{tab === "orders" ? "Total" : "Amount"}</TableHead><TableHead>{tab === "orders" ? "Payment" : "Status"}</TableHead><TableHead>{tab === "orders" ? "Supply" : "Disposition"}</TableHead><TableHead>{tab === "orders" ? "PO" : "Channel sync"}</TableHead><TableHead>Channel</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader><TableBody>{visibleRows.map((row, index) => {
           const reference = String(row.orderNumber || row.returnNumber || row.reference || row.id || "-")
           const items = Array.isArray(row.items) ? row.items as Array<Record<string, unknown>> : []
           const itemCount = items.reduce((total, item) => total + Number(item.qty || 0), 0) || Number(row.qty || 0)
