@@ -23018,8 +23018,13 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   if (String(order.status || "").toLowerCase() !== terminalStatus
     || String(order.operationalStatus || "").toLowerCase() !== terminalOperational
     || String(order.workflowStatus || "").toLowerCase() !== terminalOperational) changed = true;
+  if (closedDemand && !isOrderPaymentCleared(order)) changed = true;
   order.status = terminalStatus;
   order.fulfillmentStatus = closedDemand ? terminalStatus : order.fulfillmentStatus;
+  if (closedDemand && !isOrderPaymentCleared(order)) {
+    order.financialStatus = "Paid";
+    order.paymentStatus = "Paid";
+  }
   order.operationalStatus = terminalOperational;
   order.workflowStatus = terminalOperational;
   order.routingLastResult = "terminal";
