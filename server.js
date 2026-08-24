@@ -21522,6 +21522,22 @@ function temuLogisticsRows(payload = {}) {
   return rows.filter((row) => row && typeof row === "object");
 }
 
+function temuShippingServiceRows(payload = {}) {
+  const normalized = temuPayload(payload);
+  const rows = firstArrayFrom(
+    normalized.onlineChannelDtoList
+      || normalized.availableChannelDtoList
+      || normalized.shippingServiceList
+      || normalized.shippingServices
+      || normalized.serviceList
+      || normalized.channelList
+      || normalized.channelInfoList
+      || normalized.logisticsServiceList
+      || normalized
+  );
+  return rows.filter((row) => row && typeof row === "object");
+}
+
 function normalizeTemuWarehouse(row = {}, index = 0) {
   return {
     id: String(deepValueAt(row, ["warehouseId", "warehouse_id", "whId", "id"], "") || `temu-warehouse-${index}`),
@@ -21533,10 +21549,12 @@ function normalizeTemuWarehouse(row = {}, index = 0) {
 function normalizeTemuShippingService(row = {}, index = 0, context = {}) {
   const shipCompanyId = String(deepValueAt(row, ["shipCompanyId", "ship_company_id", "companyId", "carrierId", "logisticsCompanyId", "id"], "")).trim();
   const channelId = String(deepValueAt(row, ["channelId", "channel_id", "shippingChannelId", "logisticsChannelId", "serviceId"], "")).trim();
-  const carrier = String(deepValueAt(row, ["shipCompanyName", "companyName", "carrierName", "logisticsCompanyName", "name"], "") || "Temu");
-  const service = String(deepValueAt(row, ["channelName", "serviceName", "shippingServiceName", "logisticsServiceName", "displayName"], "") || carrier || "Temu shipping");
+  const carrier = String(deepValueAt(row, ["shippingCompanyName", "shipCompanyName", "companyName", "carrierName", "logisticsCompanyName", "name"], "") || "Temu");
+  const logisticsType = String(deepValueAt(row, ["shipLogisticsType", "logisticsType"], "")).trim();
+  const signService = String(deepValueAt(row, ["signServiceName", "signService"], "")).trim();
+  const service = String(deepValueAt(row, ["channelName", "serviceName", "shippingServiceName", "logisticsServiceName", "displayName"], "") || signService || logisticsType || carrier || "Temu shipping");
   const amount = Number(firstMoney(
-    deepValueAt(row, ["shippingFee", "shippingAmount", "estimateShippingFee", "estimatedFee", "price", "amount"], 0),
+    deepValueAt(row, ["estimatedAmount", "shippingFee", "shippingAmount", "estimateShippingFee", "estimatedFee", "price", "amount"], 0),
     deepValueAt(row, ["totalCharge", "totalCost", "cost"], 0)
   )) || 0;
   const deliveryDays = Number(deepValueAt(row, ["deliveryDays", "estimatedDeliveryDays", "promiseDeliveryDays", "deliveryTime"], 0)) || 0;
@@ -21546,13 +21564,15 @@ function normalizeTemuShippingService(row = {}, index = 0, context = {}) {
     carrier,
     service,
     amount,
-    currency: String(context.currency || "USD"),
+    currency: String(deepValueAt(row, ["estimatedCurrencyCode", "currencyCode", "currency"], "") || context.currency || "USD"),
     deliveryDays,
-    deliveryEstimate: String(deepValueAt(row, ["deliveryEstimate", "estimatedDeliveryTime", "promiseDeliveryTime", "deliveryTimeDesc"], "") || (deliveryDays ? `${deliveryDays} day${deliveryDays === 1 ? "" : "s"}` : "Provided by Temu")),
+    deliveryEstimate: String(deepValueAt(row, ["estimatedText", "deliveryEstimate", "estimatedDeliveryTime", "promiseDeliveryTime", "deliveryTimeDesc"], "") || (deliveryDays ? `${deliveryDays} day${deliveryDays === 1 ? "" : "s"}` : "Provided by Temu")),
     action: "create_shipment",
     documentType: "SHIPPING_LABEL_PDF",
     shipCompanyId,
     channelId,
+    signServiceId: String(deepValueAt(row, ["signServiceId"], "") || ""),
+    shipLogisticsType: logisticsType,
     warehouseId: String(context.warehouseId || ""),
     raw: { ...row, warehouseId: String(context.warehouseId || ""), parentOrderSn: String(context.parentOrderSn || "") }
   };
@@ -21652,7 +21672,7 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   for (const payload of attempts) {
     try {
       const response = await temuRequest("bg.logistics.shippingservices.get", payload, { db, allowErrorResult: true });
-      const rows = temuLogisticsRows(response);
+      const rows = temuShippingServiceRows(response);
       if (rows.length) {
         services = rows;
         order.external = { ...(order.external || {}), temuShippingServices: temuPayload(response), temuLogisticsWarehouse: selectedWarehouse };

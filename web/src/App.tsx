@@ -10167,7 +10167,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const selectedPreset = packagePresets.find((preset) => String(preset.id || "") === String(draft.packagePresetId || ""))
   const packageName = selectedPreset ? String(selectedPreset.name || selectedPreset.id || "Package") : "Custom package"
   const packageSummary = `${String(draft.packageType || "box").replace(/_/g, " ")} / ${draft.packageWeight || "0"} lb / ${draft.packageLength || "0"} x ${draft.packageWidth || "0"} x ${draft.packageHeight || "0"} in`
-  const rateCostLabel = (rate: Record<string, unknown>) => Number(rate.amount || 0) > 0 ? moneyLabel(Number(rate.amount || 0)) : "Channel label"
+  const rateCostLabel = (rate: Record<string, unknown>) => Number(rate.amount || 0) > 0 ? moneyLabel(Number(rate.amount || 0)) : String(rate.action || "") === "retrieve_existing_label" ? "Channel label" : "Cost not returned"
   const rateEtaLabel = (rate: Record<string, unknown>) => String(rate.deliveryEstimate || "").trim() || (Number(rate.deliveryDays || 0) > 0 ? `${Number(rate.deliveryDays)} day${Number(rate.deliveryDays) === 1 ? "" : "s"}` : "ETA not returned")
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
