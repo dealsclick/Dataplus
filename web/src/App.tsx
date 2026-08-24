@@ -18632,10 +18632,11 @@ function SettingsPage({
   async function testVeeqoConnection() {
     setTestingVeeqo(true)
     try {
-      const result = await api<{ message?: string }>("/api/system-settings/veeqo-test", {
+      const result = await api<{ message?: string; systemSettings?: SystemSettings }>("/api/system-settings/veeqo-test", {
         method: "POST",
         body: JSON.stringify(draft),
       })
+      if (result.systemSettings) setDraft((current) => ({ ...current, ...result.systemSettings }))
       toast.success(result.message || "Veeqo connection verified.")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Veeqo connection test failed.")
@@ -18775,9 +18776,18 @@ function SettingsPage({
             <CardHeader><CardTitle className="text-base">Shipping providers and universal rater</CardTitle><CardDescription>Use one label workflow while DataPlus loads channel-native labels, Veeqo rates, and future direct carrier providers.</CardDescription></CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               <ToggleField label="Enable Veeqo rates and labels" checked={boolValue("shippingRaterVeeqoEnabled")} disabled={!editing} onCheckedChange={(next) => update("shippingRaterVeeqoEnabled", next)} />
-              <div className="rounded-md border bg-muted/25 p-3 text-sm">
-                <p className="font-medium">Veeqo connection</p>
-                <p className="mt-1 text-muted-foreground">{settings.veeqoAccessTokenConfigured ? `OAuth connected${settings.veeqoConnectedAt ? ` / ${dateLabel(String(settings.veeqoConnectedAt))}` : ""}` : settings.veeqoApiKeyConfigured ? "Private API key configured" : "Not connected"}</p>
+              <div className="rounded-md border bg-muted/25 p-3 text-sm xl:col-span-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-medium">Veeqo connection</p>
+                  <Badge variant={settings.veeqoAccessTokenConfigured || settings.veeqoApiKeyConfigured ? "default" : String(value("veeqoLastAuthStatus") || "").toLowerCase() === "failed" || String(value("veeqoLastTestStatus") || "").toLowerCase() === "failed" ? "destructive" : "outline"}>{settings.veeqoAccessTokenConfigured ? "OAuth token stored" : settings.veeqoApiKeyConfigured ? "API key stored" : "Not connected"}</Badge>
+                </div>
+                <div className="mt-2 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+                  <span>Auth mode: {String(settings.veeqoAuthMode || "not_connected").replace(/_/g, " ")}</span>
+                  <span>Connected: {value("veeqoConnectedAt") ? dateLabel(String(value("veeqoConnectedAt"))) : "Not yet"}</span>
+                  <span>Last OAuth: {value("veeqoLastAuthStatus") ? `${String(value("veeqoLastAuthStatus"))} / ${dateLabel(String(value("veeqoLastAuthCallbackAt") || value("veeqoLastAuthStartedAt") || ""))}` : "No attempt yet"}</span>
+                  <span>Last test: {value("veeqoLastTestStatus") ? `${String(value("veeqoLastTestStatus"))} / ${dateLabel(String(value("veeqoLastTestedAt") || ""))}` : "Not tested"}</span>
+                </div>
+                {Boolean(value("veeqoLastAuthMessage") || value("veeqoLastTestMessage")) && <p className="mt-2 text-xs text-muted-foreground">{String(value("veeqoLastTestMessage") || value("veeqoLastAuthMessage"))}</p>}
               </div>
               <Field label="Veeqo API base URL"><Input disabled={!editing} value={String(value("veeqoApiBaseUrl") || "https://api.veeqo.com")} onChange={(event) => update("veeqoApiBaseUrl", event.target.value)} /></Field>
               <Field label="OAuth redirect URI"><Input disabled={!editing} value={String(value("veeqoRedirectUri") || "https://dataplusapp.duckdns.org/auth/veeqo/callback")} onChange={(event) => update("veeqoRedirectUri", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Use the URI registered with Veeqo. DataPlus accepts both the callback path and the homepage code return.</p></Field>
@@ -18787,7 +18797,7 @@ function SettingsPage({
               <Field label="Seller display name"><Input disabled={!editing} value={String(value("veeqoSellerDisplayName") || "DataPlus")} onChange={(event) => update("veeqoSellerDisplayName", event.target.value)} /></Field>
               <Field label="Default label format"><Select disabled={!editing} value={String(value("veeqoDefaultLabelFormat") || "PDF")} onValueChange={(next) => update("veeqoDefaultLabelFormat", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem><SelectItem value="ZPL">ZPL</SelectItem><SelectItem value="JPEG">JPEG</SelectItem></SelectContent></Select></Field>
               <div className="flex flex-wrap items-end gap-2 xl:col-span-3">
-                <Button type="button" variant="outline" disabled={editing || !String(value("veeqoClientId") || "").trim()} asChild><a href="/auth/veeqo/start" target="_blank" rel="noreferrer"><ShieldCheck className="size-4" /> Connect Veeqo OAuth</a></Button>
+                <Button type="button" variant="outline" disabled={editing || !String(value("veeqoClientId") || "").trim()} asChild><a href="/auth/veeqo/launch" target="_blank" rel="noreferrer"><ShieldCheck className="size-4" /> Connect Veeqo OAuth</a></Button>
                 <Button type="button" variant="outline" disabled={testingVeeqo || (!settings.veeqoAccessTokenConfigured && !settings.veeqoApiKeyConfigured && !String(draft.veeqoApiKey || "").trim())} onClick={() => void testVeeqoConnection()}>{testingVeeqo ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test Veeqo</Button>
               </div>
               <Field label="Auto-select rate"><Select disabled={!editing} value={String(value("shippingLabelAutoSelectRule") || "cheapest")} onValueChange={(next) => update("shippingLabelAutoSelectRule", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cheapest">Cheapest</SelectItem><SelectItem value="preferred">Preferred carrier/service</SelectItem><SelectItem value="fastest">Fastest</SelectItem><SelectItem value="none">Do not auto-select</SelectItem></SelectContent></Select></Field>
