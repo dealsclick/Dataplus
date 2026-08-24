@@ -9967,6 +9967,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   ])
   const [selectedId, setSelectedId] = useState("")
   const [draft, setDraft] = useState({ warehouseId: "", packagePresetId: "", packageType: "box", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "", shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF", printPackingSlip: false })
+  const autoLoadKeyRef = useRef("")
   const applyPreset = (presetId: string) => {
     const preset = packagePresets.find((entry) => String(entry.id) === presetId)
     setDraft((current) => preset ? { ...current, packagePresetId: presetId, packageType: String(preset.packageType || "box"), packageWeight: String(preset.weight || ""), packageLength: String(preset.length || ""), packageWidth: String(preset.width || ""), packageHeight: String(preset.height || "") } : { ...current, packagePresetId: "" })
@@ -9989,6 +9990,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     setRates([])
     setBlockers([])
     setSelectedId("")
+    autoLoadKeyRef.current = ""
   }, [open, order, warehouses, lines])
   const selected = rates.find((rate) => String(rate.id) === selectedId)
   const selectedLines = lines.map((line, lineIndex) => ({ sku: String(line.sku || ""), lineIndex, qty: remaining(line, lineIndex) })).filter((line) => line.sku && line.qty > 0)
@@ -10019,6 +10021,14 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
       toast.success(result.message || "Shipping rates loaded.")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load shipping rates.") } finally { setLoading(false) }
   }
+  useEffect(() => {
+    if (!open || loading || rates.length || blockers.length) return
+    if (!draft.packageWeight || !draft.packageLength || !draft.packageWidth || !draft.packageHeight) return
+    const key = [draft.warehouseId, draft.packageType, draft.packageWeight, draft.packageLength, draft.packageWidth, draft.packageHeight, selectedLines.length].join("|")
+    if (autoLoadKeyRef.current === key) return
+    autoLoadKeyRef.current = key
+    void loadRates()
+  }, [open, loading, rates.length, blockers.length, draft.warehouseId, draft.packageType, draft.packageWeight, draft.packageLength, draft.packageWidth, draft.packageHeight, selectedLines.length])
   const buy = async () => {
     if (!selected) return toast.error("Choose a shipping option first.")
     const printWindow = window.open("", "_blank")
@@ -10050,6 +10060,14 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     } finally { setLoading(false) }
   }
   const sortedRates = [...rates].sort((a, b) => (Number(a.amount || Number.MAX_SAFE_INTEGER) || Number.MAX_SAFE_INTEGER) - (Number(b.amount || Number.MAX_SAFE_INTEGER) || Number.MAX_SAFE_INTEGER))
+  const cheapestRateId = String(sortedRates.find((rate) => Number(rate.amount || 0) > 0)?.id || "")
+  const suggestedRateId = selectedId || chooseDefaultRate(rates, labelRules)
+  const selectedWarehouse = warehouses.find((warehouse) => String(warehouse.id || "") === String(draft.warehouseId || ""))
+  const selectedPreset = packagePresets.find((preset) => String(preset.id || "") === String(draft.packagePresetId || ""))
+  const packageName = selectedPreset ? String(selectedPreset.name || selectedPreset.id || "Package") : "Custom package"
+  const packageSummary = `${String(draft.packageType || "box").replace(/_/g, " ")} / ${draft.packageWeight || "0"} lb / ${draft.packageLength || "0"} x ${draft.packageWidth || "0"} x ${draft.packageHeight || "0"} in`
+  const rateCostLabel = (rate: Record<string, unknown>) => Number(rate.amount || 0) > 0 ? moneyLabel(Number(rate.amount || 0)) : "Channel label"
+  const rateEtaLabel = (rate: Record<string, unknown>) => String(rate.deliveryEstimate || "").trim() || (Number(rate.deliveryDays || 0) > 0 ? `${Number(rate.deliveryDays)} day${Number(rate.deliveryDays) === 1 ? "" : "s"}` : "ETA not returned")
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
@@ -10058,33 +10076,82 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
           <DialogDescription>Load available label options for this order, choose a rate, then print the attached label.</DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
+          <div className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-3">
+            <div className="md:col-span-2">
+              <p className="text-sm font-semibold">Package</p>
+              <p className="mt-1 text-xs text-muted-foreground">{packageName} / {packageSummary}</p>
+              <p className="mt-1 text-xs text-muted-foreground">Ship from {String(selectedWarehouse?.name || selectedWarehouse?.code || "selected warehouse")} on {draft.shipDate || "selected date"}.</p>
+            </div>
+            <div className="flex items-start justify-end">
+              <Badge variant={rates.length ? "default" : "outline"}>{rates.length ? `${rates.length} option${rates.length === 1 ? "" : "s"}` : "Rates pending"}</Badge>
+            </div>
+          </div>
+          <div className="grid gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><p className="text-sm font-semibold">Packages</p><p className="text-xs text-muted-foreground">Choose a preset or use custom measurements before loading rates.</p></div>
+              <Field label="Package preset"><Select value={draft.packagePresetId || "custom"} onValueChange={(value) => applyPreset(value === "custom" ? "" : value)}><SelectTrigger className="w-[220px]"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="custom">Custom package</SelectItem>{packagePresets.map((preset) => <SelectItem key={String(preset.id)} value={String(preset.id)}>{String(preset.name || preset.id)}</SelectItem>)}</SelectContent></Select></Field>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              {packagePresets.slice(0, 4).map((preset) => {
+                const active = String(draft.packagePresetId || "") === String(preset.id || "")
+                return <button key={String(preset.id)} type="button" onClick={() => applyPreset(String(preset.id || ""))} className={cn("rounded-md border p-3 text-left text-sm hover:bg-muted/40", active && "border-primary bg-primary/10")}>
+                  <div className="flex items-center justify-between gap-2"><span className="font-medium">{String(preset.name || preset.id)}</span>{preset.default ? <Badge variant="secondary">Default</Badge> : null}</div>
+                  <p className="mt-1 text-xs text-muted-foreground">{String(preset.packageType || "box").replace(/_/g, " ")} / {String(preset.weight || 0)} lb</p>
+                  <p className="text-xs text-muted-foreground">{String(preset.length || 0)} x {String(preset.width || 0)} x {String(preset.height || 0)} in</p>
+                </button>
+              })}
+            </div>
+          </div>
           <div className="grid gap-3 md:grid-cols-3">
             <Field label="Warehouse"><Select value={draft.warehouseId || "none"} onValueChange={(value) => setDraft((current) => ({ ...current, warehouseId: value === "none" ? "" : value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">No warehouse</SelectItem>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="Ship date"><Input type="date" value={draft.shipDate} onChange={(event) => setDraft((current) => ({ ...current, shipDate: event.target.value }))} /></Field>
-            <Field label="Package preset"><Select value={draft.packagePresetId || "custom"} onValueChange={(value) => applyPreset(value === "custom" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="custom">Custom package</SelectItem>{packagePresets.map((preset) => <SelectItem key={String(preset.id)} value={String(preset.id)}>{String(preset.name || preset.id)}</SelectItem>)}</SelectContent></Select></Field>
-            <Field label="Package type"><Select value={draft.packageType || "box"} onValueChange={(value) => setDraft((current) => ({ ...current, packageType: value, packagePresetId: "" }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="box">Box</SelectItem><SelectItem value="poly_mailer">Poly mailer</SelectItem><SelectItem value="envelope">Envelope</SelectItem><SelectItem value="tube">Tube</SelectItem></SelectContent></Select></Field>
             <Field label="Label format"><Select value={draft.labelFormat || "PDF"} onValueChange={(value) => setDraft((current) => ({ ...current, labelFormat: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem><SelectItem value="ZPL">ZPL</SelectItem><SelectItem value="JPEG">JPEG</SelectItem></SelectContent></Select></Field>
-            <Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={draft.packageWeight} onChange={(event) => setDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field>
-            <Field label="Length (in)"><Input type="number" min="0" step="0.01" value={draft.packageLength} onChange={(event) => setDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field>
-            <Field label="Width (in)"><Input type="number" min="0" step="0.01" value={draft.packageWidth} onChange={(event) => setDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field>
-            <Field label="Height (in)"><Input type="number" min="0" step="0.01" value={draft.packageHeight} onChange={(event) => setDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field>
+            <Field label="Package type"><Select value={draft.packageType || "box"} onValueChange={(value) => setDraft((current) => ({ ...current, packageType: value, packagePresetId: "" }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="box">Box</SelectItem><SelectItem value="poly_mailer">Poly mailer</SelectItem><SelectItem value="envelope">Envelope</SelectItem><SelectItem value="tube">Tube</SelectItem></SelectContent></Select></Field>
+            <Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={draft.packageWeight} onChange={(event) => setDraft((current) => ({ ...current, packageWeight: event.target.value, packagePresetId: "" }))} /></Field>
+            <div className="grid grid-cols-3 gap-2">
+              <Field label="L"><Input type="number" min="0" step="0.01" value={draft.packageLength} onChange={(event) => setDraft((current) => ({ ...current, packageLength: event.target.value, packagePresetId: "" }))} /></Field>
+              <Field label="W"><Input type="number" min="0" step="0.01" value={draft.packageWidth} onChange={(event) => setDraft((current) => ({ ...current, packageWidth: event.target.value, packagePresetId: "" }))} /></Field>
+              <Field label="H"><Input type="number" min="0" step="0.01" value={draft.packageHeight} onChange={(event) => setDraft((current) => ({ ...current, packageHeight: event.target.value, packagePresetId: "" }))} /></Field>
+            </div>
           </div>
           <ToggleField label="Open packing slip with label" checked={draft.printPackingSlip} onCheckedChange={(value) => setDraft((current) => ({ ...current, printPackingSlip: value }))} />
           {Number(labelRules.maxCost || 0) > 0 && <Alert><AlertCircle className="size-4" /><AlertTitle>Label cost rule</AlertTitle><AlertDescription>Labels above {moneyLabel(Number(labelRules.maxCost || 0))} require confirmation before purchase.</AlertDescription></Alert>}
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/25 p-3 text-sm">
-            <span>{selectedLines.length} line{selectedLines.length === 1 ? "" : "s"} selected for remaining quantities.</span>
+            <span>{selectedLines.length} line{selectedLines.length === 1 ? "" : "s"} selected for remaining quantities. Options auto-load when package data is complete.</span>
             <Button size="sm" onClick={() => void loadRates()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Load options</Button>
           </div>
           {blockers.length > 0 && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Rates need setup</AlertTitle><AlertDescription>{blockers.join(" ")}</AlertDescription></Alert>}
-          <div className="grid gap-2">
-            {sortedRates.map((rate, index) => <button key={String(rate.id)} type="button" onClick={() => setSelectedId(String(rate.id))} className={cn("grid gap-1 rounded-md border p-3 text-left text-sm hover:bg-muted/40", selectedId === String(rate.id) && "border-primary bg-primary/10")}>
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="font-medium">{String(rate.carrier || rate.provider)} / {String(rate.service || "Shipping")}</span>
-                <div className="flex items-center gap-2">{index === 0 && Number(rate.amount || 0) > 0 && <Badge variant="secondary">Lowest</Badge>}<Badge variant="outline">{String(rate.provider || "provider")}</Badge><span className="font-semibold">{Number(rate.amount || 0) > 0 ? moneyLabel(Number(rate.amount || 0)) : "Channel label"}</span></div>
-              </div>
-              {Array.isArray(rate.protections) && rate.protections.length > 0 && <p className="text-xs text-muted-foreground">Protections: {rate.protections.map(String).join(", ")}</p>}
-              {Boolean(rate.deliveryEstimate || rate.deliveryDays || rate.warning) && <p className="text-xs text-muted-foreground">{String(rate.deliveryEstimate || (Number(rate.deliveryDays || 0) > 0 ? `${Number(rate.deliveryDays)} day estimate` : ""))}{rate.warning ? ` / ${String(rate.warning)}` : ""}</p>}
-            </button>)}
+          <div className="grid gap-3">
+            {suggestedRateId && rates.length ? <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">Suggested option</span><Badge variant="secondary">{suggestedRateId === cheapestRateId ? "Cheapest" : "Auto-selected"}</Badge></div><p className="mt-1 text-muted-foreground">DataPlus selected the best available rate based on your Fulfillment settings. You can choose a different service before printing.</p></div> : null}
+            {sortedRates.map((rate) => {
+              const isSelected = selectedId === String(rate.id)
+              const isCheapest = cheapestRateId && String(rate.id) === cheapestRateId
+              const isSuggested = suggestedRateId && String(rate.id) === suggestedRateId
+              return <button key={String(rate.id)} type="button" onClick={() => setSelectedId(String(rate.id))} className={cn("grid gap-3 rounded-md border p-4 text-left text-sm hover:bg-muted/40", isSelected && "border-primary bg-primary/10")}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold">{String(rate.carrier || rate.provider || "Carrier")}</span>
+                      <Badge variant="outline">{String(rate.provider || "provider")}</Badge>
+                      {isSuggested && <Badge>Suggested</Badge>}
+                      {isCheapest && <Badge variant="secondary">Cheapest</Badge>}
+                    </div>
+                    <p className="mt-1 text-muted-foreground">{String(rate.service || "Shipping method")}</p>
+                  </div>
+                  <div className="grid gap-1 text-right">
+                    <span className="text-lg font-semibold">{rateCostLabel(rate)}</span>
+                    <span className="text-xs text-muted-foreground">{String(rate.currency || "USD")}</span>
+                  </div>
+                </div>
+                <div className="grid gap-2 rounded-md bg-muted/30 p-3 sm:grid-cols-3">
+                  <div><p className="text-xs font-medium uppercase text-muted-foreground">Method</p><p className="font-medium">{String(rate.service || "Shipping")}</p></div>
+                  <div><p className="text-xs font-medium uppercase text-muted-foreground">Cost</p><p className="font-medium">{rateCostLabel(rate)}</p></div>
+                  <div><p className="text-xs font-medium uppercase text-muted-foreground">ETA</p><p className="font-medium">{rateEtaLabel(rate)}</p></div>
+                </div>
+                {Array.isArray(rate.protections) && rate.protections.length > 0 && <p className="text-xs text-muted-foreground">Protections: {rate.protections.map(String).join(", ")}</p>}
+                {rate.warning ? <p className="text-xs text-amber-700 dark:text-amber-300">{String(rate.warning)}</p> : null}
+              </button>
+            })}
             {!rates.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">Load options to compare available shipping labels for this order.</p>}
           </div>
         </div>
