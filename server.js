@@ -21553,11 +21553,15 @@ function normalizeTemuShippingService(row = {}, index = 0, context = {}) {
   const logisticsType = String(deepValueAt(row, ["shipLogisticsType", "logisticsType"], "")).trim();
   const signService = String(deepValueAt(row, ["signServiceName", "signService"], "")).trim();
   const service = String(deepValueAt(row, ["channelName", "serviceName", "shippingServiceName", "logisticsServiceName", "displayName"], "") || signService || logisticsType || carrier || "Temu shipping");
+  const estimatedText = String(deepValueAt(row, ["estimatedText", "deliveryEstimate", "estimatedDeliveryTime", "promiseDeliveryTime", "deliveryTimeDesc"], "") || "").trim();
+  const estimatedTextAmount = Number((estimatedText.match(/[$€£]?\s*([0-9]+(?:[.,][0-9]{1,2})?)/) || [])[1]?.replace(",", ".") || 0) || 0;
   const amount = Number(firstMoney(
     deepValueAt(row, ["estimatedAmount", "shippingFee", "shippingAmount", "estimateShippingFee", "estimatedFee", "price", "amount"], 0),
-    deepValueAt(row, ["totalCharge", "totalCost", "cost"], 0)
+    deepValueAt(row, ["totalCharge", "totalCost", "cost"], 0),
+    estimatedTextAmount
   )) || 0;
   const deliveryDays = Number(deepValueAt(row, ["deliveryDays", "estimatedDeliveryDays", "promiseDeliveryDays", "deliveryTime"], 0)) || 0;
+  const deliveryEstimate = estimatedText.replace(/^\s*[$€£]?\s*[0-9]+(?:[.,][0-9]{1,2})?\s*,?\s*/, "").trim();
   return {
     id: `temu-service-${shipCompanyId || "company"}-${channelId || index}`,
     provider: "temu",
@@ -21566,7 +21570,7 @@ function normalizeTemuShippingService(row = {}, index = 0, context = {}) {
     amount,
     currency: String(deepValueAt(row, ["estimatedCurrencyCode", "currencyCode", "currency"], "") || context.currency || "USD"),
     deliveryDays,
-    deliveryEstimate: String(deepValueAt(row, ["estimatedText", "deliveryEstimate", "estimatedDeliveryTime", "promiseDeliveryTime", "deliveryTimeDesc"], "") || (deliveryDays ? `${deliveryDays} day${deliveryDays === 1 ? "" : "s"}` : "Provided by Temu")),
+    deliveryEstimate: deliveryEstimate || (deliveryDays ? `${deliveryDays} day${deliveryDays === 1 ? "" : "s"}` : "Provided by Temu"),
     action: "create_shipment",
     documentType: "SHIPPING_LABEL_PDF",
     shipCompanyId,
