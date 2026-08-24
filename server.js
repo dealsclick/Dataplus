@@ -21001,6 +21001,107 @@ function temuScopeAvailable(db, scope) {
   return Array.isArray(scopes) && scopes.some((value) => String(value || "").trim() === scope);
 }
 
+function collectTemuValuesByKey(source, keys, values = []) {
+  if (!source || typeof source !== "object") return values;
+  const wanted = new Set(keys.map((key) => String(key).toLowerCase()));
+  if (Array.isArray(source)) {
+    for (const item of source) collectTemuValuesByKey(item, keys, values);
+    return values;
+  }
+  for (const [key, value] of Object.entries(source)) {
+    if (wanted.has(String(key).toLowerCase()) && value !== undefined && value !== null && value !== "") {
+      values.push(String(value).trim());
+    }
+    if (value && typeof value === "object") collectTemuValuesByKey(value, keys, values);
+  }
+  return values;
+}
+
+function extractTemuPackageSns(...sources) {
+  const packageKeys = ["packageSn", "packageSN", "package_sn", "packageNo", "packageNumber", "packageId", "logisticsPackageSn"];
+  const values = sources.flatMap((source) => collectTemuValuesByKey(temuPayload(source), packageKeys));
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+function firstTemuDocumentPayload(response = {}) {
+  const payload = temuPayload(response);
+  const rows = firstArrayFrom(payload.documentList || payload.shippingLabelList || payload.labelList || payload.fileList || payload);
+  return rows[0] || payload;
+}
+
+function temuDocumentSignedHeaders(db = {}) {
+  const config = getTemuConfig(db);
+  const random = Array.from({ length: 32 }, () => Math.floor(Math.random() * 10)).join("");
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const params = {
+    "toa-access-token": config.accessToken,
+    "toa-app-key": config.appKey,
+    "toa-random": random,
+    "toa-timestamp": timestamp
+  };
+  return {
+    ...params,
+    "toa-sign": temuSign(params, config.appSecret)
+  };
+}
+
+async function fetchTemuDocumentContent(url, db = {}) {
+  const response = await fetch(url, { headers: temuDocumentSignedHeaders(db) });
+  if (!response.ok) throw new Error(`Temu label download failed (${response.status}).`);
+  const content = Buffer.from(await response.arrayBuffer());
+  const contentType = orderAttachmentMimeType(response.headers.get("content-type") || "application/pdf");
+  return { content, mimeType: contentType === "application/octet-stream" ? "application/pdf" : contentType };
+}
+
+async function attachTemuShippingLabel(order, db = {}, options = {}) {
+  const parentOrderSn = String(options.parentOrderSn || order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
+  if (!parentOrderSn) throw new Error("This Temu order does not have a parent order number.");
+
+  let packageSnList = Array.isArray(options.packageSnList) ? options.packageSnList.map(String).filter(Boolean) : [];
+  packageSnList = packageSnList.length ? packageSnList : extractTemuPackageSns(order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
+  if (!packageSnList.length) {
+    const unshipped = await temuRequest("bg.order.unshipped.package.get", { parentOrderSn }, { db, allowErrorResult: true });
+    const combined = await temuRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, allowErrorResult: true });
+    packageSnList = extractTemuPackageSns(unshipped, combined);
+    order.external = { ...(order.external || {}), unshippedPackage: temuPayload(unshipped), combinedShipment: temuPayload(combined) };
+  }
+  packageSnList = [...new Set(packageSnList)];
+  if (!packageSnList.length) throw new Error("Temu did not return a package number yet. Create/confirm the Temu shipment first, then print the label.");
+
+  const documentType = String(options.documentType || "SHIPPING_LABEL_PDF").trim() || "SHIPPING_LABEL_PDF";
+  const response = await temuRequest("bg.logistics.shipment.document.get", { documentType, packageSnList }, { db, allowErrorResult: true });
+  const documentPayload = firstTemuDocumentPayload(response);
+  const labelUrl = String(deepValueAt(documentPayload, ["url", "documentUrl", "downloadUrl", "fileUrl", "labelUrl", "shippingLabelUrl"], "")).trim();
+  const encoded = String(deepValueAt(documentPayload, ["contentBase64", "fileBase64", "documentBase64", "labelBase64", "base64"], "")).replace(/^data:[^;]+;base64,/, "").trim();
+  if (!labelUrl && !encoded) throw new Error(`Temu did not return a printable label document: ${JSON.stringify(response).slice(0, 240)}`);
+
+  const now = new Date().toISOString();
+  const attachmentId = crypto.randomUUID();
+  const name = safeOrderAttachmentName(`Temu label ${parentOrderSn}.pdf`);
+  let document;
+  if (encoded) {
+    const content = Buffer.from(encoded, "base64");
+    if (!content.length) throw new Error("Temu returned an empty label document.");
+    fs.mkdirSync(ORDER_ATTACHMENT_DIR, { recursive: true });
+    const storageKey = `${attachmentId}.pdf`;
+    fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), content);
+    document = { id: attachmentId, name, type: "shipping_label", note: `Temu package ${packageSnList.join(", ")}`, mimeType: "application/pdf", size: content.length, storage: "local", storageKey, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Temu" };
+  } else {
+    const downloaded = await fetchTemuDocumentContent(labelUrl, db);
+    fs.mkdirSync(ORDER_ATTACHMENT_DIR, { recursive: true });
+    const storageKey = `${attachmentId}${orderAttachmentExtension(name, downloaded.mimeType)}`;
+    fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), downloaded.content);
+    document = { id: attachmentId, name, type: "shipping_label", note: `Temu package ${packageSnList.join(", ")}`, mimeType: downloaded.mimeType, size: downloaded.content.length, storage: "local", storageKey, sourceUrl: labelUrl, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Temu" };
+  }
+  order.documents = Array.isArray(order.documents) ? order.documents : [];
+  order.documents = [document, ...order.documents.filter((entry) => !(entry.type === "shipping_label" && String(entry.note || "").includes(packageSnList[0])))];
+  order.temuShippingLabels = Array.isArray(order.temuShippingLabels) ? order.temuShippingLabels : [];
+  order.temuShippingLabels.unshift({ id: attachmentId, parentOrderSn, packageSnList, documentType, createdAt: now, url: document.url });
+  addOrderTimeline(order, { type: "shipping_label", title: "Temu shipping label ready", message: `Label attached for package ${packageSnList.join(", ")}.`, user: "Temu" });
+  order.updatedAt = now;
+  return { document, packageSnList, response: documentPayload };
+}
+
 function temuItemProductList(item = {}) {
   if (Array.isArray(item.productList)) return item.productList;
   if (Array.isArray(item.product_list)) return item.product_list;
@@ -35549,6 +35650,29 @@ async function handleApi(req, res) {
       return sendJson(res, 200, { order, purchase: record, shipment });
     } catch (error) {
       return sendJson(res, 502, { error: `Shopify label status check failed: ${error.message || "Unknown error"}` });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-labels" && parts[4] === "temu" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const body = await parseBody(req);
+    if (String(order.source || "").toLowerCase() !== "temu") return sendJson(res, 400, { error: "Temu labels are available only for Temu-imported orders." });
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      appendChannelApiLog({ channel: "Temu", transport: "HTTP", method: "POST", path: "bg.logistics.shipment.document.get", operation: "Temu shipping label requested", statusCode: 102, ok: true, entityType: "order", entityId: order.id, message: `Requesting shipping label for ${order.marketplaceOrderNumber || order.orderNumber || order.id}.` });
+      const result = await attachTemuShippingLabel(order, db, {
+        documentType: body.documentType,
+        packageSnList: Array.isArray(body.packageSnList) ? body.packageSnList : []
+      });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      appendChannelApiLog({ channel: "Temu", transport: "HTTP", method: "POST", path: "bg.logistics.shipment.document.get", operation: "Temu shipping label ready", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `Label attached for package ${result.packageSnList.join(", ")}.` });
+      return sendJson(res, 200, { order, document: result.document, packageSnList: result.packageSnList, message: "Temu shipping label attached. Opening it for print." });
+    } catch (error) {
+      const message = error.message || "Unable to print Temu shipping label.";
+      appendChannelApiLog({ channel: "Temu", transport: "HTTP", method: "POST", path: "bg.logistics.shipment.document.get", operation: "Temu shipping label failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message });
+      return sendJson(res, 502, { error: `Temu label print failed: ${message}` });
     }
   }
 
