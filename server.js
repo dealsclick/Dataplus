@@ -35913,8 +35913,15 @@ async function handleApi(req, res) {
       const candidateAddress = candidate.address || {};
       const sameEmail = email && String(candidate.buyerEmail || "").trim().toLowerCase() === email;
       const sameAddress = postalCode && String(candidateAddress.postalCode || "").trim().toLowerCase() === postalCode && (!addressLine || String(candidateAddress.line1 || "").trim().toLowerCase() === addressLine);
-      return sameEmail || sameAddress;
-    }).slice(0, 25).map((candidate) => ({ id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, total: candidate.total, buyer: candidate.buyer, buyerEmail: candidate.buyerEmail, address: candidate.address || {}, createdAt: candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "" }));
+      const sameGroup = order.shipmentGroupId && candidate.shipmentGroupId && String(candidate.shipmentGroupId) === String(order.shipmentGroupId);
+      return sameAddress || sameGroup || sameEmail;
+    }).slice(0, 25).map((candidate) => {
+      const candidateAddress = candidate.address || {};
+      const sameEmail = email && String(candidate.buyerEmail || "").trim().toLowerCase() === email;
+      const sameAddress = postalCode && String(candidateAddress.postalCode || "").trim().toLowerCase() === postalCode && (!addressLine || String(candidateAddress.line1 || "").trim().toLowerCase() === addressLine);
+      const sameGroup = order.shipmentGroupId && candidate.shipmentGroupId && String(candidate.shipmentGroupId) === String(order.shipmentGroupId);
+      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer, buyerEmail: candidate.buyerEmail, address: candidate.address || {}, createdAt: candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", matchReasons: [sameGroup ? "same_group" : "", sameAddress ? "same_address" : "", sameEmail ? "same_email" : ""].filter(Boolean) };
+    });
     return sendJson(res, 200, { orderId: order.id, candidates });
   }
 
