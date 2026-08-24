@@ -21097,19 +21097,16 @@ function buildTemuAuthorizationUrl(db = {}, options = {}) {
   return { authUrl: authUrl.toString(), redirectUri, state };
 }
 
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `"${key}":${stableJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
+function temuSignValue(value) {
+  if (value && typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 function temuSign(params, appSecret) {
   const unsigned = Object.entries(params)
     .filter(([key, value]) => key !== "sign" && value !== undefined && value !== null)
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `${key}${typeof value === "object" ? stableJson(value) : String(value)}`)
+    .map(([key, value]) => `${key}${temuSignValue(value)}`)
     .join("")
     .replace(/\s/g, "");
   return crypto.createHash("md5").update(`${appSecret}${unsigned}${appSecret}`, "utf8").digest("hex").toUpperCase();
