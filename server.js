@@ -47864,7 +47864,7 @@ function startServer() {
       handleEbayCallback(req, res).catch((error) => {
         sendHtml(res, 500, `<h1>eBay callback error</h1><p>${escapeHtml(error.message)}</p>`);
       });
-    } else if (req.url.startsWith("/api/")) {
+    } else if (req.url.startsWith("/api/") || req.url.startsWith("/auth/veeqo/") || /^\/\?(?:.*&)?(?:code|error)=/.test(req.url)) {
       handleApi(req, res).catch(async (error) => {
         console.error(error);
         const status = apiErrorStatus(error);
