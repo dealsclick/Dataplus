@@ -21403,9 +21403,18 @@ function shippingLabelRules(settings = {}) {
   };
 }
 
+function defaultShipFromWarehouseId(db = {}, settings = {}) {
+  const savedId = String(settings.inventoryDefaultFulfillmentWarehouseId || "").trim();
+  const warehouses = Array.isArray(db.warehouses) ? db.warehouses : [];
+  if (savedId) return savedId;
+  const statenIsland = warehouses.find((row) => String(row.code || "").toUpperCase() === "WH-SI2")
+    || warehouses.find((row) => String(row.name || "").toLowerCase().includes("staten island"));
+  return String(statenIsland?.id || "").trim();
+}
+
 async function getUniversalShippingRates(order, db = {}, body = {}) {
   const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
-  const warehouseId = String(body.warehouseId || order.fulfillmentWarehouseId || settings.inventoryDefaultFulfillmentWarehouseId || "").trim();
+  const warehouseId = String(body.warehouseId || order.fulfillmentWarehouseId || defaultShipFromWarehouseId(db, settings) || "").trim();
   const warehouse = (db.warehouses || []).find((row) => String(row.id || "") === warehouseId) || {};
   const parcel = packageForShippingRates(body, settings);
   const startedAt = Date.now();
