@@ -1036,6 +1036,12 @@ const DEFAULT_SYSTEM_SETTINGS = {
   veeqoApiKey: "",
   veeqoSellerDisplayName: "DataPlus",
   veeqoDefaultLabelFormat: "PDF",
+  shippingLabelAutoSelectRule: "cheapest",
+  shippingLabelPreferredCarrier: "",
+  shippingLabelPreferredService: "",
+  shippingLabelMaxCost: 0,
+  shippingLabelPrintPackingSlipWithLabel: false,
+  shippingLabelRequireConfirmationAboveMax: true,
   shippingPackagePresets: [
     { id: "poly-mailer", name: "Poly mailer", packageType: "poly_mailer", weight: 0.1, length: 14, width: 10, height: 1, weightUnit: "lb", dimensionUnit: "in", default: false },
     { id: "small-box", name: "Small box", packageType: "box", weight: 0.2, length: 8, width: 6, height: 4, weightUnit: "lb", dimensionUnit: "in", default: true },
@@ -5190,6 +5196,10 @@ function normalizeSystemSettings(settings = {}) {
   normalized.veeqoApiKey = String(normalized.veeqoApiKey || "").trim();
   normalized.veeqoSellerDisplayName = String(normalized.veeqoSellerDisplayName || normalized.organizationName || "DataPlus").trim() || "DataPlus";
   normalized.veeqoDefaultLabelFormat = ["PDF", "PNG", "ZPL", "JPEG"].includes(String(normalized.veeqoDefaultLabelFormat || "").toUpperCase()) ? String(normalized.veeqoDefaultLabelFormat).toUpperCase() : "PDF";
+  normalized.shippingLabelAutoSelectRule = ["cheapest", "preferred", "fastest", "none"].includes(String(normalized.shippingLabelAutoSelectRule || "").toLowerCase()) ? String(normalized.shippingLabelAutoSelectRule).toLowerCase() : "cheapest";
+  normalized.shippingLabelPreferredCarrier = sourceTextValue(normalized.shippingLabelPreferredCarrier || "");
+  normalized.shippingLabelPreferredService = sourceTextValue(normalized.shippingLabelPreferredService || "");
+  normalized.shippingLabelMaxCost = Math.max(0, Math.min(10000, Number(normalized.shippingLabelMaxCost || 0) || 0));
   normalized.shippingPackagePresets = normalizeShippingPackagePresets(normalized.shippingPackagePresets);
   normalized.backupDestination = ["local", "s3", "digitalocean-spaces"].includes(String(normalized.backupDestination || "").toLowerCase())
     ? String(normalized.backupDestination).toLowerCase() : "local";
@@ -5198,7 +5208,7 @@ function normalizeSystemSettings(settings = {}) {
     "ordersRemoveCanceledLinesFromDraftPos", "ordersRemoveRefundedLinesFromDraftPos", "ordersNotifyRoutingExceptions",
     "inventoryAllowNegativePhysicalStock", "inventoryAutoReleaseCanceledReservations", "fulfillmentAllowPartialShipments",
     "fulfillmentRequirePickedBeforeLabel", "fulfillmentRequirePackageDataBeforeLabel", "fulfillmentAutoCreatePickLists",
-    "shippingRaterVeeqoEnabled",
+    "shippingRaterVeeqoEnabled", "shippingLabelPrintPackingSlipWithLabel", "shippingLabelRequireConfirmationAboveMax",
     "notificationsEnabled", "notificationInAppEnabled", "notificationEmailEnabled", "notifyJobFailures", "notifyFeedFailures",
     "notifyChannelAuthFailures", "notifyLowStock", "notifyStaleFeeds", "notifyOverduePurchaseOrders",
     "notifyReceivingExceptions", "securityAuditLoggingEnabled", "securityCredentialChangeLoggingEnabled",
@@ -21306,6 +21316,18 @@ function normalizeVeeqoRate(rate = {}, index = 0) {
   };
 }
 
+function shippingLabelRules(settings = {}) {
+  const normalized = normalizeSystemSettings(settings);
+  return {
+    autoSelectRule: normalized.shippingLabelAutoSelectRule,
+    preferredCarrier: normalized.shippingLabelPreferredCarrier,
+    preferredService: normalized.shippingLabelPreferredService,
+    maxCost: normalized.shippingLabelMaxCost,
+    printPackingSlipWithLabel: normalized.shippingLabelPrintPackingSlipWithLabel,
+    requireConfirmationAboveMax: normalized.shippingLabelRequireConfirmationAboveMax
+  };
+}
+
 async function getUniversalShippingRates(order, db = {}, body = {}) {
   const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
   const warehouseId = String(body.warehouseId || order.fulfillmentWarehouseId || settings.inventoryDefaultFulfillmentWarehouseId || "").trim();
@@ -21346,7 +21368,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     details: { rateCount: rates.length, warehouseId, package: parcel, durationMs: Date.now() - startedAt }
   });
   appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates", statusCode: blockers.length ? 400 : 200, ok: blockers.length === 0, durationMs: Date.now() - startedAt, entityType: "order", entityId: order.id, message: blockers.length ? blockers.join(" ") : `${rates.length} shipping option(s) loaded.` });
-  return { rates, blockers, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), warehouseId, providers: { temu: String(order.source || "").toLowerCase() === "temu", veeqo: veeqoConfig(settings).enabled && Boolean(veeqoConfig(settings).apiKey) } };
+  return { rates, blockers, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), labelRules: shippingLabelRules(settings), warehouseId, providers: { temu: String(order.source || "").toLowerCase() === "temu", veeqo: veeqoConfig(settings).enabled && Boolean(veeqoConfig(settings).apiKey) } };
 }
 
 async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
@@ -35891,6 +35913,12 @@ async function handleApi(req, res) {
       if (provider === "temu") {
         result = await attachTemuShippingLabel(order, db, { documentType: body.documentType || "SHIPPING_LABEL_PDF" });
       } else if (provider === "veeqo") {
+        const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+        const rules = shippingLabelRules(settings);
+        const amount = Number(body.rate?.amount || 0) || 0;
+        if (rules.maxCost > 0 && amount > rules.maxCost && rules.requireConfirmationAboveMax && body.confirmAboveMaxCost !== true) {
+          return sendJson(res, 409, { error: `This label is $${amount.toFixed(2)} and exceeds the configured max of $${rules.maxCost.toFixed(2)}. Confirm the over-limit purchase to continue.`, requiresConfirmation: true, maxCost: rules.maxCost, amount });
+        }
         result = await attachVeeqoShippingLabel(order, db, body.rate || {}, { labelFormat: body.labelFormat, package: packageForShippingRates(body, readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {})), lines: Array.isArray(body.lines) ? body.lines : [] });
       } else {
         return sendJson(res, 400, { error: "Choose a shipping rate before printing a label." });
@@ -39185,6 +39213,53 @@ async function handleApi(req, res) {
       clearOrderApiCache(order.id);
       return sendJson(res, 502, { error: `Shopify fulfillment sync failed: ${error.message || "Unknown error"}` });
     }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "sync-channel" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const shipment = (order.shipments || []).find((row) => String(row.id || "") === parts[4]);
+    if (!shipment) return notFound(res);
+    if (String(shipment.status || "").toLowerCase() !== "fulfilled") return sendJson(res, 400, { error: "Confirm this shipment as fulfilled before sending tracking to the channel." });
+    const db = await readDbFast({ skipInventory: true });
+    const source = String(order.source || "").trim().toLowerCase();
+    if (source === "shopify") {
+      const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+      if (settings.channelEnabled === false || !settings.shopifyFulfillmentSyncEnabled) return sendJson(res, 400, { error: "Enable Shopify and fulfillment sync in Channel Settings before sending shipments." });
+      try {
+        const fulfillment = await syncShopifyShipment(order, shipment);
+        shipment.channelSync = { status: "sent", channel: "Shopify", fulfillmentId: fulfillment.id || "", updatedAt: new Date().toISOString(), message: "Fulfillment and tracking were sent to Shopify." };
+        addOrderTimeline(order, { type: "channel_sync", title: "Shipment sent to Shopify", message: `${shipment.trackingNumber || "Shipment"} was sent to Shopify.${fulfillment.id ? ` Fulfillment ${fulfillment.id}.` : ""}`, user: "Luis" });
+        order.updatedAt = new Date().toISOString();
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        return sendJson(res, 200, { order, shipment, fulfillment, message: "Shipment sent to Shopify." });
+      } catch (error) {
+        shipment.channelSync = { status: "failed", channel: "Shopify", updatedAt: new Date().toISOString(), message: error.message || "Shopify fulfillment sync failed." };
+        order.updatedAt = new Date().toISOString();
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+        return sendJson(res, 502, { error: `Shopify fulfillment sync failed: ${error.message || "Unknown error"}` });
+      }
+    }
+    const channelName = source === "temu" ? "Temu" : source === "ebay" ? "eBay" : orderSourceChannelName(order, "Channel");
+    const settings = findChannelByName(db, channelName)?.settings || DEFAULT_CHANNEL_SETTINGS;
+    const enabled = source === "temu" ? settings.temuTrackingUploadEnabled && settings.temuFulfillmentSyncEnabled
+      : source === "ebay" ? settings.ebayTrackingUploadEnabled !== false
+        : settings.trackingUpdateEnabled !== false;
+    shipment.channelSync = {
+      status: enabled ? "ready_for_api" : "disabled",
+      channel: channelName,
+      updatedAt: new Date().toISOString(),
+      message: enabled ? `${channelName} tracking upload API is queued for implementation; tracking is ready locally.` : `Enable ${channelName} tracking/fulfillment sync in Channel Settings.`
+    };
+    appendOrderShippingEvent(order, { provider: channelName, action: "sync_channel", status: shipment.channelSync.status, message: shipment.channelSync.message, details: { shipmentId: shipment.id, trackingNumber: shipment.trackingNumber || "" } });
+    appendChannelApiLog({ channel: channelName, transport: "HTTP", method: "POST", path: "shipments/sync-channel", operation: `${channelName} shipment sync readiness`, statusCode: enabled ? 202 : 400, ok: Boolean(enabled), entityType: "order", entityId: order.id, message: shipment.channelSync.message });
+    addOrderTimeline(order, { type: "channel_sync", title: `${channelName} shipment sync ${enabled ? "ready" : "disabled"}`, message: shipment.channelSync.message, user: "Luis" });
+    order.updatedAt = new Date().toISOString();
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, enabled ? 202 : 400, { order, shipment, message: shipment.channelSync.message });
   }
 
   if (req.method === "GET" && url.pathname === "/api/state") {
