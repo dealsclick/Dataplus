@@ -4025,6 +4025,25 @@ function ChannelDetail({
     }
   }
 
+  async function queueTemuStatusRefresh() {
+    setTemuOrderImportSaving(true)
+    try {
+      const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>("/api/temu/orders/refresh-statuses", {
+        method: "POST",
+        body: JSON.stringify({
+          lookbackDays: 3,
+          limit: Math.max(1, Math.min(1000, Number(settings.temuOrderImportLimit || 500) || 500))
+        })
+      })
+      toast.success(result.message || (result.duplicate ? "A Temu status refresh is already running." : "Temu order status refresh queued."))
+      await onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue Temu status refresh.")
+    } finally {
+      setTemuOrderImportSaving(false)
+    }
+  }
+
   async function runTemuSetupGuide() {
     if (!temuCanRunLive) {
       toast.error("Temu needs a generated access token before live order downloads can run.")
@@ -4964,6 +4983,17 @@ function ChannelDetail({
                       }
                       void queueTemuBlindOrderRepair()
                     }} disabled={temuOrderImportSaving}>Repair blind orders</Button>
+                    <Button variant="outline" onClick={() => {
+                      if (settings.orderDownloadEnabled === false || !settings.temuOrderImportEnabled) {
+                        toast.error("Enable order downloads and Temu order imports in Setup before refreshing statuses.")
+                        return
+                      }
+                      if (!temuHasLiveToken) {
+                        toast.error("Temu needs a generated access token before status refresh can run.")
+                        return
+                      }
+                      void queueTemuStatusRefresh()
+                    }} disabled={temuOrderImportSaving}>Refresh statuses</Button>
                     <Button variant="outline" onClick={() => {
                       if (settings.orderDownloadEnabled === false) {
                         toast.error("Enable order downloads in Setup before starting a Temu import.")

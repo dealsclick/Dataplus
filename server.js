@@ -19388,15 +19388,18 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
   const limit = Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250) || 250));
   const lookbackDays = Math.max(1, Math.min(365, Number(payload.lookbackDays || 30) || 30));
   const repairBlind = payload.repairBlind === true || String(payload.repairBlind).toLowerCase() === "true";
+  const targetedRefresh = Array.isArray(payload.parentOrderSnList) && payload.parentOrderSnList.length > 0;
   const startedAt = job.startedAt || new Date().toISOString();
   job = await persistWorkerImportJob(job, {
     status: "running",
-    phase: repairBlind ? "repairing_temu_orders" : "importing_temu_orders",
+    phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders",
     totalRows: limit,
     processedRows: 0,
     startedAt,
     message: repairBlind
       ? `Repairing blind Temu orders, up to ${limit.toLocaleString()} records...`
+      : targetedRefresh
+      ? `Refreshing ${payload.parentOrderSnList.length.toLocaleString()} Temu order status update${payload.parentOrderSnList.length === 1 ? "" : "s"}...`
       : payload.scheduled
       ? "Reconciling Temu orders changed since the last successful sync..."
       : `Importing Temu orders from the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
@@ -19423,12 +19426,19 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       }
     });
     await writeDb(normalizeDb({ ...workDb, inventory: [] }));
+    const touchedTemuOrderNumbers = new Set((result.rows || []).map((row) => String(row.orderNumber || "").trim()).filter(Boolean));
+    const terminalResult = await reconcilePersistedTerminalOrders((workDb.orders || []).filter((order) => (
+      String(order.source || "").toLowerCase() === "temu"
+      && touchedTemuOrderNumbers.has(String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.orderNumber || "").trim())
+    )), { user: targetedRefresh ? "Temu webhook reconciliation" : "Temu order import" });
     attachImportJobOriginalFile(job, rowsToCsv(result.rows || []), "temu-orders-import-results.csv");
     const errorRows = (result.errors || []).map((message) => standardImportError({ source: "Temu", issue: message }));
     attachImportJobErrorsFile(job, errorRows);
     const status = result.errors?.length ? "done_with_warnings" : "success";
     const message = repairBlind
       ? `Repaired ${Number(result.fetched || 0).toLocaleString()} blind Temu order${Number(result.fetched || 0) === 1 ? "" : "s"} from ${Number(result.repairCandidateCount || 0).toLocaleString()} candidate${Number(result.repairCandidateCount || 0) === 1 ? "" : "s"}: ${Number(result.updated || 0).toLocaleString()} updated.`
+      : targetedRefresh
+      ? `Refreshed ${Number(result.fetched || 0).toLocaleString()} Temu order status update${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.updated || 0).toLocaleString()} updated${terminalResult.reconciled ? `, ${Number(terminalResult.reconciled).toLocaleString()} moved to done/closed demand` : ""}.`
       : `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} Temu order${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`;
     finishImportJob(job, {
       status,
@@ -21968,10 +21978,12 @@ function mapTemuStatus(status) {
   if (numeric === 1) return "pending";
   if (numeric === 2) return "ready";
   if (numeric === 3) return "canceled";
-  if ([4, 5].includes(numeric)) return "fulfilled";
+  if ([4, 5].includes(numeric)) return "shipped";
   if ([41, 51].includes(numeric)) return "partial";
   const text = String(status ?? "").toLowerCase();
-  if (["confirmed", "shipped", "delivered", "completed"].some((item) => text.includes(item))) return "confirmed";
+  if (["delivered", "completed", "complete", "done"].some((item) => text.includes(item))) return "completed";
+  if (["shipped", "fulfilled"].some((item) => text.includes(item))) return "shipped";
+  if (["confirmed"].some((item) => text.includes(item))) return "confirmed";
   if (["ready", "awaiting", "pending"].some((item) => text.includes(item))) return "ready";
   if (["cancel"].some((item) => text.includes(item))) return "canceled";
   return "new";
@@ -22124,6 +22136,7 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     title: items[0]?.title || "Temu order",
     qty: items.reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1,
     status: mapTemuStatus(valueAt(raw, ["parentOrderStatus", "orderStatus", "status"])),
+    fulfillmentStatus: mapTemuStatus(valueAt(raw, ["parentOrderStatus", "orderStatus", "status"])),
     subtotal: basePriceTotal,
     total,
     productCost: 0,
@@ -22640,9 +22653,14 @@ function createOrderException(order, input = {}) {
 
 function orderTerminalDemandReason(order = {}) {
   const status = String(order.status || "").trim().toLowerCase();
+  const fulfillmentStatus = String(order.fulfillmentStatus || order.fulfillmentStage || "").trim().toLowerCase();
+  const operationalStatus = String(order.operationalStatus || order.workflowStatus || "").trim().toLowerCase();
   const financialStatus = String(order.financialStatus || "").trim().toLowerCase();
   if (order.cancelledAt || ["canceled", "cancelled", "void", "deleted"].includes(status)) return "canceled";
   if (status === "refunded" || financialStatus === "refunded") return "refunded";
+  if (["shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"].includes(status)) return status === "complete" ? "completed" : status;
+  if (["shipped", "fulfilled", "delivered", "completed", "complete", "done", "closed"].includes(fulfillmentStatus)) return fulfillmentStatus === "complete" ? "completed" : fulfillmentStatus;
+  if (["completed", "done"].includes(operationalStatus)) return operationalStatus;
   return "";
 }
 
@@ -22806,6 +22824,7 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   const reason = orderTerminalDemandReason(order);
   if (!reason) return { changed: false, purchaseOrders: [], requirementsChanged: false };
   const runtimeSettings = orderRuntimeSettings(db, options.systemSettings);
+  const closedDemand = ["shipped", "fulfilled", "delivered", "completed", "done", "closed"].includes(reason);
   const removeUncommittedDemand = reason === "refunded"
     ? runtimeSettings.ordersRemoveRefundedLinesFromDraftPos !== false
     : runtimeSettings.ordersRemoveCanceledLinesFromDraftPos !== false;
@@ -22823,23 +22842,33 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
     const po = db.purchaseOrders.find((candidate) => String(candidate.id || "") === String(route.purchaseOrderId || "")
       || (route.purchaseOrderNumber && String(candidate.poNumber || "") === String(route.purchaseOrderNumber)));
     const committed = po ? purchaseOrderHasSupplierCommitment(po) : false;
-    const nextRouteStatus = committed ? "supplier_commitment_canceled" : "canceled";
-    if (String(route.status || "") !== nextRouteStatus || !route.customerDemandCanceledAt) {
+    const nextRouteStatus = closedDemand ? "closed" : committed ? "supplier_commitment_canceled" : "canceled";
+    if (String(route.status || "") !== nextRouteStatus
+      || (!closedDemand && !route.customerDemandCanceledAt)
+      || (closedDemand && !route.customerDemandClosedAt)) {
       route.status = nextRouteStatus;
-      route.customerDemandCanceled = true;
-      route.customerDemandCanceledAt = now;
-      route.customerDemandCancelReason = reason;
+      route.customerDemandCanceled = !closedDemand;
+      route.customerDemandCanceledAt = closedDemand ? "" : now;
+      route.customerDemandCancelReason = closedDemand ? "" : reason;
+      route.customerDemandClosed = closedDemand;
+      route.customerDemandClosedAt = closedDemand ? now : "";
+      route.customerDemandCloseReason = closedDemand ? reason : "";
       route.updatedAt = now;
       changed = true;
     }
     for (const requirement of db.purchaseRequirements) {
       if (String(requirement.routeId || "") !== String(route.id || "") && String(requirement.orderId || "") !== String(order.id || "")) continue;
-      const nextStatus = committed ? "canceled_after_submission" : "canceled";
-      if (String(requirement.status || "") !== nextStatus || !requirement.customerDemandCanceledAt) {
+      const nextStatus = closedDemand ? "closed" : committed ? "canceled_after_submission" : "canceled";
+      if (String(requirement.status || "") !== nextStatus
+        || (!closedDemand && !requirement.customerDemandCanceledAt)
+        || (closedDemand && !requirement.customerDemandClosedAt)) {
         requirement.status = nextStatus;
-        requirement.customerDemandCanceled = true;
-        requirement.customerDemandCanceledAt = now;
-        requirement.customerDemandCancelReason = reason;
+        requirement.customerDemandCanceled = !closedDemand;
+        requirement.customerDemandCanceledAt = closedDemand ? "" : now;
+        requirement.customerDemandCancelReason = closedDemand ? "" : reason;
+        requirement.customerDemandClosed = closedDemand;
+        requirement.customerDemandClosedAt = closedDemand ? now : "";
+        requirement.customerDemandCloseReason = closedDemand ? reason : "";
         requirement.updatedAt = now;
         requirementsChanged = true;
       }
@@ -22929,19 +22958,24 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
     changed = true;
   }
 
-  if (String(order.status || "").toLowerCase() !== (reason === "refunded" ? "refunded" : "canceled")
-    || String(order.operationalStatus || "").toLowerCase() !== "canceled"
-    || String(order.workflowStatus || "").toLowerCase() !== "canceled") changed = true;
-  order.status = reason === "refunded" ? "refunded" : "canceled";
-  order.operationalStatus = "canceled";
-  order.workflowStatus = "canceled";
+  const terminalStatus = closedDemand ? (reason === "fulfilled" ? "shipped" : reason) : reason === "refunded" ? "refunded" : "canceled";
+  const terminalOperational = closedDemand ? "completed" : "canceled";
+  if (String(order.status || "").toLowerCase() !== terminalStatus
+    || String(order.operationalStatus || "").toLowerCase() !== terminalOperational
+    || String(order.workflowStatus || "").toLowerCase() !== terminalOperational) changed = true;
+  order.status = terminalStatus;
+  order.fulfillmentStatus = closedDemand ? terminalStatus : order.fulfillmentStatus;
+  order.operationalStatus = terminalOperational;
+  order.workflowStatus = terminalOperational;
   order.routingLastResult = "terminal";
   order.workflowUpdatedAt = now;
   order.updatedAt = now;
   const eventExists = (order.workflowHistory || []).some((event) => event.step === "terminal_demand_reconciled" && event.reason === reason);
   if (!eventExists) addOrderWorkflowEvent(order, {
-    step: "terminal_demand_reconciled", status: "done", title: "Canceled demand reconciled",
-    message: committedSummary(changedPurchaseOrders) ? "Supplier-committed items were flagged for receiving and vendor-return review." : "Uncommitted purchasing demand was removed from draft purchase orders.",
+    step: "terminal_demand_reconciled", status: "done", title: closedDemand ? "Completed channel demand reconciled" : "Canceled demand reconciled",
+    message: closedDemand
+      ? "The marketplace already shows this order as complete, so active DataPlus purchase and fulfillment demand was closed."
+      : committedSummary(changedPurchaseOrders) ? "Supplier-committed items were flagged for receiving and vendor-return review." : "Uncommitted purchasing demand was removed from draft purchase orders.",
     reason, user
   });
   return { changed, purchaseOrders: [...changedPurchaseOrders.values()], requirementsChanged };
@@ -24189,6 +24223,27 @@ function extractTemuOrderSn(order) {
   ], "")).trim();
 }
 
+function collectTemuParentOrderSns(value, found = new Set()) {
+  if (value === undefined || value === null) return found;
+  if (typeof value === "string" || typeof value === "number") {
+    const text = String(value || "").trim();
+    if (/^(PO-)?\d{2,}-\d{4,}/i.test(text)) found.add(text);
+    return found;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectTemuParentOrderSns(item, found);
+    return found;
+  }
+  if (typeof value !== "object") return found;
+  const direct = extractTemuOrderSn(value);
+  if (direct) found.add(direct);
+  for (const [key, child] of Object.entries(value)) {
+    if (/parent.*order.*sn|parentordersn|order.*sn|orderid|parent.*order.*id/i.test(key)) collectTemuParentOrderSns(child, found);
+    else if (child && typeof child === "object") collectTemuParentOrderSns(child, found);
+  }
+  return found;
+}
+
 function unixStartOfDay(value) {
   const text = String(value || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return 0;
@@ -24210,6 +24265,11 @@ async function importTemuOrders(db, options = {}) {
   const config = getTemuConfig(db);
   const pageSize = Math.min(100, Math.max(1, config.pageSize || 50));
   const repairBlind = options.repairBlind === true || String(options.repairBlind).toLowerCase() === "true";
+  const requestedOrderSns = [...new Set((Array.isArray(options.parentOrderSnList) ? options.parentOrderSnList : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))]
+    .slice(0, limit);
+  const targetedRefresh = requestedOrderSns.length > 0;
   const repairOrderSns = repairBlind
     ? [...new Set((db.orders || [])
       .filter(temuOrderNeedsRepair)
@@ -24217,8 +24277,8 @@ async function importTemuOrders(db, options = {}) {
       .filter(Boolean))]
       .slice(0, limit)
     : [];
-  const repairChunks = chunkTemuList(repairOrderSns, 20);
-  const targetRows = repairBlind ? Math.max(1, repairOrderSns.length) : limit;
+  const targetedChunks = chunkTemuList(targetedRefresh ? requestedOrderSns : repairOrderSns, 20);
+  const targetRows = targetedRefresh ? Math.max(1, requestedOrderSns.length) : repairBlind ? Math.max(1, repairOrderSns.length) : limit;
   let pageNumber = 1;
   let created = 0;
   let updated = 0;
@@ -24228,12 +24288,12 @@ async function importTemuOrders(db, options = {}) {
   const rows = [];
 
   const maxPages = Math.ceil(limit / pageSize);
-  while ((repairBlind ? repairChunks.length > 0 : pageNumber <= Math.max(1, maxPages)) && fetched < limit) {
-    const repairChunk = repairBlind ? repairChunks.shift() : [];
-    const listResponse = await temuRequest("bg.order.list.v2.get", repairBlind ? {
+  while ((targetedRefresh || repairBlind ? targetedChunks.length > 0 : pageNumber <= Math.max(1, maxPages)) && fetched < limit) {
+    const targetedChunk = (targetedRefresh || repairBlind) ? targetedChunks.shift() : [];
+    const listResponse = await temuRequest("bg.order.list.v2.get", (targetedRefresh || repairBlind) ? {
       pageNumber: 1,
-      pageSize: Math.max(1, repairChunk.length),
-      parentOrderSnList: repairChunk
+      pageSize: Math.max(1, targetedChunk.length),
+      parentOrderSnList: targetedChunk
     } : {
       pageNumber,
       pageSize,
@@ -24242,7 +24302,7 @@ async function importTemuOrders(db, options = {}) {
     }, { db, allowErrorResult: true });
     const list = firstArrayFrom(listResponse);
     if (!list.length) {
-      if (repairBlind) continue;
+      if (targetedRefresh || repairBlind) continue;
       break;
     }
 
@@ -24310,29 +24370,29 @@ async function importTemuOrders(db, options = {}) {
       fetched += 1;
       rows.push({ orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber, status: mappedOrder.status, action, itemCount: mappedOrder.items?.length || 0, buyer: mappedOrder.buyer || "" });
       if (typeof options.progress === "function") {
-        await options.progress({ phase: repairBlind ? "repairing_temu_orders" : "importing_temu_orders", processedRows: fetched, totalRows: targetRows });
+        await options.progress({ phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders", processedRows: fetched, totalRows: targetRows });
       }
     }
 
-    if (!repairBlind) {
+    if (!targetedRefresh && !repairBlind) {
       if (list.length < pageSize) break;
       pageNumber += 1;
     }
   }
 
-  if (!repairBlind) db.connectorState.temuLastOrderSync = now;
+  if (!repairBlind && !targetedRefresh) db.connectorState.temuLastOrderSync = now;
   const channel = (db.connections || []).find((entry) => String(entry.name || "").trim().toLowerCase() === "temu");
   if (channel) {
-    if (!repairBlind) channel.lastSync = now;
+    if (!repairBlind && !targetedRefresh) channel.lastSync = now;
     channel.settings = {
       ...DEFAULT_CHANNEL_SETTINGS,
       ...(channel.settings || {}),
-      ...(repairBlind ? {} : { temuLastOrderSync: now }),
+      ...(repairBlind || targetedRefresh ? {} : { temuLastOrderSync: now }),
       temuLastBlindOrderRepairAt: repairBlind ? new Date().toISOString() : channel.settings?.temuLastBlindOrderRepairAt || ""
     };
     Object.assign(channel, normalizeChannel(channel));
   }
-  return { fetched, created, updated, skipped, errors, rows, repairBlind, repairCandidateCount: repairOrderSns.length };
+  return { fetched, created, updated, skipped, errors, rows, repairBlind, targetedRefresh, repairCandidateCount: repairOrderSns.length, requestedOrderCount: requestedOrderSns.length };
 }
 
 async function queueTemuOrderImportJob(db, body = {}, options = {}) {
@@ -24345,6 +24405,10 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
   }
   const lookbackDays = Math.max(1, Math.min(365, Number(body.lookbackDays || settings.temuOrderImportLookbackDays || 30) || 30));
   const limit = Math.max(1, Math.min(5000, Number(body.limit || settings.temuOrderImportLimit || 250) || 250));
+  const parentOrderSnList = [...new Set((Array.isArray(body.parentOrderSnList) ? body.parentOrderSnList : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))]
+    .slice(0, limit);
   const workerPayload = {
     lookbackDays,
     limit,
@@ -24353,6 +24417,7 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
       ? settings.temuOrderImportIncludeCanceled === true
       : body.includeCanceled === true || String(body.includeCanceled).toLowerCase() === "true",
     repairBlind: body.repairBlind === true || String(body.repairBlind).toLowerCase() === "true",
+    parentOrderSnList,
     forceLookback: options.forceLookback === true || options.scheduled !== true,
     scheduled: options.scheduled === true,
     scheduleKey: options.scheduleKey || ""
@@ -32899,6 +32964,58 @@ async function handleApi(req, res) {
     } finally {
       shopifyWebhookInFlight = Math.max(0, shopifyWebhookInFlight - 1);
     }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/webhooks/temu") {
+    const startedAt = Date.now();
+    const rawBody = await readRawBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    let payload;
+    try {
+      payload = rawBody.length ? JSON.parse(rawBody.toString("utf8")) : {};
+    } catch {
+      appendChannelApiLog({ channel: "Temu", transport: "webhook", method: "POST", path: url.pathname, operation: "Temu webhook delivery", statusCode: 400, ok: false, durationMs: Date.now() - startedAt, message: "Temu sent invalid JSON." });
+      return sendJson(res, 400, { error: "Invalid Temu webhook payload." });
+    }
+    const channel = findChannelByName(db, "Temu");
+    const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+    if (settings.channelEnabled === false) return sendJson(res, 202, { accepted: true, message: "Temu webhook received while the channel is disabled." });
+    if (!settings.temuWebhookEnabled) return sendJson(res, 202, { accepted: true, message: "Temu webhook received while webhook processing is disabled." });
+    const eventType = String(payload.eventType || payload.event_type || payload.type || payload.messageType || payload.msgType || payload.topic || req.headers["x-temu-topic"] || "Temu notification").trim();
+    const eventId = String(payload.messageId || payload.message_id || payload.msgId || payload.id || req.headers["x-temu-message-id"] || crypto.createHash("sha256").update(rawBody).digest("hex")).trim();
+    const duplicateKey = `dataplus:temu:webhook:${eventId}`;
+    if (eventId && await redisCache.getJson(duplicateKey)) return sendJson(res, 200, { accepted: true, duplicate: true, message: "Temu webhook was already processed." });
+    if (eventId) await redisCache.setJson(duplicateKey, { receivedAt: new Date().toISOString(), eventType }, 60 * 60 * 24 * 7);
+    const parentOrderSnList = [...collectTemuParentOrderSns(payload)].slice(0, Math.min(250, Number(settings.temuOrderImportLimit || 250) || 250));
+    const shouldRefreshOrders = Boolean(settings.orderDownloadEnabled !== false && settings.temuOrderImportEnabled && (
+      parentOrderSnList.length
+      || /order|shipment|fulfill|delivery|cancel|refund|return/i.test(eventType)
+    ));
+    if (shouldRefreshOrders) {
+      void queueTemuOrderImportJob(db, {
+        lookbackDays: 1,
+        limit: parentOrderSnList.length ? parentOrderSnList.length : Math.min(250, Number(settings.temuOrderImportLimit || 250) || 250),
+        includeCanceled: true,
+        parentOrderSnList
+      }, { operation: "Temu webhook order reconciliation", forceLookback: false })
+        .catch((error) => appendChannelApiLog({ channel: "Temu", transport: "webhook", method: "POST", path: url.pathname, operation: eventType, statusCode: 500, ok: false, message: `Unable to queue Temu order reconciliation: ${error.message}` }));
+    }
+    appendChannelApiLog({
+      channel: "Temu",
+      transport: "webhook",
+      method: "POST",
+      path: url.pathname,
+      operation: eventType,
+      statusCode: 202,
+      ok: true,
+      durationMs: Date.now() - startedAt,
+      message: shouldRefreshOrders
+        ? parentOrderSnList.length
+          ? `Temu event received; queued status refresh for ${parentOrderSnList.length} order${parentOrderSnList.length === 1 ? "" : "s"}.`
+          : "Temu event received; queued recent order reconciliation."
+        : "Temu event received and recorded."
+    });
+    return sendJson(res, 202, { accepted: true, eventType, parentOrderSnList, queuedOrderReconciliation: shouldRefreshOrders });
   }
 
   if (req.method === "GET" && url.pathname === "/api/auth/session") {
@@ -43821,6 +43938,28 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/temu/orders/refresh-statuses" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const result = await queueTemuOrderImportJob(db, {
+        ...body,
+        lookbackDays: Math.max(1, Math.min(30, Number(body.lookbackDays || 3) || 3)),
+        limit: Math.max(1, Math.min(1000, Number(body.limit || 500) || 500)),
+        includeCanceled: true
+      }, { operation: "Refresh Temu order statuses", forceLookback: false });
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
+        message: result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue Temu status refresh." });
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/api/ebay/auth-url" && postgres.isPostgresEnabled()) {
     const db = await readDbFast({ skipInventory: true });
     const authUrl = await beginEbayAuthorization(db, {
@@ -45308,6 +45447,27 @@ async function handleApi(req, res) {
       });
     } catch (error) {
       return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue Temu order import." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/temu/orders/refresh-statuses") {
+    const body = await parseBody(req);
+    try {
+      const result = await queueTemuOrderImportJob(db, {
+        ...body,
+        lookbackDays: Math.max(1, Math.min(30, Number(body.lookbackDays || 3) || 3)),
+        limit: Math.max(1, Math.min(1000, Number(body.limit || 500) || 500)),
+        includeCanceled: true
+      }, { operation: "Refresh Temu order statuses", forceLookback: false });
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        job: normalizeImportJob(result.job),
+        state: publicState(normalizeDb({ ...db, importJobs: [result.job, ...(db.importJobs || [])] })),
+        message: result.job.message
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue Temu status refresh." });
     }
   }
 
