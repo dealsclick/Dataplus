@@ -9959,8 +9959,17 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const [loading, setLoading] = useState(false)
   const [rates, setRates] = useState<Array<Record<string, unknown>>>([])
   const [blockers, setBlockers] = useState<string[]>([])
+  const [packagePresets, setPackagePresets] = useState<Array<Record<string, unknown>>>([
+    { id: "poly-mailer", name: "Poly mailer", packageType: "poly_mailer", weight: 0.1, length: 14, width: 10, height: 1 },
+    { id: "small-box", name: "Small box", packageType: "box", weight: 0.2, length: 8, width: 6, height: 4, default: true },
+    { id: "medium-box", name: "Medium box", packageType: "box", weight: 0.45, length: 12, width: 10, height: 8 },
+  ])
   const [selectedId, setSelectedId] = useState("")
-  const [draft, setDraft] = useState({ warehouseId: "", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "", shipDate: new Date().toISOString().slice(0, 10) })
+  const [draft, setDraft] = useState({ warehouseId: "", packagePresetId: "", packageType: "box", packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "", shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF" })
+  const applyPreset = (presetId: string) => {
+    const preset = packagePresets.find((entry) => String(entry.id) === presetId)
+    setDraft((current) => preset ? { ...current, packagePresetId: presetId, packageType: String(preset.packageType || "box"), packageWeight: String(preset.weight || ""), packageLength: String(preset.length || ""), packageWidth: String(preset.width || ""), packageHeight: String(preset.height || "") } : { ...current, packagePresetId: "" })
+  }
   useEffect(() => {
     if (!open) return
     let weight = 0, length = 0, width = 0, height = 0
@@ -9974,7 +9983,8 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
       height = Math.max(height, numeric(product.packageHeight, product.itemHeight, line.packageHeight, line.itemHeight))
     })
     const label = (value: number) => value > 0 ? String(Math.round(value * 100) / 100) : ""
-    setDraft({ warehouseId: String(order.fulfillmentWarehouseId || warehouses[0]?.id || ""), packageWeight: label(weight), packageLength: label(length), packageWidth: label(width), packageHeight: label(height), shipDate: new Date().toISOString().slice(0, 10) })
+    const defaultPreset = packagePresets.find((preset) => preset.default) || packagePresets[0]
+    setDraft({ warehouseId: String(order.fulfillmentWarehouseId || warehouses[0]?.id || ""), packagePresetId: "", packageType: String(defaultPreset?.packageType || "box"), packageWeight: label(weight || Number(defaultPreset?.weight || 0)), packageLength: label(length || Number(defaultPreset?.length || 0)), packageWidth: label(width || Number(defaultPreset?.width || 0)), packageHeight: label(height || Number(defaultPreset?.height || 0)), shipDate: new Date().toISOString().slice(0, 10), labelFormat: "PDF" })
     setRates([])
     setBlockers([])
     setSelectedId("")
@@ -9984,8 +9994,9 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
   const loadRates = async () => {
     setLoading(true)
     try {
-      const result = await api<{ rates?: Array<Record<string, unknown>>; blockers?: string[]; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/rates`, { method: "POST", body: JSON.stringify({ ...draft, lines: selectedLines }) })
+      const result = await api<{ rates?: Array<Record<string, unknown>>; blockers?: string[]; packagePresets?: Array<Record<string, unknown>>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/rates`, { method: "POST", body: JSON.stringify({ ...draft, lines: selectedLines }) })
       const nextRates = result.rates || []
+      if (Array.isArray(result.packagePresets) && result.packagePresets.length) setPackagePresets(result.packagePresets)
       setRates(nextRates)
       setBlockers(result.blockers || [])
       setSelectedId(String(nextRates.find((rate) => Number(rate.amount) > 0)?.id || nextRates[0]?.id || ""))
@@ -9997,7 +10008,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
     const printWindow = window.open("", "_blank")
     setLoading(true)
     try {
-      const result = await api<{ document?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, labelFormat: "PDF", lines: selectedLines }) })
+      const result = await api<{ document?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, labelFormat: draft.labelFormat, lines: selectedLines }) })
       const url = String(result.document?.url || "")
       if (url) {
         if (printWindow) printWindow.location.href = url
@@ -10020,6 +10031,9 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
           <div className="grid gap-3 md:grid-cols-3">
             <Field label="Warehouse"><Select value={draft.warehouseId || "none"} onValueChange={(value) => setDraft((current) => ({ ...current, warehouseId: value === "none" ? "" : value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">No warehouse</SelectItem>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="Ship date"><Input type="date" value={draft.shipDate} onChange={(event) => setDraft((current) => ({ ...current, shipDate: event.target.value }))} /></Field>
+            <Field label="Package preset"><Select value={draft.packagePresetId || "custom"} onValueChange={(value) => applyPreset(value === "custom" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="custom">Custom package</SelectItem>{packagePresets.map((preset) => <SelectItem key={String(preset.id)} value={String(preset.id)}>{String(preset.name || preset.id)}</SelectItem>)}</SelectContent></Select></Field>
+            <Field label="Package type"><Select value={draft.packageType || "box"} onValueChange={(value) => setDraft((current) => ({ ...current, packageType: value, packagePresetId: "" }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="box">Box</SelectItem><SelectItem value="poly_mailer">Poly mailer</SelectItem><SelectItem value="envelope">Envelope</SelectItem><SelectItem value="tube">Tube</SelectItem></SelectContent></Select></Field>
+            <Field label="Label format"><Select value={draft.labelFormat || "PDF"} onValueChange={(value) => setDraft((current) => ({ ...current, labelFormat: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem><SelectItem value="ZPL">ZPL</SelectItem><SelectItem value="JPEG">JPEG</SelectItem></SelectContent></Select></Field>
             <Field label="Package weight (lb)"><Input type="number" min="0" step="0.01" value={draft.packageWeight} onChange={(event) => setDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field>
             <Field label="Length (in)"><Input type="number" min="0" step="0.01" value={draft.packageLength} onChange={(event) => setDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field>
             <Field label="Width (in)"><Input type="number" min="0" step="0.01" value={draft.packageWidth} onChange={(event) => setDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field>
@@ -10037,6 +10051,7 @@ function UniversalShippingLabelDialog({ open, onOpenChange, orderId, order, ware
                 <div className="flex items-center gap-2">{index === 0 && Number(rate.amount || 0) > 0 && <Badge variant="secondary">Lowest</Badge>}<Badge variant="outline">{String(rate.provider || "provider")}</Badge><span className="font-semibold">{Number(rate.amount || 0) > 0 ? moneyLabel(Number(rate.amount || 0)) : "Channel label"}</span></div>
               </div>
               {Array.isArray(rate.protections) && rate.protections.length > 0 && <p className="text-xs text-muted-foreground">Protections: {rate.protections.map(String).join(", ")}</p>}
+              {Boolean(rate.deliveryEstimate || rate.deliveryDays || rate.warning) && <p className="text-xs text-muted-foreground">{String(rate.deliveryEstimate || (Number(rate.deliveryDays || 0) > 0 ? `${Number(rate.deliveryDays)} day estimate` : ""))}{rate.warning ? ` / ${String(rate.warning)}` : ""}</p>}
             </button>)}
             {!rates.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">Load options to compare available shipping labels for this order.</p>}
           </div>
@@ -10326,6 +10341,7 @@ function OrderDetailWorkspace() {
   const timelineEvents = Array.isArray(order?.timeline) ? order.timeline as Array<Record<string, unknown>> : []
   const documents = Array.isArray(order?.documents) ? order.documents as Array<Record<string, unknown>> : []
   const orderNotes = Array.isArray(order?.orderNotes) ? order.orderNotes as Array<Record<string, unknown>> : []
+  const shippingActivity = Array.isArray(order?.shippingRateActivity) ? order.shippingRateActivity as Array<Record<string, unknown>> : []
   const purchaseOrderIds = Array.isArray(order?.purchaseOrderIds) ? order.purchaseOrderIds.map(String) : []
   const purchaseOrderNumbers = Array.isArray(order?.purchaseOrderNumbers) ? order.purchaseOrderNumbers.map(String) : []
   const linkedPurchaseOrders = Array.isArray(order?.linkedPurchaseOrders) ? order.linkedPurchaseOrders as Array<Record<string, unknown>> : []
@@ -10469,6 +10485,20 @@ function OrderDetailWorkspace() {
       setSaving(false)
     }
   }
+  async function voidShipmentLabel(shipment: Record<string, unknown>) {
+    const reason = window.prompt("Reason for voiding this label?", "Operator requested void")
+    if (reason === null) return
+    setSaving(true)
+    try {
+      const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(String(shipment.id || ""))}/void`, { method: "POST", body: JSON.stringify({ reason }) })
+      await load()
+      toast.success(result.message || "Label void request recorded.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to void this label.")
+    } finally {
+      setSaving(false)
+    }
+  }
   async function fulfillPurchasedShipment(shipment: Record<string, unknown>) {
     const packageInfo = (Array.isArray(shipment.packages) ? shipment.packages[0] : {}) as Record<string, unknown>
     const shipmentLines = (Array.isArray(shipment.lines) ? shipment.lines : []) as Array<Record<string, unknown>>
@@ -10510,8 +10540,11 @@ function OrderDetailWorkspace() {
           const shopifyPending = String(order.source || "").toLowerCase() === "shopify" && String(channelSync.status || "").toLowerCase() === "pending"
           const documents = Array.isArray(shipment.documents) ? shipment.documents as Array<Record<string, unknown>> : []
           const awaitingFulfillment = String(shipment.status || "").toLowerCase() === "label_purchased"
-          return <Card key={String(shipment.id)}><CardContent className="grid gap-3 p-4 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{String(shipment.reference || shipment.warehouseName || "Shipment")}</p><p className="text-xs text-muted-foreground">{String(shipment.warehouseName || "Warehouse")} / {String(shipment.status || "Shipment")}</p></div><div className="flex flex-wrap items-center gap-2"><Badge variant={awaitingFulfillment ? "secondary" : String(channelSync.status || "").toLowerCase() === "pending" ? "secondary" : "outline"}>{awaitingFulfillment ? "Label purchased" : String(channelSync.status || "Local only")}</Badge>{awaitingFulfillment && <Button size="sm" disabled={saving} onClick={() => void fulfillPurchasedShipment(shipment)}>Mark fulfilled</Button>}{shopifyPending && !awaitingFulfillment && <Button size="sm" variant="outline" disabled={saving} onClick={() => void syncShipmentToShopify(shipment)}>Send to Shopify</Button>}</div></div><div className="grid gap-2 text-muted-foreground sm:grid-cols-2"><p>{String(shipment.carrierName || shipment.service || "Carrier")} / {String(shipment.service || "Service")}</p><p>{String(shipment.trackingNumber || "No tracking")}</p><p>{Number(shipment.shippingCost || 0) > 0 ? `Shipping cost ${moneyLabel(Number(shipment.shippingCost || 0))}` : "Shipping cost not recorded"}</p><p>{Number(shipmentPackage.weight || 0) > 0 ? `${Number(shipmentPackage.weight)} lb package` : "Package measurements not recorded"}</p></div><div className="flex flex-wrap gap-3">{trackingUrl && <a className="text-primary hover:underline" href={trackingUrl} target="_blank" rel="noreferrer">Track shipment</a>}{documents.map((document, index) => <a key={`${String(document.url)}-${index}`} className="text-primary hover:underline" href={String(document.url || "")} target="_blank" rel="noreferrer">Open {String(document.format || document.documentType || "label")}</a>)}</div>{channelMessage && <p className="text-xs text-muted-foreground">{channelMessage}</p>}</CardContent></Card>
+          const voidStatus = String(shipment.voidStatus || "")
+          const canVoid = ["label_purchased", "label_ready"].includes(String(shipment.status || "").toLowerCase()) && !["voided", "void_requested", "not_supported"].includes(voidStatus.toLowerCase())
+          return <Card key={String(shipment.id)}><CardContent className="grid gap-3 p-4 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{String(shipment.reference || shipment.warehouseName || "Shipment")}</p><p className="text-xs text-muted-foreground">{String(shipment.warehouseName || "Warehouse")} / {String(shipment.status || "Shipment")}</p></div><div className="flex flex-wrap items-center gap-2"><Badge variant={awaitingFulfillment ? "secondary" : String(channelSync.status || "").toLowerCase() === "pending" ? "secondary" : "outline"}>{awaitingFulfillment ? "Label purchased" : String(channelSync.status || "Local only")}</Badge>{voidStatus && <Badge variant="outline">Void: {voidStatus.replace(/_/g, " ")}</Badge>}{awaitingFulfillment && <Button size="sm" disabled={saving} onClick={() => void fulfillPurchasedShipment(shipment)}>Mark fulfilled</Button>}{shopifyPending && !awaitingFulfillment && <Button size="sm" variant="outline" disabled={saving} onClick={() => void syncShipmentToShopify(shipment)}>Send to Shopify</Button>}{canVoid && <Button size="sm" variant="outline" disabled={saving} onClick={() => void voidShipmentLabel(shipment)}>Void label</Button>}</div></div><div className="grid gap-2 text-muted-foreground sm:grid-cols-2"><p>{String(shipment.carrierName || shipment.service || "Carrier")} / {String(shipment.service || "Service")}</p><p>{String(shipment.trackingNumber || "No tracking")}</p><p>{Number(shipment.shippingCost || 0) > 0 ? `Shipping cost ${moneyLabel(Number(shipment.shippingCost || 0))}` : "Shipping cost not recorded"}</p><p>{Number(shipmentPackage.weight || 0) > 0 ? `${Number(shipmentPackage.weight)} lb package` : "Package measurements not recorded"}</p></div><div className="flex flex-wrap gap-3">{trackingUrl && <a className="text-primary hover:underline" href={trackingUrl} target="_blank" rel="noreferrer">Track shipment</a>}{documents.map((document, index) => <a key={`${String(document.url)}-${index}`} className="text-primary hover:underline" href={String(document.url || "")} target="_blank" rel="noreferrer">Reprint {String(document.format || document.documentType || "label")}</a>)}</div>{channelMessage && <p className="text-xs text-muted-foreground">{channelMessage}</p>}</CardContent></Card>
         }) : <Card><CardContent className="p-5 text-sm text-muted-foreground">No shipments recorded yet.</CardContent></Card>}
+        {shippingActivity.length > 0 && <Card><CardHeader><CardTitle className="text-sm">Shipping rater activity</CardTitle><CardDescription>Recent rate, label, and void events for this order.</CardDescription></CardHeader><CardContent className="grid gap-2">{shippingActivity.slice(0, 6).map((event) => <div key={String(event.id)} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3 text-sm"><div><p className="font-medium">{String(event.provider || "Shipping")} / {String(event.action || "activity")}</p><p className="text-xs text-muted-foreground">{String(event.message || "")}</p></div><div className="flex items-center gap-2"><Badge variant={String(event.status || "").toLowerCase().includes("fail") ? "destructive" : "outline"}>{String(event.status || "info")}</Badge><span className="text-xs text-muted-foreground">{dateLabel(String(event.createdAt || ""))}</span></div></div>)}</CardContent></Card>}
       </TabsContent>
       <TabsContent value="purchase-orders" className="grid gap-4 pt-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -18038,6 +18071,19 @@ function SettingsPage({
     setDraft((current) => ({ ...current, [field]: next }))
   }
 
+  const shippingPackagePresets = (Array.isArray(value("shippingPackagePresets")) ? value("shippingPackagePresets") as Array<Record<string, unknown>> : [])
+  const updateShippingPackagePreset = (index: number, patch: Record<string, unknown>) => {
+    const next = shippingPackagePresets.map((preset, presetIndex) => presetIndex === index ? { ...preset, ...patch } : preset)
+    update("shippingPackagePresets", next)
+  }
+  const addShippingPackagePreset = () => {
+    update("shippingPackagePresets", [...shippingPackagePresets, { id: `package-${Date.now()}`, name: "New package", packageType: "box", weight: 0, length: 0, width: 0, height: 0, weightUnit: "lb", dimensionUnit: "in", default: shippingPackagePresets.length === 0 }])
+  }
+  const removeShippingPackagePreset = (index: number) => {
+    const next = shippingPackagePresets.filter((_, presetIndex) => presetIndex !== index)
+    update("shippingPackagePresets", next.length && !next.some((preset) => preset.default) ? next.map((preset, presetIndex) => ({ ...preset, default: presetIndex === 0 })) : next)
+  }
+
   function updateWorkflow(section: string, field: string, next: unknown) {
     setOrderWorkflowDraft((current) => ({ ...current, [`${section}.${field}`]: next }))
   }
@@ -18684,6 +18730,27 @@ function SettingsPage({
               <Field label="Seller display name"><Input disabled={!editing} value={String(value("veeqoSellerDisplayName") || "DataPlus")} onChange={(event) => update("veeqoSellerDisplayName", event.target.value)} /></Field>
               <Field label="Default label format"><Select disabled={!editing} value={String(value("veeqoDefaultLabelFormat") || "PDF")} onValueChange={(next) => update("veeqoDefaultLabelFormat", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="PDF">PDF</SelectItem><SelectItem value="PNG">PNG</SelectItem><SelectItem value="ZPL">ZPL</SelectItem><SelectItem value="JPEG">JPEG</SelectItem></SelectContent></Select></Field>
               <div className="rounded-md border bg-muted/25 p-3 text-sm text-muted-foreground xl:col-span-3">Veeqo rate shopping uses package dimensions, ship-from address, order value, and selected order lines. Temu orders can still show the marketplace label option in the same print workflow.</div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="flex flex-row items-start justify-between gap-3">
+              <div><CardTitle className="text-base">Package presets</CardTitle><CardDescription>Reusable boxes and mailers shown in the universal label modal.</CardDescription></div>
+              <Button size="sm" variant="outline" disabled={!editing} onClick={addShippingPackagePreset}>Add preset</Button>
+            </CardHeader>
+            <CardContent className="grid gap-3">
+              {shippingPackagePresets.map((preset, index) => <div key={String(preset.id || index)} className="grid gap-3 rounded-md border p-3 md:grid-cols-2 xl:grid-cols-7">
+                <Field label="Name"><Input disabled={!editing} value={String(preset.name || "")} onChange={(event) => updateShippingPackagePreset(index, { name: event.target.value })} /></Field>
+                <Field label="Type"><Select disabled={!editing} value={String(preset.packageType || "box")} onValueChange={(next) => updateShippingPackagePreset(index, { packageType: next })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="box">Box</SelectItem><SelectItem value="poly_mailer">Poly mailer</SelectItem><SelectItem value="envelope">Envelope</SelectItem><SelectItem value="tube">Tube</SelectItem></SelectContent></Select></Field>
+                <Field label="Weight (lb)"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(preset.weight || 0)} onChange={(event) => updateShippingPackagePreset(index, { weight: Number(event.target.value || 0) })} /></Field>
+                <Field label="Length (in)"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(preset.length || 0)} onChange={(event) => updateShippingPackagePreset(index, { length: Number(event.target.value || 0) })} /></Field>
+                <Field label="Width (in)"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(preset.width || 0)} onChange={(event) => updateShippingPackagePreset(index, { width: Number(event.target.value || 0) })} /></Field>
+                <Field label="Height (in)"><Input disabled={!editing} type="number" min="0" step="0.01" value={String(preset.height || 0)} onChange={(event) => updateShippingPackagePreset(index, { height: Number(event.target.value || 0) })} /></Field>
+                <div className="flex flex-wrap items-end gap-2">
+                  <Button size="sm" variant={preset.default ? "secondary" : "outline"} disabled={!editing || Boolean(preset.default)} onClick={() => update("shippingPackagePresets", shippingPackagePresets.map((entry, presetIndex) => ({ ...entry, default: presetIndex === index })))}>{preset.default ? "Default" : "Set default"}</Button>
+                  <Button size="sm" variant="ghost" disabled={!editing || shippingPackagePresets.length <= 1} onClick={() => removeShippingPackagePreset(index)}>Remove</Button>
+                </div>
+              </div>)}
+              {!shippingPackagePresets.length && <p className="rounded-md border p-4 text-sm text-muted-foreground">No package presets configured.</p>}
             </CardContent>
           </Card>
         </TabsContent>

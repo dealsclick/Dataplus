@@ -1036,6 +1036,11 @@ const DEFAULT_SYSTEM_SETTINGS = {
   veeqoApiKey: "",
   veeqoSellerDisplayName: "DataPlus",
   veeqoDefaultLabelFormat: "PDF",
+  shippingPackagePresets: [
+    { id: "poly-mailer", name: "Poly mailer", packageType: "poly_mailer", weight: 0.1, length: 14, width: 10, height: 1, weightUnit: "lb", dimensionUnit: "in", default: false },
+    { id: "small-box", name: "Small box", packageType: "box", weight: 0.2, length: 8, width: 6, height: 4, weightUnit: "lb", dimensionUnit: "in", default: true },
+    { id: "medium-box", name: "Medium box", packageType: "box", weight: 0.45, length: 12, width: 10, height: 8, weightUnit: "lb", dimensionUnit: "in", default: false }
+  ],
   notificationsEnabled: true,
   notificationRecipients: [],
   notificationInAppEnabled: true,
@@ -5105,6 +5110,28 @@ async function writeExportMappingsStore(exportMappings = []) {
   return normalized;
 }
 
+function normalizeShippingPackagePresets(presets = []) {
+  const source = Array.isArray(presets) && presets.length ? presets : DEFAULT_SYSTEM_SETTINGS.shippingPackagePresets;
+  const normalized = source.map((preset, index) => {
+    const name = sourceTextValue(preset?.name || `Package ${index + 1}`) || `Package ${index + 1}`;
+    const id = sourceTextValue(preset?.id || name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || crypto.randomUUID());
+    return {
+      id,
+      name,
+      packageType: sourceTextValue(preset?.packageType || "box") || "box",
+      weight: Math.max(0, Number(preset?.weight || 0) || 0),
+      length: Math.max(0, Number(preset?.length || 0) || 0),
+      width: Math.max(0, Number(preset?.width || 0) || 0),
+      height: Math.max(0, Number(preset?.height || 0) || 0),
+      weightUnit: ["lb", "kg", "oz", "g"].includes(String(preset?.weightUnit || "").toLowerCase()) ? String(preset.weightUnit).toLowerCase() : "lb",
+      dimensionUnit: ["in", "cm"].includes(String(preset?.dimensionUnit || "").toLowerCase()) ? String(preset.dimensionUnit).toLowerCase() : "in",
+      default: preset?.default === true || String(preset?.default).toLowerCase() === "true"
+    };
+  }).filter((preset) => preset.name && preset.weight >= 0);
+  if (normalized.length && !normalized.some((preset) => preset.default)) normalized[0].default = true;
+  return normalized.slice(0, 25);
+}
+
 function normalizeSystemSettings(settings = {}) {
   const normalized = { ...DEFAULT_SYSTEM_SETTINGS, ...(settings && typeof settings === "object" ? settings : {}) };
   normalized.vendorFeedSchedules = (Array.isArray(normalized.vendorFeedSchedules) ? normalized.vendorFeedSchedules : [])
@@ -5163,6 +5190,7 @@ function normalizeSystemSettings(settings = {}) {
   normalized.veeqoApiKey = String(normalized.veeqoApiKey || "").trim();
   normalized.veeqoSellerDisplayName = String(normalized.veeqoSellerDisplayName || normalized.organizationName || "DataPlus").trim() || "DataPlus";
   normalized.veeqoDefaultLabelFormat = ["PDF", "PNG", "ZPL", "JPEG"].includes(String(normalized.veeqoDefaultLabelFormat || "").toUpperCase()) ? String(normalized.veeqoDefaultLabelFormat).toUpperCase() : "PDF";
+  normalized.shippingPackagePresets = normalizeShippingPackagePresets(normalized.shippingPackagePresets);
   normalized.backupDestination = ["local", "s3", "digitalocean-spaces"].includes(String(normalized.backupDestination || "").toLowerCase())
     ? String(normalized.backupDestination).toLowerCase() : "local";
   for (const field of [
@@ -21108,9 +21136,32 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   order.documents = [document, ...order.documents.filter((entry) => !(entry.type === "shipping_label" && String(entry.note || "").includes(packageSnList[0])))];
   order.temuShippingLabels = Array.isArray(order.temuShippingLabels) ? order.temuShippingLabels : [];
   order.temuShippingLabels.unshift({ id: attachmentId, parentOrderSn, packageSnList, documentType, createdAt: now, url: document.url });
+  order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+  const existingShipment = order.shipments.find((shipment) => Array.isArray(shipment.packageSnList) && shipment.packageSnList.some((packageSn) => packageSnList.includes(String(packageSn))));
+  const shipmentRecord = existingShipment || {
+    id: crypto.randomUUID(),
+    reference: `${String(order.orderNumber || order.id).replace(/^#/, "")}-TM${order.shipments.length + 1}`,
+    status: "label_ready",
+    provider: "temu",
+    labelProvider: "Temu",
+    carrier: "Temu",
+    carrierName: "Temu",
+    service: "Marketplace shipping label",
+    packageSnList,
+    lines: [],
+    documents: [],
+    voidable: false,
+    voidStatus: "not_supported",
+    channelSync: { provider: "temu", status: "label_ready", message: "Temu marketplace label retrieved." },
+    createdAt: now
+  };
+  shipmentRecord.documents = [{ url: document.url, format: "PDF", documentType: "shipping_label", documentId: document.id }, ...(Array.isArray(shipmentRecord.documents) ? shipmentRecord.documents.filter((row) => String(row.documentId || "") !== document.id) : [])];
+  shipmentRecord.updatedAt = now;
+  if (!existingShipment) order.shipments.unshift(shipmentRecord);
+  appendOrderShippingEvent(order, { provider: "temu", action: "label_retrieve", status: "ready", message: `Temu label attached for package ${packageSnList.join(", ")}.`, details: { packageSnList, documentId: document.id } });
   addOrderTimeline(order, { type: "shipping_label", title: "Temu shipping label ready", message: `Label attached for package ${packageSnList.join(", ")}.`, user: "Temu" });
   order.updatedAt = now;
-  return { document, packageSnList, response: documentPayload };
+  return { document, packageSnList, response: documentPayload, shipment: shipmentRecord };
 }
 
 function veeqoConfig(settings = {}) {
@@ -21181,14 +21232,40 @@ function shipFromAddressForRates(settings = {}, warehouse = {}) {
 }
 
 function packageForShippingRates(body = {}, settings = {}) {
+  const presets = normalizeShippingPackagePresets(settings.shippingPackagePresets);
+  const preset = presets.find((entry) => String(entry.id) === String(body.packagePresetId || ""))
+    || (String(body.packagePresetId || "") === "default" ? presets.find((entry) => entry.default) : null);
   return {
-    weight: Math.max(0, Number(body.packageWeight || body.weightPounds || body.weight || 0) || 0),
-    weight_unit: String(body.weightUnit || settings.fulfillmentDefaultWeightUnit || "lb").toLowerCase(),
-    length: Math.max(0, Number(body.packageLength || body.lengthInches || body.length || 0) || 0),
-    width: Math.max(0, Number(body.packageWidth || body.widthInches || body.width || 0) || 0),
-    height: Math.max(0, Number(body.packageHeight || body.heightInches || body.height || 0) || 0),
-    dimension_unit: String(body.dimensionUnit || settings.fulfillmentDefaultDimensionUnit || "in").toLowerCase()
+    preset_id: String(preset?.id || body.packagePresetId || "").trim(),
+    preset_name: String(preset?.name || body.packagePresetName || "").trim(),
+    package_type: String(body.packageType || preset?.packageType || "box").trim() || "box",
+    weight: Math.max(0, Number(body.packageWeight || body.weightPounds || body.weight || preset?.weight || 0) || 0),
+    weight_unit: String(body.weightUnit || preset?.weightUnit || settings.fulfillmentDefaultWeightUnit || "lb").toLowerCase(),
+    length: Math.max(0, Number(body.packageLength || body.lengthInches || body.length || preset?.length || 0) || 0),
+    width: Math.max(0, Number(body.packageWidth || body.widthInches || body.width || preset?.width || 0) || 0),
+    height: Math.max(0, Number(body.packageHeight || body.heightInches || body.height || preset?.height || 0) || 0),
+    dimension_unit: String(body.dimensionUnit || preset?.dimensionUnit || settings.fulfillmentDefaultDimensionUnit || "in").toLowerCase()
   };
+}
+
+function orderSourceChannelName(order = {}, fallback = "Shipping") {
+  const source = String(order.source || order.channel || fallback || "").trim();
+  if (!source) return fallback;
+  return source.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function appendOrderShippingEvent(order = {}, event = {}) {
+  order.shippingRateActivity = Array.isArray(order.shippingRateActivity) ? order.shippingRateActivity : [];
+  order.shippingRateActivity.unshift({
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    provider: String(event.provider || "shipping"),
+    action: String(event.action || "shipping"),
+    status: String(event.status || "info"),
+    message: String(event.message || ""),
+    details: event.details && typeof event.details === "object" ? event.details : {}
+  });
+  order.shippingRateActivity = order.shippingRateActivity.slice(0, 50);
 }
 
 function orderLinesForShippingRates(order = {}, body = {}) {
@@ -21210,6 +21287,7 @@ function orderLinesForShippingRates(order = {}, body = {}) {
 
 function normalizeVeeqoRate(rate = {}, index = 0) {
   const amount = Number(rate.total_charge?.value || rate.totalCharge?.value || rate.charge?.value || rate.price?.value || rate.base_rate || rate.value || rate.amount || 0) || 0;
+  const deliveryDays = Number(rate.delivery_days || rate.deliveryDays || rate.estimated_delivery_days || rate.estimatedDeliveryDays || 0) || 0;
   return {
     id: String(rate.name || rate.rate_id || rate.rateId || rate.id || `veeqo-rate-${index}`),
     provider: "veeqo",
@@ -21217,6 +21295,9 @@ function normalizeVeeqoRate(rate = {}, index = 0) {
     service: String(rate.service_name || rate.serviceName || rate.service_type || rate.serviceType || rate.name || "Shipping"),
     amount,
     currency: String(rate.total_charge?.unit || rate.currency_code || rate.currency || "USD"),
+    deliveryDays,
+    deliveryEstimate: String(rate.delivery_estimate || rate.deliveryEstimate || rate.estimated_delivery || rate.estimatedDelivery || ""),
+    warning: String(rate.warning || rate.message || ""),
     remoteShipmentId: String(rate.remote_shipment_id || rate.remoteShipmentId || ""),
     serviceType: String(rate.service_type || rate.serviceType || ""),
     requestToken: String(rate.request_token || rate.requestToken || ""),
@@ -21230,6 +21311,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   const warehouseId = String(body.warehouseId || order.fulfillmentWarehouseId || settings.inventoryDefaultFulfillmentWarehouseId || "").trim();
   const warehouse = (db.warehouses || []).find((row) => String(row.id || "") === warehouseId) || {};
   const parcel = packageForShippingRates(body, settings);
+  const startedAt = Date.now();
   const blockers = [];
   const toAddress = shippingAddressForRates(order, settings);
   const fromAddress = shipFromAddressForRates(settings, warehouse);
@@ -21238,7 +21320,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   if (settings.fulfillmentRequirePackageDataBeforeLabel && (!parcel.weight || !parcel.length || !parcel.width || !parcel.height)) blockers.push("Package weight, length, width, and height are required.");
   const rates = [];
   if (String(order.source || "").toLowerCase() === "temu") {
-    rates.push({ id: "temu-existing-label", provider: "temu", carrier: "Temu", service: "Marketplace shipping label", amount: null, currency: String(order.currency || "USD"), action: "retrieve_existing_label", raw: {} });
+    rates.push({ id: "temu-existing-label", provider: "temu", carrier: "Temu", service: "Marketplace shipping label", amount: null, currency: String(order.currency || "USD"), action: "retrieve_existing_label", deliveryEstimate: "Provided by Temu", raw: {} });
   }
   if (!blockers.length && veeqoConfig(settings).enabled) {
     const payload = {
@@ -21256,7 +21338,15 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     const available = Array.isArray(response.available) ? response.available : firstArrayFrom(response.rates || response.shipments || response);
     rates.push(...available.map(normalizeVeeqoRate));
   }
-  return { rates, blockers, package: parcel, warehouseId, providers: { temu: String(order.source || "").toLowerCase() === "temu", veeqo: veeqoConfig(settings).enabled && Boolean(veeqoConfig(settings).apiKey) } };
+  appendOrderShippingEvent(order, {
+    provider: "universal",
+    action: "rates",
+    status: blockers.length ? "blocked" : "loaded",
+    message: blockers.length ? blockers.join(" ") : `${rates.length} shipping option${rates.length === 1 ? "" : "s"} loaded.`,
+    details: { rateCount: rates.length, warehouseId, package: parcel, durationMs: Date.now() - startedAt }
+  });
+  appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates", statusCode: blockers.length ? 400 : 200, ok: blockers.length === 0, durationMs: Date.now() - startedAt, entityType: "order", entityId: order.id, message: blockers.length ? blockers.join(" ") : `${rates.length} shipping option(s) loaded.` });
+  return { rates, blockers, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), warehouseId, providers: { temu: String(order.source || "").toLowerCase() === "temu", veeqo: veeqoConfig(settings).enabled && Boolean(veeqoConfig(settings).apiKey) } };
 }
 
 async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
@@ -21287,11 +21377,44 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
   fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), downloaded.content);
   const document = { id: attachmentId, name, type: "shipping_label", note: `${selectedRate.carrier || "Veeqo"} ${selectedRate.service || "shipping label"}`, mimeType, size: downloaded.content.length, storage: "local", storageKey, sourceUrl: labelUrl, url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Veeqo" };
   order.documents = [document, ...(Array.isArray(order.documents) ? order.documents : [])];
+  const trackingNumber = String(shipment.tracking_number || shipment.trackingNumber || "").trim();
+  const trackingUrl = String(shipment.tracking_url || shipment.trackingUrl || "").trim();
   order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
-  order.shipments.unshift({ id: crypto.randomUUID(), reference: `${String(order.orderNumber || order.id).replace(/^#/, "")}-VQ${order.shipments.length + 1}`, status: "label_purchased", carrier: selectedRate.carrier || shipment.carrier || "Veeqo", carrierName: selectedRate.carrier || shipment.carrier || "Veeqo", service: selectedRate.service || shipment.service_name || "Shipping", trackingNumber: shipment.tracking_number || shipment.trackingNumber || "", trackingUrl: shipment.tracking_url || shipment.trackingUrl || "", documents: [{ url: document.url, format, documentType: "shipping_label" }], channelSync: { provider: "veeqo", status: "label_purchased", message: "Purchased through the universal shipping rater." }, createdAt: now });
+  const shipmentRecord = {
+    id: crypto.randomUUID(),
+    reference: `${String(order.orderNumber || order.id).replace(/^#/, "")}-VQ${order.shipments.length + 1}`,
+    status: "label_purchased",
+    provider: "veeqo",
+    labelProvider: "Veeqo",
+    carrier: selectedRate.carrier || shipment.carrier || "Veeqo",
+    carrierName: selectedRate.carrier || shipment.carrier || "Veeqo",
+    service: selectedRate.service || shipment.service_name || "Shipping",
+    trackingNumber,
+    trackingUrl,
+    shippingCost: Number(selectedRate.amount || 0) || 0,
+    currency: String(selectedRate.currency || order.currency || "USD"),
+    package: options.package || {},
+    packages: options.package ? [{ id: crypto.randomUUID(), ...options.package }] : [],
+    lines: Array.isArray(options.lines) ? options.lines : [],
+    documents: [{ url: document.url, format, documentType: "shipping_label", documentId: document.id }],
+    voidable: true,
+    voidStatus: "available",
+    channelSync: { provider: "veeqo", status: "label_purchased", message: "Purchased through the universal shipping rater." },
+    remoteShipmentId: String(shipment.id || shipment.shipment_id || selectedRate.remoteShipmentId || ""),
+    rawSummary: { requestToken: selectedRate.requestToken || "", rateId: selectedRate.id || "", labelUrl },
+    createdAt: now
+  };
+  order.shipments.unshift(shipmentRecord);
+  if (trackingNumber) {
+    order.shippingCarrier = shipmentRecord.carrierName;
+    order.trackingNumber = trackingNumber;
+    order.trackingUrl = trackingUrl;
+  }
+  appendOrderShippingEvent(order, { provider: "veeqo", action: "label_purchase", status: "purchased", message: `${shipmentRecord.carrierName} ${shipmentRecord.service} label purchased.${trackingNumber ? ` Tracking ${trackingNumber}.` : ""}`, details: { shipmentId: shipmentRecord.id, cost: shipmentRecord.shippingCost, currency: shipmentRecord.currency } });
+  appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "POST", path: "/shipping/api/v1/shipments", operation: "Veeqo label purchased", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${shipmentRecord.carrierName} ${shipmentRecord.service} label attached.` });
   addOrderTimeline(order, { type: "shipping_label", title: "Veeqo shipping label purchased", message: `${document.note} attached to this order.`, user: "Veeqo" });
   order.updatedAt = now;
-  return { document, shipment };
+  return { document, shipment: shipmentRecord };
 }
 
 function temuItemProductList(item = {}) {
@@ -35743,8 +35866,16 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     try {
       const result = await getUniversalShippingRates(order, db, body);
+      order.updatedAt = new Date().toISOString();
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
       return sendJson(res, 200, { ...result, message: result.rates.length ? "Shipping rates loaded." : "No shipping rates were returned." });
     } catch (error) {
+      appendOrderShippingEvent(order, { provider: "universal", action: "rates", status: "failed", message: error.message || "Unknown shipping rate error." });
+      appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: error.message || "Unknown shipping rate error." });
+      order.updatedAt = new Date().toISOString();
+      await postgres.saveOrder(order).catch(() => {});
+      clearOrderApiCache(order.id);
       return sendJson(res, 502, { error: `Shipping rate lookup failed: ${error.message || "Unknown error"}` });
     }
   }
@@ -35760,7 +35891,7 @@ async function handleApi(req, res) {
       if (provider === "temu") {
         result = await attachTemuShippingLabel(order, db, { documentType: body.documentType || "SHIPPING_LABEL_PDF" });
       } else if (provider === "veeqo") {
-        result = await attachVeeqoShippingLabel(order, db, body.rate || {}, { labelFormat: body.labelFormat });
+        result = await attachVeeqoShippingLabel(order, db, body.rate || {}, { labelFormat: body.labelFormat, package: packageForShippingRates(body, readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {})), lines: Array.isArray(body.lines) ? body.lines : [] });
       } else {
         return sendJson(res, 400, { error: "Choose a shipping rate before printing a label." });
       }
@@ -35768,8 +35899,46 @@ async function handleApi(req, res) {
       clearOrderApiCache(order.id);
       return sendJson(res, 200, { order, document: result.document, shipment: result.shipment || null, message: "Shipping label attached. Opening it for print." });
     } catch (error) {
+      appendOrderShippingEvent(order, { provider: provider || "shipping", action: "label_purchase", status: "failed", message: error.message || "Unknown shipping label error." });
+      appendChannelApiLog({ channel: provider === "veeqo" ? "Veeqo" : orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/labels", operation: "Universal shipping label failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: error.message || "Unknown shipping label error." });
+      order.updatedAt = new Date().toISOString();
+      await postgres.saveOrder(order).catch(() => {});
+      clearOrderApiCache(order.id);
       return sendJson(res, 502, { error: `Shipping label print failed: ${error.message || "Unknown error"}` });
     }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "void" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
+    const shipment = order.shipments.find((row) => String(row.id || "") === String(parts[4]));
+    if (!shipment) return notFound(res);
+    const body = await parseBody(req);
+    const provider = String(shipment.provider || shipment.labelProvider || "").toLowerCase();
+    const now = new Date().toISOString();
+    if (String(shipment.voidStatus || "").toLowerCase() === "voided") return sendJson(res, 400, { error: "This label is already marked voided." });
+    if (provider !== "veeqo") {
+      shipment.voidStatus = "not_supported";
+      shipment.channelSync = { ...(shipment.channelSync || {}), status: "void_not_supported", updatedAt: now, message: "This label provider does not support remote voiding in DataPlus yet." };
+      appendOrderShippingEvent(order, { provider: provider || "shipping", action: "void_label", status: "not_supported", message: "Remote void is not supported for this provider yet.", details: { shipmentId: shipment.id } });
+      addOrderTimeline(order, { type: "shipping_label", title: "Label void not available", message: `${shipment.carrierName || shipment.carrier || "Carrier"} label voiding is not connected yet. Void it in the carrier/channel portal if needed.`, user: body.user || "Luis" });
+      order.updatedAt = now;
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 200, { order, shipment, message: "Remote void is not connected for this label provider yet." });
+    }
+    shipment.voidStatus = "void_requested";
+    shipment.voidRequestedAt = now;
+    shipment.voidReason = String(body.reason || "").trim();
+    shipment.channelSync = { ...(shipment.channelSync || {}), status: "void_review", updatedAt: now, message: "Veeqo void API is pending configuration; void in Veeqo and mark reviewed." };
+    appendOrderShippingEvent(order, { provider: "veeqo", action: "void_label", status: "review", message: "Void requested locally. Complete the void in Veeqo until the void endpoint is connected.", details: { shipmentId: shipment.id, reason: shipment.voidReason } });
+    appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "POST", path: "shipping/void", operation: "Veeqo label void requested", statusCode: 202, ok: true, entityType: "order", entityId: order.id, message: "Void requested locally; Veeqo remote void endpoint pending." });
+    addOrderTimeline(order, { type: "shipping_label", title: "Label void requested", message: `${shipment.reference || "Shipment"} needs to be voided in Veeqo.`, user: body.user || "Luis" });
+    order.updatedAt = now;
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 202, { order, shipment, message: "Void requested locally. Complete carrier void in Veeqo until remote void is connected." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-quotes" && parts[4] === "shopify" && postgres.isPostgresEnabled()) {
