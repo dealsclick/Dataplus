@@ -32966,10 +32966,14 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "GET" && url.pathname === "/api/webhooks/temu") {
+    appendChannelApiLog({ channel: "Temu", transport: "webhook", method: "GET", path: url.pathname, operation: "Temu webhook endpoint check", statusCode: 200, ok: true, message: "Temu webhook endpoint check completed." });
+    return sendJson(res, 200, { success: true, accepted: true, message: "DataPlus Temu webhook endpoint is ready." });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/webhooks/temu") {
     const startedAt = Date.now();
     const rawBody = await readRawBody(req);
-    const db = await readDbFast({ skipInventory: true });
     let payload;
     try {
       payload = rawBody.length ? JSON.parse(rawBody.toString("utf8")) : {};
@@ -32977,45 +32981,65 @@ async function handleApi(req, res) {
       appendChannelApiLog({ channel: "Temu", transport: "webhook", method: "POST", path: url.pathname, operation: "Temu webhook delivery", statusCode: 400, ok: false, durationMs: Date.now() - startedAt, message: "Temu sent invalid JSON." });
       return sendJson(res, 400, { error: "Invalid Temu webhook payload." });
     }
-    const channel = findChannelByName(db, "Temu");
-    const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
-    if (settings.channelEnabled === false) return sendJson(res, 202, { accepted: true, message: "Temu webhook received while the channel is disabled." });
-    if (!settings.temuWebhookEnabled) return sendJson(res, 202, { accepted: true, message: "Temu webhook received while webhook processing is disabled." });
     const eventType = String(payload.eventType || payload.event_type || payload.type || payload.messageType || payload.msgType || payload.topic || req.headers["x-temu-topic"] || "Temu notification").trim();
     const eventId = String(payload.messageId || payload.message_id || payload.msgId || payload.id || req.headers["x-temu-message-id"] || crypto.createHash("sha256").update(rawBody).digest("hex")).trim();
-    const duplicateKey = `dataplus:temu:webhook:${eventId}`;
-    if (eventId && await redisCache.getJson(duplicateKey)) return sendJson(res, 200, { accepted: true, duplicate: true, message: "Temu webhook was already processed." });
-    if (eventId) await redisCache.setJson(duplicateKey, { receivedAt: new Date().toISOString(), eventType }, 60 * 60 * 24 * 7);
-    const parentOrderSnList = [...collectTemuParentOrderSns(payload)].slice(0, Math.min(250, Number(settings.temuOrderImportLimit || 250) || 250));
-    const shouldRefreshOrders = Boolean(settings.orderDownloadEnabled !== false && settings.temuOrderImportEnabled && (
-      parentOrderSnList.length
-      || /order|shipment|fulfill|delivery|cancel|refund|return/i.test(eventType)
-    ));
-    if (shouldRefreshOrders) {
-      void queueTemuOrderImportJob(db, {
-        lookbackDays: 1,
-        limit: parentOrderSnList.length ? parentOrderSnList.length : Math.min(250, Number(settings.temuOrderImportLimit || 250) || 250),
-        includeCanceled: true,
-        parentOrderSnList
-      }, { operation: "Temu webhook order reconciliation", forceLookback: false })
-        .catch((error) => appendChannelApiLog({ channel: "Temu", transport: "webhook", method: "POST", path: url.pathname, operation: eventType, statusCode: 500, ok: false, message: `Unable to queue Temu order reconciliation: ${error.message}` }));
-    }
-    appendChannelApiLog({
+    const parentOrderSnList = [...collectTemuParentOrderSns(payload)].slice(0, 250);
+    sendJson(res, 200, { success: true, accepted: true, eventType, parentOrderSnList, message: "Temu webhook accepted." });
+    void (async () => {
+      const db = await readDbFast({ skipInventory: true });
+      const channel = findChannelByName(db, "Temu");
+      const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+      const logBase = { channel: "Temu", transport: "webhook", method: "POST", path: url.pathname, operation: eventType };
+      if (settings.channelEnabled === false) {
+        appendChannelApiLog({ ...logBase, statusCode: 202, ok: true, durationMs: Date.now() - startedAt, message: "Temu webhook received while the channel is disabled." });
+        return;
+      }
+      if (!settings.temuWebhookEnabled) {
+        appendChannelApiLog({ ...logBase, statusCode: 202, ok: true, durationMs: Date.now() - startedAt, message: "Temu webhook received while webhook processing is disabled." });
+        return;
+      }
+      const duplicateKey = `dataplus:temu:webhook:${eventId}`;
+      if (eventId && await redisCache.getJson(duplicateKey)) {
+        appendChannelApiLog({ ...logBase, statusCode: 200, ok: true, durationMs: Date.now() - startedAt, message: "Duplicate Temu webhook ignored." });
+        return;
+      }
+      if (eventId) await redisCache.setJson(duplicateKey, { receivedAt: new Date().toISOString(), eventType }, 60 * 60 * 24 * 7);
+      const limitedOrderSns = parentOrderSnList.slice(0, Math.min(250, Number(settings.temuOrderImportLimit || 250) || 250));
+      const shouldRefreshOrders = Boolean(settings.orderDownloadEnabled !== false && settings.temuOrderImportEnabled && (
+        limitedOrderSns.length
+        || /order|shipment|fulfill|delivery|cancel|refund|return/i.test(eventType)
+      ));
+      if (shouldRefreshOrders) {
+        await queueTemuOrderImportJob(db, {
+          lookbackDays: 1,
+          limit: limitedOrderSns.length ? limitedOrderSns.length : Math.min(250, Number(settings.temuOrderImportLimit || 250) || 250),
+          includeCanceled: true,
+          parentOrderSnList: limitedOrderSns
+        }, { operation: "Temu webhook order reconciliation", forceLookback: false });
+      }
+      appendChannelApiLog({
+        ...logBase,
+        statusCode: 202,
+        ok: true,
+        durationMs: Date.now() - startedAt,
+        message: shouldRefreshOrders
+          ? limitedOrderSns.length
+            ? `Temu event received; queued status refresh for ${limitedOrderSns.length} order${limitedOrderSns.length === 1 ? "" : "s"}.`
+            : "Temu event received; queued recent order reconciliation."
+          : "Temu event received and recorded."
+      });
+    })().catch((error) => appendChannelApiLog({
       channel: "Temu",
       transport: "webhook",
       method: "POST",
       path: url.pathname,
       operation: eventType,
-      statusCode: 202,
-      ok: true,
+      statusCode: 500,
+      ok: false,
       durationMs: Date.now() - startedAt,
-      message: shouldRefreshOrders
-        ? parentOrderSnList.length
-          ? `Temu event received; queued status refresh for ${parentOrderSnList.length} order${parentOrderSnList.length === 1 ? "" : "s"}.`
-          : "Temu event received; queued recent order reconciliation."
-        : "Temu event received and recorded."
-    });
-    return sendJson(res, 202, { accepted: true, eventType, parentOrderSnList, queuedOrderReconciliation: shouldRefreshOrders });
+      message: `Temu webhook background processing failed: ${error.message || "Unknown error"}`
+    }));
+    return;
   }
 
   if (req.method === "GET" && url.pathname === "/api/auth/session") {
