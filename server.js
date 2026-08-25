@@ -25590,7 +25590,8 @@ function mapEbayStatus(order) {
 
 function ebayOrderIsPaid(order = {}) {
   const status = String(order.orderPaymentStatus || "").trim().toUpperCase();
-  if (["PAID", "FULLY_PAID", "PAYMENT_COMPLETE"].includes(status)) return true;
+  if (["PAID", "FULLY_PAID", "PAYMENT_COMPLETE", "FULLY_REFUNDED"].includes(status)) return true;
+  if (status.includes("REFUND")) return true;
   if (status.includes("PAID") && !status.includes("NOT") && !status.includes("UNPAID")) return true;
   return false;
 }
