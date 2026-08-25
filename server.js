@@ -4848,10 +4848,12 @@ async function queueShopifyOrderImportJob(db, body = {}, options = {}) {
     error.statusCode = 400;
     throw error;
   }
-  const limit = Math.max(1, Math.min(1000, Number(body.limit || settings.shopifyOrderImportLimit || 250)));
+  const limit = Math.max(1, Math.min(5000, Number(body.limit || settings.shopifyOrderImportLimit || 250)));
+  const lookbackDays = Math.max(1, Math.min(365, Number(body.lookbackDays || settings.shopifyOrderImportLookbackDays || 30) || 30));
   const sources = String(body.sources ?? settings.shopifyOrderImportSources ?? "Native Shopify sources").trim() || "Native Shopify sources";
   const includeCanceled = body.includeCanceled ?? settings.shopifyOrderImportIncludeCanceled === true;
   const workerPayload = {
+    lookbackDays,
     limit,
     sources,
     includeCanceled: Boolean(includeCanceled),
@@ -4883,7 +4885,7 @@ async function queueShopifyOrderImportJob(db, body = {}, options = {}) {
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : "shopify-order-import",
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
-    message: `${schedulePrefix}Shopify order reconciliation queued for up to ${limit.toLocaleString()} orders from ${sources}.`
+    message: `${schedulePrefix}Shopify order reconciliation queued for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}, up to ${limit.toLocaleString()} orders from ${sources}.`
   });
   upsertImportJobStore(job);
   if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
@@ -12656,7 +12658,16 @@ function nextReturnNumber(db) {
 
 function nextOrderNumber(db) {
   db.sequence = db.sequence || {};
-  db.sequence.order = Number(db.sequence.order || 999) + 1;
+  const highestExisting = (db.orders || []).reduce((highest, order) => {
+    const candidates = [order.internalOrderNumber, order.orderNumber, order.displayOrderNumber];
+    const numeric = candidates
+      .map((value) => String(value || "").trim())
+      .map((value) => value.match(/^(?:DP-)?(\d+)$/i)?.[1])
+      .filter(Boolean)
+      .map((value) => Number(value));
+    return Math.max(highest, ...numeric.filter(Number.isFinite));
+  }, 999);
+  db.sequence.order = Math.max(Number(db.sequence.order || 999), highestExisting) + 1;
   return String(db.sequence.order);
 }
 
@@ -20263,7 +20274,8 @@ async function runShopifyStatusImportWorkerJob(job = {}) {
 
 async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
-  const limit = Math.max(1, Math.min(1000, Number(payload.limit || job.totalRows || 250)));
+  const limit = Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250)));
+  const lookbackDays = Math.max(1, Math.min(365, Number(payload.lookbackDays || 30) || 30));
   const sources = String(payload.sources || "Native Shopify sources");
   const startedAt = job.startedAt || new Date().toISOString();
   job = await persistWorkerImportJob(job, {
@@ -20272,7 +20284,7 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
     totalRows: limit,
     processedRows: 0,
     startedAt,
-    message: `Importing and reconciling Shopify orders from ${sources}...`
+    message: `Importing and reconciling Shopify orders from ${sources} for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
   });
   appendChannelApiLog({
     channel: "Shopify",
@@ -20286,8 +20298,8 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
     message: job.message
   });
   try {
-    const orders = await importShopifyOrders(limit, { sources, includeCanceled: Boolean(payload.includeCanceled) });
-    const message = `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed from ${sources}.`;
+    const orders = await importShopifyOrders(limit, { sources, includeCanceled: Boolean(payload.includeCanceled), lookbackDays });
+    const message = `${orders.length.toLocaleString()} Shopify order${orders.length === 1 ? "" : "s"} imported or refreshed from ${sources} for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`;
     job = await persistWorkerImportJob(job, {
       status: "success",
       phase: "complete",
@@ -31781,8 +31793,13 @@ function shopifyOrderToDataPlusOrder(node = {}) {
   return {
     id: String(node.id || "").replace("gid://shopify/Order/", "shopify-order-"),
     shopifyOrderId: node.id || "",
-    orderNumber: node.name || "",
+    orderNumber: "",
+    marketplaceOrderNumber: node.name || "",
     marketplaceOrderId: String(node.id || ""),
+    marketplaceReferences: [
+      { source: "Shopify", type: "order", value: node.name || "", primary: true },
+      { source: "Shopify", type: "gid", value: String(node.id || ""), primary: false }
+    ].filter((reference) => reference.value),
     source: "Shopify",
     channelSource: source.channel,
     shopifySourceName: source.sourceKey,
@@ -31814,21 +31831,44 @@ function shopifyOrderToDataPlusOrder(node = {}) {
   };
 }
 
+function assignImportedOrderInternalNumber(db, incoming = {}, existing = null) {
+  const internal = String(existing?.internalOrderNumber || incoming.internalOrderNumber || "").trim() || nextOrderNumber(db);
+  const marketplaceOrderNumber = String(incoming.marketplaceOrderNumber || existing?.marketplaceOrderNumber || incoming.marketplaceOrderId || existing?.marketplaceOrderId || "").trim();
+  incoming.internalOrderNumber = internal;
+  incoming.orderNumber = internal;
+  incoming.displayOrderNumber = internal;
+  incoming.marketplaceOrderNumber = marketplaceOrderNumber;
+  incoming.marketplaceOrderId = incoming.marketplaceOrderId || existing?.marketplaceOrderId || marketplaceOrderNumber;
+  incoming.marketplaceReferences = incoming.marketplaceReferences?.length ? incoming.marketplaceReferences : [
+    { source: incoming.source, type: "order", value: marketplaceOrderNumber, primary: true }
+  ].filter((reference) => reference.value);
+  db.orders = Array.isArray(db.orders) ? db.orders : [];
+  if (!db.orders.some((order) => String(order.internalOrderNumber || order.orderNumber || "") === internal)) {
+    db.orders.push({ id: incoming.id, internalOrderNumber: internal, orderNumber: internal });
+  }
+  return incoming;
+}
+
 async function importShopifyOrders(limit = 250, filters = {}) {
-  const query = `query DataPlusOrders($first: Int!, $after: String) { orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
+  const query = `query DataPlusOrders($first: Int!, $after: String, $query: String) { orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const imported = []; let after = null;
+  const lookbackDays = Math.max(1, Math.min(365, Number(filters.lookbackDays || 30) || 30));
+  const since = new Date(Date.now() - lookbackDays * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const orderQuery = `created_at:>=${since}`;
   while (imported.length < limit) {
-    const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, limit - imported.length), after }, { operation: "Import Shopify orders" });
+    const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, limit - imported.length), after, query: orderQuery }, { operation: "Import Shopify orders" });
     const connection = data?.orders || {}; imported.push(...(connection.edges || []).map((edge) => shopifyOrderToDataPlusOrder(edge.node)).filter((order) => order.id));
     if (!connection.pageInfo?.hasNextPage || !connection.pageInfo?.endCursor) break; after = connection.pageInfo.endCursor;
   }
   const sources = String(filters.sources || "Native Shopify sources");
-  const filtered = imported.filter((order) => shopifySourceIsAllowed(order, sources));
+  const includeCanceled = filters.includeCanceled === true || String(filters.includeCanceled).toLowerCase() === "true";
+  const filtered = imported.filter((order) => shopifySourceIsAllowed(order, sources) && (includeCanceled || !order.cancelledAt));
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
   for (let index = 0; index < filtered.length; index += 1) {
-    if (!isTerminalCustomerDemand(filtered[index])) continue;
     const existing = await postgres.readOrderByKey(filtered[index].id);
-    filtered[index] = preserveMarketplaceOrderOperations(filtered[index], existing);
+    filtered[index] = assignImportedOrderInternalNumber(db, preserveMarketplaceOrderOperations(filtered[index], existing), existing);
   }
+  if (postgres.isPostgresEnabled()) await postgres.writeStateField("sequence", db.sequence);
   await postgres.upsertOrdersFromState(filtered, { replace: false });
   await reconcilePersistedTerminalOrders(filtered, { user: "Shopify order import" });
   clearOrderApiCache();
@@ -31846,10 +31886,12 @@ async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}, webho
   if (!incoming.id) throw new Error("Shopify could not load the order referenced by this webhook.");
   if (!shopifySourceIsAllowed(incoming, settings.shopifyOrderImportSources)) return { skipped: true, reason: `Sales channel ${incoming.channelSource || "Unknown"} is not enabled for Shopify order imports.` };
   const existing = await postgres.readOrderByKey(incoming.id);
-  const merged = preserveMarketplaceOrderOperations(incoming, existing);
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const merged = assignImportedOrderInternalNumber(db, preserveMarketplaceOrderOperations(incoming, existing), existing);
   merged.updatedAt = new Date().toISOString();
   merged.importedAt = new Date().toISOString();
   addOrderTimeline(merged, { type: "channel_sync", title: "Shopify webhook applied", message: `${String(webhook.topic || "orders/update")} refreshed the local order record.`, user: "Shopify" });
+  if (postgres.isPostgresEnabled()) await postgres.writeStateField("sequence", db.sequence);
   await postgres.saveOrder(merged);
   await reconcilePersistedTerminalOrders([merged], { user: `Shopify ${String(webhook.topic || "orders/update")}` });
   clearOrderApiCache(merged.id);
