@@ -8788,6 +8788,19 @@ type CategoryChannelMapping = {
   matchSource?: string
   matchedQuery?: string
   matchedAt?: string
+  decision?: string
+  deniedAt?: string
+  deniedBy?: string
+  blocked?: boolean
+  blockedAt?: string
+  blockedBy?: string
+  blockReason?: string
+  lastRefreshQueuedAt?: string
+  lastRefreshStartedAt?: string
+  lastRefreshAt?: string
+  lastRefreshJobId?: string
+  lastRefreshChanged?: number | null
+  lastRefreshStatus?: string
   suggestionRank?: number | null
   categoryTreeVersion?: string
   reviewedBy?: string
@@ -9043,12 +9056,17 @@ type CategoryReviewRow = {
   pendingSuggestion?: CategoryChannelMapping["pendingSuggestion"]
   confidence?: number | null
   updatedAt?: string
+  reviewStatus?: string
+  lastRefreshAt?: string
+  lastRefreshJobId?: string
+  lastRefreshChanged?: number | null
+  lastRefreshStatus?: string
   locked?: boolean
 }
 
 type CategoryReviewResponse = {
   rows?: CategoryReviewRow[]
-  summary?: { total?: number; pending?: number; mapped?: number; missing?: number; pendingProducts?: number; mappedProducts?: number }
+  summary?: { total?: number; pending?: number; mapped?: number; missing?: number; denied?: number; blocked?: number; pendingProducts?: number; mappedProducts?: number; blockedProducts?: number }
   total?: number
   page?: number
   pageSize?: number
@@ -15229,8 +15247,16 @@ function CategoryReviewPage() {
   const [total, setTotal] = useState(0)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [allFiltered, setAllFiltered] = useState(false)
+  const [searchRowId, setSearchRowId] = useState("")
+  const [categorySearch, setCategorySearch] = useState("")
+  const [categoryResults, setCategoryResults] = useState<CategoryChannelMapping[]>([])
+  const [searching, setSearching] = useState(false)
+  const [refreshPrompt, setRefreshPrompt] = useState<{ ids: string[]; categoryName?: string; count: number; allFiltered?: boolean } | null>(null)
+  const [refreshTiming, setRefreshTiming] = useState<"now" | "later">("now")
+  const [refreshAt, setRefreshAt] = useState("")
   const limit = 100
   const selectedCount = allFiltered ? total : selected.size
+  const selectedIds = [...selected]
 
   async function load(nextPage = page) {
     setLoading(true)
@@ -15273,7 +15299,7 @@ function CategoryReviewPage() {
     return {
       channel,
       scope: "main",
-      ids: [...selected],
+      ids: selectedIds,
       allFiltered,
       q: query,
       status,
@@ -15282,36 +15308,55 @@ function CategoryReviewPage() {
     }
   }
 
-  async function approveMappings(ids?: string[]) {
+  async function decide(action: "approve" | "deny" | "block", ids?: string[], mapping?: CategoryChannelMapping) {
     const count = ids?.length || selectedCount
-    if (!count) return toast.error("Select category suggestions to approve.")
-    if (!window.confirm(`Approve and lock ${numberLabel(count)} ${channel === "ebay" ? "eBay" : "Shopify"} category mapping${count === 1 ? "" : "s"}?`)) return
+    if (!count) return toast.error("Select categories first.")
+    const verb = action === "approve" ? "approve" : action === "deny" ? "deny" : "block from selling"
+    if (!mapping && !window.confirm(`${verb[0].toUpperCase()}${verb.slice(1)} ${numberLabel(count)} ${channel === "ebay" ? "eBay" : "Shopify"} categor${count === 1 ? "y" : "ies"}?`)) return
     setBusy(true)
     try {
-      const result = await api<{ changed?: number; skipped?: unknown[]; message?: string }>("/api/categories/channel-review/apply", {
+      const result = await api<{ changed?: number; skipped?: unknown[]; message?: string }>("/api/categories/channel-review/decision", {
         method: "POST",
-        body: JSON.stringify(requestPayload(ids ? { ids, allFiltered: false, status: "pending" } : { status: "pending" })),
+        body: JSON.stringify(requestPayload({ action, ids: ids || selectedIds, allFiltered: ids ? false : allFiltered, mapping, note: action === "block" ? "Do not sell this category on this channel." : "" })),
       })
-      toast.success(result.message || `Approved ${numberLabel(result.changed || 0)} mapping${Number(result.changed || 0) === 1 ? "" : "s"}.`)
+      toast.success(result.message || "Category decision saved.")
+      setSearchRowId("")
+      setCategoryResults([])
       await load(1)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to approve category mappings.")
+      toast.error(error instanceof Error ? error.message : "Unable to save category decision.")
     } finally {
       setBusy(false)
     }
   }
 
-  async function refreshSkus() {
-    if (!selectedCount) return toast.error("Select approved mappings to refresh.")
-    if (!window.confirm(`Queue a DataPlus SKU refresh for ${numberLabel(selectedCount)} approved ${channel === "ebay" ? "eBay" : "Shopify"} category mapping${selectedCount === 1 ? "" : "s"}? This updates local SKU/channel metadata only.`)) return
+  async function searchCachedCategories(row: CategoryReviewRow, value = categorySearch) {
+    const q = value.trim() || row.name || ""
+    if (!q.trim()) return
+    setSearching(true)
+    try {
+      const result = await api<{ categories?: CategoryChannelMapping[] }>(`/api/channel-taxonomies/${channel}/categories?q=${encodeURIComponent(q)}&limit=12${channel === "ebay" ? "&live=0&marketplaceId=EBAY_US" : ""}`)
+      setCategoryResults(result.categories || [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to search cached categories.")
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  async function refreshSkus(ids?: string[], scheduledFor = "") {
+    const count = ids?.length || selectedCount
+    if (!count) return toast.error("Select approved mappings to refresh.")
     setBusy(true)
     try {
       const result = await api<{ job?: ImportJob; message?: string }>("/api/categories/channel-review/refresh-products", {
         method: "POST",
-        body: JSON.stringify(requestPayload({ status: "mapped", updateExistingSkus: true, updateChannelRecords: true })),
+        body: JSON.stringify(requestPayload({ ids: ids || selectedIds, allFiltered: refreshPrompt?.allFiltered || (!ids && allFiltered), status: "mapped", updateExistingSkus: true, updateChannelRecords: true, scheduledFor })),
       })
       toast.success(result.message || "Category SKU refresh queued.")
-      if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", `/jobs/${encodeURIComponent(result.job!.id)}`); window.dispatchEvent(new PopStateEvent("popstate")) }, 600)
+      setRefreshPrompt(null)
+      if (result.job?.id && !scheduledFor) window.setTimeout(() => { window.history.pushState({}, "", `/jobs/${encodeURIComponent(result.job!.id)}`); window.dispatchEvent(new PopStateEvent("popstate")) }, 600)
+      await load(page)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to queue SKU refresh.")
     } finally {
@@ -15319,35 +15364,60 @@ function CategoryReviewPage() {
     }
   }
 
+  function openRefresh(ids: string[], categoryName?: string, useAllFiltered = false) {
+    setRefreshPrompt({ ids, categoryName, count: useAllFiltered ? total : ids.length, allFiltered: useAllFiltered })
+    setRefreshTiming("now")
+    setRefreshAt("")
+  }
+
+  function startRefreshPrompt() {
+    if (!refreshPrompt) return
+    const scheduledFor = refreshTiming === "later" && refreshAt ? new Date(refreshAt).toISOString() : ""
+    void refreshSkus(refreshPrompt.ids, scheduledFor)
+  }
+
   const pageIds = rows.map(rowId).filter(Boolean)
   const pageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id))
-  const pendingRows = rows.filter((row) => row.pendingSuggestion?.categoryId)
-  const mappedRows = rows.filter((row) => row.mapping?.categoryId)
-  const actionHint = status === "pending"
-    ? "Approve saves and locks the suggested mapping. It does not update SKUs until you run the refresh."
-    : "Refresh updates DataPlus SKU/channel category metadata. It does not publish or revise live listings."
+  const selectedMappedIds = allFiltered ? [] : rows.filter((row) => selected.has(rowId(row)) && row.mapping?.categoryId).map(rowId)
+  const actionHint = "Approve saves a channel mapping, deny clears the suggestion, and block prevents selling that category on the selected channel."
 
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Catalog" title="Category Review" description="Review channel category suggestions in one queue, approve mappings in bulk, then decide when affected SKU records should refresh." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void load()} disabled={loading || busy}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button>{status === "pending" ? <Button size="sm" onClick={() => void approveMappings()} disabled={!selectedCount || busy}>{busy ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Approve selected</Button> : <Button size="sm" onClick={() => void refreshSkus()} disabled={!selectedCount || busy}>{busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh SKUs</Button>}</div>} />
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Detail label="Pending review" value={numberLabel(summary?.pending || 0)} /><Detail label="Pending products" value={numberLabel(summary?.pendingProducts || 0)} /><Detail label="Mapped categories" value={numberLabel(summary?.mapped || 0)} /><Detail label="Mapped products" value={numberLabel(summary?.mappedProducts || 0)} /><Detail label="Missing" value={numberLabel(summary?.missing || 0)} /></div>
+    <PageHeader eyebrow="Catalog" title="Category Review" description="Review each channel taxonomy queue, search cached categories, approve or deny suggestions, block categories from sale, and schedule SKU refresh jobs." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void load()} disabled={loading || busy}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button><Button size="sm" onClick={() => void decide("approve")} disabled={!selectedCount || busy || status !== "pending"}><CheckCircle2 className="size-4" /> Approve</Button><Button size="sm" variant="outline" onClick={() => void decide("deny")} disabled={!selectedCount || busy}>Deny</Button><Button size="sm" variant="outline" onClick={() => void decide("block")} disabled={!selectedCount || busy}>Block</Button></div>} />
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6"><Detail label="Needs review" value={numberLabel(summary?.pending || 0)} /><Detail label="Approved" value={numberLabel(summary?.mapped || 0)} /><Detail label="Unmatched" value={numberLabel(summary?.missing || 0)} /><Detail label="Denied" value={numberLabel(summary?.denied || 0)} /><Detail label="Blocked" value={numberLabel(summary?.blocked || 0)} /><Detail label="Mapped products" value={numberLabel(summary?.mappedProducts || 0)} /></div>
     <Card>
       <CardHeader className="gap-4 border-b">
-        <div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">{channel === "ebay" ? "eBay" : "Shopify"} category decisions</CardTitle><CardDescription>{actionHint}</CardDescription></div>{selectedCount ? <Badge variant="secondary">{numberLabel(selectedCount)} selected</Badge> : null}</div>
-        <div className="grid gap-2 md:grid-cols-[180px_180px_180px_minmax(220px,1fr)_auto]">
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">{channel === "ebay" ? "eBay" : "Shopify"} category review</CardTitle><CardDescription>{actionHint}</CardDescription></div>{selectedCount ? <Badge variant="secondary">{numberLabel(selectedCount)} selected</Badge> : null}</div>
+        <div className="grid gap-2 md:grid-cols-[180px_190px_180px_minmax(220px,1fr)_auto]">
           <Select value={channel} onValueChange={(value) => setChannel(value as "shopify" | "ebay")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="ebay">eBay</SelectItem><SelectItem value="shopify">Shopify / Google</SelectItem></SelectContent></Select>
-          <Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pending">Needs review</SelectItem><SelectItem value="mapped">Approved / mapped</SelectItem><SelectItem value="missing">Missing</SelectItem><SelectItem value="all">All categories</SelectItem></SelectContent></Select>
+          <Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pending">Needs review</SelectItem><SelectItem value="mapped">Approved</SelectItem><SelectItem value="missing">Unmatched</SelectItem><SelectItem value="denied">Denied</SelectItem><SelectItem value="blocked">Blocked</SelectItem><SelectItem value="all">All categories</SelectItem></SelectContent></Select>
           <Select value={confidence} onValueChange={setConfidence}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any confidence</SelectItem><SelectItem value="high">75%+</SelectItem><SelectItem value="medium">50-74%</SelectItem><SelectItem value="low">Below 50%</SelectItem><SelectItem value="none">No score</SelectItem></SelectContent></Select>
-          <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void load(1)} placeholder="Search category, vendor, current or suggested channel path" /></div>
+          <div className="relative"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void load(1)} placeholder="Search local or channel category" /></div>
           <Button onClick={() => void load(1)} disabled={loading}>Search</Button>
         </div>
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm">
           <div className="flex flex-wrap items-center gap-3"><label className="flex items-center gap-2"><Checkbox checked={pageSelected || allFiltered} onCheckedChange={(checked) => { const next = checked === true; setAllFiltered(false); setSelected(next ? new Set(pageIds) : new Set()) }} /> Select page</label><Button size="sm" variant={allFiltered ? "secondary" : "outline"} disabled={!total} onClick={() => { setAllFiltered(true); setSelected(new Set()) }}>Select all filtered ({numberLabel(total)})</Button></div>
-          <div className="flex flex-wrap gap-2">{status === "pending" ? <Button size="sm" disabled={!selectedCount || busy} onClick={() => void approveMappings()}>Approve selected</Button> : null}<Button size="sm" variant="outline" disabled={!selectedCount || busy || (status !== "mapped" && !mappedRows.length)} onClick={() => void refreshSkus()}>Refresh SKUs from approved mappings</Button></div>
+          <div className="flex flex-wrap gap-2"><Button size="sm" disabled={!selectedCount || busy || status !== "pending"} onClick={() => void decide("approve")}>Approve</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => void decide("deny")}>Deny</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => void decide("block")}>Block</Button><Button size="sm" variant="outline" disabled={busy || (!allFiltered && !selectedMappedIds.length) || (allFiltered && status !== "mapped")} onClick={() => openRefresh(allFiltered ? [] : selectedMappedIds, undefined, allFiltered)}>Refresh mapped SKUs</Button></div>
         </div>
       </CardHeader>
-      <CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-12" /><TableHead>Internal category</TableHead><TableHead>Products</TableHead><TableHead>Current mapping</TableHead><TableHead>Suggested mapping</TableHead><TableHead>Confidence</TableHead><TableHead>Source</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => { const id = rowId(row); const suggestion = row.pendingSuggestion; const confidenceLabel = row.confidence === null || row.confidence === undefined ? "-" : `${Math.round(Number(row.confidence) * 100)}%`; return <TableRow key={id}><TableCell><Checkbox aria-label={`Select ${row.name}`} checked={allFiltered || selected.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} /></TableCell><TableCell className="min-w-72"><a className="font-medium hover:underline" href={`/categories/${encodeURIComponent(id)}`}>{row.name || "Unnamed category"}</a><p className="mt-1 truncate text-xs text-muted-foreground">{(row.topVendors || []).slice(0, 2).map((vendor) => vendor.name).filter(Boolean).join(" / ") || "No vendor summary"}</p></TableCell><TableCell><p>{numberLabel(row.productCount || 0)}</p><p className="text-xs text-muted-foreground">{numberLabel(row.stockProductCount || 0)} in stock</p></TableCell><TableCell className="max-w-80"><p className="line-clamp-2 text-sm">{row.mapping?.categoryPath || row.mapping?.categoryId || "Not mapped"}</p>{row.mapping?.locked ? <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p> : null}</TableCell><TableCell className="max-w-96"><p className="line-clamp-2 text-sm font-medium">{suggestion?.categoryPath || suggestion?.categoryId || "No suggestion"}</p>{suggestion?.rationale ? <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{suggestion.rationale}</p> : null}</TableCell><TableCell><Badge variant={Number(row.confidence || 0) >= 0.75 ? "default" : Number(row.confidence || 0) >= 0.5 ? "secondary" : "outline"}>{confidenceLabel}</Badge></TableCell><TableCell className="max-w-44 truncate text-xs text-muted-foreground">{suggestion?.provider || row.mapping?.matchSource || "-"}</TableCell><TableCell><div className="flex justify-end gap-2">{suggestion?.categoryId ? <Button size="sm" disabled={busy} onClick={() => void approveMappings([id])}>Approve</Button> : null}<Button size="sm" variant="outline" asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open</a></Button></div></TableCell></TableRow>})}{!rows.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No category mappings match this review view.</TableCell></TableRow>}</TableBody></Table>{pendingRows.length === 0 && status === "pending" && rows.length > 0 ? <p className="border-t px-4 py-3 text-xs text-muted-foreground">These rows need review but do not have a directly applicable suggestion. Open the category to search manually.</p> : null}</div>}</CardContent>
-      <CardFooter className="flex flex-wrap items-center justify-between gap-3 border-t text-sm text-muted-foreground"><span>Page {page} of {pageCount} | {numberLabel(total)} categories</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => void load(page - 1)}>Previous</Button><Button size="sm" variant="outline" disabled={loading || page >= pageCount} onClick={() => void load(page + 1)}>Next</Button></div></CardFooter>
+      <CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-12" /><TableHead>Local category</TableHead><TableHead>Channel category</TableHead><TableHead>Status</TableHead><TableHead>Last refresh</TableHead><TableHead className="text-right">Approve / deny / block</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => {
+        const id = rowId(row)
+        const suggestion = row.pendingSuggestion
+        const statusValue = row.reviewStatus || (row.mapping?.blocked ? "blocked" : suggestion ? "pending" : row.mapping?.categoryId ? "mapped" : "missing")
+        const channelPath = row.mapping?.categoryPath || row.mapping?.categoryId || suggestion?.categoryPath || suggestion?.categoryId || ""
+        const confidenceLabel = row.confidence === null || row.confidence === undefined ? "" : `${Math.round(Number(row.confidence) * 100)}%`
+        return <TableRow key={id}>
+          <TableCell><Checkbox aria-label={`Select ${row.name}`} checked={allFiltered || selected.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} /></TableCell>
+          <TableCell className="min-w-80"><a className="font-medium hover:underline" href={`/categories/${encodeURIComponent(id)}`}>{row.name || "Unnamed category"}</a><p className="mt-1 text-xs text-muted-foreground">{numberLabel(row.productCount || 0)} products / {numberLabel(row.stockProductCount || 0)} in stock</p><p className="mt-1 truncate text-xs text-muted-foreground">{(row.topVendors || []).slice(0, 2).map((vendor) => vendor.name).filter(Boolean).join(" / ") || "No vendor summary"}</p></TableCell>
+          <TableCell className="min-w-96 max-w-xl"><p className="line-clamp-2 text-sm font-medium">{channelPath || "No channel category selected"}</p>{suggestion?.categoryPath && !row.mapping?.categoryId ? <p className="mt-1 text-xs text-muted-foreground">Suggested {confidenceLabel ? `/ ${confidenceLabel}` : ""}</p> : null}{row.mapping?.blockReason ? <p className="mt-1 line-clamp-2 text-xs text-destructive">{row.mapping.blockReason}</p> : null}</TableCell>
+          <TableCell><Badge variant={statusValue === "blocked" ? "destructive" : statusValue === "mapped" ? "default" : statusValue === "pending" ? "secondary" : "outline"}>{statusValue === "missing" ? "unmatched" : statusValue.replace(/_/g, " ")}</Badge>{row.locked ? <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p> : null}</TableCell>
+          <TableCell className="min-w-44"><p className="text-sm">{row.lastRefreshAt ? dateLabel(row.lastRefreshAt) : "Not refreshed"}</p>{row.lastRefreshChanged !== null && row.lastRefreshChanged !== undefined ? <p className="text-xs text-muted-foreground">{numberLabel(row.lastRefreshChanged)} SKU records</p> : null}{row.lastRefreshJobId ? <a className="text-xs text-primary hover:underline" href={`/jobs/${encodeURIComponent(row.lastRefreshJobId)}`}>Open job</a> : null}</TableCell>
+          <TableCell><div className="flex justify-end gap-2"><Button size="sm" disabled={busy || (!suggestion?.categoryId && !row.mapping?.categoryId)} onClick={() => void decide("approve", [id])}>Approve</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void decide("deny", [id])}>Deny</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void decide("block", [id])}>Block</Button></div></TableCell>
+          <TableCell><div className="flex justify-end gap-2"><Popover open={searchRowId === id} onOpenChange={(open) => { setSearchRowId(open ? id : ""); if (open) { setCategorySearch(row.name || ""); setCategoryResults([]); void searchCachedCategories(row, row.name || "") } }}><PopoverTrigger asChild><Button size="sm" variant="outline"><Search className="size-4" /> Search</Button></PopoverTrigger><PopoverContent className="w-[min(560px,calc(100vw-2rem))]" align="end"><div className="grid gap-3"><div><p className="text-sm font-medium">Search cached {channel === "ebay" ? "eBay" : "Shopify"} categories</p><p className="text-xs text-muted-foreground">Selecting a result approves and locks this local category mapping.</p></div><div className="flex gap-2"><Input value={categorySearch} onChange={(event) => setCategorySearch(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void searchCachedCategories(row)} placeholder="Search cached taxonomy" /><Button size="sm" variant="outline" onClick={() => void searchCachedCategories(row)} disabled={searching}>{searching ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}</Button></div><div className="max-h-80 overflow-y-auto rounded-md border">{categoryResults.length ? categoryResults.map((candidate, index) => { const candidateId = String(candidate.categoryId || candidate.id || ""); const path = String(candidate.categoryPath || candidate.fullName || candidate.name || candidateId); return <button key={`${candidateId}-${index}`} type="button" className="block w-full border-b p-3 text-left last:border-b-0 hover:bg-muted" onClick={() => void decide("approve", [id], { ...candidate, categoryId: candidateId, categoryPath: path })}><p className="font-mono text-xs text-muted-foreground">{candidateId || "No ID"}</p><p className="mt-1 text-sm font-medium">{path}</p></button> }) : <p className="p-4 text-sm text-muted-foreground">{searching ? "Searching..." : "No cached results yet."}</p>}</div></div></PopoverContent></Popover>{row.mapping?.categoryId ? <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => openRefresh([id], row.name)}><RefreshCw className="size-4" /> Refresh category now</DropdownMenuItem><DropdownMenuItem onClick={() => { openRefresh([id], row.name); setRefreshTiming("later") }}><Clock3 className="size-4" /> Schedule refresh</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open category</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu> : <Button size="sm" variant="outline" asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open</a></Button>}</div></TableCell>
+        </TableRow>
+      })}{!rows.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No category mappings match this review view.</TableCell></TableRow>}</TableBody></Table></div>}</CardContent>
+      <CardFooter className="flex flex-wrap items-center justify-between gap-3 border-t text-sm text-muted-foreground"><span>Page {page} of {pageCount} / {numberLabel(total)} categories</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => void load(page - 1)}>Previous</Button><Button size="sm" variant="outline" disabled={loading || page >= pageCount} onClick={() => void load(page + 1)}>Next</Button></div></CardFooter>
     </Card>
+    <Dialog open={Boolean(refreshPrompt)} onOpenChange={(open) => { if (!open && !busy) setRefreshPrompt(null) }}><DialogContent><DialogHeader><DialogTitle>Refresh category SKU records</DialogTitle><DialogDescription>{(refreshPrompt?.categoryName || refreshPrompt?.count === 1) ? "Queue a DataPlus metadata refresh for this category." : `Queue a DataPlus metadata refresh for ${numberLabel(refreshPrompt?.count || 0)} categories.`}</DialogDescription></DialogHeader><div className="grid gap-4"><Alert><Clock3 className="size-4" /><AlertTitle>Local metadata only</AlertTitle><AlertDescription>This updates DataPlus SKU/channel category records. It does not publish or revise marketplace listings.</AlertDescription></Alert><div className="grid gap-2 sm:grid-cols-2"><Button type="button" variant={refreshTiming === "now" ? "default" : "outline"} onClick={() => setRefreshTiming("now")}><RefreshCw className="size-4" /> Now</Button><Button type="button" variant={refreshTiming === "later" ? "default" : "outline"} onClick={() => setRefreshTiming("later")}><Clock3 className="size-4" /> Schedule</Button></div>{refreshTiming === "later" ? <div className="grid gap-2"><Label>Scheduled time</Label><Input type="datetime-local" value={refreshAt} min={new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)} onChange={(event) => setRefreshAt(event.target.value)} /></div> : null}</div><DialogFooter><Button variant="outline" onClick={() => setRefreshPrompt(null)} disabled={busy}>Cancel</Button><Button onClick={startRefreshPrompt} disabled={busy || (refreshTiming === "later" && !refreshAt)}>{busy ? <Loader2 className="size-4 animate-spin" /> : refreshTiming === "later" ? <Clock3 className="size-4" /> : <RefreshCw className="size-4" />}{refreshTiming === "later" ? "Schedule refresh" : "Refresh now"}</Button></DialogFooter></DialogContent></Dialog>
   </div>
 }
 

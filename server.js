@@ -6683,6 +6683,10 @@ function productInactiveOrDiscontinuedReason(item = {}) {
 }
 
 function productEbayLaunchBlockReason(item = {}, db = null) {
+  const mapping = db ? categoryMappingForProduct(db, item, "ebay") || {} : {};
+  if (mapping.blocked === true || String(mapping.status || "").toLowerCase() === "blocked") {
+    return `eBay category is blocked${mapping.blockReason ? `: ${mapping.blockReason}` : ""}`;
+  }
   const reason = productInactiveOrDiscontinuedReason(item);
   if (!reason) return "";
   const sellableQty = productSellableQty(item, db);
@@ -8707,6 +8711,19 @@ function normalizeChannelCategoryMapping(mapping = {}) {
     matchSource: mapping.matchSource || "",
     matchedQuery: mapping.matchedQuery || "",
     matchedAt: mapping.matchedAt || "",
+    decision: mapping.decision || "",
+    deniedAt: mapping.deniedAt || "",
+    deniedBy: mapping.deniedBy || "",
+    blocked: mapping.blocked === true,
+    blockedAt: mapping.blockedAt || "",
+    blockedBy: mapping.blockedBy || "",
+    blockReason: mapping.blockReason || "",
+    lastRefreshQueuedAt: mapping.lastRefreshQueuedAt || "",
+    lastRefreshStartedAt: mapping.lastRefreshStartedAt || "",
+    lastRefreshAt: mapping.lastRefreshAt || mapping.lastSkuRefreshAt || "",
+    lastRefreshJobId: mapping.lastRefreshJobId || mapping.lastSkuRefreshJobId || "",
+    lastRefreshChanged: Number.isFinite(Number(mapping.lastRefreshChanged ?? mapping.lastSkuRefreshChanged)) ? Number(mapping.lastRefreshChanged ?? mapping.lastSkuRefreshChanged) : null,
+    lastRefreshStatus: mapping.lastRefreshStatus || "",
     suggestionRank: Number.isFinite(Number(mapping.suggestionRank)) ? Number(mapping.suggestionRank) : null,
     categoryTreeVersion: mapping.categoryTreeVersion || "",
     reviewedBy: mapping.reviewedBy || "",
@@ -13638,7 +13655,7 @@ function categoryReviewScope(value = "main") {
 
 function categoryReviewStatus(value = "pending") {
   const status = String(value || "pending").trim().toLowerCase();
-  return ["pending", "mapped", "missing", "all"].includes(status) ? status : "pending";
+  return ["pending", "mapped", "missing", "denied", "blocked", "all"].includes(status) ? status : "pending";
 }
 
 function categoryReviewRowMatches(row = {}, options = {}) {
@@ -13648,9 +13665,13 @@ function categoryReviewRowMatches(row = {}, options = {}) {
   const pending = mapping.pendingSuggestion || null;
   const hasPending = Boolean(pending?.categoryId || String(mapping.status || "").toLowerCase().includes("review"));
   const hasMapping = Boolean(mapping.categoryId);
+  const isDenied = String(mapping.status || "").toLowerCase() === "denied" || mapping.decision === "denied";
+  const isBlocked = mapping.blocked === true || String(mapping.status || "").toLowerCase() === "blocked";
   if (status === "pending" && !hasPending) return false;
-  if (status === "mapped" && !hasMapping) return false;
-  if (status === "missing" && (hasPending || hasMapping)) return false;
+  if (status === "mapped" && (!hasMapping || isDenied || isBlocked)) return false;
+  if (status === "missing" && (hasPending || hasMapping || isDenied || isBlocked)) return false;
+  if (status === "denied" && !isDenied) return false;
+  if (status === "blocked" && !isBlocked) return false;
   const minimumProducts = Math.max(0, Number(options.minimumProducts || 0) || 0);
   if (minimumProducts > Number(row.productCount || 0)) return false;
   const confidence = categoryMappingListConfidence(mapping);
@@ -13671,6 +13692,8 @@ function categoryReviewRowMatches(row = {}, options = {}) {
     pending?.categoryId,
     pending?.categoryPath,
     pending?.rationale,
+    mapping.decision,
+    mapping.blockReason,
     ...(row.topVendors || []).map((vendor) => vendor.name),
     ...(row.topBrands || []).map((brand) => brand.name)
   ].join(" ").toLowerCase().includes(q);
@@ -13693,6 +13716,11 @@ function categoryReviewPublicRow(row = {}, channel = "ebay") {
     pendingSuggestion: pending,
     confidence: categoryMappingListConfidence(mapping),
     updatedAt: row.updatedAt || mapping.matchedAt || pending?.reviewedAt || "",
+    reviewStatus: mapping.blocked ? "blocked" : mapping.status === "denied" || mapping.decision === "denied" ? "denied" : pending ? "pending" : mapping.categoryId ? "mapped" : "missing",
+    lastRefreshAt: mapping.lastRefreshAt || "",
+    lastRefreshJobId: mapping.lastRefreshJobId || "",
+    lastRefreshChanged: mapping.lastRefreshChanged,
+    lastRefreshStatus: mapping.lastRefreshStatus || "",
     locked: mapping.locked === true
   };
 }
@@ -13807,6 +13835,111 @@ async function applyPendingCategoryReviewSuggestions(db = {}, options = {}) {
   return { changed: changedCategories.length, skipped, rows: changedCategories };
 }
 
+async function applyCategoryReviewDecision(db = {}, options = {}) {
+  const channel = categoryReviewChannel(options.channel);
+  const action = String(options.action || "approve").trim().toLowerCase();
+  if (!["approve", "deny", "block"].includes(action)) throw new Error("Choose approve, deny, or block.");
+  const reviewedBy = sourceTextValue(options.reviewedBy) || "Luis";
+  const now = new Date().toISOString();
+  const status = action === "approve" ? (options.status || "pending") : (options.status || "all");
+  const rows = categoryReviewSelectionRows(db, { ...options, channel, status });
+  const changedCategories = [];
+  const skipped = [];
+  const selectedMapping = options.mapping && typeof options.mapping === "object" ? options.mapping : null;
+  for (const row of rows) {
+    const category = findOrCreateCategorySetting(db, row.name);
+    const current = normalizeChannelCategoryMapping(category.mappings?.[channel] || row?.mappings?.[channel] || {});
+    const pending = current.pendingSuggestion || null;
+    const incoming = action === "approve"
+      ? selectedMapping || pending
+      : null;
+    if (action === "approve" && !incoming?.categoryId) {
+      skipped.push({ id: row.id || row.categoryId, category: row.name, reason: "No channel category was selected." });
+      continue;
+    }
+    if (action === "approve" && categoryMappingIsLocked(current) && current.categoryId && current.categoryId !== incoming.categoryId) {
+      skipped.push({ id: row.id || row.categoryId, category: row.name, reason: "Mapping is locked. Unlock it before replacing the category." });
+      continue;
+    }
+    let nextMapping;
+    if (action === "approve") {
+      nextMapping = {
+        ...current,
+        categoryId: incoming.categoryId || incoming.id || "",
+        categoryPath: incoming.categoryPath || incoming.fullName || incoming.path || incoming.name || "",
+        categoryHandle: incoming.categoryHandle || incoming.handle || "",
+        taxonomyVersion: incoming.taxonomyVersion || incoming.taxonomy || current.taxonomyVersion || "",
+        categoryTreeVersion: incoming.categoryTreeVersion || current.categoryTreeVersion || "",
+        status: "mapped",
+        decision: "approved",
+        confidence: Number.isFinite(Number(incoming.confidence)) ? Number(incoming.confidence) : current.confidence,
+        confidenceLevel: categoryConfidenceLevel(Number(incoming.confidence ?? current.confidence ?? 0)),
+        matchSource: selectedMapping ? `${channel}-manual-review-approved` : `${channel}-category-review-approved`,
+        matchedAt: now,
+        reviewedBy,
+        reviewedAt: now,
+        deniedAt: "",
+        deniedBy: "",
+        blocked: false,
+        blockedAt: "",
+        blockedBy: "",
+        blockReason: "",
+        aiProvider: incoming.provider || current.aiProvider || "",
+        aiModel: incoming.model || current.aiModel || "",
+        aiRationale: incoming.rationale || current.aiRationale || "",
+        pendingSuggestion: null,
+        locked: true,
+        lockedAt: now,
+        lockedBy: reviewedBy,
+        unlockedAt: "",
+        unlockedBy: ""
+      };
+      if (channel === "shopify") nextMapping = enrichShopifyCategoryMapping(nextMapping);
+      if (channel === "ebay") nextMapping = await enrichEbayCategoryMapping(db, nextMapping);
+    } else if (action === "deny") {
+      nextMapping = {
+        ...current,
+        status: "denied",
+        decision: "denied",
+        pendingSuggestion: null,
+        reviewedBy,
+        reviewedAt: now,
+        deniedAt: now,
+        deniedBy: reviewedBy,
+        matchSource: `${channel}-category-review-denied`,
+        notes: [current.notes, sourceTextValue(options.note)].filter(Boolean).join("\n").trim()
+      };
+    } else {
+      nextMapping = {
+        ...current,
+        categoryId: "",
+        categoryPath: "",
+        categoryHandle: "",
+        status: "blocked",
+        decision: "blocked",
+        pendingSuggestion: null,
+        reviewedBy,
+        reviewedAt: now,
+        blocked: true,
+        blockedAt: now,
+        blockedBy: reviewedBy,
+        blockReason: sourceTextValue(options.note) || "Do not sell this category on this channel.",
+        matchSource: `${channel}-category-review-blocked`,
+        locked: true,
+        lockedAt: current.lockedAt || now,
+        lockedBy: current.lockedBy || reviewedBy
+      };
+    }
+    category.mappings[channel] = withCategoryMappingHistory(current, nextMapping, `category-review-${action}`, reviewedBy);
+    category.status = action === "block" ? "blocked" : action === "approve" ? "mapped" : category.status || "needs_review";
+    category.updatedBy = reviewedBy;
+    category.updatedAt = now;
+    changedCategories.push(category);
+  }
+  if (changedCategories.length) await persistCategoryReviewDb(db, changedCategories);
+  return { changed: changedCategories.length, skipped, rows: changedCategories };
+}
+
 const bulkCategoryMappingJobTimers = new Map();
 
 function scheduleBulkCategoryMappingRefreshJob(jobId, payload = {}) {
@@ -13840,6 +13973,7 @@ function scheduleBulkCategoryMappingRefreshJob(jobId, payload = {}) {
       });
       let changedProducts = 0;
       let refreshedCategories = 0;
+      const refreshedCategorySettings = [];
       const errors = [];
       for (let index = 0; index < rows.length; index += 1) {
         const source = rows[index];
@@ -13876,6 +14010,17 @@ function scheduleBulkCategoryMappingRefreshJob(jobId, payload = {}) {
           }
           changedProducts += changed;
           refreshedCategories += 1;
+          category.mappings[channel] = withCategoryMappingHistory(mapping, {
+            ...mapping,
+            lastRefreshQueuedAt: payload.queuedAt || job.createdAt || "",
+            lastRefreshStartedAt: job.startedAt || "",
+            lastRefreshAt: new Date().toISOString(),
+            lastRefreshJobId: job.id,
+            lastRefreshChanged: changed,
+            lastRefreshStatus: "success"
+          }, "refreshed-category-skus", "DataPlus");
+          category.updatedAt = new Date().toISOString();
+          refreshedCategorySettings.push(category);
         } catch (error) {
           errors.push(`${source.name || source.id}: ${error.message || error}`);
         }
@@ -17426,8 +17571,9 @@ async function runShopifySkuMapSyncWorkerJob(job = {}, attrs = {}) {
       errors.push(error.message || String(error));
       break;
     }
-  }
-  finishImportJob(job, {
+      }
+      if (refreshedCategorySettings.length) await persistCategoryReviewDb(workingDb, refreshedCategorySettings);
+      finishImportJob(job, {
     status: errors.length ? "warning" : "success",
       message: `Shopify SKU pair audit synced ${matched.toLocaleString()} variant SKU${matched === 1 ? "" : "s"} from ${processed.toLocaleString()} Shopify variant${processed === 1 ? "" : "s"}; ${paired.toLocaleString()} include both the Shopify product and variant ID${blankSkus ? `; ${blankSkus.toLocaleString()} blank SKU${blankSkus === 1 ? "" : "s"}` : ""}${duplicateSkus ? `; ${duplicateSkus.toLocaleString()} duplicate SKU${duplicateSkus === 1 ? "" : "s"} skipped` : ""}${errors.length ? `; ${errors.length.toLocaleString()} API issue${errors.length === 1 ? "" : "s"}` : ""}.`,
     totalRows: processed,
@@ -26467,6 +26613,17 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
           if (products.length < pageSize) break;
           page += 1;
         }
+        category.mappings[channel] = withCategoryMappingHistory(mapping, {
+          ...mapping,
+          lastRefreshQueuedAt: options.queuedAt || workingJob.createdAt || "",
+          lastRefreshStartedAt: workingJob.startedAt || "",
+          lastRefreshAt: new Date().toISOString(),
+          lastRefreshJobId: workingJob.id,
+          lastRefreshChanged: changed,
+          lastRefreshStatus: "success"
+        }, "refreshed-category-skus", "DataPlus");
+        category.updatedAt = new Date().toISOString();
+        await persistCategoryReviewDb(workingDb, [category]);
         const message = `Applied ${channel} category mapping to ${changed} SKU${changed === 1 ? "" : "s"} in ${source.name}.`;
         finishImportJob(workingJob, {
           status: "success",
@@ -26496,6 +26653,18 @@ function scheduleChannelCategoryMappingJob(jobId, sourceId, scope = "main", chan
       const source = findPublicCategory(workingDb, sourceId, scope);
       if (!source) throw new Error("Master category was not found for SKU refresh.");
       const result = applyChannelCategoryMappingToProducts(workingDb, source, channel, options);
+      const category = findOrCreateCategorySetting(workingDb, source.name);
+      const mapping = normalizeChannelCategoryMapping(category.mappings?.[channel] || {});
+      category.mappings[channel] = withCategoryMappingHistory(mapping, {
+        ...mapping,
+        lastRefreshQueuedAt: options.queuedAt || workingJob.createdAt || "",
+        lastRefreshStartedAt: workingJob.startedAt || "",
+        lastRefreshAt: new Date().toISOString(),
+        lastRefreshJobId: workingJob.id,
+        lastRefreshChanged: result.changed,
+        lastRefreshStatus: "success"
+      }, "refreshed-category-skus", "DataPlus");
+      category.updatedAt = new Date().toISOString();
       const message = `Applied ${channel} category mapping to ${result.changed} SKU${result.changed === 1 ? "" : "s"} in ${source.name}.`;
       finishImportJob(workingJob, {
         status: "success",
@@ -42096,6 +42265,9 @@ async function handleApi(req, res) {
     const allRows = categoryReviewRows(db, { scope, channel, status: "all" });
     const pendingRows = allRows.filter((row) => categoryReviewRowMatches(row, { scope, channel, status: "pending" }));
     const mappedRows = allRows.filter((row) => categoryReviewRowMatches(row, { scope, channel, status: "mapped" }));
+    const deniedRows = allRows.filter((row) => categoryReviewRowMatches(row, { scope, channel, status: "denied" }));
+    const blockedRows = allRows.filter((row) => categoryReviewRowMatches(row, { scope, channel, status: "blocked" }));
+    const missingRows = allRows.filter((row) => categoryReviewRowMatches(row, { scope, channel, status: "missing" }));
     return sendJson(res, 200, {
       channel,
       scope,
@@ -42108,9 +42280,12 @@ async function handleApi(req, res) {
         total: allRows.length,
         pending: pendingRows.length,
         mapped: mappedRows.length,
-        missing: allRows.length - mappedRows.length - pendingRows.length,
+        denied: deniedRows.length,
+        blocked: blockedRows.length,
+        missing: missingRows.length,
         pendingProducts: pendingRows.reduce((sum, row) => sum + Number(row.productCount || 0), 0),
-        mappedProducts: mappedRows.reduce((sum, row) => sum + Number(row.productCount || 0), 0)
+        mappedProducts: mappedRows.reduce((sum, row) => sum + Number(row.productCount || 0), 0),
+        blockedProducts: blockedRows.reduce((sum, row) => sum + Number(row.productCount || 0), 0)
       }
     });
   }
@@ -42120,16 +42295,37 @@ async function handleApi(req, res) {
     const scope = categoryReviewScope(body.scope || "main");
     const channel = categoryReviewChannel(body.channel || "ebay");
     const db = await categoryReviewDb(scope);
-    const result = await applyPendingCategoryReviewSuggestions(db, {
+    const result = await applyCategoryReviewDecision(db, {
       ...body,
       scope,
       channel,
+      action: "approve",
       status: "pending",
       reviewedBy: body.reviewedBy || "Luis"
     });
     return sendJson(res, 200, {
       ...result,
       message: `Approved ${result.changed.toLocaleString()} ${channel === "shopify" ? "Shopify" : "eBay"} category mapping${result.changed === 1 ? "" : "s"}.${result.skipped.length ? ` ${result.skipped.length.toLocaleString()} skipped.` : ""}`
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/categories/channel-review/decision") {
+    const body = await parseBody(req);
+    const scope = categoryReviewScope(body.scope || "main");
+    const channel = categoryReviewChannel(body.channel || "ebay");
+    const action = String(body.action || "approve").trim().toLowerCase();
+    const db = await categoryReviewDb(scope);
+    const result = await applyCategoryReviewDecision(db, {
+      ...body,
+      scope,
+      channel,
+      action,
+      reviewedBy: body.reviewedBy || "Luis"
+    });
+    const actionLabel = action === "block" ? "Blocked" : action === "deny" ? "Denied" : "Approved";
+    return sendJson(res, 200, {
+      ...result,
+      message: `${actionLabel} ${result.changed.toLocaleString()} ${channel === "shopify" ? "Shopify" : "eBay"} category decision${result.changed === 1 ? "" : "s"}.${result.skipped.length ? ` ${result.skipped.length.toLocaleString()} skipped.` : ""}`
     });
   }
 
@@ -42184,6 +42380,7 @@ async function handleApi(req, res) {
         scope,
         channel,
         ids: selectedRows.map((row) => row.id || row.categoryId).filter(Boolean),
+        queuedAt: new Date().toISOString(),
         ...options
       }
     });
@@ -45377,6 +45574,7 @@ async function handleApi(req, res) {
           sourceId: source.id || source.categoryId,
           scope,
           channel,
+          queuedAt: new Date().toISOString(),
           ...options
         }
       });
@@ -45384,7 +45582,7 @@ async function handleApi(req, res) {
       if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
       else await writeDb(normalized);
       clearCategoryResponseCache();
-      scheduleChannelCategoryMappingJob(job.id, source.id || source.categoryId, scope, channel, options);
+      scheduleChannelCategoryMappingJob(job.id, source.id || source.categoryId, scope, channel, job.workerPayload);
       return sendJson(res, 202, {
         queued: true,
         job: normalized.importJobs.find((row) => row.id === job.id) || job,
