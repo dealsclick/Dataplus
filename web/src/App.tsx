@@ -15265,6 +15265,7 @@ function CategoryReviewPage() {
     setLoadError("")
     try {
       const params = new URLSearchParams({ channel, scope: "main", status, page: String(nextPage), limit: String(limit) })
+      params.set("_", String(Date.now()))
       if (query.trim()) params.set("q", query.trim())
       if (confidence !== "all") params.set("confidence", confidence)
       const result = await api<CategoryReviewResponse>(`/api/categories/channel-review?${params}`)
@@ -15325,6 +15326,13 @@ function CategoryReviewPage() {
         body: JSON.stringify(requestPayload({ action, ids: ids || selectedIds, allFiltered: ids ? false : allFiltered, mapping, note: action === "block" ? "Do not sell this category on this channel." : "" })),
       })
       toast.success(result.message || "Category decision saved.")
+      setSelected(new Set())
+      setAllFiltered(false)
+      if (!mapping && (allFiltered || count > 1)) {
+        setRows([])
+        setTotal(0)
+        setPage(1)
+      }
       setSearchRowId("")
       setCategoryResults([])
       await load(1)
