@@ -22513,6 +22513,8 @@ function mapTemuOrder(listOrder, detail = {}, shipping = {}, amount = {}, apiErr
     shippingService: String(valueAt(raw, ["shippingService", "logisticsServiceName"], "Temu fulfillment")),
     trackingNumber: String(valueAt(raw, ["trackingNumber", "trackingNo"], "")),
     shipBy: temuDate(valueAt(raw, ["expectShipLatestTime", "latestShipTime", "shipBy"])).slice(0, 10),
+    orderDate: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),
+    orderedAt: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),
     createdAt: temuDate(valueAt(raw, ["createTime", "createdAt", "parentOrderTime"], Date.now())),
     updatedAt: new Date().toISOString(),
     notes: apiErrors.length ? `Imported from Temu API with ${apiErrors.length} order data warning${apiErrors.length === 1 ? "" : "s"}.` : "Imported from Temu API.",
@@ -28027,6 +28029,8 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
     shipBy: temuDate(shipBy).slice(0, 10),
     minEstimatedDeliveryDate: order.fulfillmentStartInstructions?.[0]?.minEstimatedDeliveryDate || "",
     maxEstimatedDeliveryDate: order.fulfillmentStartInstructions?.[0]?.maxEstimatedDeliveryDate || "",
+    orderDate: temuDate(order.creationDate || Date.now()),
+    orderedAt: temuDate(order.creationDate || Date.now()),
     createdAt: temuDate(order.creationDate || Date.now()),
     marketplaceUpdatedAt: temuDate(order.lastModifiedDate || Date.now()),
     updatedAt: new Date().toISOString(),
@@ -31790,6 +31794,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
   const financial = String(node.displayFinancialStatus || "").toLowerCase();
   const fulfillment = String(node.displayFulfillmentStatus || "").toLowerCase();
   const status = node.cancelledAt ? "canceled" : financial === "refunded" ? "refunded" : fulfillment === "fulfilled" ? "fulfilled" : fulfillment === "partial" ? "partial_fulfilled" : financial === "paid" ? "processing" : "new";
+  const orderDate = node.createdAt || new Date().toISOString();
   return {
     id: String(node.id || "").replace("gid://shopify/Order/", "shopify-order-"),
     shopifyOrderId: node.id || "",
@@ -31827,7 +31832,9 @@ function shopifyOrderToDataPlusOrder(node = {}) {
     items: (node.lineItems?.edges || []).map((edge, index) => ({ lineId: edge.node?.id || "", lineIndex: index, sku: edge.node?.sku || edge.node?.variant?.sku || "", originalSku: edge.node?.sku || edge.node?.variant?.sku || "", channelVariantSku: edge.node?.variant?.sku || edge.node?.sku || "", channelVariantId: edge.node?.variant?.id || "", title: edge.node?.title || "", qty: Number(edge.node?.quantity || 0), price: Number(edge.node?.originalUnitPriceSet?.shopMoney?.amount || 0), taxable: Boolean(edge.node?.taxable), vendor: edge.node?.vendor || "", variantTitle: edge.node?.variantTitle || "" })),
     payments: (node.transactions || []).map((transaction) => ({ id: transaction?.id || crypto.randomUUID(), provider: transaction?.gateway || "Shopify", transactionId: transaction?.authorizationCode || transaction?.id || "", amount: Number(transaction?.amountSet?.shopMoney?.amount || 0), currency: transaction?.amountSet?.shopMoney?.currencyCode || node.currencyCode || "USD", status: String(transaction?.status || "").toLowerCase(), kind: String(transaction?.kind || "").toLowerCase(), manuallyCapturable: Boolean(transaction?.manuallyCapturable), parentTransactionId: transaction?.parentTransaction?.id || "", createdAt: transaction?.createdAt || "" })),
     shopifyAdminUrl: node.legacyResourceId ? `https://admin.shopify.com/store/${shopifyAdminConfig().shop.split(".")[0]}/orders/${node.legacyResourceId}` : "",
-    createdAt: node.createdAt || new Date().toISOString(), updatedAt: node.updatedAt || new Date().toISOString(), importedAt: new Date().toISOString()
+    orderDate,
+    orderedAt: orderDate,
+    createdAt: orderDate, updatedAt: node.updatedAt || new Date().toISOString(), importedAt: new Date().toISOString()
   };
 }
 

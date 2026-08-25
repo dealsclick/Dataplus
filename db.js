@@ -5091,33 +5091,36 @@ function orderLineRowToState(row = {}) {
 }
 
 function orderRowToState(row = {}, lines = []) {
+  const raw = row.raw || {};
+  const orderDate = row.order_date?.toISOString?.() || raw.orderDate || raw.orderedAt || raw.purchaseDate || raw.purchasedAt || row.created_at?.toISOString?.() || raw.createdAt || "";
   return {
-    ...(row.raw || {}),
-    id: row.order_id || row.raw?.id,
-    orderId: row.order_id || row.raw?.orderId,
-    orderNumber: row.order_number || row.raw?.orderNumber || row.raw?.displayOrderNumber || "",
-    internalOrderNumber: row.internal_order_number || row.raw?.internalOrderNumber || "",
-    marketplaceOrderId: row.marketplace_order_id || row.raw?.marketplaceOrderId || "",
-    marketplaceOrderNumber: row.marketplace_order_id || row.raw?.marketplaceOrderNumber || "",
-    source: row.source || row.raw?.source || "",
-    channelSource: row.channel_source || row.raw?.channelSource || row.raw?.salesChannel || row.raw?.sourceChannel || "",
-    status: row.status || row.raw?.status || "",
-    buyer: row.buyer || row.raw?.buyer || row.raw?.customerName || "",
-    buyerEmail: row.buyer_email || row.raw?.buyerEmail || "",
-    phone: row.phone || row.raw?.phone || "",
-    customerId: row.customer_id || row.raw?.customerId || "",
-    total: row.total ?? row.raw?.total,
-    productCost: row.product_cost ?? row.raw?.productCost,
-    marketplaceFees: row.marketplace_fees ?? row.raw?.marketplaceFees,
-    shippingCost: row.shipping_cost ?? row.raw?.shippingCost,
-    refundAmount: row.refund_amount ?? row.raw?.refundAmount,
-    paidAmount: row.paid_amount ?? row.raw?.paidAmount ?? row.raw?.paid,
-    qty: row.qty ?? row.raw?.qty,
-    shipBy: row.ship_by?.toISOString?.().slice(0, 10) || row.raw?.shipBy || "",
-    shippedAt: row.shipped_at?.toISOString?.() || row.raw?.shippedAt || "",
-    trackingNumber: row.tracking_number || row.raw?.trackingNumber || "",
-    shippingCarrier: row.shipping_carrier || row.raw?.shippingCarrier || row.raw?.carrierName || "",
+    ...raw,
+    id: row.order_id || raw.id,
+    orderId: row.order_id || raw.orderId,
+    orderNumber: row.order_number || raw.orderNumber || raw.displayOrderNumber || "",
+    internalOrderNumber: row.internal_order_number || raw.internalOrderNumber || "",
+    marketplaceOrderId: row.marketplace_order_id || raw.marketplaceOrderId || "",
+    marketplaceOrderNumber: row.marketplace_order_id || raw.marketplaceOrderNumber || "",
+    source: row.source || raw.source || "",
+    channelSource: row.channel_source || raw.channelSource || raw.salesChannel || raw.sourceChannel || "",
+    status: row.status || raw.status || "",
+    buyer: row.buyer || raw.buyer || raw.customerName || "",
+    buyerEmail: row.buyer_email || raw.buyerEmail || "",
+    phone: row.phone || raw.phone || "",
+    customerId: row.customer_id || raw.customerId || "",
+    total: row.total ?? raw.total,
+    productCost: row.product_cost ?? raw.productCost,
+    marketplaceFees: row.marketplace_fees ?? raw.marketplaceFees,
+    shippingCost: row.shipping_cost ?? raw.shippingCost,
+    refundAmount: row.refund_amount ?? raw.refundAmount,
+    paidAmount: row.paid_amount ?? raw.paidAmount ?? raw.paid,
+    qty: row.qty ?? raw.qty,
+    shipBy: row.ship_by?.toISOString?.().slice(0, 10) || raw.shipBy || "",
+    shippedAt: row.shipped_at?.toISOString?.() || raw.shippedAt || "",
+    trackingNumber: row.tracking_number || raw.trackingNumber || "",
+    shippingCarrier: row.shipping_carrier || raw.shippingCarrier || raw.carrierName || "",
     reportable: row.reportable !== false,
+    orderDate,
     createdAt: row.created_at?.toISOString?.() || row.raw?.createdAt || "",
     updatedAt: row.updated_at?.toISOString?.() || row.raw?.updatedAt || "",
     items: lines.length ? lines.map(orderLineRowToState) : (Array.isArray(row.raw?.items) ? row.raw.items : [])
@@ -5140,6 +5143,7 @@ function orderLineRowToSummary(row = {}) {
 
 function orderRowToSummary(row = {}, lines = []) {
   const raw = row.raw || {};
+  const orderDate = row.order_date?.toISOString?.() || raw.orderDate || raw.orderedAt || raw.purchaseDate || raw.purchasedAt || row.created_at?.toISOString?.() || raw.createdAt || "";
   return {
     id: row.order_id || raw.id,
     orderId: row.order_id || raw.orderId,
@@ -5165,6 +5169,7 @@ function orderRowToSummary(row = {}, lines = []) {
     paidAmount: row.paid_amount ?? raw.paidAmount ?? raw.paid,
     qty: row.qty ?? raw.qty,
     shipBy: row.ship_by?.toISOString?.().slice(0, 10) || raw.shipBy || "",
+    orderDate,
     createdAt: row.created_at?.toISOString?.() || raw.createdAt || "",
     updatedAt: row.updated_at?.toISOString?.() || raw.updatedAt || "",
     purchaseOrderIds: Array.isArray(row.purchase_order_ids) ? row.purchase_order_ids : (Array.isArray(raw.purchaseOrderIds) ? raw.purchaseOrderIds : []),
@@ -5453,6 +5458,15 @@ async function listOrders(options = {}) {
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   params.push(limit);
+  const rawTimestampSql = (key) => `case when nullif(raw->>'${key}', '') ~ '^\\d{4}-\\d{2}-\\d{2}' then nullif(raw->>'${key}', '')::timestamptz end`;
+  const orderDateSql = `coalesce(
+    ${rawTimestampSql("orderDate")},
+    ${rawTimestampSql("orderedAt")},
+    ${rawTimestampSql("purchaseDate")},
+    ${rawTimestampSql("purchasedAt")},
+    created_at,
+    updated_at
+  )`;
   const orderSelect = summary ? `
     select
       order_id,
@@ -5471,6 +5485,7 @@ async function listOrders(options = {}) {
       ship_by,
       created_at,
       updated_at,
+      ${orderDateSql} as order_date,
       raw->>'financialStatus' as financial_status,
       raw->>'paymentStatus' as payment_status,
       raw->>'operationalStatus' as operational_status,
@@ -5506,13 +5521,13 @@ async function listOrders(options = {}) {
         from jsonb_array_elements(case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end) route
       ) as fulfillment_routes
   ` : `
-    select *
+    select *, ${orderDateSql} as order_date
   `;
   const orders = await client.query(`
     ${orderSelect}
     from order_records
     ${whereSql}
-    order by created_at desc, order_number desc
+    order by ${orderDateSql} desc, order_number desc
     limit $${params.length}
   `, params);
   const ids = orders.rows.map((row) => row.order_id).filter(Boolean);
