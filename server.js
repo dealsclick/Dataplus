@@ -22020,62 +22020,19 @@ function normalizeVeeqoRate(rate = {}, index = 0) {
   };
 }
 
-function shopifyCheckoutShippingRates(order = {}) {
-  const rows = [
-    ...(Array.isArray(order.shippingLines) ? order.shippingLines : []),
-    ...(Array.isArray(order.shipping_lines) ? order.shipping_lines : [])
-  ];
-  const normalizedRows = rows.map((line, index) => {
-    const title = String(valueAt(line, ["title", "name", "service", "serviceName", "code"], "Shopify shipping")).trim() || "Shopify shipping";
-    const amount = nestedMoney(line.priceSet?.shopMoney || line.originalPriceSet?.shopMoney || line.discountedPriceSet?.shopMoney || line.price_set?.shop_money || line.price || line.amount);
-    return {
-      id: `shopify-checkout-${index}-${String(line.code || title).replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`,
-      provider: "shopify",
-      carrier: "Shopify",
-      service: title,
-      amount,
-      currency: String(line.currency || line.currencyCode || order.currency || "USD"),
-      deliveryDays: 0,
-      deliveryEstimate: String(valueAt(line, ["deliveryEstimate", "delivery_estimate", "description"], "Customer checkout method")),
-      action: "reference_only",
-      purchaseDisabled: true,
-      warning: "Shopify checkout shipping is shown for reference. Use Veeqo, Temu, or another label provider to buy the label.",
-      raw: line
-    };
-  });
-  if (!normalizedRows.length && (Number(order.shippingCost || 0) > 0 || order.shippingService || order.shippingMethod)) {
-    normalizedRows.push({
-      id: "shopify-checkout-order-shipping",
-      provider: "shopify",
-      carrier: "Shopify",
-      service: String(order.shippingService || order.shippingMethod || "Shopify checkout shipping"),
-      amount: Number(order.shippingCost || 0) || 0,
-      currency: String(order.currency || "USD"),
-      deliveryDays: 0,
-      deliveryEstimate: "Customer checkout method",
-      action: "reference_only",
-      purchaseDisabled: true,
-      warning: "Shopify checkout shipping is shown for reference. Use Veeqo, Temu, or another label provider to buy the label.",
-      raw: { shippingCost: order.shippingCost }
-    });
-  }
-  return normalizedRows;
-}
-
-function normalizeShopifyDeliveryRate(rate = {}, index = 0, quote = {}) {
+function shopifyShippingLabelRate(order = {}) {
   return {
-    id: `shopify-delivery-${String(quote.id || "quote")}-${String(rate.handle || index)}`,
+    id: "shopify-shipping-label-purchase",
     provider: "shopify",
-    carrier: "Shopify",
-    service: String(rate.title || rate.service || rate.handle || "Shopify delivery"),
-    amount: Number(rate.amount || 0) || 0,
-    currency: String(rate.currency || "USD"),
+    carrier: "Shopify Shipping",
+    service: "Recommended Shopify Shipping label",
+    amount: 0,
+    currency: String(order.currency || "USD"),
     deliveryDays: 0,
-    deliveryEstimate: "Calculated by Shopify",
-    action: "reference_only",
-    purchaseDisabled: true,
-    warning: "Shopify calculated delivery options are customer-facing rates. Select a purchasable provider to print a label.",
-    raw: { quoteId: quote.id, ...rate }
+    deliveryEstimate: "Purchased through Shopify Shipping",
+    action: "purchase_label",
+    warning: "Shopify selects the available label rate during purchase unless a preferred carrier/service is configured.",
+    raw: { source: "shippingLabelPurchase" }
   };
 }
 
@@ -22116,21 +22073,16 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   const providerErrors = [];
   const sourceKey = String(order.source || "").toLowerCase();
   if (sourceKey === "shopify") {
-    const checkoutRates = shopifyCheckoutShippingRates(order);
-    rates.push(...checkoutRates);
-    if (!blockers.length) {
-      try {
-        const quote = await quoteShopifyOrderShipping(order, body.lines || []);
-        const calculatedRates = (quote.options || []).map((rate, index) => normalizeShopifyDeliveryRate(rate, index, quote));
-        rates.push(...calculatedRates);
-        if (!calculatedRates.length) {
-          providerErrors.push({ provider: "Shopify", message: checkoutRates.length ? "Shopify returned no calculated delivery options; showing the saved checkout method only." : "Shopify did not return checkout or calculated delivery options for this order." });
-        }
-      } catch (error) {
-        providerErrors.push({ provider: "Shopify", message: checkoutRates.length ? `Calculated delivery options failed: ${error.message || "Shopify did not return delivery options."}` : error.message || "Shopify did not return delivery options." });
-      }
-    } else if (!checkoutRates.length) {
-      providerErrors.push({ provider: "Shopify", message: "A complete shipment is required before Shopify can calculate delivery options." });
+    const shopifySettings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+    const apiVersion = String(shopifyAdminConfig().apiVersion || "");
+    if (!shopifySettings.shopifyLabelPurchaseEnabled) {
+      providerErrors.push({ provider: "Shopify", message: "Enable Shopify label purchase in Channel Settings after granting Shopify Shipping label permissions." });
+    } else if (apiVersion < "2026-07") {
+      providerErrors.push({ provider: "Shopify", message: "Shopify label purchase requires Admin API version 2026-07 or later." });
+    } else if (!String(order.shopifyOrderId || "").startsWith("gid://shopify/Order/")) {
+      providerErrors.push({ provider: "Shopify", message: "Shopify order link is missing. Refresh the order from Shopify before buying a Shopify label." });
+    } else {
+      rates.push(shopifyShippingLabelRate(order));
     }
   }
   if (sourceKey === "temu") {
@@ -22184,6 +22136,59 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   appendChannelApiLog({ channel: orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/rates", operation: "Universal shipping rates", statusCode: blockers.length ? 400 : providerErrors.length ? 207 : 200, ok: blockers.length === 0, durationMs: Date.now() - startedAt, entityType: "order", entityId: order.id, message });
   const config = veeqoConfig(settings);
   return { rates, blockers, providerErrors, package: parcel, packagePresets: normalizeShippingPackagePresets(settings.shippingPackagePresets), labelRules: shippingLabelRules(settings), warehouseId, providers: { shopify: sourceKey === "shopify", temu: sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey) } };
+}
+
+async function attachShopifyShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
+  const settings = findChannelByName(db, "Shopify")?.settings || DEFAULT_CHANNEL_SETTINGS;
+  if (String(order.source || "").toLowerCase() !== "shopify") throw new Error("Shopify labels are available only for Shopify-imported orders.");
+  if (!settings.shopifyLabelPurchaseEnabled) throw new Error("Enable Shopify label purchase in Channel Settings before buying a Shopify label.");
+  if (String(shopifyAdminConfig().apiVersion || "") < "2026-07") throw new Error("Shopify label purchase requires Admin API version 2026-07 or later.");
+  const parcel = options.package || {};
+  const purchase = await purchaseShopifyShippingLabel(order, {
+    fulfillmentOrderId: selectedRate.fulfillmentOrderId || selectedRate.raw?.fulfillmentOrderId || "",
+    carrierCode: selectedRate.carrierCode || selectedRate.raw?.carrierCode || "",
+    serviceCode: selectedRate.serviceCode || selectedRate.raw?.serviceCode || "",
+    weightPounds: Number(parcel.weight || options.packageWeight || 0),
+    lengthInches: Number(parcel.length || options.packageLength || 0),
+    widthInches: Number(parcel.width || options.packageWidth || 0),
+    heightInches: Number(parcel.height || options.packageHeight || 0),
+    packageType: String(parcel.package_type || options.packageType || "BOX"),
+    shipDate: String(options.shipDate || new Date().toISOString().slice(0, 10)),
+    notifyCustomer: Boolean(options.notifyCustomer)
+  });
+  order.shippingLabelPurchases = Array.isArray(order.shippingLabelPurchases) ? order.shippingLabelPurchases : [];
+  const record = {
+    ...purchase.result,
+    fulfillmentOrderId: purchase.fulfillmentOrderId,
+    requestedAt: new Date().toISOString(),
+    requestedBy: options.user || "DataPlus",
+    notifyCustomer: Boolean(options.notifyCustomer),
+    warehouseId: String(options.warehouseId || ""),
+    warehouseName: String(options.warehouseName || ""),
+    lines: (Array.isArray(options.lines) ? options.lines : []).map((line) => ({ sku: String(line?.sku || ""), lineIndex: Number(line?.lineIndex || 0), qty: Number(line?.qty || 0) })).filter((line) => line.sku && line.qty > 0),
+    package: {
+      weightPounds: Number(parcel.weight || 0),
+      lengthInches: Number(parcel.length || 0),
+      widthInches: Number(parcel.width || 0),
+      heightInches: Number(parcel.height || 0),
+      packageType: String(parcel.package_type || options.packageType || "BOX"),
+      shipDate: String(options.shipDate || "")
+    }
+  };
+  order.shippingLabelPurchases = [record, ...order.shippingLabelPurchases.filter((entry) => String(entry?.id || "") !== record.id)];
+  const shipment = ensureLocalShipmentForPurchasedLabel(order, record);
+  const document = shipment?.documents?.[0]
+    ? (order.documents || []).find((entry) => String(entry.url || "") === String(shipment.documents[0].url || "")) || shipment.documents[0]
+    : null;
+  appendOrderShippingEvent(order, {
+    provider: "shopify",
+    action: "label_purchase",
+    status: String(record.status || "").toUpperCase() === "PURCHASED" ? "purchased" : "pending",
+    message: String(record.status || "").toUpperCase() === "PURCHASED" ? "Shopify Shipping label purchased." : `Shopify label purchase ${record.status || "started"}.`,
+    details: { purchaseId: record.id, fulfillmentOrderId: record.fulfillmentOrderId, errors: record.errors || [] }
+  });
+  addOrderTimeline(order, { type: "shipping_label", title: "Shopify label purchase started", message: `Shopify label purchase ${record.id || ""} is ${record.status || "pending"}.`, user: record.requestedBy });
+  return { purchase: record, shipment, document, pending: String(record.status || "").toUpperCase() !== "PURCHASED" };
 }
 
 async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, options = {}) {
@@ -37110,7 +37115,21 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     try {
       let result;
-      if (provider === "temu") {
+      if (provider === "shopify") {
+        const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+        const parcel = packageForShippingRates(body, settings);
+        const warehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(body.warehouseId || "")) || {};
+        result = await attachShopifyShippingLabel(order, db, body.rate || {}, {
+          package: parcel,
+          packageType: body.packageType,
+          shipDate: body.shipDate,
+          notifyCustomer: Boolean(body.notifyCustomer),
+          warehouseId: body.warehouseId,
+          warehouseName: warehouse.name || warehouse.code || "",
+          lines: Array.isArray(body.lines) ? body.lines : [],
+          user: body.user || "DataPlus"
+        });
+      } else if (provider === "temu") {
         result = await attachTemuShippingLabel(order, db, {
           rate: body.rate || {},
           documentType: body.documentType || body.rate?.documentType || "SHIPPING_LABEL_PDF",
@@ -37135,7 +37154,8 @@ async function handleApi(req, res) {
       }
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
-      return sendJson(res, 200, { order, document: result.document, shipment: result.shipment || null, message: "Shipping label attached. Opening it for print." });
+      const pending = Boolean(result.pending || result.purchase?.status === "PENDING_PURCHASE");
+      return sendJson(res, pending ? 202 : 200, { order, document: result.document, shipment: result.shipment || null, purchase: result.purchase || null, message: pending ? "Shopify label purchase started. Check status shortly if the label does not appear immediately." : "Shipping label attached. Opening it for print." });
     } catch (error) {
       appendOrderShippingEvent(order, { provider: provider || "shipping", action: "label_purchase", status: "failed", message: error.message || "Unknown shipping label error." });
       appendChannelApiLog({ channel: provider === "veeqo" ? "Veeqo" : orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/labels", operation: "Universal shipping label failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: error.message || "Unknown shipping label error." });
