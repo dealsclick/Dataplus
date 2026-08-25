@@ -25588,6 +25588,18 @@ function mapEbayStatus(order) {
   return "new";
 }
 
+function ebayOrderIsPaid(order = {}) {
+  const status = String(order.orderPaymentStatus || "").trim().toUpperCase();
+  if (["PAID", "FULLY_PAID", "PAYMENT_COMPLETE"].includes(status)) return true;
+  if (status.includes("PAID") && !status.includes("NOT") && !status.includes("UNPAID")) return true;
+  return false;
+}
+
+function ebayFinancialStatus(order = {}) {
+  if (ebayRefundTotal(order) > 0 || String(order.orderPaymentStatus || "").toLowerCase().includes("refund")) return "Refunded";
+  return ebayOrderIsPaid(order) ? "Paid" : "Unpaid";
+}
+
 function ebayRefundTotal(order) {
   return (order.paymentSummary?.refunds || []).reduce((sum, refund) => sum + nestedMoney(refund.amount || refund.refundAmount), 0);
 }
@@ -27983,6 +27995,7 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
   const shippingService = tracking.primary?.service || shippingStep.shippingServiceCode || shippingCarrier || "eBay shipping";
   const trackingNumber = tracking.primary?.trackingNumber || "";
   const shippedDate = tracking.primary?.shippedDate || "";
+  const financialStatus = ebayFinancialStatus(order);
   const shipBy = order.lineItems?.[0]?.lineItemFulfillmentInstructions?.shipByDate
     || shippingStep.maxEstimatedDeliveryDate
     || order.creationDate
@@ -28010,9 +28023,12 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
     title: items[0]?.title || "eBay order",
     qty: items.reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1,
     status: mapEbayStatus(order),
+    financialStatus,
+    paymentStatus: financialStatus,
     total,
     subtotal: itemSubtotal,
     shippingPaid,
+    paidAmount: financialStatus === "Paid" ? total : 0,
     taxAmount,
     productCost,
     marketplaceFees,
@@ -28044,6 +28060,7 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
       sellerId: order.sellerId || "",
       orderFulfillmentStatus: order.orderFulfillmentStatus || "",
       orderPaymentStatus: order.orderPaymentStatus || "",
+      financialStatus,
       fulfillmentCount: fulfillments.length,
       shipmentCount: tracking.records.length,
       trackingNumbers: tracking.records.map((record) => record.trackingNumber).filter(Boolean),
@@ -28122,6 +28139,19 @@ async function importEbayOrders(db, options = {}) {
     const orders = Array.isArray(data.orders) ? data.orders : [];
     for (const order of orders) {
       try {
+        if (!ebayOrderIsPaid(order)) {
+          skipped += 1;
+          rows.push({
+            order_id: order.orderId || "",
+            created_date: order.creationDate || "",
+            status: order.orderFulfillmentStatus || order.orderPaymentStatus || "",
+            action: "skipped_unpaid",
+            total: order.pricingSummary?.total?.value || "",
+            currency: order.pricingSummary?.total?.currency || "",
+            buyer: order.buyer?.username || ""
+          });
+          continue;
+        }
         let fulfillments = [];
         try {
           if (order.orderId && (order.fulfillmentHrefs?.length || String(order.orderFulfillmentStatus || "").toLowerCase() !== "not_started")) {
