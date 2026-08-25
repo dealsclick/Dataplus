@@ -1274,6 +1274,7 @@ async function runShopifyInventoryUpdateJob(job) {
   if (apply) args.push("--apply");
   else args.push("--dry-run");
   if (payload.limit) args.push(`--limit=${Math.max(1, Number(payload.limit) || 1)}`);
+  if (Array.isArray(payload.skus) && payload.skus.length) args.push(`--skus=${payload.skus.map((sku) => String(sku || "").trim()).filter(Boolean).join(",")}`);
   args.push(`--product-batch-size=${Math.max(1, Math.min(50, Number(payload.productBatchSize || 35) || 35))}`);
   args.push(`--batch-size=${Math.max(1, Math.min(250, Number(payload.batchSize || 100) || 100))}`);
   if (payload.locationId) args.push(`--location=${payload.locationId}`);
@@ -1836,9 +1837,12 @@ async function runProductDumpImportJob(job) {
     const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
     if (["dry-run", "apply"].includes(inventoryMode)) {
       try {
-        const result = await dataplus.queueShopifyInventoryUpdateJob(stateDb, { apply: inventoryMode === "apply", dryRun: inventoryMode !== "apply" }, { scheduled: true, operation: `Post-import Shopify inventory ${inventoryMode === "apply" ? "update" : "review"}`, sourceJobId: current.id });
-        followOn.push(result.duplicate ? "Shopify inventory follow-on was already active." : `Shopify inventory ${inventoryMode === "apply" ? "update" : "dry run"} queued as Job ${result.job.id}.`);
-      } catch (error) { followOn.push(`Shopify inventory follow-on skipped: ${error.message || error}`); }
+        const result = await dataplus.queueMarketplaceInventoryUpdateJobs(stateDb, { apply: inventoryMode === "apply", dryRun: inventoryMode !== "apply" }, { scheduled: true, operation: `Post-import marketplace inventory ${inventoryMode === "apply" ? "update" : "review"}`, sourceJobId: current.id, trigger: "product-dump-import" });
+        followOn.push(...(result.results || []).map((entry) => entry.queued
+          ? `${entry.channel} inventory ${inventoryMode === "apply" ? "update" : "dry run"} queued as Job ${entry.job?.id || entry.jobId}.`
+          : `${entry.channel} inventory follow-on skipped: ${entry.reason || "not configured"}.`
+        ));
+      } catch (error) { followOn.push(`Marketplace inventory follow-on skipped: ${error.message || error}`); }
     }
     if (["dry-run", "apply"].includes(priceMode)) {
       try {

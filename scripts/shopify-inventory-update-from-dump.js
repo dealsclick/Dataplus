@@ -494,15 +494,23 @@ async function setInventory(batch, locationId, token, reference) {
   return data.inventorySetQuantities || {};
 }
 
-async function loadLinkedProducts(limit, requestedSku = "") {
+async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   try {
     const params = [];
-    const requested = textValue(requestedSku);
-    const skuSql = requested
+    const requestedList = [...new Set([
+      textValue(requestedSku),
+      ...(Array.isArray(requestedSkus) ? requestedSkus : [])
+    ].map(textValue).filter(Boolean))];
+    const skuSql = requestedList.length === 1
       ? `and (
-          lower(p.sku) = lower($${params.push(requested)})
+          lower(p.sku) = lower($${params.push(requestedList[0])})
           or lower(coalesce(p.vendor_sku, '')) = lower($${params.length})
+        )`
+      : requestedList.length > 1
+        ? `and (
+          lower(p.sku) = any($${params.push(requestedList.map((sku) => sku.toLowerCase()))})
+          or lower(coalesce(p.vendor_sku, '')) = any($${params.length})
         )`
       : "";
     const limitSql = limit > 0 ? `limit $${params.push(limit)}` : "";
@@ -551,9 +559,14 @@ async function main() {
   const apply = hasFlag("apply") && !dryRun;
   const limit = Math.max(0, Number(argValue("limit", "0")) || 0);
   const requestedSku = textValue(argValue("sku", ""));
+  const requestedSkus = argValue("skus", "")
+    .split(/[,;\s]+/)
+    .map(textValue)
+    .filter(Boolean);
   const requestedQuantity = argValue("quantity", "");
   const explicitQuantity = requestedQuantity === "" ? null : Math.max(0, Math.floor(numberValue(requestedQuantity, 0)));
   if (explicitQuantity !== null && !requestedSku) throw new Error("--quantity requires a targeted --sku value.");
+  if (explicitQuantity !== null && requestedSkus.length > 1) throw new Error("--quantity cannot be used with --skus.");
   const explicitLocation = normalizeGid(argValue("location", ""), "Location");
   const batchSize = Math.max(1, Math.min(250, Number(argValue("batch-size", "100")) || 100));
   const packMode = ["divide", "export"].includes(argValue("pack-mode", "export")) ? argValue("pack-mode", "export") : "export";
@@ -572,7 +585,7 @@ async function main() {
   const locationId = explicitLocation || activeLocations[0]?.id || locations[0]?.id || "";
   if (!locationId) throw new Error("No Shopify location found for inventory update.");
 
-  const products = await loadLinkedProducts(limit, requestedSku);
+  const products = await loadLinkedProducts(limit, requestedSku, requestedSkus);
   if (explicitQuantity !== null) products.forEach((product) => { product.source_qty = explicitQuantity; });
   const report = {
     mode: apply ? "apply" : "dry-run",
@@ -588,6 +601,7 @@ async function main() {
     packMode,
     quantityPolicy,
     requestedSku,
+    requestedSkus,
     explicitQuantity,
     productsLoaded: products.length,
     variantsPrepared: 0,

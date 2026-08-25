@@ -376,7 +376,7 @@ const PRODUCT_SYSTEM_EXTRA_FIELDS = [
   { key: "purchaseUnit", label: "Purchase unit", type: "text" },
   { key: "relatedSku", label: "Related SKU", type: "text" },
   { key: "replacedBy", label: "Replaced by", type: "text" },
-  { key: "sellUnitCost", label: "Sell unit cost", type: "decimal" },
+  { key: "sellUnitCost", label: "Sell unit cost", type: "money" },
   { key: "shippingMethod", label: "Shipping method", type: "list" },
   { key: "sourceActive", label: "Source active", type: "boolean" },
   { key: "sourceCreatedAt", label: "Source created at", type: "datetime" },
@@ -4684,6 +4684,9 @@ function resolveShopifyInventoryLocation(db, body = {}) {
 async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
   requireEnabledChannel(db, "Shopify");
   const apply = body.apply !== false && body.dryRun !== true;
+  const skus = Array.isArray(body.skus)
+    ? [...new Set(body.skus.map((sku) => sourceTextValue(sku)).filter(Boolean))].slice(0, 5000)
+    : [];
   const limit = Math.max(0, Number(body.limit || 0) || 0);
   const productBatchSize = Math.max(1, Math.min(50, Number(body.productBatchSize || 35) || 35));
   const batchSize = Math.max(1, Math.min(250, Number(body.batchSize || 100) || 100));
@@ -4702,6 +4705,7 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
   const workerPayload = {
     apply,
     dryRun: !apply,
+    skus,
     limit,
     productBatchSize,
     batchSize,
@@ -4747,15 +4751,15 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
     direction: "sync",
     status: "queued",
     fileName: "shopify-inventory-report.json",
-    totalRows: limit || 50000,
+    totalRows: skus.length || limit || 50000,
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
     workerTask: "shopify-inventory-update",
     workerPayload,
     message: apply
-      ? `${schedulePrefix}Shopify inventory update queued from the latest data dump${inventoryTarget.warehouse?.name ? ` for ${inventoryTarget.warehouse.name}` : ""}.`
-      : `${schedulePrefix}Shopify inventory dry run queued from the latest data dump${inventoryTarget.warehouse?.name ? ` for ${inventoryTarget.warehouse.name}` : ""}.`
+      ? `${schedulePrefix}Shopify inventory update queued${skus.length ? ` for ${skus.length.toLocaleString()} SKU${skus.length === 1 ? "" : "s"}` : " from the latest data dump"}${inventoryTarget.warehouse?.name ? ` for ${inventoryTarget.warehouse.name}` : ""}.`
+      : `${schedulePrefix}Shopify inventory dry run queued${skus.length ? ` for ${skus.length.toLocaleString()} SKU${skus.length === 1 ? "" : "s"}` : " from the latest data dump"}${inventoryTarget.warehouse?.name ? ` for ${inventoryTarget.warehouse.name}` : ""}.`
   });
   upsertImportJobStore(job);
   if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
@@ -4768,7 +4772,7 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
     statusCode: 202,
     ok: true,
     jobId: job.id,
-    message: `${job.message} Location ${inventoryTarget.locationId || "not mapped"}; batch ${batchSize}; product batch ${productBatchSize};${limit ? ` limit ${limit};` : ""} pack mode ${packMode}.`
+    message: `${job.message} Location ${inventoryTarget.locationId || "not mapped"}; batch ${batchSize}; product batch ${productBatchSize};${skus.length ? ` targeted SKUs ${skus.length};` : ""}${limit ? ` limit ${limit};` : ""} pack mode ${packMode}.`
   });
   return { job, workerPayload, inventoryTarget };
 }
@@ -6306,6 +6310,15 @@ function shopifyMoneyValue(value) {
   return number.toFixed(2);
 }
 
+function shopifyMoneyMetafieldValue(value, currencyCode = "USD") {
+  const number = Number(sourceNumberValue(value));
+  if (!(number > 0)) return "";
+  return JSON.stringify({
+    amount: number.toFixed(2),
+    currency_code: String(currencyCode || "USD").trim().toUpperCase()
+  });
+}
+
 function shopifyReferenceValue(value, type = "") {
   const text = sourceTextValue(value);
   if (!text) return "";
@@ -6323,7 +6336,7 @@ function shopifyDumpMetafieldValue(item = {}, metafieldKey = "") {
     ? shopifyShippingMetafieldRawValue(item, field, config)
     : item[field] ?? item.productManagerFields?.[config.key.replace(/^custom\./, "")] ?? item.productManagerFields?.[config.key.replace(/^custom\./, "").replace(/_/g, "")];
   if (value === undefined || value === null || value === "") return "";
-  if (config.type === "money") return shopifyMoneyValue(value);
+  if (config.type === "money") return shopifyMoneyMetafieldValue(value);
   if (config.type === "dimension" || config.type === "weight") return shopifyMoneyValue(value);
   if (config.type === "number_integer") {
     const number = Math.round(Number(sourceNumberValue(value)));
@@ -6478,7 +6491,7 @@ function exportMappingsForTemplate(template = {}) {
     { externalColumn: "Variant Metafield: custom.purchase_unit [single_line_text_field]", productField: "" },
     { externalColumn: "Variant Metafield: custom.uom [single_line_text_field]", productField: "" },
     { externalColumn: "Variant Metafield: custom.uom_qty [number_integer]", productField: "" },
-    { externalColumn: "Variant Metafield: custom.sell_unit_cost [number_decimal]", productField: "" }
+    { externalColumn: "Variant Metafield: custom.sell_unit_cost [money]", productField: "" }
   ].filter((mapping) => !columns.has(mapping.externalColumn.toLowerCase()));
   return [...mappings, ...synthetic];
 }
@@ -6971,7 +6984,7 @@ function productFieldValue(db, item, field, mapping = {}) {
   if (source === "shopify" && /^Variant Metafield:\s*custom\.purchase_unit\s/i.test(column)) return variant?.optionValue || cache.uomInfo.display;
   if (source === "shopify" && /^Variant Metafield:\s*custom\.uom\s/i.test(column)) return variant?.uom || cache.uomInfo.code;
   if (source === "shopify" && /^Variant Metafield:\s*custom\.uom_qty\s/i.test(column)) return variant?.uomQty || cache.uomInfo.qty;
-  if (source === "shopify" && /^Variant Metafield:\s*custom\.sell_unit_cost\s/i.test(column)) return variant?.unitCost !== undefined ? Number(variant.unitCost).toFixed(2) : productSellUnitCost(item, db).toFixed(2);
+  if (source === "shopify" && /^Variant Metafield:\s*custom\.sell_unit_cost\s/i.test(column)) return shopifyMoneyMetafieldValue(variant?.unitCost !== undefined ? variant.unitCost : productSellUnitCost(item, db));
   if (source === "shopify" && /^Option1 Name$/i.test(column)) return variant?.optionName || (cache.uomInfo.isMultiUnit ? "Purchase Unit" : "Title");
   if (source === "shopify" && /^Option1 Value$/i.test(column)) return variant?.optionValue || (cache.uomInfo.isMultiUnit ? cache.uomInfo.display : "Default Title");
   if (source === "shopify" && /^Variant SKU$/i.test(column)) return variant?.shopifyVariantSku || variant?.sku || item.sku || "";
@@ -17201,8 +17214,12 @@ async function queueEbayPriceInventorySyncJob(db, body = {}, options = {}) {
     error.statusCode = 400;
     throw error;
   }
+  const skus = Array.isArray(body.skus)
+    ? [...new Set(body.skus.map((sku) => sourceTextValue(sku)).filter(Boolean))].slice(0, 5000)
+    : [];
   const limit = Math.max(1, Math.min(25000, Number(body.limit || settings.ebayPriceInventorySyncLimit || 1000) || 1000));
   const workerPayload = {
+    skus,
     limit,
     updateInventory: body.updateInventory === undefined
       ? settings.ebayInventoryUpdateEnabled !== false
@@ -17232,13 +17249,13 @@ async function queueEbayPriceInventorySyncJob(db, body = {}, options = {}) {
     direction: "sync",
     status: "queued",
     fileName: "ebay-price-inventory-sync-results.csv",
-    totalRows: limit,
+    totalRows: skus.length || limit,
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : "ebay-price-inventory-sync",
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
-    message: `${options.scheduled ? "Scheduled " : ""}eBay ${changes} sync queued for up to ${limit.toLocaleString()} existing eBay listings. New listings will not be created.`
+    message: `${options.scheduled ? "Scheduled " : ""}eBay ${changes} sync queued for ${skus.length ? `${skus.length.toLocaleString()} selected SKU${skus.length === 1 ? "" : "s"}` : `up to ${limit.toLocaleString()} existing eBay listings`}. New listings will not be created.`
   });
   upsertImportJobStore(job);
   if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
@@ -17267,6 +17284,86 @@ async function queueEbayPriceInventorySyncJob(db, body = {}, options = {}) {
     }), 25);
   }
   return { duplicate: false, job, workerPayload };
+}
+
+function inventorySyncSkuSet(values = []) {
+  const skus = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const sku = sourceTextValue(value);
+    if (!sku) continue;
+    skus.add(sku);
+    const baseSku = sku.replace(/-\d+PC$/i, "");
+    if (baseSku && baseSku !== sku) skus.add(baseSku);
+  }
+  return [...skus].slice(0, 5000);
+}
+
+async function queueMarketplaceInventoryUpdateJobs(db, body = {}, options = {}) {
+  const apply = body.apply !== false && body.dryRun !== true;
+  const skus = inventorySyncSkuSet(body.skus || []);
+  const results = [];
+  const trigger = sourceTextValue(options.trigger || body.trigger || "inventory-sync");
+  const scheduled = options.scheduled === true;
+  try {
+    const result = await queueShopifyInventoryUpdateJob(db, {
+      ...body,
+      apply,
+      dryRun: !apply,
+      skus,
+      limit: skus.length || body.limit || 0
+    }, {
+      ...options,
+      scheduled,
+      operation: options.operation || (skus.length ? `Partial Shopify inventory ${apply ? "update" : "review"}` : `Shopify inventory ${apply ? "update" : "review"}`)
+    });
+    results.push({ channel: "Shopify", queued: !result.duplicate, duplicate: Boolean(result.duplicate), job: result.job, jobId: result.job?.id || "", skus: skus.length });
+  } catch (error) {
+    results.push({ channel: "Shopify", queued: false, reason: error.message || "Shopify inventory update is not configured." });
+  }
+
+  if (apply) {
+    try {
+      const result = await queueEbayPriceInventorySyncJob(db, {
+        skus,
+        limit: skus.length || body.limit || 25000,
+        updateInventory: true,
+        updatePrice: false
+      }, {
+        ...options,
+        scheduled,
+        operation: options.operation || (skus.length ? "Partial eBay inventory update" : "eBay inventory update")
+      });
+      results.push({ channel: "eBay", queued: !result.duplicate, duplicate: Boolean(result.duplicate), job: result.job, jobId: result.job?.id || "", skus: skus.length });
+    } catch (error) {
+      results.push({ channel: "eBay", queued: false, reason: error.message || "eBay inventory update is not configured." });
+    }
+  } else {
+    results.push({ channel: "eBay", queued: false, reason: "eBay inventory dry-run is not implemented; live updates only run in apply mode." });
+  }
+
+  for (const channel of ["Temu", "Whatnot"]) {
+    const settings = findChannelByName(db, channel)?.settings || {};
+    const enabled = channel === "Temu" ? settings.temuInventorySyncEnabled : settings.whatnotInventorySyncEnabled;
+    results.push({
+      channel,
+      queued: false,
+      reason: enabled
+        ? `${channel} inventory push worker is not implemented yet.`
+        : `${channel} inventory sync is disabled.`
+    });
+  }
+
+  appendChannelApiLog({
+    channel: "Inventory",
+    transport: "Job",
+    method: "QUEUE",
+    path: "marketplace-inventory",
+    operation: skus.length ? "Partial marketplace inventory update queued" : "Marketplace inventory update queued",
+    statusCode: results.some((result) => result.queued || result.duplicate) ? 202 : 400,
+    ok: results.some((result) => result.queued || result.duplicate),
+    message: `${trigger}: ${results.map((result) => `${result.channel} ${result.queued ? "queued" : result.duplicate ? "already active" : `skipped (${result.reason})`}`).join("; ")}`
+  });
+  return { results, skus };
 }
 
 function normalizeEbayListingLifecycleAction(value = "launch") {
@@ -19622,6 +19719,30 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
     await postgres.upsertOperationJob(job);
     await postgres.upsertOperationArtifact(job, "original").catch(() => {});
     if (errorRows.length) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
+    const soldSkus = inventorySyncSkuSet(result.soldSkus || []);
+    if (soldSkus.length) {
+      await queueMarketplaceInventoryUpdateJobs(workDb, {
+        apply: true,
+        dryRun: false,
+        skus: soldSkus,
+        limit: soldSkus.length
+      }, {
+        scheduled: true,
+        operation: "eBay sell-through marketplace inventory update",
+        trigger: "eBay order import",
+        sourceJobId: job.id
+      }).catch((error) => appendChannelApiLog({
+        channel: "Inventory",
+        transport: "Job",
+        method: "QUEUE",
+        path: "marketplace-inventory",
+        operation: "eBay sell-through marketplace inventory update failed",
+        statusCode: 500,
+        ok: false,
+        jobId: job.id,
+        message: error.message || "Unable to queue eBay sell-through inventory updates."
+      }));
+    }
     appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-orders", operation: "eBay order import completed", statusCode: errorRows.length ? 207 : 200, ok: !errorRows.length, jobId: job.id, message });
     publicStateJsonCache = null;
     return job;
@@ -19706,6 +19827,30 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
     await postgres.upsertOperationJob(job);
     await postgres.upsertOperationArtifact(job, "original").catch(() => {});
     if (errorRows.length) await postgres.upsertOperationArtifact(job, "errors").catch(() => {});
+    const soldSkus = inventorySyncSkuSet(result.soldSkus || []);
+    if (soldSkus.length) {
+      await queueMarketplaceInventoryUpdateJobs(workDb, {
+        apply: true,
+        dryRun: false,
+        skus: soldSkus,
+        limit: soldSkus.length
+      }, {
+        scheduled: true,
+        operation: "Temu sell-through marketplace inventory update",
+        trigger: "Temu order import",
+        sourceJobId: job.id
+      }).catch((error) => appendChannelApiLog({
+        channel: "Inventory",
+        transport: "Job",
+        method: "QUEUE",
+        path: "marketplace-inventory",
+        operation: "Temu sell-through marketplace inventory update failed",
+        statusCode: 500,
+        ok: false,
+        jobId: job.id,
+        message: error.message || "Unable to queue Temu sell-through inventory updates."
+      }));
+    }
     appendChannelApiLog({ channel: "Temu", transport: "Job", method: "RUN", path: "temu-orders", operation: "Temu order import completed", statusCode: errorRows.length ? 207 : 200, ok: !errorRows.length, jobId: job.id, message });
     publicStateJsonCache = null;
     return job;
@@ -20078,6 +20223,9 @@ async function runEbayPriceInventorySyncWorkerJobLegacy(job = {}, attrs = {}) {
 
 async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const selectedSkus = Array.isArray(payload.skus)
+    ? [...new Set(payload.skus.map((sku) => sourceTextValue(sku)).filter(Boolean))]
+    : [];
   const limit = Math.max(1, Math.min(25000, Number(payload.limit || job.totalRows || 1000) || 1000));
   const updateInventory = payload.updateInventory !== false;
   const updatePrice = payload.updatePrice !== false;
@@ -20095,7 +20243,9 @@ async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
   try {
     const [workDb, candidates] = await Promise.all([
       readDbFast({ skipInventory: true }).then(normalizeDb),
-      ebayListingLaunchCandidates({ allFiltered: true, filters: { channelStatusAll: ["ebay-detected"] }, limit })
+      ebayListingLaunchCandidates(selectedSkus.length
+        ? { skus: selectedSkus, limit: selectedSkus.length }
+        : { allFiltered: true, filters: { channelStatusAll: ["ebay-detected"] }, limit })
     ]);
     const linked = candidates.filter((item) => {
       const listing = item?.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
@@ -24926,6 +25076,7 @@ async function importTemuOrders(db, options = {}) {
   let fetched = 0;
   const errors = [];
   const rows = [];
+  const soldSkus = new Set();
 
   const maxPages = Math.ceil(limit / pageSize);
   while ((targetedRefresh || repairBlind ? targetedChunks.length > 0 : pageNumber <= Math.max(1, maxPages)) && fetched < limit) {
@@ -25029,6 +25180,12 @@ async function importTemuOrders(db, options = {}) {
         continue;
       }
       const action = upsertOrder(db, mappedOrder);
+      for (const line of orderLineItems(mappedOrder)) {
+        for (const value of [line.sku, line.originalSku, line.channelSku, line.channelVariantSku]) {
+          const sku = sourceTextValue(value);
+          if (sku) soldSkus.add(sku);
+        }
+      }
       if (action === "created") created += 1;
       if (action === "updated") updated += 1;
       if (action === "skipped") skipped += 1;
@@ -25057,7 +25214,7 @@ async function importTemuOrders(db, options = {}) {
     };
     Object.assign(channel, normalizeChannel(channel));
   }
-  return { fetched, created, updated, skipped, errors, rows, repairBlind, targetedRefresh, repairCandidateCount: repairOrderSns.length, requestedOrderCount: requestedOrderSns.length };
+  return { fetched, created, updated, skipped, errors, rows, soldSkus: [...soldSkus], repairBlind, targetedRefresh, repairCandidateCount: repairOrderSns.length, requestedOrderCount: requestedOrderSns.length };
 }
 
 async function queueTemuOrderImportJob(db, body = {}, options = {}) {
@@ -28387,6 +28544,7 @@ async function importEbayOrders(db, options = {}) {
   let fetched = 0;
   const errors = [];
   const rows = [];
+  const soldSkus = new Set();
 
   while (offset < maxOrders) {
     const params = new URLSearchParams({
@@ -28431,6 +28589,12 @@ async function importEbayOrders(db, options = {}) {
         const mergedOrder = preserveMarketplaceOrderOperations(mappedOrder, existingOrder);
         const action = upsertOrder(db, mergedOrder);
         reconcileTerminalOrderPurchasing(db, mergedOrder, { user: "eBay order import" });
+        for (const line of orderLineItems(mergedOrder)) {
+          for (const value of [line.sku, line.originalSku, line.channelSku, line.channelVariantSku]) {
+            const sku = sourceTextValue(value);
+            if (sku) soldSkus.add(sku);
+          }
+        }
         if (action === "created") created += 1;
         if (action === "updated") updated += 1;
         if (action === "skipped") skipped += 1;
@@ -28464,7 +28628,7 @@ async function importEbayOrders(db, options = {}) {
   if (postgres.isPostgresEnabled()) {
     writeConnectorStateSync({ ...readConnectorStateSync(), ebayLastOrderSync: db.connectorState.ebayLastOrderSync });
   }
-  return { fetched, created, updated, skipped, errors, rows, lookbackDays, startedAt: start.toISOString(), endedAt: now.toISOString() };
+  return { fetched, created, updated, skipped, errors, rows, soldSkus: [...soldSkus], lookbackDays, startedAt: start.toISOString(), endedAt: now.toISOString() };
 }
 
 function parseList(value) {
@@ -32194,6 +32358,29 @@ async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}, webho
   if (postgres.isPostgresEnabled()) await postgres.writeStateField("sequence", db.sequence);
   await postgres.saveOrder(merged);
   await reconcilePersistedTerminalOrders([merged], { user: `Shopify ${String(webhook.topic || "orders/update")}` });
+  const soldSkus = inventorySyncSkuSet(orderLineItems(merged).flatMap((line) => [line.sku, line.originalSku, line.channelVariantSku]));
+  if (soldSkus.length) {
+    queueMarketplaceInventoryUpdateJobs(db, {
+      apply: true,
+      dryRun: false,
+      skus: soldSkus,
+      limit: soldSkus.length
+    }, {
+      scheduled: true,
+      operation: "Sell-through marketplace inventory update",
+      trigger: `Shopify ${String(webhook.topic || "orders/update")}`,
+      sourceJobId: webhook.webhookId || orderId
+    }).catch((error) => appendChannelApiLog({
+      channel: "Inventory",
+      transport: "webhook",
+      method: "QUEUE",
+      path: "marketplace-inventory",
+      operation: "Sell-through marketplace inventory update failed",
+      statusCode: 500,
+      ok: false,
+      message: error.message || "Unable to queue sell-through inventory updates."
+    }));
+  }
   clearOrderApiCache(merged.id);
   return { order: merged, created: !existing };
 }
@@ -49618,6 +49805,7 @@ module.exports = {
   normalizeShopifyStatus,
   normalizeShopifyVariantGid,
   queueShopifyInventoryUpdateJob,
+  queueMarketplaceInventoryUpdateJobs,
   queueShopifyShippingEligibilitySyncJob,
   queueShopifyVariantPricePushJob,
   queueShopifyOrderImportJob,
