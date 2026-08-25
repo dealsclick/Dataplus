@@ -20895,6 +20895,29 @@ function publicEbayListing(listing = null) {
   };
 }
 
+function productCompatibilityAliases(item = {}, rulesDb = null) {
+  const aliases = Array.isArray(item.aliases) ? [...item.aliases] : [];
+  const sku = String(item.sku || "").trim();
+  if (!sku || !productRequiresUomOnlyVariants(item, rulesDb)) return aliases;
+  const uomQty = productUomQty(item);
+  if (!(uomQty > 1)) return aliases;
+  const legacySku = productVariantSku(sku, `${uomQty}PC`);
+  const hasAlias = aliases.some((alias) => String(alias.aliasSku || alias.sku || alias.value || "").trim().toLowerCase() === legacySku.toLowerCase());
+  if (!hasAlias && legacySku && legacySku.toLowerCase() !== sku.toLowerCase()) {
+    aliases.push({
+      id: `compat-${sku}-${uomQty}pc`,
+      parentSku: sku,
+      aliasSku: legacySku,
+      source: "DataPlus compatibility",
+      type: "renamed",
+      active: true,
+      notes: "Legacy generated pack SKU now resolves to the supplier UOM sell unit.",
+      systemDefault: true
+    });
+  }
+  return aliases;
+}
+
 function publicInventoryItem(item = {}, context = {}) {
   const rulesDb = context.db || dbCache.data || null;
   item = sourceEnrichedItem(item, context.sourceEnrichmentMap || {});
@@ -20917,6 +20940,7 @@ function publicInventoryItem(item = {}, context = {}) {
   const markedUpPrice = pricedFromCost(primarySellUnitCost, SHOPIFY_PRICE_MARKUP_PERCENT);
   const websitePrice = shopifyVariantWebsitePrice(pricedItem, primaryVariant, SHOPIFY_PRICE_MARKUP_PERCENT, rulesDb);
   const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
+  const compatibilityAliases = productCompatibilityAliases(pricedItem, rulesDb);
   return {
     id: item.id,
     sku: item.sku,
@@ -21051,7 +21075,7 @@ function publicInventoryItem(item = {}, context = {}) {
     productManagerFields: item.productManagerFields && typeof item.productManagerFields === "object" ? item.productManagerFields : {},
     original: item.original || null,
     attributes: item.attributes && typeof item.attributes === "object" ? item.attributes : {},
-    aliases: Array.isArray(item.aliases) ? item.aliases : [],
+    aliases: compatibilityAliases,
     shadowSkus: Array.isArray(item.shadowSkus) ? item.shadowSkus : [],
     identifiers: Array.isArray(item.identifiers) ? item.identifiers : [],
     vendorOffers: Array.isArray(item.vendorOffers) ? item.vendorOffers : [],
@@ -21157,6 +21181,7 @@ function publicInventoryListItem(item = {}, context = {}) {
   // exactly like the SKU detail page. Pack pricing stays on its own variant row.
   const websitePrice = shopifyVariantWebsitePrice(pricedItem, primaryVariant, SHOPIFY_PRICE_MARKUP_PERCENT, rulesDb);
   const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
+  const compatibilityAliases = productCompatibilityAliases(pricedItem, rulesDb);
   const images = Array.isArray(item.images) ? item.images : [];
   const warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
   const onHand = Number(item.qty || 0);
@@ -21263,7 +21288,7 @@ function publicInventoryListItem(item = {}, context = {}) {
     updatedAt: item.updatedAt || item.productDumpUpdatedAt || "",
     ebayListing: publicEbayListing(item.ebayListing),
     ebayCategoryComparison: ebayCategoryComparison(rulesDb, item),
-    aliasCount: Array.isArray(item.aliases) ? item.aliases.filter((alias) => alias.active !== false).length : 0,
+    aliasCount: compatibilityAliases.filter((alias) => alias.active !== false).length,
     shadowSkuCount: Array.isArray(item.shadowSkus) ? item.shadowSkus.length : 0,
     inProducts: item.inProducts === undefined ? true : Boolean(item.inProducts),
     sourceOnly: Boolean(item.sourceOnly || item.inProducts === false),
