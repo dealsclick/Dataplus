@@ -44094,8 +44094,6 @@ async function handleApi(req, res) {
       items: body.items,
       status: "draft"
     });
-    if (!draft.buyer) return sendJson(res, 400, { error: "Customer name is required." });
-    if (!draft.items.length) return sendJson(res, 400, { error: "Add at least one line item." });
     db.orderDrafts = Array.isArray(db.orderDrafts) ? db.orderDrafts : [];
     db.orderDrafts.unshift(draft);
     await persistOrderDraftWorkflowDb(db);
@@ -44141,10 +44139,9 @@ async function handleApi(req, res) {
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
       items: body.items ?? current.items,
+      status: body.status ?? current.status,
       updatedAt: new Date().toISOString()
     });
-    if (!updated.buyer) return sendJson(res, 400, { error: "Customer name is required." });
-    if (!updated.items.length) return sendJson(res, 400, { error: "Add at least one line item." });
     Object.assign(current, updated);
     await persistOrderDraftWorkflowDb(db);
     return sendJson(res, 200, { draft: current, state: publicState({ ...db, inventory: [] }, { lite: true }) });
@@ -44408,10 +44405,43 @@ async function handleApi(req, res) {
     const draft = (db.orderDrafts || []).find((row) => row.id === parts[2]);
     if (!draft) return notFound(res);
     const format = parts[4] || "pdf";
-    if (format !== "pdf") return sendJson(res, 400, { error: "Unsupported export format." });
     const address = draft.shippingAddress || {};
     const items = Array.isArray(draft.items) ? draft.items : [];
     const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
+    if (format === "csv") {
+      const shipTo = [address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(" "), address.country].filter(Boolean).join(" | ");
+      const rows = items.length ? items.map((item) => ({
+        quoteNumber: draft.draftNumber,
+        status: draft.status || "draft",
+        customer: draft.buyer || "",
+        email: draft.buyerEmail || "",
+        phone: draft.phone || "",
+        source: draft.source || "Manual",
+        sku: item.sku || "",
+        title: item.title || "",
+        qty: Number(item.qty || 0),
+        unitPrice: Number(item.price || 0),
+        lineTotal: Number(item.qty || 0) * Number(item.price || 0),
+        shipTo,
+        note: draft.note || ""
+      })) : [{
+        quoteNumber: draft.draftNumber,
+        status: draft.status || "draft",
+        customer: draft.buyer || "",
+        email: draft.buyerEmail || "",
+        phone: draft.phone || "",
+        source: draft.source || "Manual",
+        sku: "",
+        title: "",
+        qty: 0,
+        unitPrice: 0,
+        lineTotal: 0,
+        shipTo,
+        note: draft.note || ""
+      }];
+      return sendCsv(res, rowsToCsv(rows), `${draft.draftNumber || "draft-quote"}.csv`);
+    }
+    if (format !== "pdf") return sendJson(res, 400, { error: "Unsupported export format." });
     const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(draft.draftNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}dl{display:grid;grid-template-columns:180px 1fr;gap:8px 16px;margin-top:20px}</style></head><body><h1>${escapeHtml(draft.draftNumber)}</h1><p class="muted">Manual draft / ${escapeHtml(draft.source || "Manual")}</p><p><strong>${escapeHtml(draft.buyer || "Unknown customer")}</strong><br>${escapeHtml(draft.buyerEmail || "")}<br>${escapeHtml(draft.phone || "")}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.price || 0).toFixed(2))}</td><td>${escapeHtml((Number(item.qty || 0) * Number(item.price || 0)).toFixed(2))}</td></tr>`).join("")}</tbody></table><dl><dt>Subtotal</dt><dd>${escapeHtml(subtotal.toFixed(2))}</dd><dt>External reference</dt><dd>${escapeHtml(draft.marketplaceOrderNumber || "N/A")}</dd><dt>Shipping</dt><dd>${escapeHtml([address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join(" / "))}</dd><dt>Notes</dt><dd>${escapeHtml(draft.note || "None")}</dd></dl></body></html>`;
     res.writeHead(200, htmlResponseHeaders({
       "Content-Disposition": `attachment; filename=${draft.draftNumber}.html`
@@ -47108,10 +47138,43 @@ async function handleApi(req, res) {
     const draft = (db.orderDrafts || []).find((row) => row.id === parts[2]);
     if (!draft) return notFound(res);
     const format = parts[4] || "pdf";
-    if (format !== "pdf") return sendJson(res, 400, { error: "Unsupported export format." });
     const address = draft.shippingAddress || {};
     const items = Array.isArray(draft.items) ? draft.items : [];
     const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
+    if (format === "csv") {
+      const shipTo = [address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(" "), address.country].filter(Boolean).join(" | ");
+      const rows = items.length ? items.map((item) => ({
+        quoteNumber: draft.draftNumber,
+        status: draft.status || "draft",
+        customer: draft.buyer || "",
+        email: draft.buyerEmail || "",
+        phone: draft.phone || "",
+        source: draft.source || "Manual",
+        sku: item.sku || "",
+        title: item.title || "",
+        qty: Number(item.qty || 0),
+        unitPrice: Number(item.price || 0),
+        lineTotal: Number(item.qty || 0) * Number(item.price || 0),
+        shipTo,
+        note: draft.note || ""
+      })) : [{
+        quoteNumber: draft.draftNumber,
+        status: draft.status || "draft",
+        customer: draft.buyer || "",
+        email: draft.buyerEmail || "",
+        phone: draft.phone || "",
+        source: draft.source || "Manual",
+        sku: "",
+        title: "",
+        qty: 0,
+        unitPrice: 0,
+        lineTotal: 0,
+        shipTo,
+        note: draft.note || ""
+      }];
+      return sendCsv(res, rowsToCsv(rows), `${draft.draftNumber || "draft-quote"}.csv`);
+    }
+    if (format !== "pdf") return sendJson(res, 400, { error: "Unsupported export format." });
     const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(draft.draftNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}dl{display:grid;grid-template-columns:180px 1fr;gap:8px 16px;margin-top:20px}</style></head><body><h1>${escapeHtml(draft.draftNumber)}</h1><p class="muted">Manual draft / ${escapeHtml(draft.source || "Manual")}</p><p><strong>${escapeHtml(draft.buyer || "Unknown customer")}</strong><br>${escapeHtml(draft.buyerEmail || "")}<br>${escapeHtml(draft.phone || "")}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.price || 0).toFixed(2))}</td><td>${escapeHtml((Number(item.qty || 0) * Number(item.price || 0)).toFixed(2))}</td></tr>`).join("")}</tbody></table><dl><dt>Subtotal</dt><dd>${escapeHtml(subtotal.toFixed(2))}</dd><dt>External reference</dt><dd>${escapeHtml(draft.marketplaceOrderNumber || "N/A")}</dd><dt>Shipping</dt><dd>${escapeHtml([address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join(" / "))}</dd><dt>Notes</dt><dd>${escapeHtml(draft.note || "None")}</dd></dl></body></html>`;
     res.writeHead(200, htmlResponseHeaders({
       "Content-Disposition": `attachment; filename=${draft.draftNumber}.html`
@@ -47784,8 +47847,6 @@ async function handleApi(req, res) {
       items: body.items,
       status: "draft"
     });
-    if (!draft.buyer) return sendJson(res, 400, { error: "Customer name is required." });
-    if (!draft.items.length) return sendJson(res, 400, { error: "Add at least one line item." });
     db.orderDrafts = Array.isArray(db.orderDrafts) ? db.orderDrafts : [];
     db.orderDrafts.unshift(draft);
     await writeDb(db);
@@ -47828,10 +47889,9 @@ async function handleApi(req, res) {
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
       items: body.items ?? current.items,
+      status: body.status ?? current.status,
       updatedAt: new Date().toISOString()
     });
-    if (!updated.buyer) return sendJson(res, 400, { error: "Customer name is required." });
-    if (!updated.items.length) return sendJson(res, 400, { error: "Add at least one line item." });
     Object.assign(current, updated);
     await writeDb(db);
     return sendJson(res, 200, { draft: current, state: publicState(db) });
