@@ -541,6 +541,7 @@ async function initRelationalSchema() {
       refund_amount numeric,
       paid_amount numeric,
       qty numeric,
+      order_date timestamptz,
       ship_by date,
       shipped_at timestamptz,
       tracking_number text,
@@ -554,6 +555,7 @@ async function initRelationalSchema() {
     create index if not exists order_records_source_idx on order_records (lower(source), created_at desc);
     create index if not exists order_records_customer_idx on order_records (customer_id, created_at desc);
     create index if not exists order_records_created_idx on order_records (created_at desc, order_number desc);
+    create index if not exists order_records_order_date_idx on order_records (order_date desc, order_number desc);
     create index if not exists order_records_order_number_idx on order_records (lower(order_number));
     create index if not exists order_records_marketplace_order_idx on order_records (lower(marketplace_order_id));
     create index if not exists order_records_tracking_number_idx on order_records (lower(tracking_number));
@@ -748,7 +750,21 @@ async function initRelationalSchema() {
     await client.query("update operations_jobs set job_number = nextval('operations_job_number_seq') where job_number is null");
     await client.query("create unique index if not exists operations_jobs_job_number_idx on operations_jobs (job_number) where job_number is not null");
     await client.query("alter table order_records add column if not exists channel_source text");
+    await client.query("alter table order_records add column if not exists order_date timestamptz");
+    await client.query(`
+      update order_records
+      set order_date = coalesce(
+        case when nullif(raw->>'orderDate', '') ~ '^\\d{4}-\\d{2}-\\d{2}' then nullif(raw->>'orderDate', '')::timestamptz end,
+        case when nullif(raw->>'orderedAt', '') ~ '^\\d{4}-\\d{2}-\\d{2}' then nullif(raw->>'orderedAt', '')::timestamptz end,
+        case when nullif(raw->>'purchaseDate', '') ~ '^\\d{4}-\\d{2}-\\d{2}' then nullif(raw->>'purchaseDate', '')::timestamptz end,
+        case when nullif(raw->>'purchasedAt', '') ~ '^\\d{4}-\\d{2}-\\d{2}' then nullif(raw->>'purchasedAt', '')::timestamptz end,
+        created_at,
+        updated_at
+      )
+      where order_date is null
+    `);
     await client.query("create index if not exists order_records_channel_source_idx on order_records (lower(channel_source), created_at desc)");
+    await client.query("create index if not exists order_records_order_date_idx on order_records (order_date desc, order_number desc)");
     // Broad workspace searches use trigram indexes when the extension is available.
     // A managed database can deny CREATE EXTENSION, which must not block startup.
     try {
@@ -5026,6 +5042,7 @@ function dateOrNull(value) {
 function orderRecordFromState(order = {}) {
   const orderId = nullableString(order.id || order.orderId || order.internalOrderNumber || order.orderNumber);
   if (!orderId) return null;
+  const orderDate = dateOrNull(order.orderDate || order.orderedAt || order.purchaseDate || order.purchasedAt || order.createdAt || order.updatedAt);
   return {
     order_id: orderId,
     order_number: nullableString(order.orderNumber || order.displayOrderNumber || order.internalOrderNumber),
@@ -5045,6 +5062,7 @@ function orderRecordFromState(order = {}) {
     refund_amount: nullableNumber(order.refundAmount),
     paid_amount: nullableNumber(order.paidAmount ?? order.paid ?? order.total),
     qty: nullableNumber(order.qty),
+    order_date: orderDate,
     ship_by: dateOrNull(order.shipBy),
     shipped_at: dateOrNull(order.shippedAt || order.shipDate),
     tracking_number: nullableString(order.trackingNumber),
@@ -5320,19 +5338,19 @@ async function upsertOrdersFromState(orders = [], options = {}) {
         insert into order_records (
           order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source,
           status, buyer, buyer_email, phone, customer_id, total, product_cost,
-          marketplace_fees, shipping_cost, refund_amount, paid_amount, qty, ship_by,
+          marketplace_fees, shipping_cost, refund_amount, paid_amount, qty, order_date, ship_by,
           shipped_at, tracking_number, shipping_carrier, reportable, raw, created_at, updated_at
         )
         select order_id, order_number, internal_order_number, marketplace_order_id, source, channel_source,
           status, buyer, buyer_email, phone, customer_id, total, product_cost,
-          marketplace_fees, shipping_cost, refund_amount, paid_amount, qty, ship_by,
+          marketplace_fees, shipping_cost, refund_amount, paid_amount, qty, order_date, ship_by,
           shipped_at, tracking_number, shipping_carrier, reportable, raw,
           coalesce(created_at, now()), coalesce(updated_at, now())
         from jsonb_to_recordset($1::jsonb) as x(
           order_id text, order_number text, internal_order_number text, marketplace_order_id text,
           source text, channel_source text, status text, buyer text, buyer_email text, phone text, customer_id text,
           total numeric, product_cost numeric, marketplace_fees numeric, shipping_cost numeric,
-          refund_amount numeric, paid_amount numeric, qty numeric, ship_by date, shipped_at timestamptz,
+          refund_amount numeric, paid_amount numeric, qty numeric, order_date timestamptz, ship_by date, shipped_at timestamptz,
           tracking_number text, shipping_carrier text, reportable boolean, raw jsonb,
           created_at timestamptz, updated_at timestamptz
         )
@@ -5354,6 +5372,7 @@ async function upsertOrdersFromState(orders = [], options = {}) {
           refund_amount = excluded.refund_amount,
           paid_amount = excluded.paid_amount,
           qty = excluded.qty,
+          order_date = excluded.order_date,
           ship_by = excluded.ship_by,
           shipped_at = excluded.shipped_at,
           tracking_number = excluded.tracking_number,
@@ -5513,15 +5532,7 @@ async function listOrders(options = {}) {
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   params.push(limit);
-  const rawTimestampSql = (key) => `case when nullif(raw->>'${key}', '') ~ '^\\d{4}-\\d{2}-\\d{2}' then nullif(raw->>'${key}', '')::timestamptz end`;
-  const orderDateSql = `coalesce(
-    ${rawTimestampSql("orderDate")},
-    ${rawTimestampSql("orderedAt")},
-    ${rawTimestampSql("purchaseDate")},
-    ${rawTimestampSql("purchasedAt")},
-    created_at,
-    updated_at
-  )`;
+  const orderDateSql = "coalesce(order_date, created_at, updated_at)";
   const orderSelect = summary ? `
     select
       order_id,
@@ -5553,28 +5564,9 @@ async function listOrders(options = {}) {
       case when jsonb_typeof(raw->'purchaseOrderIds') = 'array' then raw->'purchaseOrderIds' else '[]'::jsonb end as purchase_order_ids,
       case when jsonb_typeof(raw->'purchaseOrderNumbers') = 'array' then raw->'purchaseOrderNumbers' else '[]'::jsonb end as purchase_order_numbers,
       case when jsonb_typeof(raw->'workflowExceptions') = 'array' then raw->'workflowExceptions' else '[]'::jsonb end as workflow_exceptions,
-      (
-        select coalesce(jsonb_agg(jsonb_build_object(
-          'id', shipment->>'id',
-          'status', shipment->>'status',
-          'trackingNumber', shipment->>'trackingNumber',
-          'carrier', shipment->>'carrier',
-          'service', shipment->>'service'
-        )), '[]'::jsonb)
-        from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment
-      ) as shipments,
+      case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end as shipments,
       case when jsonb_typeof(raw->'backorderLines') = 'array' then raw->'backorderLines' else '[]'::jsonb end as backorder_lines,
-      (
-        select coalesce(jsonb_agg(jsonb_build_object(
-          'id', route->>'id',
-          'type', route->>'type',
-          'status', route->>'status',
-          'purchaseOrderId', route->>'purchaseOrderId',
-          'warehouseId', route->>'warehouseId',
-          'sku', route->>'sku'
-        )), '[]'::jsonb)
-        from jsonb_array_elements(case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end) route
-      ) as fulfillment_routes
+      case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end as fulfillment_routes
   ` : `
     select *, ${orderDateSql} as order_date
   `;
