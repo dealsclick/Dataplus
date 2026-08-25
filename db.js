@@ -5563,18 +5563,9 @@ async function listOrders(options = {}) {
       case when jsonb_typeof(raw->'purchaseOrderIds') = 'array' then raw->'purchaseOrderIds' else '[]'::jsonb end as purchase_order_ids,
       case when jsonb_typeof(raw->'purchaseOrderNumbers') = 'array' then raw->'purchaseOrderNumbers' else '[]'::jsonb end as purchase_order_numbers,
       case when jsonb_typeof(raw->'workflowExceptions') = 'array' then raw->'workflowExceptions' else '[]'::jsonb end as workflow_exceptions,
-      (
-        select coalesce(jsonb_agg(jsonb_build_object('status', shipment->>'status')), '[]'::jsonb)
-        from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment
-      ) as shipments,
+      '[]'::jsonb as shipments,
       case when jsonb_typeof(raw->'backorderLines') = 'array' then raw->'backorderLines' else '[]'::jsonb end as backorder_lines,
-      (
-        select coalesce(jsonb_agg(jsonb_build_object(
-          'status', route->>'status',
-          'purchaseOrderId', route->>'purchaseOrderId'
-        )), '[]'::jsonb)
-        from jsonb_array_elements(case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end) route
-      ) as fulfillment_routes
+      '[]'::jsonb as fulfillment_routes
   ` : `
     select *, ${orderDateSql} as order_date
   `;
