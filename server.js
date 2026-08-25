@@ -13692,6 +13692,11 @@ function categoryReviewStatus(value = "pending") {
   return ["pending", "mapped", "missing", "denied", "blocked", "all"].includes(status) ? status : "pending";
 }
 
+function categoryReviewSort(value = "confidence-desc") {
+  const sort = String(value || "confidence-desc").trim().toLowerCase();
+  return ["name-asc", "product-desc", "confidence-desc"].includes(sort) ? sort : "confidence-desc";
+}
+
 function categoryReviewRowMatches(row = {}, options = {}) {
   const channel = categoryReviewChannel(options.channel);
   const status = categoryReviewStatus(options.status);
@@ -13874,6 +13879,7 @@ async function categoryReviewDb(scope = "main") {
 function categoryReviewRows(db = {}, options = {}) {
   const scope = categoryReviewScope(options.scope);
   const channel = categoryReviewChannel(options.channel);
+  const sort = categoryReviewSort(options.sort);
   const rows = Array.isArray(db.__categoryReviewRows) ? db.__categoryReviewRows : (publicCategories(db, "", scope).categories || []);
   return rows
     .filter((row) => categoryReviewRowMatches(row, { ...options, channel, scope }))
@@ -13882,7 +13888,12 @@ function categoryReviewRows(db = {}, options = {}) {
       const rightPending = right?.mappings?.[channel]?.pendingSuggestion;
       const leftConfidence = Number(leftPending?.confidence ?? left?.mappings?.[channel]?.confidence ?? -1);
       const rightConfidence = Number(rightPending?.confidence ?? right?.mappings?.[channel]?.confidence ?? -1);
-      return rightConfidence - leftConfidence || Number(right.productCount || 0) - Number(left.productCount || 0) || String(left.name || "").localeCompare(String(right.name || ""));
+      const nameSort = String(left.name || "").localeCompare(String(right.name || ""));
+      const productSort = Number(right.productCount || 0) - Number(left.productCount || 0);
+      const confidenceSort = rightConfidence - leftConfidence;
+      if (sort === "name-asc") return nameSort || productSort || confidenceSort;
+      if (sort === "product-desc") return productSort || confidenceSort || nameSort;
+      return confidenceSort || productSort || nameSort;
     });
 }
 
@@ -42586,7 +42597,8 @@ async function handleApi(req, res) {
       status: url.searchParams.get("status") || "pending",
       q: url.searchParams.get("q") || "",
       confidence: url.searchParams.get("confidence") || "",
-      minimumProducts: url.searchParams.get("minimumProducts") || ""
+      minimumProducts: url.searchParams.get("minimumProducts") || "",
+      sort: url.searchParams.get("sort") || ""
     });
     const total = rows.length;
     const pageCount = Math.max(1, Math.ceil(total / pageSize));
