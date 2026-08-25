@@ -555,7 +555,6 @@ async function initRelationalSchema() {
     create index if not exists order_records_source_idx on order_records (lower(source), created_at desc);
     create index if not exists order_records_customer_idx on order_records (customer_id, created_at desc);
     create index if not exists order_records_created_idx on order_records (created_at desc, order_number desc);
-    create index if not exists order_records_order_date_idx on order_records (order_date desc, order_number desc);
     create index if not exists order_records_order_number_idx on order_records (lower(order_number));
     create index if not exists order_records_marketplace_order_idx on order_records (lower(marketplace_order_id));
     create index if not exists order_records_tracking_number_idx on order_records (lower(tracking_number));
