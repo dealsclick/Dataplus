@@ -20901,7 +20901,7 @@ function productCompatibilityAliases(item = {}, rulesDb = null) {
   if (!sku || !productRequiresUomOnlyVariants(item, rulesDb)) return aliases;
   const uomQty = productUomQty(item);
   if (!(uomQty > 1)) return aliases;
-  const legacySku = productVariantSku(sku, `${uomQty}PC`);
+  const legacySku = variantSkuFromBase(sku, `${uomQty}PC`);
   const hasAlias = aliases.some((alias) => String(alias.aliasSku || alias.sku || alias.value || "").trim().toLowerCase() === legacySku.toLowerCase());
   if (!hasAlias && legacySku && legacySku.toLowerCase() !== sku.toLowerCase()) {
     aliases.push({
