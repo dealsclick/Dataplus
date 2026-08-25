@@ -13976,7 +13976,7 @@ async function applyPendingCategoryReviewSuggestions(db = {}, options = {}) {
 async function applyCategoryReviewDecision(db = {}, options = {}) {
   const channel = categoryReviewChannel(options.channel);
   const action = String(options.action || "approve").trim().toLowerCase();
-  if (!["approve", "deny", "block"].includes(action)) throw new Error("Choose approve, deny, or block.");
+  if (!["approve", "deny", "block", "unmatch"].includes(action)) throw new Error("Choose approve, deny, block, or unmatched.");
   const reviewedBy = sourceTextValue(options.reviewedBy) || "Luis";
   const now = new Date().toISOString();
   const status = action === "approve" ? (options.status || "pending") : (options.status || "all");
@@ -14047,6 +14047,46 @@ async function applyCategoryReviewDecision(db = {}, options = {}) {
         matchSource: `${channel}-category-review-denied`,
         notes: [current.notes, sourceTextValue(options.note)].filter(Boolean).join("\n").trim()
       };
+    } else if (action === "unmatch") {
+      nextMapping = {
+        ...current,
+        categoryId: "",
+        categoryPath: "",
+        categoryHandle: "",
+        taxonomyVersion: "",
+        categoryTreeVersion: current.categoryTreeVersion || "",
+        status: "missing",
+        decision: "unmatched",
+        confidence: null,
+        confidenceLevel: "none",
+        matchSource: `${channel}-category-review-unmatched`,
+        matchedAt: "",
+        reviewedBy,
+        reviewedAt: now,
+        deniedAt: "",
+        deniedBy: "",
+        blocked: false,
+        blockedAt: "",
+        blockedBy: "",
+        blockReason: "",
+        pendingSuggestion: null,
+        locked: false,
+        lockedAt: "",
+        lockedBy: "",
+        unlockedAt: now,
+        unlockedBy: reviewedBy
+      };
+      if (channel === "shopify") {
+        nextMapping.googleCategory = null;
+        nextMapping.googleCategoryId = "";
+        nextMapping.googleCategoryPath = "";
+        nextMapping.shopifyTaxonomyCategoryId = "";
+        nextMapping.shopifyTaxonomyCategoryPath = "";
+      }
+      if (channel === "ebay") {
+        nextMapping.ebayCategoryId = "";
+        nextMapping.ebayCategoryPath = "";
+      }
     } else {
       nextMapping = {
         ...current,
@@ -14069,7 +14109,7 @@ async function applyCategoryReviewDecision(db = {}, options = {}) {
       };
     }
     category.mappings[channel] = withCategoryMappingHistory(current, nextMapping, `category-review-${action}`, reviewedBy);
-    category.status = action === "block" ? "blocked" : action === "approve" ? "mapped" : category.status || "needs_review";
+    category.status = action === "block" ? "blocked" : action === "approve" ? "mapped" : action === "unmatch" ? "needs_review" : category.status || "needs_review";
     category.updatedBy = reviewedBy;
     category.updatedAt = now;
     changedCategories.push(category);
@@ -42664,7 +42704,7 @@ async function handleApi(req, res) {
       action,
       reviewedBy: body.reviewedBy || "Luis"
     });
-    const actionLabel = action === "block" ? "Blocked" : action === "deny" ? "Denied" : "Approved";
+    const actionLabel = action === "block" ? "Blocked" : action === "deny" ? "Denied" : action === "unmatch" ? "Marked unmatched" : "Approved";
     return sendJson(res, 200, {
       ...result,
       message: `${actionLabel} ${result.changed.toLocaleString()} ${channel === "shopify" ? "Shopify" : "eBay"} category decision${result.changed === 1 ? "" : "s"}.${result.skipped.length ? ` ${result.skipped.length.toLocaleString()} skipped.` : ""}`

@@ -15339,7 +15339,8 @@ function CategoryReviewPage() {
   const [searching, setSearching] = useState(false)
   const [showCategoryStats, setShowCategoryStats] = useState(false)
   const [manualMappingPrompt, setManualMappingPrompt] = useState<{ row: CategoryReviewRow; mapping: CategoryChannelMapping } | null>(null)
-  const [pendingCategoryDecisions, setPendingCategoryDecisions] = useState<Record<string, { action: "approve" | "deny" | "block"; mapping?: CategoryChannelMapping; label: string }>>({})
+  type CategoryReviewDecisionAction = "approve" | "deny" | "block" | "unmatch"
+  const [pendingCategoryDecisions, setPendingCategoryDecisions] = useState<Record<string, { action: CategoryReviewDecisionAction; mapping?: CategoryChannelMapping; label: string }>>({})
   const [columnWidths, setColumnWidths] = useState({
     select: 48,
     local: 520,
@@ -15421,7 +15422,14 @@ function CategoryReviewPage() {
     }
   }
 
-  function stageCategoryDecision(row: CategoryReviewRow, action: "approve" | "deny" | "block", mapping?: CategoryChannelMapping) {
+  function categoryReviewDecisionLabel(action: CategoryReviewDecisionAction) {
+    if (action === "approve") return "approve"
+    if (action === "deny") return "deny"
+    if (action === "block") return "block"
+    return "mark as unmatched"
+  }
+
+  function stageCategoryDecision(row: CategoryReviewRow, action: CategoryReviewDecisionAction, mapping?: CategoryChannelMapping) {
     const id = rowId(row)
     if (!id) return
     if (action === "approve" && !mapping?.categoryId && !row.pendingSuggestion?.categoryId && !row.mapping?.categoryId) {
@@ -15432,11 +15440,11 @@ function CategoryReviewPage() {
       ...current,
       [id]: { action, mapping, label: row.name || id },
     }))
-    const verb = action === "approve" ? "approve" : action === "deny" ? "deny" : "block"
+    const verb = categoryReviewDecisionLabel(action)
     setDecisionStatus({ state: "done", message: `Marked "${row.name || id}" to ${verb}. Use Save when you are ready to apply changes.` })
   }
 
-  function stageSelectedDecision(action: "approve" | "deny" | "block") {
+  function stageSelectedDecision(action: CategoryReviewDecisionAction) {
     const targets = sortedRows.filter((row) => allFiltered || selected.has(rowId(row)))
     if (!targets.length) return toast.error("Select categories first.")
     let staged = 0
@@ -15454,7 +15462,7 @@ function CategoryReviewPage() {
     if (!staged) return toast.error("None of the selected rows have a category suggestion to approve.")
     setSelected(new Set())
     setAllFiltered(false)
-    const verb = action === "approve" ? "approve" : action === "deny" ? "deny" : "block"
+    const verb = categoryReviewDecisionLabel(action)
     setDecisionStatus({ state: "done", message: `Marked ${numberLabel(staged)} visible categor${staged === 1 ? "y" : "ies"} to ${verb}. Use Save when you are ready to apply changes.` })
   }
 
@@ -15466,14 +15474,14 @@ function CategoryReviewPage() {
     try {
       let changed = 0
       const approvedIds: string[] = []
-      const grouped: Record<"approve" | "deny" | "block", string[]> = { approve: [], deny: [], block: [] }
-      const manualEntries: Array<[string, { action: "approve" | "deny" | "block"; mapping?: CategoryChannelMapping; label: string }]> = []
+      const grouped: Record<CategoryReviewDecisionAction, string[]> = { approve: [], deny: [], block: [], unmatch: [] }
+      const manualEntries: Array<[string, { action: CategoryReviewDecisionAction; mapping?: CategoryChannelMapping; label: string }]> = []
       entries.forEach(([id, decision]) => {
         if (decision.mapping) manualEntries.push([id, decision])
         else grouped[decision.action].push(id)
         if (decision.action === "approve") approvedIds.push(id)
       })
-      for (const action of ["approve", "deny", "block"] as const) {
+      for (const action of ["approve", "deny", "block", "unmatch"] as const) {
         const ids = grouped[action]
         if (!ids.length) continue
         const result = await api<{ changed?: number; message?: string }>("/api/categories/channel-review/decision", {
@@ -15610,7 +15618,7 @@ function CategoryReviewPage() {
         </div>
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm">
           <div className="flex flex-wrap items-center gap-3"><label className="flex items-center gap-2"><Checkbox checked={pageSelected || allFiltered} onCheckedChange={(checked) => { const next = checked === true; setAllFiltered(false); setSelected(next ? new Set(pageIds) : new Set()) }} /> Select page</label><Button size="sm" variant={allFiltered ? "secondary" : "outline"} disabled={!total} onClick={() => { setAllFiltered(true); setSelected(new Set()) }}>Select all filtered ({numberLabel(total)})</Button><label className="flex items-center gap-2 text-muted-foreground"><Checkbox checked={showCategoryStats} onCheckedChange={(checked) => setShowCategoryStats(checked === true)} /> Show SKU counts</label><Button size="sm" variant="ghost" onClick={() => setColumnWidths(defaultCategoryReviewColumnWidths)}>Reset widths</Button></div>
-          <div className="flex flex-wrap gap-2"><Button size="sm" disabled={!selectedCount || busy || status !== "pending"} onClick={() => stageSelectedDecision("approve")}>Mark approve</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => stageSelectedDecision("deny")}>Mark deny</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => stageSelectedDecision("block")}>Mark block</Button><Button size="sm" variant="outline" disabled={busy || (!allFiltered && !selectedMappedIds.length) || (allFiltered && status !== "mapped")} onClick={() => openRefresh(allFiltered ? [] : selectedMappedIds, undefined, allFiltered)}>Refresh mapped SKUs</Button></div>
+          <div className="flex flex-wrap gap-2"><Button size="sm" disabled={!selectedCount || busy || status !== "pending"} onClick={() => stageSelectedDecision("approve")}>Mark approve</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => stageSelectedDecision("deny")}>Mark deny</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => stageSelectedDecision("unmatch")}>Mark unmatched</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => stageSelectedDecision("block")}>Mark block</Button><Button size="sm" variant="outline" disabled={busy || (!allFiltered && !selectedMappedIds.length) || (allFiltered && status !== "mapped")} onClick={() => openRefresh(allFiltered ? [] : selectedMappedIds, undefined, allFiltered)}>Refresh mapped SKUs</Button></div>
         </div>
         {pendingDecisionCount ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-sm text-blue-900 dark:text-blue-100"><span>{numberLabel(pendingDecisionCount)} pending decision{pendingDecisionCount === 1 ? "" : "s"} ready to save.</span><div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => void savePendingCategoryDecisions(false)} disabled={busy}>{busy ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Save</Button><Button size="sm" variant="outline" onClick={() => void savePendingCategoryDecisions(true)} disabled={busy}>Save and update</Button><Button size="sm" variant="ghost" onClick={() => setPendingCategoryDecisions({})} disabled={busy}>Clear</Button></div></div> : null}
       </CardHeader>
@@ -15628,8 +15636,8 @@ function CategoryReviewPage() {
           <TableCell><Checkbox aria-label={`Select ${row.name}`} checked={allFiltered || selected.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} /></TableCell>
           <TableCell className="whitespace-normal border-l-2 border-blue-500/40 bg-blue-500/5 align-top py-2 dark:bg-blue-500/10"><a className="block break-words text-sm font-medium leading-5 text-blue-950 hover:underline dark:text-blue-100" href={`/categories/${encodeURIComponent(id)}`}>{row.name || "Unnamed category"}</a>{showCategoryStats ? <><p className="mt-0.5 text-[11px] text-muted-foreground">{numberLabel(row.productCount || 0)} products / {numberLabel(row.stockProductCount || 0)} in stock</p><p className="mt-0.5 truncate text-[11px] text-muted-foreground">{(row.topVendors || []).slice(0, 2).map((vendor) => vendor.name).filter(Boolean).join(" / ") || "No vendor summary"}</p></> : null}</TableCell>
           <TableCell className="whitespace-normal border-l-2 border-emerald-500/40 bg-emerald-500/5 align-top py-2 dark:bg-emerald-500/10"><div className="flex min-w-0 items-start gap-2"><div className="min-w-0 flex-1"><p className="break-words text-[13px] font-medium leading-5 text-emerald-950 dark:text-emerald-100" title={channelPath || "No channel category selected"}>{channelPath || "No channel category selected"}</p>{suggestion?.categoryPath && !row.mapping?.categoryId ? <div className="mt-1 flex flex-wrap items-center gap-1.5"><Badge variant="outline" className={cn("h-5 px-1.5 text-[11px]", confidenceClass)}>Suggested {confidenceLabel || "no score"}</Badge></div> : null}{row.mapping?.blockReason ? <p className="mt-1 break-words text-xs text-destructive">{row.mapping.blockReason}</p> : null}</div><Popover open={searchRowId === id} onOpenChange={(open) => { setSearchRowId(open ? id : ""); if (open) { setCategorySearch(row.name || ""); setCategoryResults([]); void searchCachedCategories(row, row.name || "") } }}><PopoverTrigger asChild><Button size="sm" variant="outline" className="h-7 shrink-0 border-emerald-500/30 bg-emerald-500/10 px-2 text-xs text-emerald-800 hover:bg-emerald-500/15 dark:text-emerald-200"><Search className="size-3.5" /> Search</Button></PopoverTrigger><PopoverContent className="w-[min(620px,calc(100vw-2rem))] p-3" align="start"><div className="grid gap-2"><div className="grid gap-1 rounded-md bg-muted/40 p-2 text-xs"><p><span className="font-medium">Local:</span> {row.name || "Unnamed category"}</p><p><span className="font-medium">{channel === "ebay" ? "eBay" : "Shopify"}:</span> {channelPath || "No channel category selected"}</p></div><div className="flex gap-2"><Input className="h-8 text-sm" value={categorySearch} onChange={(event) => setCategorySearch(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void searchCachedCategories(row)} placeholder="Search cached taxonomy" /><Button size="sm" variant="outline" className="h-8" onClick={() => void searchCachedCategories(row)} disabled={searching}>{searching ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}</Button></div><div className="max-h-80 overflow-y-auto rounded-md border">{categoryResults.length ? categoryResults.map((candidate, index) => { const candidateId = String(candidate.categoryId || candidate.id || ""); const path = String(candidate.categoryPath || candidate.fullName || candidate.name || candidateId); return <button key={`${candidateId}-${index}`} type="button" className="block w-full border-b p-2.5 text-left last:border-b-0 hover:bg-muted" onClick={() => { setManualMappingPrompt({ row, mapping: { ...candidate, categoryId: candidateId, categoryPath: path } }); setSearchRowId("") }}><p className="font-mono text-[11px] text-muted-foreground">{candidateId || "No ID"}</p><p className="mt-1 text-sm font-medium leading-5">{path}</p></button> }) : <p className="p-4 text-sm text-muted-foreground">{searching ? "Searching..." : "No cached results yet."}</p>}</div></div></PopoverContent></Popover></div></TableCell>
-          <TableCell className="whitespace-normal align-top"><Badge variant="outline" className={cn("capitalize", statusClass)}>{statusValue === "missing" ? "unmatched" : statusValue.replace(/_/g, " ")}</Badge>{pendingDecision ? <Badge variant="outline" className="ml-1 border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300">Save pending: {pendingDecision.action}</Badge> : null}{row.locked ? <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p> : null}<p className="mt-1 text-xs text-muted-foreground">{row.lastRefreshAt ? dateLabel(row.lastRefreshAt) : "Not refreshed"}</p>{row.lastRefreshJobId ? <a className="text-xs text-primary hover:underline" href={`/jobs/${encodeURIComponent(row.lastRefreshJobId)}`}>Open job</a> : null}</TableCell>
-          <TableCell><div className="flex justify-end"><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant={pendingDecision ? "secondary" : "outline"}>{pendingDecision ? pendingDecision.action : "Action"}</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={busy || (!suggestion?.categoryId && !row.mapping?.categoryId)} onClick={() => stageCategoryDecision(row, "approve")}><CheckCircle2 className="size-4" /> Mark approve</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "deny")}>Mark deny</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "block")}>Mark block</DropdownMenuItem>{pendingDecision ? <DropdownMenuItem disabled={busy} onClick={() => setPendingCategoryDecisions((current) => { const next = { ...current }; delete next[id]; return next })}>Clear pending decision</DropdownMenuItem> : null}<DropdownMenuSeparator />{row.mapping?.categoryId ? <><DropdownMenuItem onClick={() => openRefresh([id], row.name)}><RefreshCw className="size-4" /> Refresh category now</DropdownMenuItem><DropdownMenuItem onClick={() => { openRefresh([id], row.name); setRefreshTiming("later") }}><Clock3 className="size-4" /> Schedule refresh</DropdownMenuItem><DropdownMenuSeparator /></> : null}<DropdownMenuItem asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open category</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></TableCell>
+          <TableCell className="whitespace-normal align-top"><Badge variant="outline" className={cn("capitalize", statusClass)}>{statusValue === "missing" ? "unmatched" : statusValue.replace(/_/g, " ")}</Badge>{pendingDecision ? <Badge variant="outline" className="ml-1 border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300">Save pending: {pendingDecision.action === "unmatch" ? "unmatched" : pendingDecision.action}</Badge> : null}{row.locked ? <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p> : null}<p className="mt-1 text-xs text-muted-foreground">{row.lastRefreshAt ? dateLabel(row.lastRefreshAt) : "Not refreshed"}</p>{row.lastRefreshJobId ? <a className="text-xs text-primary hover:underline" href={`/jobs/${encodeURIComponent(row.lastRefreshJobId)}`}>Open job</a> : null}</TableCell>
+          <TableCell><div className="flex justify-end"><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant={pendingDecision ? "secondary" : "outline"}>{pendingDecision ? pendingDecision.action === "unmatch" ? "unmatched" : pendingDecision.action : "Action"}</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={busy || (!suggestion?.categoryId && !row.mapping?.categoryId)} onClick={() => stageCategoryDecision(row, "approve")}><CheckCircle2 className="size-4" /> Mark approve</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "deny")}>Mark deny</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "unmatch")}>Mark unmatched</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "block")}>Mark block</DropdownMenuItem>{pendingDecision ? <DropdownMenuItem disabled={busy} onClick={() => setPendingCategoryDecisions((current) => { const next = { ...current }; delete next[id]; return next })}>Clear pending decision</DropdownMenuItem> : null}<DropdownMenuSeparator />{row.mapping?.categoryId ? <><DropdownMenuItem onClick={() => openRefresh([id], row.name)}><RefreshCw className="size-4" /> Refresh category now</DropdownMenuItem><DropdownMenuItem onClick={() => { openRefresh([id], row.name); setRefreshTiming("later") }}><Clock3 className="size-4" /> Schedule refresh</DropdownMenuItem><DropdownMenuSeparator /></> : null}<DropdownMenuItem asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open category</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></TableCell>
         </TableRow>
       })}{!sortedRows.length && <TableRow><TableCell colSpan={5} className="h-28 text-center text-muted-foreground">No category mappings match this review view.</TableCell></TableRow>}</TableBody></Table>}</CardContent>
       <CardFooter className="flex flex-wrap items-center justify-between gap-3 border-t text-sm text-muted-foreground"><span>Page {page} of {pageCount} / {numberLabel(total)} categories</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => void load(page - 1)}>Previous</Button><Button size="sm" variant="outline" disabled={loading || page >= pageCount} onClick={() => void load(page + 1)}>Next</Button></div></CardFooter>
