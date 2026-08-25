@@ -15255,13 +15255,13 @@ function CategoryReviewPage() {
   const [searching, setSearching] = useState(false)
   const [showCategoryStats, setShowCategoryStats] = useState(false)
   const [manualMappingPrompt, setManualMappingPrompt] = useState<{ row: CategoryReviewRow; mapping: CategoryChannelMapping } | null>(null)
+  const [pendingCategoryDecisions, setPendingCategoryDecisions] = useState<Record<string, { action: "approve" | "deny" | "block"; mapping?: CategoryChannelMapping; label: string }>>({})
   const [columnWidths, setColumnWidths] = useState({
     select: 48,
     local: 520,
     channel: 760,
     status: 130,
-    decision: 120,
-    more: 92,
+    action: 160,
   })
   const [refreshPrompt, setRefreshPrompt] = useState<{ ids: string[]; categoryName?: string; count: number; allFiltered?: boolean } | null>(null)
   const [refreshTiming, setRefreshTiming] = useState<"now" | "later">("now")
@@ -15324,33 +15324,93 @@ function CategoryReviewPage() {
     }
   }
 
-  async function decide(action: "approve" | "deny" | "block", ids?: string[], mapping?: CategoryChannelMapping) {
-    const count = ids?.length || selectedCount
-    if (!count) return toast.error("Select categories first.")
-    const verb = action === "approve" ? "approve" : action === "deny" ? "deny" : "block from selling"
-    if (!mapping && !window.confirm(`${verb[0].toUpperCase()}${verb.slice(1)} ${numberLabel(count)} ${channel === "ebay" ? "eBay" : "Shopify"} categor${count === 1 ? "y" : "ies"}?`)) return
-    setBusy(true)
-    setDecisionStatus({ state: "running", message: `${verb[0].toUpperCase()}${verb.slice(1)} ${numberLabel(count)} ${channel === "ebay" ? "eBay" : "Shopify"} categor${count === 1 ? "y" : "ies"}...` })
-    try {
-      const result = await api<{ changed?: number; skipped?: unknown[]; message?: string }>("/api/categories/channel-review/decision", {
-        method: "POST",
-        body: JSON.stringify(requestPayload({ action, ids: ids || selectedIds, allFiltered: ids ? false : allFiltered, mapping, note: action === "block" ? "Do not sell this category on this channel." : "" })),
+  function stageCategoryDecision(row: CategoryReviewRow, action: "approve" | "deny" | "block", mapping?: CategoryChannelMapping) {
+    const id = rowId(row)
+    if (!id) return
+    if (action === "approve" && !mapping?.categoryId && !row.pendingSuggestion?.categoryId && !row.mapping?.categoryId) {
+      toast.error("Search and choose a channel category before approving this row.")
+      return
+    }
+    setPendingCategoryDecisions((current) => ({
+      ...current,
+      [id]: { action, mapping, label: row.name || id },
+    }))
+    const verb = action === "approve" ? "approve" : action === "deny" ? "deny" : "block"
+    setDecisionStatus({ state: "done", message: `Marked "${row.name || id}" to ${verb}. Use Save when you are ready to apply changes.` })
+  }
+
+  function stageSelectedDecision(action: "approve" | "deny" | "block") {
+    const targets = rows.filter((row) => allFiltered || selected.has(rowId(row)))
+    if (!targets.length) return toast.error("Select categories first.")
+    let staged = 0
+    setPendingCategoryDecisions((current) => {
+      const next = { ...current }
+      targets.forEach((row) => {
+        const id = rowId(row)
+        if (!id) return
+        if (action === "approve" && !row.pendingSuggestion?.categoryId && !row.mapping?.categoryId) return
+        next[id] = { action, label: row.name || id }
+        staged += 1
       })
-      const finalMessage = result.message || "Category decision saved."
+      return next
+    })
+    if (!staged) return toast.error("None of the selected rows have a category suggestion to approve.")
+    setSelected(new Set())
+    setAllFiltered(false)
+    const verb = action === "approve" ? "approve" : action === "deny" ? "deny" : "block"
+    setDecisionStatus({ state: "done", message: `Marked ${numberLabel(staged)} visible categor${staged === 1 ? "y" : "ies"} to ${verb}. Use Save when you are ready to apply changes.` })
+  }
+
+  async function savePendingCategoryDecisions(updateAfter = false) {
+    const entries = Object.entries(pendingCategoryDecisions)
+    if (!entries.length) return toast.error("Mark one or more category decisions first.")
+    setBusy(true)
+    setDecisionStatus({ state: "running", message: `Saving ${numberLabel(entries.length)} category decision${entries.length === 1 ? "" : "s"}...` })
+    try {
+      let changed = 0
+      const approvedIds: string[] = []
+      const grouped: Record<"approve" | "deny" | "block", string[]> = { approve: [], deny: [], block: [] }
+      const manualEntries: Array<[string, { action: "approve" | "deny" | "block"; mapping?: CategoryChannelMapping; label: string }]> = []
+      entries.forEach(([id, decision]) => {
+        if (decision.mapping) manualEntries.push([id, decision])
+        else grouped[decision.action].push(id)
+        if (decision.action === "approve") approvedIds.push(id)
+      })
+      for (const action of ["approve", "deny", "block"] as const) {
+        const ids = grouped[action]
+        if (!ids.length) continue
+        const result = await api<{ changed?: number; message?: string }>("/api/categories/channel-review/decision", {
+          method: "POST",
+          body: JSON.stringify(requestPayload({ action, ids, allFiltered: false, note: action === "block" ? "Do not sell this category on this channel." : "" })),
+        })
+        changed += Number(result.changed || ids.length)
+      }
+      for (const [id, decision] of manualEntries) {
+        const result = await api<{ changed?: number; message?: string }>("/api/categories/channel-review/decision", {
+          method: "POST",
+          body: JSON.stringify(requestPayload({ action: decision.action, ids: [id], allFiltered: false, mapping: decision.mapping, note: decision.action === "block" ? "Do not sell this category on this channel." : "" })),
+        })
+        changed += Number(result.changed || 1)
+      }
+      let refreshMessage = ""
+      if (updateAfter && approvedIds.length) {
+        const refresh = await api<{ job?: ImportJob; message?: string }>("/api/categories/channel-review/refresh-products", {
+          method: "POST",
+          body: JSON.stringify(requestPayload({ ids: approvedIds, allFiltered: false, status: "mapped", updateExistingSkus: true, updateChannelRecords: true })),
+        })
+        refreshMessage = refresh.job?.id ? ` SKU refresh queued as job ${refresh.job.id}.` : ` ${refresh.message || "SKU refresh queued."}`
+      }
+      const finalMessage = `Saved ${numberLabel(changed || entries.length)} category decision${(changed || entries.length) === 1 ? "" : "s"}.${refreshMessage}`
       toast.success(finalMessage)
+      setPendingCategoryDecisions({})
       setSelected(new Set())
       setAllFiltered(false)
-      if (!mapping && (allFiltered || count > 1)) {
-        setRows([])
-        setTotal(0)
-        setPage(1)
-      }
       setSearchRowId("")
       setCategoryResults([])
       await load(1)
       setDecisionStatus({ state: "done", message: `${finalMessage} Review list refreshed.` })
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to save category decision."
+      const message = error instanceof Error ? error.message : "Unable to save category decisions."
       setDecisionStatus({ state: "error", message })
       toast.error(message)
     } finally {
@@ -15407,10 +15467,11 @@ function CategoryReviewPage() {
   const pageIds = rows.map(rowId).filter(Boolean)
   const pageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id))
   const selectedMappedIds = allFiltered ? [] : rows.filter((row) => selected.has(rowId(row)) && row.mapping?.categoryId).map(rowId)
-  const actionHint = "Approve saves a channel mapping, deny clears the suggestion, and block prevents selling that category on the selected channel."
-  const defaultCategoryReviewColumnWidths = { select: 48, local: 520, channel: 760, status: 130, decision: 120, more: 92 }
-  type CategoryReviewResizableColumn = "local" | "channel" | "status" | "decision" | "more"
-  const columnMinimums: Record<CategoryReviewResizableColumn, number> = { local: 280, channel: 420, status: 110, decision: 100, more: 76 }
+  const pendingDecisionCount = Object.keys(pendingCategoryDecisions).length
+  const actionHint = "Mark decisions first, then Save to apply them. Save and update also queues a local SKU/category metadata refresh."
+  const defaultCategoryReviewColumnWidths = { select: 48, local: 520, channel: 760, status: 130, action: 160 }
+  type CategoryReviewResizableColumn = "local" | "channel" | "status" | "action"
+  const columnMinimums: Record<CategoryReviewResizableColumn, number> = { local: 280, channel: 420, status: 110, action: 130 }
   const tableWidth = Object.values(columnWidths).reduce((sum, width) => sum + width, 0)
   function startColumnResize(column: CategoryReviewResizableColumn, event: ReactMouseEvent<HTMLButtonElement>) {
     event.preventDefault()
@@ -15435,7 +15496,7 @@ function CategoryReviewPage() {
   }
 
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Catalog" title="Category Review" description="Review each channel taxonomy queue, search cached categories, approve or deny suggestions, block categories from sale, and schedule SKU refresh jobs." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void load()} disabled={loading || busy}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button><Button size="sm" onClick={() => void decide("approve")} disabled={!selectedCount || busy || status !== "pending"}><CheckCircle2 className="size-4" /> Approve</Button><Button size="sm" variant="outline" onClick={() => void decide("deny")} disabled={!selectedCount || busy}>Deny</Button><Button size="sm" variant="outline" onClick={() => void decide("block")} disabled={!selectedCount || busy}>Block</Button></div>} />
+    <PageHeader eyebrow="Catalog" title="Category Review" description="Review each channel taxonomy queue, search cached categories, approve or deny suggestions, block categories from sale, and schedule SKU refresh jobs." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void load()} disabled={loading || busy}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button><Button size="sm" onClick={() => void savePendingCategoryDecisions(false)} disabled={!pendingDecisionCount || busy}><CheckCircle2 className="size-4" /> Save</Button><Button size="sm" variant="outline" onClick={() => void savePendingCategoryDecisions(true)} disabled={!pendingDecisionCount || busy}>Save and update</Button></div>} />
     {loadError ? <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">Category review failed to load: {loadError}</div> : null}
     {decisionStatus ? <div className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${decisionStatus.state === "error" ? "border-destructive/30 bg-destructive/10 text-destructive" : decisionStatus.state === "done" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-primary/30 bg-primary/10 text-primary"}`}>{decisionStatus.state === "running" ? <Loader2 className="size-4 animate-spin" /> : decisionStatus.state === "done" ? <CheckCircle2 className="size-4" /> : null}<span>{decisionStatus.message}</span>{decisionStatus.state !== "running" ? <Button size="sm" variant="ghost" className="ml-auto h-7 px-2" onClick={() => setDecisionStatus(null)}>Dismiss</Button> : null}</div> : null}
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6"><Detail label="Needs review" value={numberLabel(summary?.pending || 0)} /><Detail label="Approved" value={numberLabel(summary?.mapped || 0)} /><Detail label="Unmatched" value={numberLabel(summary?.missing || 0)} /><Detail label="Denied" value={numberLabel(summary?.denied || 0)} /><Detail label="Blocked" value={numberLabel(summary?.blocked || 0)} /><Detail label="Mapped products" value={numberLabel(summary?.mappedProducts || 0)} /></div>
@@ -15451,12 +15512,14 @@ function CategoryReviewPage() {
         </div>
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm">
           <div className="flex flex-wrap items-center gap-3"><label className="flex items-center gap-2"><Checkbox checked={pageSelected || allFiltered} onCheckedChange={(checked) => { const next = checked === true; setAllFiltered(false); setSelected(next ? new Set(pageIds) : new Set()) }} /> Select page</label><Button size="sm" variant={allFiltered ? "secondary" : "outline"} disabled={!total} onClick={() => { setAllFiltered(true); setSelected(new Set()) }}>Select all filtered ({numberLabel(total)})</Button><label className="flex items-center gap-2 text-muted-foreground"><Checkbox checked={showCategoryStats} onCheckedChange={(checked) => setShowCategoryStats(checked === true)} /> Show SKU counts</label><Button size="sm" variant="ghost" onClick={() => setColumnWidths(defaultCategoryReviewColumnWidths)}>Reset widths</Button></div>
-          <div className="flex flex-wrap gap-2"><Button size="sm" disabled={!selectedCount || busy || status !== "pending"} onClick={() => void decide("approve")}>Approve</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => void decide("deny")}>Deny</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => void decide("block")}>Block</Button><Button size="sm" variant="outline" disabled={busy || (!allFiltered && !selectedMappedIds.length) || (allFiltered && status !== "mapped")} onClick={() => openRefresh(allFiltered ? [] : selectedMappedIds, undefined, allFiltered)}>Refresh mapped SKUs</Button></div>
+          <div className="flex flex-wrap gap-2"><Button size="sm" disabled={!selectedCount || busy || status !== "pending"} onClick={() => stageSelectedDecision("approve")}>Mark approve</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => stageSelectedDecision("deny")}>Mark deny</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => stageSelectedDecision("block")}>Mark block</Button><Button size="sm" variant="outline" disabled={busy || (!allFiltered && !selectedMappedIds.length) || (allFiltered && status !== "mapped")} onClick={() => openRefresh(allFiltered ? [] : selectedMappedIds, undefined, allFiltered)}>Refresh mapped SKUs</Button></div>
         </div>
+        {pendingDecisionCount ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-sm text-blue-900 dark:text-blue-100"><span>{numberLabel(pendingDecisionCount)} pending decision{pendingDecisionCount === 1 ? "" : "s"} ready to save.</span><div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => void savePendingCategoryDecisions(false)} disabled={busy}>{busy ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Save</Button><Button size="sm" variant="outline" onClick={() => void savePendingCategoryDecisions(true)} disabled={busy}>Save and update</Button><Button size="sm" variant="ghost" onClick={() => setPendingCategoryDecisions({})} disabled={busy}>Clear</Button></div></div> : null}
       </CardHeader>
-      <CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <Table className="table-fixed" style={{ width: tableWidth }}><colgroup><col style={{ width: columnWidths.select }} /><col style={{ width: columnWidths.local }} /><col style={{ width: columnWidths.channel }} /><col style={{ width: columnWidths.status }} /><col style={{ width: columnWidths.decision }} /><col style={{ width: columnWidths.more }} /></colgroup><TableHeader><TableRow><TableHead className="w-10" style={{ width: columnWidths.select }} />{resizableHeader("Local category", "local")}{resizableHeader("Channel category", "channel")}{resizableHeader("Status", "status")}{resizableHeader("Decision", "decision", "text-right")}{resizableHeader("More", "more", "text-right")}</TableRow></TableHeader><TableBody>{rows.map((row) => {
+      <CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <Table className="table-fixed" style={{ width: tableWidth }}><colgroup><col style={{ width: columnWidths.select }} /><col style={{ width: columnWidths.local }} /><col style={{ width: columnWidths.channel }} /><col style={{ width: columnWidths.status }} /><col style={{ width: columnWidths.action }} /></colgroup><TableHeader><TableRow><TableHead className="w-10" style={{ width: columnWidths.select }} />{resizableHeader("Local category", "local")}{resizableHeader("Channel category", "channel")}{resizableHeader("Status", "status")}{resizableHeader("Action", "action", "text-right")}</TableRow></TableHeader><TableBody>{rows.map((row) => {
         const id = rowId(row)
         const suggestion = row.pendingSuggestion
+        const pendingDecision = pendingCategoryDecisions[id]
         const statusValue = row.reviewStatus || (row.mapping?.blocked ? "blocked" : suggestion ? "pending" : row.mapping?.categoryId ? "mapped" : "missing")
         const channelPath = row.mapping?.categoryPath || row.mapping?.categoryId || suggestion?.categoryPath || suggestion?.categoryId || ""
         const confidencePercent = row.confidence === null || row.confidence === undefined ? null : Math.round(Number(row.confidence) * 100)
@@ -15467,14 +15530,13 @@ function CategoryReviewPage() {
           <TableCell><Checkbox aria-label={`Select ${row.name}`} checked={allFiltered || selected.has(id)} onCheckedChange={(checked) => toggleRow(id, checked === true)} /></TableCell>
           <TableCell className="whitespace-normal border-l-2 border-blue-500/40 bg-blue-500/5 align-top py-2 dark:bg-blue-500/10"><a className="block break-words text-sm font-medium leading-5 text-blue-950 hover:underline dark:text-blue-100" href={`/categories/${encodeURIComponent(id)}`}>{row.name || "Unnamed category"}</a>{showCategoryStats ? <><p className="mt-0.5 text-[11px] text-muted-foreground">{numberLabel(row.productCount || 0)} products / {numberLabel(row.stockProductCount || 0)} in stock</p><p className="mt-0.5 truncate text-[11px] text-muted-foreground">{(row.topVendors || []).slice(0, 2).map((vendor) => vendor.name).filter(Boolean).join(" / ") || "No vendor summary"}</p></> : null}</TableCell>
           <TableCell className="whitespace-normal border-l-2 border-emerald-500/40 bg-emerald-500/5 align-top py-2 dark:bg-emerald-500/10"><div className="flex min-w-0 items-start gap-2"><div className="min-w-0 flex-1"><p className="break-words text-[13px] font-medium leading-5 text-emerald-950 dark:text-emerald-100" title={channelPath || "No channel category selected"}>{channelPath || "No channel category selected"}</p>{suggestion?.categoryPath && !row.mapping?.categoryId ? <div className="mt-1 flex flex-wrap items-center gap-1.5"><Badge variant="outline" className={cn("h-5 px-1.5 text-[11px]", confidenceClass)}>Suggested {confidenceLabel || "no score"}</Badge></div> : null}{row.mapping?.blockReason ? <p className="mt-1 break-words text-xs text-destructive">{row.mapping.blockReason}</p> : null}</div><Popover open={searchRowId === id} onOpenChange={(open) => { setSearchRowId(open ? id : ""); if (open) { setCategorySearch(row.name || ""); setCategoryResults([]); void searchCachedCategories(row, row.name || "") } }}><PopoverTrigger asChild><Button size="sm" variant="outline" className="h-7 shrink-0 border-emerald-500/30 bg-emerald-500/10 px-2 text-xs text-emerald-800 hover:bg-emerald-500/15 dark:text-emerald-200"><Search className="size-3.5" /> Search</Button></PopoverTrigger><PopoverContent className="w-[min(620px,calc(100vw-2rem))] p-3" align="start"><div className="grid gap-2"><div className="grid gap-1 rounded-md bg-muted/40 p-2 text-xs"><p><span className="font-medium">Local:</span> {row.name || "Unnamed category"}</p><p><span className="font-medium">{channel === "ebay" ? "eBay" : "Shopify"}:</span> {channelPath || "No channel category selected"}</p></div><div className="flex gap-2"><Input className="h-8 text-sm" value={categorySearch} onChange={(event) => setCategorySearch(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void searchCachedCategories(row)} placeholder="Search cached taxonomy" /><Button size="sm" variant="outline" className="h-8" onClick={() => void searchCachedCategories(row)} disabled={searching}>{searching ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}</Button></div><div className="max-h-80 overflow-y-auto rounded-md border">{categoryResults.length ? categoryResults.map((candidate, index) => { const candidateId = String(candidate.categoryId || candidate.id || ""); const path = String(candidate.categoryPath || candidate.fullName || candidate.name || candidateId); return <button key={`${candidateId}-${index}`} type="button" className="block w-full border-b p-2.5 text-left last:border-b-0 hover:bg-muted" onClick={() => { setManualMappingPrompt({ row, mapping: { ...candidate, categoryId: candidateId, categoryPath: path } }); setSearchRowId("") }}><p className="font-mono text-[11px] text-muted-foreground">{candidateId || "No ID"}</p><p className="mt-1 text-sm font-medium leading-5">{path}</p></button> }) : <p className="p-4 text-sm text-muted-foreground">{searching ? "Searching..." : "No cached results yet."}</p>}</div></div></PopoverContent></Popover></div></TableCell>
-          <TableCell className="whitespace-normal align-top"><Badge variant="outline" className={cn("capitalize", statusClass)}>{statusValue === "missing" ? "unmatched" : statusValue.replace(/_/g, " ")}</Badge>{row.locked ? <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p> : null}<p className="mt-1 text-xs text-muted-foreground">{row.lastRefreshAt ? dateLabel(row.lastRefreshAt) : "Not refreshed"}</p>{row.lastRefreshJobId ? <a className="text-xs text-primary hover:underline" href={`/jobs/${encodeURIComponent(row.lastRefreshJobId)}`}>Open job</a> : null}</TableCell>
-          <TableCell><div className="flex justify-end"><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline">Decide</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={busy || (!suggestion?.categoryId && !row.mapping?.categoryId)} onClick={() => void decide("approve", [id])}><CheckCircle2 className="size-4" /> Approve</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => void decide("deny", [id])}>Deny</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => void decide("block", [id])}>Block</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></TableCell>
-          <TableCell><div className="flex justify-end gap-2">{row.mapping?.categoryId ? <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => openRefresh([id], row.name)}><RefreshCw className="size-4" /> Refresh category now</DropdownMenuItem><DropdownMenuItem onClick={() => { openRefresh([id], row.name); setRefreshTiming("later") }}><Clock3 className="size-4" /> Schedule refresh</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open category</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu> : <Button size="sm" variant="outline" asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open</a></Button>}</div></TableCell>
+          <TableCell className="whitespace-normal align-top"><Badge variant="outline" className={cn("capitalize", statusClass)}>{statusValue === "missing" ? "unmatched" : statusValue.replace(/_/g, " ")}</Badge>{pendingDecision ? <Badge variant="outline" className="ml-1 border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300">Save pending: {pendingDecision.action}</Badge> : null}{row.locked ? <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><LockKeyhole className="size-3" /> Locked</p> : null}<p className="mt-1 text-xs text-muted-foreground">{row.lastRefreshAt ? dateLabel(row.lastRefreshAt) : "Not refreshed"}</p>{row.lastRefreshJobId ? <a className="text-xs text-primary hover:underline" href={`/jobs/${encodeURIComponent(row.lastRefreshJobId)}`}>Open job</a> : null}</TableCell>
+          <TableCell><div className="flex justify-end"><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant={pendingDecision ? "secondary" : "outline"}>{pendingDecision ? pendingDecision.action : "Action"}</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={busy || (!suggestion?.categoryId && !row.mapping?.categoryId)} onClick={() => stageCategoryDecision(row, "approve")}><CheckCircle2 className="size-4" /> Mark approve</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "deny")}>Mark deny</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => stageCategoryDecision(row, "block")}>Mark block</DropdownMenuItem>{pendingDecision ? <DropdownMenuItem disabled={busy} onClick={() => setPendingCategoryDecisions((current) => { const next = { ...current }; delete next[id]; return next })}>Clear pending decision</DropdownMenuItem> : null}<DropdownMenuSeparator />{row.mapping?.categoryId ? <><DropdownMenuItem onClick={() => openRefresh([id], row.name)}><RefreshCw className="size-4" /> Refresh category now</DropdownMenuItem><DropdownMenuItem onClick={() => { openRefresh([id], row.name); setRefreshTiming("later") }}><Clock3 className="size-4" /> Schedule refresh</DropdownMenuItem><DropdownMenuSeparator /></> : null}<DropdownMenuItem asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open category</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></TableCell>
         </TableRow>
-      })}{!rows.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No category mappings match this review view.</TableCell></TableRow>}</TableBody></Table>}</CardContent>
+      })}{!rows.length && <TableRow><TableCell colSpan={5} className="h-28 text-center text-muted-foreground">No category mappings match this review view.</TableCell></TableRow>}</TableBody></Table>}</CardContent>
       <CardFooter className="flex flex-wrap items-center justify-between gap-3 border-t text-sm text-muted-foreground"><span>Page {page} of {pageCount} / {numberLabel(total)} categories</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => void load(page - 1)}>Previous</Button><Button size="sm" variant="outline" disabled={loading || page >= pageCount} onClick={() => void load(page + 1)}>Next</Button></div></CardFooter>
     </Card>
-    <Dialog open={Boolean(manualMappingPrompt)} onOpenChange={(open) => { if (!open && !busy) setManualMappingPrompt(null) }}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>Approve channel category?</DialogTitle><DialogDescription>Confirm this manual category match before DataPlus saves and locks the mapping.</DialogDescription></DialogHeader>{manualMappingPrompt ? <div className="grid gap-3 text-sm"><div className="rounded-md border p-3"><p className="text-xs font-medium uppercase text-muted-foreground">Local category</p><p className="mt-1 font-medium">{manualMappingPrompt.row.name || "Unnamed category"}</p></div><div className="rounded-md border border-primary/30 bg-primary/5 p-3"><p className="text-xs font-medium uppercase text-muted-foreground">{channel === "ebay" ? "eBay" : "Shopify"} category to save</p><p className="mt-1 font-medium">{String(manualMappingPrompt.mapping.categoryPath || manualMappingPrompt.mapping.fullName || manualMappingPrompt.mapping.name || manualMappingPrompt.mapping.categoryId || "")}</p>{manualMappingPrompt.mapping.categoryId ? <p className="mt-1 font-mono text-xs text-muted-foreground">{String(manualMappingPrompt.mapping.categoryId)}</p> : null}</div></div> : null}<DialogFooter><Button variant="outline" onClick={() => setManualMappingPrompt(null)} disabled={busy}>Cancel</Button><Button onClick={() => { if (!manualMappingPrompt) return; void decide("approve", [rowId(manualMappingPrompt.row)], manualMappingPrompt.mapping).then(() => setManualMappingPrompt(null)) }} disabled={busy}>{busy ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Approve and save</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(manualMappingPrompt)} onOpenChange={(open) => { if (!open && !busy) setManualMappingPrompt(null) }}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>Mark channel category for approval?</DialogTitle><DialogDescription>This adds the manual match to pending decisions. It will not save until you click Save or Save and update.</DialogDescription></DialogHeader>{manualMappingPrompt ? <div className="grid gap-3 text-sm"><div className="rounded-md border p-3"><p className="text-xs font-medium uppercase text-muted-foreground">Local category</p><p className="mt-1 font-medium">{manualMappingPrompt.row.name || "Unnamed category"}</p></div><div className="rounded-md border border-primary/30 bg-primary/5 p-3"><p className="text-xs font-medium uppercase text-muted-foreground">{channel === "ebay" ? "eBay" : "Shopify"} category to save</p><p className="mt-1 font-medium">{String(manualMappingPrompt.mapping.categoryPath || manualMappingPrompt.mapping.fullName || manualMappingPrompt.mapping.name || manualMappingPrompt.mapping.categoryId || "")}</p>{manualMappingPrompt.mapping.categoryId ? <p className="mt-1 font-mono text-xs text-muted-foreground">{String(manualMappingPrompt.mapping.categoryId)}</p> : null}</div></div> : null}<DialogFooter><Button variant="outline" onClick={() => setManualMappingPrompt(null)} disabled={busy}>Cancel</Button><Button onClick={() => { if (!manualMappingPrompt) return; stageCategoryDecision(manualMappingPrompt.row, "approve", manualMappingPrompt.mapping); setManualMappingPrompt(null) }} disabled={busy}>{busy ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Add to pending</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={Boolean(refreshPrompt)} onOpenChange={(open) => { if (!open && !busy) setRefreshPrompt(null) }}><DialogContent><DialogHeader><DialogTitle>Refresh category SKU records</DialogTitle><DialogDescription>{(refreshPrompt?.categoryName || refreshPrompt?.count === 1) ? "Queue a DataPlus metadata refresh for this category." : `Queue a DataPlus metadata refresh for ${numberLabel(refreshPrompt?.count || 0)} categories.`}</DialogDescription></DialogHeader><div className="grid gap-4"><Alert><Clock3 className="size-4" /><AlertTitle>Local metadata only</AlertTitle><AlertDescription>This updates DataPlus SKU/channel category records. It does not publish or revise marketplace listings.</AlertDescription></Alert><div className="grid gap-2 sm:grid-cols-2"><Button type="button" variant={refreshTiming === "now" ? "default" : "outline"} onClick={() => setRefreshTiming("now")}><RefreshCw className="size-4" /> Now</Button><Button type="button" variant={refreshTiming === "later" ? "default" : "outline"} onClick={() => setRefreshTiming("later")}><Clock3 className="size-4" /> Schedule</Button></div>{refreshTiming === "later" ? <div className="grid gap-2"><Label>Scheduled time</Label><Input type="datetime-local" value={refreshAt} min={new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)} onChange={(event) => setRefreshAt(event.target.value)} /></div> : null}</div><DialogFooter><Button variant="outline" onClick={() => setRefreshPrompt(null)} disabled={busy}>Cancel</Button><Button onClick={startRefreshPrompt} disabled={busy || (refreshTiming === "later" && !refreshAt)}>{busy ? <Loader2 className="size-4 animate-spin" /> : refreshTiming === "later" ? <Clock3 className="size-4" /> : <RefreshCw className="size-4" />}{refreshTiming === "later" ? "Schedule refresh" : "Refresh now"}</Button></DialogFooter></DialogContent></Dialog>
   </div>
 }
