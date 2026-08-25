@@ -5531,7 +5531,7 @@ async function listOrders(options = {}) {
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   params.push(limit);
-  const orderDateSql = "coalesce(order_date, created_at, updated_at)";
+  const orderDateSql = "order_date";
   const orderSelect = summary ? `
     select
       order_id,
@@ -5573,7 +5573,7 @@ async function listOrders(options = {}) {
     ${orderSelect}
     from order_records
     ${whereSql}
-    order by ${orderDateSql} desc, order_number desc
+    order by order_date desc nulls last, created_at desc, order_number desc
     limit $${params.length}
   `, params);
   const ids = orders.rows.map((row) => row.order_id).filter(Boolean);
