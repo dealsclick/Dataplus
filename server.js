@@ -13725,21 +13725,94 @@ function categoryReviewPublicRow(row = {}, channel = "ebay") {
   };
 }
 
+function categoryReviewRowsFromIndexedState(categoryState = {}, summaryRows = [], scope = "main") {
+  const normalizedScope = categoryReviewScope(scope);
+  const settings = normalizeCategorySettings(categoryState.categorySettings || []);
+  const settingsByName = new Map();
+  for (const setting of settings) {
+    const name = formatCategoryName(setting.name || setting.category || "");
+    if (name) settingsByName.set(name.toLowerCase(), setting);
+  }
+  const seen = new Set();
+  const rows = (Array.isArray(summaryRows) ? summaryRows : []).map((rawRow) => {
+    const name = formatCategoryName(rawRow.name || "Uncategorized") || "Uncategorized";
+    const key = name.toLowerCase();
+    seen.add(key);
+    const saved = settingsByName.get(key) || {};
+    const identity = categoryIdentity(name, normalizedScope);
+    return {
+      ...rawRow,
+      ...saved,
+      id: rawRow.id || saved.id || saved.categoryId || identity.id,
+      categoryId: rawRow.categoryId || rawRow.id || saved.categoryId || saved.id || identity.id,
+      name,
+      scope: normalizedScope,
+      productCount: Number(rawRow.productCount || 0),
+      activeProductCount: Number(rawRow.activeProductCount || 0),
+      stockProductCount: Number(rawRow.stockProductCount || 0),
+      topVendors: Array.isArray(rawRow.topVendors) ? rawRow.topVendors : [],
+      topBrands: Array.isArray(rawRow.topBrands) ? rawRow.topBrands : [],
+      mappings: {
+        shopify: normalizeChannelCategoryMapping(saved.mappings?.shopify || rawRow.mappings?.shopify || {}),
+        temu: normalizeChannelCategoryMapping(saved.mappings?.temu || rawRow.mappings?.temu || {}),
+        tiktok: normalizeChannelCategoryMapping(saved.mappings?.tiktok || rawRow.mappings?.tiktok || {}),
+        ebay: normalizeChannelCategoryMapping(saved.mappings?.ebay || rawRow.mappings?.ebay || {}),
+        whatnot: normalizeChannelCategoryMapping(saved.mappings?.whatnot || rawRow.mappings?.whatnot || {})
+      },
+      status: saved.status || rawRow.status || "needs_review",
+      owner: saved.owner || rawRow.owner || "",
+      notes: saved.notes || rawRow.notes || "",
+      lifecycle: saved.lifecycle || rawRow.lifecycle || (Number(rawRow.productCount || 0) > 0 ? "current" : "outdated"),
+      updatedAt: saved.updatedAt || rawRow.updatedAt || "",
+      createdAt: saved.createdAt || rawRow.createdAt || ""
+    };
+  });
+  for (const saved of settings) {
+    const name = formatCategoryName(saved.name || saved.category || "");
+    if (!name || seen.has(name.toLowerCase())) continue;
+    const identity = categoryIdentity(name, normalizedScope);
+    rows.push({
+      ...saved,
+      id: saved.id || saved.categoryId || identity.id,
+      categoryId: saved.categoryId || saved.id || identity.id,
+      name,
+      scope: normalizedScope,
+      productCount: 0,
+      activeProductCount: 0,
+      stockProductCount: 0,
+      topVendors: [],
+      topBrands: [],
+      mappings: {
+        shopify: normalizeChannelCategoryMapping(saved.mappings?.shopify || {}),
+        temu: normalizeChannelCategoryMapping(saved.mappings?.temu || {}),
+        tiktok: normalizeChannelCategoryMapping(saved.mappings?.tiktok || {}),
+        ebay: normalizeChannelCategoryMapping(saved.mappings?.ebay || {}),
+        whatnot: normalizeChannelCategoryMapping(saved.mappings?.whatnot || {})
+      },
+      lifecycle: saved.lifecycle || "outdated"
+    });
+  }
+  return rows;
+}
+
 async function categoryReviewDb(scope = "main") {
   if (postgres.isPostgresEnabled()) {
-    const [baseDb, categoryDb, mainRows] = await Promise.all([
-      readDbFast({ skipInventory: true }),
+    const [categoryDb, summaryIndex] = await Promise.all([
       postgres.readCategoryState(),
-      scope === "main" ? postgres.listCategoryProductStats() : Promise.resolve([])
+      scope === "main"
+        ? postgres.readCategorySummaryIndex("main", { limit: 100000 }).catch(() => null)
+        : Promise.resolve(null)
     ]);
+    const summaryRows = Array.isArray(summaryIndex?.rows) ? summaryIndex.rows : [];
+    const reviewRows = categoryReviewRowsFromIndexedState(categoryDb || {}, summaryRows, scope);
     return normalizeDb({
-      ...baseDb,
       ...(categoryDb || {}),
-      __mainCategoryRows: mainRows || [],
-      connections: baseDb.connections || [],
-      channels: baseDb.channels || [],
-      systemSettings: baseDb.systemSettings || {},
-      sequence: baseDb.sequence || {}
+      inventory: [],
+      connections: [],
+      channels: [],
+      systemSettings: {},
+      sequence: {},
+      __categoryReviewRows: reviewRows
     });
   }
   return normalizeDb(await readDbFast({ skipInventory: false }));
@@ -13748,7 +13821,8 @@ async function categoryReviewDb(scope = "main") {
 function categoryReviewRows(db = {}, options = {}) {
   const scope = categoryReviewScope(options.scope);
   const channel = categoryReviewChannel(options.channel);
-  return (publicCategories(db, "", scope).categories || [])
+  const rows = Array.isArray(db.__categoryReviewRows) ? db.__categoryReviewRows : (publicCategories(db, "", scope).categories || []);
+  return rows
     .filter((row) => categoryReviewRowMatches(row, { ...options, channel, scope }))
     .sort((left, right) => {
       const leftPending = left?.mappings?.[channel]?.pendingSuggestion;
