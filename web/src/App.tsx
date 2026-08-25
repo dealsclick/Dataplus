@@ -15237,6 +15237,7 @@ function CategoryReviewPage() {
   const [rows, setRows] = useState<CategoryReviewRow[]>([])
   const [summary, setSummary] = useState<CategoryReviewResponse["summary"]>({})
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState("")
   const [busy, setBusy] = useState(false)
   const [query, setQuery] = useState("")
   const [channel, setChannel] = useState<"shopify" | "ebay">("ebay")
@@ -15260,6 +15261,7 @@ function CategoryReviewPage() {
 
   async function load(nextPage = page) {
     setLoading(true)
+    setLoadError("")
     try {
       const params = new URLSearchParams({ channel, scope: "main", status, page: String(nextPage), limit: String(limit) })
       if (query.trim()) params.set("q", query.trim())
@@ -15273,7 +15275,9 @@ function CategoryReviewPage() {
       setSelected(new Set())
       setAllFiltered(false)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load category review.")
+      const message = error instanceof Error ? error.message : "Unable to load category review."
+      setLoadError(message)
+      toast.error(message)
     } finally {
       setLoading(false)
     }
@@ -15383,6 +15387,7 @@ function CategoryReviewPage() {
 
   return <div className="grid gap-5">
     <PageHeader eyebrow="Catalog" title="Category Review" description="Review each channel taxonomy queue, search cached categories, approve or deny suggestions, block categories from sale, and schedule SKU refresh jobs." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void load()} disabled={loading || busy}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button><Button size="sm" onClick={() => void decide("approve")} disabled={!selectedCount || busy || status !== "pending"}><CheckCircle2 className="size-4" /> Approve</Button><Button size="sm" variant="outline" onClick={() => void decide("deny")} disabled={!selectedCount || busy}>Deny</Button><Button size="sm" variant="outline" onClick={() => void decide("block")} disabled={!selectedCount || busy}>Block</Button></div>} />
+    {loadError ? <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">Category review failed to load: {loadError}</div> : null}
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6"><Detail label="Needs review" value={numberLabel(summary?.pending || 0)} /><Detail label="Approved" value={numberLabel(summary?.mapped || 0)} /><Detail label="Unmatched" value={numberLabel(summary?.missing || 0)} /><Detail label="Denied" value={numberLabel(summary?.denied || 0)} /><Detail label="Blocked" value={numberLabel(summary?.blocked || 0)} /><Detail label="Mapped products" value={numberLabel(summary?.mappedProducts || 0)} /></div>
     <Card>
       <CardHeader className="gap-4 border-b">

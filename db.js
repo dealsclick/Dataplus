@@ -4857,6 +4857,58 @@ async function upsertCategoryChannelMappingsFromState(categorySettings = [], opt
   return { enabled: true, mappings: records.length };
 }
 
+async function listCategoryChannelMappings(channel = "", options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const normalizedChannel = nullableString(channel)?.toLowerCase() || "";
+  const limit = Math.max(1, Math.min(100000, Number(options.limit || 100000)));
+  const params = [limit];
+  const where = [];
+  if (normalizedChannel) {
+    params.push(normalizedChannel);
+    where.push(`lower(channel) = $${params.length}`);
+  }
+  const result = await client.query(`
+    select
+      category_id,
+      category_name,
+      channel,
+      channel_category_id,
+      channel_category_path,
+      channel_category_handle,
+      status,
+      attribute_count,
+      attribute_mapping_count,
+      raw,
+      updated_at
+    from category_channel_mappings
+    ${where.length ? `where ${where.join(" and ")}` : ""}
+    order by updated_at desc, category_name
+    limit $1
+  `, params);
+  return result.rows.map((row) => {
+    const channelKey = nullableString(row.channel)?.toLowerCase() || "ebay";
+    const raw = row.raw && typeof row.raw === "object" ? row.raw : {};
+    return {
+      categoryId: nullableString(row.category_id),
+      name: nullableString(row.category_name),
+      updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : "",
+      mappings: {
+        [channelKey]: {
+          ...raw,
+          categoryId: raw.categoryId ?? nullableString(row.channel_category_id),
+          categoryPath: raw.categoryPath ?? nullableString(row.channel_category_path),
+          categoryHandle: raw.categoryHandle ?? nullableString(row.channel_category_handle),
+          status: raw.status ?? nullableString(row.status),
+          attributeCount: raw.attributeCount ?? Number(row.attribute_count || 0),
+          attributeMappingCount: raw.attributeMappingCount ?? Number(row.attribute_mapping_count || 0)
+        }
+      }
+    };
+  });
+}
+
 async function replaceCategorySummaryIndex(scope = "main", rows = [], meta = {}) {
   const client = getPool();
   if (!client) return { enabled: false, rows: 0 };
@@ -9115,6 +9167,7 @@ module.exports = {
   listCategoryProductSamples,
   readCategorySummaryEntry,
   readCategorySummaryIndex,
+  listCategoryChannelMappings,
   replaceCategorySummaryIndex,
   listCategoryProductStats,
   listUncategorizedProducts,

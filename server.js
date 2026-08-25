@@ -13733,6 +13733,24 @@ function categoryReviewRowsFromIndexedState(categoryState = {}, summaryRows = []
     const name = formatCategoryName(setting.name || setting.category || "");
     if (name) settingsByName.set(name.toLowerCase(), setting);
   }
+  for (const mappingRow of normalizeCategorySettings(categoryState.categoryChannelMappings || [])) {
+    const name = formatCategoryName(mappingRow.name || mappingRow.category || "");
+    if (!name) continue;
+    const key = name.toLowerCase();
+    const existing = settingsByName.get(key) || {};
+    settingsByName.set(key, {
+      ...mappingRow,
+      ...existing,
+      id: existing.id || mappingRow.id,
+      categoryId: existing.categoryId || mappingRow.categoryId,
+      name,
+      mappings: {
+        ...(mappingRow.mappings || {}),
+        ...(existing.mappings || {})
+      },
+      updatedAt: existing.updatedAt || mappingRow.updatedAt || ""
+    });
+  }
   const seen = new Set();
   const rows = (Array.isArray(summaryRows) ? summaryRows : []).map((rawRow) => {
     const name = formatCategoryName(rawRow.name || "Uncategorized") || "Uncategorized";
@@ -13797,14 +13815,15 @@ function categoryReviewRowsFromIndexedState(categoryState = {}, summaryRows = []
 
 async function categoryReviewDb(scope = "main") {
   if (postgres.isPostgresEnabled()) {
-    const [categoryDb, summaryIndex] = await Promise.all([
-      postgres.readCategoryState(),
+    const [categoryDb, mappingRows, summaryIndex] = await Promise.all([
+      postgres.readStateFields(["categorySettings", "vendorCategoryMappings"], { fallbackToLegacy: false }),
+      postgres.listCategoryChannelMappings("", { limit: 100000 }).catch(() => []),
       scope === "main"
         ? postgres.readCategorySummaryIndex("main", { limit: 100000 }).catch(() => null)
         : Promise.resolve(null)
     ]);
     const summaryRows = Array.isArray(summaryIndex?.rows) ? summaryIndex.rows : [];
-    const reviewRows = categoryReviewRowsFromIndexedState(categoryDb || {}, summaryRows, scope);
+    const reviewRows = categoryReviewRowsFromIndexedState({ ...(categoryDb || {}), categoryChannelMappings: mappingRows || [] }, summaryRows, scope);
     return normalizeDb({
       ...(categoryDb || {}),
       inventory: [],
