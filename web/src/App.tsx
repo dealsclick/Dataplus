@@ -15239,6 +15239,7 @@ function CategoryReviewPage() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState("")
   const [busy, setBusy] = useState(false)
+  const [decisionStatus, setDecisionStatus] = useState<{ state: "running" | "done" | "error"; message: string } | null>(null)
   const [query, setQuery] = useState("")
   const [channel, setChannel] = useState<"shopify" | "ebay">("ebay")
   const [status, setStatus] = useState("pending")
@@ -15320,12 +15321,14 @@ function CategoryReviewPage() {
     const verb = action === "approve" ? "approve" : action === "deny" ? "deny" : "block from selling"
     if (!mapping && !window.confirm(`${verb[0].toUpperCase()}${verb.slice(1)} ${numberLabel(count)} ${channel === "ebay" ? "eBay" : "Shopify"} categor${count === 1 ? "y" : "ies"}?`)) return
     setBusy(true)
+    setDecisionStatus({ state: "running", message: `${verb[0].toUpperCase()}${verb.slice(1)} ${numberLabel(count)} ${channel === "ebay" ? "eBay" : "Shopify"} categor${count === 1 ? "y" : "ies"}...` })
     try {
       const result = await api<{ changed?: number; skipped?: unknown[]; message?: string }>("/api/categories/channel-review/decision", {
         method: "POST",
         body: JSON.stringify(requestPayload({ action, ids: ids || selectedIds, allFiltered: ids ? false : allFiltered, mapping, note: action === "block" ? "Do not sell this category on this channel." : "" })),
       })
-      toast.success(result.message || "Category decision saved.")
+      const finalMessage = result.message || "Category decision saved."
+      toast.success(finalMessage)
       setSelected(new Set())
       setAllFiltered(false)
       if (!mapping && (allFiltered || count > 1)) {
@@ -15336,8 +15339,11 @@ function CategoryReviewPage() {
       setSearchRowId("")
       setCategoryResults([])
       await load(1)
+      setDecisionStatus({ state: "done", message: `${finalMessage} Review list refreshed.` })
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to save category decision.")
+      const message = error instanceof Error ? error.message : "Unable to save category decision."
+      setDecisionStatus({ state: "error", message })
+      toast.error(message)
     } finally {
       setBusy(false)
     }
@@ -15397,6 +15403,7 @@ function CategoryReviewPage() {
   return <div className="grid gap-5">
     <PageHeader eyebrow="Catalog" title="Category Review" description="Review each channel taxonomy queue, search cached categories, approve or deny suggestions, block categories from sale, and schedule SKU refresh jobs." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void load()} disabled={loading || busy}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button><Button size="sm" onClick={() => void decide("approve")} disabled={!selectedCount || busy || status !== "pending"}><CheckCircle2 className="size-4" /> Approve</Button><Button size="sm" variant="outline" onClick={() => void decide("deny")} disabled={!selectedCount || busy}>Deny</Button><Button size="sm" variant="outline" onClick={() => void decide("block")} disabled={!selectedCount || busy}>Block</Button></div>} />
     {loadError ? <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">Category review failed to load: {loadError}</div> : null}
+    {decisionStatus ? <div className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${decisionStatus.state === "error" ? "border-destructive/30 bg-destructive/10 text-destructive" : decisionStatus.state === "done" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-primary/30 bg-primary/10 text-primary"}`}>{decisionStatus.state === "running" ? <Loader2 className="size-4 animate-spin" /> : decisionStatus.state === "done" ? <CheckCircle2 className="size-4" /> : null}<span>{decisionStatus.message}</span>{decisionStatus.state !== "running" ? <Button size="sm" variant="ghost" className="ml-auto h-7 px-2" onClick={() => setDecisionStatus(null)}>Dismiss</Button> : null}</div> : null}
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6"><Detail label="Needs review" value={numberLabel(summary?.pending || 0)} /><Detail label="Approved" value={numberLabel(summary?.mapped || 0)} /><Detail label="Unmatched" value={numberLabel(summary?.missing || 0)} /><Detail label="Denied" value={numberLabel(summary?.denied || 0)} /><Detail label="Blocked" value={numberLabel(summary?.blocked || 0)} /><Detail label="Mapped products" value={numberLabel(summary?.mappedProducts || 0)} /></div>
     <Card>
       <CardHeader className="gap-4 border-b">
