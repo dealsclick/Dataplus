@@ -44022,6 +44022,62 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { draft, warehouses: db.warehouses });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts[3] === "similar-skus" && postgres.isPostgresEnabled()) {
+    const drafts = await postgres.readStateField("orderDrafts").catch(() => []);
+    const rawDraft = (drafts || []).find((row) => String(row.id || "") === String(parts[2]) || String(row.draftNumber || "").toLowerCase() === String(parts[2]).toLowerCase());
+    if (!rawDraft) return notFound(res);
+    const lineIndex = Math.max(0, Number(url.searchParams.get("lineIndex") || 0));
+    const line = Array.isArray(rawDraft.items) ? rawDraft.items[lineIndex] || {} : {};
+    const sku = String(url.searchParams.get("sku") || line.sku || "").trim();
+    const title = String(url.searchParams.get("title") || line.title || "").trim();
+    const currentProducts = sku ? await postgres.readProductsForOrderSkus([sku]).catch(() => []) : [];
+    const current = currentProducts?.[0] || null;
+    const words = title.split(/\s+/).map((word) => word.replace(/[^a-z0-9-]/gi, "")).filter((word) => word.length > 2);
+    const searchTerms = [
+      current?.category,
+      current?.mainCategory,
+      current?.brand,
+      words.slice(0, 4).join(" "),
+      words.slice(0, 2).join(" "),
+      title
+    ].map((value) => String(value || "").trim()).filter(Boolean);
+    const seen = new Set([sku.toLowerCase()]);
+    const candidates = [];
+    for (const term of searchTerms) {
+      if (candidates.length >= 12) break;
+      const result = await postgres.listProducts({ q: term, limit: 30, fastPage: true, filters: { active: "true" } }).catch(() => null);
+      for (const product of result?.items || result?.inventory || []) {
+        const candidateSku = String(product.sku || "").trim();
+        if (!candidateSku || seen.has(candidateSku.toLowerCase())) continue;
+        seen.add(candidateSku.toLowerCase());
+        const available = Number(product.available ?? product.stockQty ?? product.qty ?? 0);
+        const price = Number(product.websitePrice ?? product.price ?? 0);
+        const currentPrice = Number(line.price || current?.websitePrice || current?.price || 0);
+        const currentCost = Number(line.cost || current?.cost || 0);
+        const cost = Number(product.cost || 0);
+        candidates.push({
+          sku: candidateSku,
+          title: product.title || product.marketplaceTitle || candidateSku,
+          brand: product.brand || "",
+          category: product.mainCategory || product.category || "",
+          available,
+          price,
+          cost,
+          image: product.defaultImage || product.image || "",
+          reason: available > 0
+            ? (currentPrice > 0 && price > 0 && price < currentPrice ? "In stock and lower sell price" : "In stock alternative")
+            : (currentCost > 0 && cost > 0 && cost < currentCost ? "Lower cost, verify availability" : "Possible catalog match"),
+          score: (available > 0 ? 40 : 0)
+            + (current?.category && String(product.category || product.mainCategory || "").toLowerCase().includes(String(current.category || current.mainCategory || "").toLowerCase()) ? 25 : 0)
+            + (current?.brand && String(product.brand || "").toLowerCase() === String(current.brand || "").toLowerCase() ? 15 : 0)
+            + (currentPrice > 0 && price > 0 && price < currentPrice ? 10 : 0)
+        });
+      }
+    }
+    candidates.sort((left, right) => Number(right.score || 0) - Number(left.score || 0) || Number(right.available || 0) - Number(left.available || 0) || Number(left.price || 0) - Number(right.price || 0));
+    return sendJson(res, 200, { line, current, alternatives: candidates.slice(0, 12), message: candidates.length ? "Similar SKU suggestions are ready." : "No similar catalog SKUs were found." });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readOrderDraftWorkflowDb();
