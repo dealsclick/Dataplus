@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
+import { type FormEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react"
 import { createColumnHelper, flexRender, getCoreRowModel, getFilteredRowModel, useReactTable } from "@tanstack/react-table"
 import { useChat } from "@ai-sdk/react"
 import { createChat } from "@shadcn/helpers/ai-sdk"
@@ -15255,6 +15255,15 @@ function CategoryReviewPage() {
   const [searching, setSearching] = useState(false)
   const [showCategoryStats, setShowCategoryStats] = useState(false)
   const [manualMappingPrompt, setManualMappingPrompt] = useState<{ row: CategoryReviewRow; mapping: CategoryChannelMapping } | null>(null)
+  const [columnWidths, setColumnWidths] = useState({
+    select: 48,
+    local: 420,
+    channel: 680,
+    status: 130,
+    refresh: 160,
+    decision: 230,
+    more: 92,
+  })
   const [refreshPrompt, setRefreshPrompt] = useState<{ ids: string[]; categoryName?: string; count: number; allFiltered?: boolean } | null>(null)
   const [refreshTiming, setRefreshTiming] = useState<"now" | "later">("now")
   const [refreshAt, setRefreshAt] = useState("")
@@ -15400,6 +15409,30 @@ function CategoryReviewPage() {
   const pageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id))
   const selectedMappedIds = allFiltered ? [] : rows.filter((row) => selected.has(rowId(row)) && row.mapping?.categoryId).map(rowId)
   const actionHint = "Approve saves a channel mapping, deny clears the suggestion, and block prevents selling that category on the selected channel."
+  type CategoryReviewResizableColumn = "local" | "channel" | "status" | "refresh" | "decision" | "more"
+  const columnMinimums: Record<CategoryReviewResizableColumn, number> = { local: 240, channel: 360, status: 110, refresh: 130, decision: 180, more: 76 }
+  const tableWidth = Object.values(columnWidths).reduce((sum, width) => sum + width, 0)
+  function startColumnResize(column: CategoryReviewResizableColumn, event: ReactMouseEvent<HTMLButtonElement>) {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = columnWidths[column]
+    const previousCursor = document.body.style.cursor
+    document.body.style.cursor = "col-resize"
+    const onMove = (moveEvent: globalThis.MouseEvent) => {
+      const nextWidth = Math.max(columnMinimums[column], Math.round(startWidth + moveEvent.clientX - startX))
+      setColumnWidths((current) => ({ ...current, [column]: nextWidth }))
+    }
+    const onUp = () => {
+      document.body.style.cursor = previousCursor
+      window.removeEventListener("mousemove", onMove)
+      window.removeEventListener("mouseup", onUp)
+    }
+    window.addEventListener("mousemove", onMove)
+    window.addEventListener("mouseup", onUp)
+  }
+  function resizableHeader(label: string, column: CategoryReviewResizableColumn, className = "") {
+    return <TableHead style={{ width: columnWidths[column] }} className={cn("relative select-none pr-4", className)}><span>{label}</span><button type="button" aria-label={`Resize ${label} column`} className="absolute right-0 top-0 h-full w-2 cursor-col-resize border-r border-transparent hover:border-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary" onMouseDown={(event) => startColumnResize(column, event)} /></TableHead>
+  }
 
   return <div className="grid gap-5">
     <PageHeader eyebrow="Catalog" title="Category Review" description="Review each channel taxonomy queue, search cached categories, approve or deny suggestions, block categories from sale, and schedule SKU refresh jobs." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void load()} disabled={loading || busy}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button><Button size="sm" onClick={() => void decide("approve")} disabled={!selectedCount || busy || status !== "pending"}><CheckCircle2 className="size-4" /> Approve</Button><Button size="sm" variant="outline" onClick={() => void decide("deny")} disabled={!selectedCount || busy}>Deny</Button><Button size="sm" variant="outline" onClick={() => void decide("block")} disabled={!selectedCount || busy}>Block</Button></div>} />
@@ -15421,7 +15454,7 @@ function CategoryReviewPage() {
           <div className="flex flex-wrap gap-2"><Button size="sm" disabled={!selectedCount || busy || status !== "pending"} onClick={() => void decide("approve")}>Approve</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => void decide("deny")}>Deny</Button><Button size="sm" variant="outline" disabled={!selectedCount || busy} onClick={() => void decide("block")}>Block</Button><Button size="sm" variant="outline" disabled={busy || (!allFiltered && !selectedMappedIds.length) || (allFiltered && status !== "mapped")} onClick={() => openRefresh(allFiltered ? [] : selectedMappedIds, undefined, allFiltered)}>Refresh mapped SKUs</Button></div>
         </div>
       </CardHeader>
-      <CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10" /><TableHead>Local category</TableHead><TableHead>Channel category</TableHead><TableHead>Status</TableHead><TableHead>Last refresh</TableHead><TableHead className="text-right">Decision</TableHead><TableHead className="text-right">More</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => {
+      <CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <Table className="table-fixed" style={{ width: tableWidth }}><colgroup><col style={{ width: columnWidths.select }} /><col style={{ width: columnWidths.local }} /><col style={{ width: columnWidths.channel }} /><col style={{ width: columnWidths.status }} /><col style={{ width: columnWidths.refresh }} /><col style={{ width: columnWidths.decision }} /><col style={{ width: columnWidths.more }} /></colgroup><TableHeader><TableRow><TableHead className="w-10" style={{ width: columnWidths.select }} />{resizableHeader("Local category", "local")}{resizableHeader("Channel category", "channel")}{resizableHeader("Status", "status")}{resizableHeader("Last refresh", "refresh")}{resizableHeader("Decision", "decision", "text-right")}{resizableHeader("More", "more", "text-right")}</TableRow></TableHeader><TableBody>{rows.map((row) => {
         const id = rowId(row)
         const suggestion = row.pendingSuggestion
         const statusValue = row.reviewStatus || (row.mapping?.blocked ? "blocked" : suggestion ? "pending" : row.mapping?.categoryId ? "mapped" : "missing")
@@ -15439,7 +15472,7 @@ function CategoryReviewPage() {
           <TableCell><div className="flex justify-end gap-2"><Button size="sm" disabled={busy || (!suggestion?.categoryId && !row.mapping?.categoryId)} onClick={() => void decide("approve", [id])}>Approve</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void decide("deny", [id])}>Deny</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void decide("block", [id])}>Block</Button></div></TableCell>
           <TableCell><div className="flex justify-end gap-2">{row.mapping?.categoryId ? <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => openRefresh([id], row.name)}><RefreshCw className="size-4" /> Refresh category now</DropdownMenuItem><DropdownMenuItem onClick={() => { openRefresh([id], row.name); setRefreshTiming("later") }}><Clock3 className="size-4" /> Schedule refresh</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open category</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu> : <Button size="sm" variant="outline" asChild><a href={`/categories/${encodeURIComponent(id)}`}>Open</a></Button>}</div></TableCell>
         </TableRow>
-      })}{!rows.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No category mappings match this review view.</TableCell></TableRow>}</TableBody></Table></div>}</CardContent>
+      })}{!rows.length && <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No category mappings match this review view.</TableCell></TableRow>}</TableBody></Table>}</CardContent>
       <CardFooter className="flex flex-wrap items-center justify-between gap-3 border-t text-sm text-muted-foreground"><span>Page {page} of {pageCount} / {numberLabel(total)} categories</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => void load(page - 1)}>Previous</Button><Button size="sm" variant="outline" disabled={loading || page >= pageCount} onClick={() => void load(page + 1)}>Next</Button></div></CardFooter>
     </Card>
     <Dialog open={Boolean(manualMappingPrompt)} onOpenChange={(open) => { if (!open && !busy) setManualMappingPrompt(null) }}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>Approve channel category?</DialogTitle><DialogDescription>Confirm this manual category match before DataPlus saves and locks the mapping.</DialogDescription></DialogHeader>{manualMappingPrompt ? <div className="grid gap-3 text-sm"><div className="rounded-md border p-3"><p className="text-xs font-medium uppercase text-muted-foreground">Local category</p><p className="mt-1 font-medium">{manualMappingPrompt.row.name || "Unnamed category"}</p></div><div className="rounded-md border border-primary/30 bg-primary/5 p-3"><p className="text-xs font-medium uppercase text-muted-foreground">{channel === "ebay" ? "eBay" : "Shopify"} category to save</p><p className="mt-1 font-medium">{String(manualMappingPrompt.mapping.categoryPath || manualMappingPrompt.mapping.fullName || manualMappingPrompt.mapping.name || manualMappingPrompt.mapping.categoryId || "")}</p>{manualMappingPrompt.mapping.categoryId ? <p className="mt-1 font-mono text-xs text-muted-foreground">{String(manualMappingPrompt.mapping.categoryId)}</p> : null}</div></div> : null}<DialogFooter><Button variant="outline" onClick={() => setManualMappingPrompt(null)} disabled={busy}>Cancel</Button><Button onClick={() => { if (!manualMappingPrompt) return; void decide("approve", [rowId(manualMappingPrompt.row)], manualMappingPrompt.mapping).then(() => setManualMappingPrompt(null)) }} disabled={busy}>{busy ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Approve and save</Button></DialogFooter></DialogContent></Dialog>
