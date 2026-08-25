@@ -39,6 +39,9 @@ const KNOWN_SUPPLIER_NAMES_BY_KEY = Object.freeze({
   marcone: "Marcone",
   mcn: "Marcone",
   msc: "MSC",
+  rjs: "RJ Schinner Company",
+  "rj schinner": "RJ Schinner Company",
+  "rj schinner company": "RJ Schinner Company",
   dib: "Do It Best",
   "do it best": "Do It Best",
   doitbest: "Do It Best"
@@ -6914,16 +6917,43 @@ function productRowVariantSku(baseSku = "", suffix = "") {
   return sku && cleanSuffix && !sku.toUpperCase().endsWith(`-${cleanSuffix}`) ? `${sku}-${cleanSuffix}` : sku;
 }
 
+function productRowUsesSupplierSellUnitOnly(item = {}) {
+  return [item.supplier, item.vendor, item.supplierCode, item.vendorCode]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .some((value) => value === "uss" || value.includes("essendant") || value === "rjs" || value.includes("rj schinner"));
+}
+
+function productRowCostAppearsToBeSellUnit(item = {}, uom = productRowUomInfo(item)) {
+  if (productRowUsesSupplierSellUnitOnly(item)) return true;
+  const qty = Number(uom.qty || 1);
+  const cost = productRowNumber(item.sourceCost ?? item.cost, 0);
+  const sourcePrice = [
+    item.vendorWebsitePrice,
+    item.vendor_website_price,
+    item.websitePrice,
+    item.shopifyPrice,
+    item.price
+  ].map((value) => productRowNumber(value, 0)).find((value) => value > 0) || 0;
+  if (!(qty > 1) || !(cost > 0) || !(sourcePrice > 0)) return false;
+  const expectedEachPrice = cost * 1.35;
+  const expectedPackPrice = cost * qty * 1.35;
+  if (sourcePrice > expectedEachPrice * 5) return true;
+  if (!(expectedPackPrice > sourcePrice * 5)) return false;
+  return cost <= sourcePrice * 1.5 && expectedEachPrice <= sourcePrice * 1.75;
+}
+
 function productRowSystemVariants(item = {}) {
   const uom = productRowUomInfo(item);
   const parentSku = String(item.sku || item.vendorSku || item.mfrPartNumber || "").trim();
-  const sku = uom.isMultiUnit ? productRowVariantSku(parentSku, `${uom.qty}PC`) : parentSku;
+  const uomOnly = productRowUsesSupplierSellUnitOnly(item);
+  const sku = uom.isMultiUnit && !uomOnly ? productRowVariantSku(parentSku, `${uom.qty}PC`) : parentSku;
   if (!sku) return [];
   const available = Math.max(0, productRowNumber(item.qty ?? item.stockQty, 0) - productRowNumber(item.reserved, 0));
-  const unitCost = productRowNumber(item.sourceCost ?? item.cost, 0) * uom.qty;
+  const sourceCost = productRowNumber(item.sourceCost ?? item.cost, 0);
+  const unitCost = productRowCostAppearsToBeSellUnit(item, uom) ? sourceCost : sourceCost * uom.qty;
   return [{
     id: `${parentSku || "sku"}:${uom.isMultiUnit ? `pack-${uom.qty}` : "each"}`,
-    key: uom.isMultiUnit ? `pack-${uom.qty}` : "each",
+    key: uom.isMultiUnit && !uomOnly ? `pack-${uom.qty}` : "each",
     sku,
     parentSku,
     title: String(item.marketplaceTitle || item.title || parentSku || "").trim(),
@@ -6941,7 +6971,7 @@ function productRowSystemVariants(item = {}) {
     actual: true,
     generated: true,
     status: "active",
-    note: uom.isMultiUnit ? `Actual sell unit from source data: ${uom.display}.` : "Actual sell unit from source data."
+    note: uomOnly ? "Single vendor UOM sell unit from supplier rules. No generated UOM SKU suffix." : uom.isMultiUnit ? `Actual sell unit from source data: ${uom.display}.` : "Actual sell unit from source data."
   }];
 }
 

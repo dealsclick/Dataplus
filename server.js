@@ -1557,18 +1557,36 @@ function productIsEssendant(item = {}) {
   });
 }
 
+function productIsRjSchinner(item = {}) {
+  return productSupplierTokens(item).some((value) => {
+    const text = value.toLowerCase();
+    return text === "rjs" || text.includes("rj schinner");
+  });
+}
+
+function productUsesSupplierSellUnitOnly(item = {}) {
+  return productIsEssendant(item) || productIsRjSchinner(item);
+}
+
 function productVariationRules(item = {}, db = null) {
   const vendor = vendorProfileForProduct(db, item);
   const rules = vendor?.variationRules && typeof vendor.variationRules === "object" ? vendor.variationRules : {};
   const channelRules = vendor?.channelRules?.shopify && typeof vendor.channelRules.shopify === "object" ? vendor.channelRules.shopify : {};
-  const isEssendant = productIsEssendant(item);
+  const isUomOnlySupplier = productUsesSupplierSellUnitOnly(item);
   const isTrueValue = productSupplierTokens(item).some((value) => {
     const text = value.toLowerCase();
     return text === "trv" || text.includes("true value");
   });
+  if (isUomOnlySupplier) {
+    return {
+      shopifyVariantMode: "uom-only",
+      allowShopifyVariations: false,
+      note: rules.note || channelRules.note || "Supplier cost, price, and inventory are sell-unit/UOM values. Do not create Shopify pack variations."
+    };
+  }
   return {
-    shopifyVariantMode: rules.shopifyVariantMode || channelRules.variantMode || (isEssendant ? "uom-only" : isTrueValue ? "each-and-uom" : "standard"),
-    allowShopifyVariations: rules.allowShopifyVariations ?? channelRules.allowVariations ?? (isEssendant ? false : true),
+    shopifyVariantMode: rules.shopifyVariantMode || channelRules.variantMode || (isTrueValue ? "each-and-uom" : "standard"),
+    allowShopifyVariations: rules.allowShopifyVariations ?? channelRules.allowVariations ?? true,
     note: rules.note || channelRules.note || ""
   };
 }
@@ -1618,6 +1636,7 @@ function productSourceSellPriceValue(item = {}) {
 }
 
 function productCostAppearsToBeSellUnit(item = {}, db = null) {
+  if (productUsesSupplierSellUnitOnly(item)) return true;
   const explicitCostBasis = productExplicitPricingCostBasis(item, db);
   if (explicitCostBasis === "sell-unit") return true;
   if (explicitCostBasis === "each-unit") return false;
@@ -13166,6 +13185,8 @@ function normalizeVendor(db, vendor) {
     ? `DataWarehouse source supplier. Catalog participation is ${catalogParticipationEnabled ? "enabled" : "disabled until reviewed"}.`
     : (vendor.catalogSettings?.note || "");
   const isEssendant = vendorName.toLowerCase().includes("essendant") || vendorCode.toLowerCase() === "uss";
+  const isRjSchinner = vendorName.toLowerCase().includes("rj schinner") || vendorCode.toLowerCase() === "rjs";
+  const isUomOnlySellUnitSupplier = isEssendant || isRjSchinner;
   const isTrueValue = vendorName.toLowerCase().includes("true value") || vendorCode.toLowerCase() === "trv";
   const existingChannelRules = vendor.channelRules && typeof vendor.channelRules === "object" ? vendor.channelRules : {};
   const existingShopifyRules = existingChannelRules.shopify && typeof existingChannelRules.shopify === "object" ? existingChannelRules.shopify : {};
@@ -13176,12 +13197,12 @@ function normalizeVendor(db, vendor) {
   const deliverySchedule = configuredDeliverySchedule.length
     ? configuredDeliverySchedule
     : inferredVendorDeliverySchedule({ name: vendorName, code: vendorCode });
-  const pricingRuleDefaults = isEssendant
+  const pricingRuleDefaults = isUomOnlySellUnitSupplier
     ? {
         costBasis: "sell-unit",
         enforceMinimumAllowedPrice: true,
         suspiciousPriceMultiplier: 5,
-        note: "Essendant cost, price, and MAP values are sell-unit/UOM prices. Do not multiply by UOM quantity."
+        note: `${isEssendant ? "Essendant" : "RJ Schinner"} cost and price values are sell-unit/UOM prices. Do not multiply by UOM quantity.`
       }
     : {
         costBasis: existingPricingRules.costBasis || "each-unit",
@@ -13189,11 +13210,11 @@ function normalizeVendor(db, vendor) {
         suspiciousPriceMultiplier: Number(existingPricingRules.suspiciousPriceMultiplier || 5),
         note: existingPricingRules.note || ""
       };
-  const variationRuleDefaults = isEssendant
+  const variationRuleDefaults = isUomOnlySellUnitSupplier
     ? {
         shopifyVariantMode: "uom-only",
         allowShopifyVariations: false,
-        note: "Essendant SKUs must follow the vendor UOM only. Do not create Shopify variations."
+        note: `${isEssendant ? "Essendant" : "RJ Schinner"} SKUs must follow the vendor UOM only. Do not create Shopify variations.`
       }
     : isTrueValue
       ? {
@@ -13206,11 +13227,11 @@ function normalizeVendor(db, vendor) {
         allowShopifyVariations: existingVariationRules.allowShopifyVariations !== false,
         note: existingVariationRules.note || ""
       };
-  const shopifyRuleDefaults = isEssendant
+  const shopifyRuleDefaults = isUomOnlySellUnitSupplier
     ? {
         variantMode: "uom-only",
         allowVariations: false,
-        note: "Essendant SKUs must follow the vendor UOM only. Do not create Shopify variations."
+        note: `${isEssendant ? "Essendant" : "RJ Schinner"} SKUs must follow the vendor UOM only. Do not create Shopify variations.`
       }
     : {
         variantMode: existingShopifyRules.variantMode || "standard",
@@ -32890,10 +32911,14 @@ async function enrichOrderDetail(order = {}) {
     const directProduct = lineKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
     const product = directProduct || fallbackKeys.map((key) => localByKey.get(key)).find(Boolean) || null;
     const matchedVariant = product?.systemVariants?.find((variant) => lineKeys.includes(String(variant.sku || "").toLowerCase())) || null;
-    // A base SKU is sold as one each. Only an explicitly matched UOM variant
-    // (for example BUS101275TRV-6PC) may apply its pack multiplier.
     const sellUnitQty = Number(matchedVariant?.uomQty || 1) || 1;
-    const sourceUnitCost = matchedVariant?.unitCost ?? (product ? productEachUnitCost(product) : line.cost);
+    const sourceUnitCost = product
+      ? matchedVariant
+        ? shopifyVariantPriceBasis(product, matchedVariant, null)
+        : productUsesSellUnitPricing(product, null)
+          ? productSellUnitCost(product, null)
+          : productEachUnitCost(product, null)
+      : line.cost;
     const unitCost = Number(sourceUnitCost || 0);
     const quantity = Number(line.qty || 0);
     const revenue = Number(line.price || 0) * quantity;
