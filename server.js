@@ -19700,7 +19700,7 @@ async function runEbayCatalogImportWorkerJob(job = {}) {
   return finalJob;
 }
 
-async function ebayListingLaunchCandidates(payload = {}) {
+async function ebayListingLaunchCandidates(payload = {}, options = {}) {
   const selectedKeys = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
     .map((value) => String(value || "").trim())
     .filter(Boolean))];
@@ -19723,11 +19723,20 @@ async function ebayListingLaunchCandidates(payload = {}) {
         filters,
         ebayDefaults: ebayReadinessDefaults,
         page,
-        limit: Math.min(pageSize, limit - items.length)
+        limit: Math.min(pageSize, limit - items.length),
+        fastPage: true
       });
       const rows = result?.inventory || result?.items || [];
       if (!rows.length) break;
       items.push(...rows);
+      if (typeof options.onProgress === "function") {
+        await options.onProgress({
+          loaded: Math.min(items.length, limit),
+          limit,
+          page,
+          pageSize: rows.length
+        });
+      }
       if (rows.length < pageSize) break;
     }
     return items.slice(0, limit);
@@ -19974,7 +19983,20 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
   try {
     const [workDb, candidates] = await Promise.all([
       readDbFast({ skipInventory: true }).then(normalizeDb),
-      ebayListingLaunchCandidates(payload)
+      ebayListingLaunchCandidates(payload, {
+        onProgress: async ({ loaded, limit }) => {
+          job = await persistWorkerImportJob(job, {
+            status: "running",
+            phase: "loading_ebay_launch_candidates",
+            totalRows: limit,
+            processedRows: loaded,
+            progressPercent: Math.min(10, Math.max(1, Math.round((loaded / Math.max(1, limit)) * 10))),
+            estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, loaded, limit),
+            lastProgressAt: new Date().toISOString(),
+            message: `Loaded ${loaded.toLocaleString()} eBay launch candidate${loaded === 1 ? "" : "s"}...`
+          });
+        }
+      })
     ]);
     workDb.inventory = candidates;
     const total = candidates.length;
