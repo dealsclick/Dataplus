@@ -7419,6 +7419,12 @@ async function listProducts(options = {}) {
   const params = [];
   const where = [];
   const filters = options.filters || {};
+  const ebayDefaults = options.ebayDefaults || {};
+  const sqlStringLiteral = (value = "") => `'${String(value || "").replace(/'/g, "''")}'`;
+  const defaultEbayMerchantLocationKey = sqlStringLiteral(ebayDefaults.merchantLocationKey || ebayDefaults.ebayMerchantLocationKey || process.env.EBAY_MERCHANT_LOCATION_KEY || "");
+  const defaultEbayPaymentPolicyId = sqlStringLiteral(ebayDefaults.paymentPolicyId || ebayDefaults.ebayPaymentPolicyId || process.env.EBAY_PAYMENT_POLICY_ID || "");
+  const defaultEbayReturnPolicyId = sqlStringLiteral(ebayDefaults.returnPolicyId || ebayDefaults.ebayReturnPolicyId || process.env.EBAY_RETURN_POLICY_ID || "");
+  const defaultEbayFulfillmentPolicyId = sqlStringLiteral(ebayDefaults.fulfillmentPolicyId || ebayDefaults.ebayFulfillmentPolicyId || process.env.EBAY_FULFILLMENT_POLICY_ID || "");
   if (q) {
     params.push(`%${q.toLowerCase()}%`);
     where.push(`(
@@ -7710,12 +7716,23 @@ async function listProducts(options = {}) {
     case when coalesce(raw ->> 'stockQty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'stockQty')::numeric end,
     0
   )`;
+  const hasEbayCategoryMapping = `(
+    coalesce(raw #>> '{ebayListing,categoryId}', raw ->> 'ebayCategoryId', '') <> ''
+    or exists (
+      select 1
+      from category_channel_mappings ccm
+      where lower(coalesce(ccm.channel, '')) = 'ebay'
+        and lower(coalesce(ccm.category_name, '')) = lower(coalesce(products.category, raw ->> 'category', ''))
+        and coalesce(ccm.channel_category_id, '') <> ''
+        and lower(coalesce(ccm.status, 'mapped')) not in ('blocked', 'denied', 'missing')
+    )
+  )`;
   const hasEbayRequiredFields = `(
-    coalesce(raw #>> '{ebayListing,merchantLocationKey}', raw ->> 'ebayMerchantLocationKey', '') <> ''
-    and coalesce(raw #>> '{ebayListing,categoryId}', raw ->> 'ebayCategoryId', category, raw ->> 'category', '') <> ''
-    and coalesce(raw #>> '{ebayListing,paymentPolicyId}', raw ->> 'ebayPaymentPolicyId', '') <> ''
-    and coalesce(raw #>> '{ebayListing,returnPolicyId}', raw ->> 'ebayReturnPolicyId', '') <> ''
-    and coalesce(raw #>> '{ebayListing,fulfillmentPolicyId}', raw ->> 'ebayFulfillmentPolicyId', '') <> ''
+    coalesce(raw #>> '{ebayListing,merchantLocationKey}', raw ->> 'ebayMerchantLocationKey', ${defaultEbayMerchantLocationKey}, '') <> ''
+    and ${hasEbayCategoryMapping}
+    and coalesce(raw #>> '{ebayListing,paymentPolicyId}', raw ->> 'ebayPaymentPolicyId', ${defaultEbayPaymentPolicyId}, '') <> ''
+    and coalesce(raw #>> '{ebayListing,returnPolicyId}', raw ->> 'ebayReturnPolicyId', ${defaultEbayReturnPolicyId}, '') <> ''
+    and coalesce(raw #>> '{ebayListing,fulfillmentPolicyId}', raw ->> 'ebayFulfillmentPolicyId', ${defaultEbayFulfillmentPolicyId}, '') <> ''
     and ${numericEbayPriceExpression} > 0
     and ${numericEbayQtyExpression} > 0
     and (

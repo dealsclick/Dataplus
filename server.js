@@ -19715,10 +19715,13 @@ async function ebayListingLaunchCandidates(payload = {}) {
   if (postgres.isPostgresEnabled()) {
     const items = [];
     const pageSize = Math.min(500, limit);
+    const filters = payload.filters && typeof payload.filters === "object" ? payload.filters : {};
+    const ebayReadinessDefaults = await ebayReadinessDefaultsForFilters(filters);
     for (let page = 1; items.length < limit; page += 1) {
       const result = await postgres.listProducts({
         q: String(payload.query || ""),
-        filters: payload.filters && typeof payload.filters === "object" ? payload.filters : {},
+        filters,
+        ebayDefaults: ebayReadinessDefaults,
         page,
         limit: Math.min(pageSize, limit - items.length)
       });
@@ -29033,6 +29036,29 @@ function catalogFilterParams(searchParams) {
   };
 }
 
+function catalogFilterIncludesValue(filters = {}, expected = "") {
+  const target = String(expected || "").trim().toLowerCase();
+  if (!target) return false;
+  return [filters.channelStatus, filters.channelStatusAll]
+    .flatMap((value) => catalogFilterValues(value))
+    .some((value) => String(value || "").trim().toLowerCase() === target);
+}
+
+async function ebayReadinessDefaultsForFilters(filters = {}) {
+  if (!catalogFilterIncludesValue(filters, "ebay-ready") && !catalogFilterIncludesValue(filters, "ebay-not-ready")) return {};
+  const connections = postgres.isPostgresEnabled()
+    ? await postgres.readStateField("connections").catch(() => [])
+    : (normalizeDb(await readDbFast({ skipInventory: true })).connections || []);
+  const channel = findChannelByName({ connections: Array.isArray(connections) ? connections : [] }, "eBay");
+  const settings = { ...DEFAULT_CHANNEL_SETTINGS, ...(channel?.settings || {}) };
+  return {
+    ebayMerchantLocationKey: settings.ebayMerchantLocationKey || process.env.EBAY_MERCHANT_LOCATION_KEY || "",
+    ebayPaymentPolicyId: settings.ebayPaymentPolicyId || process.env.EBAY_PAYMENT_POLICY_ID || "",
+    ebayReturnPolicyId: settings.ebayReturnPolicyId || process.env.EBAY_RETURN_POLICY_ID || "",
+    ebayFulfillmentPolicyId: settings.ebayFulfillmentPolicyId || process.env.EBAY_FULFILLMENT_POLICY_ID || ""
+  };
+}
+
 function vendorCatalogSourceCodes(vendor = {}) {
   const configuredCodes = Array.isArray(vendor.catalogSettings?.sourceCodes)
     ? vendor.catalogSettings.sourceCodes
@@ -35159,10 +35185,11 @@ async function handleApi(req, res) {
     res.write("sku,title,on_hand,reserved,available,reorder_point,warehouse_count,cost,supplier,replenishable,status\n");
     const filters = catalogFilterParams(url.searchParams);
     const query = url.searchParams.get("q") || "";
+    const ebayReadinessDefaults = await ebayReadinessDefaultsForFilters(filters);
     const shopifyStatusMap = readShopifyStatusMapSync();
     const sourceEnrichmentMap = readProductSourceEnrichmentSync();
     for (let page = 1; ; page += 1) {
-      const result = await postgres.listProducts({ q: query, page, limit: 1000, includeInventoryLevels: true, filters });
+      const result = await postgres.listProducts({ q: query, page, limit: 1000, includeInventoryLevels: true, filters, ebayDefaults: ebayReadinessDefaults });
       const rows = result?.inventory || [];
       if (!rows.length) break;
       const csvRows = rows.map((item) => {
@@ -35288,7 +35315,8 @@ async function handleApi(req, res) {
           requestedFilters,
           Array.isArray(catalogVendors) ? catalogVendors : []
         );
-      const cacheQuery = `${url.searchParams.toString()}|feedCodes:${String(filters.includedSupplierCodes || "")}`;
+      const ebayReadinessDefaults = await ebayReadinessDefaultsForFilters(filters);
+      const cacheQuery = `${url.searchParams.toString()}|feedCodes:${String(filters.includedSupplierCodes || "")}|ebayDefaults:${stableJsonKey(ebayReadinessDefaults)}`;
       const cacheKey = `dataplus:products:v9:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
@@ -35302,7 +35330,8 @@ async function handleApi(req, res) {
         sortDirection: url.searchParams.get("sortDirection") || "asc",
         includeInventoryLevels: ["1", "true", "yes"].includes(String(url.searchParams.get("inventoryWorkspace") || "").toLowerCase()),
         includeVendorOffers: true,
-        filters
+        filters,
+        ebayDefaults: ebayReadinessDefaults
       });
       if (result) {
         const sourceMatches = isExactCatalogIdentifier(catalogQuery)
