@@ -28474,6 +28474,87 @@ function ebayProductImageUrls(item = {}) {
   return [...new Set(images)];
 }
 
+function ebayListingPublishBlockSummary(item = {}) {
+  const listing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const listingId = String(listing.listingId || item.ebayId || "").trim();
+  const offerId = String(listing.offerId || "").trim();
+  if (listingId || !offerId) return null;
+  const status = String(listing.status || "").trim().toLowerCase();
+  const classified = listing.publishBlockCode
+    ? {
+      publishBlockCode: String(listing.publishBlockCode || ""),
+      publishBlockField: String(listing.publishBlockField || ""),
+      publishSuggestedFix: String(listing.publishSuggestedFix || ""),
+      publishRetryable: listing.publishRetryable === true
+    }
+    : listing.publishError
+      ? ebayPublishBlockDetails({ message: listing.publishError })
+      : {
+        publishBlockCode: "prepared_not_live",
+        publishBlockField: "offerId",
+        publishSuggestedFix: "Retry publish for the prepared eBay offer.",
+        publishRetryable: true
+      };
+  const code = classified.publishBlockCode || "ebay_publish_rejected";
+  return {
+    sku: String(item.sku || item.id || "").trim(),
+    title: String(item.marketplaceTitle || item.title || item.name || "").trim(),
+    supplier: String(item.supplier || item.vendor || item.supplierName || "").trim(),
+    offerId,
+    status: status || "offer",
+    publishBlocked: listing.publishBlocked === true || status === "publish_blocked",
+    code,
+    field: classified.publishBlockField || "",
+    suggestedFix: classified.publishSuggestedFix || "",
+    retryable: classified.publishRetryable === true || ["prepared_not_live", "missing_or_invalid_package_weight", "invalid_shipping_package_type", "invalid_or_missing_image"].includes(code),
+    error: String(listing.publishError || "").trim(),
+    errorAt: String(listing.publishErrorAt || listing.updatedAt || "").trim(),
+    packageWeight: Number(ebayMeasurementValue(item, "packageWeight", "itemWeight") || 0),
+    dimensionalWeight: ebayDimensionalWeightValue(item),
+    packageType: ebayPackageType(listing.packageType || item.ebayPackageType || item.packageType)
+  };
+}
+
+async function ebayListingBlockerReport(payload = {}) {
+  const limit = Math.max(1, Math.min(25000, Number(payload.limit || 5000) || 5000));
+  const candidates = await ebayListingLaunchCandidates({
+    allFiltered: true,
+    filters: { channelStatus: "ebay-offer" },
+    limit
+  });
+  const blockers = candidates.map(ebayListingPublishBlockSummary).filter(Boolean);
+  const byCode = new Map();
+  for (const row of blockers) {
+    const key = row.code || "ebay_publish_rejected";
+    if (!byCode.has(key)) {
+      byCode.set(key, {
+        code: key,
+        field: row.field || "",
+        suggestedFix: row.suggestedFix || "",
+        retryable: row.retryable === true,
+        count: 0,
+        samples: []
+      });
+    }
+    const group = byCode.get(key);
+    group.count += 1;
+    group.retryable = group.retryable || row.retryable === true;
+    if (!group.field && row.field) group.field = row.field;
+    if (!group.suggestedFix && row.suggestedFix) group.suggestedFix = row.suggestedFix;
+    if (group.samples.length < 8) group.samples.push(row);
+  }
+  const groups = [...byCode.values()].sort((left, right) => right.count - left.count || String(left.code).localeCompare(String(right.code)));
+  return {
+    total: blockers.length,
+    scanned: candidates.length,
+    limited: candidates.length >= limit,
+    retryableTotal: blockers.filter((row) => row.retryable).length,
+    generatedAt: new Date().toISOString(),
+    groups,
+    rows: blockers.slice(0, Math.min(250, blockers.length))
+  };
+}
+
 function ebayOfferPayload(item, config) {
   const payload = {
     sku: config.merchantSku || item.sku,
@@ -45499,6 +45580,54 @@ async function handleApi(req, res) {
       });
     } catch (error) {
       return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay listing launch." });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/ebay/listings/blockers" && postgres.isPostgresEnabled()) {
+    try {
+      const report = await ebayListingBlockerReport({ limit: url.searchParams.get("limit") || 5000 });
+      return sendJson(res, 200, report);
+    } catch (error) {
+      return sendJson(res, error.statusCode || 500, { error: error.message || "Unable to load eBay listing blockers." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/listings/retry-blocked" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const limit = Math.max(1, Math.min(500, Number(body.limit || 25) || 25));
+      const requestedCodes = new Set((Array.isArray(body.codes) ? body.codes : String(body.codes || "").split("|"))
+        .map((value) => String(value || "").trim())
+        .filter(Boolean));
+      const report = await ebayListingBlockerReport({ limit: Math.max(5000, limit) });
+      const rows = (report.rows || []).filter((row) => {
+        if (requestedCodes.size && !requestedCodes.has(row.code)) return false;
+        return row.retryable === true || body.includeUnclassified === true;
+      });
+      const skus = rows.slice(0, limit).map((row) => row.sku).filter(Boolean);
+      if (!skus.length) return sendJson(res, 400, { error: "No retryable eBay prepared-not-live SKUs were found.", report });
+      const result = await queueEbayListingLaunchJob(db, {
+        ...body,
+        skus,
+        allFiltered: false,
+        lifecycleAction: "launch",
+        action: "launch",
+        dryRun: false,
+        apply: true,
+        publish: true,
+        limit: skus.length
+      }, { operation: "eBay blocked listing retry" });
+      return sendJson(res, result.duplicate ? 200 : 202, {
+        queued: true,
+        duplicate: result.duplicate,
+        selected: skus.length,
+        skus,
+        job: normalizeImportJob(result.job),
+        message: result.duplicate ? "An eBay listing retry job is already running." : `Queued eBay retry for ${skus.length.toLocaleString()} prepared-not-live SKU${skus.length === 1 ? "" : "s"}.`
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay blocked listing retry." });
     }
   }
 

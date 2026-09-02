@@ -998,6 +998,42 @@ type ProductItem = CatalogItem & {
   recentChanges?: Array<{ field?: string; previousValue?: string; nextValue?: string; updatedAt?: string; createdAt?: string }>
 }
 
+type EbayListingBlockerSample = {
+  sku?: string
+  title?: string
+  supplier?: string
+  offerId?: string
+  status?: string
+  code?: string
+  field?: string
+  suggestedFix?: string
+  retryable?: boolean
+  error?: string
+  errorAt?: string
+  packageWeight?: number
+  dimensionalWeight?: number
+  packageType?: string
+}
+
+type EbayListingBlockerGroup = {
+  code: string
+  field?: string
+  suggestedFix?: string
+  retryable?: boolean
+  count: number
+  samples?: EbayListingBlockerSample[]
+}
+
+type EbayListingBlockerReport = {
+  total?: number
+  scanned?: number
+  limited?: boolean
+  retryableTotal?: number
+  generatedAt?: string
+  groups?: EbayListingBlockerGroup[]
+  rows?: EbayListingBlockerSample[]
+}
+
 type SupplierCoverageEntry = {
   supplier?: string
   supplierCode?: string
@@ -1159,6 +1195,7 @@ const catalogSidebarItems: Array<{ label: string; path: string; icon: React.Comp
   { label: "Categories", path: "/categories", icon: PackageSearch },
   { label: "Brands", path: "/brands", icon: Store },
   { label: "Vendor Mappings", path: "/vendor-category-mappings", icon: Warehouse },
+  { label: "eBay Blockers", path: "/ebay-blockers", icon: AlertTriangle },
   { label: "Attributes", path: "/attributes", icon: CheckCircle2 },
   { label: "Attribute Groups", path: "/groups", icon: Boxes },
   { label: "Inventory", path: "/inventory", icon: Warehouse },
@@ -1221,7 +1258,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (/^\/brands\/[^/]+$/.test(path)) return "brand-detail"
   if (path.startsWith("/brands")) return "brands"
   if (path.startsWith("/products") || path.startsWith("/catalog")) return "catalog"
-  if (["/categories", "/source-catalog", "/import-review", "/sku-changes", "/category-review", "/vendor-category-mappings", "/attributes", "/groups", "/inventory", "/templates", "/readiness"].some((prefix) => path.startsWith(prefix))) return "catalog"
+  if (["/categories", "/source-catalog", "/import-review", "/sku-changes", "/category-review", "/vendor-category-mappings", "/ebay-blockers", "/attributes", "/groups", "/inventory", "/templates", "/readiness"].some((prefix) => path.startsWith(prefix))) return "catalog"
   if (path.startsWith("/vendors")) return "vendors"
   if (path.startsWith("/ai")) return "ai-chat"
   if (path.startsWith("/settings")) return "settings"
@@ -8858,7 +8895,7 @@ function ToggleRow({ label, description, checked, disabled, onCheckedChange }: {
   return <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-medium">{label}</p><p className="text-xs text-muted-foreground">{description}</p></div><Switch aria-label={label} checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} /></div>
 }
 
-type CatalogWorkspaceTab = "products" | "review" | "changes" | "category-review" | "categories" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "readiness"
+type CatalogWorkspaceTab = "products" | "review" | "changes" | "category-review" | "categories" | "mappings" | "ebay-blockers" | "attributes" | "groups" | "inventory" | "templates" | "readiness"
 
 type CategoryAttribute = {
   id?: string
@@ -9095,6 +9132,7 @@ const catalogWorkspaceTabs: Array<{ id: CatalogWorkspaceTab; label: string }> = 
   { id: "category-review", label: "Category Review" },
   { id: "categories", label: "Categories" },
   { id: "mappings", label: "Vendor Mappings" },
+  { id: "ebay-blockers", label: "eBay Blockers" },
   { id: "attributes", label: "Attributes" },
   { id: "groups", label: "Attribute Groups" },
   { id: "inventory", label: "Inventory" },
@@ -9108,6 +9146,7 @@ function catalogWorkspaceTabFromPath() {
   if (path.startsWith("/import-review")) return "review"
   if (path.startsWith("/sku-changes")) return "changes"
   if (path.startsWith("/category-review")) return "category-review"
+  if (path.startsWith("/ebay-blockers")) return "ebay-blockers"
   if (path.startsWith("/categories")) return "categories"
   if (path.startsWith("/vendor-category-mappings")) return "mappings"
   if (path.startsWith("/attributes")) return "attributes"
@@ -10041,11 +10080,11 @@ function StandaloneCategoryPage() {
   return <CategoriesWorkspace categoryId={categoryId} initialScope={scope} standalone />
 }
 
-const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "category-review" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "categories">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
+const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "category-review" | "mappings" | "ebay-blockers" | "attributes" | "groups" | "inventory" | "templates" | "categories">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
   readiness: { endpoint: "/api/data-quality/products?limit=100", title: "Readiness", description: "Product readiness queue for missing content, dimensions, category, or marketplace requirements.", rows: "rows", columns: [["sku", "SKU"], ["title", "Product"], ["issues", "Missing or invalid"], ["channel", "Channel"], ["status", "Status"]] },
 }
 
-function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "category-review" | "mappings" | "attributes" | "groups" | "inventory" | "templates" | "categories"> }) {
+function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "category-review" | "mappings" | "ebay-blockers" | "attributes" | "groups" | "inventory" | "templates" | "categories"> }) {
   const config = catalogResourceConfig[tab]
   const [rows, setRows] = useState<Array<Record<string, unknown>>>([])
   const [loading, setLoading] = useState(true)
@@ -17408,6 +17447,62 @@ function CatalogTemplatesPage() {
   return <div className="grid gap-5"><PageHeader eyebrow="Catalog" title="Templates" description="Download structured templates for category maintenance and catalog review." /><div className="grid gap-3 sm:grid-cols-2">{templates.map(([title, href, description]) => <Card key={href}><CardHeader><CardTitle className="text-sm">{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader><CardContent><Button variant="outline" size="sm" asChild><a href={href}><FileDown className="size-4" /> Download CSV</a></Button></CardContent></Card>)}</div></div>
 }
 
+function EbayBlockersPage() {
+  const [report, setReport] = useState<EbayListingBlockerReport | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [retrying, setRetrying] = useState("")
+  const [limit, setLimit] = useState("25")
+  const load = async () => {
+    setLoading(true)
+    try {
+      const result = await api<EbayListingBlockerReport>("/api/ebay/listings/blockers?limit=5000")
+      setReport(result)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load eBay blockers.")
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { void load() }, [])
+  const retry = async (code = "") => {
+    const retryLimit = Math.max(1, Math.min(500, Number(limit || 25) || 25))
+    setRetrying(code || "all")
+    try {
+      const result = await api<{ job?: ImportJob; selected?: number; duplicate?: boolean; message?: string }>("/api/ebay/listings/retry-blocked", {
+        method: "POST",
+        body: JSON.stringify({
+          limit: retryLimit,
+          codes: code ? [code] : [],
+          includeUnclassified: true,
+          marketplaceId: "EBAY_US",
+          fulfillmentPolicyId: "252002458010"
+        }),
+      })
+      toast.success(result.message || `Queued eBay retry for ${numberLabel(result.selected || retryLimit)} SKU${Number(result.selected || retryLimit) === 1 ? "" : "s"}.`)
+      if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 500)
+      void load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue eBay retry.")
+    } finally {
+      setRetrying("")
+    }
+  }
+  const groups = report?.groups || []
+  const rows = report?.rows || []
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Catalog" title="eBay Launch Blockers" description="Prepared eBay offers that are not live yet, grouped by the publish blocker DataPlus can see." action={<div className="flex flex-wrap items-center gap-2"><Input className="h-9 w-20" type="number" min="1" max="500" value={limit} onChange={(event) => setLimit(event.target.value)} /><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button><Button size="sm" disabled={loading || retrying !== "" || !Number(report?.retryableTotal || 0)} onClick={() => void retry()}>{retrying === "all" ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Retry {numberLabel(Math.min(Number(limit || 25) || 25, Number(report?.retryableTotal || 0)))} </Button></div>} />
+    <div className="grid gap-3 md:grid-cols-4">
+      <MetricCard label="Prepared, not live" value={report?.total || 0} icon={ShoppingBag} />
+      <MetricCard label="Retryable" value={report?.retryableTotal || 0} icon={RotateCcw} />
+      <MetricCard label="Scanned" value={report?.scanned || 0} icon={Search} />
+      <MetricCard label="Blocker groups" value={groups.length} icon={AlertTriangle} />
+    </div>
+    <Alert className="border-blue-500/35 bg-blue-500/5"><AlertCircle className="size-4" /><AlertTitle>Small batch retry mode</AlertTitle><AlertDescription>The retry button queues prepared-not-live eBay offers in capped batches and forces the True Value fulfillment policy ID `252002458010`. Shipping defaults now send dimensional weight when actual package weight is missing.</AlertDescription></Alert>
+    {loading ? <div className="grid gap-3"><Skeleton className="h-28" /><Skeleton className="h-60" /></div> : groups.length ? <div className="grid gap-3">{groups.map((group) => <Card key={group.code} className="overflow-hidden"><CardHeader className="border-b bg-muted/20"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">{group.code.replace(/_/g, " ")}</CardTitle><CardDescription>{group.suggestedFix || "Review the eBay publish error and update the SKU or channel defaults."}</CardDescription></div><div className="flex flex-wrap items-center gap-2"><Badge variant={group.retryable ? "secondary" : "outline"}>{group.retryable ? "Retryable" : "Review needed"}</Badge><Badge variant="outline">{numberLabel(group.count)} SKU{group.count === 1 ? "" : "s"}</Badge>{group.retryable ? <Button size="sm" variant="outline" disabled={retrying !== ""} onClick={() => void retry(group.code)}>{retrying === group.code ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Retry group</Button> : null}</div></div></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Product</TableHead><TableHead>Field</TableHead><TableHead>Package</TableHead><TableHead>Last error</TableHead></TableRow></TableHeader><TableBody>{(group.samples || []).map((sample) => <TableRow key={`${group.code}-${sample.sku}`}><TableCell><a className="font-mono text-xs font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(sample.sku || "")}`}>{sample.sku || "-"}</a><p className="text-[11px] text-muted-foreground">Offer {sample.offerId || "-"}</p></TableCell><TableCell className="max-w-md"><p className="line-clamp-2 text-sm">{sample.title || "Untitled product"}</p><p className="text-xs text-muted-foreground">{sample.supplier || "No supplier"}</p></TableCell><TableCell>{sample.field || "-"}</TableCell><TableCell><p className="text-xs">{numberLabel(sample.packageWeight || 0)} lb actual</p><p className="text-xs text-muted-foreground">{numberLabel(sample.dimensionalWeight || 0)} lb dimensional / {sample.packageType || "default type"}</p></TableCell><TableCell className="max-w-xl"><p className="line-clamp-3 text-xs text-muted-foreground">{sample.error || sample.suggestedFix || "No raw publish error stored yet."}</p>{sample.errorAt ? <p className="mt-1 text-[11px] text-muted-foreground">{dateLabel(sample.errorAt)}</p> : null}</TableCell></TableRow>)}</TableBody></Table></CardContent></Card>)}</div> : <Empty><EmptyHeader><EmptyMedia variant="icon"><CheckCircle2 className="size-5" /></EmptyMedia><EmptyTitle>No prepared eBay blockers found</EmptyTitle><EmptyDescription>There are no offer-only eBay SKUs in the first scan window. New publish failures will appear here with their blocker code and suggested fix.</EmptyDescription></EmptyHeader></Empty>}
+    {rows.length ? <Card><CardHeader><CardTitle className="text-base">Recent prepared-not-live SKUs</CardTitle><CardDescription>First {numberLabel(rows.length)} rows from the blocker scan.</CardDescription></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Block type</TableHead><TableHead>Fix</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{rows.slice(0, 25).map((row) => <TableRow key={`blocked-row-${row.sku}`}><TableCell><a className="font-mono text-xs font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(row.sku || "")}`}>{row.sku}</a></TableCell><TableCell>{row.code?.replace(/_/g, " ") || "-"}</TableCell><TableCell className="max-w-xl text-xs text-muted-foreground">{row.suggestedFix || "-"}</TableCell><TableCell><Badge variant={row.retryable ? "secondary" : "outline"}>{row.retryable ? "Retryable" : "Review"}</Badge></TableCell></TableRow>)}</TableBody></Table></CardContent></Card> : null}
+  </div>
+}
+
 function CatalogPage({ channels = [], systemSettings = {} }: { channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
   const [tab, setTab] = useState<CatalogWorkspaceTab>(catalogWorkspaceTabFromPath)
   const [workspaceCounts, setWorkspaceCounts] = useState<Record<string, number>>({})
@@ -17427,10 +17522,10 @@ function CatalogPage({ channels = [], systemSettings = {} }: { channels?: Channe
   const selectTab = (next: string) => {
     const selected = next as CatalogWorkspaceTab
     setTab(selected)
-    const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", review: "/import-review", changes: "/sku-changes", "category-review": "/category-review", categories: "/categories", mappings: "/vendor-category-mappings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
+    const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", review: "/import-review", changes: "/sku-changes", "category-review": "/category-review", categories: "/categories", mappings: "/vendor-category-mappings", "ebay-blockers": "/ebay-blockers", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
     window.history.replaceState({}, "", paths[selected])
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
+  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "ebay-blockers" && <EbayBlockersPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
 }
 
 export function SourceCatalogPage() {
