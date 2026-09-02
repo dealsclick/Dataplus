@@ -117,6 +117,66 @@ function channelSellableQuantity(quantity = 0, options = {}) {
   return sellable;
 }
 
+function productShippingDimensionValue(item = {}, camelKey = "", snakeKey = "") {
+  return numberValue(item[camelKey] ?? item[snakeKey] ?? 0, 0);
+}
+
+function calculateDimensionalWeight(item = {}) {
+  const length = productShippingDimensionValue(item, "packageLength", "package_length");
+  const width = productShippingDimensionValue(item, "packageWidth", "package_width");
+  const height = productShippingDimensionValue(item, "packageHeight", "package_height");
+  if (!(length > 0 && width > 0 && height > 0)) return 0;
+  return Math.round(((length * width * height) / 139) * 1000) / 1000;
+}
+
+function productHasShippingMeasurements(item = {}) {
+  return [
+    ["packageLength", "package_length"],
+    ["packageWidth", "package_width"],
+    ["packageHeight", "package_height"],
+    ["packageWeight", "package_weight"],
+    ["itemLength", "item_length"],
+    ["itemWidth", "item_width"],
+    ["itemHeight", "item_height"],
+    ["itemWeight", "item_weight"]
+  ].some(([camelKey, snakeKey]) => productShippingDimensionValue(item, camelKey, snakeKey) > 0);
+}
+
+function productShippingClassification(item = {}) {
+  const length = productShippingDimensionValue(item, "packageLength", "package_length") || productShippingDimensionValue(item, "itemLength", "item_length");
+  const width = productShippingDimensionValue(item, "packageWidth", "package_width") || productShippingDimensionValue(item, "itemWidth", "item_width");
+  const height = productShippingDimensionValue(item, "packageHeight", "package_height") || productShippingDimensionValue(item, "itemHeight", "item_height");
+  const weight = productShippingDimensionValue(item, "packageWeight", "package_weight") || productShippingDimensionValue(item, "itemWeight", "item_weight");
+  const dimensionalWeight = productShippingDimensionValue(item, "dimensionalWeight", "dimensional_weight") || calculateDimensionalWeight(item);
+  const sorted = [length, width, height].sort((a, b) => b - a);
+  const longest = sorted[0] || 0;
+  const lengthPlusGirth = longest + (2 * ((sorted[1] || 0) + (sorted[2] || 0)));
+  const ltlReasons = [];
+  if (longest > 60) ltlReasons.push(`longest side ${longest}" exceeds 60" parcel threshold`);
+  if (lengthPlusGirth > 130) ltlReasons.push(`length plus girth ${lengthPlusGirth}" exceeds 130"`);
+  if (weight >= 50) ltlReasons.push(`package weight ${weight} lb is 50 lb or more`);
+  if (dimensionalWeight >= 70) ltlReasons.push(`dimensional weight ${dimensionalWeight} lb is 70 lb or more`);
+  if (ltlReasons.length) return { shippingClass: "ltl", shippingMethod: "LTL", shippingClassReason: ltlReasons.join("; "), dimensionalWeight };
+  const oversizeReasons = [];
+  if (longest > 48) oversizeReasons.push(`longest side ${longest}" exceeds 48"`);
+  if (lengthPlusGirth > 105) oversizeReasons.push(`length plus girth ${lengthPlusGirth}" exceeds 105"`);
+  if (dimensionalWeight >= 50) oversizeReasons.push(`dimensional weight ${dimensionalWeight} lb is 50 lb or more`);
+  if (oversizeReasons.length) return { shippingClass: "oversize_parcel", shippingMethod: "Oversize Parcel", shippingClassReason: oversizeReasons.join("; "), dimensionalWeight };
+  return { shippingClass: "parcel", shippingMethod: "Parcel", shippingClassReason: "Within parcel size and weight thresholds.", dimensionalWeight };
+}
+
+function channelShippingRestriction(item = {}, options = {}) {
+  if (options.shippingRestrictionGateEnabled === false) return { blocked: false, reason: "", shippingClass: "", dimensionalWeight: 0 };
+  if (!productHasShippingMeasurements(item)) {
+    const blocked = options.shippingRestrictMissingMeasurementsInventory === true;
+    return { blocked, reason: blocked ? "Shipping measurements are missing." : "", shippingClass: "missing_measurements", dimensionalWeight: 0 };
+  }
+  const classification = productShippingClassification(item);
+  const blocked = (classification.shippingClass === "ltl" && options.shippingRestrictLtlInventory !== false)
+    || (classification.shippingClass === "oversize_parcel" && options.shippingRestrictOversizeInventory !== false);
+  return { ...classification, blocked, reason: blocked ? classification.shippingClassReason : "" };
+}
+
 function baseSkuCandidates(item = {}) {
   return [...new Set([item.sku, item.vendor_sku, item.vendorSku, item.mfr_part_number, item.mfrPartNumber]
     .map(textValue)
@@ -139,12 +199,14 @@ function parseShopifyPackVariantSku(sku = "", bases = []) {
 
 function expectedVariantQuantities(item = {}, options = {}) {
   const baseSku = baseSkuCandidates(item)[0] || "";
+  const shippingRestriction = channelShippingRestriction(item, options);
+  const blockedByShipping = shippingRestriction.blocked === true;
   const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
     ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
     : 0;
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options);
+  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options);
   const uomQty = productUomQty(item);
   if (!baseSku) return [];
   if (uomQty <= 1) return [{ sku: baseSku, quantity: availableEach, role: "each", uomQty: 1 }];
@@ -157,12 +219,14 @@ function expectedVariantQuantities(item = {}, options = {}) {
 
 function expectedVariantQuantitiesForShopify(item = {}, variants = [], options = {}) {
   const bases = baseSkuCandidates(item);
+  const shippingRestriction = channelShippingRestriction(item, options);
+  const blockedByShipping = shippingRestriction.blocked === true;
   const replenishableQty = booleanValue(item.replenishable) && !booleanValue(item.replenishable_use_vendor_rules) && !booleanValue(item.replenishable_qty_use_vendor_default)
     ? Math.max(0, Math.floor(numberValue(item.replenishable_qty, 0)))
     : 0;
   const stock = Math.max(0, Math.floor(numberValue(item.source_qty ?? item.qty, 0)));
   const reserved = Math.max(0, Math.floor(numberValue(item.reserved, 0)));
-  const availableEach = channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options);
+  const availableEach = blockedByShipping ? 0 : channelSellableQuantity(replenishableQty > 0 ? replenishableQty : Math.max(0, stock - reserved), options);
   const bySku = new Map((variants || []).map((variant) => [textValue(variant.sku).toLowerCase(), variant]));
   const expected = expectedVariantQuantities(item, options);
   const matchedExpected = expected.filter((row) => bySku.has(textValue(row.sku).toLowerCase()));
@@ -528,6 +592,18 @@ async function loadLinkedProducts(limit, requestedSku = "", requestedSkus = []) 
         coalesce(p.raw->>'replenishableQty', '0') as replenishable_qty,
         coalesce(vci.uom, p.uom, p.raw->>'uom', '') as uom,
         coalesce(vci.uom_qty::text, p.uom_qty::text, p.raw->>'uomQty', p.raw->>'uom_qty', '1') as uom_qty,
+        coalesce(p.raw->>'shippingClass', p.raw->>'shipping_class', '') as shipping_class,
+        coalesce(p.raw->>'shippingMethod', p.raw->>'shipping_method', '') as shipping_method,
+        coalesce(p.raw->>'shippingClassReason', p.raw->>'shipping_class_reason', '') as shipping_class_reason,
+        coalesce(p.raw->>'dimensionalWeight', p.raw->>'dimensional_weight', '0') as dimensional_weight,
+        coalesce(p.raw->>'packageLength', p.raw->>'package_length', '0') as package_length,
+        coalesce(p.raw->>'packageWidth', p.raw->>'package_width', '0') as package_width,
+        coalesce(p.raw->>'packageHeight', p.raw->>'package_height', '0') as package_height,
+        coalesce(p.raw->>'packageWeight', p.raw->>'package_weight', '0') as package_weight,
+        coalesce(p.raw->>'itemLength', p.raw->>'item_length', '0') as item_length,
+        coalesce(p.raw->>'itemWidth', p.raw->>'item_width', '0') as item_width,
+        coalesce(p.raw->>'itemHeight', p.raw->>'item_height', '0') as item_height,
+        coalesce(p.raw->>'itemWeight', p.raw->>'item_weight', '0') as item_weight,
         coalesce(sps.shopify_id, p.raw->>'shopifyId', '') as shopify_id,
         coalesce(sps.shopify_variant_id, p.raw->>'shopifyVariantId', '') as shopify_variant_id
       from products p
@@ -575,7 +651,11 @@ async function main() {
     allocationPercent: numberValue(argValue("allocation-percent", "100"), 100),
     safetyQty: numberValue(argValue("safety-qty", "0"), 0),
     maxSellableQty: numberValue(argValue("max-sellable-qty", "0"), 0),
-    fixedQty: numberValue(argValue("fixed-qty", "0"), 0)
+    fixedQty: numberValue(argValue("fixed-qty", "0"), 0),
+    shippingRestrictionGateEnabled: !["false", "0", "no"].includes(textValue(argValue("shipping-restriction-gate", "true")).toLowerCase()),
+    shippingRestrictLtlInventory: !["false", "0", "no"].includes(textValue(argValue("shipping-restrict-ltl-inventory", "true")).toLowerCase()),
+    shippingRestrictOversizeInventory: !["false", "0", "no"].includes(textValue(argValue("shipping-restrict-oversize-inventory", "true")).toLowerCase()),
+    shippingRestrictMissingMeasurementsInventory: booleanValue(argValue("shipping-restrict-missing-measurements-inventory", "false"))
   };
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const reportPath = path.join(OUTPUT_DIR, `shopify-inventory-${apply ? "applied" : "dry-run"}-${timestamp}.json`);
@@ -608,6 +688,7 @@ async function main() {
     variantsChanged: 0,
     variantsApplied: 0,
     productsMissingVariants: 0,
+    productsShippingRestricted: 0,
     skippedUntracked: 0,
     shopifyRetryStats: graphqlRetryStats,
     errors: [],
@@ -644,6 +725,8 @@ async function main() {
       if (processed % 250 === 0) process.stderr.write(`Checked ${processed}/${products.length}; prepared ${updates.length}\r`);
       const productId = normalizeGid(product.shopify_id, "Product");
       if (!productId) continue;
+      const shippingRestriction = channelShippingRestriction(product, quantityPolicy);
+      if (shippingRestriction.blocked) report.productsShippingRestricted += 1;
       const variants = variantsByProduct.get(productId) || [];
       const bySku = new Map(variants.map((variant) => [textValue(variant.sku).toLowerCase(), variant]));
       const expectedRows = expectedVariantQuantitiesForShopify(product, variants, { packMode, ...quantityPolicy });
@@ -668,6 +751,9 @@ async function main() {
           current,
           quantity,
           delta: quantity - current,
+          shippingRestricted: shippingRestriction.blocked === true,
+          shippingClass: shippingRestriction.shippingClass || product.shipping_class || "",
+          shippingRestrictionReason: shippingRestriction.reason || "",
           productId,
           variantId: variant.id,
           inventoryItemId: variant.inventoryItem.id

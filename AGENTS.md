@@ -371,6 +371,7 @@ Jobs are the audit trail for imports, exports, syncs, scans, index rebuilds, bac
 - If a worker restarts, persist progress and mark the job for retry/review rather than silently losing it.
 - Errors should be collected per row where possible, with an error CSV and a clear distinction between auto-fixable and human-review errors.
 - Jobs should run in an external worker for large imports and marketplace syncs; do not hold a browser request open for a large task.
+- Channel shipping protection uses the catalog shipping classification (`parcel`, `oversize_parcel`, `ltl`) to prevent unsafe selling. When enabled on a channel, LTL and oversize parcel SKUs can be forced to zero inventory for live listings, and blocked from launch when not already live; missing measurements are optional because they can affect broad catalog coverage.
 
 ## Releases and change history
 

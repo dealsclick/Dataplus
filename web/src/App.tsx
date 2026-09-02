@@ -264,6 +264,13 @@ type ChannelSettings = {
   defaultMaxSellableQty?: number
   defaultShippingProfile?: string
   defaultShippingService?: string
+  shippingRestrictionGateEnabled?: boolean
+  shippingRestrictLtlInventory?: boolean
+  shippingRestrictOversizeInventory?: boolean
+  shippingRestrictMissingMeasurementsInventory?: boolean
+  shippingRestrictLtlLaunch?: boolean
+  shippingRestrictOversizeLaunch?: boolean
+  shippingRestrictMissingMeasurementsLaunch?: boolean
   priceUpdateEnabled?: boolean
   inventoryUpdateEnabled?: boolean
   orderDownloadEnabled?: boolean
@@ -5245,6 +5252,15 @@ function ChannelDetail({
                 {shippingProfiles.length ? <Select disabled={!editing} value={String(settings.defaultShippingProfile || "")} onValueChange={(value) => update("defaultShippingProfile", value)}><SelectTrigger><SelectValue placeholder="Select profile" /></SelectTrigger><SelectContent>{shippingProfiles.map((profile) => <SelectItem key={profile.id || profile.name} value={profile.name || profile.id || ""}>{profile.name || profile.id}</SelectItem>)}</SelectContent></Select> : <Input disabled={!editing} value={String(settings.defaultShippingProfile || "")} onChange={(event) => update("defaultShippingProfile", event.target.value)} />}
               </Field>}
               {!isTemu && <Field label="Default shipping service"><Input disabled={!editing} value={String(settings.defaultShippingService || "")} onChange={(event) => update("defaultShippingService", event.target.value)} /></Field>}
+              {!isTemu && <>
+                <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Shipping inventory protection</p><p className="pt-1 text-xs text-muted-foreground">Uses the catalog shipping class already calculated from package dimensions and weight. Restricted live SKUs publish zero inventory; restricted unpublished SKUs are blocked from launch.</p></div>
+                <ToggleField label="Enable shipping restriction gate" description="Turns the class-based inventory and launch protections on for this channel." checked={settings.shippingRestrictionGateEnabled !== false} disabled={!editing} onCheckedChange={(value) => update("shippingRestrictionGateEnabled", value)} />
+                <ToggleField label="Zero inventory for freight/LTL" description="Live listings in the LTL class will sync inventory as 0." checked={settings.shippingRestrictLtlInventory !== false} disabled={!editing || settings.shippingRestrictionGateEnabled === false} onCheckedChange={(value) => update("shippingRestrictLtlInventory", value)} />
+                <ToggleField label="Zero inventory for large parcel" description="Live listings in the oversize parcel class will sync inventory as 0." checked={settings.shippingRestrictOversizeInventory !== false} disabled={!editing || settings.shippingRestrictionGateEnabled === false} onCheckedChange={(value) => update("shippingRestrictOversizeInventory", value)} />
+                <ToggleField label="Zero inventory when measurements are missing" description="Optional. Leave off unless this channel should never sell SKUs without package data." checked={Boolean(settings.shippingRestrictMissingMeasurementsInventory)} disabled={!editing || settings.shippingRestrictionGateEnabled === false} onCheckedChange={(value) => update("shippingRestrictMissingMeasurementsInventory", value)} />
+                <ToggleField label="Block launch for freight/LTL" description="Unpublished LTL SKUs will fail readiness instead of creating a listing." checked={settings.shippingRestrictLtlLaunch !== false} disabled={!editing || settings.shippingRestrictionGateEnabled === false} onCheckedChange={(value) => update("shippingRestrictLtlLaunch", value)} />
+                <ToggleField label="Block launch for large parcel" description="Unpublished oversize parcel SKUs will fail readiness instead of creating a listing." checked={settings.shippingRestrictOversizeLaunch !== false} disabled={!editing || settings.shippingRestrictionGateEnabled === false} onCheckedChange={(value) => update("shippingRestrictOversizeLaunch", value)} />
+              </>}
               {isShopify && <>
                 <Field label="Default product status"><Select disabled={!editing} value={String(settings.shopifyDefaultStatus || "draft")} onValueChange={(value) => update("shopifyDefaultStatus", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="draft">Draft</SelectItem><SelectItem value="active">Active</SelectItem><SelectItem value="archived">Archived</SelectItem></SelectContent></Select></Field>
                 <Field label="Inventory policy"><Select disabled={!editing} value={String(settings.shopifyInventoryPolicy || "deny")} onValueChange={(value) => update("shopifyInventoryPolicy", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="deny">Deny oversell</SelectItem><SelectItem value="continue">Continue selling</SelectItem></SelectContent></Select></Field>

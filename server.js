@@ -755,6 +755,13 @@ const DEFAULT_CHANNEL_SETTINGS = {
   warehouseRoutingRules: [],
   defaultShippingProfile: "Standard",
   defaultShippingService: "Marketplace Standard",
+  shippingRestrictionGateEnabled: true,
+  shippingRestrictLtlInventory: true,
+  shippingRestrictOversizeInventory: true,
+  shippingRestrictMissingMeasurementsInventory: false,
+  shippingRestrictLtlLaunch: true,
+  shippingRestrictOversizeLaunch: true,
+  shippingRestrictMissingMeasurementsLaunch: false,
   priceUpdateEnabled: true,
   inventoryUpdateEnabled: true,
   orderDownloadEnabled: true,
@@ -3310,6 +3317,34 @@ function applyProductShippingClassification(item = {}) {
   return classification;
 }
 
+function channelShippingRestriction(item = {}, settings = {}, mode = "inventory") {
+  if (settings.shippingRestrictionGateEnabled === false) return { blocked: false, reason: "", shippingClass: "", dimensionalWeight: 0 };
+  const hasMeasurements = productHasShippingMeasurements(item);
+  if (!hasMeasurements) {
+    const blocked = mode === "launch"
+      ? settings.shippingRestrictMissingMeasurementsLaunch === true
+      : settings.shippingRestrictMissingMeasurementsInventory === true;
+    return {
+      blocked,
+      reason: blocked ? "Shipping measurements are missing." : "",
+      shippingClass: "missing_measurements",
+      dimensionalWeight: 0
+    };
+  }
+  const classification = productShippingClassification(item);
+  const shippingClass = String(classification.shippingClass || "").trim();
+  const blockLtl = mode === "launch" ? settings.shippingRestrictLtlLaunch !== false : settings.shippingRestrictLtlInventory !== false;
+  const blockOversize = mode === "launch" ? settings.shippingRestrictOversizeLaunch !== false : settings.shippingRestrictOversizeInventory !== false;
+  const blocked = (shippingClass === "ltl" && blockLtl) || (shippingClass === "oversize_parcel" && blockOversize);
+  return {
+    blocked,
+    reason: blocked ? classification.shippingClassReason || `${classification.shippingMethod || shippingClass} is blocked for this channel.` : "",
+    shippingClass,
+    shippingMethod: classification.shippingMethod || "",
+    dimensionalWeight: classification.dimensionalWeight || 0
+  };
+}
+
 function normalizedCompareValue(value) {
   if (Array.isArray(value)) return value.map((item) => normalizedCompareValue(item)).join("|");
   if (value && typeof value === "object") return JSON.stringify(value);
@@ -4373,7 +4408,7 @@ function normalizeChannel(channel = {}) {
   for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
@@ -4734,6 +4769,10 @@ async function queueShopifyInventoryUpdateJob(db, body = {}, options = {}) {
     warehouseName: inventoryTarget.warehouse?.name || "",
     locationName: inventoryTarget.locationName || "",
     mappingId: inventoryTarget.mapping?.id || "",
+    shippingRestrictionGateEnabled: inventoryTarget.settings.shippingRestrictionGateEnabled !== false,
+    shippingRestrictLtlInventory: inventoryTarget.settings.shippingRestrictLtlInventory !== false,
+    shippingRestrictOversizeInventory: inventoryTarget.settings.shippingRestrictOversizeInventory !== false,
+    shippingRestrictMissingMeasurementsInventory: inventoryTarget.settings.shippingRestrictMissingMeasurementsInventory === true,
     scheduleKey: options.scheduleKey || "",
     scheduled: options.scheduled === true
   };
@@ -6718,6 +6757,11 @@ function productEbayLaunchBlockReason(item = {}, db = null) {
   const mapping = db ? categoryMappingForProduct(db, item, "ebay") || {} : {};
   if (mapping.blocked === true || String(mapping.status || "").toLowerCase() === "blocked") {
     return `eBay category is blocked${mapping.blockReason ? `: ${mapping.blockReason}` : ""}`;
+  }
+  if (db) {
+    const settings = ebayChannelSettings(db);
+    const restriction = channelShippingRestriction(item, settings, "launch");
+    if (restriction.blocked) return `eBay shipping blocked (${restriction.shippingMethod || restriction.shippingClass}): ${restriction.reason}`;
   }
   const reason = productInactiveOrDiscontinuedReason(item);
   if (!reason) return "";
@@ -20048,6 +20092,9 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
             enabled: config.enabled !== false,
             restricted: config.restricted === true,
             inventory_source: config.inventorySource || "",
+            shipping_class: config.shippingClass || "",
+            shipping_inventory_blocked: config.shippingInventoryBlocked === true,
+            shipping_inventory_block_reason: config.shippingInventoryBlockReason || "",
             price: readiness.price,
             gross_profit: Number(grossProfit.toFixed(2)),
             gross_margin_percent: Number(grossMarginPercent.toFixed(2)),
@@ -26361,6 +26408,8 @@ function marketplaceSuggestedPrice(item = {}, settings = {}) {
 }
 
 function marketplaceListingQuantity(item = {}, settings = {}) {
+  const shippingRestriction = channelShippingRestriction(item, settings, "inventory");
+  if (shippingRestriction.blocked) return 0;
   const onHand = Math.max(0, Math.floor(Number(item.qty ?? 0)));
   const sourceStock = Math.max(0, Math.floor(Number(item.stockQty ?? item.qty ?? 0)));
   const reserved = Math.max(0, Math.floor(Number(item.reserved || 0)));
@@ -26617,6 +26666,7 @@ function ebayListingConfig(db, item, body = {}) {
     ebaySafetyQty: safetyQty,
     ebayMaxSellableQty: maxSellableQty
   });
+  const shippingInventoryRestriction = channelShippingRestriction(item, effectiveSettings, "inventory");
   const inventoryConnected = productSettings.ebayInventoryConnected !== false;
   const quantityOverride = productSettings.ebayQuantityOverride !== undefined && productSettings.ebayQuantityOverride !== null && productSettings.ebayQuantityOverride !== ""
     ? Math.max(0, Math.floor(Number(productSettings.ebayQuantityOverride || 0)))
@@ -26704,6 +26754,11 @@ function ebayListingConfig(db, item, body = {}) {
     restrictionReason,
     inventoryConnected,
     inventorySource: !inventoryConnected ? "manual" : useChannelDefaultQuantity ? "channel default" : "actual inventory",
+    shippingInventoryBlocked: shippingInventoryRestriction.blocked,
+    shippingInventoryBlockReason: shippingInventoryRestriction.reason,
+    shippingClass: shippingInventoryRestriction.shippingClass,
+    shippingMethod: shippingInventoryRestriction.shippingMethod,
+    dimensionalWeight: shippingInventoryRestriction.dimensionalWeight,
     safetyQty,
     maxSellableQty,
     minInventoryForAutoListing,
@@ -28164,6 +28219,7 @@ function validateEbayListingConfig(config, publish = false, item = {}) {
     if (!value) missing.push(key);
   }
   if (!(config.price > 0)) missing.push("price");
+  if (publish && config.shippingInventoryBlocked) missing.push(`shipping blocked: ${config.shippingInventoryBlockReason || config.shippingClass || "restricted by channel setting"}`);
   if (publish && !(config.quantity > 0)) missing.push("quantity");
   if (publish && config.minInventoryForAutoListing > 0 && Number(config.quantity || 0) < Number(config.minInventoryForAutoListing || 0)) {
     missing.push(`minimum inventory ${config.minInventoryForAutoListing}`);

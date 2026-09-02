@@ -1284,6 +1284,10 @@ async function runShopifyInventoryUpdateJob(job) {
   args.push(`--safety-qty=${Math.max(0, Math.floor(Number(payload.safetyQty || 0)))}`);
   args.push(`--max-sellable-qty=${Math.max(0, Math.floor(Number(payload.maxSellableQty || 0)))}`);
   args.push(`--fixed-qty=${Math.max(0, Math.floor(Number(payload.fixedQty || 0)))}`);
+  args.push(`--shipping-restriction-gate=${payload.shippingRestrictionGateEnabled !== false}`);
+  args.push(`--shipping-restrict-ltl-inventory=${payload.shippingRestrictLtlInventory !== false}`);
+  args.push(`--shipping-restrict-oversize-inventory=${payload.shippingRestrictOversizeInventory !== false}`);
+  args.push(`--shipping-restrict-missing-measurements-inventory=${payload.shippingRestrictMissingMeasurementsInventory === true}`);
 
   let current = await persistJob(job, {
     status: "running",
