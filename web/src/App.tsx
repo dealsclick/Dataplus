@@ -910,6 +910,9 @@ type ProductItem = CatalogItem & {
     paymentPolicyId?: string
     returnPolicyId?: string
     fulfillmentPolicyId?: string
+    publishBlocked?: boolean
+    publishError?: string
+    publishErrorAt?: string
     bestOfferEnabled?: boolean
     bestOfferAutoAcceptPrice?: number
     bestOfferAutoDeclinePrice?: number
@@ -5515,7 +5518,7 @@ function channelFilterLabel(value: string) {
     "shopify-not-ready": "Shopify setup incomplete",
     "shopify-price-mismatch": "Shopify price needs review",
     "ebay-live": "eBay live",
-    "ebay-offer": "eBay offer needs publishing",
+    "ebay-offer": "Prepared for eBay, not live",
     "ebay-detected": "Detected in eBay catalog",
     "ebay-ready": "Ready to send to eBay",
     "ebay-not-ready": "eBay setup incomplete",
@@ -5666,6 +5669,44 @@ function marketplaceListingUrl(item: ProductItem, channel: ChannelConnection) {
   return ""
 }
 
+function ebayListingOperatorState(item: ProductItem) {
+  const listing = item.ebayListing || {}
+  const status = String(listing.status || "").toLowerCase()
+  const listingId = String(listing.listingId || item.ebayId || "").trim()
+  const offerId = String(listing.offerId || "").trim()
+  const publishBlocked = listing.publishBlocked === true || ["publish_blocked", "publish failed", "publish_failed"].includes(status)
+  if (listingId) {
+    return {
+      state: "live" as const,
+      filter: "ebay-live",
+      label: "Live on eBay",
+      detail: "A public eBay listing ID exists. Buyers can find this item unless eBay has separately ended or restricted it."
+    }
+  }
+  if (offerId && publishBlocked) {
+    return {
+      state: "attention" as const,
+      filter: "ebay-offer",
+      label: "Prepared, publish blocked",
+      detail: listing.publishError || "eBay accepted the offer setup, but blocked the final publish step."
+    }
+  }
+  if (offerId) {
+    return {
+      state: "attention" as const,
+      filter: "ebay-offer",
+      label: "Prepared, not live",
+      detail: "An eBay offer exists, but no public listing ID is stored yet."
+    }
+  }
+  return {
+    state: "disabled" as const,
+    filter: "ebay-missing",
+    label: "Not on eBay",
+    detail: "No eBay listing ID or offer ID is stored for this SKU."
+  }
+}
+
 function catalogChannelState(item: ProductItem, channel: ChannelConnection) {
   const key = `${channel.id} ${channel.name}`.toLowerCase()
   const isShopify = key.includes("shopify")
@@ -5677,18 +5718,18 @@ function catalogChannelState(item: ProductItem, channel: ChannelConnection) {
   const whatnotListing = record.whatnotListing && typeof record.whatnotListing === "object" ? record.whatnotListing as Record<string, unknown> : {}
   const temuStatus = String(temuListing.status || record.temuStatus || "").toLowerCase()
   const whatnotStatus = String(whatnotListing.status || record.whatnotStatus || "").toLowerCase()
-  const ebayStatus = String(item.ebayListing?.status || "").toLowerCase()
+  const ebayState = ebayListingOperatorState(item)
   const state: "live" | "attention" | "disabled" = isShopify
     ? item.shopifyId && item.shopifyPublished ? "live" : item.shopifyId ? "attention" : "disabled"
     : isEbay
-      ? item.ebayListing?.listingId || ["active", "live"].includes(ebayStatus) ? "live" : item.ebayListing?.offerId ? "attention" : "disabled"
+      ? ebayState.state
       : isTemu
         ? item.temuListingId || ["active", "live", "published"].includes(temuStatus) ? "live" : item.temuOfferId || item.temuProductId ? "attention" : "disabled"
         : isWhatnot
           ? record.whatnotListingId || ["active", "live", "published"].includes(whatnotStatus) ? "live" : record.whatnotProductId || record.whatnotVariantId ? "attention" : "disabled"
           : "disabled"
-  const filter = isShopify ? state === "live" ? "shopify-live" : state === "attention" ? "shopify-unpublished" : "shopify-missing" : isEbay ? state === "live" ? "ebay-live" : state === "attention" ? "ebay-offer" : "ebay-missing" : isTemu ? state === "live" ? "temu-live" : state === "attention" ? "temu-offer" : "temu-missing" : isWhatnot ? state === "live" ? "whatnot-live" : state === "attention" ? "whatnot-detected" : "whatnot-missing" : ""
-  return { isShopify, isEbay, isTemu, isWhatnot, state, filter }
+  const filter = isShopify ? state === "live" ? "shopify-live" : state === "attention" ? "shopify-unpublished" : "shopify-missing" : isEbay ? ebayState.filter : isTemu ? state === "live" ? "temu-live" : state === "attention" ? "temu-offer" : "temu-missing" : isWhatnot ? state === "live" ? "whatnot-live" : state === "attention" ? "whatnot-detected" : "whatnot-missing" : ""
+  return { isShopify, isEbay, isTemu, isWhatnot, state, filter, ebayState }
 }
 
 function CatalogChannelMarks({ item, channels }: { item: ProductItem; channels: ChannelConnection[] }) {
@@ -5696,17 +5737,18 @@ function CatalogChannelMarks({ item, channels }: { item: ProductItem; channels: 
   if (!enabled.length) return <span className="text-xs text-muted-foreground">No channels enabled</span>
   return <div className="flex min-w-28 items-center gap-1.5">
     {enabled.map((channel) => {
-      const { isShopify, isEbay, state } = catalogChannelState(item, channel)
+      const { isShopify, isEbay, state, ebayState } = catalogChannelState(item, channel)
       const destinationUrl = marketplaceListingUrl(item, channel)
       const listingUrl = state === "live" ? destinationUrl : ""
       const sourceUrl = item.productCatalogSku || item.sku ? `/products/${encodeURIComponent(item.productCatalogSku || item.sku || "")}` : ""
       const stateLabel = state === "live"
-        ? "Live on the storefront"
+        ? isEbay ? ebayState.label : "Live on the storefront"
         : state === "attention"
           ? isShopify
             ? "In Shopify catalog, not published to the storefront"
-            : "Needs attention"
+            : isEbay ? ebayState.label : "Needs attention"
           : "Not enabled for this SKU"
+      const stateDetail = isEbay ? ebayState.detail : stateLabel
       const src = channel.logoDataUrl || channel.logoUrl
       const fallback = isShopify ? "S" : isEbay ? "e" : String(channel.name || "?").slice(0, 1).toUpperCase()
       const color = state === "live"
@@ -5729,6 +5771,7 @@ function CatalogChannelMarks({ item, channels }: { item: ProductItem; channels: 
           </TooltipTrigger>
           <TooltipContent className="w-64 p-3" data-no-image-preview>
             <p className="text-xs leading-5">{channel.name}: {stateLabel}.</p>
+            {isEbay && stateDetail !== stateLabel ? <p className="mt-1 text-xs leading-5 text-muted-foreground">{stateDetail}</p> : null}
             {(destinationUrl || sourceUrl) && <div className="mt-2">
               <Button asChild type="button" size="sm" className="h-7 gap-1 px-2 text-[11px] text-white hover:text-white">
                 <a href={destinationUrl || sourceUrl} target={destinationUrl ? "_blank" : undefined} rel={destinationUrl ? "noreferrer" : undefined} data-no-image-preview>
@@ -6687,6 +6730,7 @@ function ProductChannelPanel({ channel, product, section, values, onEditEbay }: 
 
   if (kind === "ebay") {
     const ebay = product.ebayListing || {}
+    const ebayOperatorState = ebayListingOperatorState(product)
     const settings = channel.settings || {}
     const overrides = ebay.settings || {}
     const usesChannelDefaults = overrides.useChannelDefaults !== false
@@ -6704,10 +6748,10 @@ function ProductChannelPanel({ channel, product, section, values, onEditEbay }: 
     const returnPolicyId = configuredValue("returnPolicyId", "ebayReturnPolicyId")
     const fulfillmentPolicyId = configuredValue("fulfillmentPolicyId", "ebayFulfillmentPolicyId")
     const comparison = product.ebayCategoryComparison
-    const listingRows: Array<[string, string]> = [["Settings source", usesChannelDefaults ? "Channel defaults" : "SKU override"], ["Status", ebay.status || "Not listed"], ["Listing ID", ebay.listingId || "Not linked"], ["Offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", String(configuredValue("marketplaceId", "ebayMarketplaceId", "EBAY_US"))], ["Merchant location", locationKey], ["Local category ID", comparison?.local?.id || String(overrides.ebayCategoryId || "")], ["Local category path", comparison?.local?.path || String(overrides.ebayCategoryPath || "")], ["Live eBay category ID", comparison?.live?.id || ""], ["Live eBay category path", comparison?.live?.path || comparison?.live?.name || ""], ["Taxonomy version", ebay.taxonomyVersion || String(overrides.ebayTaxonomyVersion || "")], ["Condition", String(configuredValue("condition", "ebayDefaultCondition", product.condition || "New"))], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
+    const listingRows: Array<[string, string]> = [["Settings source", usesChannelDefaults ? "Channel defaults" : "SKU override"], ["Operator status", ebayOperatorState.label], ["Blocking reason", ebayOperatorState.state === "attention" ? ebayOperatorState.detail : ""], ["Public listing ID", ebay.listingId || "Not live"], ["API offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", String(configuredValue("marketplaceId", "ebayMarketplaceId", "EBAY_US"))], ["Merchant location", locationKey], ["Local category ID", comparison?.local?.id || String(overrides.ebayCategoryId || "")], ["Local category path", comparison?.local?.path || String(overrides.ebayCategoryPath || "")], ["Live eBay category ID", comparison?.live?.id || ""], ["Live eBay category path", comparison?.live?.path || comparison?.live?.name || ""], ["Taxonomy version", ebay.taxonomyVersion || String(overrides.ebayTaxonomyVersion || "")], ["Condition", String(configuredValue("condition", "ebayDefaultCondition", product.condition || "New"))], ["Last publish error", ebay.publishErrorAt ? dateLabel(ebay.publishErrorAt) : ""], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
     const commerceRows: Array<[string, string]> = [["Listing price", ebay.price === undefined ? "Not listed" : `${ebay.currency || configuredValue("currency", "ebayCurrency", "USD")} ${moneyLabel(ebay.price)}`], ["Listing quantity", ebay.quantity === undefined ? "Not listed" : numberLabel(ebay.quantity)], ["Price rule", String(effectiveSettings.ebayPricingMode || "cost-plus")], ["Markup", `${numberLabel(Number(effectiveSettings.ebayPriceMarkupPercent || 0))}%`], ["Minimum margin", `${numberLabel(Number(effectiveSettings.ebayMinMarginPercent || 0))}%`], ["Minimum price", moneyLabel(Number(effectiveSettings.ebayMinimumPrice || 0))], ["Rounding", String(effectiveSettings.ebayRoundingRule || "none")], ["Quantity rule", String(effectiveSettings.ebayQuantityMode || "available")], ["Best offer", configuredValue("bestOfferEnabled", "ebayBestOfferEnabled") ? "Enabled" : "Off"], ["Auto publish", effectiveSettings.ebayAutoPublish ? "Enabled" : "Off"], ["Require image", effectiveSettings.ebayRequireImage === false ? "Off" : "Enabled"], ["DataPlus price", moneyLabel(product.websitePrice ?? product.price)], ["Available quantity", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]
     const policyRows: Array<[string, string]> = [["Merchant location", location ? `${location.name || locationKey}${location.status ? ` / ${location.status}` : ""}` : locationKey || "Not selected"], ["Payment policy", policyLabel(settings.ebayPaymentPolicies, paymentPolicyId, "Not selected")], ["Return policy", policyLabel(settings.ebayReturnPolicies, returnPolicyId, "Not selected")], ["Shipping / fulfillment policy", policyLabel(settings.ebayFulfillmentPolicies, fulfillmentPolicyId, "Not selected")], ["Description source", String(effectiveSettings.ebayDescriptionSource || "longDescription")], ["Maximum images", numberLabel(Number(effectiveSettings.ebayMaxImages ?? 12))]]
-    return <><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 px-4 py-3"><div className="flex flex-wrap items-center gap-2"><Badge variant={usesChannelDefaults ? "outline" : "default"}>{usesChannelDefaults ? "Using eBay defaults" : "SKU override"}</Badge><p className="text-sm text-muted-foreground">Policies can inherit from eBay while pricing and quantity use their own SKU-level controls.</p></div><div className="flex flex-wrap items-center gap-2">{ebay.listingUrl ? <Button asChild type="button" size="sm" variant="outline"><a href={ebay.listingUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> View on eBay</a></Button> : null}{onEditEbay ? <Button type="button" size="sm" variant="outline" onClick={onEditEbay}><Pencil className="size-4" /> Edit eBay settings</Button> : null}</div></div><EbayCategoryComparisonCard comparison={comparison} />{section("eBay SKU controls", "The individual price and inventory behavior DataPlus will send with this offer.", values([["Pricing source", overrides.ebayUseDefaultPricingFormula !== false ? "eBay channel pricing formula" : "SKU eBay price"], ["SKU eBay price", overrides.ebayUseDefaultPricingFormula !== false ? "Not used" : moneyLabel(Number(overrides.ebayPrice ?? overrides.ebayManualPrice ?? 0))], ["Quantity source", overrides.ebayUseChannelDefaultQuantity !== false ? `eBay channel rule (${String(effectiveSettings.ebayQuantityMode || "available")})` : "Actual available inventory"], ["Actual available", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]))}{section("eBay listing connection", "Offer, listing, and category values associated with this SKU.", values(listingRows))}{section("eBay commercial settings", "Product-level pricing, quantity, and publishing behavior used for this listing.", values(commerceRows))}{section("eBay policy bundle", "Imported seller-account policies that will be used when this SKU is created or updated on eBay.", values(policyRows))}</>
+    return <><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 px-4 py-3"><div className="flex flex-wrap items-center gap-2"><Badge variant={ebayOperatorState.state === "live" ? "default" : ebayOperatorState.state === "attention" ? "secondary" : "outline"}>{ebayOperatorState.label}</Badge><Badge variant={usesChannelDefaults ? "outline" : "default"}>{usesChannelDefaults ? "Using eBay defaults" : "SKU override"}</Badge><p className="text-sm text-muted-foreground">{ebayOperatorState.detail}</p></div><div className="flex flex-wrap items-center gap-2">{ebay.listingUrl ? <Button asChild type="button" size="sm" variant="outline"><a href={ebay.listingUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> View on eBay</a></Button> : null}{onEditEbay ? <Button type="button" size="sm" variant="outline" onClick={onEditEbay}><Pencil className="size-4" /> Edit eBay settings</Button> : null}</div></div><EbayCategoryComparisonCard comparison={comparison} />{section("eBay SKU controls", "The individual price and inventory behavior DataPlus will send with this offer.", values([["Pricing source", overrides.ebayUseDefaultPricingFormula !== false ? "eBay channel pricing formula" : "SKU eBay price"], ["SKU eBay price", overrides.ebayUseDefaultPricingFormula !== false ? "Not used" : moneyLabel(Number(overrides.ebayPrice ?? overrides.ebayManualPrice ?? 0))], ["Quantity source", overrides.ebayUseChannelDefaultQuantity !== false ? `eBay channel rule (${String(effectiveSettings.ebayQuantityMode || "available")})` : "Actual available inventory"], ["Actual available", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]))}{section("eBay listing connection", "Public listing state first; API offer ID is shown only for troubleshooting prepared or blocked records.", values(listingRows))}{section("eBay commercial settings", "Product-level pricing, quantity, and publishing behavior used for this listing.", values(commerceRows))}{section("eBay policy bundle", "Imported seller-account policies that will be used when this SKU is created or updated on eBay.", values(policyRows))}</>
   }
   const shadowRows = (product.shadowSkus || []).filter((shadow) => String(shadow.marketplace || shadow.company || "").toLowerCase() === kind)
   const channelRows: Array<[string, string]> = [["Connection", channel.connected ? "Enabled" : "Disabled"], ["Channel status", channel.status || "Active"], ["Default status", String(channel.settings?.defaultShadowStatus || "Draft")], ["Default handling days", String(channel.settings?.defaultHandlingTimeDays ?? "")], ["Default safety quantity", String(channel.settings?.defaultSafetyQty ?? "")], ["Default max sellable qty", String(channel.settings?.defaultMaxSellableQty ?? "")], ["Default shipping profile", String(channel.settings?.defaultShippingProfile || "")], ["Default shipping service", String(channel.settings?.defaultShippingService || "")]]

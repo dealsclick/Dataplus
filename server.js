@@ -20099,6 +20099,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         }
       } catch (error) {
         const issue = error.message || "eBay listing request failed";
+        if (error.ebayListingSaved && item.ebayListing?.offerId) touched.push(item);
         errors.push(standardImportError({ sku, supplier, field: "ebay_api", issue, details: `${label} failed for this SKU.` }));
         results.push({ ...resultContext, status: "failed", reason: "eBay API error", error: issue });
       }
@@ -28439,7 +28440,40 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
   let published = null;
   const offerId = offer.offerId || config.offerId;
   if (publish) {
-    published = await ebayRequest(db, `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, { method: "POST" });
+    try {
+      published = await ebayRequest(db, `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, { method: "POST" });
+    } catch (error) {
+      const now = new Date().toISOString();
+      const previous = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+      const listingId = previous.listingId || config.listingId || "";
+      const message = error.message || "eBay publish failed.";
+      item.ebayListing = {
+        ...previous,
+        ...config,
+        offerId,
+        listingId,
+        listingUrl: ebayListingUrl(listingId, config.marketplaceId),
+        status: listingId ? "published" : "publish_blocked",
+        publishBlocked: !listingId,
+        publishError: message,
+        publishErrorAt: now,
+        updatedAt: now,
+        lastLifecycleAction: "publish_failed",
+        history: appendEbayListingHistory(previous, {
+          action: "publish_failed",
+          message,
+          at: now,
+          offerId,
+          listingId
+        })
+      };
+      item.ebayId = item.ebayListing.listingId || item.ebayId || "";
+      item.sources = { ...(item.sources || {}), eBay: item.ebayListing.listingId || item.ebayListing.offerId || item.sku };
+      item.updatedAt = now;
+      error.ebayListingSaved = true;
+      error.ebayOfferId = offerId;
+      throw error;
+    }
   }
 
   const now = new Date().toISOString();
