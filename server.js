@@ -20204,6 +20204,28 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
   }
 }
 
+async function ebayBulkUpdatePriceQuantity(db, batch = [], jobId = "") {
+  try {
+    return await ebayRequest(db, "/sell/inventory/v1/bulk_update_price_quantity", {
+      method: "POST",
+      jobId,
+      body: { requests: batch.map((entry) => entry.request) }
+    });
+  } catch (error) {
+    const responses = Array.isArray(error?.ebayData?.responses) ? error.ebayData.responses : [];
+    if (responses.length) return { responses, partialFailure: true };
+    throw error;
+  }
+}
+
+function ebayInventoryApiSkuMissing(responseErrors = []) {
+  return (Array.isArray(responseErrors) ? responseErrors : []).some((error) => {
+    const id = String(error?.errorId || "");
+    const message = String(error?.longMessage || error?.message || "");
+    return id === "25604" || /sku not found/i.test(message);
+  });
+}
+
 // Retained for compatibility with older queued payloads. New dispatches use
 // the implementation below; keeping the name distinct avoids accidental
 // shadowing when the worker module is loaded.
@@ -20281,10 +20303,7 @@ async function runEbayPriceInventorySyncWorkerJobLegacy(job = {}, attrs = {}) {
     const batches = [];
     for (let index = 0; index < prepared.length; index += 25) batches.push(prepared.slice(index, index + 25));
     for (const batch of batches) {
-      const response = await ebayRequest(workDb, "/sell/inventory/v1/bulk_update_price_quantity", {
-        method: "POST",
-        body: { requests: batch.map((entry) => entry.request) }
-      });
+      const response = await ebayBulkUpdatePriceQuantity(workDb, batch, job.id);
       const responseRows = Array.isArray(response?.responses) ? response.responses : [];
       for (let index = 0; index < batch.length; index += 1) {
         const entry = batch[index];
@@ -20294,8 +20313,30 @@ async function runEbayPriceInventorySyncWorkerJobLegacy(job = {}, attrs = {}) {
         const issue = responseErrors.map((row) => row.longMessage || row.message || row.errorId).filter(Boolean).join("; ");
         if (failed) {
           const message = issue || `eBay rejected this ${Number(responseRow.statusCode || 0) || ""} update.`.trim();
+          const now = new Date().toISOString();
+          const skuMissing = ebayInventoryApiSkuMissing(responseErrors);
+          if (skuMissing) {
+            entry.item.ebayListing = {
+              ...entry.previous,
+              lastPriceInventorySyncAt: now,
+              lastPriceInventorySyncError: message,
+              inventoryApiSkuMissing: true,
+              inventoryApiSkuMissingAt: now,
+              syncStatus: "needs_relink",
+              syncStatusMessage: "eBay Inventory API does not recognize this SKU. Re-link the live listing or recreate the Inventory API offer before price/inventory sync can update it.",
+              history: appendEbayListingHistory(entry.previous, {
+                action: "price_inventory_sync_failed",
+                message,
+                at: now,
+                offerId: entry.previous.offerId || "",
+                listingId: entry.previous.listingId || ""
+              })
+            };
+            entry.item.updatedAt = now;
+            touched.push(entry.item);
+          }
           errors.push({ sku: entry.sku, issue: message });
-          rows.push({ sku: entry.sku, status: "failed", error: message, previous_price: entry.previous.price || "", target_price: entry.config.price, previous_quantity: entry.previous.quantity ?? "", target_quantity: entry.config.quantity, offer_id: entry.previous.offerId || "", listing_id: entry.previous.listingId || "" });
+          rows.push({ sku: entry.sku, status: skuMissing ? "needs_relink" : "failed", error: message, inventory_api_sku_missing: skuMissing, previous_price: entry.previous.price || "", target_price: entry.config.price, previous_quantity: entry.previous.quantity ?? "", target_quantity: entry.config.quantity, offer_id: entry.previous.offerId || "", listing_id: entry.previous.listingId || "" });
         } else {
           const now = new Date().toISOString();
           entry.item.ebayListing = {
@@ -20445,10 +20486,7 @@ async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
     const batches = [];
     for (let index = 0; index < prepared.length; index += 25) batches.push(prepared.slice(index, index + 25));
     for (const batch of batches) {
-      const response = await ebayRequest(workDb, "/sell/inventory/v1/bulk_update_price_quantity", {
-        method: "POST",
-        body: { requests: batch.map((entry) => entry.request) }
-      });
+      const response = await ebayBulkUpdatePriceQuantity(workDb, batch, job.id);
       const responseRows = Array.isArray(response?.responses) ? response.responses : [];
       for (let index = 0; index < batch.length; index += 1) {
         const entry = batch[index];
@@ -20458,8 +20496,30 @@ async function runEbayPriceInventorySyncWorkerJob(job = {}, attrs = {}) {
         const issue = responseErrors.map((row) => row.longMessage || row.message || row.errorId).filter(Boolean).join("; ");
         if (failed) {
           const message = issue || `eBay rejected this ${Number(responseRow.statusCode || 0) || ""} update.`.trim();
+          const now = new Date().toISOString();
+          const skuMissing = ebayInventoryApiSkuMissing(responseErrors);
+          if (skuMissing) {
+            entry.item.ebayListing = {
+              ...entry.previous,
+              lastPriceInventorySyncAt: now,
+              lastPriceInventorySyncError: message,
+              inventoryApiSkuMissing: true,
+              inventoryApiSkuMissingAt: now,
+              syncStatus: "needs_relink",
+              syncStatusMessage: "eBay Inventory API does not recognize this SKU. Re-link the live listing or recreate the Inventory API offer before price/inventory sync can update it.",
+              history: appendEbayListingHistory(entry.previous, {
+                action: "price_inventory_sync_failed",
+                message,
+                at: now,
+                offerId: entry.previous.offerId || "",
+                listingId: entry.previous.listingId || ""
+              })
+            };
+            entry.item.updatedAt = now;
+            touched.push(entry.item);
+          }
           errors.push({ sku: entry.sku, issue: message });
-          rows.push({ sku: entry.sku, status: "failed", error: message, previous_price: entry.previous.price || "", target_price: entry.config.price, previous_quantity: entry.previous.quantity ?? "", target_quantity: entry.config.quantity, offer_id: entry.previous.offerId || "", listing_id: entry.previous.listingId || "" });
+          rows.push({ sku: entry.sku, status: skuMissing ? "needs_relink" : "failed", error: message, inventory_api_sku_missing: skuMissing, previous_price: entry.previous.price || "", target_price: entry.config.price, previous_quantity: entry.previous.quantity ?? "", target_quantity: entry.config.quantity, offer_id: entry.previous.offerId || "", listing_id: entry.previous.listingId || "" });
         } else {
           const now = new Date().toISOString();
           entry.item.ebayListing = {
