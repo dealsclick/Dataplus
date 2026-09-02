@@ -28266,6 +28266,16 @@ function ebayRoundedMeasurement(value) {
   return number > 0 ? Math.round(number * 100) / 100 : 0;
 }
 
+function ebayDimensionalWeightValue(item = {}) {
+  return ebayRoundedMeasurement(
+    item.dimensionalWeight
+    ?? item.dimensional_weight
+    ?? item.raw?.dimensionalWeight
+    ?? item.raw?.dimensional_weight
+    ?? calculateDimensionalWeight(item)
+  );
+}
+
 const EBAY_PACKAGE_TYPES = new Set([
   "LETTER", "BULKY_GOODS", "CARAVAN", "CARS", "EUROPALLET", "EXPANDABLE_TOUGH_BAGS",
   "EXTRA_LARGE_PACK", "FURNITURE", "INDUSTRY_VEHICLES", "LARGE_CANADA_POSTBOX",
@@ -28277,13 +28287,146 @@ const EBAY_PACKAGE_TYPES = new Set([
 ]);
 
 function ebayPackageType(value) {
-  const normalized = String(value || "").trim().toUpperCase();
-  if (!normalized || normalized === "MAILINGBOXES" || normalized === "MAILING_BOX") return "";
-  return EBAY_PACKAGE_TYPES.has(normalized) ? normalized : "";
+  const normalized = String(value || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+  const aliases = {
+    BOX: "PACKAGE_THICK_ENVELOPE",
+    MAILINGBOX: "PACKAGE_THICK_ENVELOPE",
+    MAILINGBOXES: "PACKAGE_THICK_ENVELOPE",
+    MAILING_BOXES: "PACKAGE_THICK_ENVELOPE",
+    POLY_MAILER: "PARCEL_OR_PADDED_ENVELOPE",
+    ENVELOPE: "PACKAGE_THICK_ENVELOPE",
+    PADDED_ENVELOPE: "PARCEL_OR_PADDED_ENVELOPE",
+    TUBE: "ROLL"
+  };
+  if (!normalized) return "";
+  const candidate = aliases[normalized] || normalized;
+  if (candidate === "MAILING_BOX") return "PACKAGE_THICK_ENVELOPE";
+  return EBAY_PACKAGE_TYPES.has(candidate) ? candidate : "";
+}
+
+function ebayPublishBlockDetails(error = {}) {
+  const message = String(error.message || "");
+  const errors = Array.isArray(error.ebayData?.errors) ? error.ebayData.errors : [];
+  const haystack = [
+    message,
+    ...errors.flatMap((row) => [
+      row?.errorId,
+      row?.message,
+      row?.longMessage,
+      row?.inputRefIds,
+      row?.outputRefIds,
+      ...(Array.isArray(row?.parameters) ? row.parameters.map((param) => `${param?.name || ""} ${param?.value || ""}`) : [])
+    ])
+  ].filter(Boolean).join(" ").toLowerCase();
+  const detail = {
+    publishBlockCode: "ebay_publish_rejected",
+    publishBlockField: "",
+    publishSuggestedFix: "Review the eBay error, update the listing data or channel default, then publish again.",
+    publishRetryable: false
+  };
+  if (/weight|package weight|packageweight|25020/.test(haystack)) {
+    return {
+      publishBlockCode: "missing_or_invalid_package_weight",
+      publishBlockField: "packageWeight",
+      publishSuggestedFix: "Use package weight when present; otherwise send calculated dimensional weight from package dimensions.",
+      publishRetryable: true
+    };
+  }
+  if (/shippingpackage|shipping package|package type|mailingboxes|216305|package_type/.test(haystack)) {
+    return {
+      publishBlockCode: "invalid_shipping_package_type",
+      publishBlockField: "packageType",
+      publishSuggestedFix: "Use a supported eBay package type fallback such as PACKAGE_THICK_ENVELOPE.",
+      publishRetryable: true
+    };
+  }
+  if (/imageurl|image url|picture|image|25721/.test(haystack)) {
+    return {
+      publishBlockCode: "invalid_or_missing_image",
+      publishBlockField: "imageUrls",
+      publishSuggestedFix: "Remove placeholder image values and send only valid http/https image URLs.",
+      publishRetryable: true
+    };
+  }
+  if (/aspect|item specific|specifics|required field/.test(haystack)) {
+    return {
+      publishBlockCode: "missing_required_item_specific",
+      publishBlockField: "aspects",
+      publishSuggestedFix: "Load required item specifics for the mapped eBay category and fill the missing values.",
+      publishRetryable: false
+    };
+  }
+  if (/category|categoryid/.test(haystack)) {
+    return {
+      publishBlockCode: "invalid_or_missing_category",
+      publishBlockField: "categoryId",
+      publishSuggestedFix: "Approve or replace the eBay category mapping, then refresh SKU readiness.",
+      publishRetryable: false
+    };
+  }
+  if (/policy|paymentpolicy|returnpolicy|fulfillmentpolicy|business polic/.test(haystack)) {
+    return {
+      publishBlockCode: "missing_or_invalid_business_policy",
+      publishBlockField: "listingPolicies",
+      publishSuggestedFix: "Select valid eBay payment, return, and fulfillment policies in channel defaults.",
+      publishRetryable: false
+    };
+  }
+  if (/location|merchantlocationkey/.test(haystack)) {
+    return {
+      publishBlockCode: "missing_or_invalid_location",
+      publishBlockField: "merchantLocationKey",
+      publishSuggestedFix: "Select an enabled eBay merchant location with a complete address.",
+      publishRetryable: false
+    };
+  }
+  if (/condition/.test(haystack)) {
+    return {
+      publishBlockCode: "invalid_or_missing_condition",
+      publishBlockField: "condition",
+      publishSuggestedFix: "Use a condition supported by the selected eBay category.",
+      publishRetryable: false
+    };
+  }
+  if (/price|pricing|currency/.test(haystack)) {
+    return {
+      publishBlockCode: "invalid_or_missing_price",
+      publishBlockField: "price",
+      publishSuggestedFix: "Set a positive listing price and supported currency before publishing.",
+      publishRetryable: false
+    };
+  }
+  if (/quantity|availablequantity|availability/.test(haystack)) {
+    return {
+      publishBlockCode: "invalid_or_missing_quantity",
+      publishBlockField: "quantity",
+      publishSuggestedFix: "Set a positive eBay launch quantity or adjust the channel quantity rule.",
+      publishRetryable: false
+    };
+  }
+  if (/identifier|upc|ean|isbn|mpn|brand/.test(haystack)) {
+    return {
+      publishBlockCode: "missing_product_identifier",
+      publishBlockField: "identifier",
+      publishSuggestedFix: "Send a UPC/EAN/ISBN, brand plus MPN, or the configured identifier-unavailable value when allowed.",
+      publishRetryable: false
+    };
+  }
+  if (/compliance|hazard|regulatory|safety|gpsr|energy|charger|epr/.test(haystack)) {
+    return {
+      publishBlockCode: "missing_compliance_data",
+      publishBlockField: "compliance",
+      publishSuggestedFix: "Add the category-required regulatory, safety, hazardous-material, or compliance policy data.",
+      publishRetryable: false
+    };
+  }
+  return detail;
 }
 
 function ebayPackageWeightAndSize(item = {}, config = {}) {
-  const weight = ebayRoundedMeasurement(ebayMeasurementValue(item, "packageWeight", "itemWeight"));
+  const actualWeight = ebayRoundedMeasurement(ebayMeasurementValue(item, "packageWeight", "itemWeight"));
+  const dimensionalWeight = ebayDimensionalWeightValue(item);
+  const weight = actualWeight > 0 ? actualWeight : dimensionalWeight;
   const length = ebayRoundedMeasurement(ebayMeasurementValue(item, "packageLength", "itemLength"));
   const width = ebayRoundedMeasurement(ebayMeasurementValue(item, "packageWidth", "itemWidth"));
   const height = ebayRoundedMeasurement(ebayMeasurementValue(item, "packageHeight", "itemHeight"));
@@ -28447,6 +28590,7 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
       const previous = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
       const listingId = previous.listingId || config.listingId || "";
       const message = error.message || "eBay publish failed.";
+      const blockDetails = ebayPublishBlockDetails(error);
       item.ebayListing = {
         ...previous,
         ...config,
@@ -28457,6 +28601,10 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
         publishBlocked: !listingId,
         publishError: message,
         publishErrorAt: now,
+        publishBlockCode: blockDetails.publishBlockCode,
+        publishBlockField: blockDetails.publishBlockField,
+        publishSuggestedFix: blockDetails.publishSuggestedFix,
+        publishRetryable: blockDetails.publishRetryable,
         updatedAt: now,
         lastLifecycleAction: "publish_failed",
         history: appendEbayListingHistory(previous, {

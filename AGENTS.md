@@ -235,6 +235,8 @@ eBay product settings must support channel defaults with per-SKU overrides for:
 
 If a SKU exists on eBay, show a View on eBay action when a listing URL is available.
 
+When eBay accepts an inventory item/offer but rejects the final publish step, preserve the offer ID as a prepared-not-live record and store a structured publish-block code, field, raw error, suggested fix, retryable flag, and timestamp. For package errors, DataPlus should prefer actual package/item weight when present and otherwise send calculated dimensional weight from complete package dimensions. Normalize legacy or local package labels such as box, MailingBoxes, poly mailer, envelope, and tube into supported eBay package type enum values before sending.
+
 ### Other channels
 
 Temu, TikTok Shop, Whatnot, and future channels must follow the same shape: master channel gate, connection/settings tab, rules tab, mappings, product fields, import/export/sync actions, jobs, and channel logs. Do not force all marketplaces into Shopify's workflow.

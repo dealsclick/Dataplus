@@ -913,6 +913,10 @@ type ProductItem = CatalogItem & {
     publishBlocked?: boolean
     publishError?: string
     publishErrorAt?: string
+    publishBlockCode?: string
+    publishBlockField?: string
+    publishSuggestedFix?: string
+    publishRetryable?: boolean
     bestOfferEnabled?: boolean
     bestOfferAutoAcceptPrice?: number
     bestOfferAutoDeclinePrice?: number
@@ -5688,7 +5692,7 @@ function ebayListingOperatorState(item: ProductItem) {
       state: "attention" as const,
       filter: "ebay-offer",
       label: "Prepared, publish blocked",
-      detail: listing.publishError || "eBay accepted the offer setup, but blocked the final publish step."
+      detail: listing.publishSuggestedFix || listing.publishError || "eBay accepted the offer setup, but blocked the final publish step."
     }
   }
   if (offerId) {
@@ -6748,7 +6752,7 @@ function ProductChannelPanel({ channel, product, section, values, onEditEbay }: 
     const returnPolicyId = configuredValue("returnPolicyId", "ebayReturnPolicyId")
     const fulfillmentPolicyId = configuredValue("fulfillmentPolicyId", "ebayFulfillmentPolicyId")
     const comparison = product.ebayCategoryComparison
-    const listingRows: Array<[string, string]> = [["Settings source", usesChannelDefaults ? "Channel defaults" : "SKU override"], ["Operator status", ebayOperatorState.label], ["Blocking reason", ebayOperatorState.state === "attention" ? ebayOperatorState.detail : ""], ["Public listing ID", ebay.listingId || "Not live"], ["API offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", String(configuredValue("marketplaceId", "ebayMarketplaceId", "EBAY_US"))], ["Merchant location", locationKey], ["Local category ID", comparison?.local?.id || String(overrides.ebayCategoryId || "")], ["Local category path", comparison?.local?.path || String(overrides.ebayCategoryPath || "")], ["Live eBay category ID", comparison?.live?.id || ""], ["Live eBay category path", comparison?.live?.path || comparison?.live?.name || ""], ["Taxonomy version", ebay.taxonomyVersion || String(overrides.ebayTaxonomyVersion || "")], ["Condition", String(configuredValue("condition", "ebayDefaultCondition", product.condition || "New"))], ["Last publish error", ebay.publishErrorAt ? dateLabel(ebay.publishErrorAt) : ""], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
+    const listingRows: Array<[string, string]> = [["Settings source", usesChannelDefaults ? "Channel defaults" : "SKU override"], ["Operator status", ebayOperatorState.label], ["Blocking reason", ebayOperatorState.state === "attention" ? ebayOperatorState.detail : ""], ["Block type", ebay.publishBlockCode || ""], ["Block field", ebay.publishBlockField || ""], ["Suggested fix", ebay.publishSuggestedFix || ""], ["Auto retry eligible", ebay.publishRetryable ? "Yes" : ebay.publishBlocked ? "No" : ""], ["Public listing ID", ebay.listingId || "Not live"], ["API offer ID", ebay.offerId || ""], ["Listing URL", ebay.listingUrl || ""], ["Marketplace", String(configuredValue("marketplaceId", "ebayMarketplaceId", "EBAY_US"))], ["Merchant location", locationKey], ["Local category ID", comparison?.local?.id || String(overrides.ebayCategoryId || "")], ["Local category path", comparison?.local?.path || String(overrides.ebayCategoryPath || "")], ["Live eBay category ID", comparison?.live?.id || ""], ["Live eBay category path", comparison?.live?.path || comparison?.live?.name || ""], ["Taxonomy version", ebay.taxonomyVersion || String(overrides.ebayTaxonomyVersion || "")], ["Condition", String(configuredValue("condition", "ebayDefaultCondition", product.condition || "New"))], ["Last publish error", ebay.publishErrorAt ? dateLabel(ebay.publishErrorAt) : ""], ["Last listing update", ebay.updatedAt ? dateLabel(ebay.updatedAt) : ""], ["Attributes synced", ebay.attributesSyncedAt ? dateLabel(ebay.attributesSyncedAt) : ""]]
     const commerceRows: Array<[string, string]> = [["Listing price", ebay.price === undefined ? "Not listed" : `${ebay.currency || configuredValue("currency", "ebayCurrency", "USD")} ${moneyLabel(ebay.price)}`], ["Listing quantity", ebay.quantity === undefined ? "Not listed" : numberLabel(ebay.quantity)], ["Price rule", String(effectiveSettings.ebayPricingMode || "cost-plus")], ["Markup", `${numberLabel(Number(effectiveSettings.ebayPriceMarkupPercent || 0))}%`], ["Minimum margin", `${numberLabel(Number(effectiveSettings.ebayMinMarginPercent || 0))}%`], ["Minimum price", moneyLabel(Number(effectiveSettings.ebayMinimumPrice || 0))], ["Rounding", String(effectiveSettings.ebayRoundingRule || "none")], ["Quantity rule", String(effectiveSettings.ebayQuantityMode || "available")], ["Best offer", configuredValue("bestOfferEnabled", "ebayBestOfferEnabled") ? "Enabled" : "Off"], ["Auto publish", effectiveSettings.ebayAutoPublish ? "Enabled" : "Off"], ["Require image", effectiveSettings.ebayRequireImage === false ? "Off" : "Enabled"], ["DataPlus price", moneyLabel(product.websitePrice ?? product.price)], ["Available quantity", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]
     const policyRows: Array<[string, string]> = [["Merchant location", location ? `${location.name || locationKey}${location.status ? ` / ${location.status}` : ""}` : locationKey || "Not selected"], ["Payment policy", policyLabel(settings.ebayPaymentPolicies, paymentPolicyId, "Not selected")], ["Return policy", policyLabel(settings.ebayReturnPolicies, returnPolicyId, "Not selected")], ["Shipping / fulfillment policy", policyLabel(settings.ebayFulfillmentPolicies, fulfillmentPolicyId, "Not selected")], ["Description source", String(effectiveSettings.ebayDescriptionSource || "longDescription")], ["Maximum images", numberLabel(Number(effectiveSettings.ebayMaxImages ?? 12))]]
     return <><div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 px-4 py-3"><div className="flex flex-wrap items-center gap-2"><Badge variant={ebayOperatorState.state === "live" ? "default" : ebayOperatorState.state === "attention" ? "secondary" : "outline"}>{ebayOperatorState.label}</Badge><Badge variant={usesChannelDefaults ? "outline" : "default"}>{usesChannelDefaults ? "Using eBay defaults" : "SKU override"}</Badge><p className="text-sm text-muted-foreground">{ebayOperatorState.detail}</p></div><div className="flex flex-wrap items-center gap-2">{ebay.listingUrl ? <Button asChild type="button" size="sm" variant="outline"><a href={ebay.listingUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> View on eBay</a></Button> : null}{onEditEbay ? <Button type="button" size="sm" variant="outline" onClick={onEditEbay}><Pencil className="size-4" /> Edit eBay settings</Button> : null}</div></div><EbayCategoryComparisonCard comparison={comparison} />{section("eBay SKU controls", "The individual price and inventory behavior DataPlus will send with this offer.", values([["Pricing source", overrides.ebayUseDefaultPricingFormula !== false ? "eBay channel pricing formula" : "SKU eBay price"], ["SKU eBay price", overrides.ebayUseDefaultPricingFormula !== false ? "Not used" : moneyLabel(Number(overrides.ebayPrice ?? overrides.ebayManualPrice ?? 0))], ["Quantity source", overrides.ebayUseChannelDefaultQuantity !== false ? `eBay channel rule (${String(effectiveSettings.ebayQuantityMode || "available")})` : "Actual available inventory"], ["Actual available", numberLabel(Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0)))]]))}{section("eBay listing connection", "Public listing state first; API offer ID is shown only for troubleshooting prepared or blocked records.", values(listingRows))}{section("eBay commercial settings", "Product-level pricing, quantity, and publishing behavior used for this listing.", values(commerceRows))}{section("eBay policy bundle", "Imported seller-account policies that will be used when this SKU is created or updated on eBay.", values(policyRows))}</>
@@ -7902,6 +7906,7 @@ function EbayListingWorkspace({
     product.packageWeight,
     product.itemWeight,
   );
+  const dimensionalWeight = measurementValue(product.dimensionalWeight);
   const packageLength = measurementValue(
     product.packageLength,
     product.itemLength,
@@ -7917,7 +7922,8 @@ function EbayListingWorkspace({
   const hasPackageWeight = packageWeight > 0;
   const hasPackageDimensions =
     packageLength > 0 && packageWidth > 0 && packageHeight > 0;
-  const packageReady = hasPackageWeight && hasPackageDimensions;
+  const hasEbayWeight = hasPackageWeight || dimensionalWeight > 0;
+  const packageReady = hasEbayWeight && hasPackageDimensions;
   const packageTypeOptions = [
     { value: "PACKAGE_THICK_ENVELOPE", label: "Package / thick envelope" },
     { value: "PARCEL_OR_PADDED_ENVELOPE", label: "Parcel or padded envelope" },
