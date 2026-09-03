@@ -23870,6 +23870,21 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   const changedPurchaseOrders = new Map();
   let requirementsChanged = false;
   let changed = false;
+  const canceledDemand = !closedDemand;
+  const shippedRouteConflict = canceledDemand && (
+    order.fulfillmentRoutes.some((route) => ["fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()))
+    || (Array.isArray(order.shipments) && order.shipments.some((shipment) => ["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())))
+    || Boolean(order.trackingNumber || order.shippedAt || order.shipDate)
+  );
+  if (shippedRouteConflict) {
+    createOrderException(order, {
+      type: "channel_canceled_after_shipment",
+      severity: "blocking",
+      owner: "Management",
+      description: "The channel now shows this order as canceled, but DataPlus has shipment/tracking activity. Review before taking any warehouse, PO, refund, or customer action."
+    });
+    changed = true;
+  }
 
   for (const route of order.fulfillmentRoutes) {
     if (route.type !== "purchase") continue;
@@ -23912,6 +23927,15 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
     const matchingLines = po.items.filter((line) => String(line.routeId || "") === String(route.id || "")
       || String(line.orderId || "") === String(order.id || ""));
     if (!matchingLines.length) continue;
+    if (canceledDemand && committed) {
+      createOrderException(order, {
+        type: "channel_canceled_after_committed_po",
+        severity: "blocking",
+        owner: "Management",
+        description: `The channel canceled this order, but ${po.poNumber || "a supplier PO"} was already submitted or committed. Hold fulfillment and review receiving/vendor return steps.`
+      });
+      changed = true;
+    }
     if (externalClosedDemand && !committed) {
       po.removedDemand = Array.isArray(po.removedDemand) ? po.removedDemand : [];
       for (const line of matchingLines) {
