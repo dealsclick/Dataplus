@@ -5630,6 +5630,8 @@ function channelFilterLabel(value: string) {
     "ebay-detected": "Detected in eBay catalog",
     "ebay-ready": "Ready to send to eBay",
     "ebay-not-ready": "eBay setup incomplete",
+    "ebay-sync-warning": "eBay sync warning",
+    "ebay-needs-relink": "eBay needs relink",
     "ebay-missing": "Not in eBay catalog",
     "temu-detected": "Detected in Temu catalog",
     "temu-missing": "Not in Temu catalog",
@@ -15927,7 +15929,7 @@ export function MainCatalogPage({ inventoryOnly = false, totalSkuCount = 0 }: { 
   const filterCount = Object.values(filters).filter(Boolean).length
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
-    channelStatus: { label: "Shopify", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "ebay-live", "ebay-detected", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     supplier: { label: "Supplier", values: facets.suppliers || [], display: (value) => value },
     brand: { label: "Brand", values: facets.brands || [], display: (value) => value },
@@ -16089,7 +16091,7 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
   const filterDefinitions: Record<string, { label: string; values: string[]; display: (value: string) => string }> = {
     catalogStatus: { label: "Catalog review", values: ["source-only"], display: () => "Needs review" },
     vendorScope: { label: "Supplier participation", values: ["enabled", "all"], display: (value) => value === "all" ? "All supplier profiles" : "Enabled supplier profiles" },
-    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
+    channelStatus: { label: "Channel", values: ["shopify-detected", "shopify-live", "shopify-linked", "shopify-missing", "shopify-ready", "shopify-not-ready", "shopify-unpublished", "shopify-price-mismatch", "ebay-detected", "ebay-live", "ebay-offer", "ebay-ready", "ebay-not-ready", "ebay-sync-warning", "ebay-needs-relink", "ebay-missing", "temu-detected", "temu-missing"], display: channelFilterLabel },
     hasStock: { label: "Inventory", values: ["true", "false"], display: (value) => value === "true" ? "In stock" : "Out of stock" },
     hasImage: { label: "Has image", values: ["true", "false"], display: (value) => value === "true" ? "Has image" : "No image" },
     multipleSuppliers: { label: "Supplier coverage", values: ["true", "false"], display: (value) => value === "true" ? "Multiple suppliers" : "Not multiple suppliers" },
@@ -16543,6 +16545,13 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                 >
                   Not in Shopify catalog
                 </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    applySavedFilter({ channelStatus: "ebay-needs-relink" })
+                  }
+                >
+                  eBay needs relink
+                </DropdownMenuItem>
                 {savedViews.length ? (
                   <>
                     <DropdownMenuSeparator />
@@ -16642,6 +16651,11 @@ function AdvancedMainCatalogPage({ totalSkuCount = 0, channels = [], systemSetti
                       <p className="text-xs text-muted-foreground">
                         Choose a channel, then select marketplace presence, storefront, readiness, or price state to filter.
                       </p>
+                      {channelFilterScope === "ebay" ? (
+                        <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-2 text-xs text-muted-foreground">
+                          Use eBay sync warning to find SKUs DataPlus could not update. Use eBay needs relink when eBay has the listing but the Inventory API SKU does not match.
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                   <Input value="Is any of" disabled />
@@ -17671,6 +17685,17 @@ function EbaySyncWarningsPage() {
       <MetricCard label="Latest job errors" value={(report?.latestJobs || []).reduce((sum, job) => sum + Number(job.errorCount || 0), 0)} icon={History} />
     </div>
     <Alert className="border-amber-500/35 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>What this page means</AlertTitle><AlertDescription>A listing ID means the item can be live on eBay. A sync warning means DataPlus could not update price or inventory for that SKU. Needs relink usually means eBay has the live listing, but the Inventory API SKU saved in DataPlus does not match what eBay expects.</AlertDescription></Alert>
+    <Card className="border-blue-500/30 bg-blue-500/5">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">How to relink a SKU</CardTitle>
+        <CardDescription>Open the SKU, go to Channels, and compare the DataPlus SKU/merchant SKU with the live eBay listing. If eBay has the listing under a different custom label, update the SKU's eBay merchant SKU or listing identity to match eBay, save it, then retry inventory sync from this page. If the eBay listing cannot be tied back to the Inventory API SKU, recreate the eBay offer/listing from DataPlus so future price and inventory updates use the correct SKU.</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-2 pt-0 text-xs text-muted-foreground md:grid-cols-3">
+        <div className="rounded-md border bg-background/70 p-3"><span className="font-semibold text-foreground">1. Open product</span><br />Use the row action to open the SKU and inspect its eBay listing fields.</div>
+        <div className="rounded-md border bg-background/70 p-3"><span className="font-semibold text-foreground">2. Match eBay identity</span><br />Make the merchant SKU/custom label and listing identity match the live eBay record.</div>
+        <div className="rounded-md border bg-background/70 p-3"><span className="font-semibold text-foreground">3. Retry sync</span><br />Return here and retry inventory sync. A successful sync clears the warning automatically.</div>
+      </CardContent>
+    </Card>
     {groups.length ? <div className="grid gap-3 md:grid-cols-2">{groups.map((group) => <Card key={group.code}><CardHeader className="pb-3"><div className="flex items-start justify-between gap-3"><div><CardTitle className="text-sm capitalize">{String(group.reason || group.code || "warning").replace(/_/g, " ")}</CardTitle><CardDescription>{group.suggestedFix || "Review and retry after correcting the SKU/channel data."}</CardDescription></div><Badge variant={group.code === "needs_relink" ? "destructive" : "secondary"}>{numberLabel(group.count || 0)}</Badge></div></CardHeader></Card>)}</div> : null}
     {selectedRows.length ? <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/30 p-3"><p className="text-sm font-medium">{numberLabel(selectedRows.length)} selected</p><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={working !== ""} onClick={() => void clear()}>{working === "clear" ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Clear reviewed</Button><Button size="sm" disabled={working !== ""} onClick={() => void retry("selected")}>{working === "retry-selected" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Retry selected</Button></div></div> : null}
     {loading ? <div className="grid gap-3"><Skeleton className="h-28" /><Skeleton className="h-96" /></div> : rows.length ? <Card className="overflow-hidden"><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox checked={allPageSelected} onCheckedChange={(checked) => setPageSelected(checked === true)} aria-label="Select page" /></TableHead><TableHead className="min-w-44">SKU</TableHead><TableHead className="min-w-80">Product</TableHead><TableHead className="min-w-52">eBay identity</TableHead><TableHead className="min-w-40">Status</TableHead><TableHead className="min-w-96">Latest error</TableHead><TableHead className="w-24 text-right">Actions</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => <TableRow key={`${row.sku}-${row.code}-${row.jobId}`}><TableCell><Checkbox checked={Boolean(row.sku && selected.has(row.sku))} onCheckedChange={(checked) => toggleSku(row.sku, checked === true)} aria-label={`Select ${row.sku || "SKU"}`} /></TableCell><TableCell><a className="font-mono text-xs font-semibold text-primary hover:underline" href={`/products/${encodeURIComponent(row.sku || "")}`}>{row.sku || "-"}</a><p className="text-[11px] text-muted-foreground">Merchant {row.merchantSku || row.sku || "-"}</p></TableCell><TableCell><p className="line-clamp-2 text-sm font-medium">{row.title || "Untitled product"}</p><p className="text-xs text-muted-foreground">{row.supplier || "No supplier"}</p></TableCell><TableCell><p className="text-xs">Listing {row.listingId || "-"}</p><p className="text-xs text-muted-foreground">Offer {row.offerId || "-"}</p>{row.jobNumber ? <p className="text-[11px] text-muted-foreground">Job #{row.jobNumber}</p> : null}</TableCell><TableCell><Badge variant={row.code === "needs_relink" ? "destructive" : "secondary"} className="capitalize">{String(row.reason || row.status || "warning").replace(/_/g, " ")}</Badge><p className="mt-1 text-[11px] text-muted-foreground">{row.lastSyncAt ? dateLabel(row.lastSyncAt) : "No sync date"}</p></TableCell><TableCell><p className="line-clamp-3 text-xs text-muted-foreground">{row.error || row.suggestedFix || "No raw error stored."}</p></TableCell><TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="size-4" /><span className="sr-only">Open actions</span></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Actions</DropdownMenuLabel><DropdownMenuItem asChild><a href={`/products/${encodeURIComponent(row.sku || "")}`}><PackageSearch className="size-4" /> Open product</a></DropdownMenuItem>{row.listingUrl ? <DropdownMenuItem asChild><a href={row.listingUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> View on eBay</a></DropdownMenuItem> : null}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => { if (row.sku) void retry("selected", [row.sku]) }}><RotateCcw className="size-4" /> Retry sync</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card> : <Empty><EmptyHeader><EmptyMedia variant="icon"><CheckCircle2 className="size-5" /></EmptyMedia><EmptyTitle>No eBay sync warnings found</EmptyTitle><EmptyDescription>DataPlus did not find saved relink warnings or recent eBay price/inventory job errors in this scan.</EmptyDescription></EmptyHeader></Empty>}

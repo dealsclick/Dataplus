@@ -29865,6 +29865,17 @@ function productMatchesCatalogChannelStatus(product = {}, status = "") {
   if (value === "ebay-detected") return catalogProductMarketplaceDetected(product, "ebay");
   if (value === "ebay-live") return ebayStatus === "live";
   if (value === "ebay-offer") return ebayStatus === "offer";
+  if (value === "ebay-sync-warning") {
+    const syncStatus = String(ebayListing.syncStatus || "").trim().toLowerCase();
+    return ["needs_relink", "warning", "failed"].includes(syncStatus)
+      || Boolean(ebayListing.lastPriceInventorySyncError || ebayListing.syncStatusMessage)
+      || ebayListing.inventoryApiSkuMissing === true;
+  }
+  if (value === "ebay-needs-relink") {
+    const syncStatus = String(ebayListing.syncStatus || "").trim().toLowerCase();
+    const message = String(ebayListing.lastPriceInventorySyncError || ebayListing.syncStatusMessage || "");
+    return syncStatus === "needs_relink" || ebayListing.inventoryApiSkuMissing === true || /sku not found/i.test(message);
+  }
   if (value === "ebay-missing") return ebayStatus === "missing";
   if (value === "ebay-ready") return catalogProductEbayReadinessStatus(product) === "ready";
   if (value === "ebay-not-ready") return catalogProductEbayReadinessStatus(product) === "not-ready";

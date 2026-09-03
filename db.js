@@ -7741,6 +7741,16 @@ async function listProducts(options = {}) {
       or jsonb_array_length(case when jsonb_typeof(raw -> 'productImages') = 'array' then raw -> 'productImages' else '[]'::jsonb end) > 0
     )
   )`;
+  const hasEbaySyncWarning = `(
+    lower(coalesce(raw #>> '{ebayListing,syncStatus}', '')) in ('needs_relink', 'warning', 'failed')
+    or coalesce(raw #>> '{ebayListing,lastPriceInventorySyncError}', raw #>> '{ebayListing,syncStatusMessage}', '') <> ''
+    or lower(coalesce(raw #>> '{ebayListing,inventoryApiSkuMissing}', 'false')) in ('true', '1', 'yes', 'y')
+  )`;
+  const hasEbayNeedsRelink = `(
+    lower(coalesce(raw #>> '{ebayListing,syncStatus}', '')) = 'needs_relink'
+    or lower(coalesce(raw #>> '{ebayListing,inventoryApiSkuMissing}', 'false')) in ('true', '1', 'yes', 'y')
+    or lower(coalesce(raw #>> '{ebayListing,lastPriceInventorySyncError}', raw #>> '{ebayListing,syncStatusMessage}', '')) like '%sku not found%'
+  )`;
   const hasShopifyRequiredFields = `(
     coalesce(sku, raw ->> 'sku', raw ->> 'variantSku', raw ->> 'shopifyVariantSku', '') <> ''
     and not (
@@ -7865,6 +7875,8 @@ async function listProducts(options = {}) {
     if (channelStatus === "ebay-not-ready") return `(not (${hasEbayLive}) and not (${hasEbayRequiredFields}))`;
     if (channelStatus === "ebay-live") return hasEbayLive;
     if (channelStatus === "ebay-offer") return `(${hasEbayOffer} and not (${hasEbayLive}))`;
+    if (channelStatus === "ebay-sync-warning") return hasEbaySyncWarning;
+    if (channelStatus === "ebay-needs-relink") return hasEbayNeedsRelink;
     if (channelStatus === "ebay-missing") return `(not (${hasEbayLive}) and not (${hasEbayOffer}))`;
     if (channelStatus.startsWith("ebay:")) {
       params.push(channelStatus.slice("ebay:".length));
