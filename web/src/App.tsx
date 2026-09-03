@@ -1041,6 +1041,56 @@ type EbayListingBlockerReport = {
   rows?: EbayListingBlockerSample[]
 }
 
+type EbaySyncWarningRow = {
+  sku?: string
+  title?: string
+  supplier?: string
+  merchantSku?: string
+  listingId?: string
+  offerId?: string
+  listingUrl?: string
+  status?: string
+  code?: string
+  reason?: string
+  suggestedFix?: string
+  error?: string
+  lastSyncAt?: string
+  inventoryApiSkuMissing?: boolean
+  source?: string
+  jobId?: string
+  jobNumber?: number
+  price?: number
+  quantity?: number
+}
+
+type EbaySyncWarningGroup = {
+  code?: string
+  reason?: string
+  suggestedFix?: string
+  count?: number
+  samples?: EbaySyncWarningRow[]
+}
+
+type EbaySyncWarningJob = {
+  id?: string
+  jobNumber?: number
+  status?: string
+  message?: string
+  errorCount?: number
+  finishedAt?: string
+}
+
+type EbaySyncWarningReport = {
+  total?: number
+  needsRelinkTotal?: number
+  scanned?: number
+  limited?: boolean
+  generatedAt?: string
+  groups?: EbaySyncWarningGroup[]
+  rows?: EbaySyncWarningRow[]
+  latestJobs?: EbaySyncWarningJob[]
+}
+
 type SupplierCoverageEntry = {
   supplier?: string
   supplierCode?: string
@@ -1203,6 +1253,7 @@ const catalogSidebarItems: Array<{ label: string; path: string; icon: React.Comp
   { label: "Brands", path: "/brands", icon: Store },
   { label: "Vendor Mappings", path: "/vendor-category-mappings", icon: Warehouse },
   { label: "eBay Blockers", path: "/ebay-blockers", icon: AlertTriangle },
+  { label: "eBay Sync Warnings", path: "/ebay-sync-warnings", icon: AlertCircle },
   { label: "Attributes", path: "/attributes", icon: CheckCircle2 },
   { label: "Attribute Groups", path: "/groups", icon: Boxes },
   { label: "Inventory", path: "/inventory", icon: Warehouse },
@@ -1265,7 +1316,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (/^\/brands\/[^/]+$/.test(path)) return "brand-detail"
   if (path.startsWith("/brands")) return "brands"
   if (path.startsWith("/products") || path.startsWith("/catalog")) return "catalog"
-  if (["/categories", "/source-catalog", "/import-review", "/sku-changes", "/category-review", "/vendor-category-mappings", "/ebay-blockers", "/attributes", "/groups", "/inventory", "/templates", "/readiness"].some((prefix) => path.startsWith(prefix))) return "catalog"
+  if (["/categories", "/source-catalog", "/import-review", "/sku-changes", "/category-review", "/vendor-category-mappings", "/ebay-blockers", "/ebay-sync-warnings", "/attributes", "/groups", "/inventory", "/templates", "/readiness"].some((prefix) => path.startsWith(prefix))) return "catalog"
   if (path.startsWith("/vendors")) return "vendors"
   if (path.startsWith("/ai")) return "ai-chat"
   if (path.startsWith("/settings")) return "settings"
@@ -8911,7 +8962,7 @@ function ToggleRow({ label, description, checked, disabled, onCheckedChange }: {
   return <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-medium">{label}</p><p className="text-xs text-muted-foreground">{description}</p></div><Switch aria-label={label} checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} /></div>
 }
 
-type CatalogWorkspaceTab = "products" | "review" | "changes" | "category-review" | "categories" | "mappings" | "ebay-blockers" | "attributes" | "groups" | "inventory" | "templates" | "readiness"
+type CatalogWorkspaceTab = "products" | "review" | "changes" | "category-review" | "categories" | "mappings" | "ebay-blockers" | "ebay-sync-warnings" | "attributes" | "groups" | "inventory" | "templates" | "readiness"
 
 type CategoryAttribute = {
   id?: string
@@ -9149,6 +9200,7 @@ const catalogWorkspaceTabs: Array<{ id: CatalogWorkspaceTab; label: string }> = 
   { id: "categories", label: "Categories" },
   { id: "mappings", label: "Vendor Mappings" },
   { id: "ebay-blockers", label: "eBay Blockers" },
+  { id: "ebay-sync-warnings", label: "eBay Sync Warnings" },
   { id: "attributes", label: "Attributes" },
   { id: "groups", label: "Attribute Groups" },
   { id: "inventory", label: "Inventory" },
@@ -9163,6 +9215,7 @@ function catalogWorkspaceTabFromPath() {
   if (path.startsWith("/sku-changes")) return "changes"
   if (path.startsWith("/category-review")) return "category-review"
   if (path.startsWith("/ebay-blockers")) return "ebay-blockers"
+  if (path.startsWith("/ebay-sync-warnings")) return "ebay-sync-warnings"
   if (path.startsWith("/categories")) return "categories"
   if (path.startsWith("/vendor-category-mappings")) return "mappings"
   if (path.startsWith("/attributes")) return "attributes"
@@ -10096,11 +10149,11 @@ function StandaloneCategoryPage() {
   return <CategoriesWorkspace categoryId={categoryId} initialScope={scope} standalone />
 }
 
-const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "category-review" | "mappings" | "ebay-blockers" | "attributes" | "groups" | "inventory" | "templates" | "categories">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
+const catalogResourceConfig: Record<Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "category-review" | "mappings" | "ebay-blockers" | "ebay-sync-warnings" | "attributes" | "groups" | "inventory" | "templates" | "categories">, { endpoint: string; title: string; description: string; rows: string; columns: Array<[string, string]> }> = {
   readiness: { endpoint: "/api/data-quality/products?limit=100", title: "Readiness", description: "Product readiness queue for missing content, dimensions, category, or marketplace requirements.", rows: "rows", columns: [["sku", "SKU"], ["title", "Product"], ["issues", "Missing or invalid"], ["channel", "Channel"], ["status", "Status"]] },
 }
 
-function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "category-review" | "mappings" | "ebay-blockers" | "attributes" | "groups" | "inventory" | "templates" | "categories"> }) {
+function CatalogResourcePage({ tab }: { tab: Exclude<CatalogWorkspaceTab, "products" | "source" | "review" | "changes" | "category-review" | "mappings" | "ebay-blockers" | "ebay-sync-warnings" | "attributes" | "groups" | "inventory" | "templates" | "categories"> }) {
   const config = catalogResourceConfig[tab]
   const [rows, setRows] = useState<Array<Record<string, unknown>>>([])
   const [loading, setLoading] = useState(true)
@@ -17531,6 +17584,99 @@ function EbayBlockersPage() {
   </div>
 }
 
+function EbaySyncWarningsPage() {
+  const [report, setReport] = useState<EbaySyncWarningReport | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [working, setWorking] = useState("")
+  const [limit, setLimit] = useState("500")
+  const load = async () => {
+    setLoading(true)
+    try {
+      const result = await api<EbaySyncWarningReport>(`/api/ebay/listings/sync-warnings?limit=${encodeURIComponent(limit || "500")}`)
+      setReport(result)
+      setSelected(new Set())
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load eBay sync warnings.")
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { void load() }, [])
+  const rows = report?.rows || []
+  const groups = report?.groups || []
+  const selectedRows = rows.filter((row) => row.sku && selected.has(row.sku))
+  const allPageSelected = rows.length > 0 && rows.every((row) => row.sku && selected.has(row.sku))
+  const toggleSku = (sku = "", checked: boolean) => {
+    if (!sku) return
+    setSelected((current) => {
+      const next = new Set(current)
+      if (checked) next.add(sku)
+      else next.delete(sku)
+      return next
+    })
+  }
+  const setPageSelected = (checked: boolean) => {
+    setSelected((current) => {
+      const next = new Set(current)
+      for (const row of rows) {
+        if (!row.sku) continue
+        if (checked) next.add(row.sku)
+        else next.delete(row.sku)
+      }
+      return next
+    })
+  }
+  const retry = async (mode: "selected" | "all", explicitSkus: string[] = []) => {
+    const skus = explicitSkus.length ? explicitSkus : mode === "selected" ? selectedRows.map((row) => row.sku).filter(Boolean) : []
+    if (mode === "selected" && !skus.length) return toast.error("Select at least one SKU to retry.")
+    setWorking(`retry-${mode}`)
+    try {
+      const result = await api<{ message?: string; job?: ImportJob; selected?: number }>("/api/ebay/listings/sync-warnings/retry", {
+        method: "POST",
+        body: JSON.stringify({ skus, limit: Math.max(1, Math.min(500, Number(limit || 25) || 25)), updateInventory: true, updatePrice: false }),
+      })
+      toast.success(result.message || `Queued eBay sync retry for ${numberLabel(result.selected || skus.length)} SKU${Number(result.selected || skus.length) === 1 ? "" : "s"}.`)
+      if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 700)
+      void load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue eBay sync retry.")
+    } finally {
+      setWorking("")
+    }
+  }
+  const clear = async () => {
+    const skus = selectedRows.map((row) => row.sku).filter(Boolean)
+    if (!skus.length) return toast.error("Select at least one reviewed SKU to clear.")
+    setWorking("clear")
+    try {
+      const result = await api<{ changed?: number; message?: string }>("/api/ebay/listings/sync-warnings/clear", {
+        method: "POST",
+        body: JSON.stringify({ skus }),
+      })
+      toast.success(result.message || `Cleared ${numberLabel(result.changed || 0)} eBay sync warning${Number(result.changed || 0) === 1 ? "" : "s"}.`)
+      void load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to clear eBay sync warnings.")
+    } finally {
+      setWorking("")
+    }
+  }
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Catalog" title="eBay Sync Warnings" description="Live or linked eBay SKUs that DataPlus could not update through the eBay Inventory API." action={<div className="flex flex-wrap items-center gap-2"><Input className="h-9 w-24" type="number" min="1" max="5000" value={limit} onChange={(event) => setLimit(event.target.value)} /><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button><Button size="sm" disabled={loading || working !== "" || !rows.length} onClick={() => void retry("all")}>{working === "retry-all" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Retry batch</Button></div>} />
+    <div className="grid gap-3 md:grid-cols-4">
+      <MetricCard label="Sync warnings" value={report?.total || 0} icon={AlertTriangle} />
+      <MetricCard label="Need relink" value={report?.needsRelinkTotal || 0} icon={Link2} />
+      <MetricCard label="Scanned listings" value={report?.scanned || 0} icon={Search} />
+      <MetricCard label="Latest job errors" value={(report?.latestJobs || []).reduce((sum, job) => sum + Number(job.errorCount || 0), 0)} icon={History} />
+    </div>
+    <Alert className="border-amber-500/35 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>What this page means</AlertTitle><AlertDescription>A listing ID means the item can be live on eBay. A sync warning means DataPlus could not update price or inventory for that SKU. Needs relink usually means eBay has the live listing, but the Inventory API SKU saved in DataPlus does not match what eBay expects.</AlertDescription></Alert>
+    {groups.length ? <div className="grid gap-3 md:grid-cols-2">{groups.map((group) => <Card key={group.code}><CardHeader className="pb-3"><div className="flex items-start justify-between gap-3"><div><CardTitle className="text-sm capitalize">{String(group.reason || group.code || "warning").replace(/_/g, " ")}</CardTitle><CardDescription>{group.suggestedFix || "Review and retry after correcting the SKU/channel data."}</CardDescription></div><Badge variant={group.code === "needs_relink" ? "destructive" : "secondary"}>{numberLabel(group.count || 0)}</Badge></div></CardHeader></Card>)}</div> : null}
+    {selectedRows.length ? <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/30 p-3"><p className="text-sm font-medium">{numberLabel(selectedRows.length)} selected</p><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={working !== ""} onClick={() => void clear()}>{working === "clear" ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Clear reviewed</Button><Button size="sm" disabled={working !== ""} onClick={() => void retry("selected")}>{working === "retry-selected" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Retry selected</Button></div></div> : null}
+    {loading ? <div className="grid gap-3"><Skeleton className="h-28" /><Skeleton className="h-96" /></div> : rows.length ? <Card className="overflow-hidden"><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox checked={allPageSelected} onCheckedChange={(checked) => setPageSelected(checked === true)} aria-label="Select page" /></TableHead><TableHead className="min-w-44">SKU</TableHead><TableHead className="min-w-80">Product</TableHead><TableHead className="min-w-52">eBay identity</TableHead><TableHead className="min-w-40">Status</TableHead><TableHead className="min-w-96">Latest error</TableHead><TableHead className="w-24 text-right">Actions</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => <TableRow key={`${row.sku}-${row.code}-${row.jobId}`}><TableCell><Checkbox checked={Boolean(row.sku && selected.has(row.sku))} onCheckedChange={(checked) => toggleSku(row.sku, checked === true)} aria-label={`Select ${row.sku || "SKU"}`} /></TableCell><TableCell><a className="font-mono text-xs font-semibold text-primary hover:underline" href={`/products/${encodeURIComponent(row.sku || "")}`}>{row.sku || "-"}</a><p className="text-[11px] text-muted-foreground">Merchant {row.merchantSku || row.sku || "-"}</p></TableCell><TableCell><p className="line-clamp-2 text-sm font-medium">{row.title || "Untitled product"}</p><p className="text-xs text-muted-foreground">{row.supplier || "No supplier"}</p></TableCell><TableCell><p className="text-xs">Listing {row.listingId || "-"}</p><p className="text-xs text-muted-foreground">Offer {row.offerId || "-"}</p>{row.jobNumber ? <p className="text-[11px] text-muted-foreground">Job #{row.jobNumber}</p> : null}</TableCell><TableCell><Badge variant={row.code === "needs_relink" ? "destructive" : "secondary"} className="capitalize">{String(row.reason || row.status || "warning").replace(/_/g, " ")}</Badge><p className="mt-1 text-[11px] text-muted-foreground">{row.lastSyncAt ? dateLabel(row.lastSyncAt) : "No sync date"}</p></TableCell><TableCell><p className="line-clamp-3 text-xs text-muted-foreground">{row.error || row.suggestedFix || "No raw error stored."}</p></TableCell><TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="size-4" /><span className="sr-only">Open actions</span></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Actions</DropdownMenuLabel><DropdownMenuItem asChild><a href={`/products/${encodeURIComponent(row.sku || "")}`}><PackageSearch className="size-4" /> Open product</a></DropdownMenuItem>{row.listingUrl ? <DropdownMenuItem asChild><a href={row.listingUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> View on eBay</a></DropdownMenuItem> : null}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => { if (row.sku) void retry("selected", [row.sku]) }}><RotateCcw className="size-4" /> Retry sync</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card> : <Empty><EmptyHeader><EmptyMedia variant="icon"><CheckCircle2 className="size-5" /></EmptyMedia><EmptyTitle>No eBay sync warnings found</EmptyTitle><EmptyDescription>DataPlus did not find saved relink warnings or recent eBay price/inventory job errors in this scan.</EmptyDescription></EmptyHeader></Empty>}
+  </div>
+}
+
 function CatalogPage({ channels = [], systemSettings = {} }: { channels?: ChannelConnection[]; systemSettings?: SystemSettings }) {
   const [tab, setTab] = useState<CatalogWorkspaceTab>(catalogWorkspaceTabFromPath)
   const [workspaceCounts, setWorkspaceCounts] = useState<Record<string, number>>({})
@@ -17550,10 +17696,10 @@ function CatalogPage({ channels = [], systemSettings = {} }: { channels?: Channe
   const selectTab = (next: string) => {
     const selected = next as CatalogWorkspaceTab
     setTab(selected)
-    const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", review: "/import-review", changes: "/sku-changes", "category-review": "/category-review", categories: "/categories", mappings: "/vendor-category-mappings", "ebay-blockers": "/ebay-blockers", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
+    const paths: Record<CatalogWorkspaceTab, string> = { products: "/products", review: "/import-review", changes: "/sku-changes", "category-review": "/category-review", categories: "/categories", mappings: "/vendor-category-mappings", "ebay-blockers": "/ebay-blockers", "ebay-sync-warnings": "/ebay-sync-warnings", attributes: "/attributes", groups: "/groups", inventory: "/inventory", templates: "/templates", readiness: "/readiness" }
     window.history.replaceState({}, "", paths[selected])
   }
-  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "ebay-blockers" && <EbayBlockersPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
+  return <div className="grid gap-5"><Tabs value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/80 p-1.5 shadow-sm dark:border-slate-700/80 dark:bg-slate-950/80"><TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">{catalogWorkspaceTabs.map((item) => <TabsTrigger key={item.id} value={item.id} className="px-3 text-xs font-semibold text-slate-600 hover:bg-slate-200/80 hover:text-slate-950 data-[state=active]:bg-blue-600 data-[state=active]:!text-white dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white dark:data-[state=active]:bg-blue-500">{item.label}</TabsTrigger>)}</TabsList></div></Tabs>{tab === "products" && <AdvancedMainCatalogPage totalSkuCount={workspaceCounts.products} channels={channels} systemSettings={systemSettings} />}{tab === "review" && <ImportReviewPage />}{tab === "changes" && <SkuChangesPage />}{tab === "category-review" && <CategoryReviewPage />}{tab === "mappings" && <VendorMappingsPage />}{tab === "ebay-blockers" && <EbayBlockersPage />}{tab === "ebay-sync-warnings" && <EbaySyncWarningsPage />}{tab === "attributes" && <AttributesPage />}{tab === "groups" && <AttributeGroupsPage />}{tab === "inventory" && <InventoryWorkspace />}{tab === "templates" && <CatalogTemplatesPage />}{tab === "categories" && <CategoriesWorkspace />}{tab === "readiness" && <CatalogResourcePage tab="readiness" />}</div>
 }
 
 export function SourceCatalogPage() {

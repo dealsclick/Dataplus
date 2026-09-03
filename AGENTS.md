@@ -237,7 +237,7 @@ If a SKU exists on eBay, show a View on eBay action when a listing URL is availa
 
 When eBay accepts an inventory item/offer but rejects the final publish step, preserve the offer ID as a prepared-not-live record and store a structured publish-block code, field, raw error, suggested fix, retryable flag, and timestamp. For package errors, DataPlus should prefer actual package/item weight when present and otherwise send calculated dimensional weight from complete package dimensions. Normalize legacy or local package labels such as box, MailingBoxes, poly mailer, envelope, and tube into supported eBay package type enum values before sending.
 
-eBay price/inventory sync must treat Inventory API `SKU not found` rows as per-SKU relink warnings, not as a fatal batch failure. Mark the SKU's eBay listing metadata with `inventoryApiSkuMissing` and `syncStatus: needs_relink` so operators know it is on eBay but cannot be updated through the Inventory API SKU currently saved in DataPlus.
+eBay price/inventory sync must treat Inventory API `SKU not found` rows as per-SKU relink warnings, not as a fatal batch failure. Mark the SKU's eBay listing metadata with `inventoryApiSkuMissing` and `syncStatus: needs_relink` so operators know it is on eBay but cannot be updated through the Inventory API SKU currently saved in DataPlus. Catalog must include an eBay Sync Warnings review view separate from eBay Launch Blockers; it should show listing IDs, offer IDs, latest sync errors, relink warnings, retry actions, and a deliberate clear-after-review action so users can distinguish "live on eBay" from "live but DataPlus cannot sync it."
 
 ### Other channels
 
