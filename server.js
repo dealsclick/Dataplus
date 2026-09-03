@@ -23858,6 +23858,7 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
   if (!reason) return { changed: false, purchaseOrders: [], requirementsChanged: false };
   const runtimeSettings = orderRuntimeSettings(db, options.systemSettings);
   const closedDemand = ["shipped", "fulfilled", "delivered", "completed", "done", "closed"].includes(reason);
+  const externalClosedDemand = closedDemand && /import|webhook|reconciliation|channel|marketplace/i.test(String(options.user || options.source || ""));
   const removeUncommittedDemand = reason === "refunded"
     ? runtimeSettings.ordersRemoveRefundedLinesFromDraftPos !== false
     : runtimeSettings.ordersRemoveCanceledLinesFromDraftPos !== false;
@@ -23911,7 +23912,36 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
     const matchingLines = po.items.filter((line) => String(line.routeId || "") === String(route.id || "")
       || String(line.orderId || "") === String(order.id || ""));
     if (!matchingLines.length) continue;
-    if (!committed && removeUncommittedDemand) {
+    if (externalClosedDemand && !committed) {
+      po.removedDemand = Array.isArray(po.removedDemand) ? po.removedDemand : [];
+      for (const line of matchingLines) {
+        if (!po.removedDemand.some((entry) => String(entry.routeId || "") === String(line.routeId || "") && String(entry.orderId || "") === String(order.id || ""))) {
+          po.removedDemand.push({ ...line, removedAt: now, removedBy: user, reason: "external_completed_customer_order" });
+        }
+      }
+      po.items = po.items.filter((line) => !matchingLines.includes(line));
+      po.orderIds = (po.orderIds || []).filter((id) => String(id || "") !== String(order.id || ""));
+      po.orderNumbers = (po.orderNumbers || []).filter((number) => String(number || "") !== String(order.orderNumber || ""));
+      const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+      if (po.items.length) recalculateWaitingPurchaseOrder(db, po, vendor);
+      else {
+        po.orderIds = [];
+        po.orderNumbers = [];
+        po.totalUnits = 0;
+        po.estimatedCost = 0;
+        po.openEstimatedCost = 0;
+        po.status = "deleted";
+        po.workflowStage = "history";
+        po.deletedAt = now;
+        po.deleteReason = `External channel already completed ${order.orderNumber || order.id}; draft PO demand was never needed.`;
+      }
+      addPoTimeline(po, {
+        type: "external_completed_order_unlinked",
+        title: "External completed order unlinked",
+        message: `${order.orderNumber || order.id} was completed outside DataPlus; its uncommitted draft PO demand was removed.`,
+        user
+      });
+    } else if (!committed && removeUncommittedDemand) {
       po.removedDemand = Array.isArray(po.removedDemand) ? po.removedDemand : [];
       for (const line of matchingLines) {
         if (!po.removedDemand.some((entry) => String(entry.routeId || "") === String(line.routeId || ""))) {
@@ -23998,6 +24028,25 @@ function reconcileTerminalOrderPurchasing(db, order, options = {}) {
     || String(order.workflowStatus || "").toLowerCase() !== terminalOperational) changed = true;
   order.status = terminalStatus;
   order.fulfillmentStatus = closedDemand ? terminalStatus : order.fulfillmentStatus;
+  if (externalClosedDemand) {
+    if ((order.fulfillmentRoutes || []).length
+      || (order.purchaseOrderIds || []).length
+      || (order.purchaseOrderNumbers || []).length
+      || order.purchaseOrderId
+      || order.purchaseOrderNumber
+      || order.hasPurchaseOrder) changed = true;
+    order.fulfillmentRoutes = (order.fulfillmentRoutes || []).filter((route) => String(route.type || "") !== "purchase");
+    order.purchaseOrderIds = [];
+    order.purchaseOrderNumbers = [];
+    order.purchaseOrderId = "";
+    order.purchaseOrderNumber = "";
+    order.hasPurchaseOrder = false;
+    for (const line of orderLineItems(order)) {
+      delete line.purchaseOrderId;
+      delete line.purchaseOrderNumber;
+      delete line.purchaseRequirementId;
+    }
+  }
   if (closedDemand && String(order.source || "").toLowerCase() === "temu" && !String(order.financialStatus || order.paymentStatus || "").trim()) {
     order.financialStatus = "Paid";
     order.paymentStatus = "Paid";
@@ -50785,6 +50834,7 @@ module.exports = {
   queueShopifyOrderImportJob,
   queueShopifySkuMapSyncJob,
   queueTemuOrderImportJob,
+  reconcilePersistedTerminalOrders,
   queueEbayOrderImportJob,
   queueEbayPriceInventorySyncJob,
   queueEbayListingLaunchJob,
