@@ -24710,8 +24710,8 @@ function vendorCanReceivePurchaseDemand(vendor = {}) {
   return vendor.active !== false && !["inactive", "disabled", "deleted"].includes(status);
 }
 
-function routingSupplierOffers(db, product = {}, line = {}) {
-  const rows = [
+function routingSupplierCandidateRows(product = {}, line = {}) {
+  return [
     {
       vendorId: line.vendorId,
       supplier: line.vendor || line.supplier,
@@ -24741,31 +24741,60 @@ function routingSupplierOffers(db, product = {}, line = {}) {
     },
     ...(Array.isArray(product.vendorOffers) ? product.vendorOffers.map((offer) => ({ ...offer, matchMethod: offer.matchMethod || offer.matchType || "supplier_coverage" })) : [])
   ];
+}
+
+function normalizedRoutingSupplierCandidate(db, product = {}, line = {}, row = {}, options = {}) {
+  const rawName = String(row.supplier || row.vendor || "").trim();
+  const vendor = findVendorById(db, row.vendorId) || findVendorByName(db, rawName);
+  if (!vendor) return null;
+  const discontinued = row.discontinued === true || ["true", "yes", "1", "discontinued"].includes(String(row.discontinued || "").toLowerCase());
+  if (discontinued) return null;
+  const rawAvailability = row.availableQty ?? row.stockQty ?? row.qty;
+  const availabilityKnown = rawAvailability !== undefined && rawAvailability !== null && rawAvailability !== "";
+  const unitCost = Number(row.sellUnitCost ?? row.unitCost ?? row.cost ?? 0);
+  const status = String(vendor.status || (vendor.active === false ? "inactive" : "active")).trim().toLowerCase();
+  return {
+    vendorId: vendor.id,
+    vendorName: vendor.name,
+    vendorStatus: status || "active",
+    blocked: options.blocked === true,
+    blockReason: options.blockReason || "",
+    vendorSku: String(row.vendorSku || row.sku || ""),
+    manufacturer: String(row.manufacturer || product.manufacturer || line.manufacturer || ""),
+    mfrPartNumber: String(row.mfrPartNumber || row.manufacturerPartNumber || row.mpn || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || ""),
+    vendorPartNumber: String(row.vendorPartNumber || row.vendorPart || row.partNumber || line.vendorPartNumber || line.vendorPart || line.partNumber || ""),
+    unitCost: Number.isFinite(unitCost) && unitCost > 0 ? unitCost : 0,
+    availableQty: availabilityKnown ? Math.max(0, Number(rawAvailability) || 0) : 0,
+    availabilityKnown,
+    uom: String(row.uom || row.unitOfMeasure || ""),
+    uomQty: Math.max(1, Number(row.uomQty ?? row.packQty ?? row.packageQty ?? 1) || 1),
+    sourceKey: String(row.sourceKey || row.source || ""),
+    matchMethod: String(row.matchMethod || "supplier_coverage")
+  };
+}
+
+function routingBlockedSupplierOffers(db, product = {}, line = {}) {
+  const offers = new Map();
+  for (const row of routingSupplierCandidateRows(product, line)) {
+    const candidate = normalizedRoutingSupplierCandidate(db, product, line, row, {
+      blocked: true,
+      blockReason: "Supplier profile is inactive or disabled for purchasing."
+    });
+    if (!candidate || vendorCanReceivePurchaseDemand(findVendorById(db, candidate.vendorId))) continue;
+    const key = String(candidate.vendorId || candidate.vendorName).toLowerCase();
+    if (!offers.has(key)) offers.set(key, candidate);
+  }
+  return [...offers.values()].sort((left, right) => left.vendorName.localeCompare(right.vendorName));
+}
+
+function routingSupplierOffers(db, product = {}, line = {}) {
+  const rows = routingSupplierCandidateRows(product, line);
   const offers = new Map();
   for (const row of rows) {
-    const rawName = String(row.supplier || row.vendor || "").trim();
-    const vendor = findVendorById(db, row.vendorId) || findVendorByName(db, rawName);
+    const vendor = findVendorById(db, row.vendorId) || findVendorByName(db, String(row.supplier || row.vendor || "").trim());
     if (!vendor || !vendorCanReceivePurchaseDemand(vendor)) continue;
-    const discontinued = row.discontinued === true || ["true", "yes", "1", "discontinued"].includes(String(row.discontinued || "").toLowerCase());
-    if (discontinued) continue;
-    const rawAvailability = row.availableQty ?? row.stockQty ?? row.qty;
-    const availabilityKnown = rawAvailability !== undefined && rawAvailability !== null && rawAvailability !== "";
-    const unitCost = Number(row.sellUnitCost ?? row.unitCost ?? row.cost ?? 0);
-    const offer = {
-      vendorId: vendor.id,
-      vendorName: vendor.name,
-      vendorSku: String(row.vendorSku || row.sku || ""),
-      manufacturer: String(row.manufacturer || product.manufacturer || line.manufacturer || ""),
-      mfrPartNumber: String(row.mfrPartNumber || row.manufacturerPartNumber || row.mpn || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || ""),
-      vendorPartNumber: String(row.vendorPartNumber || row.vendorPart || row.partNumber || line.vendorPartNumber || line.vendorPart || line.partNumber || ""),
-      unitCost: Number.isFinite(unitCost) && unitCost > 0 ? unitCost : 0,
-      availableQty: availabilityKnown ? Math.max(0, Number(rawAvailability) || 0) : 0,
-      availabilityKnown,
-      uom: String(row.uom || row.unitOfMeasure || ""),
-      uomQty: Math.max(1, Number(row.uomQty ?? row.packQty ?? row.packageQty ?? 1) || 1),
-      sourceKey: String(row.sourceKey || row.source || ""),
-      matchMethod: String(row.matchMethod || "supplier_coverage")
-    };
+    const offer = normalizedRoutingSupplierCandidate(db, product, line, row);
+    if (!offer) continue;
     const key = String(vendor.id || vendor.name).toLowerCase();
     const existing = offers.get(key);
     const offerScore = (offer.availabilityKnown && offer.availableQty > 0 ? 1000000 : 0) + offer.availableQty - offer.unitCost / 100000;
@@ -24915,6 +24944,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     }
     if (remaining > 0) {
       const supplierOffers = routingSupplierOffers(db, product || {}, line);
+      const blockedSupplierOffers = supplierOffers.length ? [] : routingBlockedSupplierOffers(db, product || {}, line);
       const supplierOffer = supplierOffers.find((offer) => offer.availabilityKnown && offer.availableQty >= remaining)
         || supplierOffers.find((offer) => offer.availabilityKnown && offer.availableQty > 0)
         || supplierOffers.find((offer) => !offer.availabilityKnown)
@@ -24924,7 +24954,9 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       const sourceWarehouse = supplierOffer ? supplierSourceWarehouseForOffer(db, supplierOffer, plan) : null;
       const supplierHasEnough = Boolean(supplierOffer && (!supplierOffer.availabilityKnown || supplierOffer.availableQty >= remaining));
       const reviewReason = !supplierOffer
-        ? "Assign an active supplier before creating the purchase order."
+        ? blockedSupplierOffers.length
+          ? `${blockedSupplierOffers[0].vendorName} is ${blockedSupplierOffers[0].vendorStatus || "inactive"}; activate the supplier profile or choose another active supplier before creating the purchase order.`
+          : "Assign an active supplier before creating the purchase order."
         : supplierHasEnough
           ? ""
           : supplierOffer.availableQty > 0
@@ -24955,7 +24987,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           manufacturer: supplierOffer?.manufacturer || product?.manufacturer || line.manufacturer || "",
           mfrPartNumber: supplierOffer?.mfrPartNumber || product?.mfrPartNumber || product?.manufacturerPartNumber || product?.mpn || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || "",
           vendorPartNumber: supplierOffer?.vendorPartNumber || line.vendorPartNumber || line.vendorPart || line.partNumber || "",
-          supplierOffers,
+          supplierOffers: supplierOffers.length ? supplierOffers : blockedSupplierOffers,
           availableQty: supplierOffer?.availableQty || 0, availabilityKnown: supplierOffer?.availabilityKnown === true,
           uom: supplierOffer?.uom || "", uomQty: supplierOffer?.uomQty || 1, sourceKey: supplierOffer?.sourceKey || "",
           sourceWarehouseId: sourceWarehouse?.id || "", sourceWarehouseName: sourceWarehouse?.name || "",
@@ -24968,7 +25000,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           manufacturer: supplierOffer?.manufacturer || product?.manufacturer || line.manufacturer,
           mfrPartNumber: supplierOffer?.mfrPartNumber || product?.mfrPartNumber || product?.manufacturerPartNumber || product?.mpn || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn,
           vendorPartNumber: supplierOffer?.vendorPartNumber || line.vendorPartNumber || line.vendorPart || line.partNumber,
-          supplierOffers,
+          supplierOffers: supplierOffers.length ? supplierOffers : blockedSupplierOffers,
           unitCost: supplierOffer?.unitCost,
           availableQty: supplierOffer?.availableQty,
           availabilityKnown: supplierOffer?.availabilityKnown === true,
@@ -24982,7 +25014,10 @@ async function routeOrderForFulfillment(db, order, body = {}) {
         if (!supplierOffer) {
           createOrderException(order, {
             type: "supplier_assignment_required", severity: "warning", owner: "Purchasing", lineIndex,
-            sku: line.sku, description: `${line.sku || "This line"} needs a supplier assignment before a PO can be created.`
+            sku: line.sku,
+            description: blockedSupplierOffers.length
+              ? `${line.sku || "This line"} is matched to ${blockedSupplierOffers[0].vendorName}, but that supplier profile is ${blockedSupplierOffers[0].vendorStatus || "inactive"}. Activate the supplier or choose another source before PO creation.`
+              : `${line.sku || "This line"} needs a supplier assignment before a PO can be created.`
           });
         } else {
           resolveOrderRoutingExceptions(order, lineIndex, ["supplier_assignment_required"]);
