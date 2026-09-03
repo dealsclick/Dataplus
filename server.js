@@ -19884,7 +19884,8 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
 
 async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
-  const limit = Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250) || 250));
+  const fetchAll = payload.fetchAll === true || String(payload.fetchAll).toLowerCase() === "true" || String(payload.limit || "").toLowerCase() === "all";
+  const limit = fetchAll ? 0 : Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250) || 250));
   const lookbackDays = Math.max(1, Math.min(365, Number(payload.lookbackDays || 30) || 30));
   const repairBlind = payload.repairBlind === true || String(payload.repairBlind).toLowerCase() === "true";
   const targetedRefresh = Array.isArray(payload.parentOrderSnList) && payload.parentOrderSnList.length > 0;
@@ -19892,15 +19893,19 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
   job = await persistWorkerImportJob(job, {
     status: "running",
     phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders",
-    totalRows: limit,
+    totalRows: fetchAll ? 0 : limit,
     processedRows: 0,
     startedAt,
     message: repairBlind
-      ? `Repairing blind Temu orders, up to ${limit.toLocaleString()} records...`
+      ? fetchAll
+        ? "Repairing all blind Temu orders..."
+        : `Repairing blind Temu orders, up to ${limit.toLocaleString()} records...`
       : targetedRefresh
       ? `Refreshing ${payload.parentOrderSnList.length.toLocaleString()} Temu order status update${payload.parentOrderSnList.length === 1 ? "" : "s"}...`
       : payload.scheduled
       ? "Reconciling Temu orders changed since the last successful sync..."
+      : fetchAll
+      ? `Importing all Temu orders changed in the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
       : `Importing Temu orders from the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}...`
   });
   appendChannelApiLog({ channel: "Temu", transport: "Job", method: "RUN", path: "temu-orders", operation: "Temu order import started", statusCode: 102, ok: true, jobId: job.id, message: job.message });
@@ -19911,15 +19916,16 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       jobId: job.id,
       lookbackDays,
       limit,
+      fetchAll,
       forceLookback: payload.forceLookback !== false,
       progress: async (patch = {}) => {
         await persistWorkerImportJob(job, {
           status: "running",
           phase: patch.phase || "importing_temu_orders",
-          totalRows: Math.max(Number(patch.totalRows || 0), Number(job.totalRows || 0), limit),
+          totalRows: fetchAll ? Number(patch.totalRows || 0) : Math.max(Number(patch.totalRows || 0), Number(job.totalRows || 0), limit),
           processedRows: Number(patch.processedRows || 0),
-          progressPercent: progressPercent(Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
-          estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
+          progressPercent: fetchAll ? 0 : progressPercent(Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
+          estimatedSecondsRemaining: fetchAll ? 0 : estimateRemainingSeconds(startedAt, Number(patch.processedRows || 0), Math.max(Number(patch.totalRows || 0), limit)),
           lastProgressAt: new Date().toISOString()
         });
       }
@@ -25366,7 +25372,8 @@ async function importTemuOrders(db, options = {}) {
   const settings = temuChannelSettings(db);
   const lastSync = Number(db.connectorState.temuLastOrderSync || 0);
   const lookbackDays = Math.max(1, Math.min(365, Number(options.lookbackDays || 30) || 30));
-  const limit = Math.max(1, Math.min(5000, Number(options.limit || 250) || 250));
+  const fetchAll = options.fetchAll === true || String(options.fetchAll).toLowerCase() === "true" || String(options.limit || "").toLowerCase() === "all";
+  const limit = fetchAll ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.min(5000, Number(options.limit || 250) || 250));
   const configuredStart = unixStartOfDay(options.startDate || settings.temuOrderImportStartDate);
   const lookbackStart = options.forceLookback === false && lastSync ? Math.max(0, lastSync - 3600) : now - lookbackDays * 24 * 3600;
   const updateAtStart = Math.min(now, configuredStart ? Math.max(configuredStart, lookbackStart) : lookbackStart);
@@ -25388,7 +25395,7 @@ async function importTemuOrders(db, options = {}) {
       .slice(0, limit)
     : [];
   const targetedChunks = chunkTemuList(targetedRefresh ? requestedOrderSns : repairOrderSns, 20);
-  const targetRows = targetedRefresh ? Math.max(1, requestedOrderSns.length) : repairBlind ? Math.max(1, repairOrderSns.length) : limit;
+  const targetRows = targetedRefresh ? Math.max(1, requestedOrderSns.length) : repairBlind ? Math.max(1, repairOrderSns.length) : fetchAll ? 0 : limit;
   let pageNumber = 1;
   let created = 0;
   let updated = 0;
@@ -25398,7 +25405,7 @@ async function importTemuOrders(db, options = {}) {
   const rows = [];
   const soldSkus = new Set();
 
-  const maxPages = Math.ceil(limit / pageSize);
+  const maxPages = fetchAll ? Number.MAX_SAFE_INTEGER : Math.ceil(limit / pageSize);
   while ((targetedRefresh || repairBlind ? targetedChunks.length > 0 : pageNumber <= Math.max(1, maxPages)) && fetched < limit) {
     const targetedChunk = (targetedRefresh || repairBlind) ? targetedChunks.shift() : [];
     const listResponse = await temuRequest("bg.order.list.v2.get", (targetedRefresh || repairBlind) ? {
@@ -25512,7 +25519,11 @@ async function importTemuOrders(db, options = {}) {
       fetched += 1;
       rows.push({ orderNumber: mappedOrder.marketplaceOrderNumber || mappedOrder.orderNumber, status: mappedOrder.status, action, itemCount: mappedOrder.items?.length || 0, buyer: mappedOrder.buyer || "" });
       if (typeof options.progress === "function") {
-        await options.progress({ phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders", processedRows: fetched, totalRows: targetRows });
+        await options.progress({
+          phase: repairBlind ? "repairing_temu_orders" : targetedRefresh ? "refreshing_temu_orders" : "importing_temu_orders",
+          processedRows: fetched,
+          totalRows: targetRows || (fetched + (list.length >= pageSize ? pageSize : 0))
+        });
       }
     }
 
@@ -25546,14 +25557,23 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     throw error;
   }
   const lookbackDays = Math.max(1, Math.min(365, Number(body.lookbackDays || settings.temuOrderImportLookbackDays || 30) || 30));
-  const limit = Math.max(1, Math.min(5000, Number(body.limit || settings.temuOrderImportLimit || 250) || 250));
+  const targetedOrderRequest = Array.isArray(body.parentOrderSnList) && body.parentOrderSnList.length > 0;
+  const fetchAll = body.fetchAll === true
+    || options.fetchAll === true
+    || String(body.fetchAll).toLowerCase() === "true"
+    || String(options.fetchAll).toLowerCase() === "true"
+    || String(body.limit || "").toLowerCase() === "all"
+    || (options.forceLookback === true && lookbackDays >= 90 && !targetedOrderRequest);
+  const limit = fetchAll ? 0 : Math.max(1, Math.min(5000, Number(body.limit || settings.temuOrderImportLimit || 250) || 250));
+  const orderSnLimit = fetchAll ? Number.MAX_SAFE_INTEGER : limit;
   const parentOrderSnList = [...new Set((Array.isArray(body.parentOrderSnList) ? body.parentOrderSnList : [])
     .map((value) => String(value || "").trim())
     .filter(Boolean))]
-    .slice(0, limit);
+    .slice(0, orderSnLimit);
   const workerPayload = {
     lookbackDays,
     limit,
+    fetchAll,
     startDate: String(body.startDate || settings.temuOrderImportStartDate || "").trim(),
     includeCanceled: body.includeCanceled === undefined || body.includeCanceled === null || body.includeCanceled === ""
       ? settings.temuOrderImportIncludeCanceled === true
@@ -25583,16 +25603,20 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     direction: "import",
     status: "queued",
     fileName: "temu-orders-import-results.csv",
-    totalRows: limit,
+    totalRows: fetchAll ? 0 : limit,
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
     workerTask: shouldRunJobsInline() ? "" : "temu-order-import",
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
     message: workerPayload.repairBlind
-      ? `Blind Temu order repair queued, up to ${limit.toLocaleString()} existing orders.`
+      ? fetchAll
+        ? "Blind Temu order repair queued for all matching existing orders."
+        : `Blind Temu order repair queued, up to ${limit.toLocaleString()} existing orders.`
       : options.scheduled
       ? `Scheduled Temu order reconciliation queued. It will use the last sync point, or the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"} on its first run, up to ${limit.toLocaleString()} orders.`
+      : fetchAll
+      ? `Temu order import queued for all orders changed in the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}.`
       : `Temu order import queued for the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}, up to ${limit.toLocaleString()} orders.`
   });
   upsertImportJobStore(job);
